@@ -7,6 +7,7 @@
 
 mod app;
 mod base_select;
+mod blade;
 mod branches;
 mod diff_view;
 mod highlight;

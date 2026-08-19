@@ -570,6 +570,20 @@ dont le hunk porte du HTML l'attend déjà, et lui en préfixer un second
 casserait le parse. Les positions des lignes suivent le décalage, si bien que
 les styles du prologue, n'appartenant à aucune d'elles, s'ignorent d'eux-mêmes.
 
+**Une vue Blade est du HTML avant d'être du PHP** (`ui::blade`). Aucune
+grammaire tree-sitter n'en est publiée, et la grammaire PHP ne voit dans
+`@foreach` ou `{{ $x }}` que du texte : la vue arrivait avec ses balises
+colorées et tout le vocabulaire de Blade en gris. La grammaire colore donc ce
+qu'elle sait lire, puis `blade::overlay` repasse dessus les directives, les
+échos et les commentaires — un scanner à la main, assumé comme tel. Deux
+conséquences à retenir : un `.blade.php` ne reçoit **jamais** de prologue, sinon
+ses balises seraient lues comme du code ; et un rôle Blade se traduit en style
+par une **liste de noms**, du plus juste au plus sûrement présent, parce que nos
+thèmes ne définissent ni `punctuation` ni `operator` — sans repli, les
+délimiteurs d'un écho restaient invisibles. `blade::tests::every_scope_resolves_to_a_colour`
+le vérifie, et `keys_of` compare désormais aussi les styles de coloration d'un
+thème à l'autre.
+
 PHP n'est pas dans les grammaires que gpui-component embarque, et c'est le
 langage de la moitié des dépôts qu'on relit : `highlight::register_languages`
 le déclare dans le registre partagé au démarrage, avec ses injections HTML et
@@ -597,6 +611,14 @@ programme dessine, et ce qui précède n'appartient qu'à lui. La molette s'y
 traduit donc en flèches, trois lignes par cran, comme dans tous les terminaux ;
 la faire défiler l'historique n'y produirait rien du tout. Ailleurs, elle
 déplace bien l'affichage.
+
+**Les lignes de l'historique sont numérotées négativement.** Le parcours de la
+grille commence à `-display_offset` : dès qu'on remonte la molette, les lignes
+visibles portent des indices négatifs. Les ramener par un `max(0)` les écrasait
+toutes sur l'indice 0, où elles s'accumulaient en une seule — l'écran paraissait
+« s'effacer » à chaque cran de molette. `snapshot::viewport_line` fait la
+translation, pour les cellules comme pour le curseur, que remonter fait sortir
+de la vue.
 
 Les fractions de ligne sont **accumulées** (`take_lines`) : un pavé tactile en
 envoie par dixièmes, et les arrondir chacune à zéro rend le défilement inerte.

@@ -26,6 +26,7 @@ use gpui_component::highlighter::{
 };
 use gpui_component::input::Rope;
 
+use super::blade;
 use crate::git::{DiffLineKind, FileDiff};
 
 /// Enregistre les grammaires que gpui-component n'embarque pas.
@@ -99,6 +100,12 @@ impl DiffHighlights {
             .map(|hunk| vec![LineStyles::new(); hunk.lines.len()])
             .collect();
 
+        // Une vue Blade est du HTML avant d'être du PHP : lui préfixer une
+        // balise d'ouverture ferait lire ses balises comme du code. Ses
+        // constructions propres — directives, échos, commentaires — sont
+        // ajoutées après coup, la grammaire PHP n'en connaissant aucune.
+        let blade = blade::is_blade(path);
+
         // Une seule instance pour les deux passes : `SyntaxHighlighter::new`
         // compile les requêtes de la grammaire — près de quarante
         // millisecondes pour JavaScript — alors que `update` ne fait que
@@ -114,7 +121,7 @@ impl DiffHighlights {
             // grammaire. Les positions des lignes suivent le décalage : le
             // prologue n'appartient à aucune d'elles, ses styles sont donc
             // ignorés d'eux-mêmes.
-            let prologue = prologue(language, &text);
+            let prologue = if blade { "" } else { prologue(language, &text) };
             if !prologue.is_empty() {
                 text.insert_str(0, prologue);
                 for span in &mut spans {
@@ -125,6 +132,9 @@ impl DiffHighlights {
             highlighter.update(None, &Rope::from_str(&text));
             let highlighted = highlighter.styles(&(0..text.len()), theme);
             distribute(&highlighted, &spans, &mut styles);
+        }
+        if blade {
+            blade::overlay(diff, theme, &mut styles);
         }
 
         Self { hunks: styles }
@@ -157,9 +167,10 @@ impl Side {
 /// d'ouverture — c'est le cas courant, pas l'exception, ce qui explique que la
 /// coloration paraissait cassée « très souvent ».
 ///
-/// Le prologue n'est ajouté que s'il manque : un fichier Blade ou une vue dont
-/// le hunk contient le début du fichier commence bien par `<?php` ou par du
-/// HTML, et lui en préfixer un second casserait le parse.
+/// Le prologue n'est ajouté que s'il manque : une vue dont le hunk contient le
+/// début du fichier commence bien par `<?php` ou par du HTML, et lui en
+/// préfixer un second casserait le parse. Les vues Blade n'en reçoivent jamais
+/// — voir `blade`.
 fn prologue(language: &str, fragment: &str) -> &'static str {
     match language {
         "php" if !opens_php(fragment) => "<?php\n",
@@ -474,6 +485,55 @@ mod php_tests {
             coloured_lines(&diff) > 0,
             "un fragment sans balise d'ouverture doit être coloré"
         );
+    }
+
+    /// Bout à bout : une vue Blade traverse la grammaire PHP *et* la
+    /// surcouche, et ses deux vocabulaires ressortent colorés.
+    #[test]
+    fn a_blade_view_is_coloured_by_both_passes() {
+        register_languages();
+        let source = "<table>\n\
+                      @foreach ($factures as $facture)\n\
+                      <td>{{ $facture->total }}</td>\n\
+                      @endforeach";
+        let diff = hunk_of(source);
+        let styles = DiffHighlights::compute(
+            Path::new("resources/views/factures.blade.php"),
+            &diff,
+            &HighlightTheme::default_dark(),
+        );
+
+        assert!(
+            !styles.line(0, 1).is_empty(),
+            "la directive @foreach reste grise sans la surcouche"
+        );
+        assert!(!styles.line(0, 3).is_empty(), "la directive fermante aussi");
+
+        // La ligne d'écho porte à la fois la balise HTML, vue par la
+        // grammaire, et les délimitateurs, vus par la surcouche.
+        let echo = styles.line(0, 2);
+        assert!(echo.len() >= 3, "styles de l'écho : {echo:?}");
+        let mut last = 0;
+        for (range, _) in echo {
+            assert!(range.start >= last, "plages non triées : {echo:?}");
+            last = range.end;
+        }
+        let text = &diff.hunks[0].lines[2].text;
+        assert!(
+            last <= text.len(),
+            "un style déborde de sa ligne : {last} > {}",
+            text.len()
+        );
+    }
+
+    /// Et un fichier PHP ordinaire n'y passe pas : `@` y est un opérateur, pas
+    /// une directive.
+    #[test]
+    fn a_plain_php_file_is_not_treated_as_blade() {
+        assert!(!crate::ui::blade::is_blade(Path::new("app/Facture.php")));
+        assert!(crate::ui::blade::is_blade(Path::new(
+            "resources/views/facture.blade.php"
+        )));
     }
 
     /// Et le prologue ne doit pas casser ce qui marchait : un fragment qui

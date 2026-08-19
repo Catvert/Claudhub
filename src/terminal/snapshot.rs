@@ -89,7 +89,15 @@ pub(crate) fn capture<T: EventListener>(term: &Term<T>) -> Snapshot {
     let mut line_index: Option<usize> = None;
 
     for indexed in content.display_iter {
-        let index = indexed.point.line.0.max(0) as usize;
+        // Les lignes du parcours sont numérotées depuis le **bas** de
+        // l'historique : la première visible est `-display_offset`, et donc
+        // négative dès qu'on a remonté la molette. Le décalage les ramène en
+        // coordonnées de viewport, `0` étant la ligne du haut.
+        //
+        // Sans lui, `max(0)` écrasait à l'indice 0 toutes les lignes venues du
+        // passé : elles s'accumulaient dans une seule, ce qui faisait
+        // « disparaître » l'écran dès qu'on remontait.
+        let index = viewport_line(indexed.point.line.0, display_offset).unwrap_or(0);
         if line_index != Some(index) {
             if line_index.is_some() {
                 flush(&mut lines, &mut line, &mut pending);
@@ -138,9 +146,12 @@ pub(crate) fn capture<T: EventListener>(term: &Term<T>) -> Snapshot {
     }
 
     let cursor_point = content.cursor.point;
-    let cursor_line = cursor_point.line.0;
+    // Le curseur est repéré dans la même numérotation que les cellules, et
+    // suit donc le même décalage : remonter l'historique le fait descendre
+    // hors de la vue, où il ne doit plus être dessiné.
+    let screen_lines = lines.len();
     let cursor = Some(Cursor {
-        line: (cursor_line >= 0).then_some(cursor_line as usize),
+        line: viewport_line(cursor_point.line.0, display_offset).filter(|l| *l < screen_lines),
         column: cursor_point.column.0,
         visible: content.cursor.shape != alacritty_terminal::vte::ansi::CursorShape::Hidden,
     });
@@ -151,6 +162,15 @@ pub(crate) fn capture<T: EventListener>(term: &Term<T>) -> Snapshot {
         display_offset,
         total_history: term.grid().total_lines(),
     }
+}
+
+/// Passe d'une ligne de la grille à sa ligne du viewport.
+///
+/// Rend `None` pour ce qui reste au-dessus de la vue — impossible pour les
+/// cellules parcourues, mais pas pour le curseur, qui garde sa place pendant
+/// qu'on remonte l'historique.
+fn viewport_line(line: i32, display_offset: usize) -> Option<usize> {
+    usize::try_from(line + display_offset as i32).ok()
 }
 
 /// Clôt la ligne en cours et la range, en repartant d'une ligne vide.
@@ -366,6 +386,50 @@ mod tests {
         // Rouge gras = rouge clair, comme dans tout terminal.
         assert_eq!(snap.lines[0].segments[0].fg, Paint::Rgb(0xf1, 0x4c, 0x4c));
         assert!(snap.lines[0].segments[0].bold);
+    }
+
+    /// Le geste signalé : remonter la molette « effaçait » l'écran.
+    ///
+    /// Les lignes venues de l'historique sont numérotées négativement ; sans
+    /// le décalage du viewport elles s'écrasaient toutes sur l'indice 0, et
+    /// l'instantané ne rendait plus qu'une ligne au lieu de quatre.
+    #[test]
+    fn scrolling_back_shows_the_history_instead_of_collapsing_it() {
+        use alacritty_terminal::grid::Scroll;
+
+        let size = TermSize::new(20, 4, 8, 16);
+        let mut term = Term::new(
+            Config {
+                scrolling_history: 100,
+                ..Default::default()
+            },
+            &size,
+            VoidListener,
+        );
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        for n in 1..=8 {
+            parser.advance(&mut term, format!("ligne{n}\r\n").as_bytes());
+        }
+
+        // En bas : les dernières lignes écrites.
+        let bottom = capture(&term);
+        assert_eq!(bottom.lines.len(), 4);
+        assert_eq!(bottom.lines[0].text, "ligne6");
+        assert_eq!(bottom.display_offset, 0);
+
+        term.scroll_display(Scroll::Delta(3));
+        let scrolled = capture(&term);
+        assert_eq!(scrolled.display_offset, 3);
+        assert_eq!(
+            scrolled.lines.len(),
+            4,
+            "l'écran garde sa hauteur quand on remonte"
+        );
+        let texts: Vec<&str> = scrolled.lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["ligne3", "ligne4", "ligne5", "ligne6"]);
+
+        // Le curseur est trois lignes plus bas que la vue : hors champ.
+        assert_eq!(scrolled.cursor.unwrap().line, None);
     }
 
     #[test]

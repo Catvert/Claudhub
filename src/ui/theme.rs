@@ -270,14 +270,23 @@ mod tests {
         }
     }
 
+    /// Les couleurs de l'interface **et** celles de la coloration : un thème
+    /// à qui manque `keyword` ou `embedded` rend le code d'une seule teinte,
+    /// ce qui se remarque tout autant qu'une tache blanche.
     fn keys_of(name: &str) -> std::collections::BTreeSet<String> {
         let file = BundledThemes::get(name).expect("fichier embarqué");
         let value: serde_json::Value = serde_json::from_slice(&file.data).expect("JSON");
-        value["themes"][0]["colors"]
+        let theme = &value["themes"][0];
+        let colors = theme["colors"]
             .as_object()
             .expect("une table de couleurs")
             .keys()
-            .cloned()
-            .collect()
+            .cloned();
+        let syntax = theme["highlight"]["syntax"]
+            .as_object()
+            .expect("une table de styles")
+            .keys()
+            .map(|k| format!("syntax.{k}"));
+        colors.chain(syntax).collect()
     }
 }
