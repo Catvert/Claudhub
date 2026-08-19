@@ -18,7 +18,11 @@ use crate::ui::app::PerchApp;
 use crate::ui::icons::icon;
 
 impl PerchApp {
-    pub(super) fn render_branches(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_branches(
+        &mut self,
+        _window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let Some(worktree) = self.active.clone() else {
             return div().into_any_element();
         };

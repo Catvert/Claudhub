@@ -12,6 +12,7 @@ mod diff_view;
 mod highlight;
 mod history_view;
 mod icons;
+mod panels;
 mod review;
 mod settings;
 mod settings_view;

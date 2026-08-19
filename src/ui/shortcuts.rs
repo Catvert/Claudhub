@@ -13,7 +13,6 @@ use crate::ui::app::PerchApp;
 actions!(
     perch,
     [
-        ToggleHistory,
         ShowWorking,
         ShowBranch,
         Refresh,
@@ -86,8 +85,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-shift-w", CloseTerminal, Some(PREDICATE)),
         KeyBinding::new("secondary-`", ToggleTerminal, Some(PREDICATE)),
         KeyBinding::new("secondary-tab", NextTerminal, Some(PREDICATE)),
-        // Les quatre domaines de revue, dans l'ordre des onglets.
-        KeyBinding::new("secondary-h", ToggleHistory, Some(PREDICATE)),
+        // Les deux domaines de revue, dans l'ordre des onglets.
         KeyBinding::new("secondary-1", ShowWorking, Some(PREDICATE)),
         KeyBinding::new("secondary-2", ShowBranch, Some(PREDICATE)),
         KeyBinding::new("secondary-enter", Commit, Some(PREDICATE)),
@@ -139,7 +137,7 @@ pub fn new_terminal(
     group.update(cx, |group, cx| {
         group.open(None, crate::tr!("terminal-shell"), window, cx);
     });
-    this.show_terminal_panel(cx);
+    this.show_terminal_panel(window, cx);
 }
 
 pub fn close_terminal(
@@ -161,10 +159,10 @@ pub fn close_terminal(
 pub fn toggle_terminal(
     this: &mut PerchApp,
     _: &ToggleTerminal,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut gpui::Context<PerchApp>,
 ) {
-    this.toggle_terminal_panel(cx);
+    this.toggle_terminal_panel(window, cx);
 }
 
 pub fn next_terminal(
@@ -178,15 +176,6 @@ pub fn next_terminal(
     };
     let group = this.terminal_group(&worktree, window, cx);
     group.update(cx, |group, cx| group.next(window, cx));
-}
-
-pub fn toggle_history(
-    this: &mut PerchApp,
-    _: &ToggleHistory,
-    _window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
-) {
-    this.toggle_history_panel(cx);
 }
 
 pub fn show_working(

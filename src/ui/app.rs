@@ -15,9 +15,9 @@ use gpui::{
 use gpui_component::{
     button::{Button, ButtonVariants},
     divider::Divider,
+    dock::{DockArea, DockItem, DockPlacement},
     h_flex,
     input::InputState,
-    resizable::{h_resizable, resizable_panel, v_resizable, ResizableState},
     select::{SearchableVec, SelectEvent, SelectState},
     v_flex, ActiveTheme, Disableable, Root, Selectable, Sizable, StyledExt, WindowExt,
 };
@@ -26,11 +26,52 @@ use crate::git::{Branch, Commit, DiffFile, DiffRange, GraphRow, LogRange, Status
 use crate::runtime::watch::Watcher;
 use crate::runtime::{self, Action, Cmd, Evt};
 use crate::tr;
+use std::sync::Arc;
+
 use crate::ui::base_select::BaseChoice;
 use crate::ui::diff_view::Rendered;
 use crate::ui::icons::icon;
+use crate::ui::panels::{
+    BranchesPanel, DiffPanel, HistoryPanel, ReviewPanel, SidebarPanel, TerminalPanel,
+};
 use crate::ui::settings::Settings;
 use crate::ui::terminal_view::TerminalGroup;
+
+/// Version de la disposition enregistrée. À incrémenter quand les panneaux
+/// changent de nom ou de nature, pour que gpui-component écarte une
+/// disposition qu'il ne saurait plus reconstruire.
+const LAYOUT_VERSION: usize = 1;
+
+fn load_layout() -> Option<gpui_component::dock::DockAreaState> {
+    let path = crate::ui::settings::layout_path()?;
+    let text = std::fs::read_to_string(path).ok()?;
+    match serde_json::from_str(&text) {
+        Ok(state) => Some(state),
+        Err(e) => {
+            // Une disposition illisible n'est pas une raison de ne pas
+            // démarrer : on repart de celle par défaut.
+            log::warn!("disposition illisible : {e}");
+            None
+        }
+    }
+}
+
+fn save_layout(state: &gpui_component::dock::DockAreaState) {
+    let Some(path) = crate::ui::settings::layout_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match serde_json::to_string_pretty(state) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                log::warn!("écriture de la disposition : {e}");
+            }
+        }
+        Err(e) => log::warn!("sérialisation de la disposition : {e}"),
+    }
+}
 
 /// Un dépôt ouvert dans la barre latérale.
 pub struct RepoState {
@@ -82,6 +123,12 @@ pub struct ReviewState {
     /// ne doit pas payer un `git log` que personne ne regardera.
     pub history: Option<std::rc::Rc<History>>,
     pub history_range: LogRange,
+    /// Une lecture de l'historique est partie et n'est pas revenue.
+    ///
+    /// Sans ce garde, le panneau redemanderait un `git log` à chaque frame
+    /// pendant tout le temps de la commande : c'est lui qui demande, et il
+    /// demande au rendu.
+    pub history_pending: bool,
     /// Commit sélectionné dans l'historique, dont le diff est affiché.
     pub commit: Option<String>,
 }
@@ -108,6 +155,7 @@ impl Default for ReviewState {
             base: None,
             history: None,
             history_range: LogRange::All,
+            history_pending: false,
             commit: None,
         }
     }
@@ -161,12 +209,12 @@ pub struct PerchApp {
     /// fichiers empile mille `git status` identiques, et tout ce qui suit —
     /// diffs compris — attend derrière eux.
     pending_status: std::collections::HashSet<PathBuf>,
-    pub(super) show_terminal: bool,
-    pub(super) show_branches: bool,
-    /// L'historique remplace la liste des fichiers quand il est affiché : les
-    /// deux répondent à la même question — que regarde-t-on — et les montrer
-    /// ensemble couperait la place en deux pour rien.
-    pub(super) show_history: bool,
+    /// La disposition. Elle appartient à gpui-component : c'est lui qui gère
+    /// le glissement d'un panneau d'une zone à l'autre, les onglets et les
+    /// zones d'accueil.
+    pub(super) dock: Entity<DockArea>,
+    /// Vrai quand une écriture différée de la disposition est déjà programmée.
+    layout_save_scheduled: bool,
     /// Vrai entre l'enfoncement et le relâchement du bouton dans la vue de
     /// diff : c'est ce qui distingue un glissement de sélection d'un simple
     /// survol, et ce qui empêche un glissement commencé ailleurs — dans la
@@ -186,11 +234,6 @@ pub struct PerchApp {
     /// Défilement de la liste des fichiers, virtualisée elle aussi.
     pub(super) file_scroll: gpui::UniformListScrollHandle,
     pub(super) history_scroll: gpui::UniformListScrollHandle,
-    history_split: Entity<ResizableState>,
-
-    sidebar_resize: Entity<ResizableState>,
-    center_resize: Entity<ResizableState>,
-    bottom_resize: Entity<ResizableState>,
     focus: FocusHandle,
 }
 
@@ -223,6 +266,88 @@ impl PerchApp {
         })
         .detach();
 
+        // Le dock et ses panneaux. Les panneaux ne portent aucun état : ils
+        // délèguent à cette entité, dont ils ne gardent qu'une référence
+        // faible pour ne pas former de cycle.
+        let this = cx.entity();
+        let dock = cx.new(|cx| DockArea::new("perch", Some(LAYOUT_VERSION), window, cx));
+        let weak_dock = dock.downgrade();
+        crate::ui::panels::register(&this, cx);
+
+        // Une disposition enregistrée reprend la main sur celle par défaut.
+        // Elle est écartée si sa version diffère : les panneaux ont pu changer
+        // de nom, et reconstruire à partir de noms inconnus donnerait une
+        // fenêtre pleine de cadres vides.
+        let restored = load_layout()
+            .filter(|state| state.version == Some(LAYOUT_VERSION))
+            .and_then(|state| {
+                dock.update(cx, |area, cx| area.load(state, window, cx))
+                    .ok()
+            })
+            .is_some();
+        let sidebar = cx.new(|cx| SidebarPanel::new(&this, cx));
+        let branches = cx.new(|cx| BranchesPanel::new(&this, cx));
+        let review = cx.new(|cx| ReviewPanel::new(&this, cx));
+        let history = cx.new(|cx| HistoryPanel::new(&this, cx));
+        let diff = cx.new(|cx| DiffPanel::new(&this, cx));
+        let terminal = cx.new(|cx| TerminalPanel::new(&this, cx));
+
+        if !restored {
+            dock.update(cx, |area, cx| {
+                // Trois zones d'accueil et un centre, sans `DockItem::split` :
+                // `split_with_sizes` de gpui-component 0.5.1 ajoute chaque
+                // panneau **deux fois** à son conteneur — deux boucles
+                // identiques dans le même corps — et la disposition obtenue
+                // n'est pas celle qu'on décrit. Les zones d'accueil n'y
+                // passent pas.
+                area.set_left_dock(
+                    DockItem::tabs(
+                        vec![Arc::new(sidebar), Arc::new(branches)],
+                        &weak_dock,
+                        window,
+                        cx,
+                    ),
+                    Some(px(260.)),
+                    true,
+                    window,
+                    cx,
+                );
+                // La liste des fichiers et l'historique répondent à la même
+                // question — que regarde-t-on — d'où deux onglets et non deux
+                // panneaux côte à côte.
+                area.set_center(
+                    DockItem::tabs(
+                        vec![Arc::new(review), Arc::new(history)],
+                        &weak_dock,
+                        window,
+                        cx,
+                    ),
+                    window,
+                    cx,
+                );
+                area.set_right_dock(
+                    DockItem::tab(diff, &weak_dock, window, cx),
+                    Some(px(900.)),
+                    true,
+                    window,
+                    cx,
+                );
+                area.set_bottom_dock(
+                    DockItem::tab(terminal, &weak_dock, window, cx),
+                    Some(px(280.)),
+                    true,
+                    window,
+                    cx,
+                );
+            });
+        }
+
+        // Le dock notifie à chaque déplacement, redimensionnement ou
+        // changement d'onglet : c'est le signal d'enregistrement, différé pour
+        // qu'un glissement n'écrive pas un fichier par pixel.
+        cx.observe(&dock, |this, _, cx| this.schedule_layout_save(cx))
+            .detach();
+
         let mut app = Self {
             git,
             repos: Vec::new(),
@@ -233,18 +358,13 @@ impl PerchApp {
             base_select,
             toast: None,
             pending_status: std::collections::HashSet::new(),
-            show_terminal: true,
-            show_branches: false,
-            show_history: false,
+            dock,
+            layout_save_scheduled: false,
             diff_dragging: false,
             watcher: None,
             diff_scroll: gpui::UniformListScrollHandle::new(),
             file_scroll: gpui::UniformListScrollHandle::new(),
             history_scroll: gpui::UniformListScrollHandle::new(),
-            history_split: cx.new(|_| ResizableState::default()),
-            sidebar_resize: cx.new(|_| ResizableState::default()),
-            center_resize: cx.new(|_| ResizableState::default()),
-            bottom_resize: cx.new(|_| ResizableState::default()),
             focus: cx.focus_handle(),
         };
 
@@ -264,6 +384,28 @@ impl PerchApp {
             }
         }
         app
+    }
+
+    /// Enregistre la disposition, une fois le calme revenu.
+    ///
+    /// L'état est relu au moment d'écrire et non à l'appel : l'ouverture d'une
+    /// zone d'accueil est différée d'une frame, et le capturer tout de suite
+    /// enregistrerait l'état d'avant le geste.
+    fn schedule_layout_save(&mut self, cx: &mut Context<Self>) {
+        if self.layout_save_scheduled {
+            return;
+        }
+        self.layout_save_scheduled = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(700))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.layout_save_scheduled = false;
+                save_layout(&this.dock.read(cx).dump(cx));
+            });
+        })
+        .detach();
     }
 
     /// Draine les événements des workers par lots.
@@ -463,6 +605,7 @@ impl PerchApp {
                 graph,
             } => {
                 if let Some(state) = self.review.get_mut(&worktree) {
+                    state.history_pending = false;
                     // Une réponse en retard, pour un domaine qu'on ne regarde
                     // plus, remplacerait l'historique par le mauvais.
                     if state.history_range == range {
@@ -716,9 +859,6 @@ impl PerchApp {
         if let Some(state) = self.review.get_mut(&worktree) {
             state.history = None;
         }
-        if self.show_history {
-            self.ensure_history(cx);
-        }
         cx.notify();
     }
 
@@ -875,44 +1015,18 @@ impl PerchApp {
                     })),
             )
             .child(Divider::vertical().h(px(16.)))
-            .child(
-                Button::new("history")
-                    .ghost()
-                    .small()
-                    .icon(icon("git-commit-horizontal"))
-                    .tooltip(tr!("panel-history"))
-                    .selected(self.show_history)
-                    .disabled(!has_active)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_history = !this.show_history;
-                        if this.show_history {
-                            this.ensure_history(cx);
-                        }
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("branches")
-                    .ghost()
-                    .small()
-                    .icon(icon("git-merge"))
-                    .tooltip(tr!("panel-branches"))
-                    .selected(self.show_branches)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_branches = !this.show_branches;
-                        cx.notify();
-                    })),
-            )
+            // L'historique et les branches sont des onglets du dock, atteints
+            // d'un clic sur leur onglet : un bouton de plus ici ferait deux
+            // chemins pour le même geste.
             .child(
                 Button::new("terminal")
                     .ghost()
                     .small()
                     .icon(icon("square-terminal"))
                     .tooltip(tr!("panel-terminal"))
-                    .selected(self.show_terminal)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_terminal = !this.show_terminal;
-                        cx.notify();
+                    .selected(self.terminal_visible(cx))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_terminal_panel(window, cx);
                     })),
             )
             .child(
@@ -986,63 +1100,6 @@ impl Focusable for PerchApp {
 
 impl Render for PerchApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let center = h_resizable("perch-center")
-            .with_state(&self.center_resize)
-            .child(
-                resizable_panel()
-                    .size(if self.show_history {
-                        px(560.)
-                    } else {
-                        px(320.)
-                    })
-                    .size_range(px(220.)..px(900.))
-                    .child(if self.show_history {
-                        // Le graphe seul ne dit pas ce qu'un commit a touché :
-                        // la liste de ses fichiers va dessous, sinon
-                        // sélectionner un commit n'ouvre que son premier
-                        // fichier et les autres restent invisibles.
-                        v_resizable("perch-history")
-                            .with_state(&self.history_split)
-                            .child(
-                                resizable_panel()
-                                    .size(px(420.))
-                                    .size_range(px(140.)..px(1200.))
-                                    .child(self.render_history(window, cx).into_any_element()),
-                            )
-                            .child(
-                                resizable_panel()
-                                    .child(self.render_file_list(window, cx).into_any_element()),
-                            )
-                            .into_any_element()
-                    } else {
-                        self.render_file_list(window, cx).into_any_element()
-                    }),
-            )
-            .child(resizable_panel().child(self.render_diff(window, cx).into_any_element()));
-
-        let main = h_resizable("perch-main")
-            .with_state(&self.sidebar_resize)
-            .child(
-                resizable_panel()
-                    .size(px(260.))
-                    .size_range(px(180.)..px(420.))
-                    .child(self.render_sidebar(window, cx).into_any_element()),
-            )
-            .child(resizable_panel().child(if self.show_terminal {
-                v_resizable("perch-vertical")
-                    .with_state(&self.bottom_resize)
-                    .child(resizable_panel().child(center.into_any_element()))
-                    .child(
-                        resizable_panel()
-                            .size(px(280.))
-                            .size_range(px(120.)..px(900.))
-                            .child(self.render_terminals(window, cx).into_any_element()),
-                    )
-                    .into_any_element()
-            } else {
-                center.into_any_element()
-            }));
-
         v_flex()
             .key_context(super::shortcuts::context())
             .track_focus(&self.focus)
@@ -1054,7 +1111,6 @@ impl Render for PerchApp {
             .on_action(cx.listener(super::shortcuts::commit))
             .on_action(cx.listener(super::shortcuts::show_working))
             .on_action(cx.listener(super::shortcuts::show_branch))
-            .on_action(cx.listener(super::shortcuts::toggle_history))
             .on_action(cx.listener(super::shortcuts::open_settings))
             .on_action(cx.listener(super::shortcuts::zoom_in))
             .on_action(cx.listener(super::shortcuts::zoom_out))
@@ -1066,7 +1122,7 @@ impl Render for PerchApp {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(self.render_topbar(window, cx))
-            .child(div().flex_1().min_h_0().child(main))
+            .child(div().flex_1().min_h_0().child(self.dock.clone()))
             .child(self.render_status_bar(cx))
             // Les couches de gpui-component doivent être ré-émises par la vue
             // racine, sinon dialogues et notifications ne s'affichent nulle
@@ -1113,17 +1169,14 @@ impl PerchApp {
         self.active.clone()
     }
 
-    pub(super) fn show_terminal_panel(&mut self, cx: &mut Context<Self>) {
-        self.show_terminal = true;
-        cx.notify();
+    pub(super) fn terminal_visible(&self, cx: &App) -> bool {
+        self.dock.read(cx).is_dock_open(DockPlacement::Bottom, cx)
     }
 
-    pub(super) fn toggle_history_panel(&mut self, cx: &mut Context<Self>) {
-        self.show_history = !self.show_history;
-        if self.show_history {
-            self.ensure_history(cx);
+    pub(super) fn show_terminal_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.terminal_visible(cx) {
+            self.toggle_terminal_panel(window, cx);
         }
-        cx.notify();
     }
 
     /// La zone que le zoom au clavier vise.
@@ -1161,8 +1214,14 @@ impl PerchApp {
         cx.notify();
     }
 
-    pub(super) fn toggle_terminal_panel(&mut self, cx: &mut Context<Self>) {
-        self.show_terminal = !self.show_terminal;
+    pub(super) fn toggle_terminal_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dock.update(cx, |area, cx| {
+            area.toggle_dock(DockPlacement::Bottom, window, cx);
+        });
+        // `toggle_dock` agit sur le dock intérieur et ne notifie pas l'aire :
+        // l'observation qui enregistre ne se déclencherait pas, et un panneau
+        // fermé rouvrirait au prochain lancement.
+        self.schedule_layout_save(cx);
         cx.notify();
     }
 }

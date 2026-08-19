@@ -336,9 +336,6 @@ impl PerchApp {
                             }),
                     ),
             )
-            .when(self.show_branches, |el| {
-                el.child(self.render_branches(cx).into_any_element())
-            })
     }
 
     /// Ouvre un dépôt. Le sélecteur de dossier natif est asynchrone : la

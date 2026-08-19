@@ -344,6 +344,48 @@ la seule qui ne mente pas quand l'apparence suit le système.
 Le chargement du registre est asynchrone : au premier `apply`, le thème choisi
 n'y est pas encore, d'où la ré-application dans le rappel de `watch_dir`.
 
+### Le dock
+
+La disposition appartient à `gpui_component::dock` : c'est lui qui gère le
+glissement d'un panneau d'une zone à l'autre, les onglets et les zones
+d'accueil. Chaque zone est donc une **entité à part** — `ui/panels.rs` — parce
+que le dock ne sait déplacer que des entités.
+
+Les panneaux ne portent aucun état : ils délèguent à `PerchApp`, dont ils ne
+gardent qu'une référence **faible** — forte, elle formerait un cycle,
+l'application tenant le dock qui tient les panneaux. Ils l'observent, sans quoi
+ils garderaient l'image de l'état au moment de leur construction.
+
+Rendre depuis un `update` sur `PerchApp` est licite : le rendu d'une vue enfant
+a lieu *après* que la fermeture de rendu du parent a rendu la main, donc hors
+de cet emprunt.
+
+Trois pièges, tous rencontrés :
+
+- **`DockItem::split_with_sizes` de gpui-component 0.5.1 ajoute chaque panneau
+  deux fois** — deux boucles identiques dans le même corps — et la disposition
+  obtenue n'est pas celle qu'on décrit. La disposition par défaut n'emploie
+  donc que des zones d'accueil et un centre.
+- **`toggle_dock` ne notifie pas l'aire**, seulement le dock intérieur :
+  l'observation qui enregistre ne se déclenche pas toute seule, d'où l'appel
+  explicite.
+- **L'état se relit au moment d'écrire**, pas à l'appel : l'ouverture d'une
+  zone est différée d'une frame, et le capturer tout de suite enregistrerait
+  l'état d'avant le geste.
+
+La disposition est enregistrée dans `<config>/layout.json`, à part des
+réglages : c'est l'état d'une fenêtre, volumineux et illisible, pas une
+préférence qu'on écrit à la main. `LAYOUT_VERSION` la fait écarter quand les
+panneaux changent de nom — reconstruire à partir de noms inconnus donnerait une
+fenêtre pleine de cadres vides. Les panneaux se déclarent au registre du dock
+(`panels::register`), sans quoi une disposition relue ne saurait pas les
+fabriquer.
+
+L'historique se charge au **rendu** de son onglet et non à la construction :
+c'est ce qui évite un `git log` que personne ne regardera. D'où
+`history_pending`, sans lequel chaque frame relancerait la commande pendant
+tout le temps de la lecture.
+
 ### Quel worktree s'ouvre
 
 `runtime::open_repo` retient le checkout d'où l'ouverture vient, et non le

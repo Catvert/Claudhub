@@ -473,6 +473,16 @@ pub fn available_shells() -> Vec<String> {
         .collect()
 }
 
+/// Où la disposition des panneaux est enregistrée.
+///
+/// À part des réglages : ce n'est pas une préférence qu'on écrit à la main
+/// mais l'état d'une fenêtre, volumineux et illisible, et un utilisateur qui
+/// ouvre `settings.json` n'a pas à le trouver là.
+pub fn layout_path() -> Option<PathBuf> {
+    directories::ProjectDirs::from("be", "acetics", "perch")
+        .map(|dirs| dirs.config_dir().join("layout.json"))
+}
+
 fn settings_path() -> Option<PathBuf> {
     directories::ProjectDirs::from("be", "acetics", "perch")
         .map(|dirs| dirs.config_dir().join("settings.json"))

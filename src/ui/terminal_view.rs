@@ -792,7 +792,7 @@ impl PerchApp {
                 cx,
             );
         });
-        self.show_terminal = true;
+        self.show_terminal_panel(window, cx);
         cx.notify();
     }
 }

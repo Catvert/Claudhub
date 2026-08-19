@@ -56,12 +56,13 @@ impl PerchApp {
         let Some(worktree) = self.active.clone() else {
             return;
         };
-        let Some(state) = self.review.get(&worktree) else {
+        let Some(state) = self.review.get_mut(&worktree) else {
             return;
         };
-        if state.history.is_some() {
+        if state.history.is_some() || state.history_pending {
             return;
         }
+        state.history_pending = true;
         let range = state.history_range.clone();
         self.git.send(Cmd::LoadHistory {
             worktree,
@@ -86,6 +87,7 @@ impl PerchApp {
         // chargement donnerait l'impression que le bouton n'a rien fait, puis
         // que la liste change toute seule.
         state.history = None;
+        state.history_pending = true;
         self.git.send(Cmd::LoadHistory {
             worktree,
             range,
