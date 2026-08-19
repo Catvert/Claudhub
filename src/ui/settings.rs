@@ -142,6 +142,18 @@ impl Default for TerminalSettings {
 }
 
 impl TerminalSettings {
+    /// Le programme à lancer, découpé en commande et arguments.
+    ///
+    /// Rend `None` pour un réglage vide, ce qui laisse alacritty ouvrir le
+    /// shell de connexion tel que `/etc/passwd` le déclare. Le réglage accepte
+    /// une ligne de commande entière — `fish -l`, `tmux new-session -A -s
+    /// perch` — parce qu'un shell nu n'est pas toujours ce qu'on veut ouvrir.
+    pub fn program(&self) -> Option<(String, Vec<String>)> {
+        let mut parts = self.shell.split_whitespace().map(str::to_string);
+        let program = parts.next()?;
+        Some((program, parts.collect()))
+    }
+
     /// Police effective : la sienne, sinon celle des diffs.
     pub fn family<'a>(&'a self, mono: &'a str) -> &'a str {
         if self.font_family.is_empty() {
@@ -566,6 +578,36 @@ mod tests {
         assert!(s.reset_zoom(Zoom::Diff));
         assert_eq!(s.diff_font_size, Settings::default().diff_font_size);
         assert!(!s.reset_zoom(Zoom::Diff));
+    }
+
+    #[test]
+    fn the_shell_setting_becomes_a_command_line() {
+        let mut s = TerminalSettings::default();
+        // Vide : c'est le shell de connexion, et personne d'autre n'a à
+        // décider lequel.
+        assert_eq!(s.program(), None);
+        s.shell = "   ".into();
+        assert_eq!(s.program(), None);
+
+        s.shell = "fish".into();
+        assert_eq!(s.program(), Some(("fish".into(), vec![])));
+
+        // Une ligne de commande entière : ouvrir directement une session tmux
+        // est un usage courant, et un shell nu n'est pas toujours ce qu'on
+        // veut.
+        s.shell = "tmux new-session -A -s perch".into();
+        assert_eq!(
+            s.program(),
+            Some((
+                "tmux".into(),
+                vec![
+                    "new-session".into(),
+                    "-A".into(),
+                    "-s".into(),
+                    "perch".into()
+                ]
+            ))
+        );
     }
 
     #[test]

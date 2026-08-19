@@ -67,7 +67,10 @@ impl TerminalView {
     ) -> anyhow::Result<Terminal> {
         Terminal::spawn(Spawn {
             working_directory,
-            command,
+            // Un onglet ordinaire prend le programme des réglages ; une
+            // commande explicite — l'agent — passe avant, elle est justement
+            // ce qu'on a demandé à lancer.
+            command: command.or_else(|| settings.program()),
             env: HashMap::new(),
             // La vraie taille arrive au premier rendu ; celle-ci ne sert qu'à
             // ce que le shell ait une géométrie plausible avant sa première

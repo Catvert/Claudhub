@@ -121,7 +121,14 @@ impl From<TermSize> for WindowSize {
 /// perdre un réveil — le prochain redessinera de toute façon l'état courant —
 /// que bloquer le thread qui lit le pty.
 #[derive(Clone)]
-struct Proxy(async_channel::Sender<TerminalEvent>);
+struct Proxy {
+    events: async_channel::Sender<TerminalEvent>,
+    /// Voie d'écriture vers le pty.
+    ///
+    /// Elle n'existe qu'une fois la boucle d'E/S créée, alors que le proxy lui
+    /// est passé à la construction : d'où le `OnceLock`, rempli juste après.
+    pty: Arc<std::sync::OnceLock<EventLoopSender>>,
+}
 
 impl EventListener for Proxy {
     fn send_event(&self, event: AlacEvent) {
@@ -131,11 +138,22 @@ impl EventListener for Proxy {
             AlacEvent::ResetTitle => TerminalEvent::Title(String::new()),
             AlacEvent::Bell => TerminalEvent::Bell,
             AlacEvent::Exit | AlacEvent::ChildExit(_) => TerminalEvent::Exited,
+            // Une réponse que l'émulateur doit au programme : identité du
+            // terminal, position du curseur, état d'un mode. Ce n'est pas
+            // facultatif — fish interroge le terminal au démarrage et attend
+            // **dix secondes** avant de renoncer, puis se prive des
+            // fonctionnalités qui en dépendaient.
+            AlacEvent::PtyWrite(text) => {
+                if let Some(pty) = self.pty.get() {
+                    let _ = pty.send(Msg::Input(text.into_bytes().into()));
+                }
+                return;
+            }
             // Presse-papiers, couleurs, forme du curseur : rien que la vue
             // sache traiter aujourd'hui, et les ignorer est sans conséquence.
             _ => return,
         };
-        let _ = self.0.try_send(mapped);
+        let _ = self.events.try_send(mapped);
     }
 }
 
@@ -166,7 +184,10 @@ pub struct Spawn<'a> {
 impl Terminal {
     pub fn spawn(options: Spawn<'_>) -> Result<Self> {
         let (evt_tx, evt_rx) = async_channel::unbounded();
-        let proxy = Proxy(evt_tx);
+        let proxy = Proxy {
+            events: evt_tx,
+            pty: Arc::new(std::sync::OnceLock::new()),
+        };
 
         let mut env = options.env;
         // Sans TERM, les programmes plein écran retombent sur un terminal
@@ -207,9 +228,18 @@ impl Terminal {
             )
         })?;
 
-        let event_loop = EventLoop::new(term.clone(), proxy, pty, pty_options.drain_on_exit, false)
-            .context("démarrage de la boucle d'entrées-sorties du terminal")?;
+        let event_loop = EventLoop::new(
+            term.clone(),
+            proxy.clone(),
+            pty,
+            pty_options.drain_on_exit,
+            false,
+        )
+        .context("démarrage de la boucle d'entrées-sorties du terminal")?;
         let sender = event_loop.channel();
+        // À installer avant que la boucle démarre : la première interrogation
+        // du terminal arrive dès la première invite.
+        let _ = proxy.pty.set(sender.clone());
         // Le JoinHandle est délibérément lâché : l'arrêt passe par
         // `Msg::Shutdown` dans `Drop`, et attendre le thread au moment de
         // fermer un onglet ferait attendre l'interface.
