@@ -26,6 +26,11 @@ use crate::ui::highlight::DiffHighlights;
 pub struct Rendered {
     pub file: FileDiff,
     pub rows: Vec<Row>,
+    /// La même chose en deux colonnes, appariée ligne à ligne. Construite en
+    /// même temps que le reste plutôt qu'au premier passage en mode « split » :
+    /// un `Rendered` est partagé par `Rc` et ne se modifie plus, et le coût
+    /// est sans commune mesure avec celui de la coloration.
+    pub split: Vec<SplitRow>,
     pub highlights: DiffHighlights,
     pub patches: Vec<String>,
     pub gutter_digits: usize,
@@ -50,6 +55,7 @@ impl Rendered {
             gutter_digits: gutter_digits(&file),
             longest_row,
             longest_chars,
+            split: split_rows(&file, &rows),
             rows,
             file,
         }
@@ -118,6 +124,57 @@ impl Rendered {
         Some((first, last))
     }
 
+    /// Le nombre d'entrées de la liste affichée.
+    pub fn len(&self, split: bool) -> usize {
+        if split {
+            self.split.len()
+        } else {
+            self.rows.len()
+        }
+    }
+
+    /// Ramène une plage de la liste en deux colonnes à la liste unifiée.
+    ///
+    /// C'est la liste unifiée qui porte l'ordre du fichier : appariées, les
+    /// lignes supprimées et ajoutées se retrouvent sur la même entrée, et une
+    /// copie doit rendre les deux dans l'ordre où git les écrit.
+    pub fn unified_span(&self, from: usize, to: usize) -> Option<(usize, usize)> {
+        let (from, to) = (from.min(to), from.max(to));
+        let mut bounds: Option<(usize, usize)> = None;
+        for row in self
+            .split
+            .get(from..=to.min(self.split.len().saturating_sub(1)))?
+        {
+            for index in row.unified() {
+                bounds = Some(match bounds {
+                    Some((a, b)) => (a.min(index), b.max(index)),
+                    None => (index, index),
+                });
+            }
+        }
+        bounds
+    }
+
+    /// Les indices des en-têtes de hunk dans la liste affichée, en ordre
+    /// croissant.
+    pub fn headers(&self, split: bool) -> Vec<usize> {
+        if split {
+            self.split
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| matches!(row, SplitRow::Header { .. }))
+                .map(|(index, _)| index)
+                .collect()
+        } else {
+            self.rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| matches!(row, Row::Header { .. }))
+                .map(|(index, _)| index)
+                .collect()
+        }
+    }
+
     /// Le texte d'une entrée, pour la mesure comme pour le rendu.
     pub fn row_text(&self, row: Row) -> &str {
         match row {
@@ -183,6 +240,90 @@ pub fn rows(diff: &FileDiff) -> Vec<Row> {
         rows.extend((0..hunk.lines.len()).map(|line| Row::Line { hunk: h, line }));
     }
     rows
+}
+
+/// Une entrée de la liste en deux colonnes.
+///
+/// Les indices sont ceux de la liste **unifiée** : elle reste la référence —
+/// pour le texte, la coloration et la copie —, et les deux colonnes n'en sont
+/// qu'un autre agencement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitRow {
+    Header {
+        hunk: usize,
+        row: usize,
+    },
+    /// Une ligne de gauche, une de droite, ou une seule des deux : un ajout
+    /// sans suppression en face laisse la gauche vide, et réciproquement.
+    Pair {
+        old: Option<usize>,
+        new: Option<usize>,
+    },
+}
+
+impl SplitRow {
+    /// Les entrées de la liste unifiée que cette entrée-ci recouvre.
+    pub fn unified(self) -> impl Iterator<Item = usize> {
+        let (a, b) = match self {
+            SplitRow::Header { row, .. } => (Some(row), None),
+            SplitRow::Pair { old, new } => (old, new),
+        };
+        a.into_iter().chain(b)
+    }
+}
+
+/// Apparie les deux versions d'un diff.
+///
+/// Un bloc de suppressions suivi d'un bloc d'ajouts est ce que git écrit pour
+/// une modification : les apparier rang par rang remet en face les deux
+/// versions d'une même ligne, ce qui est tout l'intérêt de la vue en colonnes.
+/// Quand les blocs n'ont pas la même hauteur, le plus court se termine par des
+/// cases vides — il n'y a rien à montrer en face.
+pub fn split_rows(diff: &FileDiff, rows: &[Row]) -> Vec<SplitRow> {
+    let mut out = Vec::new();
+    let mut olds: Vec<usize> = Vec::new();
+    let mut news: Vec<usize> = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        match *row {
+            Row::Header { hunk } => {
+                pair_up(&mut olds, &mut news, &mut out);
+                out.push(SplitRow::Header { hunk, row: index });
+            }
+            Row::Line { hunk, line } => {
+                let kind = diff
+                    .hunks
+                    .get(hunk)
+                    .and_then(|h| h.lines.get(line))
+                    .map(|l| l.kind);
+                match kind {
+                    Some(DiffLineKind::Removed) => olds.push(index),
+                    Some(DiffLineKind::Added) => news.push(index),
+                    // Une ligne de contexte appartient aux deux versions : elle
+                    // ferme le bloc en cours et occupe les deux colonnes.
+                    _ => {
+                        pair_up(&mut olds, &mut news, &mut out);
+                        out.push(SplitRow::Pair {
+                            old: Some(index),
+                            new: Some(index),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    pair_up(&mut olds, &mut news, &mut out);
+    out
+}
+
+fn pair_up(olds: &mut Vec<usize>, news: &mut Vec<usize>, out: &mut Vec<SplitRow>) {
+    for i in 0..olds.len().max(news.len()) {
+        out.push(SplitRow::Pair {
+            old: olds.get(i).copied(),
+            new: news.get(i).copied(),
+        });
+    }
+    olds.clear();
+    news.clear();
 }
 
 /// Le nombre de chiffres du plus grand numéro de ligne du fichier.
@@ -301,12 +442,36 @@ impl PerchApp {
         self.diff_dragging = false;
     }
 
+    /// Bascule entre une colonne et deux.
+    ///
+    /// La sélection est abandonnée : ses indices désignent la liste affichée,
+    /// et les deux listes ne comptent pas les mêmes entrées.
+    pub(super) fn toggle_diff_split(&mut self, cx: &mut Context<Self>) {
+        crate::ui::settings::Settings::update_global(cx, |s| s.diff_split = !s.diff_split);
+        if let Some(state) = self.active_review_mut() {
+            state.diff_selection = None;
+        }
+        cx.notify();
+    }
+
+    /// Bascule entre « tout le fichier » et les seules modifications.
+    ///
+    /// Le diff est relu : les lignes élidées ne sont nulle part dans ce qu'on
+    /// a en mémoire, git seul sait ce qu'elles contenaient.
+    pub(super) fn toggle_whole_file(&mut self, cx: &mut Context<Self>) {
+        crate::ui::settings::Settings::update_global(cx, |s| {
+            s.diff_whole_file = !s.diff_whole_file
+        });
+        self.reload_diff(cx);
+    }
+
     /// Sélectionne tout le diff affiché.
     pub(super) fn select_whole_diff(&mut self, cx: &mut Context<Self>) {
+        let split = crate::ui::settings::Settings::global(cx).diff_split;
         let Some(last) = self
             .active_review()
             .and_then(|state| state.diff.as_ref())
-            .map(|diff| diff.rows.len().saturating_sub(1))
+            .map(|diff| diff.len(split).saturating_sub(1))
         else {
             return;
         };
@@ -328,9 +493,17 @@ impl PerchApp {
         let Some(diff) = state.diff.clone() else {
             return;
         };
-        let (from, to) = state
-            .diff_selection
-            .unwrap_or((0, diff.rows.len().saturating_sub(1)));
+        // La copie part toujours de la liste unifiée : c'est elle qui porte
+        // l'ordre du fichier. En deux colonnes, la sélection y est ramenée.
+        let split = crate::ui::settings::Settings::global(cx).diff_split;
+        let (from, to) = match (split, state.diff_selection) {
+            (true, Some((a, b))) => match diff.unified_span(a, b) {
+                Some(span) => span,
+                None => return,
+            },
+            (false, Some(span)) => span,
+            (_, None) => (0, diff.rows.len().saturating_sub(1)),
+        };
         self.copy_rows(&diff, from, to, with_markers, cx);
     }
 
@@ -371,6 +544,66 @@ impl PerchApp {
         let path = path.display().to_string();
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(path));
         self.announce(tr!("copy-path-done"), cx);
+    }
+
+    /// Déplace la sélection d'une ligne, et la ramène dans la vue.
+    ///
+    /// `extend` garde l'ancre en place : c'est Maj+flèche, qui prend un bloc
+    /// de lignes au clavier comme le glissement le prend à la souris.
+    pub(super) fn step_diff_row(&mut self, delta: isize, extend: bool, cx: &mut Context<Self>) {
+        let split = crate::ui::settings::Settings::global(cx).diff_split;
+        let Some(len) = self
+            .active_review()
+            .and_then(|state| state.diff.as_ref())
+            .map(|diff| diff.len(split))
+        else {
+            return;
+        };
+        let current = self.active_review().and_then(|state| state.diff_selection);
+        let Some(head) = step(current.map(|(_, head)| head), delta, len) else {
+            return;
+        };
+        let anchor = match current {
+            Some((anchor, _)) if extend => anchor,
+            _ => head,
+        };
+        self.move_diff_selection(anchor, head, cx);
+    }
+
+    /// Saute au hunk précédent ou suivant.
+    ///
+    /// Relire, c'est passer d'une modification à l'autre : les lignes de
+    /// contexte entre deux hunks n'ont, elles, rien à montrer.
+    pub(super) fn step_diff_hunk(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let split = crate::ui::settings::Settings::global(cx).diff_split;
+        let Some(headers) = self
+            .active_review()
+            .and_then(|state| state.diff.as_ref())
+            .map(|diff| diff.headers(split))
+        else {
+            return;
+        };
+        let from = self
+            .active_review()
+            .and_then(|state| state.diff_selection)
+            .map(|(_, head)| head);
+        let Some(target) = next_header(&headers, from, delta) else {
+            return;
+        };
+        self.move_diff_selection(target, target, cx);
+    }
+
+    fn move_diff_selection(&mut self, anchor: usize, head: usize, cx: &mut Context<Self>) {
+        let Some(state) = self.active_review_mut() else {
+            return;
+        };
+        state.diff_selection = Some((anchor, head));
+        // Défilement non strict : une ligne déjà visible ne fait pas sauter la
+        // vue, ce qui laisse le regard où il est tant qu'on ne sort pas de
+        // l'écran.
+        self.diff_scroll
+            .scroll_to_item(head, gpui::ScrollStrategy::Top);
+        cx.notify();
     }
 
     /// Molette avec la touche système : grossir ou réduire le code relu.
@@ -424,6 +657,8 @@ impl PerchApp {
         };
         let stageable = state.range == DiffRange::Working;
         let diff = state.diff.clone();
+        let settings = crate::ui::settings::Settings::global(cx);
+        let (split, whole_file) = (settings.diff_split, settings.diff_whole_file);
         let mono = cx.theme().mono_font_family.clone();
         let font_size = px(crate::ui::settings::Settings::global(cx).diff_font_size);
         let line_height = line_height(font_size);
@@ -451,6 +686,33 @@ impl PerchApp {
                     })
                     .on_click(cx.listener(|this, _, _window, cx| this.copy_diff_path(cx)))
                     .child(path.display().to_string()),
+            )
+            .child(
+                Button::new("diff-whole-file")
+                    .ghost()
+                    .xsmall()
+                    // L'icône dit l'état courant, comme la bascule de
+                    // l'arborescence : le fichier entier, ou ses seules
+                    // modifications.
+                    .icon(icon(if whole_file { "file-text" } else { "file-diff" }))
+                    .tooltip(if whole_file {
+                        tr!("diff-hunks-only")
+                    } else {
+                        tr!("diff-whole-file")
+                    })
+                    .on_click(cx.listener(|this, _, _window, cx| this.toggle_whole_file(cx))),
+            )
+            .child(
+                Button::new("diff-split")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon(if split { "columns-2" } else { "list" }))
+                    .tooltip(if split {
+                        tr!("diff-unified")
+                    } else {
+                        tr!("diff-split")
+                    })
+                    .on_click(cx.listener(|this, _, _window, cx| this.toggle_diff_split(cx))),
             )
             .child(
                 Button::new("copy-file")
@@ -506,13 +768,23 @@ impl PerchApp {
         // précédente : sans ce plancher, le fond coloré d'une ligne modifiée
         // s'arrêterait au bout de son texte au lieu de traverser la vue.
         let viewport = self.diff_scroll.0.borrow().base_handle.bounds().size.width;
-        let content_width =
-            (cell * diff.longest_chars as f32 + gutter * 2. + px(24.)).max(viewport);
+        let text_width = cell * diff.longest_chars as f32 + px(24.);
+        // En deux colonnes, chacune est taillée pour la plus longue ligne du
+        // fichier — et non pour la moitié de la vue. Les tailler à la vue
+        // couperait le code ou le renverrait à la ligne, alors que le tout
+        // reste atteignable par le défilement horizontal, qui emmène les deux
+        // colonnes ensemble et garde donc les versions en regard.
+        let column = ((text_width + gutter).max(viewport / 2.)).max(px(80.));
+        let content_width = if split {
+            column * 2.
+        } else {
+            (text_width + gutter * 2.).max(viewport)
+        };
 
         let colors = DiffColors::of(cx);
         let entity = cx.entity();
         let rows = diff.clone();
-        let count = diff.rows.len();
+        let count = diff.len(split);
         let selection = self
             .active_review()
             .and_then(|state| state.diff_selection)
@@ -536,19 +808,37 @@ impl PerchApp {
                         uniform_list("diff-lines", count, move |range, _window, cx| {
                             range
                                 .map(|ix| {
-                                    render_row(
-                                        &rows,
-                                        ix,
-                                        &colors,
-                                        gutter,
-                                        content_width,
-                                        line_height,
-                                        stageable,
-                                        selection.is_some_and(|(a, b)| ix >= a && ix <= b),
-                                        selection_bg,
-                                        &entity,
-                                        cx,
-                                    )
+                                    let selected =
+                                        selection.is_some_and(|(a, b)| ix >= a && ix <= b);
+                                    if split {
+                                        render_split_row(
+                                            &rows,
+                                            ix,
+                                            &colors,
+                                            gutter,
+                                            column,
+                                            line_height,
+                                            stageable,
+                                            selected,
+                                            selection_bg,
+                                            &entity,
+                                            cx,
+                                        )
+                                    } else {
+                                        render_row(
+                                            &rows,
+                                            ix,
+                                            &colors,
+                                            gutter,
+                                            content_width,
+                                            line_height,
+                                            stageable,
+                                            selected,
+                                            selection_bg,
+                                            &entity,
+                                            cx,
+                                        )
+                                    }
                                 })
                                 .collect::<Vec<_>>()
                         })
@@ -562,7 +852,10 @@ impl PerchApp {
                         .with_horizontal_sizing_behavior(
                             ListHorizontalSizingBehavior::Unconstrained,
                         )
-                        .with_width_from_item(Some(diff.longest_row))
+                        // En deux colonnes, toutes les entrées ont la même
+                        // largeur — celle des deux colonnes réunies — et
+                        // n'importe laquelle mesure donc la bonne.
+                        .with_width_from_item(Some(if split { 0 } else { diff.longest_row }))
                         .track_scroll(self.diff_scroll.clone()),
                     ),
             )
@@ -588,86 +881,25 @@ fn render_row(
         return div().into_any_element();
     };
     match row {
-        Row::Header { hunk } => {
-            let patch = diff.patches.get(hunk).cloned().unwrap_or_default();
-            let entity = entity.clone();
-            let for_copy = entity.clone();
-            let for_click = entity.clone();
-            let for_drag = entity.clone();
-            h_flex()
-                .id(("hunk", index))
-                .h(line_height)
-                .min_w(content_width)
-                .px_2()
-                .gap_2()
-                .items_center()
-                .whitespace_nowrap()
-                .bg(if selected {
-                    selection_bg
-                } else {
-                    colors.hunk_bg
-                })
-                .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
-                    select(&for_click, index, event.modifiers.shift, window, cx);
-                })
-                .on_mouse_move(move |event, _window, cx| drag(&for_drag, index, event, cx))
-                .child(
-                    div()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(SharedString::from(diff.row_text(row).to_string())),
-                )
-                .child(
-                    Button::new(("copy-hunk", index))
-                        .ghost()
-                        .xsmall()
-                        .icon(icon("copy"))
-                        .tooltip(tr!("action-copy-hunk"))
-                        .on_click(move |_, _window, cx| {
-                            for_copy.update(cx, |this, cx| this.copy_hunk(hunk, false, cx));
-                        }),
-                )
-                // Indexer un hunk seul n'a de sens que depuis les
-                // modifications non indexées : ailleurs, ou bien tout est déjà
-                // dans l'index, ou bien on regarde des commits déjà écrits.
-                .when(stageable, |el| {
-                    el.child(
-                        Button::new(("stage-hunk", index))
-                            .ghost()
-                            .xsmall()
-                            .icon(icon("plus"))
-                            .tooltip(tr!("action-stage-hunk"))
-                            .on_click(move |_, _window, cx| {
-                                entity.update(cx, |this, cx| this.apply_hunk(patch.clone(), cx));
-                            }),
-                    )
-                })
-                .into_any_element()
-        }
+        Row::Header { hunk } => render_header(
+            diff,
+            index,
+            hunk,
+            colors,
+            content_width,
+            line_height,
+            stageable,
+            selected,
+            selection_bg,
+            entity,
+            cx,
+        ),
         Row::Line { hunk, line } => {
             let Some(source) = diff.file.hunks.get(hunk).and_then(|h| h.lines.get(line)) else {
                 return div().into_any_element();
             };
-            let (bg, fg) = match source.kind {
-                DiffLineKind::Added => (Some(colors.added_bg), Some(colors.added_fg)),
-                DiffLineKind::Removed => (Some(colors.removed_bg), Some(colors.removed_fg)),
-                DiffLineKind::Context | DiffLineKind::NoNewline => (None, None),
-            };
-
-            let text = SharedString::from(source.text.clone());
-            let styles = diff.highlights.line(hunk, line);
-            // Les tabulations sont rendues telles quelles par la police : les
-            // remplacer ici garderait l'alignement mais décalerait les plages
-            // de coloration, calculées sur le texte d'origine.
-            let content = if styles.is_empty() {
-                div()
-                    .when_some(fg, |el, fg| el.text_color(fg))
-                    .child(text)
-                    .into_any_element()
-            } else {
-                StyledText::new(text)
-                    .with_highlights(styles.iter().cloned())
-                    .into_any_element()
-            };
+            let (bg, fg) = line_colors(source.kind, colors);
+            let content = line_content(diff, hunk, line, fg);
 
             let for_drag = entity.clone();
             let entity = entity.clone();
@@ -700,6 +932,300 @@ fn render_row(
                 .child(content)
                 .into_any_element()
         }
+    }
+}
+
+/// L'en-tête `@@ … @@`, avec ses boutons. Le même dans les deux modes : il
+/// porte sur le hunk entier, qui n'a pas deux versions.
+#[allow(clippy::too_many_arguments)]
+fn render_header(
+    diff: &Rc<Rendered>,
+    index: usize,
+    hunk: usize,
+    colors: &DiffColors,
+    content_width: Pixels,
+    line_height: Pixels,
+    stageable: bool,
+    selected: bool,
+    selection_bg: gpui::Hsla,
+    entity: &Entity<PerchApp>,
+    cx: &mut gpui::App,
+) -> gpui::AnyElement {
+    let patch = diff.patches.get(hunk).cloned().unwrap_or_default();
+    let entity = entity.clone();
+    let for_copy = entity.clone();
+    let for_click = entity.clone();
+    let for_drag = entity.clone();
+    h_flex()
+        .id(("hunk", index))
+        .h(line_height)
+        .min_w(content_width)
+        .px_2()
+        .gap_2()
+        .items_center()
+        .whitespace_nowrap()
+        .bg(if selected {
+            selection_bg
+        } else {
+            colors.hunk_bg
+        })
+        .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+            select(&for_click, index, event.modifiers.shift, window, cx);
+        })
+        .on_mouse_move(move |event, _window, cx| drag(&for_drag, index, event, cx))
+        .child(
+            div()
+                .text_color(cx.theme().muted_foreground)
+                .child(SharedString::from(
+                    diff.row_text(Row::Header { hunk }).to_string(),
+                )),
+        )
+        .child(
+            Button::new(("copy-hunk", index))
+                .ghost()
+                .xsmall()
+                .icon(icon("copy"))
+                .tooltip(tr!("action-copy-hunk"))
+                .on_click(move |_, _window, cx| {
+                    for_copy.update(cx, |this, cx| this.copy_hunk(hunk, false, cx));
+                }),
+        )
+        // Indexer un hunk seul n'a de sens que depuis les modifications non
+        // indexées : ailleurs, ou bien tout est déjà dans l'index, ou bien on
+        // regarde des commits déjà écrits.
+        .when(stageable, |el| {
+            el.child(
+                Button::new(("stage-hunk", index))
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("plus"))
+                    .tooltip(tr!("action-stage-hunk"))
+                    .on_click(move |_, _window, cx| {
+                        entity.update(cx, |this, cx| this.apply_hunk(patch.clone(), cx));
+                    }),
+            )
+        })
+        .into_any_element()
+}
+
+fn line_colors(
+    kind: DiffLineKind,
+    colors: &DiffColors,
+) -> (Option<gpui::Hsla>, Option<gpui::Hsla>) {
+    match kind {
+        DiffLineKind::Added => (Some(colors.added_bg), Some(colors.added_fg)),
+        DiffLineKind::Removed => (Some(colors.removed_bg), Some(colors.removed_fg)),
+        DiffLineKind::Context | DiffLineKind::NoNewline => (None, None),
+    }
+}
+
+/// Le texte d'une ligne, coloré s'il l'est.
+///
+/// Les tabulations sont rendues telles quelles par la police : les remplacer
+/// ici garderait l'alignement mais décalerait les plages de coloration,
+/// calculées sur le texte d'origine.
+fn line_content(
+    diff: &Rc<Rendered>,
+    hunk: usize,
+    line: usize,
+    fg: Option<gpui::Hsla>,
+) -> gpui::AnyElement {
+    let Some(source) = diff.file.hunks.get(hunk).and_then(|h| h.lines.get(line)) else {
+        return div().into_any_element();
+    };
+    let text = SharedString::from(source.text.clone());
+    let styles = diff.highlights.line(hunk, line);
+    if styles.is_empty() {
+        div()
+            .when_some(fg, |el, fg| el.text_color(fg))
+            .child(text)
+            .into_any_element()
+    } else {
+        StyledText::new(text)
+            .with_highlights(styles.iter().cloned())
+            .into_any_element()
+    }
+}
+
+/// Une entrée de la vue en deux colonnes.
+#[allow(clippy::too_many_arguments)]
+fn render_split_row(
+    diff: &Rc<Rendered>,
+    index: usize,
+    colors: &DiffColors,
+    gutter: Pixels,
+    column: Pixels,
+    line_height: Pixels,
+    stageable: bool,
+    selected: bool,
+    selection_bg: gpui::Hsla,
+    entity: &Entity<PerchApp>,
+    cx: &mut gpui::App,
+) -> gpui::AnyElement {
+    let Some(row) = diff.split.get(index).copied() else {
+        return div().into_any_element();
+    };
+    let (old, new) = match row {
+        SplitRow::Header { hunk, .. } => {
+            return render_header(
+                diff,
+                index,
+                hunk,
+                colors,
+                column * 2.,
+                line_height,
+                stageable,
+                selected,
+                selection_bg,
+                entity,
+                cx,
+            )
+        }
+        SplitRow::Pair { old, new } => (old, new),
+    };
+
+    let for_drag = entity.clone();
+    let for_click = entity.clone();
+    h_flex()
+        .id(("pair", index))
+        .h(line_height)
+        .items_center()
+        .whitespace_nowrap()
+        .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+            select(&for_click, index, event.modifiers.shift, window, cx);
+        })
+        .on_mouse_move(move |event, _window, cx| drag(&for_drag, index, event, cx))
+        .child(half(
+            diff,
+            old,
+            Column::Old,
+            colors,
+            gutter,
+            column,
+            selected,
+            selection_bg,
+        ))
+        .child(half(
+            diff,
+            new,
+            Column::New,
+            colors,
+            gutter,
+            column,
+            selected,
+            selection_bg,
+        ))
+        .into_any_element()
+}
+
+/// Une moitié de ligne : son numéro, son signe et son texte.
+///
+/// Sans ligne à montrer — un ajout n'a rien en face —, la moitié reste vide et
+/// grisée : c'est ce qui rend visible que la modification n'a pas de
+/// contrepartie de ce côté-là.
+/// Laquelle des deux versions une colonne montre.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Column {
+    Old,
+    New,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn half(
+    diff: &Rc<Rendered>,
+    row: Option<usize>,
+    side: Column,
+    colors: &DiffColors,
+    gutter: Pixels,
+    column: Pixels,
+    selected: bool,
+    selection_bg: gpui::Hsla,
+) -> gpui::AnyElement {
+    let source = row
+        .and_then(|index| diff.rows.get(index).copied())
+        .and_then(|row| match row {
+            Row::Line { hunk, line } => Some((hunk, line)),
+            Row::Header { .. } => None,
+        })
+        .and_then(|(hunk, line)| {
+            let source = diff.file.hunks.get(hunk)?.lines.get(line)?;
+            Some((hunk, line, source))
+        });
+
+    let Some((hunk, line, source)) = source else {
+        return div()
+            .w(column)
+            .flex_none()
+            .h_full()
+            .bg(if selected {
+                selection_bg
+            } else {
+                colors.absent_bg
+            })
+            .into_any_element();
+    };
+
+    let (bg, fg) = line_colors(source.kind, colors);
+    // Le numéro de *cette* version : une ligne de contexte en a deux, et
+    // afficher le même des deux côtés ferait mentir la colonne de gauche dès
+    // que le fichier a gagné ou perdu des lignes plus haut.
+    let number_of = match side {
+        Column::Old => source.old_no.or(source.new_no),
+        Column::New => source.new_no.or(source.old_no),
+    };
+    let kind = source.kind;
+    h_flex()
+        .w(column)
+        .flex_none()
+        .h_full()
+        .items_center()
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .when_some(bg.filter(|_| !selected), |el, bg| el.bg(bg))
+        .when(selected, |el| el.bg(selection_bg))
+        // Une seule gouttière par colonne : chacune montre sa propre version,
+        // et y répéter les deux numéros ferait payer deux fois la largeur pour
+        // une information que la colonne d'en face porte déjà.
+        .child(number(number_of, gutter, colors))
+        .child(
+            div()
+                .w(px(14.))
+                .flex_none()
+                .text_center()
+                .when_some(fg, |el, fg| el.text_color(fg))
+                .child(sign(kind)),
+        )
+        .child(line_content(diff, hunk, line, fg))
+        .into_any_element()
+}
+
+/// Où va la sélection après une flèche.
+///
+/// Sans sélection, la première flèche part de l'extrémité vers laquelle elle
+/// pointe : vers le bas depuis la première ligne, vers le haut depuis la
+/// dernière. Aux bords, elle bute plutôt que de faire le tour — dépasser la
+/// fin d'un fichier pour revenir à son début n'est jamais ce qu'on voulait.
+fn step(current: Option<usize>, delta: isize, len: usize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let last = len as isize - 1;
+    let next = match current {
+        Some(index) => index as isize + delta,
+        None if delta > 0 => 0,
+        None => last,
+    };
+    Some(next.clamp(0, last) as usize)
+}
+
+/// L'en-tête de hunk suivant ou précédent, à partir d'une position.
+fn next_header(headers: &[usize], from: Option<usize>, delta: isize) -> Option<usize> {
+    match from {
+        // Strictement au-delà : sans quoi, partir d'un en-tête y resterait.
+        Some(index) if delta > 0 => headers.iter().find(|h| **h > index).copied(),
+        Some(index) => headers.iter().rev().find(|h| **h < index).copied(),
+        None if delta > 0 => headers.first().copied(),
+        None => headers.last().copied(),
     }
 }
 
@@ -822,6 +1348,104 @@ mod tests {
                 Row::Line { hunk: 1, line: 0 },
             ]
         );
+    }
+
+    /// L'appariement est toute la vue en colonnes : un bloc de suppressions
+    /// suivi d'un bloc d'ajouts remet les deux versions en regard.
+    #[test]
+    fn the_two_columns_face_each_other() {
+        let diff = FileDiff {
+            hunks: vec![hunk(
+                "@@ a @@",
+                &[
+                    DiffLineKind::Context,
+                    DiffLineKind::Removed,
+                    DiffLineKind::Removed,
+                    DiffLineKind::Added,
+                    DiffLineKind::Context,
+                ],
+            )],
+            binary: false,
+            empty: false,
+        };
+        let rows = rows(&diff);
+        assert_eq!(
+            split_rows(&diff, &rows),
+            vec![
+                SplitRow::Header { hunk: 0, row: 0 },
+                SplitRow::Pair {
+                    old: Some(1),
+                    new: Some(1)
+                },
+                SplitRow::Pair {
+                    old: Some(2),
+                    new: Some(4)
+                },
+                // Deux suppressions pour un seul ajout : la seconde n'a rien en
+                // face, et la case de droite reste vide.
+                SplitRow::Pair {
+                    old: Some(3),
+                    new: None
+                },
+                SplitRow::Pair {
+                    old: Some(5),
+                    new: Some(5)
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_column_selection_comes_back_to_the_file_order() {
+        let diff = FileDiff {
+            hunks: vec![hunk(
+                "@@ a @@",
+                &[
+                    DiffLineKind::Removed,
+                    DiffLineKind::Added,
+                    DiffLineKind::Context,
+                ],
+            )],
+            binary: false,
+            empty: false,
+        };
+        let rendered = Rendered::new(Path::new("x.txt"), diff, &Theme::default_dark());
+        // La paire (suppression, ajout) recouvre deux lignes de la liste
+        // unifiée : les copier doit rendre les deux, dans l'ordre de git.
+        assert_eq!(rendered.unified_span(1, 1), Some((1, 2)));
+        assert_eq!(rendered.unified_span(0, 2), Some((0, 3)));
+        assert_eq!(rendered.headers(true), vec![0]);
+        assert_eq!(rendered.headers(false), vec![0]);
+        assert_eq!(rendered.len(false), 4);
+        assert_eq!(
+            rendered.len(true),
+            3,
+            "l'ajout et la suppression tiennent sur une entrée"
+        );
+    }
+
+    #[test]
+    fn arrows_stop_at_the_edges() {
+        assert_eq!(step(Some(3), 1, 10), Some(4));
+        assert_eq!(step(Some(0), -1, 10), Some(0), "butée haute");
+        assert_eq!(step(Some(9), 1, 10), Some(9), "butée basse");
+        // Sans sélection, la flèche part de l'extrémité vers laquelle elle va.
+        assert_eq!(step(None, 1, 10), Some(0));
+        assert_eq!(step(None, -1, 10), Some(9));
+        assert_eq!(step(Some(0), 1, 0), None, "rien à parcourir");
+    }
+
+    #[test]
+    fn hunk_jumps_never_stay_put() {
+        let headers = [0usize, 12, 40];
+        assert_eq!(next_header(&headers, Some(0), 1), Some(12));
+        assert_eq!(next_header(&headers, Some(13), 1), Some(40));
+        assert_eq!(next_header(&headers, Some(40), 1), None, "le dernier");
+        assert_eq!(next_header(&headers, Some(13), -1), Some(12));
+        assert_eq!(next_header(&headers, Some(12), -1), Some(0));
+        assert_eq!(next_header(&headers, Some(0), -1), None);
+        assert_eq!(next_header(&headers, None, 1), Some(0));
+        assert_eq!(next_header(&headers, None, -1), Some(40));
     }
 
     #[test]

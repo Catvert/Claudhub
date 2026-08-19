@@ -190,6 +190,12 @@ pub struct Settings {
     pub diff_context: usize,
     /// Liste des fichiers en arborescence de dossiers plutôt qu'à plat.
     pub review_tree: bool,
+    /// Diff en deux colonnes — ancienne version à gauche, nouvelle à droite —
+    /// plutôt qu'en une seule liste.
+    pub diff_split: bool,
+    /// Afficher le fichier entier autour des modifications, et non seulement
+    /// leurs quelques lignes de contexte.
+    pub diff_whole_file: bool,
 }
 
 impl Default for Settings {
@@ -208,11 +214,29 @@ impl Default for Settings {
             repositories: Vec::new(),
             diff_context: 3,
             review_tree: true,
+            diff_split: false,
+            diff_whole_file: false,
         }
     }
 }
 
+/// Contexte demandé à git pour « tout le fichier ».
+///
+/// `git diff` n'a pas d'option « fichier entier » : on lui demande un contexte
+/// plus grand que n'importe quel fichier, qu'il ramène de lui-même à ce qui
+/// existe.
+pub const WHOLE_FILE_CONTEXT: usize = 1_000_000;
+
 impl Settings {
+    /// Lignes de contexte à demander pour le fichier affiché.
+    pub fn context_lines(&self) -> usize {
+        if self.diff_whole_file {
+            WHOLE_FILE_CONTEXT
+        } else {
+            self.diff_context
+        }
+    }
+
     pub fn load() -> Self {
         let Some(path) = settings_path() else {
             return Self::default();

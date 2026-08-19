@@ -164,6 +164,35 @@ d'indexation, largeur de gouttière — est calculé une fois dans
 fermeture de rendu est appelée pour chaque ligne visible à chaque frame,
 animation de molette comprise : elle ne doit rien y calculer.
 
+**Deux colonnes, une seule référence.** La vue côte à côte (`SplitRow`,
+`split_rows`) n'est qu'un autre agencement de la liste unifiée : ses entrées ne
+portent que des **indices dans `rows`**, jamais du texte ni des styles à elles.
+La copie ramène donc toujours la sélection à la liste unifiée
+(`unified_span`), qui seule porte l'ordre du fichier — appariées, une
+suppression et l'ajout qui lui répond tiennent sur une même entrée, et il faut
+bien décider laquelle vient d'abord. Conséquence à ne pas oublier : les indices
+de `diff_selection` désignent la liste **affichée**, donc basculer de mode
+abandonne la sélection.
+
+Chaque colonne est taillée pour la plus longue ligne du fichier, et non pour la
+moitié de la vue : les tailler à la vue couperait le code ou le renverrait à la
+ligne, alors qu'un défilement horizontal emmène les deux colonnes ensemble et
+garde les versions en regard.
+
+**« Tout le fichier » est un contexte, pas un mode.** `git diff` n'a pas
+d'option pour cela : `Settings::context_lines` demande un contexte plus grand
+que n'importe quel fichier (`WHOLE_FILE_CONTEXT`), que git ramène de lui-même à
+ce qui existe. Basculer relit donc le fichier — les lignes élidées ne sont
+nulle part en mémoire.
+
+**Les flèches sont les seules touches qui ne passent pas par la touche
+système**, et c'est ce qui les rend délicates : elles appartiennent d'abord à
+qui a le focus. `NAVIGATION_PREDICATE` exclut donc les champs de saisie, les
+terminaux et les couches flottantes, exactement comme la copie. Haut/bas
+déplacent la ligne (Maj étend la sélection, la touche système saute de hunk en
+hunk), gauche/droite changent de fichier — dans l'ordre **affiché**, celui que
+l'œil suit, replis compris. Aux extrémités, tout bute plutôt que de boucler.
+
 ### Une seule liste pour l'index et les modifications
 
 `DiffRange` n'a plus de `Unstaged` ni de `Staged` : la distinction est un

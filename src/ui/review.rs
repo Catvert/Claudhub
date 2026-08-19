@@ -287,6 +287,55 @@ impl PerchApp {
         rows_for(range, &state.status, files)
     }
 
+    /// Les fichiers de la liste, dans l'ordre où ils s'affichent.
+    ///
+    /// L'ordre affiché et non l'ordre brut : un dossier replié cache ses
+    /// fichiers, et les flèches ne doivent pas ouvrir un fichier que la liste
+    /// ne montre pas — le suivant serait alors introuvable à l'œil.
+    fn visible_files(&self, cx: &Context<Self>) -> Vec<PathBuf> {
+        let Some(state) = self.active_review() else {
+            return Vec::new();
+        };
+        let flat = self.rows(&state.range, cx);
+        let rows = if crate::ui::settings::Settings::global(cx).review_tree {
+            tree_rows(&flat, &state.collapsed)
+        } else {
+            flat
+        };
+        rows.into_iter()
+            .filter_map(|row| match row {
+                Row::File(file) => Some(file.path),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Ouvre le fichier précédent ou suivant de la liste.
+    ///
+    /// Aux extrémités, rien ne se passe : boucler ferait recommencer une revue
+    /// qu'on vient de finir sans que rien ne le signale.
+    pub(super) fn step_file(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let files = self.visible_files(cx);
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let Some(state) = self.review.get(&worktree) else {
+            return;
+        };
+        let range = state.range.clone();
+        let current = state
+            .selected
+            .as_ref()
+            .and_then(|path| files.iter().position(|file| file == path));
+        let Some(index) = step_index(current, delta, files.len()) else {
+            return;
+        };
+        let Some(path) = files.get(index).cloned() else {
+            return;
+        };
+        self.open_file(worktree, path, range, cx);
+    }
+
     /// La barre du panneau des modifications : juste la bascule d'affichage.
     fn render_changes_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         self.bar(cx).child(self.tree_toggle(cx))
@@ -824,6 +873,22 @@ fn render_file(
 
 /// Les entrées de la liste pour un domaine de revue donné.
 ///
+/// Le fichier voisin, ou rien aux extrémités.
+///
+/// Sans fichier ouvert, la première flèche prend l'extrémité vers laquelle
+/// elle pointe.
+fn step_index(current: Option<usize>, delta: isize, len: usize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let next = match current {
+        Some(index) => index as isize + delta,
+        None if delta > 0 => 0,
+        None => len as isize - 1,
+    };
+    (next >= 0 && next < len as isize).then_some(next as usize)
+}
+
 /// Fonction libre parce que c'est la seule vraie décision de cette vue — quel
 /// fichier apparaît, dans quel groupe, coché ou non — et qu'elle se teste sans
 /// fenêtre.
@@ -1329,6 +1394,16 @@ mod tests {
             group_paths(&rows, Group::Tracked),
             vec![PathBuf::from("suivi.rs")]
         );
+    }
+
+    #[test]
+    fn arrows_walk_the_file_list_without_wrapping() {
+        assert_eq!(step_index(Some(1), 1, 4), Some(2));
+        assert_eq!(step_index(Some(0), -1, 4), None, "avant le premier, rien");
+        assert_eq!(step_index(Some(3), 1, 4), None, "après le dernier non plus");
+        assert_eq!(step_index(None, 1, 4), Some(0));
+        assert_eq!(step_index(None, -1, 4), Some(3));
+        assert_eq!(step_index(None, 1, 0), None);
     }
 
     #[test]

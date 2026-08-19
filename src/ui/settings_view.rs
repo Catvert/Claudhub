@@ -440,7 +440,33 @@ fn review_page() -> SettingPage {
                     .text_xs()
                     .text_color(gpui_component::ActiveTheme::theme(cx).muted_foreground)
                     .child(tr!("settings-diff-context-note"))
-            })),
+            }))
+            .item(
+                SettingItem::new(
+                    tr!("settings-diff-whole-file"),
+                    SettingField::switch(
+                        |cx: &App| Settings::global(cx).diff_whole_file,
+                        |value: bool, cx: &mut App| {
+                            Settings::update_global(cx, |s| s.diff_whole_file = value)
+                        },
+                    )
+                    .default_value(false),
+                )
+                .description(tr!("settings-diff-whole-file-help")),
+            )
+            .item(
+                SettingItem::new(
+                    tr!("settings-diff-split"),
+                    SettingField::switch(
+                        |cx: &App| Settings::global(cx).diff_split,
+                        |value: bool, cx: &mut App| {
+                            Settings::update_global(cx, |s| s.diff_split = value)
+                        },
+                    )
+                    .default_value(false),
+                )
+                .description(tr!("settings-diff-split-help")),
+            ),
     )
 }
 

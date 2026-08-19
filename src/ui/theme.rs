@@ -168,6 +168,10 @@ pub struct DiffColors {
     pub removed_fg: Hsla,
     pub hunk_bg: Hsla,
     pub line_number: Hsla,
+    /// La moitié vide d'une ligne en deux colonnes : là où une version n'a
+    /// rien en face de l'autre. Une teinte neutre et non un fond transparent,
+    /// sans quoi rien ne distingue « pas de ligne ici » d'une ligne vide.
+    pub absent_bg: Hsla,
 }
 
 impl DiffColors {
@@ -192,6 +196,10 @@ impl DiffColors {
                     a: 0.45,
                     ..rgb(0xc9d1d9)
                 },
+                absent_bg: Hsla {
+                    a: 0.05,
+                    ..rgb(0xc9d1d9)
+                },
             }
         } else {
             Self {
@@ -211,6 +219,10 @@ impl DiffColors {
                 },
                 line_number: Hsla {
                     a: 0.55,
+                    ..rgb(0x1f2328)
+                },
+                absent_bg: Hsla {
+                    a: 0.05,
                     ..rgb(0x1f2328)
                 },
             }

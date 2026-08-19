@@ -25,7 +25,17 @@ actions!(
         ZoomReset,
         CopyDiff,
         CopyDiffPatch,
-        SelectWholeDiff
+        SelectWholeDiff,
+        PreviousLine,
+        NextLine,
+        ExtendUp,
+        ExtendDown,
+        PreviousHunk,
+        NextHunk,
+        PreviousFile,
+        NextFile,
+        ToggleDiffSplit,
+        ToggleWholeFile
     ]
 );
 
@@ -46,6 +56,15 @@ const PREDICATE: &str = "Perch && !Dialog && !PopupMenu && !Popover";
 /// commit rendrait le diff à la place.
 const COPY_PREDICATE: &str =
     "Perch && !Dialog && !PopupMenu && !Popover && !Input && !PerchTerminal";
+
+/// Prédicat de la navigation au clavier.
+///
+/// Les flèches nues sont les seules touches de Perch qui ne passent pas par la
+/// touche système, et c'est ce qui les rend délicates : elles appartiennent à
+/// qui a le focus. Un champ de saisie déplace son curseur, un terminal les
+/// transmet au programme, un menu change d'entrée — ces trois-là sont donc
+/// exclus, comme pour la copie.
+const NAVIGATION_PREDICATE: &str = COPY_PREDICATE;
 
 /// Le contexte que la vue racine déclare. Un simple identifiant : c'est le
 /// nom auquel `PREDICATE` se réfère.
@@ -98,6 +117,19 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-c", CopyDiff, Some(COPY_PREDICATE)),
         KeyBinding::new("secondary-shift-c", CopyDiffPatch, Some(COPY_PREDICATE)),
         KeyBinding::new("secondary-a", SelectWholeDiff, Some(COPY_PREDICATE)),
+        // Relire au clavier : les flèches parcourent le fichier, Maj étend la
+        // sélection, et la touche système saute de modification en
+        // modification.
+        KeyBinding::new("up", PreviousLine, Some(NAVIGATION_PREDICATE)),
+        KeyBinding::new("down", NextLine, Some(NAVIGATION_PREDICATE)),
+        KeyBinding::new("shift-up", ExtendUp, Some(NAVIGATION_PREDICATE)),
+        KeyBinding::new("shift-down", ExtendDown, Some(NAVIGATION_PREDICATE)),
+        KeyBinding::new("secondary-up", PreviousHunk, Some(NAVIGATION_PREDICATE)),
+        KeyBinding::new("secondary-down", NextHunk, Some(NAVIGATION_PREDICATE)),
+        KeyBinding::new("left", PreviousFile, Some(NAVIGATION_PREDICATE)),
+        KeyBinding::new("right", NextFile, Some(NAVIGATION_PREDICATE)),
+        KeyBinding::new("secondary-shift-s", ToggleDiffSplit, Some(PREDICATE)),
+        KeyBinding::new("secondary-shift-f", ToggleWholeFile, Some(PREDICATE)),
         // Les conventions des terminaux : la touche système *avec* Maj, parce
         // que `Ctrl+C` et `Ctrl+V` nus appartiennent au programme.
         KeyBinding::new("secondary-shift-c", CopySelection, Some(TERMINAL_PREDICATE)),
@@ -234,6 +266,96 @@ pub fn select_whole_diff(
     cx: &mut gpui::Context<PerchApp>,
 ) {
     this.select_whole_diff(cx);
+}
+
+pub fn previous_line(
+    this: &mut PerchApp,
+    _: &PreviousLine,
+    _window: &mut Window,
+    cx: &mut gpui::Context<PerchApp>,
+) {
+    this.step_diff_row(-1, false, cx);
+}
+
+pub fn next_line(
+    this: &mut PerchApp,
+    _: &NextLine,
+    _window: &mut Window,
+    cx: &mut gpui::Context<PerchApp>,
+) {
+    this.step_diff_row(1, false, cx);
+}
+
+pub fn extend_up(
+    this: &mut PerchApp,
+    _: &ExtendUp,
+    _window: &mut Window,
+    cx: &mut gpui::Context<PerchApp>,
+) {
+    this.step_diff_row(-1, true, cx);
+}
+
+pub fn extend_down(
+    this: &mut PerchApp,
+    _: &ExtendDown,
+    _window: &mut Window,
+    cx: &mut gpui::Context<PerchApp>,
+) {
+    this.step_diff_row(1, true, cx);
+}
+
+pub fn previous_hunk(
+    this: &mut PerchApp,
+    _: &PreviousHunk,
+    _window: &mut Window,
+    cx: &mut gpui::Context<PerchApp>,
+) {
+    this.step_diff_hunk(-1, cx);
+}
+
+pub fn next_hunk(
+    this: &mut PerchApp,
+    _: &NextHunk,
+    _window: &mut Window,
+    cx: &mut gpui::Context<PerchApp>,
+) {
+    this.step_diff_hunk(1, cx);
+}
+
+pub fn previous_file(
+    this: &mut PerchApp,
+    _: &PreviousFile,
+    _window: &mut Window,
+    cx: &mut gpui::Context<PerchApp>,
+) {
+    this.step_file(-1, cx);
+}
+
+pub fn next_file(
+    this: &mut PerchApp,
+    _: &NextFile,
+    _window: &mut Window,
+    cx: &mut gpui::Context<PerchApp>,
+) {
+    this.step_file(1, cx);
+}
+
+pub fn toggle_diff_split(
+    this: &mut PerchApp,
+    _: &ToggleDiffSplit,
+    _window: &mut Window,
+    cx: &mut gpui::Context<PerchApp>,
+) {
+    this.toggle_diff_split(cx);
+}
+
+pub fn toggle_whole_file(
+    this: &mut PerchApp,
+    _: &ToggleWholeFile,
+    _window: &mut Window,
+    cx: &mut gpui::Context<PerchApp>,
+) {
+    this.toggle_whole_file(cx);
 }
 
 pub fn commit(

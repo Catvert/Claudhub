@@ -953,10 +953,28 @@ impl PerchApp {
             worktree,
             range,
             path,
-            context: Settings::global(cx).diff_context,
+            context: Settings::global(cx).context_lines(),
             untracked,
         });
         cx.notify();
+    }
+
+    /// Redemande le diff du fichier affiché.
+    ///
+    /// Ce qu'il contient dépend de réglages qui changent en cours de
+    /// relecture — le contexte, et « tout le fichier » : il faut alors le
+    /// relire, git étant seul à savoir ce que les lignes élidées contenaient.
+    pub(super) fn reload_diff(&mut self, cx: &mut Context<Self>) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let Some(state) = self.review.get(&worktree) else {
+            return;
+        };
+        let (Some(path), range) = (state.selected.clone(), state.range.clone()) else {
+            return;
+        };
+        self.open_file(worktree, path, range, cx);
     }
 
     /// Demande la liste des fichiers d'un domaine, si elle manque.
@@ -1329,6 +1347,16 @@ impl Render for PerchApp {
             .on_action(cx.listener(super::shortcuts::copy_diff))
             .on_action(cx.listener(super::shortcuts::copy_diff_patch))
             .on_action(cx.listener(super::shortcuts::select_whole_diff))
+            .on_action(cx.listener(super::shortcuts::previous_line))
+            .on_action(cx.listener(super::shortcuts::next_line))
+            .on_action(cx.listener(super::shortcuts::extend_up))
+            .on_action(cx.listener(super::shortcuts::extend_down))
+            .on_action(cx.listener(super::shortcuts::previous_hunk))
+            .on_action(cx.listener(super::shortcuts::next_hunk))
+            .on_action(cx.listener(super::shortcuts::previous_file))
+            .on_action(cx.listener(super::shortcuts::next_file))
+            .on_action(cx.listener(super::shortcuts::toggle_diff_split))
+            .on_action(cx.listener(super::shortcuts::toggle_whole_file))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
