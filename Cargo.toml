@@ -19,6 +19,11 @@ gpui-component = { version = "0.5", features = ["tree-sitter-languages"] }
 # Assets embarqués (icônes Lucide, polices) servis à gpui via AssetSource.
 rust-embed = "8"
 
+# PHP n'est pas dans les grammaires que gpui-component embarque, et c'est le
+# langage de la moitié des dépôts que Perch sert à relire. La grammaire est
+# donc enregistrée à la main dans son registre (voir ui::highlight).
+tree-sitter-php = "0.24"
+
 # Émulateur de terminal : le même que Zed et Alacritty. Il fournit le parseur
 # VTE, la grille de cellules, le scrollback et l'ouverture du pty ; le rendu
 # gpui des cellules est à nous (src/ui/terminal_element.rs).

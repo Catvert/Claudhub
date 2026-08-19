@@ -13,19 +13,52 @@
 
 pub mod branch;
 pub mod diff;
+// Nommé `history` et non `log` : un module `log` dans ce crate masquerait la
+// bibliothèque de journalisation du même nom pour tout le fichier.
+pub mod history;
 pub mod repo;
 pub mod status;
 
 pub use branch::{Branch, BranchKind, Upstream};
 pub use diff::{DiffFile, DiffLine, DiffLineKind, FileDiff, Hunk, Range as DiffRange};
+pub use history::{Commit, GraphRow, LogRange};
 pub use repo::{Repo, Worktree};
 pub use status::{FileStatus, Status, StatusCode};
 
 use std::ffi::OsStr;
+use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+
+/// Au-delà, la commande est tuée et l'échec remonte comme un message.
+///
+/// Aucune lecture git ne prend trente secondes : un `status` coûte dix
+/// millisecondes sur un dépôt de quarante mille fichiers. Ce délai n'existe
+/// donc pas pour les commandes lentes mais pour celles qui **n'aboutissent
+/// jamais** — une invite d'authentification qu'on ne voit pas, un dépôt sur un
+/// montage réseau qui a disparu, un verrou tenu par un autre outil. Sans lui,
+/// une seule commande de ce genre emporte un worker définitivement, et trois
+/// figent toute l'application sans le moindre message.
+const TIMEOUT: Duration = Duration::from_secs(30);
+
+// Le délai est réglable pour les tests : trente secondes d'attente y seraient
+// insupportables, et vérifier qu'une commande bloquée est bien interrompue vaut
+// mieux que de faire confiance au code.
+#[cfg(test)]
+thread_local! {
+    static TEST_TIMEOUT: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+}
+
+fn timeout() -> Duration {
+    #[cfg(test)]
+    if let Some(d) = TEST_TIMEOUT.with(|t| t.get()) {
+        return d;
+    }
+    TIMEOUT
+}
 
 /// Exécute `git -C <dir> <args…>` et rend sa sortie standard, sans le saut de
 /// ligne final.
@@ -36,9 +69,14 @@ use anyhow::{bail, Context, Result};
 /// personne ne voit. `GIT_TERMINAL_PROMPT=0` fait dire non à git plutôt que de
 /// le laisser essayer, et l'échec remonte comme un message d'erreur normal.
 pub(crate) fn git<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<String> {
-    let out = command(dir, args)
-        .output()
-        .context("`git` est introuvable dans le PATH")?;
+    let started = Instant::now();
+    let out = run(dir, args)?;
+    let elapsed = started.elapsed();
+    // Une commande qui dépasse la demi-seconde mérite qu'on sache laquelle :
+    // c'est la première trace à regarder quand l'interface traîne.
+    if elapsed > Duration::from_millis(500) {
+        log::debug!("git {} : {elapsed:?}", describe(args));
+    }
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         bail!("git {}: {}", describe(args), stderr.trim());
@@ -46,6 +84,71 @@ pub(crate) fn git<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<String> {
     Ok(strip_trailing_newline(
         String::from_utf8_lossy(&out.stdout).into_owned(),
     ))
+}
+
+/// Lance la commande et attend sa fin, sans dépasser `TIMEOUT`.
+///
+/// Les deux sorties sont lues par des threads : un tube plein bloque
+/// l'écrivain, et `git diff` d'un gros fichier remplit les soixante-quatre
+/// kilo-octets du tube bien avant de se terminer. Les lire après l'attente
+/// donnerait un interblocage — le processus attend qu'on vide le tube, nous
+/// attendons qu'il se termine.
+fn run<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<std::process::Output> {
+    let mut cmd = command(dir, args);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    wait_with_timeout(cmd, || format!("git {}", describe(args)))
+}
+
+/// Attend la fin d'un processus, ou l'interrompt passé le délai.
+///
+/// Séparé de `run` pour être vérifiable : le tester avec `git` demanderait une
+/// commande git qui pend de façon reproductible, ce qui n'existe pas.
+fn wait_with_timeout(
+    mut cmd: Command,
+    describe: impl Fn() -> String,
+) -> Result<std::process::Output> {
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("{} : programme introuvable", describe()))?;
+
+    let mut stdout = child.stdout.take().expect("stdout demandé en piped");
+    let mut stderr = child.stderr.take().expect("stderr demandé en piped");
+    let out_reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = stdout.read_to_end(&mut buffer);
+        buffer
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = stderr.read_to_end(&mut buffer);
+        buffer
+    });
+
+    let limit = timeout();
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!(
+                    "{} n'a pas répondu en {:?} et a été interrompue",
+                    describe(),
+                    limit
+                );
+            }
+            // Assez court pour qu'une commande de dix millisecondes n'en
+            // paraisse pas cinquante, assez long pour ne pas tourner à vide.
+            None => std::thread::sleep(Duration::from_millis(5)),
+        }
+    };
+
+    Ok(std::process::Output {
+        status,
+        stdout: out_reader.join().unwrap_or_default(),
+        stderr: err_reader.join().unwrap_or_default(),
+    })
 }
 
 /// Idem, mais l'échec vaut `None` : pour les lectures facultatives (une
@@ -103,4 +206,51 @@ fn strip_trailing_newline(mut s: String) -> String {
 /// s'appelle mal.
 pub(crate) fn split_nul(s: &str) -> impl Iterator<Item = &str> {
     s.split('\0').filter(|r| !r.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Une commande qui n'aboutit jamais ne doit pas emporter son worker : sans
+    /// cette interruption, trois d'entre elles figent l'application entière —
+    /// plus de statut, plus de diff — sans le moindre message.
+    #[test]
+    fn a_command_that_never_returns_is_interrupted() {
+        TEST_TIMEOUT.with(|t| t.set(Some(Duration::from_millis(300))));
+
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30").stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let started = Instant::now();
+        let result = wait_with_timeout(cmd, || "sleep 30".into());
+        let elapsed = started.elapsed();
+
+        TEST_TIMEOUT.with(|t| t.set(None));
+
+        let message = result.expect_err("la commande devait être interrompue");
+        assert!(
+            message.to_string().contains("interrompue"),
+            "message inattendu : {message}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "l'interruption a pris {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_large_output_is_read_while_waiting() {
+        // Bien plus que la taille d'un tube : si les sorties n'étaient pas
+        // lues pendant l'attente, le processus resterait bloqué à écrire et
+        // nous à l'attendre — l'interblocage classique de `spawn` + `wait`.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "head -c 2000000 /dev/zero | tr '\\0' 'x'"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let out = wait_with_timeout(cmd, || "sortie volumineuse".into())
+            .expect("la commande doit se terminer");
+        assert_eq!(out.stdout.len(), 2_000_000);
+    }
 }

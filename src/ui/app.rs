@@ -20,7 +20,7 @@ use gpui_component::{
     v_flex, ActiveTheme, Disableable, Root, Selectable, Sizable, StyledExt, WindowExt,
 };
 
-use crate::git::{Branch, DiffFile, DiffRange, Status, Worktree};
+use crate::git::{Branch, Commit, DiffFile, DiffRange, GraphRow, LogRange, Status, Worktree};
 use crate::runtime::watch::Watcher;
 use crate::runtime::{self, Action, Cmd, Evt};
 use crate::tr;
@@ -65,6 +65,20 @@ pub struct ReviewState {
     pub diff: Option<std::rc::Rc<Rendered>>,
     /// Base de comparaison de la revue de branche, devinée à l'ouverture.
     pub base: Option<String>,
+    /// L'historique et son graphe, chargés à la demande — ouvrir un worktree
+    /// ne doit pas payer un `git log` que personne ne regardera.
+    pub history: Option<std::rc::Rc<History>>,
+    pub history_range: LogRange,
+    /// Commit sélectionné dans l'historique, dont le diff est affiché.
+    pub commit: Option<String>,
+}
+
+/// L'historique tel que la vue l'affiche.
+pub struct History {
+    pub commits: Vec<Commit>,
+    pub graph: Vec<GraphRow>,
+    /// Nombre de colonnes du graphe, pour dimensionner sa gouttière.
+    pub width: usize,
 }
 
 impl Default for ReviewState {
@@ -77,6 +91,9 @@ impl Default for ReviewState {
             selected: None,
             diff: None,
             base: None,
+            history: None,
+            history_range: LogRange::All,
+            commit: None,
         }
     }
 }
@@ -120,8 +137,19 @@ pub struct PerchApp {
     pub(super) terminals: HashMap<PathBuf, Entity<TerminalGroup>>,
     pub(super) commit_input: Entity<InputState>,
     pub(super) toast: Option<Toast>,
+    /// Worktrees dont une lecture de statut est déjà partie.
+    ///
+    /// Le surveillant de fichiers peut produire plusieurs vagues avant qu'une
+    /// réponse revienne ; sans ce garde-fou, une compilation qui touche mille
+    /// fichiers empile mille `git status` identiques, et tout ce qui suit —
+    /// diffs compris — attend derrière eux.
+    pending_status: std::collections::HashSet<PathBuf>,
     pub(super) show_terminal: bool,
     pub(super) show_branches: bool,
+    /// L'historique remplace la liste des fichiers quand il est affiché : les
+    /// deux répondent à la même question — que regarde-t-on — et les montrer
+    /// ensemble couperait la place en deux pour rien.
+    pub(super) show_history: bool,
 
     /// Surveillance du worktree affiché. `None` si le système refuse de nous
     /// donner un observateur (limite d'inotify atteinte, par exemple) : Perch
@@ -134,6 +162,7 @@ pub struct PerchApp {
     pub(super) diff_scroll: gpui::UniformListScrollHandle,
     /// Défilement de la liste des fichiers, virtualisée elle aussi.
     pub(super) file_scroll: gpui::UniformListScrollHandle,
+    pub(super) history_scroll: gpui::UniformListScrollHandle,
 
     sidebar_resize: Entity<ResizableState>,
     center_resize: Entity<ResizableState>,
@@ -160,11 +189,14 @@ impl PerchApp {
             terminals: HashMap::new(),
             commit_input,
             toast: None,
+            pending_status: std::collections::HashSet::new(),
             show_terminal: true,
             show_branches: false,
+            show_history: false,
             watcher: None,
             diff_scroll: gpui::UniformListScrollHandle::new(),
             file_scroll: gpui::UniformListScrollHandle::new(),
+            history_scroll: gpui::UniformListScrollHandle::new(),
             sidebar_resize: cx.new(|_| ResizableState::default()),
             center_resize: cx.new(|_| ResizableState::default()),
             bottom_resize: cx.new(|_| ResizableState::default()),
@@ -261,7 +293,7 @@ impl PerchApp {
         if !path.starts_with(&active) {
             return;
         }
-        self.git.send(Cmd::RefreshStatus { worktree: active });
+        self.request_status(active);
         cx.notify();
     }
 
@@ -313,6 +345,7 @@ impl PerchApp {
                 }
             }
             Evt::Status { worktree, status } => {
+                self.pending_status.remove(&worktree);
                 let base = self.default_base_for(&worktree);
                 let state = self.review.entry(worktree.clone()).or_default();
                 state.status = status;
@@ -375,6 +408,25 @@ impl PerchApp {
                 if let Some(state) = self.review.get_mut(&worktree) {
                     if state.selected.as_deref() == Some(path.as_path()) {
                         state.diff = Some(std::rc::Rc::new(Rendered::new(&path, diff, &theme)));
+                    }
+                }
+            }
+            Evt::History {
+                worktree,
+                range,
+                commits,
+                graph,
+            } => {
+                if let Some(state) = self.review.get_mut(&worktree) {
+                    // Une réponse en retard, pour un domaine qu'on ne regarde
+                    // plus, remplacerait l'historique par le mauvais.
+                    if state.history_range == range {
+                        let width = crate::git::history::width(&graph);
+                        state.history = Some(std::rc::Rc::new(History {
+                            commits,
+                            graph,
+                            width,
+                        }));
                     }
                 }
             }
@@ -444,8 +496,16 @@ impl PerchApp {
                 }
             }
             Evt::Failed {
-                action, message, ..
+                worktree,
+                action,
+                message,
             } => {
+                // Sans cela, un statut qui échoue une fois — dépôt momentanément
+                // verrouillé, disque occupé — bloquerait pour de bon tout
+                // rafraîchissement ultérieur de ce worktree.
+                if let Some(worktree) = worktree.as_ref() {
+                    self.pending_status.remove(worktree);
+                }
                 log::warn!("{action:?} a échoué : {message}");
                 self.toast = Some(Toast {
                     text: SharedString::from(message),
@@ -457,6 +517,13 @@ impl PerchApp {
     }
 
     // — Sélection ————————————————————————————————————————————————
+
+    /// Demande un statut, sauf s'il y en a déjà un en vol pour ce worktree.
+    fn request_status(&mut self, worktree: PathBuf) {
+        if self.pending_status.insert(worktree.clone()) {
+            self.git.send(Cmd::RefreshStatus { worktree });
+        }
+    }
 
     pub(super) fn select_worktree(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if self.active.as_deref() == Some(path.as_path()) {
@@ -470,7 +537,7 @@ impl PerchApp {
         }
         self.active = Some(path.clone());
         self.review.entry(path.clone()).or_default();
-        self.git.send(Cmd::RefreshStatus { worktree: path });
+        self.request_status(path);
         cx.notify();
     }
 
@@ -525,7 +592,7 @@ impl PerchApp {
             self.git.send(Cmd::RefreshRepo { main: main.clone() });
             self.git.send(Cmd::LoadBranches { main });
         }
-        self.git.send(Cmd::RefreshStatus { worktree });
+        self.request_status(worktree);
         cx.notify();
     }
 
@@ -707,6 +774,22 @@ impl PerchApp {
                     })),
             )
             .child(
+                Button::new("history")
+                    .ghost()
+                    .small()
+                    .icon(icon("git-commit-horizontal"))
+                    .tooltip(tr!("panel-history"))
+                    .selected(self.show_history)
+                    .disabled(!has_active)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_history = !this.show_history;
+                        if this.show_history {
+                            this.ensure_history(cx);
+                        }
+                        cx.notify();
+                    })),
+            )
+            .child(
                 Button::new("branches")
                     .ghost()
                     .small()
@@ -768,9 +851,17 @@ impl Render for PerchApp {
             .with_state(&self.center_resize)
             .child(
                 resizable_panel()
-                    .size(px(320.))
-                    .size_range(px(220.)..px(520.))
-                    .child(self.render_file_list(window, cx).into_any_element()),
+                    .size(if self.show_history {
+                        px(560.)
+                    } else {
+                        px(320.)
+                    })
+                    .size_range(px(220.)..px(900.))
+                    .child(if self.show_history {
+                        self.render_history(window, cx).into_any_element()
+                    } else {
+                        self.render_file_list(window, cx).into_any_element()
+                    }),
             )
             .child(resizable_panel().child(self.render_diff(window, cx).into_any_element()));
 
@@ -810,6 +901,7 @@ impl Render for PerchApp {
             .on_action(cx.listener(super::shortcuts::show_staged))
             .on_action(cx.listener(super::shortcuts::show_head))
             .on_action(cx.listener(super::shortcuts::show_branch))
+            .on_action(cx.listener(super::shortcuts::toggle_history))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -863,6 +955,14 @@ impl PerchApp {
 
     pub(super) fn show_terminal_panel(&mut self, cx: &mut Context<Self>) {
         self.show_terminal = true;
+        cx.notify();
+    }
+
+    pub(super) fn toggle_history_panel(&mut self, cx: &mut Context<Self>) {
+        self.show_history = !self.show_history;
+        if self.show_history {
+            self.ensure_history(cx);
+        }
         cx.notify();
     }
 

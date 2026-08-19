@@ -19,22 +19,40 @@ use anyhow::Result;
 
 pub use protocol::{Action, Cmd, Evt, WorktreeId};
 
-use crate::git::{branch, diff, repo, status};
+use crate::git::{branch, diff, history, repo, status};
 
-/// Nombre de workers. Trois suffisent : une opération réseau longue, une
-/// lecture de diff, et un rafraîchissement de statut peuvent se recouvrir,
-/// ce qui couvre tout ce qu'un humain déclenche en même temps.
-const WORKERS: usize = 3;
+/// Workers dédiés aux lectures : statut, diffs, branches, et les écritures
+/// locales, qui se comptent toutes en millisecondes.
+const READERS: usize = 3;
+
+/// Les opérations qui parlent au réseau ont leur propre file.
+///
+/// Un `fetch` sur un dépôt distant lent, une authentification qui attend, une
+/// connexion qui expire : ces commandes-là se comptent en secondes, parfois en
+/// dizaines de secondes. Partager la file avec les lectures faisait qu'un
+/// `pull` malheureux emportait un worker sur trois, et trois de suite figeaient
+/// l'interface entière — plus de statut, plus de diff, plus rien, sans que
+/// personne puisse relier cela au bouton qui l'a déclenché.
+fn is_network(cmd: &Cmd) -> bool {
+    matches!(cmd, Cmd::Fetch { .. } | Cmd::Pull { .. } | Cmd::Push { .. })
+}
 
 pub struct Handle {
-    cmd_tx: async_channel::Sender<Cmd>,
+    reads: async_channel::Sender<Cmd>,
+    network: async_channel::Sender<Cmd>,
 }
 
 impl Handle {
-    /// Envoie une commande. L'échec (canal fermé) n'arrive qu'à l'extinction :
-    /// il n'y a rien à en dire à l'utilisateur, dont la fenêtre se ferme.
+    /// Envoie une commande dans la file qui lui convient. L'échec (canal
+    /// fermé) n'arrive qu'à l'extinction : il n'y a rien à en dire à
+    /// l'utilisateur, dont la fenêtre se ferme.
     pub fn send(&self, cmd: Cmd) {
-        if let Err(err) = self.cmd_tx.try_send(cmd) {
+        let queue = if is_network(&cmd) {
+            &self.network
+        } else {
+            &self.reads
+        };
+        if let Err(err) = queue.try_send(cmd) {
             log::debug!("commande abandonnée : {err}");
         }
     }
@@ -42,27 +60,43 @@ impl Handle {
 
 /// Démarre les workers et rend de quoi leur parler et les écouter.
 pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
-    let (cmd_tx, cmd_rx) = async_channel::unbounded::<Cmd>();
+    let (read_tx, read_rx) = async_channel::unbounded::<Cmd>();
+    let (net_tx, net_rx) = async_channel::unbounded::<Cmd>();
     let (evt_tx, evt_rx) = async_channel::unbounded::<Evt>();
 
-    for n in 0..WORKERS {
-        let cmd_rx = cmd_rx.clone();
-        let evt_tx = evt_tx.clone();
-        std::thread::Builder::new()
-            .name(format!("perch-git-{n}"))
-            .spawn(move || {
-                while let Ok(cmd) = cmd_rx.recv_blocking() {
-                    for evt in handle(cmd) {
-                        if evt_tx.send_blocking(evt).is_err() {
-                            return; // la fenêtre est partie
-                        }
+    for n in 0..READERS {
+        worker(format!("perch-git-{n}"), read_rx.clone(), evt_tx.clone());
+    }
+    // Un seul pour le réseau : deux `fetch` simultanés sur le même dépôt se
+    // disputeraient le verrou des références sans rien accélérer.
+    worker("perch-git-net".into(), net_rx, evt_tx);
+
+    (
+        Handle {
+            reads: read_tx,
+            network: net_tx,
+        },
+        evt_rx,
+    )
+}
+
+fn worker(
+    name: String,
+    commands: async_channel::Receiver<Cmd>,
+    events: async_channel::Sender<Evt>,
+) {
+    std::thread::Builder::new()
+        .name(name)
+        .spawn(move || {
+            while let Ok(cmd) = commands.recv_blocking() {
+                for evt in handle(cmd) {
+                    if events.send_blocking(evt).is_err() {
+                        return; // la fenêtre est partie
                     }
                 }
-            })
-            .expect("le système refuse de créer un thread");
-    }
-
-    (Handle { cmd_tx }, evt_rx)
+            }
+        })
+        .expect("le système refuse de créer un thread");
 }
 
 /// Exécute une commande et rend les événements à publier.
@@ -112,6 +146,22 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
                 Err(e) => vec![fail(Some(worktree), Action::Diff, e)],
             }
         }
+        Cmd::LoadHistory {
+            worktree,
+            range,
+            limit,
+        } => match history::commits(&worktree, &range, limit) {
+            Ok(commits) => {
+                let graph = history::layout(&commits);
+                vec![Evt::History {
+                    worktree,
+                    range,
+                    commits,
+                    graph,
+                }]
+            }
+            Err(e) => vec![fail(Some(worktree), Action::History, e)],
+        },
         Cmd::LoadBranches { main } => match branch::list(&main) {
             Ok(branches) => {
                 let default_base = branch::default_base(&main);

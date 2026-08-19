@@ -13,6 +13,7 @@ use crate::ui::app::PerchApp;
 actions!(
     perch,
     [
+        ToggleHistory,
         ShowUnstaged,
         ShowStaged,
         ShowHead,
@@ -72,6 +73,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-`", ToggleTerminal, Some(PREDICATE)),
         KeyBinding::new("secondary-tab", NextTerminal, Some(PREDICATE)),
         // Les quatre domaines de revue, dans l'ordre des onglets.
+        KeyBinding::new("secondary-h", ToggleHistory, Some(PREDICATE)),
         KeyBinding::new("secondary-1", ShowUnstaged, Some(PREDICATE)),
         KeyBinding::new("secondary-2", ShowStaged, Some(PREDICATE)),
         KeyBinding::new("secondary-3", ShowHead, Some(PREDICATE)),
@@ -150,6 +152,15 @@ pub fn next_terminal(
     };
     let group = this.terminal_group(&worktree, window, cx);
     group.update(cx, |group, cx| group.next(window, cx));
+}
+
+pub fn toggle_history(
+    this: &mut PerchApp,
+    _: &ToggleHistory,
+    _window: &mut Window,
+    cx: &mut gpui::Context<PerchApp>,
+) {
+    this.toggle_history_panel(cx);
 }
 
 pub fn show_unstaged(

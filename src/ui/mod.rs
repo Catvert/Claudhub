@@ -9,6 +9,7 @@ mod app;
 mod branches;
 mod diff_view;
 mod highlight;
+mod history_view;
 mod icons;
 mod review;
 mod settings;
@@ -78,6 +79,7 @@ pub fn run() {
 
     Application::new().with_assets(Assets).run(move |cx| {
         gpui_component::init(cx);
+        highlight::register_languages();
         shortcuts::init(cx);
         install_fonts(cx);
         theme::apply(&settings, None, cx);

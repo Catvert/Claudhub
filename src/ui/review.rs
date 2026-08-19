@@ -475,7 +475,7 @@ fn rows_for(range: &DiffRange, status: &Status, files: &[DiffFile]) -> Vec<Row> 
                 }
             })
             .collect(),
-        DiffRange::Head | DiffRange::Branch { .. } => files
+        DiffRange::Head | DiffRange::Branch { .. } | DiffRange::Commit { .. } => files
             .iter()
             .map(|f| Row {
                 path: f.path.clone(),

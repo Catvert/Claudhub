@@ -8,7 +8,9 @@
 
 use std::path::PathBuf;
 
-use crate::git::{Branch, DiffFile, DiffRange, FileDiff, Status, Worktree};
+use crate::git::{
+    Branch, Commit, DiffFile, DiffRange, FileDiff, GraphRow, LogRange, Status, Worktree,
+};
 
 /// Identifie le checkout concerné. C'est le chemin qui sert de clé partout :
 /// il est stable, unique, et c'est aussi le répertoire de travail passé à git.
@@ -42,6 +44,12 @@ pub enum Cmd {
     },
     LoadBranches {
         main: PathBuf,
+    },
+    /// Charge l'historique d'un checkout, avec la disposition de son graphe.
+    LoadHistory {
+        worktree: WorktreeId,
+        range: LogRange,
+        limit: usize,
     },
 
     Stage {
@@ -147,6 +155,14 @@ pub enum Evt {
         /// revue de branche n'a alors rien à quoi se comparer.
         default_base: Option<String>,
     },
+    History {
+        worktree: WorktreeId,
+        range: LogRange,
+        commits: Vec<Commit>,
+        /// Une entrée par commit, dans le même ordre : la vue les affiche côte
+        /// à côte et un décalage ferait pointer chaque trait sur le mauvais.
+        graph: Vec<GraphRow>,
+    },
     /// Une opération d'écriture a abouti. `output` est la sortie de git, que
     /// la vue affiche telle quelle : c'est elle qui dit ce qui a été poussé,
     /// avancé ou créé, et la reformuler n'apporterait que des approximations.
@@ -179,6 +195,7 @@ pub enum Action {
     Branch,
     Worktree,
     Diff,
+    History,
 }
 
 impl Action {
@@ -198,6 +215,7 @@ impl Action {
             Self::Branch => "action-branch-ok",
             Self::Worktree => "action-worktree-ok",
             Self::Diff => "action-diff-ok",
+            Self::History => "action-history-ok",
         }
     }
 }

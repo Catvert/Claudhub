@@ -21,10 +21,37 @@ use std::ops::Range;
 use std::path::Path;
 
 use gpui::HighlightStyle;
-use gpui_component::highlighter::{HighlightTheme, SyntaxHighlighter};
+use gpui_component::highlighter::{
+    HighlightTheme, LanguageConfig, LanguageRegistry, SyntaxHighlighter,
+};
 use gpui_component::input::Rope;
 
 use crate::git::{DiffLineKind, FileDiff};
+
+/// Enregistre les grammaires que gpui-component n'embarque pas.
+///
+/// PHP en est absent, alors que c'est le langage de la moitié des dépôts que
+/// Perch sert à relire ; sa grammaire est donc liée en direct et déclarée dans
+/// le registre partagé, d'où le reste de la bibliothèque la retrouvera sous le
+/// nom `php` comme n'importe quelle autre.
+///
+/// À appeler une fois au démarrage, avant tout rendu : le registre est un
+/// singleton verrouillé, et l'enregistrer sous une frappe reviendrait à le
+/// faire pendant qu'un highlighter le lit.
+pub fn register_languages() {
+    // Les injections décrivent le HTML qui entoure le PHP et le SQL des
+    // chaînes de requête : sans elles, un fichier Blade ou une vue n'aurait de
+    // couleurs que dans ses balises `<?php`.
+    let php = LanguageConfig::new(
+        "php",
+        tree_sitter_php::LANGUAGE_PHP.into(),
+        vec!["html".into(), "sql".into()],
+        tree_sitter_php::HIGHLIGHTS_QUERY,
+        tree_sitter_php::INJECTIONS_QUERY,
+        "",
+    );
+    LanguageRegistry::singleton().register("php", &php);
+}
 
 /// Les styles d'une ligne, en décalages d'octets relatifs à son texte.
 pub type LineStyles = Vec<(Range<usize>, HighlightStyle)>;
@@ -216,6 +243,10 @@ pub fn language_for_path(path: &Path) -> Option<&'static str> {
         "ex" | "exs" => "elixir",
         "zig" => "zig",
         "sh" | "bash" | "zsh" => "bash",
+        // Les vues Blade sont du PHP entrecoupé de HTML : la grammaire PHP les
+        // couvre par ses injections, et sa directive `@if` non reconnue coûte
+        // moins qu'un fichier entier sans couleurs.
+        "php" | "phtml" | "blade" => "php",
         "css" | "scss" => "css",
         "html" | "htm" => "html",
         "json" => "json",
@@ -339,5 +370,57 @@ mod tests {
             DiffHighlights::compute(Path::new("notes.txt"), &d, &HighlightTheme::default_dark());
         assert!(highlights.is_empty());
         assert!(highlights.line(0, 0).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod php_tests {
+    use super::*;
+    use crate::git::{DiffLine, DiffLineKind, Hunk};
+
+    #[test]
+    fn php_is_coloured_once_registered() {
+        register_languages();
+
+        let source = "<?php\nclass Facture extends Model {\n    public function total(): int { return 42; }\n}";
+        let diff = FileDiff {
+            hunks: vec![Hunk {
+                header: "@@ -1,4 +1,4 @@".into(),
+                old_start: 1,
+                new_start: 1,
+                lines: source
+                    .lines()
+                    .map(|text| DiffLine {
+                        kind: DiffLineKind::Added,
+                        old_no: None,
+                        new_no: Some(1),
+                        text: text.to_string(),
+                    })
+                    .collect(),
+            }],
+            binary: false,
+            empty: false,
+        };
+
+        assert_eq!(
+            language_for_path(Path::new("app/Models/Facture.php")),
+            Some("php")
+        );
+        assert_eq!(
+            language_for_path(Path::new("resources/views/facture.blade.php")),
+            Some("php"),
+            "une vue Blade est du PHP pour nos besoins"
+        );
+
+        let highlights = DiffHighlights::compute(
+            Path::new("app/Models/Facture.php"),
+            &diff,
+            &HighlightTheme::default_dark(),
+        );
+        // La ligne de la déclaration de classe porte au moins un mot-clé.
+        assert!(
+            !highlights.line(0, 1).is_empty(),
+            "la grammaire PHP n'est pas prise en compte"
+        );
     }
 }

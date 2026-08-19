@@ -52,16 +52,16 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
-    pub fn new(
+    /// Ouvre un pty. Séparé de la vue parce que c'est la seule étape qui peut
+    /// échouer, et qu'un échec dans un constructeur d'entité ne laisse d'autre
+    /// issue que la panique — pendant un rendu, donc avec la fenêtre figée
+    /// pour seul message.
+    pub fn open(
         working_directory: &Path,
         command: Option<(String, Vec<String>)>,
         settings: &TerminalSettings,
-        label: SharedString,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> anyhow::Result<Self> {
-        let font_size = px(settings.font_size);
-        let terminal = Terminal::spawn(Spawn {
+    ) -> anyhow::Result<Terminal> {
+        Terminal::spawn(Spawn {
             working_directory,
             command,
             env: HashMap::new(),
@@ -70,8 +70,17 @@ impl TerminalView {
             // invite.
             size: TermSize::new(80, 24, 8, 16),
             scrollback: settings.scrollback,
-        })?;
+        })
+    }
 
+    pub fn attach(
+        terminal: Terminal,
+        font_size: f32,
+        label: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let font_size = px(font_size);
         let events = terminal.events();
         // Une tâche de premier plan par terminal : elle réveille la vue quand
         // la boucle d'E/S a du nouveau. Sans elle, la sortie n'apparaîtrait
@@ -99,7 +108,7 @@ impl TerminalView {
         })
         .detach();
 
-        Ok(Self {
+        Self {
             snapshot: terminal.snapshot(),
             terminal,
             focus: cx.focus_handle(),
@@ -108,7 +117,7 @@ impl TerminalView {
             cell: gpui::size(px(8.), px(16.)),
             selecting: false,
             label,
-        })
+        }
     }
 
     pub fn label(&self) -> SharedString {
@@ -494,6 +503,8 @@ pub struct TerminalGroup {
     tabs: Vec<Entity<TerminalView>>,
     active: usize,
     settings: TerminalSettings,
+    /// Pourquoi le dernier onglet n'a pas pu s'ouvrir, s'il y a lieu.
+    error: Option<SharedString>,
 }
 
 impl TerminalGroup {
@@ -503,6 +514,7 @@ impl TerminalGroup {
             tabs: Vec::new(),
             active: 0,
             settings,
+            error: None,
         }
     }
 
@@ -514,19 +526,22 @@ impl TerminalGroup {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let worktree = self.worktree.clone();
-        let settings = self.settings.clone();
-        let view = cx.new(|cx| {
-            TerminalView::new(&worktree, command, &settings, label, window, cx).unwrap_or_else(
-                |e| {
-                    // Un pty qu'on n'arrive pas à ouvrir est un problème système
-                    // (limite de descripteurs, /dev/pts absent) : le dire et ne
-                    // pas ouvrir d'onglet vaut mieux qu'un onglet mort.
-                    log::error!("ouverture du terminal : {e:#}");
-                    panic!("terminal indisponible : {e:#}");
-                },
-            )
-        });
+        // Un pty qu'on n'arrive pas à ouvrir est un problème système : limite
+        // de descripteurs atteinte, `/dev/pts` absent. On renonce à l'onglet et
+        // on le dit, plutôt que de paniquer au milieu d'un rendu — ce que
+        // faisait ce code, avec pour seul symptôme une fenêtre figée.
+        let terminal = match TerminalView::open(&self.worktree, command, &self.settings) {
+            Ok(terminal) => terminal,
+            Err(e) => {
+                log::error!("ouverture du terminal : {e:#}");
+                self.error = Some(SharedString::from(e.to_string()));
+                cx.notify();
+                return;
+            }
+        };
+        let font_size = self.settings.font_size;
+        let view = cx.new(|cx| TerminalView::attach(terminal, font_size, label, window, cx));
+        self.error = None;
         self.tabs.push(view);
         self.active = self.tabs.len() - 1;
         self.focus_active(window, cx);
@@ -637,6 +652,15 @@ impl Render for TerminalGroup {
                 div()
                     .flex_1()
                     .min_h_0()
+                    .when_some(self.error.clone(), |el, message| {
+                        el.child(
+                            div()
+                                .p_3()
+                                .text_sm()
+                                .text_color(cx.theme().danger)
+                                .child(message),
+                        )
+                    })
                     .children(self.tabs.get(active).cloned()),
             )
     }

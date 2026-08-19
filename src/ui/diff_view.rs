@@ -561,3 +561,43 @@ mod tests {
         assert_eq!(gutter_digits(&diff), 4);
     }
 }
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    #[test]
+    fn time_rendered() {
+        let Ok(spec) = std::env::var("PERCH_BENCH") else {
+            return;
+        };
+        crate::ui::highlight::register_languages();
+        let mut parts = spec.splitn(2, '|');
+        let dir = std::path::PathBuf::from(parts.next().unwrap());
+        let range = crate::git::DiffRange::Staged;
+        let files = crate::git::diff::files(&dir, &range).unwrap();
+        let theme = HighlightTheme::default_dark();
+
+        let mut worst = (String::new(), std::time::Duration::ZERO, 0usize);
+        let mut total = std::time::Duration::ZERO;
+        for f in &files {
+            let diff = crate::git::diff::file(&dir, &range, &f.path, 3).unwrap();
+            let lines: usize = diff.hunks.iter().map(|h| h.lines.len()).sum();
+            let start = std::time::Instant::now();
+            let _ = Rendered::new(&f.path, diff, &theme);
+            let took = start.elapsed();
+            total += took;
+            if took > worst.1 {
+                worst = (f.path.display().to_string(), took, lines);
+            }
+        }
+        println!(
+            "{} fichiers, total {:?}, pire : {} ({} lignes) en {:?}",
+            files.len(),
+            total,
+            worst.0,
+            worst.2,
+            worst.1
+        );
+    }
+}

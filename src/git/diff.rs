@@ -11,6 +11,9 @@ use anyhow::Result;
 
 use super::{git, split_nul};
 
+/// L'empreinte de l'arbre vide, telle que git la calcule partout.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 /// Ce que la revue compare.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Range {
@@ -20,6 +23,12 @@ pub enum Range {
     Staged,
     /// Tout ce qui sépare le checkout de HEAD.
     Head,
+    /// Un commit précis, comparé à son premier parent.
+    ///
+    /// `parent` est explicite plutôt que déduit d'un `^` : un commit racine
+    /// n'a pas de parent, et `<sha>^` y échoue au lieu de rendre le diff
+    /// complet du premier commit.
+    Commit { id: String, parent: Option<String> },
     /// Revue de branche : de la divergence d'avec `base` jusqu'à HEAD.
     ///
     /// Écrit `base...HEAD` (trois points) et non `base..HEAD` : le premier
@@ -36,6 +45,13 @@ impl Range {
             Self::Staged => vec!["--cached".into()],
             Self::Head => vec!["HEAD".into()],
             Self::Branch { base } => vec![format!("{base}...HEAD")],
+            Self::Commit { id, parent } => match parent {
+                Some(parent) => vec![parent.clone(), id.clone()],
+                // L'arbre vide : le seul point de comparaison d'un commit sans
+                // parent. Son empreinte est une constante de git, la même dans
+                // tous les dépôts.
+                None => vec![EMPTY_TREE.to_string(), id.clone()],
+            },
         }
     }
 }
@@ -389,6 +405,22 @@ index 1234567..89abcde 100644
         // de l'en-tête d'origine : un hunk isolé peut être plus court.
         assert!(patch.contains("@@ -5,2 +5,3 @@\n"), "patch = {patch}");
         assert!(patch.ends_with(" contexte\n-vieux\n+neuf\n+encore\n"));
+    }
+
+    #[test]
+    fn a_commit_compares_against_its_parent_or_the_empty_tree() {
+        let with_parent = Range::Commit {
+            id: "abc".into(),
+            parent: Some("def".into()),
+        };
+        assert_eq!(with_parent.args(), vec!["def", "abc"]);
+
+        // Un commit racine se compare à l'arbre vide : `abc^` n'existe pas.
+        let root = Range::Commit {
+            id: "abc".into(),
+            parent: None,
+        };
+        assert_eq!(root.args(), vec![EMPTY_TREE, "abc"]);
     }
 
     #[test]

@@ -29,6 +29,7 @@ src/
     status.rs   `status --porcelain=v2 -z` → index et worktree séparés
     branch.rs   `for-each-ref` → branches, amont, divergence
     diff.rs     `--numstat` et diff unifié → fichiers, hunks, lignes
+    history.rs  `git log` → commits, et la disposition du graphe
   runtime/      les workers
     protocol.rs `Cmd` / `Evt` — des données, aucune logique
     mod.rs      trois threads consommant le même canal de commandes
@@ -42,6 +43,7 @@ src/
     mod.rs      `run()`, `AssetSource`, polices, i18n
     app.rs      `PerchApp` : l'état, la pompe d'événements, le chrome
     diff_view.rs   la vue de diff, virtualisée
+    history_view.rs  l'historique et son graphe peint
     highlight.rs   coloration tree-sitter d'un diff
     sidebar.rs / review.rs / branches.rs / terminal_view.rs
     settings.rs / theme.rs / shortcuts.rs / icons.rs
@@ -160,6 +162,28 @@ les deux premiers domaines (lui seul distingue index et répertoire de travail,
 et un fichier peut être des deux côtés), `--numstat` pour les deux autres, qui
 parlent de commits et n'ont pas de notion d'index.
 
+### Le graphe d'historique
+
+`git::history` lit les commits **et** calcule la disposition du graphe :
+`git log --graph` produit un dessin en caractères qu'il faudrait re-parser pour
+en refaire des coordonnées. L'algorithme est celui de tous les visualiseurs —
+une liste de rails, chacun attendant un commit ; un commit prend le rail qui
+l'attendait, y installe son premier parent et place les autres à côté. Les
+rails libérés sont réutilisés avant d'en ouvrir de nouveaux, ce qui garde le
+graphe étroit.
+
+`layout` rend **exactement autant d'entrées que de commits** : la vue les
+affiche côte à côte, et un décalage d'une ligne ferait pointer chaque trait sur
+le mauvais commit.
+
+Le graphe est peint par un `canvas` **par ligne**, ce qui est ce qui permet à la
+liste de rester virtualisée : une ligne se dessine à partir de son seul
+`GraphRow`, sans rien savoir de celles qu'on ne voit pas. La puce est peinte en
+dernier pour recouvrir les courbes qui l'atteignent.
+
+Le module s'appelle `history` et non `log` : un module `log` dans ce crate
+masquerait la bibliothèque de journalisation du même nom.
+
 ### Quel worktree s'ouvre
 
 `runtime::open_repo` retient le checkout d'où l'ouverture vient, et non le
@@ -200,6 +224,11 @@ donné : une plage désordonnée décale tout ce qui suit), et les décalages so
 en **octets** — indexer en caractères casse dès le premier accent. Les deux
 sont verrouillés par `diff_view::tests::highlight_runs_stay_sorted_and_disjoint`,
 qui a déjà attrapé le doublon des lignes de contexte.
+
+PHP n'est pas dans les grammaires que gpui-component embarque, et c'est le
+langage de la moitié des dépôts qu'on relit : `highlight::register_languages`
+le déclare dans le registre partagé au démarrage, avec ses injections HTML et
+SQL. À appeler avant tout rendu — le registre est un singleton verrouillé.
 
 `SyntaxHighlighter::new` compile les requêtes de la grammaire — près de
 quarante millisecondes pour JavaScript. Jamais dans un `render`, et **une seule

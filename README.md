@@ -37,6 +37,10 @@ sans quitter l'application.
   modifications (avec confirmation, c'est la seule action que git ne rattrape
   pas), valider, récupérer, tirer en avance rapide, publier avec
   `--set-upstream`.
+- **Historique** — la liste des commits avec son graphe dessiné : une couleur
+  par colonne, des courbes pour les rattachements de branche, les étiquettes de
+  branches et de tags. Toutes les branches ou seulement la courante ; cliquer
+  un commit affiche son diff, comparé à son premier parent.
 - **Branches** — liste locale et distante avec leur dernier commit et leur
   écart à l'amont, bascule, création, et création d'un worktree depuis une
   branche existante.
@@ -98,6 +102,7 @@ le terminal.
 | `Ctrl+Tab` | onglet de terminal suivant |
 | `Ctrl+Entrée` | valider |
 | `Ctrl+1` … `Ctrl+4` | changer de domaine de revue |
+| `Ctrl+H` | afficher/masquer l'historique |
 | `Ctrl+Maj+C` | copier la sélection du terminal |
 | `Ctrl+Maj+V` | coller dans le terminal |
 | `Ctrl+Maj+A` | tout sélectionner dans le terminal |
@@ -107,7 +112,9 @@ le terminal.
 - Écran de préférences : le fichier de réglages s'édite à la main.
 - Résolution de conflits — les fichiers en conflit sont signalés, pas outillés.
 - Recherche dans un diff ou dans l'historique d'un terminal.
-- Les langages sans grammaire embarquée s'affichent en texte nu.
+- Les langages sans grammaire embarquée s'affichent en texte nu. PHP est lié en
+  direct ; les autres viennent de gpui-component.
+- L'historique s'arrête à deux mille commits et ne se recherche pas.
 
 ## Licence
 
