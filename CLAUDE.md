@@ -285,6 +285,19 @@ et le `Ctrl+C` qui suit part au programme qui y tourne au lieu de copier. Pour
 la même raison, la liaison de copie exclut `Input` et `PerchTerminal` de son
 prédicat : le champ de message de commit a sa propre copie.
 
+### La répartition du chrome
+
+La barre d'outils ne porte que des **actions** ; ce qui décrit l'endroit où
+l'on est — branche, avance et retard sur l'amont — vit dans la barre d'état.
+Ces informations ne changent presque jamais, et la barre d'état ne portait
+qu'un message épisodique, donc restait vide la plupart du temps pendant que la
+barre du haut débordait. Les boutons y sont séparés en trois groupes — le
+réseau, l'agent, les panneaux — par des filets verticaux.
+
+Les états vides portent une icône et, quand une action s'impose, un bouton :
+au premier lancement la barre latérale vide est la première chose qu'on voit,
+et une phrase grise ne dit pas quoi faire.
+
 ### Quel worktree s'ouvre
 
 `runtime::open_repo` retient le checkout d'où l'ouverture vient, et non le

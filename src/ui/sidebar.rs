@@ -104,13 +104,35 @@ impl PerchApp {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    // Au premier lancement, c'est tout ce qu'on voit : un
+                    // texte gris ne dit pas quoi faire, un bouton si.
                     .when(empty, |el| {
                         el.child(
-                            div()
-                                .p_3()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(tr!("sidebar-empty")),
+                            v_flex()
+                                .p_4()
+                                .gap_2()
+                                .items_center()
+                                .child(
+                                    icon("folder")
+                                        .large()
+                                        .text_color(cx.theme().muted_foreground.opacity(0.4)),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_center()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(tr!("sidebar-empty")),
+                                )
+                                .child(
+                                    Button::new("open-first-repo")
+                                        .outline()
+                                        .small()
+                                        .label(tr!("sidebar-open-repository"))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.prompt_open_repository(window, cx);
+                                        })),
+                                ),
                         )
                     })
                     .children(

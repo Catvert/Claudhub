@@ -14,6 +14,7 @@ use gpui::{
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
+    divider::Divider,
     h_flex,
     input::InputState,
     resizable::{h_resizable, resizable_panel, v_resizable, ResizableState},
@@ -783,17 +784,10 @@ impl PerchApp {
 
     fn render_topbar(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let worktree = self.active_worktree();
-        let branch = worktree
-            .and_then(|w| w.branch.clone())
-            .unwrap_or_else(|| tr!("branch-detached").to_string());
         let label = worktree
             .map(|w| w.label())
             .unwrap_or_else(|| tr!("no-worktree").to_string());
         let has_active = self.active.is_some();
-        let review = self.active_review();
-        let (ahead, behind) = review
-            .map(|r| (r.status.ahead, r.status.behind))
-            .unwrap_or((0, 0));
 
         h_flex()
             .h(super::theme::toolbar_height(cx))
@@ -804,30 +798,11 @@ impl PerchApp {
             .border_b_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().title_bar)
-            .child(icon("git-branch").small())
+            .child(icon("folder").small())
+            // Le worktree, et rien d'autre : la branche et sa divergence sont
+            // descendues dans la barre d'état, qui ne portait qu'un message
+            // épisodique pendant que celle-ci débordait.
             .child(div().font_semibold().text_sm().child(label))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(branch),
-            )
-            .when(behind > 0, |el| {
-                el.child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(format!("↓{behind}")),
-                )
-            })
-            .when(ahead > 0, |el| {
-                el.child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(format!("↑{ahead}")),
-                )
-            })
             .child(div().flex_1())
             .child(
                 Button::new("fetch")
@@ -874,6 +849,7 @@ impl PerchApp {
                         cx.notify();
                     })),
             )
+            .child(Divider::vertical().h(px(16.)))
             .child(
                 Button::new("agent")
                     .ghost()
@@ -885,6 +861,7 @@ impl PerchApp {
                         this.open_agent_terminal(window, cx);
                     })),
             )
+            .child(Divider::vertical().h(px(16.)))
             .child(
                 Button::new("history")
                     .ghost()
@@ -937,11 +914,27 @@ impl PerchApp {
             )
     }
 
+    /// La barre d'état : où l'on est, et ce qui vient de se passer.
+    ///
+    /// La branche et sa divergence y vivent parce qu'elles ne changent presque
+    /// jamais et n'ont pas à occuper la barre d'outils ; le message, lui, est
+    /// épisodique, et une barre qui ne porte que lui reste vide la plupart du
+    /// temps.
     fn render_status_bar(&self, cx: &Context<Self>) -> impl IntoElement {
         let (text, error) = match &self.toast {
             Some(t) => (t.text.clone(), t.error),
             None => (SharedString::default(), false),
         };
+        let branch = self
+            .active_worktree()
+            .and_then(|w| w.branch.clone())
+            .unwrap_or_else(|| tr!("branch-detached").to_string());
+        let (ahead, behind) = self
+            .active_review()
+            .map(|r| (r.status.ahead, r.status.behind))
+            .unwrap_or((0, 0));
+        let muted = cx.theme().muted_foreground;
+
         h_flex()
             .h(super::theme::row_height(cx))
             .w_full()
@@ -952,12 +945,23 @@ impl PerchApp {
             .border_color(cx.theme().border)
             .bg(cx.theme().title_bar)
             .text_xs()
-            .text_color(if error {
-                cx.theme().danger
-            } else {
-                cx.theme().muted_foreground
+            .text_color(muted)
+            .when(self.active.is_some(), |el| {
+                el.child(icon("git-branch").xsmall())
+                    .child(div().max_w(px(220.)).truncate().child(branch))
+                    // Le retard avant l'avance : c'est ce qu'il faut intégrer
+                    // avant de pouvoir pousser.
+                    .when(behind > 0, |el| el.child(format!("↓{behind}")))
+                    .when(ahead > 0, |el| el.child(format!("↑{ahead}")))
+                    .child(Divider::vertical().h(px(12.)))
             })
-            .child(div().truncate().child(text))
+            .child(
+                div()
+                    .flex_1()
+                    .truncate()
+                    .when(error, |el| el.text_color(cx.theme().danger))
+                    .child(text),
+            )
     }
 }
 

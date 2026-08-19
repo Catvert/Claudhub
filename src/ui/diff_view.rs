@@ -687,11 +687,22 @@ fn number(value: Option<usize>, width: Pixels, colors: &DiffColors) -> impl Into
         .child(value.map(|n| n.to_string()).unwrap_or_default())
 }
 
+/// L'état vide de la vue de diff.
+///
+/// Une icône et un mot au centre plutôt qu'une phrase grise en haut à gauche :
+/// un panneau vide sans repère visuel se lit comme un panneau cassé, surtout
+/// au premier lancement où c'est la première chose qu'on voit.
 fn centered_message(text: SharedString, cx: &mut gpui::App) -> gpui::AnyElement {
     v_flex()
         .size_full()
         .items_center()
         .justify_center()
+        .gap_2()
+        .child(
+            icon("file-diff")
+                .large()
+                .text_color(cx.theme().muted_foreground.opacity(0.4)),
+        )
         .child(
             div()
                 .text_sm()
