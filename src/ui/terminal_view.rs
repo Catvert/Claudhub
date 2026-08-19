@@ -22,7 +22,7 @@ use gpui::{
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
-    menu::{DropdownMenu, PopupMenuItem},
+    menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
     v_flex, ActiveTheme, Sizable,
 };
 
@@ -413,11 +413,29 @@ impl Render for TerminalView {
         .size_full();
 
         let selection_bg = cx.theme().selection;
+        // Chaque ligne dans une boîte de la hauteur d'une cellule, qui ne
+        // revient pas à la ligne et qui rogne ce qui dépasse.
+        //
+        // Sans cela, une ligne plus large que le panneau est *repliée* par
+        // gpui : elle occupe deux hauteurs, pousse tout ce qui suit vers le bas
+        // et la grille ne correspond plus à ce que le programme croit
+        // afficher. C'est ce qui se voyait après avoir rétréci puis rouvert le
+        // panneau — la géométrie est mesurée après la mise en page, donc la
+        // grille reste trop large pendant une frame, et le repli qui s'ensuit
+        // désaligne tout.
+        let cell_height = self.cell.height;
         let lines: Vec<_> = self
             .snapshot
             .lines
             .iter()
-            .map(|line| styled_line(line, &font_family, default_fg, selection_bg))
+            .map(|line| {
+                div()
+                    .h(cell_height)
+                    .w_full()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(styled_line(line, &font_family, default_fg, selection_bg))
+            })
             .collect();
 
         v_flex()
@@ -450,6 +468,33 @@ impl Render for TerminalView {
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_middle_click))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            // Le clic droit : les gestes qu'on cherche d'abord dans un
+            // terminal, et que `Ctrl+C` ne peut pas porter — il appartient au
+            // programme qui tourne.
+            .context_menu({
+                let entity = cx.entity();
+                move |menu, _window, _cx| {
+                    let (copy, paste, all) = (entity.clone(), entity.clone(), entity.clone());
+                    menu.item(PopupMenuItem::new(tr!("terminal-copy")).on_click(
+                        move |_, _window, cx| {
+                            copy.update(cx, |this, cx| this.copy_selection(cx));
+                        },
+                    ))
+                    .item(PopupMenuItem::new(tr!("terminal-paste")).on_click(
+                        move |_, _window, cx| {
+                            paste.update(cx, |this, cx| this.paste_from_clipboard(cx));
+                        },
+                    ))
+                    .separator()
+                    .item(
+                        PopupMenuItem::new(tr!("terminal-select-all")).on_click(
+                            move |_, _window, cx| {
+                                all.update(cx, |this, cx| this.select_all(cx));
+                            },
+                        ),
+                    )
+                }
+            })
             .child(measure)
             .child(v_flex().size_full().overflow_hidden().children(lines))
             .children(self.render_cursor(focused, cx))
@@ -815,31 +860,6 @@ impl PerchApp {
         });
         self.terminals.insert(worktree.to_path_buf(), group.clone());
         group
-    }
-
-    /// Ouvre un onglet exécutant l'agent de codage configuré.
-    pub(super) fn open_agent_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(worktree) = self.active.clone() else {
-            return;
-        };
-        let command = Settings::global(cx).terminal.agent_command.clone();
-        if command.trim().is_empty() {
-            return;
-        }
-        let mut parts = command.split_whitespace().map(str::to_string);
-        let Some(program) = parts.next() else { return };
-        let args: Vec<String> = parts.collect();
-        let group = self.terminal_group(&worktree, window, cx);
-        group.update(cx, |group, cx| {
-            group.open(
-                Some((program.clone(), args)),
-                SharedString::from(program),
-                window,
-                cx,
-            );
-        });
-        self.show_terminal_panel(window, cx);
-        cx.notify();
     }
 }
 

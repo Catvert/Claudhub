@@ -1189,18 +1189,6 @@ impl PerchApp {
                     })),
             )
             .child(Divider::vertical().h(px(16.)))
-            .child(
-                Button::new("agent")
-                    .ghost()
-                    .small()
-                    .icon(icon("bot"))
-                    .tooltip(tr!("terminal-agent"))
-                    .disabled(!has_active)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_agent_terminal(window, cx);
-                    })),
-            )
-            .child(Divider::vertical().h(px(16.)))
             // L'historique et les branches sont des onglets du dock, atteints
             // d'un clic sur leur onglet : un bouton de plus ici ferait deux
             // chemins pour le même geste.
