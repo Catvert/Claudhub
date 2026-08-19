@@ -112,7 +112,65 @@ panels! {
     ChangesPanel => ("PerchChanges", "range-working", render_changes),
     BranchPanel => ("PerchBranch", "range-branch", render_branch_review),
     DiffPanel => ("PerchDiff", "panel-diff", render_diff),
-    TerminalPanel => ("PerchTerminal", "panel-terminal", render_terminals),
+}
+
+/// Les terminaux se masquent sans se fermer.
+///
+/// `Panel::visible` plutôt qu'une zone d'accueil repliable : gpui-component
+/// interdit de déplacer le dernier panneau d'une zone, et les terminaux
+/// seraient alors figés là où ils sont.
+pub struct TerminalPanel {
+    app: WeakEntity<PerchApp>,
+    focus: FocusHandle,
+}
+
+impl TerminalPanel {
+    pub fn new(app: &Entity<PerchApp>, cx: &mut Context<Self>) -> Self {
+        cx.observe(app, |_, _, cx| cx.notify()).detach();
+        Self {
+            app: app.downgrade(),
+            focus: cx.focus_handle(),
+        }
+    }
+}
+
+impl Focusable for TerminalPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl EventEmitter<PanelEvent> for TerminalPanel {}
+
+impl Panel for TerminalPanel {
+    fn panel_name(&self) -> &'static str {
+        "PerchTerminal"
+    }
+
+    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        tr!("panel-terminal")
+    }
+
+    fn closable(&self, _: &App) -> bool {
+        false
+    }
+
+    fn visible(&self, cx: &App) -> bool {
+        self.app
+            .upgrade()
+            .is_some_and(|app| app.read(cx).terminal_visible(cx))
+    }
+}
+
+impl Render for TerminalPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(app) = self.app.upgrade() else {
+            return div().into_any_element();
+        };
+        app.update(cx, |app, cx| {
+            app.render_terminals(window, cx).into_any_element()
+        })
+    }
 }
 
 /// L'historique a besoin d'être chargé la première fois qu'on le regarde.

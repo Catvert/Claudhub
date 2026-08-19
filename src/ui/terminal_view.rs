@@ -21,7 +21,9 @@ use gpui::{
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
-    h_flex, v_flex, ActiveTheme, Sizable,
+    h_flex,
+    menu::{DropdownMenu, PopupMenuItem},
+    v_flex, ActiveTheme, Sizable,
 };
 
 use crate::terminal::{
@@ -619,6 +621,27 @@ impl TerminalGroup {
             .is_some_and(|tab| tab.read(cx).focus_handle(cx).is_focused(window))
     }
 
+    /// Ouvre un onglet exécutant l'agent de codage configuré.
+    ///
+    /// Le geste vit avec les autres ouvertures de terminal — dans le menu du
+    /// bouton « + » — et non dans la barre d'outils de la fenêtre : c'est un
+    /// terminal de plus dans *ce* worktree, pas une action sur le dépôt.
+    pub fn open_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let command = Settings::global(cx).terminal.agent_command.clone();
+        if command.trim().is_empty() {
+            return;
+        }
+        let mut parts = command.split_whitespace().map(str::to_string);
+        let Some(program) = parts.next() else { return };
+        let args: Vec<String> = parts.collect();
+        self.open(
+            Some((program.clone(), args)),
+            SharedString::from(program),
+            window,
+            cx,
+        );
+    }
+
     pub fn close(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index >= self.tabs.len() {
             return;
@@ -707,17 +730,40 @@ impl Render for TerminalGroup {
                                     })),
                             )
                     }))
-                    .child(div().flex_1())
+                    // Le bouton suit le dernier onglet plutôt que de se coller
+                    // au bord droit : c'est là que le regard finit sa lecture
+                    // des onglets, et un bouton à l'autre bout du panneau
+                    // demande de traverser la barre pour ouvrir la suite.
                     .child(
                         Button::new("new-tab")
                             .ghost()
                             .xsmall()
                             .icon(icon("plus"))
                             .tooltip(tr!("terminal-new"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open(None, tr!("terminal-shell"), window, cx);
-                            })),
-                    ),
+                            .dropdown_menu({
+                                let entity = cx.entity();
+                                move |menu, _window, _cx| {
+                                    let (shell, agent) = (entity.clone(), entity.clone());
+                                    menu.item(PopupMenuItem::new(tr!("terminal-new")).on_click(
+                                        move |_, window, cx| {
+                                            shell.update(cx, |this, cx| {
+                                                this.open(None, tr!("terminal-shell"), window, cx)
+                                            });
+                                        },
+                                    ))
+                                    .item(
+                                        PopupMenuItem::new(tr!("terminal-agent")).on_click(
+                                            move |_, window, cx| {
+                                                agent.update(cx, |this, cx| {
+                                                    this.open_agent(window, cx)
+                                                });
+                                            },
+                                        ),
+                                    )
+                                }
+                            }),
+                    )
+                    .child(div().flex_1()),
             )
             .child(
                 div()

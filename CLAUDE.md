@@ -399,6 +399,15 @@ Quatre pièges, tous rencontrés :
 - **`toggle_dock` ne notifie pas l'aire**, seulement le dock intérieur :
   l'observation qui enregistre ne se déclenche pas toute seule, d'où l'appel
   explicite.
+- **Le dernier panneau d'une zone ne se déplace pas.** `is_last_panel` remonte
+  la pile : un panneau seul dans un `TabPanel` seul dans son conteneur est
+  figé. C'est pourquoi les terminaux vivent dans le centre, sous la revue, et
+  non dans une zone d'accueil — leur pile en compte deux, donc ils se
+  glissent. Leur disparition passe alors par `Panel::visible`, pas par un
+  repli de zone.
+- **Les tailles d'une division se donnent toutes.** Un `None` laisse la pile
+  partager la hauteur en parts égales, et la proportion demandée passe à la
+  trappe.
 - **L'état se relit au moment d'écrire**, pas à l'appel : l'ouverture d'une
   zone est différée d'une frame, et le capturer tout de suite enregistrerait
   l'état d'avant le geste.

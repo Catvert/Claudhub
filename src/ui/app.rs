@@ -15,7 +15,7 @@ use gpui::{
 use gpui_component::{
     button::{Button, ButtonVariants},
     divider::Divider,
-    dock::{DockArea, DockItem, DockPlacement},
+    dock::{DockArea, DockItem},
     h_flex,
     input::InputState,
     menu::{DropdownMenu, PopupMenuItem},
@@ -38,10 +38,13 @@ use crate::ui::panels::{
 use crate::ui::settings::Settings;
 use crate::ui::terminal_view::TerminalGroup;
 
+/// Hauteur d'origine du panneau des terminaux.
+const TERMINAL_HEIGHT: gpui::Pixels = px(280.);
+
 /// Version de la disposition enregistrée. À incrémenter quand les panneaux
 /// changent de nom ou de nature, pour que gpui-component écarte une
 /// disposition qu'il ne saurait plus reconstruire.
-const LAYOUT_VERSION: usize = 2;
+const LAYOUT_VERSION: usize = 3;
 
 /// Les panneaux de la disposition par défaut.
 struct DefaultPanels {
@@ -67,54 +70,73 @@ fn install_default_layout(
     window: &mut Window,
     cx: &mut Context<DockArea>,
 ) {
-    use crate::ui::layout::{split, wrap};
+    use crate::ui::layout::split;
 
+    // Les dépôts et les branches l'un au-dessus de l'autre, et non en onglets :
+    // on choisit un worktree *puis* on regarde ses branches, et devoir passer
+    // de l'un à l'autre pour cela est un aller-retour de trop. Un tiers pour
+    // les branches, mesuré sur la fenêtre plutôt que fixé en pixels : la
+    // proportion tient d'un écran à l'autre, là où un nombre de pixels
+    // occuperait la moitié d'une petite fenêtre.
+    // Les deux tailles sont données explicitement : un `None` laisse la pile
+    // partager la hauteur en parts égales, et la proportion demandée passe à
+    // la trappe.
+    let height = window.viewport_size().height.max(px(600.));
+    let third = height / 3.;
     area.set_left_dock(
-        wrap(
-            DockItem::tabs(vec![panels.sidebar, panels.branches], weak_dock, window, cx),
-            weak_dock,
-            window,
-            cx,
-        ),
-        Some(px(260.)),
-        true,
-        window,
-        cx,
-    );
-    area.set_center(
         split(
-            gpui::Axis::Horizontal,
+            gpui::Axis::Vertical,
             vec![
-                // Les trois façons de choisir quoi relire : ce qui change
-                // maintenant, ce que la branche a écrit, ce qui est déjà
-                // committé. Des onglets et non des panneaux côte à côte —
-                // ils répondent à la même question et se glissent ailleurs
-                // d'un geste si l'on préfère les voir ensemble.
-                DockItem::tabs(
-                    vec![panels.changes, panels.branch, panels.history],
-                    weak_dock,
-                    window,
-                    cx,
-                ),
-                DockItem::tabs(vec![panels.diff], weak_dock, window, cx),
+                DockItem::tabs(vec![panels.sidebar], weak_dock, window, cx),
+                DockItem::tabs(vec![panels.branches], weak_dock, window, cx),
             ],
-            vec![Some(px(420.)), None],
-            weak_dock,
-            window,
-            cx,
-        ),
-        window,
-        cx,
-    );
-    area.set_bottom_dock(
-        wrap(
-            DockItem::tabs(vec![panels.terminal], weak_dock, window, cx),
+            vec![Some(height - third), Some(third)],
             weak_dock,
             window,
             cx,
         ),
         Some(px(280.)),
         true,
+        window,
+        cx,
+    );
+    area.set_center(
+        split(
+            gpui::Axis::Vertical,
+            vec![
+                split(
+                    gpui::Axis::Horizontal,
+                    vec![
+                        // Les trois façons de choisir quoi relire : ce qui
+                        // change maintenant, ce que la branche a écrit, ce qui
+                        // est déjà committé. Des onglets et non des panneaux
+                        // côte à côte — ils répondent à la même question, et se
+                        // glissent ailleurs d'un geste si l'on préfère les voir
+                        // ensemble.
+                        DockItem::tabs(
+                            vec![panels.changes, panels.branch, panels.history],
+                            weak_dock,
+                            window,
+                            cx,
+                        ),
+                        DockItem::tabs(vec![panels.diff], weak_dock, window, cx),
+                    ],
+                    vec![Some(px(420.)), None],
+                    weak_dock,
+                    window,
+                    cx,
+                ),
+                // Les terminaux vivent dans le centre et non dans une zone
+                // d'accueil : gpui-component interdit de déplacer le dernier
+                // panneau d'une zone, et une zone qui n'en contient qu'un est
+                // donc figée. Ici la pile en compte deux — il se glisse.
+                DockItem::tabs(vec![panels.terminal], weak_dock, window, cx),
+            ],
+            vec![Some(height - TERMINAL_HEIGHT), Some(TERMINAL_HEIGHT)],
+            weak_dock,
+            window,
+            cx,
+        ),
         window,
         cx,
     );
@@ -311,6 +333,12 @@ pub struct PerchApp {
     pub(super) dock: Entity<DockArea>,
     /// Vrai quand une écriture différée de la disposition est déjà programmée.
     layout_save_scheduled: bool,
+    /// Le panneau des terminaux est-il affiché.
+    ///
+    /// Un drapeau et non une zone d'accueil repliable : les terminaux vivent
+    /// dans le centre pour rester déplaçables, et c'est `Panel::visible` qui
+    /// les fait disparaître.
+    pub(super) show_terminal: bool,
 
     /// Ce que chaque worktree a en chantier, y compris ceux qu'on n'a pas
     /// ouverts : c'est la question qu'on se pose en parcourant la liste.
@@ -390,6 +418,7 @@ impl PerchApp {
         // Elle est écartée si sa version diffère : les panneaux ont pu changer
         // de nom, et reconstruire à partir de noms inconnus donnerait une
         // fenêtre pleine de cadres vides.
+        let mut app_needs_layout_save = false;
         let restored = load_layout()
             .filter(|state| state.version == Some(LAYOUT_VERSION))
             .and_then(|state| {
@@ -420,6 +449,13 @@ impl PerchApp {
             });
         }
 
+        // La disposition d'origine est écrite tout de suite : sans cela, le
+        // fichier garde celle d'une version antérieure jusqu'au premier
+        // déplacement, et c'est elle qu'on relirait au prochain démarrage.
+        if !restored {
+            app_needs_layout_save = true;
+        }
+
         // Le dock notifie à chaque déplacement, redimensionnement ou
         // changement d'onglet : c'est le signal d'enregistrement, différé pour
         // qu'un glissement n'écrive pas un fichier par pixel.
@@ -438,6 +474,7 @@ impl PerchApp {
             pending_status: std::collections::HashSet::new(),
             dock,
             layout_save_scheduled: false,
+            show_terminal: true,
             summaries: HashMap::new(),
             agents: HashMap::new(),
             agent_cpu: HashMap::new(),
@@ -451,6 +488,9 @@ impl PerchApp {
             focus: cx.focus_handle(),
         };
 
+        if app_needs_layout_save {
+            app.schedule_layout_save(cx);
+        }
         app.pump_events(events, window, cx);
         app.start_scanning(cx);
         app.start_watching(window, cx);
@@ -1375,14 +1415,13 @@ impl PerchApp {
         cx.notify();
     }
 
-    pub(super) fn terminal_visible(&self, cx: &App) -> bool {
-        self.dock.read(cx).is_dock_open(DockPlacement::Bottom, cx)
+    pub(super) fn terminal_visible(&self, _cx: &App) -> bool {
+        self.show_terminal
     }
 
-    pub(super) fn show_terminal_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.terminal_visible(cx) {
-            self.toggle_terminal_panel(window, cx);
-        }
+    pub(super) fn show_terminal_panel(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.show_terminal = true;
+        cx.notify();
     }
 
     /// La zone que le zoom au clavier vise.
@@ -1420,14 +1459,8 @@ impl PerchApp {
         cx.notify();
     }
 
-    pub(super) fn toggle_terminal_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.dock.update(cx, |area, cx| {
-            area.toggle_dock(DockPlacement::Bottom, window, cx);
-        });
-        // `toggle_dock` agit sur le dock intérieur et ne notifie pas l'aire :
-        // l'observation qui enregistre ne se déclencherait pas, et un panneau
-        // fermé rouvrirait au prochain lancement.
-        self.schedule_layout_save(cx);
+    pub(super) fn toggle_terminal_panel(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.show_terminal = !self.show_terminal;
         cx.notify();
     }
 }

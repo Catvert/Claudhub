@@ -39,23 +39,3 @@ pub fn split(
         view: stack,
     }
 }
-
-/// Un conteneur d'un seul élément.
-///
-/// Il ne divise rien, mais il donne un parent au panneau — ce qui suffit à le
-/// rendre accueillant pour un panneau qu'on lui glisse dessus.
-pub fn wrap(
-    item: DockItem,
-    dock_area: &WeakEntity<DockArea>,
-    window: &mut Window,
-    cx: &mut gpui::App,
-) -> DockItem {
-    split(
-        Axis::Vertical,
-        vec![item],
-        vec![None],
-        dock_area,
-        window,
-        cx,
-    )
-}
