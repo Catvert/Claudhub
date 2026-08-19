@@ -6,6 +6,7 @@
 //! plan. Les terminaux ont leur propre boucle, dans `crate::terminal`.
 
 mod app;
+mod base_select;
 mod branches;
 mod diff_view;
 mod highlight;

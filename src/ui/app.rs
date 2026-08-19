@@ -25,6 +25,7 @@ use crate::git::{Branch, Commit, DiffFile, DiffRange, GraphRow, LogRange, Status
 use crate::runtime::watch::Watcher;
 use crate::runtime::{self, Action, Cmd, Evt};
 use crate::tr;
+use crate::ui::base_select::BaseChoice;
 use crate::ui::diff_view::Rendered;
 use crate::ui::icons::icon;
 use crate::ui::settings::Settings;
@@ -144,7 +145,7 @@ pub struct PerchApp {
     /// vivant a des dizaines de branches, et faire défiler une liste de
     /// soixante-dix entrées pour en trouver une dont on connaît le nom est
     /// exactement ce qu'un champ de recherche évite.
-    pub(super) base_select: Entity<SelectState<SearchableVec<SharedString>>>,
+    pub(super) base_select: Entity<SelectState<SearchableVec<BaseChoice>>>,
     pub(super) toast: Option<Toast>,
     /// Worktrees dont une lecture de statut est déjà partie.
     ///
@@ -192,7 +193,7 @@ impl PerchApp {
 
         let base_select = cx.new(|cx| {
             SelectState::new(
-                SearchableVec::new(Vec::<SharedString>::new()),
+                SearchableVec::new(Vec::<BaseChoice>::new()),
                 None,
                 window,
                 cx,
@@ -652,11 +653,7 @@ impl PerchApp {
         let Some(repo) = self.repo_of(&worktree) else {
             return;
         };
-        let names: Vec<SharedString> = repo
-            .branches
-            .iter()
-            .map(|b| SharedString::from(b.name.clone()))
-            .collect();
+        let choices: Vec<BaseChoice> = repo.branches.iter().map(BaseChoice::of).collect();
         let current = self
             .review
             .get(&worktree)
@@ -664,7 +661,7 @@ impl PerchApp {
             .map(SharedString::from);
 
         self.base_select.update(cx, |select, cx| {
-            select.set_items(SearchableVec::new(names), window, cx);
+            select.set_items(SearchableVec::new(choices), window, cx);
             if let Some(current) = current {
                 select.set_selected_value(&current, window, cx);
             }

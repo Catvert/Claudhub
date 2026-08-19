@@ -31,6 +31,9 @@ pub struct Branch {
     /// la formule — nous n'avons pas à la recalculer.
     pub date: String,
     pub subject: String,
+    /// Auteur du dernier commit. Dans un dépôt d'équipe, c'est ce qui
+    /// distingue deux branches au nom voisin plus sûrement que leur date.
+    pub author: String,
     pub upstream: Option<Upstream>,
     /// Worktree qui a déjà cette branche déployée. Git refuse deux checkouts
     /// de la même branche : le dire avant d'essayer vaut mieux qu'une erreur.
@@ -42,8 +45,12 @@ pub struct Branch {
 pub fn list(main: &Path) -> Result<Vec<Branch>> {
     // Le séparateur doit être un caractère qu'un sujet de commit ne contient
     // pas ; `%00` est écrit littéralement par for-each-ref comme un octet nul.
+    // L'auteur est en dernier : ajouter un champ à la fin garde les sorties
+    // écrites par une version antérieure lisibles, un champ absent valant la
+    // chaîne vide.
     const FORMAT: &str = "%(refname:short)%00%(HEAD)%00%(committerdate:relative)%00\
-                          %(contents:subject)%00%(upstream:short)%00%(upstream:track)";
+                          %(contents:subject)%00%(upstream:short)%00%(upstream:track)%00\
+                          %(authorname)";
 
     let raw = git(
         main,
@@ -91,6 +98,7 @@ fn parse_ref(line: &str, locals: &[String]) -> Option<Branch> {
     let subject = f.next().unwrap_or("").to_string();
     let upstream_name = f.next().unwrap_or("");
     let track = f.next().unwrap_or("");
+    let author = f.next().unwrap_or("").to_string();
 
     let kind = if name.contains('/') && !locals.iter().any(|l| l == &name) {
         BranchKind::Remote
@@ -117,6 +125,7 @@ fn parse_ref(line: &str, locals: &[String]) -> Option<Branch> {
         is_head: head,
         date,
         subject,
+        author,
         upstream: (!upstream_name.is_empty()).then(|| {
             let (ahead, behind) = parse_track(track);
             Upstream {
@@ -238,12 +247,14 @@ mod tests {
     #[test]
     fn reads_a_local_branch_with_its_upstream() {
         let locals = vec!["main".to_string()];
-        let line = "main\0*\0il y a 2 heures\0Corrige le rendu\0origin/main\0[ahead 1, behind 4]";
+        let line =
+            "main\0*\0il y a 2 heures\0Corrige le rendu\0origin/main\0[ahead 1, behind 4]\0Zoé";
         let b = parse_ref(line, &locals).unwrap();
         assert_eq!(b.name, "main");
         assert_eq!(b.kind, BranchKind::Local);
         assert!(b.is_head);
         assert_eq!(b.subject, "Corrige le rendu");
+        assert_eq!(b.author, "Zoé");
         let up = b.upstream.unwrap();
         assert_eq!(up.name, "origin/main");
         assert_eq!((up.ahead, up.behind), (1, 4));
@@ -256,6 +267,9 @@ mod tests {
         assert_eq!(b.kind, BranchKind::Local, "une locale peut contenir un /");
         assert!(!b.is_head);
         assert_eq!(b.upstream, None);
+        // Un champ absent — une sortie d'avant l'ajout de l'auteur — ne fait
+        // pas échouer la lecture.
+        assert_eq!(b.author, "");
     }
 
     #[test]

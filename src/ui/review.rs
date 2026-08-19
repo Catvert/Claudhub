@@ -262,7 +262,7 @@ impl PerchApp {
                     .xsmall()
                     .title_prefix(tr!("range-base-prefix"))
                     .placeholder(tr!("range-base-placeholder"))
-                    .menu_width(px(280.)),
+                    .menu_width(crate::ui::base_select::MENU_WIDTH),
             )
     }
 
