@@ -15,7 +15,9 @@ use gpui::{
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
-    h_flex, v_flex, ActiveTheme, Selectable, Sizable,
+    h_flex,
+    resizable::{resizable_panel, v_resizable},
+    v_flex, ActiveTheme, Selectable, Sizable,
 };
 
 use crate::git::{DiffRange, GraphRow, LogRange};
@@ -112,24 +114,31 @@ impl PerchApp {
         };
 
         state.commit = Some(commit.id.clone());
-        state.range = DiffRange::Commit {
+        // Le premier parent : c'est la comparaison qu'attend un relecteur
+        // devant un merge, celle qui montre ce que la fusion a apporté.
+        let range = DiffRange::Commit {
             id: commit.id.clone(),
-            // Le premier parent : c'est la comparaison qu'attend un relecteur
-            // devant un merge, celle qui montre ce que la fusion a apporté.
             parent: commit.parents.first().cloned(),
         };
-        state.files.clear();
+        state.range = range.clone();
         state.selected = None;
         state.diff = None;
         state.diff_selection = None;
-        let range = state.range.clone();
-        self.git.send(Cmd::LoadDiffFiles { worktree, range });
+        // Les diffs d'un autre commit n'ont plus d'usage : les garder ferait
+        // enfler l'état d'un domaine par commit consulté.
+        state
+            .files
+            .retain(|kept, _| !matches!(kept, DiffRange::Commit { .. }));
+        state
+            .pending_files
+            .retain(|kept| !matches!(kept, DiffRange::Commit { .. }));
+        self.ensure_files(range, cx);
         cx.notify();
     }
 
     pub(super) fn render_history(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let Some(state) = self.active_review() else {
@@ -199,29 +208,45 @@ impl PerchApp {
         let count = history.commits.len();
         let gutter = LANE * history.width as f32 + px(6.);
 
-        v_flex()
-            .size_full()
-            .child(header)
+        let commit_range = self
+            .active_review()
+            .and_then(|state| state.commit.as_ref().map(|_| state.range.clone()))
+            .filter(|range| matches!(range, DiffRange::Commit { .. }));
+
+        let graph = v_flex().size_full().child(header).child(
+            div().flex_1().min_h_0().child(
+                uniform_list("history", count, move |visible, _window, cx| {
+                    visible
+                        .map(|ix| {
+                            render_commit(
+                                &history,
+                                ix,
+                                gutter,
+                                selected.as_deref(),
+                                row_height,
+                                &entity,
+                                cx,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .size_full()
+                .track_scroll(self.history_scroll.clone()),
+            ),
+        );
+
+        // Le graphe seul ne dit pas ce qu'un commit a touché : la liste de ses
+        // fichiers va dessous, sinon sélectionner un commit n'ouvre que son
+        // premier fichier et les autres restent invisibles.
+        let Some(range) = commit_range else {
+            return graph.into_any_element();
+        };
+        v_resizable("perch-history-split")
+            .with_state(&self.history_split)
+            .child(resizable_panel().size(px(420.)).child(graph))
             .child(
-                div().flex_1().min_h_0().child(
-                    uniform_list("history", count, move |visible, _window, cx| {
-                        visible
-                            .map(|ix| {
-                                render_commit(
-                                    &history,
-                                    ix,
-                                    gutter,
-                                    selected.as_deref(),
-                                    row_height,
-                                    &entity,
-                                    cx,
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .size_full()
-                    .track_scroll(self.history_scroll.clone()),
-                ),
+                resizable_panel()
+                    .child(self.render_file_list(range, window, cx).into_any_element()),
             )
             .into_any_element()
     }

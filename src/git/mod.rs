@@ -157,6 +157,31 @@ pub(crate) fn git_opt<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Option<String>
     git(dir, args).ok()
 }
 
+/// Lance git et rend sa sortie **même si le code de retour n'est pas nul**.
+///
+/// Pour la poignée de commandes dont un code non nul est le cas normal :
+/// `diff --no-index` sort avec 1 dès qu'il y a une différence, ce qui est
+/// exactement ce qu'on lui demande de trouver. Passer par `git` ferait jeter
+/// la sortie avec l'« erreur ».
+///
+/// Au-delà de `max_code`, c'est un vrai échec : `--no-index` sort avec 2 quand
+/// le fichier n'existe pas ou n'est pas lisible.
+pub(crate) fn git_tolerant<S: AsRef<OsStr>>(
+    dir: &Path,
+    args: &[S],
+    max_code: i32,
+) -> Result<String> {
+    let out = run(dir, args)?;
+    let code = out.status.code().unwrap_or(-1);
+    if code < 0 || code > max_code {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!("git {}: {}", describe(args), stderr.trim());
+    }
+    Ok(strip_trailing_newline(
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    ))
+}
+
 /// Vrai si la commande sort avec le code 0. Pour les questions fermées
 /// (`show-ref --verify --quiet`) dont la sortie n'intéresse personne.
 pub(crate) fn git_ok<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> bool {

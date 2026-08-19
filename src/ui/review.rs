@@ -8,14 +8,14 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use gpui::{div, prelude::*, px, uniform_list, Context, SharedString, Window};
+use gpui::{div, prelude::*, px, uniform_list, Context, Window};
 use gpui_component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     h_flex,
     input::Input,
     select::Select,
-    v_flex, ActiveTheme, Disableable, Selectable, Sizable, WindowExt,
+    v_flex, ActiveTheme, Disableable, Sizable, WindowExt,
 };
 
 use crate::git::{DiffFile, DiffRange, Status, StatusCode};
@@ -115,8 +115,46 @@ impl FileRow {
 }
 
 impl PerchApp {
+    /// La liste des modifications en cours, et de quoi les valider.
+    pub(super) fn render_changes(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        self.render_file_list(DiffRange::Working, window, cx)
+    }
+
+    /// La revue de branche : ce que la branche a écrit depuis sa base.
+    ///
+    /// Tant que la base est inconnue — dépôt sans branche d'intégration, ou
+    /// branche déployée ici qui n'aurait rien à se comparer — le panneau le
+    /// dit plutôt que d'afficher une liste vide qu'on croirait fausse.
+    pub(super) fn render_branch_review(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        match self.active_review().and_then(|state| state.base.clone()) {
+            Some(base) => self
+                .render_file_list(DiffRange::Branch { base }, window, cx)
+                .into_any_element(),
+            None => v_flex()
+                .size_full()
+                .child(self.render_base_bar(cx))
+                .child(
+                    div()
+                        .p_3()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(tr!("range-branch-none")),
+                )
+                .into_any_element(),
+        }
+    }
+
     pub(super) fn render_file_list(
         &mut self,
+        range: DiffRange,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -134,16 +172,19 @@ impl PerchApp {
                 .into_any_element();
         };
 
+        // C'est le panneau qui demande sa liste : lui seul sait ce qu'il
+        // affiche, et charger les deux domaines d'avance coûterait une
+        // commande pour un onglet que personne n'ouvrira.
+        self.ensure_files(range.clone(), cx);
         let Some(state) = self.review.get(&worktree) else {
             return div().into_any_element();
         };
-        let range = state.range.clone();
         let selected = state.selected.clone();
         let collapsed = state.collapsed.clone();
         // La liste plate reste la référence : c'est elle qui compte ce qui est
         // indexé et qui donne à la case d'un groupe les fichiers sur lesquels
         // agir, y compris ceux qu'un dossier replié cache.
-        let flat = self.rows(cx);
+        let flat = self.rows(&range, cx);
         let staged_count = flat
             .iter()
             .filter(|row| matches!(row, Row::File(file) if file.staged))
@@ -153,13 +194,26 @@ impl PerchApp {
         } else {
             flat.clone()
         };
-        let can_commit = staged_count > 0 && matches!(range, DiffRange::Working);
+        let can_commit = staged_count > 0;
+        let commits = matches!(range, DiffRange::Working);
+        // Deux listes vivent côte à côte : elles ne peuvent pas porter le même
+        // identifiant, sans quoi elles partageraient leur défilement.
+        let list_id = match &range {
+            DiffRange::Working => "working".to_string(),
+            DiffRange::Branch { base } => format!("branch-{base}"),
+            DiffRange::Commit { id, .. } => format!("commit-{id}"),
+        };
 
         v_flex()
             .size_full()
             .border_r_1()
             .border_color(cx.theme().border)
-            .child(self.render_range_tabs(&range, cx))
+            .when(!matches!(range, DiffRange::Working), |el| {
+                el.child(self.render_base_bar(cx))
+            })
+            .when(matches!(range, DiffRange::Working), |el| {
+                el.child(self.render_changes_bar(cx))
+            })
             .child(
                 div()
                     .flex_1()
@@ -186,140 +240,97 @@ impl PerchApp {
                         // Seules les modifications en cours se cochent : sur un
                         // commit déjà écrit, il n'y a rien à indexer.
                         let checkable = matches!(range, DiffRange::Working);
+                        let row_range = range.clone();
                         el.child(
-                            uniform_list("file-list", count, move |visible, _window, cx| {
-                                visible
-                                    .map(|ix| {
-                                        render_row(
-                                            &rows,
-                                            &flat,
-                                            ix,
-                                            &worktree,
-                                            selected.as_deref(),
-                                            &colors,
-                                            checkable,
-                                            &entity,
-                                            cx,
-                                        )
-                                    })
-                                    .collect::<Vec<_>>()
-                            })
-                            .size_full()
-                            .track_scroll(self.file_scroll.clone()),
+                            uniform_list(
+                                gpui::SharedString::from(format!("file-list-{}", list_id)),
+                                count,
+                                move |visible, _window, cx| {
+                                    visible
+                                        .map(|ix| {
+                                            render_row(
+                                                &rows,
+                                                &flat,
+                                                ix,
+                                                &worktree,
+                                                &row_range,
+                                                selected.as_deref(),
+                                                &colors,
+                                                checkable,
+                                                &entity,
+                                                cx,
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
+                                },
+                            )
+                            .size_full(),
                         )
                     }),
             )
-            .child(self.render_commit_box(can_commit, staged_count, cx))
+            .when(commits, |el| {
+                el.child(self.render_commit_box(can_commit, staged_count, cx))
+            })
             .into_any_element()
     }
 
-    /// Les entrées de la liste pour le domaine courant.
+    /// Les entrées de la liste d'un domaine.
     ///
-    /// Le statut est la source pour les deux premiers onglets — lui seul
-    /// distingue index et répertoire de travail — et `--numstat` pour les deux
-    /// autres, qui portent sur des commits et n'ont pas de notion d'index.
-    fn rows(&self, _cx: &Context<Self>) -> Vec<Row> {
-        match self.active_review() {
-            Some(state) => rows_for(&state.range, &state.status, &state.files),
-            None => Vec::new(),
-        }
+    /// Le statut est la source pour les modifications en cours — lui seul
+    /// distingue index et répertoire de travail — et `--numstat` pour les
+    /// domaines qui portent sur des commits et n'ont pas de notion d'index.
+    fn rows(&self, range: &DiffRange, _cx: &Context<Self>) -> Vec<Row> {
+        let Some(state) = self.active_review() else {
+            return Vec::new();
+        };
+        let files = state.files.get(range).map(Vec::as_slice).unwrap_or(&[]);
+        rows_for(range, &state.status, files)
     }
 
-    fn render_range_tabs(&self, range: &DiffRange, cx: &mut Context<Self>) -> impl IntoElement {
-        // La base vient de git, jamais d'un nom supposé : proposer « main » à
-        // un dépôt qui s'appelle autrement produit un `unknown revision` au
-        // premier clic. Tant qu'elle est inconnue — ou que c'est la branche
-        // déployée ici, qui n'aurait rien à se comparer — l'onglet reste
-        // présent mais inactif, plutôt que de disparaître et de faire sauter
-        // l'autre.
-        let base = self.active_review().and_then(|r| r.base.clone());
-        let branch_range = base
-            .clone()
-            .map(|base| DiffRange::Branch { base })
-            .unwrap_or(DiffRange::Working);
-        // L'onglet ne nomme plus la base : le sélecteur juste à côté la porte,
-        // et la répéter donnait deux fois la même information sur une ligne
-        // qui n'en a pas la place.
-        let branch_label = match &base {
-            Some(_) => tr!("range-branch"),
-            None => tr!("range-branch-none"),
-        };
-        // Le compte se lit sans cliquer : c'est ce qui évite d'ouvrir Perch
-        // sur une liste vide sans comprendre où sont passées les
-        // modifications.
-        let changed = self
-            .active_review()
-            .map(|r| {
-                r.status
-                    .files
-                    .iter()
-                    .filter(|f| !matches!(f.index, StatusCode::Ignored))
-                    .count()
-            })
-            .unwrap_or(0);
-        let working_label = if changed == 0 {
-            tr!("range-working")
-        } else {
-            SharedString::from(format!("{} {changed}", tr!("range-working")))
-        };
+    /// La barre du panneau des modifications : juste la bascule d'affichage.
+    fn render_changes_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        self.bar(cx).child(self.tree_toggle(cx))
+    }
 
-        // Un commit choisi dans l'historique n'a pas d'onglet à lui : il
-        // occupe la liste jusqu'à ce qu'on revienne à l'un des deux domaines.
-        let showing_commit = matches!(range, DiffRange::Commit { .. });
-        let tree = crate::ui::settings::Settings::global(cx).review_tree;
-        let tabs: [(DiffRange, SharedString, bool); 2] = [
-            (DiffRange::Working, working_label, true),
-            (branch_range, branch_label, base.is_some()),
-        ];
+    /// La barre de la revue de branche : la bascule, et le choix de la base.
+    ///
+    /// La branche d'intégration devinée par git est un point de départ, pas une
+    /// fatalité — on compare aussi bien à `dev`, à une autre branche de travail
+    /// ou à une distante.
+    fn render_base_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        self.bar(cx).child(self.tree_toggle(cx)).child(
+            Select::new(&self.base_select)
+                .xsmall()
+                .title_prefix(tr!("range-base-prefix"))
+                .placeholder(tr!("range-base-placeholder"))
+                .menu_width(crate::ui::base_select::MENU_WIDTH),
+        )
+    }
 
+    fn bar(&self, cx: &mut Context<Self>) -> gpui::Div {
         h_flex()
             .h(crate::ui::theme::bar_height(cx))
             .w_full()
             .px_1()
             .gap_1()
             .items_center()
+            .justify_end()
             .border_b_1()
             .border_color(cx.theme().border)
-            .children(
-                tabs.into_iter()
-                    .enumerate()
-                    .map(|(ix, (target, label, enabled))| {
-                        let selected = enabled && !showing_commit && *range == target;
-                        Button::new(("range", ix))
-                            .ghost()
-                            .xsmall()
-                            .label(label)
-                            .selected(selected)
-                            .disabled(!enabled)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.set_range(target.clone(), cx);
-                            }))
-                    }),
-            )
-            .child(div().flex_1())
-            // Le choix de la base vit à côté de son onglet : la branche
-            // d'intégration devinée est un point de départ, pas une fatalité —
-            // on compare aussi bien à `dev`, à une autre branche de travail ou
-            // à une distante.
-            .child(
-                Button::new("review-tree")
-                    .ghost()
-                    .xsmall()
-                    .icon(icon(if tree { "list-tree" } else { "list" }))
-                    .tooltip(if tree {
-                        tr!("review-as-list")
-                    } else {
-                        tr!("review-as-tree")
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_review_tree(cx))),
-            )
-            .child(
-                Select::new(&self.base_select)
-                    .xsmall()
-                    .title_prefix(tr!("range-base-prefix"))
-                    .placeholder(tr!("range-base-placeholder"))
-                    .menu_width(crate::ui::base_select::MENU_WIDTH),
-            )
+    }
+
+    fn tree_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let tree = crate::ui::settings::Settings::global(cx).review_tree;
+        Button::new("review-tree")
+            .ghost()
+            .xsmall()
+            .icon(icon(if tree { "list-tree" } else { "list" }))
+            .tooltip(if tree {
+                tr!("review-as-list")
+            } else {
+                tr!("review-as-tree")
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_review_tree(cx)))
     }
 
     fn render_commit_box(
@@ -424,31 +435,40 @@ impl PerchApp {
     /// Seule action de Perch qui détruit du travail sans que git en garde une
     /// copie : ni `reflog` ni `stash` ne rattrapent un `restore --worktree`.
     /// D'où le dialogue, même si tout le reste de l'interface agit au clic.
-    fn confirm_discard(
+    fn confirm_removal(
         &mut self,
         worktree: PathBuf,
         path: PathBuf,
+        untracked: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let label = path.display().to_string();
         let entity = cx.entity();
+        let (title, warning) = if untracked {
+            (tr!("delete-title"), tr!("delete-warning"))
+        } else {
+            (tr!("discard-title"), tr!("discard-warning"))
+        };
         window.open_dialog(cx, move |dialog, _window, _cx| {
             let (worktree, path, entity) = (worktree.clone(), path.clone(), entity.clone());
             dialog
-                .title(tr!("discard-title"))
+                .title(title.clone())
                 .child(
                     v_flex()
                         .gap_1()
                         .child(div().text_sm().child(label.clone()))
-                        .child(div().text_xs().child(tr!("discard-warning"))),
+                        .child(div().text_xs().child(warning.clone())),
                 )
                 .confirm()
                 .on_ok(move |_, _window, cx| {
                     entity.update(cx, |this, cx| {
-                        this.git.send(Cmd::Discard {
-                            worktree: worktree.clone(),
-                            paths: vec![path.clone()],
+                        let paths = vec![path.clone()];
+                        let worktree = worktree.clone();
+                        this.git.send(if untracked {
+                            Cmd::Delete { worktree, paths }
+                        } else {
+                            Cmd::Discard { worktree, paths }
                         });
                         cx.notify();
                     });
@@ -481,6 +501,7 @@ fn render_row(
     flat: &std::rc::Rc<Vec<Row>>,
     index: usize,
     worktree: &Path,
+    range: &DiffRange,
     selected: Option<&Path>,
     colors: &DiffColors,
     checkable: bool,
@@ -491,7 +512,7 @@ fn render_row(
         Some(Row::Group(group)) => render_group(flat, index, *group, worktree, entity, cx),
         Some(Row::Dir(dir)) => render_dir(dir, index, worktree, colors, checkable, entity, cx),
         Some(Row::File(file)) => render_file(
-            file, index, worktree, selected, colors, checkable, entity, cx,
+            file, index, worktree, range, selected, colors, checkable, entity, cx,
         ),
         None => div().into_any_element(),
     }
@@ -654,6 +675,7 @@ fn render_file(
     row: &FileRow,
     index: usize,
     worktree: &Path,
+    range: &DiffRange,
     selected: Option<&Path>,
     colors: &DiffColors,
     checkable: bool,
@@ -676,11 +698,15 @@ fn render_file(
         .when(is_selected, |el| el.bg(cx.theme().accent))
         .hover(|s| s.bg(cx.theme().accent.opacity(0.5)))
         .on_click({
-            let (entity, worktree, path) =
-                (entity.clone(), worktree.to_path_buf(), row.path.clone());
+            let (entity, worktree, path, range) = (
+                entity.clone(),
+                worktree.to_path_buf(),
+                row.path.clone(),
+                range.clone(),
+            );
             move |_, _window, cx| {
                 entity.update(cx, |this, cx| {
-                    this.open_file(worktree.clone(), path.clone(), cx)
+                    this.open_file(worktree.clone(), path.clone(), range.clone(), cx)
                 });
             }
         })
@@ -763,18 +789,32 @@ fn render_file(
                     .child(format!("−{}", row.removed)),
             )
         })
-        .when(checkable && !row.untracked, |el| {
+        // Un fichier suivi se rend à son état d'origine ; un fichier nouveau
+        // n'en a pas — il se supprime, ce qui n'est pas le même geste et ne
+        // porte donc ni la même icône ni le même avertissement.
+        .when(checkable, |el| {
             let (entity, worktree, path) =
                 (entity.clone(), worktree.to_path_buf(), row.path.clone());
+            let untracked = row.untracked;
             el.child(
                 Button::new(("discard", index))
                     .ghost()
                     .xsmall()
-                    .icon(icon("undo-2"))
-                    .tooltip(tr!("action-discard"))
+                    .icon(icon(if untracked { "trash-2" } else { "undo-2" }))
+                    .tooltip(if untracked {
+                        tr!("action-delete")
+                    } else {
+                        tr!("action-discard")
+                    })
                     .on_click(move |_, window, cx| {
                         entity.update(cx, |this, cx| {
-                            this.confirm_discard(worktree.clone(), path.clone(), window, cx)
+                            this.confirm_removal(
+                                worktree.clone(),
+                                path.clone(),
+                                untracked,
+                                window,
+                                cx,
+                            )
                         });
                     }),
             )

@@ -15,7 +15,11 @@ use super::{git, split_nul};
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// Ce que la revue compare.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Hash` parce que les fichiers de chaque domaine sont rangés par domaine :
+/// deux panneaux montrent deux listes en même temps, et elles ne se
+/// chevauchent pas.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Range {
     /// Tout ce qui sépare le répertoire de travail de HEAD, indexé ou non.
     ///
@@ -138,7 +142,12 @@ pub fn file(dir: &Path, range: &Range, path: &Path, context: usize) -> Result<Fi
 /// pour les autres fichiers, ce qui évite un second chemin d'affichage.
 pub fn untracked_file(dir: &Path, path: &Path) -> Result<FileDiff> {
     let full = dir.join(path);
-    let out = super::git_opt(
+    // `--no-index` sort avec le code 1 dès qu'il y a une différence, ce qui
+    // est le cas normal ici : le fichier entier *est* la différence. Passer
+    // par `git` jetterait la sortie avec l'« erreur », et le fichier
+    // s'affichait vide — c'est ce qui faisait croire qu'un fichier nouveau
+    // n'était pas lisible.
+    let out = super::git_tolerant(
         dir,
         &[
             "diff",
@@ -148,10 +157,8 @@ pub fn untracked_file(dir: &Path, path: &Path) -> Result<FileDiff> {
             "/dev/null",
             &full.to_string_lossy(),
         ],
-    )
-    // `--no-index` sort avec le code 1 dès qu'il y a une différence, ce qui
-    // est le cas normal ici : l'échec attendu n'est pas une erreur.
-    .unwrap_or_default();
+        1,
+    )?;
     Ok(parse_unified(&out))
 }
 
@@ -319,6 +326,47 @@ pub fn hunk_patch(path: &Path, original: Option<&Path>, hunk: &Hunk, reverse: bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Le fichier nouveau se lit entièrement.
+    ///
+    /// `--no-index` sort avec le code 1 dès qu'il trouve une différence, et
+    /// c'est le cas normal ici : le fichier entier *est* la différence. Une
+    /// lecture qui traite ce code comme un échec rend un diff vide, et la vue
+    /// affiche « aucune modification » sur un fichier qui n'est que des
+    /// ajouts.
+    #[test]
+    fn an_untracked_file_is_read_whole() {
+        let dir = tempdir();
+        std::process::Command::new("git")
+            .args(["init", "-q", "."])
+            .current_dir(&dir)
+            .status()
+            .expect("git init");
+        std::fs::write(dir.join("nouveau.txt"), "une\ndeux\n").unwrap();
+
+        let diff = untracked_file(&dir, Path::new("nouveau.txt")).expect("lecture");
+        let lines: Vec<&str> = diff
+            .hunks
+            .iter()
+            .flat_map(|hunk| hunk.lines.iter())
+            .map(|line| line.text.as_str())
+            .collect();
+        assert_eq!(lines, vec!["une", "deux"]);
+        assert!(diff
+            .hunks
+            .iter()
+            .flat_map(|h| h.lines.iter())
+            .all(|l| l.kind == DiffLineKind::Added));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn tempdir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("perch-diff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("répertoire de test");
+        dir
+    }
 
     #[test]
     fn reads_numstat_with_a_rename_and_a_binary() {

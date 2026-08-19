@@ -164,6 +164,21 @@ pub fn discard(dir: &Path, paths: &[PathBuf]) -> Result<()> {
     git(dir, &args).map(|_| ())
 }
 
+/// Supprime des fichiers que git ne suit pas.
+///
+/// `git clean` et non `std::fs::remove_file` : il refuse ce qui est suivi, ce
+/// qui est la garantie qu'on veut ici — une erreur d'aiguillage dans la vue ne
+/// peut pas détruire un fichier versionné. `-d` couvre les dossiers, `-f`
+/// est exigé par git pour toute suppression.
+pub fn clean(dir: &Path, paths: &[PathBuf]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut args: Vec<OsString> = vec!["clean".into(), "-f".into(), "-d".into(), "--".into()];
+    args.extend(paths.iter().map(OsString::from));
+    git(dir, &args).map(|_| ())
+}
+
 /// Applique (`reverse = false`) ou annule (`reverse = true`) un patch sur
 /// l'index : c'est ainsi que se fait l'indexation d'un hunk isolé, git n'ayant
 /// pas d'API pour « ajoute ce morceau-là ».

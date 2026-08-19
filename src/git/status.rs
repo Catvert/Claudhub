@@ -156,7 +156,12 @@ pub fn status(dir: &Path) -> Result<Status> {
             "--porcelain=v2",
             "--branch",
             "-z",
-            "--untracked-files=normal",
+            // `all` et non `normal` : sans cela, un dossier entièrement
+            // nouveau apparaît comme une seule entrée `dossier/` qu'on ne peut
+            // ni lire ni indexer fichier par fichier — et un worktree d'agent
+            // en crée. Le coût est un parcours complet des dossiers non
+            // versionnés *et non ignorés*, ce que `.gitignore` borne déjà.
+            "--untracked-files=all",
         ],
     )?;
     Ok(parse(&out))

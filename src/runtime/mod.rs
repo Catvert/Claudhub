@@ -215,6 +215,9 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
         Cmd::Discard { worktree, paths } => write_then_refresh(worktree, Action::Discard, |dir| {
             repo::discard(dir, &paths).map(|_| String::new())
         }),
+        Cmd::Delete { worktree, paths } => write_then_refresh(worktree, Action::Delete, |dir| {
+            repo::clean(dir, &paths).map(|_| String::new())
+        }),
         Cmd::ApplyHunk {
             worktree,
             patch,

@@ -43,7 +43,8 @@ pub fn register(app: &Entity<PerchApp>, cx: &mut App) {
     declare! {
         SidebarPanel => "PerchSidebar",
         BranchesPanel => "PerchBranches",
-        ReviewPanel => "PerchReview",
+        ChangesPanel => "PerchChanges",
+        BranchPanel => "PerchBranch",
         HistoryPanel => "PerchHistory",
         DiffPanel => "PerchDiff",
         TerminalPanel => "PerchTerminal",
@@ -108,7 +109,8 @@ macro_rules! panels {
 panels! {
     SidebarPanel => ("PerchSidebar", "panel-repositories", render_sidebar),
     BranchesPanel => ("PerchBranches", "panel-branches", render_branches),
-    ReviewPanel => ("PerchReview", "panel-review", render_file_list),
+    ChangesPanel => ("PerchChanges", "range-working", render_changes),
+    BranchPanel => ("PerchBranch", "range-branch", render_branch_review),
     DiffPanel => ("PerchDiff", "panel-diff", render_diff),
     TerminalPanel => ("PerchTerminal", "panel-terminal", render_terminals),
 }

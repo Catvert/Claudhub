@@ -18,6 +18,7 @@ use gpui_component::{
     dock::{DockArea, DockItem, DockPlacement},
     h_flex,
     input::InputState,
+    menu::{DropdownMenu, PopupMenuItem},
     select::{SearchableVec, SelectEvent, SelectState},
     v_flex, ActiveTheme, Disableable, Root, Selectable, Sizable, StyledExt, WindowExt,
 };
@@ -32,7 +33,7 @@ use crate::ui::base_select::BaseChoice;
 use crate::ui::diff_view::Rendered;
 use crate::ui::icons::icon;
 use crate::ui::panels::{
-    BranchesPanel, DiffPanel, HistoryPanel, ReviewPanel, SidebarPanel, TerminalPanel,
+    BranchPanel, BranchesPanel, ChangesPanel, DiffPanel, HistoryPanel, SidebarPanel, TerminalPanel,
 };
 use crate::ui::settings::Settings;
 use crate::ui::terminal_view::TerminalGroup;
@@ -40,7 +41,84 @@ use crate::ui::terminal_view::TerminalGroup;
 /// Version de la disposition enregistrée. À incrémenter quand les panneaux
 /// changent de nom ou de nature, pour que gpui-component écarte une
 /// disposition qu'il ne saurait plus reconstruire.
-const LAYOUT_VERSION: usize = 1;
+const LAYOUT_VERSION: usize = 2;
+
+/// Les panneaux de la disposition par défaut.
+struct DefaultPanels {
+    sidebar: Arc<dyn gpui_component::dock::PanelView>,
+    branches: Arc<dyn gpui_component::dock::PanelView>,
+    changes: Arc<dyn gpui_component::dock::PanelView>,
+    branch: Arc<dyn gpui_component::dock::PanelView>,
+    history: Arc<dyn gpui_component::dock::PanelView>,
+    diff: Arc<dyn gpui_component::dock::PanelView>,
+    terminal: Arc<dyn gpui_component::dock::PanelView>,
+}
+
+/// La disposition d'origine : les dépôts à gauche, la revue et le diff au
+/// centre, les terminaux en dessous sur toute la largeur.
+///
+/// Le diff est dans le **centre** et non dans une zone d'accueil à droite :
+/// les zones latérales occupent toute la hauteur, et le diff à droite couperait
+/// les terminaux en deux au lieu de les laisser courir sous toute la revue.
+fn install_default_layout(
+    area: &mut DockArea,
+    panels: DefaultPanels,
+    weak_dock: &gpui::WeakEntity<DockArea>,
+    window: &mut Window,
+    cx: &mut Context<DockArea>,
+) {
+    use crate::ui::layout::{split, wrap};
+
+    area.set_left_dock(
+        wrap(
+            DockItem::tabs(vec![panels.sidebar, panels.branches], weak_dock, window, cx),
+            weak_dock,
+            window,
+            cx,
+        ),
+        Some(px(260.)),
+        true,
+        window,
+        cx,
+    );
+    area.set_center(
+        split(
+            gpui::Axis::Horizontal,
+            vec![
+                // Les trois façons de choisir quoi relire : ce qui change
+                // maintenant, ce que la branche a écrit, ce qui est déjà
+                // committé. Des onglets et non des panneaux côte à côte —
+                // ils répondent à la même question et se glissent ailleurs
+                // d'un geste si l'on préfère les voir ensemble.
+                DockItem::tabs(
+                    vec![panels.changes, panels.branch, panels.history],
+                    weak_dock,
+                    window,
+                    cx,
+                ),
+                DockItem::tabs(vec![panels.diff], weak_dock, window, cx),
+            ],
+            vec![Some(px(420.)), None],
+            weak_dock,
+            window,
+            cx,
+        ),
+        window,
+        cx,
+    );
+    area.set_bottom_dock(
+        wrap(
+            DockItem::tabs(vec![panels.terminal], weak_dock, window, cx),
+            weak_dock,
+            window,
+            cx,
+        ),
+        Some(px(280.)),
+        true,
+        window,
+        cx,
+    );
+}
 
 fn load_layout() -> Option<gpui_component::dock::DockAreaState> {
     let path = crate::ui::settings::layout_path()?;
@@ -94,13 +172,19 @@ pub struct RepoState {
 /// l'autre pour comparer est le geste central de l'outil, et il ne doit pas
 /// coûter la perte du fichier qu'on était en train de lire.
 pub struct ReviewState {
+    /// Domaine du diff affiché à droite. Ce n'est plus le domaine « courant »
+    /// de la revue — chaque panneau a le sien — mais celui du fichier sur
+    /// lequel on a cliqué en dernier, quel que soit le panneau d'où il vient.
     pub range: DiffRange,
     pub status: Status,
-    pub files: Vec<DiffFile>,
-    /// Faux tant que le premier statut n'est pas arrivé. C'est lui qui décide
-    /// du domaine ouvert par défaut, et il ne doit le faire qu'une fois :
-    /// ensuite, la portée appartient à l'utilisateur.
-    pub range_chosen: bool,
+    /// Les fichiers touchés, **par domaine**. Deux panneaux affichent deux
+    /// listes en même temps : une seule liste ferait clignoter l'une chaque
+    /// fois que l'autre se recharge.
+    pub files: HashMap<DiffRange, Vec<DiffFile>>,
+    /// Domaines dont la liste est demandée et pas encore revenue. C'est le
+    /// panneau qui demande, et il demande au rendu : sans ce garde, chaque
+    /// frame relancerait la commande.
+    pub pending_files: std::collections::HashSet<DiffRange>,
     pub selected: Option<PathBuf>,
     /// Le diff affiché, avec tout ce qui s'en déduit. Un `Rc` parce que le
     /// rendu doit le capturer dans la fermeture de la liste virtualisée, et
@@ -146,8 +230,8 @@ impl Default for ReviewState {
         Self {
             range: DiffRange::Working,
             status: Status::default(),
-            files: Vec::new(),
-            range_chosen: false,
+            files: HashMap::new(),
+            pending_files: std::collections::HashSet::new(),
             selected: None,
             diff: None,
             diff_selection: None,
@@ -159,27 +243,6 @@ impl Default for ReviewState {
             commit: None,
         }
     }
-}
-
-/// Le domaine de revue ouvert au premier statut d'un worktree.
-///
-/// Ouvrir sur un domaine vide alors que l'autre est plein est la façon la plus
-/// sûre de faire croire que Perch ne voit rien — c'est le cas d'un dépôt dont
-/// tout le travail a été indexé avant qu'on l'ouvre.
-/// Rend `None` quand rien ne tranche encore — un worktree propre dont on ne
-/// connaît pas la base : mieux vaut réessayer à l'arrivée des branches que de
-/// se figer sur un domaine vide.
-fn initial_range(status: &Status, base: Option<&str>) -> Option<DiffRange> {
-    // Quelque chose est en cours : c'est ce qu'on vient voir.
-    if !status.is_clean() {
-        return Some(DiffRange::Working);
-    }
-    // Rien en cours : ce qu'on vient relire dans un worktree d'agent, c'est le
-    // travail de sa branche. Ouvrir sur « Modifications » y affiche « rien à
-    // relire » alors qu'il y a parfois des centaines de fichiers à lire.
-    base.map(|base| DiffRange::Branch {
-        base: base.to_string(),
-    })
 }
 
 /// Ce qu'on sait des agents d'un worktree.
@@ -273,9 +336,9 @@ pub struct PerchApp {
     /// jamais reconstruit : le recréer par frame remettrait le diff en haut à
     /// chaque image.
     pub(super) diff_scroll: gpui::UniformListScrollHandle,
-    /// Défilement de la liste des fichiers, virtualisée elle aussi.
-    pub(super) file_scroll: gpui::UniformListScrollHandle,
     pub(super) history_scroll: gpui::UniformListScrollHandle,
+    /// Partage entre le graphe et la liste des fichiers du commit choisi.
+    pub(super) history_split: Entity<gpui_component::resizable::ResizableState>,
     focus: FocusHandle,
 }
 
@@ -329,58 +392,24 @@ impl PerchApp {
             .is_some();
         let sidebar = cx.new(|cx| SidebarPanel::new(&this, cx));
         let branches = cx.new(|cx| BranchesPanel::new(&this, cx));
-        let review = cx.new(|cx| ReviewPanel::new(&this, cx));
+        let changes = cx.new(|cx| ChangesPanel::new(&this, cx));
+        let branch = cx.new(|cx| BranchPanel::new(&this, cx));
         let history = cx.new(|cx| HistoryPanel::new(&this, cx));
         let diff = cx.new(|cx| DiffPanel::new(&this, cx));
         let terminal = cx.new(|cx| TerminalPanel::new(&this, cx));
 
         if !restored {
+            let panels = DefaultPanels {
+                sidebar: Arc::new(sidebar),
+                branches: Arc::new(branches),
+                changes: Arc::new(changes),
+                branch: Arc::new(branch),
+                history: Arc::new(history),
+                diff: Arc::new(diff),
+                terminal: Arc::new(terminal),
+            };
             dock.update(cx, |area, cx| {
-                // Trois zones d'accueil et un centre, sans `DockItem::split` :
-                // `split_with_sizes` de gpui-component 0.5.1 ajoute chaque
-                // panneau **deux fois** à son conteneur — deux boucles
-                // identiques dans le même corps — et la disposition obtenue
-                // n'est pas celle qu'on décrit. Les zones d'accueil n'y
-                // passent pas.
-                area.set_left_dock(
-                    DockItem::tabs(
-                        vec![Arc::new(sidebar), Arc::new(branches)],
-                        &weak_dock,
-                        window,
-                        cx,
-                    ),
-                    Some(px(260.)),
-                    true,
-                    window,
-                    cx,
-                );
-                // La liste des fichiers et l'historique répondent à la même
-                // question — que regarde-t-on — d'où deux onglets et non deux
-                // panneaux côte à côte.
-                area.set_center(
-                    DockItem::tabs(
-                        vec![Arc::new(review), Arc::new(history)],
-                        &weak_dock,
-                        window,
-                        cx,
-                    ),
-                    window,
-                    cx,
-                );
-                area.set_right_dock(
-                    DockItem::tab(diff, &weak_dock, window, cx),
-                    Some(px(900.)),
-                    true,
-                    window,
-                    cx,
-                );
-                area.set_bottom_dock(
-                    DockItem::tab(terminal, &weak_dock, window, cx),
-                    Some(px(280.)),
-                    true,
-                    window,
-                    cx,
-                );
+                install_default_layout(area, panels, &weak_dock, window, cx);
             });
         }
 
@@ -408,8 +437,8 @@ impl PerchApp {
             diff_dragging: false,
             watcher: None,
             diff_scroll: gpui::UniformListScrollHandle::new(),
-            file_scroll: gpui::UniformListScrollHandle::new(),
             history_scroll: gpui::UniformListScrollHandle::new(),
+            history_split: cx.new(|_| gpui_component::resizable::ResizableState::default()),
             focus: cx.focus_handle(),
         };
 
@@ -627,23 +656,12 @@ impl PerchApp {
                 if state.base.is_none() {
                     state.base = base;
                 }
-                // Ouvrir sur un domaine vide alors que l'autre est plein est la
-                // façon la plus sûre de faire croire que Perch ne voit rien :
-                // c'est le cas d'un dépôt dont tout le travail a été indexé
-                // avant qu'on l'ouvre. Le premier statut choisit donc le
-                // domaine où il y a quelque chose à lire ; après quoi la
-                // portée n'appartient plus qu'à l'utilisateur.
-                if !state.range_chosen {
-                    if let Some(range) = initial_range(&state.status, state.base.as_deref()) {
-                        state.range_chosen = true;
-                        state.range = range;
-                    }
-                }
-                // La liste des fichiers de la revue courante dépend du statut :
-                // la recharger ici évite que la vue affiche un fichier qui
-                // vient d'être indexé du mauvais côté.
-                let range = state.range.clone();
-                self.git.send(Cmd::LoadDiffFiles { worktree, range });
+                // Les listes dépendent du statut : les redemander ici évite
+                // qu'un fichier qu'on vient d'indexer reste affiché du mauvais
+                // côté. Chaque panneau redemandera la sienne au prochain
+                // rendu, d'où le simple oubli de ce qu'on avait.
+                state.files.clear();
+                state.pending_files.clear();
             }
             Evt::DiffFiles {
                 worktree,
@@ -653,24 +671,20 @@ impl PerchApp {
                 let Some(state) = self.review.get_mut(&worktree) else {
                     return;
                 };
-                // Une réponse en retard, pour une portée qu'on ne regarde
-                // plus, remplacerait la liste par la mauvaise.
-                if state.range != range {
-                    return;
-                }
-                let still_there = state
-                    .selected
-                    .as_ref()
-                    .is_some_and(|p| files.iter().any(|f| &f.path == p));
-                state.files = files;
-                if !still_there {
+                state.pending_files.remove(&range);
+                // Le fichier affiché venait-il de ce domaine, et y est-il
+                // encore ? S'il a disparu — indexé, jeté, committé — laisser
+                // son diff à l'écran ferait relire un état qui n'existe plus.
+                let gone = state.range == range
+                    && state
+                        .selected
+                        .as_ref()
+                        .is_some_and(|path| !files.iter().any(|f| &f.path == path));
+                state.files.insert(range, files);
+                if gone {
                     state.selected = None;
                     state.diff = None;
                     state.diff_selection = None;
-                    let next = state.files.first().map(|f| f.path.clone());
-                    if let Some(path) = next {
-                        self.open_file(worktree, path, cx);
-                    }
                 }
             }
             Evt::FileDiff {
@@ -755,21 +769,11 @@ impl PerchApp {
                     .keys()
                     .map(|worktree| (worktree.clone(), self.default_base_for(worktree)))
                     .collect();
-                let mut reload: Vec<(PathBuf, DiffRange)> = Vec::new();
+                let reload: Vec<(PathBuf, DiffRange)> = Vec::new();
                 for (worktree, base) in bases {
                     if let Some(state) = self.review.get_mut(&worktree) {
                         if state.base.is_none() {
                             state.base = base;
-                        }
-                        // Un worktree propre attendait sa base pour savoir quoi
-                        // ouvrir : c'est maintenant possible.
-                        if !state.range_chosen {
-                            if let Some(range) = initial_range(&state.status, state.base.as_deref())
-                            {
-                                state.range_chosen = true;
-                                state.range = range.clone();
-                                reload.push((worktree.clone(), range));
-                            }
                         }
                     }
                 }
@@ -860,7 +864,18 @@ impl PerchApp {
         cx.notify();
     }
 
-    pub(super) fn open_file(&mut self, worktree: PathBuf, path: PathBuf, cx: &mut Context<Self>) {
+    /// Ouvre un fichier dans la vue de diff.
+    ///
+    /// Le domaine vient du panneau d'où le clic part : « Modifications » et
+    /// « Revue de branche » montrent le même fichier de deux façons, et c'est
+    /// la liste qu'on a cliquée qui décide de laquelle.
+    pub(super) fn open_file(
+        &mut self,
+        worktree: PathBuf,
+        path: PathBuf,
+        range: DiffRange,
+        cx: &mut Context<Self>,
+    ) {
         let Some(state) = self.review.get_mut(&worktree) else {
             return;
         };
@@ -870,7 +885,7 @@ impl PerchApp {
         // n'a rien fait, puis que le contenu change tout seul.
         state.diff = None;
         state.diff_selection = None;
-        let range = state.range.clone();
+        state.range = range.clone();
         let untracked = state
             .status
             .files
@@ -886,21 +901,21 @@ impl PerchApp {
         cx.notify();
     }
 
-    pub fn set_range(&mut self, range: DiffRange, cx: &mut Context<Self>) {
+    /// Demande la liste des fichiers d'un domaine, si elle manque.
+    ///
+    /// Appelée au rendu du panneau qui l'affiche : c'est lui qui sait ce qu'il
+    /// montre, et le charger d'avance coûterait une commande pour un onglet
+    /// que personne n'ouvrira.
+    pub(super) fn ensure_files(&mut self, range: DiffRange, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
         };
         let Some(state) = self.review.get_mut(&worktree) else {
             return;
         };
-        if state.range == range {
+        if state.files.contains_key(&range) || !state.pending_files.insert(range.clone()) {
             return;
         }
-        state.range = range.clone();
-        state.files.clear();
-        state.selected = None;
-        state.diff = None;
-        state.diff_selection = None;
         self.git.send(Cmd::LoadDiffFiles { worktree, range });
         cx.notify();
     }
@@ -964,17 +979,14 @@ impl PerchApp {
         // Bascule sur la revue de branche : choisir une base en regardant ses
         // modifications en cours n'aurait aucun effet visible, ce qui ferait
         // croire que le sélecteur ne marche pas.
-        let range = DiffRange::Branch { base };
-        state.range = range.clone();
-        state.range_chosen = true;
-        state.files.clear();
-        state.selected = None;
-        state.diff = None;
-        state.diff_selection = None;
-        self.git.send(Cmd::LoadDiffFiles {
-            worktree: worktree.clone(),
-            range,
-        });
+        // Les listes de branche portaient sur l'ancienne base : les oublier
+        // les fait redemander au prochain rendu du panneau.
+        state
+            .files
+            .retain(|range, _| !matches!(range, DiffRange::Branch { .. }));
+        state
+            .pending_files
+            .retain(|range| !matches!(range, DiffRange::Branch { .. }));
         // L'historique de branche dépend de la même base.
         if let Some(state) = self.review.get_mut(&worktree) {
             state.history = None;
@@ -983,10 +995,6 @@ impl PerchApp {
     }
 
     /// Base de comparaison de la revue courante, si elle en a une.
-    pub(super) fn review_base(&self) -> Option<String> {
-        self.active_review().and_then(|r| r.base.clone())
-    }
-
     pub(super) fn active_review(&self) -> Option<&ReviewState> {
         self.active.as_ref().and_then(|p| self.review.get(p))
     }
@@ -1071,7 +1079,7 @@ impl PerchApp {
             .border_b_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().title_bar)
-            .child(icon("folder").small())
+            .child(self.render_main_menu(cx))
             // Le worktree, et rien d'autre : la branche et sa divergence sont
             // descendues dans la barre d'état, qui ne portait qu'un message
             // épisodique pendant que celle-ci débordait.
@@ -1149,16 +1157,36 @@ impl PerchApp {
                         this.toggle_terminal_panel(window, cx);
                     })),
             )
-            .child(
-                Button::new("settings")
-                    .ghost()
-                    .small()
-                    .icon(icon("settings"))
-                    .tooltip(tr!("settings-title"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_settings(window, cx);
-                    })),
-            )
+    }
+
+    /// Le menu de l'application.
+    ///
+    /// Un seul point d'entrée pour ce qui ne concerne pas le dépôt regardé —
+    /// réglages, disposition, sortie — plutôt que des boutons dispersés dans
+    /// une barre d'outils qui parle, elle, du worktree courant.
+    fn render_main_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let entity = cx.entity();
+        Button::new("main-menu")
+            .ghost()
+            .small()
+            .icon(icon("menu"))
+            .tooltip(tr!("menu-title"))
+            .dropdown_menu(move |menu, _window, _cx| {
+                let entity = entity.clone();
+                let for_reset = entity.clone();
+                menu.item(PopupMenuItem::new(tr!("settings-title")).on_click(
+                    move |_, window, cx| {
+                        entity.update(cx, |this, cx| this.open_settings(window, cx));
+                    },
+                ))
+                .item(PopupMenuItem::new(tr!("menu-reset-layout")).on_click(
+                    move |_, window, cx| {
+                        for_reset.update(cx, |this, cx| this.reset_layout(window, cx));
+                    },
+                ))
+                .separator()
+                .item(PopupMenuItem::new(tr!("menu-quit")).on_click(|_, _window, cx| cx.quit()))
+            })
     }
 
     /// La barre d'état : où l'on est, et ce qui vient de se passer.
@@ -1229,8 +1257,6 @@ impl Render for PerchApp {
             .on_action(cx.listener(super::shortcuts::toggle_terminal))
             .on_action(cx.listener(super::shortcuts::next_terminal))
             .on_action(cx.listener(super::shortcuts::commit))
-            .on_action(cx.listener(super::shortcuts::show_working))
-            .on_action(cx.listener(super::shortcuts::show_branch))
             .on_action(cx.listener(super::shortcuts::open_settings))
             .on_action(cx.listener(super::shortcuts::zoom_in))
             .on_action(cx.listener(super::shortcuts::zoom_out))
@@ -1289,6 +1315,29 @@ impl PerchApp {
         self.active.clone()
     }
 
+    /// Remet les panneaux à leur place d'origine.
+    ///
+    /// La sortie de secours d'un système où l'on peut tout déplacer : un
+    /// panneau glissé hors de vue n'a sinon aucun moyen de revenir.
+    pub(super) fn reset_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity();
+        let weak_dock = self.dock.downgrade();
+        let panels = DefaultPanels {
+            sidebar: Arc::new(cx.new(|cx| SidebarPanel::new(&this, cx))),
+            branches: Arc::new(cx.new(|cx| BranchesPanel::new(&this, cx))),
+            changes: Arc::new(cx.new(|cx| ChangesPanel::new(&this, cx))),
+            branch: Arc::new(cx.new(|cx| BranchPanel::new(&this, cx))),
+            history: Arc::new(cx.new(|cx| HistoryPanel::new(&this, cx))),
+            diff: Arc::new(cx.new(|cx| DiffPanel::new(&this, cx))),
+            terminal: Arc::new(cx.new(|cx| TerminalPanel::new(&this, cx))),
+        };
+        self.dock.update(cx, |area, cx| {
+            install_default_layout(area, panels, &weak_dock, window, cx);
+        });
+        self.schedule_layout_save(cx);
+        cx.notify();
+    }
+
     pub(super) fn terminal_visible(&self, cx: &App) -> bool {
         self.dock.read(cx).is_dock_open(DockPlacement::Bottom, cx)
     }
@@ -1343,62 +1392,5 @@ impl PerchApp {
         // fermé rouvrirait au prochain lancement.
         self.schedule_layout_save(cx);
         cx.notify();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::git::{FileStatus, StatusCode};
-
-    fn status(files: &[(StatusCode, StatusCode)]) -> Status {
-        Status {
-            files: files
-                .iter()
-                .enumerate()
-                .map(|(ix, (index, worktree))| FileStatus {
-                    path: PathBuf::from(format!("f{ix}.rs")),
-                    original: None,
-                    index: *index,
-                    worktree: *worktree,
-                })
-                .collect(),
-            ..Status::default()
-        }
-    }
-
-    #[test]
-    fn opens_on_the_changes_whenever_there_are_any() {
-        // Indexé, non indexé, non suivi : tout se regarde au même endroit
-        // désormais, et la présence de quoi que ce soit suffit.
-        for files in [
-            &[(StatusCode::Modified, StatusCode::Unmodified)][..],
-            &[(StatusCode::Modified, StatusCode::Modified)][..],
-            &[(StatusCode::Untracked, StatusCode::Untracked)][..],
-        ] {
-            assert_eq!(
-                initial_range(&status(files), Some("main")),
-                Some(DiffRange::Working)
-            );
-        }
-    }
-
-    #[test]
-    fn a_clean_worktree_opens_on_its_branch_review() {
-        // Le cas d'un worktree d'agent : rien en cours, mais des commits à
-        // relire. C'est là que « rien à relire ici » était le plus faux.
-        assert_eq!(
-            initial_range(&Status::default(), Some("master")),
-            Some(DiffRange::Branch {
-                base: "master".into()
-            })
-        );
-    }
-
-    #[test]
-    fn nothing_is_decided_before_the_base_is_known() {
-        // Le statut arrive avant les branches : sans base, on ne tranche pas
-        // et on réessaiera plutôt que de se figer sur un domaine vide.
-        assert_eq!(initial_range(&Status::default(), None), None);
     }
 }

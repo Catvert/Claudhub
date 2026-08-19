@@ -78,6 +78,13 @@ pub enum Cmd {
         worktree: WorktreeId,
         paths: Vec<PathBuf>,
     },
+    /// Supprime des fichiers que git ne suit pas. Séparé de `Discard` : ce
+    /// n'est pas un retour en arrière mais une suppression, et git n'en garde
+    /// aucune trace.
+    Delete {
+        worktree: WorktreeId,
+        paths: Vec<PathBuf>,
+    },
     /// Indexe (ou dés-indexe, avec `reverse`) un seul hunk.
     ApplyHunk {
         worktree: WorktreeId,
@@ -205,6 +212,7 @@ pub enum Action {
     Stage,
     Unstage,
     Discard,
+    Delete,
     Commit,
     Fetch,
     Pull,
@@ -225,6 +233,7 @@ impl Action {
             Self::Stage => "action-stage-ok",
             Self::Unstage => "action-unstage-ok",
             Self::Discard => "action-discard-ok",
+            Self::Delete => "action-delete-ok",
             Self::Commit => "action-commit-ok",
             Self::Fetch => "action-fetch-ok",
             Self::Pull => "action-pull-ok",

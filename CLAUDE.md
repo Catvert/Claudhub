@@ -360,12 +360,17 @@ Rendre depuis un `update` sur `PerchApp` est licite : le rendu d'une vue enfant
 a lieu *après* que la fermeture de rendu du parent a rendu la main, donc hors
 de cet emprunt.
 
-Trois pièges, tous rencontrés :
+Quatre pièges, tous rencontrés :
 
 - **`DockItem::split_with_sizes` de gpui-component 0.5.1 ajoute chaque panneau
   deux fois** — deux boucles identiques dans le même corps — et la disposition
-  obtenue n'est pas celle qu'on décrit. La disposition par défaut n'emploie
-  donc que des zones d'accueil et un centre.
+  obtenue n'est pas celle qu'on décrit. D'où `ui/layout.rs`, qui refait la
+  fonction correctement.
+- **Un panneau sans `StackPanel` parent est verrouillé.**
+  `TabPanel::is_locked` rend vrai quand `stack_panel` est `None`, et rien ne se
+  glisse ni ne s'accueille plus. S'être passé de `split` pour contourner le
+  point précédent avait donc supprimé le glissement en entier : tout panneau
+  doit être enveloppé, fût-ce dans un conteneur d'un seul élément (`wrap`).
 - **`toggle_dock` ne notifie pas l'aire**, seulement le dock intérieur :
   l'observation qui enregistre ne se déclenche pas toute seule, d'où l'appel
   explicite.
@@ -422,6 +427,45 @@ d'un curseur.
 parenthèses, et il peut contenir des espaces et des parenthèses — découper la
 ligne sur les espaces décale tous les champs suivants. C'est le piège que tout
 parseur naïf de `/proc` rate, et un test le verrouille.
+
+### Les domaines de revue
+
+« Modifications » et « Revue de branche » sont **deux panneaux**, pas deux
+onglets d'une même vue : on les regarde ensemble, l'un montrant ce qui change
+maintenant, l'autre ce que la branche a écrit.
+
+Conséquence sur l'état : `ReviewState::files` est une **table par domaine**.
+Une seule liste ferait clignoter l'un des deux panneaux chaque fois que l'autre
+se recharge. Chaque panneau demande la sienne au rendu (`ensure_files`), avec
+un garde `pending_files` — sans lui, chaque frame relancerait la commande
+pendant tout le temps de la lecture.
+
+`ReviewState::range` ne désigne plus « le domaine courant » mais celui du
+fichier ouvert en dernier, quel que soit le panneau d'où le clic vient : c'est
+lui qui décide de ce que la vue de diff compare, et de la possibilité
+d'indexer.
+
+Le diff est au **centre**, pas dans une zone d'accueil à droite : les zones
+latérales occupent toute la hauteur, et le diff à droite couperait les
+terminaux en deux au lieu de les laisser courir sous toute la revue.
+
+### Lire et supprimer un fichier non versionné
+
+`git diff --no-index` sort avec le code **1** dès qu'il trouve une différence,
+et c'est le cas normal ici : le fichier entier *est* la différence. La lecture
+passait par `git`, qui traite tout code non nul comme un échec et jette la
+sortie avec — un fichier nouveau s'affichait donc vide. D'où `git_tolerant`,
+qui accepte un code borné.
+
+Le statut est lu avec `--untracked-files=all` et non `normal` : sans cela, un
+dossier entièrement nouveau apparaît comme une seule entrée `dossier/` qu'on ne
+peut ni lire ni indexer fichier par fichier — et un worktree d'agent en crée.
+Le coût est un parcours complet des dossiers non versionnés *et non ignorés*,
+que `.gitignore` borne déjà.
+
+La suppression passe par `git clean` et non par `remove_file` : il refuse ce
+qui est suivi, ce qui est la garantie qu'on veut — une erreur d'aiguillage dans
+la vue ne peut pas détruire un fichier versionné.
 
 ### Quel worktree s'ouvre
 

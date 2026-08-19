@@ -13,8 +13,6 @@ use crate::ui::app::PerchApp;
 actions!(
     perch,
     [
-        ShowWorking,
-        ShowBranch,
         Refresh,
         NewTerminal,
         CloseTerminal,
@@ -85,9 +83,6 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-shift-w", CloseTerminal, Some(PREDICATE)),
         KeyBinding::new("secondary-`", ToggleTerminal, Some(PREDICATE)),
         KeyBinding::new("secondary-tab", NextTerminal, Some(PREDICATE)),
-        // Les deux domaines de revue, dans l'ordre des onglets.
-        KeyBinding::new("secondary-1", ShowWorking, Some(PREDICATE)),
-        KeyBinding::new("secondary-2", ShowBranch, Some(PREDICATE)),
         KeyBinding::new("secondary-enter", Commit, Some(PREDICATE)),
         // La convention de tous les éditeurs, y compris sous Linux.
         KeyBinding::new("secondary-,", OpenSettings, Some(PREDICATE)),
@@ -176,28 +171,6 @@ pub fn next_terminal(
     };
     let group = this.terminal_group(&worktree, window, cx);
     group.update(cx, |group, cx| group.next(window, cx));
-}
-
-pub fn show_working(
-    this: &mut PerchApp,
-    _: &ShowWorking,
-    _window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
-) {
-    this.set_range(crate::git::DiffRange::Working, cx);
-}
-
-/// Sans base connue, il n'y a rien à comparer : le raccourci ne fait rien,
-/// comme l'onglet correspondant est inactif.
-pub fn show_branch(
-    this: &mut PerchApp,
-    _: &ShowBranch,
-    _window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
-) {
-    if let Some(base) = this.review_base() {
-        this.set_range(crate::git::DiffRange::Branch { base }, cx);
-    }
 }
 
 pub fn open_settings(
