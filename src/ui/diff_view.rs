@@ -180,14 +180,17 @@ use crate::ui::app::PerchApp;
 use crate::ui::icons::icon;
 use crate::ui::theme::DiffColors;
 
-/// Police du diff. La même que les terminaux : c'est du code, et les colonnes
-/// doivent s'aligner.
-const MONO: &str = "JetBrains Mono";
-const FONT_SIZE: Pixels = px(12.);
-/// Hauteur d'une ligne, fixée et non mesurée : toutes les entrées font
-/// exactement une ligne de texte, et une hauteur explicite dispense la liste
-/// virtualisée de mesurer quoi que ce soit.
-const LINE_HEIGHT: Pixels = px(18.);
+/// Hauteur d'une ligne, en proportion de la taille du texte.
+///
+/// Elle est fixée et non mesurée : toutes les entrées font exactement une
+/// ligne, et une hauteur explicite dispense la liste virtualisée de mesurer
+/// quoi que ce soit. Le facteur suit la taille choisie, faute de quoi grossir
+/// le texte le ferait déborder d'une hauteur restée constante.
+const LINE_SPACING: f32 = 1.5;
+
+pub fn line_height(font_size: Pixels) -> Pixels {
+    (font_size * LINE_SPACING).round()
+}
 
 impl PerchApp {
     pub(super) fn render_diff(
@@ -203,6 +206,9 @@ impl PerchApp {
         };
         let stageable = state.range == DiffRange::Working;
         let diff = state.diff.clone();
+        let mono = cx.theme().mono_font_family.clone();
+        let font_size = px(crate::ui::settings::Settings::global(cx).diff_font_size);
+        let line_height = line_height(font_size);
 
         let header = h_flex()
             .h(px(30.))
@@ -218,7 +224,7 @@ impl PerchApp {
                     .flex_1()
                     .truncate()
                     .text_sm()
-                    .font_family(MONO)
+                    .font_family(mono.clone())
                     .child(path.display().to_string()),
             );
 
@@ -249,7 +255,7 @@ impl PerchApp {
         // écart d'un pixel décale la gouttière de tout un caractère au bout
         // d'une centaine de colonnes.
         let font = gpui::Font {
-            family: MONO.into(),
+            family: mono.clone(),
             features: Default::default(),
             weight: Default::default(),
             style: Default::default(),
@@ -258,7 +264,7 @@ impl PerchApp {
         let font_id = window.text_system().resolve_font(&font);
         let cell = window
             .text_system()
-            .advance(font_id, FONT_SIZE, 'M')
+            .advance(font_id, font_size, 'M')
             .map(|size| size.width)
             .unwrap_or(px(7.));
 
@@ -289,6 +295,7 @@ impl PerchApp {
                                     &colors,
                                     gutter,
                                     content_width,
+                                    line_height,
                                     stageable,
                                     &entity,
                                     cx,
@@ -297,8 +304,8 @@ impl PerchApp {
                             .collect::<Vec<_>>()
                     })
                     .size_full()
-                    .font_family(MONO)
-                    .text_size(FONT_SIZE)
+                    .font_family(mono)
+                    .text_size(font_size)
                     // Sans `Unconstrained`, les lignes sont contraintes à la
                     // largeur de la vue et le défilement horizontal n'a rien à
                     // révéler ; la largeur défilable est déduite du seul item
@@ -319,6 +326,7 @@ fn render_row(
     colors: &DiffColors,
     gutter: Pixels,
     content_width: Pixels,
+    line_height: Pixels,
     stageable: bool,
     entity: &Entity<PerchApp>,
     cx: &mut gpui::App,
@@ -331,7 +339,7 @@ fn render_row(
             let patch = diff.patches.get(hunk).cloned().unwrap_or_default();
             let entity = entity.clone();
             h_flex()
-                .h(LINE_HEIGHT)
+                .h(line_height)
                 .min_w(content_width)
                 .px_2()
                 .gap_2()
@@ -387,7 +395,7 @@ fn render_row(
             };
 
             h_flex()
-                .h(LINE_HEIGHT)
+                .h(line_height)
                 .min_w(content_width)
                 .items_center()
                 .whitespace_nowrap()

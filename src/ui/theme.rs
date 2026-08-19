@@ -30,8 +30,8 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
     Theme::change(mode, window, cx);
 
     let theme = Theme::global_mut(cx);
-    theme.font_family = "Inter".into();
-    theme.mono_font_family = "JetBrains Mono".into();
+    theme.font_family = settings.ui_font().to_string().into();
+    theme.mono_font_family = settings.mono_font().to_string().into();
     theme.font_size = px(settings.font_size);
 
     cx.refresh_windows();

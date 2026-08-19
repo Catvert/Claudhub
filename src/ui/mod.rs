@@ -13,6 +13,7 @@ mod history_view;
 mod icons;
 mod review;
 mod settings;
+mod settings_view;
 mod shortcuts;
 mod sidebar;
 mod terminal_view;
@@ -83,6 +84,9 @@ pub fn run() {
         shortcuts::init(cx);
         install_fonts(cx);
         theme::apply(&settings, None, cx);
+        // Les réglages passent en global avant l'ouverture de la fenêtre : le
+        // formulaire les écrit depuis des fermetures qui n'ont qu'un `App`.
+        settings.clone().init_global(cx);
 
         let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
         // `Maximized` porte quand même ces dimensions : elles deviennent la
@@ -102,7 +106,7 @@ pub fn run() {
                 ..Default::default()
             },
             |window, cx| {
-                let main = cx.new(|cx| app::PerchApp::new(settings.clone(), window, cx));
+                let main = cx.new(|cx| app::PerchApp::new(window, cx));
                 cx.new(|cx| Root::new(main, window, cx))
             },
         );

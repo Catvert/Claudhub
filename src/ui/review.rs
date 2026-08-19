@@ -515,7 +515,7 @@ fn render_file(
                 .w(px(20.))
                 .flex_none()
                 .text_xs()
-                .font_family("JetBrains Mono")
+                .font_family(cx.theme().mono_font_family.clone())
                 .text_color(status_color(
                     if row.untracked {
                         StatusCode::Untracked

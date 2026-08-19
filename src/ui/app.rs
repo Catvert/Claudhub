@@ -127,7 +127,6 @@ pub struct Toast {
 }
 
 pub struct PerchApp {
-    pub(super) settings: Settings,
     pub(super) git: runtime::Handle,
     pub(super) repos: Vec<RepoState>,
     /// Worktree sélectionné : la clé de presque tout le reste.
@@ -176,7 +175,7 @@ pub struct PerchApp {
 }
 
 impl PerchApp {
-    pub fn new(settings: Settings, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (git, events) = runtime::spawn();
 
         let commit_input = cx.new(|cx| {
@@ -205,7 +204,6 @@ impl PerchApp {
         .detach();
 
         let mut app = Self {
-            settings,
             git,
             repos: Vec::new(),
             active: None,
@@ -235,7 +233,7 @@ impl PerchApp {
         // Les dépôts de la session précédente, puis le répertoire courant s'il
         // en est un — c'est ce qu'attend quelqu'un qui lance `perch` depuis son
         // projet.
-        let remembered = app.settings.repositories.clone();
+        let remembered = Settings::global(cx).repositories.clone();
         for path in remembered {
             app.git.send(Cmd::OpenRepo(path));
         }
@@ -345,8 +343,7 @@ impl PerchApp {
                     default_base: None,
                     collapsed: false,
                 });
-                self.settings.remember_repository(&main);
-                self.settings.save();
+                Settings::update_global(cx, |s| s.remember_repository(&main));
                 self.git.send(Cmd::LoadBranches { main });
                 if self.active.is_none() {
                     if let Some(path) = first {
@@ -597,7 +594,7 @@ impl PerchApp {
             worktree,
             range,
             path,
-            context: self.settings.diff_context,
+            context: Settings::global(cx).diff_context,
             untracked,
         });
         cx.notify();
@@ -869,17 +866,6 @@ impl PerchApp {
                     })),
             )
             .child(
-                Button::new("agent")
-                    .ghost()
-                    .small()
-                    .icon(icon("bot"))
-                    .tooltip(tr!("terminal-agent"))
-                    .disabled(!has_active)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_agent_terminal(window, cx);
-                    })),
-            )
-            .child(
                 Button::new("history")
                     .ghost()
                     .small()
@@ -917,6 +903,16 @@ impl PerchApp {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.show_terminal = !this.show_terminal;
                         cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("settings")
+                    .ghost()
+                    .small()
+                    .icon(icon("settings"))
+                    .tooltip(tr!("settings-title"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_settings(window, cx);
                     })),
             )
     }
@@ -1022,6 +1018,7 @@ impl Render for PerchApp {
             .on_action(cx.listener(super::shortcuts::show_working))
             .on_action(cx.listener(super::shortcuts::show_branch))
             .on_action(cx.listener(super::shortcuts::toggle_history))
+            .on_action(cx.listener(super::shortcuts::open_settings))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)

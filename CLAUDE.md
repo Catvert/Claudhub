@@ -46,7 +46,9 @@ src/
     history_view.rs  l'historique et son graphe peint
     highlight.rs   coloration tree-sitter d'un diff
     sidebar.rs / review.rs / branches.rs / terminal_view.rs
-    settings.rs / theme.rs / shortcuts.rs / icons.rs
+    settings.rs     les réglages et leur global
+    settings_view.rs  le formulaire, bâti sur `gpui_component::setting`
+    theme.rs / shortcuts.rs / icons.rs
 ```
 
 ### La boucle Cmd/Evt
@@ -209,6 +211,35 @@ dernier pour recouvrir les courbes qui l'atteignent.
 
 Le module s'appelle `history` et non `log` : un module `log` dans ce crate
 masquerait la bibliothèque de journalisation du même nom.
+
+### Les réglages
+
+Ils vivent dans un **global gpui** (`settings::SettingsStore`) et non dans
+`PerchApp`. Ce n'est pas un choix de style : le formulaire de gpui-component
+déclare chaque champ par un couple lire/écrire dont les fermetures ne reçoivent
+qu'un `App`, sans accès à l'entité racine. `Settings::global(cx)` lit,
+`Settings::update_global(cx, |s| …)` écrit.
+
+`update_global` ré-applique le thème à chaque modification, y compris celles
+qui ne le concernent pas — c'est lui qui porte les polices et la taille du
+texte, et trier les champs qui l'affectent coûterait plus de code qu'un
+`refresh_windows` de trop. L'écriture du fichier est **différée d'une demi-
+seconde** : un champ de saisie émet une valeur par frappe et la molette un cran
+par encoche.
+
+Le formulaire n'a pas de bouton « Appliquer » : choisir une police ou une
+taille sans en voir l'effet reviendrait à choisir à l'aveugle.
+
+Corollaire pour les vues : ce qui dépend d'un réglage se **relit à chaque
+rendu**, jamais au moment de la construction. `TerminalView::sync_font` en est
+l'exemple : changer la police invalide la géométrie mesurée, et il faut effacer
+les bornes retenues pour que le pty soit redimensionné — sinon le texte change
+de taille et le shell continue de croire à l'ancienne largeur en colonnes.
+
+Les familles proposées viennent de `cx.text_system().all_font_names()`, filtrées
+par convention de nommage pour les champs à chasse fixe : gpui n'expose pas
+cette propriété de façon portable. La liste rate donc des familles, et le
+fichier de réglages reste modifiable à la main pour ces cas-là.
 
 ### Quel worktree s'ouvre
 

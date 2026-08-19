@@ -21,7 +21,8 @@ actions!(
         CloseTerminal,
         ToggleTerminal,
         NextTerminal,
-        Commit
+        Commit,
+        OpenSettings
     ]
 );
 
@@ -75,6 +76,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-1", ShowWorking, Some(PREDICATE)),
         KeyBinding::new("secondary-2", ShowBranch, Some(PREDICATE)),
         KeyBinding::new("secondary-enter", Commit, Some(PREDICATE)),
+        // La convention de tous les éditeurs, y compris sous Linux.
+        KeyBinding::new("secondary-,", OpenSettings, Some(PREDICATE)),
         // Les conventions des terminaux : la touche système *avec* Maj, parce
         // que `Ctrl+C` et `Ctrl+V` nus appartiennent au programme.
         KeyBinding::new("secondary-shift-c", CopySelection, Some(TERMINAL_PREDICATE)),
@@ -179,6 +182,15 @@ pub fn show_branch(
     if let Some(base) = this.review_base() {
         this.set_range(crate::git::DiffRange::Branch { base }, cx);
     }
+}
+
+pub fn open_settings(
+    this: &mut PerchApp,
+    _: &OpenSettings,
+    window: &mut Window,
+    cx: &mut gpui::Context<PerchApp>,
+) {
+    this.open_settings(window, cx);
 }
 
 pub fn commit(

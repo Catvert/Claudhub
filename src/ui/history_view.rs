@@ -271,7 +271,7 @@ fn render_commit(
                 // Dix caractères de chasse fixe : la longueur que git donne à
                 // `%h` sur un dépôt de cette taille, plus une marge.
                 .w(px(84.))
-                .font_family("JetBrains Mono")
+                .font_family(cx.theme().mono_font_family.clone())
                 .text_xs()
                 .text_color(dot_color)
                 .child(commit.short.clone()),

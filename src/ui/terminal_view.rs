@@ -31,7 +31,7 @@ use crate::terminal::{
 use crate::tr;
 use crate::ui::app::PerchApp;
 use crate::ui::icons::icon;
-use crate::ui::settings::TerminalSettings;
+use crate::ui::settings::{Settings, TerminalSettings};
 
 /// Un onglet de terminal.
 pub struct TerminalView {
@@ -39,6 +39,10 @@ pub struct TerminalView {
     snapshot: Snapshot,
     focus: FocusHandle,
     font_size: Pixels,
+    /// Police effective, relue à chaque rendu depuis les réglages : c'est ce
+    /// qui fait qu'un changement dans le formulaire se voit sans rouvrir
+    /// l'onglet.
+    font_family: SharedString,
     /// Dernière taille connue de la zone de rendu, pour ne redimensionner le
     /// pty que quand la géométrie change vraiment.
     bounds: Bounds<Pixels>,
@@ -75,12 +79,13 @@ impl TerminalView {
 
     pub fn attach(
         terminal: Terminal,
-        font_size: f32,
         label: SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let font_size = px(font_size);
+        let settings = Settings::global(cx);
+        let font_size = px(settings.terminal.font_size);
+        let font_family = SharedString::from(settings.terminal_font().to_string());
         let events = terminal.events();
         // Une tâche de premier plan par terminal : elle réveille la vue quand
         // la boucle d'E/S a du nouveau. Sans elle, la sortie n'apparaîtrait
@@ -113,6 +118,7 @@ impl TerminalView {
             terminal,
             focus: cx.focus_handle(),
             font_size,
+            font_family,
             bounds: Bounds::default(),
             cell: gpui::size(px(8.), px(16.)),
             selecting: false,
@@ -127,6 +133,25 @@ impl TerminalView {
         } else {
             SharedString::from(title.to_string())
         }
+    }
+
+    /// Aligne la police sur les réglages courants.
+    ///
+    /// Un changement de taille ou de famille invalide la géométrie mesurée :
+    /// on efface les bornes retenues pour que le prochain passage du canvas de
+    /// mesure recalcule la grille et redimensionne le pty. Sans cela, le texte
+    /// changerait de taille mais le shell continuerait de croire à
+    /// l'ancienne largeur en colonnes.
+    fn sync_font(&mut self, cx: &App) {
+        let settings = Settings::global(cx);
+        let font_size = px(settings.terminal.font_size);
+        let font_family = settings.terminal_font();
+        if font_size == self.font_size && font_family == self.font_family.as_ref() {
+            return;
+        }
+        self.font_size = font_size;
+        self.font_family = SharedString::from(font_family.to_string());
+        self.bounds = Bounds::default();
     }
 
     pub fn has_exited(&self) -> bool {
@@ -146,7 +171,7 @@ impl TerminalView {
         self.bounds = bounds;
 
         let font = gpui::Font {
-            family: "JetBrains Mono".into(),
+            family: self.font_family.clone(),
             features: Default::default(),
             weight: Default::default(),
             style: Default::default(),
@@ -353,7 +378,9 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus.is_focused(window);
         let default_fg = cx.theme().foreground;
+        self.sync_font(cx);
         let font_size = self.font_size;
+        let font_family = self.font_family.clone();
         let entity = cx.entity();
 
         // La mesure se fait dans un `canvas` de fond, qui reçoit la géométrie
@@ -373,7 +400,7 @@ impl Render for TerminalView {
             .snapshot
             .lines
             .iter()
-            .map(|line| styled_line(line, default_fg, selection_bg))
+            .map(|line| styled_line(line, &font_family, default_fg, selection_bg))
             .collect();
 
         v_flex()
@@ -398,7 +425,7 @@ impl Render for TerminalView {
             .size_full()
             .relative()
             .bg(cx.theme().background)
-            .font_family("JetBrains Mono")
+            .font_family(font_family.clone())
             .text_size(font_size)
             .on_key_down(cx.listener(Self::on_key))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
@@ -413,7 +440,12 @@ impl Render for TerminalView {
 }
 
 /// Convertit une ligne de l'instantané en texte stylé.
-fn styled_line(line: &crate::terminal::Line, default_fg: Hsla, selection_bg: Hsla) -> StyledText {
+fn styled_line(
+    line: &crate::terminal::Line,
+    family: &SharedString,
+    default_fg: Hsla,
+    selection_bg: Hsla,
+) -> StyledText {
     let text = SharedString::from(line.text.clone());
     let mut runs: Vec<TextRun> = Vec::with_capacity(line.segments.len());
     for seg in &line.segments {
@@ -424,7 +456,7 @@ fn styled_line(line: &crate::terminal::Line, default_fg: Hsla, selection_bg: Hsl
         runs.push(TextRun {
             len,
             font: gpui::Font {
-                family: "JetBrains Mono".into(),
+                family: family.clone(),
                 features: Default::default(),
                 weight: if seg.bold {
                     gpui::FontWeight::BOLD
@@ -502,18 +534,16 @@ pub struct TerminalGroup {
     worktree: PathBuf,
     tabs: Vec<Entity<TerminalView>>,
     active: usize,
-    settings: TerminalSettings,
     /// Pourquoi le dernier onglet n'a pas pu s'ouvrir, s'il y a lieu.
     error: Option<SharedString>,
 }
 
 impl TerminalGroup {
-    pub fn new(worktree: PathBuf, settings: TerminalSettings) -> Self {
+    pub fn new(worktree: PathBuf) -> Self {
         Self {
             worktree,
             tabs: Vec::new(),
             active: 0,
-            settings,
             error: None,
         }
     }
@@ -530,7 +560,11 @@ impl TerminalGroup {
         // de descripteurs atteinte, `/dev/pts` absent. On renonce à l'onglet et
         // on le dit, plutôt que de paniquer au milieu d'un rendu — ce que
         // faisait ce code, avec pour seul symptôme une fenêtre figée.
-        let terminal = match TerminalView::open(&self.worktree, command, &self.settings) {
+        // Les réglages sont relus à l'ouverture plutôt que retenus à la
+        // construction : changer le shell ou le défilement arrière doit valoir
+        // pour le prochain onglet, sans avoir à fermer les autres.
+        let settings = Settings::global(cx).terminal.clone();
+        let terminal = match TerminalView::open(&self.worktree, command, &settings) {
             Ok(terminal) => terminal,
             Err(e) => {
                 log::error!("ouverture du terminal : {e:#}");
@@ -539,8 +573,7 @@ impl TerminalGroup {
                 return;
             }
         };
-        let font_size = self.settings.font_size;
-        let view = cx.new(|cx| TerminalView::attach(terminal, font_size, label, window, cx));
+        let view = cx.new(|cx| TerminalView::attach(terminal, label, window, cx));
         self.error = None;
         self.tabs.push(view);
         self.active = self.tabs.len() - 1;
@@ -691,9 +724,8 @@ impl PerchApp {
         if let Some(group) = self.terminals.get(worktree) {
             return group.clone();
         }
-        let settings = self.settings.terminal.clone();
         let path = worktree.to_path_buf();
-        let group = cx.new(|_| TerminalGroup::new(path, settings));
+        let group = cx.new(|_| TerminalGroup::new(path));
         group.update(cx, |group, cx| {
             group.open(None, tr!("terminal-shell"), window, cx);
         });
@@ -706,7 +738,7 @@ impl PerchApp {
         let Some(worktree) = self.active.clone() else {
             return;
         };
-        let command = self.settings.terminal.agent_command.clone();
+        let command = Settings::global(cx).terminal.agent_command.clone();
         if command.trim().is_empty() {
             return;
         }

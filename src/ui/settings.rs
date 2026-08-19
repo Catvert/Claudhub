@@ -4,10 +4,32 @@
 //! Tout y est optionnel : une clé absente reprend sa valeur par défaut, ce qui
 //! rend l'ajout d'un réglage compatible avec les fichiers déjà écrits, et un
 //! fichier illisible n'empêche jamais Perch de démarrer.
+//!
+//! Les réglages vivent dans un global gpui plutôt que dans `PerchApp` : le
+//! formulaire de gpui-component lit et écrit chaque champ à travers des
+//! fermetures qui ne reçoivent qu'un `App`, sans accès à l'entité racine.
+//! Passer par un global est ce qui permet d'écrire un réglage depuis
+//! n'importe où — le formulaire, un raccourci de zoom, la molette.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use gpui::{App, BorrowAppContext};
 use serde::{Deserialize, Serialize};
+
+/// Police d'interface embarquée. Elle est toujours disponible, ce qui en fait
+/// le seul défaut qu'on puisse promettre.
+pub const DEFAULT_UI_FONT: &str = "Inter";
+/// Police à chasse fixe embarquée, celle du terminal et des diffs.
+pub const DEFAULT_MONO_FONT: &str = "JetBrains Mono";
+
+/// Délai avant écriture du fichier après une modification.
+///
+/// Un champ de saisie émet une valeur par frappe et la molette un cran par
+/// encoche : écrire à chaque fois ferait des dizaines d'ouvertures de fichier
+/// pour un geste. Une demi-seconde est assez courte pour qu'une fermeture
+/// brutale ne perde rien de visible.
+const SAVE_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -17,6 +39,26 @@ pub enum ThemeMode {
     Dark,
     /// Suit le réglage clair/sombre du système.
     System,
+}
+
+impl ThemeMode {
+    /// Valeur telle qu'elle circule dans le formulaire, qui ne manipule que
+    /// des chaînes.
+    pub fn as_key(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Dark => "dark",
+            Self::System => "system",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Self {
+        match key {
+            "light" => Self::Light,
+            "system" => Self::System,
+            _ => Self::Dark,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -47,13 +89,32 @@ impl LanguageChoice {
             }
         }
     }
+
+    pub fn as_key(self) -> &'static str {
+        match self {
+            Self::Fr => "fr",
+            Self::En => "en",
+            Self::System => "system",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Self {
+        match key {
+            "fr" => Self::Fr,
+            "en" => Self::En,
+            _ => Self::System,
+        }
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerminalSettings {
     /// Programme lancé dans un nouvel onglet. Vide = le shell de connexion.
     pub shell: String,
+    /// Police du terminal. Vide = celle des diffs, pour que régler la chasse
+    /// fixe une fois suffise au cas courant.
+    pub font_family: String,
     pub font_size: f32,
     pub scrollback: usize,
     /// Commande de l'agent de codage, lancée par le bouton dédié dans un
@@ -65,6 +126,7 @@ impl Default for TerminalSettings {
     fn default() -> Self {
         Self {
             shell: String::new(),
+            font_family: String::new(),
             font_size: 13.0,
             // 10 000 lignes : de quoi remonter la sortie d'une suite de tests
             // sans que la mémoire d'une dizaine d'onglets se remarque.
@@ -74,12 +136,30 @@ impl Default for TerminalSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl TerminalSettings {
+    /// Police effective : la sienne, sinon celle des diffs.
+    pub fn family<'a>(&'a self, mono: &'a str) -> &'a str {
+        if self.font_family.is_empty() {
+            mono
+        } else {
+            &self.font_family
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub theme: ThemeMode,
     pub language: LanguageChoice,
+    /// Police de l'interface : libellés, menus, listes.
+    pub ui_font_family: String,
+    /// Police à chasse fixe : diffs, sha, chemins alignés.
+    pub mono_font_family: String,
     pub font_size: f32,
+    /// Taille du texte des diffs, indépendante de celle de l'interface : on
+    /// grossit du code pour le relire sans vouloir grossir toute la fenêtre.
+    pub diff_font_size: f32,
     pub start_maximized: bool,
     pub terminal: TerminalSettings,
     /// Dépôts rouverts au démarrage, dans l'ordre d'ouverture.
@@ -93,7 +173,10 @@ impl Default for Settings {
         Self {
             theme: ThemeMode::default(),
             language: LanguageChoice::default(),
+            ui_font_family: DEFAULT_UI_FONT.into(),
+            mono_font_family: DEFAULT_MONO_FONT.into(),
             font_size: 14.0,
+            diff_font_size: 13.0,
             start_maximized: false,
             terminal: TerminalSettings::default(),
             repositories: Vec::new(),
@@ -149,6 +232,167 @@ impl Settings {
     pub fn forget_repository(&mut self, main: &Path) {
         self.repositories.retain(|p| p != main);
     }
+
+    /// Police effective de l'interface, jamais vide.
+    pub fn ui_font(&self) -> &str {
+        non_empty(&self.ui_font_family, DEFAULT_UI_FONT)
+    }
+
+    /// Police effective à chasse fixe, jamais vide.
+    pub fn mono_font(&self) -> &str {
+        non_empty(&self.mono_font_family, DEFAULT_MONO_FONT)
+    }
+
+    /// Police effective du terminal.
+    pub fn terminal_font(&self) -> &str {
+        self.terminal.family(self.mono_font())
+    }
+}
+
+fn non_empty<'a>(value: &'a str, fallback: &'a str) -> &'a str {
+    if value.trim().is_empty() {
+        fallback
+    } else {
+        value
+    }
+}
+
+// --- Global -----------------------------------------------------------------
+
+pub struct SettingsStore {
+    settings: Settings,
+    /// Vrai quand une écriture différée est déjà programmée : les
+    /// modifications suivantes s'y agrègent au lieu d'en programmer une autre.
+    saving: bool,
+}
+
+impl gpui::Global for SettingsStore {}
+
+impl Settings {
+    /// Installe les réglages chargés. À appeler une fois, au démarrage.
+    pub fn init_global(self, cx: &mut App) {
+        cx.set_global(SettingsStore {
+            settings: self,
+            saving: false,
+        });
+    }
+
+    pub fn global(cx: &App) -> &Settings {
+        &cx.global::<SettingsStore>().settings
+    }
+
+    /// Modifie les réglages, applique ce qui se voit tout de suite et
+    /// programme l'écriture.
+    ///
+    /// Le thème est ré-appliqué à chaque modification, y compris celles qui ne
+    /// le concernent pas : c'est lui qui porte polices et taille de texte, et
+    /// distinguer les champs qui l'affectent des autres coûterait plus de code
+    /// qu'un `refresh_windows` de trop.
+    pub fn update_global(cx: &mut App, f: impl FnOnce(&mut Settings)) {
+        let before = Self::global(cx).clone();
+        cx.update_global::<SettingsStore, _>(|store, _| f(&mut store.settings));
+        let after = Self::global(cx).clone();
+        if after == before {
+            return;
+        }
+        if after.language != before.language {
+            crate::ui::set_language(after.language);
+        }
+        crate::ui::theme::apply(&after, None, cx);
+        schedule_save(cx);
+    }
+}
+
+fn schedule_save(cx: &mut App) {
+    let already_scheduled =
+        cx.update_global::<SettingsStore, _>(|store, _| std::mem::replace(&mut store.saving, true));
+    if already_scheduled {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(SAVE_DELAY).await;
+        let settings = cx.update(|cx| {
+            cx.update_global::<SettingsStore, _>(|store, _| {
+                store.saving = false;
+                store.settings.clone()
+            })
+        });
+        if let Ok(settings) = settings {
+            settings.save();
+        }
+    })
+    .detach();
+}
+
+// --- Choix proposés dans le formulaire --------------------------------------
+
+/// Fragments de noms qui trahissent une police à chasse fixe.
+///
+/// Il n'existe pas d'interrogation portable de cette propriété dans gpui : on
+/// se rabat sur la convention de nommage, qui couvre les familles qu'un
+/// développeur a installées. La liste reste modifiable à la main dans le
+/// fichier de réglages pour les cas qu'elle rate.
+const MONO_HINTS: [&str; 14] = [
+    "mono",
+    "code",
+    "consol",
+    "courier",
+    "menlo",
+    "hack",
+    "iosevka",
+    "terminus",
+    "inconsolata",
+    "monaco",
+    "andale",
+    "jetbrains",
+    "cascadia",
+    "monospace",
+];
+
+pub fn is_monospace_name(name: &str) -> bool {
+    let name = name.to_lowercase();
+    MONO_HINTS.iter().any(|hint| name.contains(hint))
+}
+
+/// Familles proposées pour un champ de police.
+///
+/// La police embarquée est toujours présente, même si le système ne la connaît
+/// pas : c'est celle qui sert de recours, et un choix qu'on ne peut pas
+/// reprendre après en être parti serait un piège.
+pub fn font_choices(installed: &[String], monospace_only: bool, embedded: &str) -> Vec<String> {
+    let mut names: Vec<String> = installed
+        .iter()
+        // Les polices d'icônes et les variantes privées commencent par un
+        // point sur macOS ; elles n'ont rien à faire dans une liste de choix.
+        .filter(|name| !name.starts_with('.'))
+        .filter(|name| !monospace_only || is_monospace_name(name))
+        .cloned()
+        .collect();
+    names.push(embedded.to_string());
+    names.sort_by_key(|name| name.to_lowercase());
+    names.dedup_by_key(|name| name.to_lowercase());
+    names
+}
+
+/// Shells déclarés par le système, tels que `/etc/shells` les liste.
+pub fn parse_shells(text: &str) -> Vec<String> {
+    let mut shells: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('/'))
+        .map(str::to_string)
+        .collect();
+    shells.dedup();
+    shells
+}
+
+/// Shells proposés : ceux du système qui existent encore sur le disque.
+pub fn available_shells() -> Vec<String> {
+    let text = std::fs::read_to_string("/etc/shells").unwrap_or_default();
+    parse_shells(&text)
+        .into_iter()
+        .filter(|shell| Path::new(shell).exists())
+        .collect()
 }
 
 fn settings_path() -> Option<PathBuf> {
@@ -193,6 +437,10 @@ mod tests {
         assert_eq!(s.theme, ThemeMode::Light);
         assert_eq!(s.terminal.scrollback, 10_000);
         assert_eq!(s.diff_context, 3);
+        // Les champs ajoutés après coup aussi : c'est le cas de tous les
+        // fichiers déjà écrits sur le disque des utilisateurs.
+        assert_eq!(s.ui_font_family, DEFAULT_UI_FONT);
+        assert_eq!(s.mono_font_family, DEFAULT_MONO_FONT);
     }
 
     #[test]
@@ -215,5 +463,59 @@ mod tests {
         // compte : deux lettres connues du catalogue.
         assert!(matches!(LanguageChoice::System.to_lang_id(), "fr" | "en"));
         assert_eq!(LanguageChoice::Fr.to_lang_id(), "fr");
+    }
+
+    #[test]
+    fn an_emptied_font_falls_back_instead_of_disappearing() {
+        // Vider le champ dans le formulaire ne doit pas rendre le texte
+        // invisible : c'est le geste naturel avant de saisir autre chose.
+        let mut s = Settings {
+            ui_font_family: "  ".into(),
+            mono_font_family: String::new(),
+            ..Default::default()
+        };
+        assert_eq!(s.ui_font(), DEFAULT_UI_FONT);
+        assert_eq!(s.mono_font(), DEFAULT_MONO_FONT);
+        // Le terminal sans police propre suit celle des diffs.
+        assert_eq!(s.terminal_font(), DEFAULT_MONO_FONT);
+        s.mono_font_family = "Iosevka".into();
+        assert_eq!(s.terminal_font(), "Iosevka");
+        s.terminal.font_family = "Terminus".into();
+        assert_eq!(s.terminal_font(), "Terminus");
+    }
+
+    #[test]
+    fn monospace_names_are_recognised_by_convention() {
+        for name in ["JetBrains Mono", "Fira Code", "Consolas", "Iosevka Term"] {
+            assert!(is_monospace_name(name), "{name}");
+        }
+        for name in ["Inter", "Fira Sans", "Helvetica"] {
+            assert!(!is_monospace_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn font_choices_are_sorted_deduplicated_and_always_offer_the_default() {
+        let installed = vec![
+            "Fira Code".to_string(),
+            "Inter".to_string(),
+            ".SF NS Mono".to_string(),
+            "fira code".to_string(),
+        ];
+        let mono = font_choices(&installed, true, DEFAULT_MONO_FONT);
+        assert_eq!(mono, vec!["Fira Code", DEFAULT_MONO_FONT]);
+
+        // Sans le filtre, l'interface voit tout — sauf les familles privées.
+        let all = font_choices(&installed, false, DEFAULT_UI_FONT);
+        assert_eq!(all, vec!["Fira Code", "Inter"]);
+    }
+
+    #[test]
+    fn shells_ignore_comments_and_blank_lines() {
+        let text = "# /etc/shells\n\n/bin/sh\n/bin/bash\n /usr/bin/fish \n";
+        assert_eq!(
+            parse_shells(text),
+            vec!["/bin/sh", "/bin/bash", "/usr/bin/fish"]
+        );
     }
 }
