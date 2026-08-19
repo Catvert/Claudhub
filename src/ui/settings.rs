@@ -257,6 +257,57 @@ fn non_empty<'a>(value: &'a str, fallback: &'a str) -> &'a str {
     }
 }
 
+/// Zone dont la taille de texte se règle indépendamment.
+///
+/// Deux zones et non une seule : grossir la sortie d'un agent pour la lire ne
+/// doit pas déplacer le code qu'on relit à côté.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Zoom {
+    Diff,
+    Terminal,
+}
+
+/// En dessous de huit points le texte n'est plus lisible, au-dessus de
+/// trente-deux une seule ligne de diff occupe la vue : ce sont les deux façons
+/// de rendre l'interface inutilisable, et la molette y arrive vite.
+pub const MIN_FONT_SIZE: f32 = 8.0;
+pub const MAX_FONT_SIZE: f32 = 32.0;
+
+pub fn clamp_font_size(value: f32) -> f32 {
+    value.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
+}
+
+impl Settings {
+    fn size_of(&mut self, zone: Zoom) -> &mut f32 {
+        match zone {
+            Zoom::Diff => &mut self.diff_font_size,
+            Zoom::Terminal => &mut self.terminal.font_size,
+        }
+    }
+
+    /// Ajoute `steps` points à la taille d'une zone. Rend vrai si quelque
+    /// chose a changé — au bout de la course, il n'y a rien à réafficher.
+    pub fn zoom(&mut self, zone: Zoom, steps: f32) -> bool {
+        let size = self.size_of(zone);
+        let next = clamp_font_size(*size + steps);
+        let changed = next != *size;
+        *size = next;
+        changed
+    }
+
+    pub fn reset_zoom(&mut self, zone: Zoom) -> bool {
+        let default = Settings::default();
+        let target = match zone {
+            Zoom::Diff => default.diff_font_size,
+            Zoom::Terminal => default.terminal.font_size,
+        };
+        let size = self.size_of(zone);
+        let changed = *size != target;
+        *size = target;
+        changed
+    }
+}
+
 // --- Global -----------------------------------------------------------------
 
 pub struct SettingsStore {
@@ -482,6 +533,24 @@ mod tests {
         assert_eq!(s.terminal_font(), "Iosevka");
         s.terminal.font_family = "Terminus".into();
         assert_eq!(s.terminal_font(), "Terminus");
+    }
+
+    #[test]
+    fn zooming_stops_at_the_bounds_and_says_so() {
+        let mut s = Settings::default();
+        assert!(s.zoom(Zoom::Diff, 2.));
+        assert_eq!(s.diff_font_size, 15.0);
+        // Le terminal ne bouge pas avec les diffs.
+        assert_eq!(s.terminal.font_size, 13.0);
+
+        assert!(s.zoom(Zoom::Diff, 1_000.));
+        assert_eq!(s.diff_font_size, MAX_FONT_SIZE);
+        // Au bout de la course, rien à réafficher : c'est ce que dit le faux.
+        assert!(!s.zoom(Zoom::Diff, 1.));
+
+        assert!(s.reset_zoom(Zoom::Diff));
+        assert_eq!(s.diff_font_size, Settings::default().diff_font_size);
+        assert!(!s.reset_zoom(Zoom::Diff));
     }
 
     #[test]

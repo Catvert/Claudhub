@@ -25,9 +25,10 @@ use crate::ui::app::{History, PerchApp};
 
 /// Largeur d'une colonne du graphe.
 const LANE: Pixels = px(14.);
-/// Hauteur d'une ligne. Fixe, comme dans les autres listes virtualisées : la
-/// liste réserve la hauteur d'un seul élément mesuré.
-const ROW: Pixels = px(26.);
+// La hauteur d'une ligne se déduit de la taille du texte
+// (`theme::row_height`) : la liste réserve la hauteur d'un seul élément et ne
+// mesure rien, si bien qu'une ligne trop haute recouvre la suivante dès qu'on
+// grossit la police.
 const DOT: Pixels = px(7.);
 const STROKE: Pixels = px(1.5);
 /// Nombre de commits demandés. Au-delà, l'historique se lit par recherche, pas
@@ -135,8 +136,9 @@ impl PerchApp {
         let selected = state.commit.clone();
         let history = state.history.clone();
 
+        let row_height = crate::ui::theme::row_height(cx);
         let header = h_flex()
-            .h(px(30.))
+            .h(crate::ui::theme::bar_height(cx))
             .w_full()
             .px_1()
             .gap_1()
@@ -207,6 +209,7 @@ impl PerchApp {
                                     ix,
                                     gutter,
                                     selected.as_deref(),
+                                    row_height,
                                     &entity,
                                     cx,
                                 )
@@ -221,11 +224,13 @@ impl PerchApp {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_commit(
     history: &Rc<History>,
     index: usize,
     gutter: Pixels,
     selected: Option<&str>,
+    row_height: Pixels,
     entity: &Entity<PerchApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
@@ -244,11 +249,11 @@ fn render_commit(
         move |bounds, _, window, cx| paint_graph(&row, bounds, window, cx),
     )
     .w(gutter)
-    .h(ROW);
+    .h(row_height);
 
     h_flex()
         .id(("commit", index))
-        .h(ROW)
+        .h(row_height)
         .w_full()
         .items_center()
         .gap_2()

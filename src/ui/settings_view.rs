@@ -10,14 +10,18 @@
 //! de valider pour voir le résultat rend le choix d'une police ou d'une taille
 //! impossible autrement qu'à l'aveugle.
 
-use gpui::{div, prelude::*, px, App, Context, SharedString, Window};
+use gpui::{div, prelude::*, px, App, Context, Corner, Entity, SharedString, Subscription, Window};
+use gpui_component::button::Button;
+use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
 };
-use gpui_component::{v_flex, WindowExt};
+use gpui_component::{h_flex, v_flex, Sizable, WindowExt};
 
 use crate::tr;
 use crate::ui::app::PerchApp;
+use crate::ui::icons::icon;
 use crate::ui::settings::{
     self, LanguageChoice, Settings, ThemeMode, DEFAULT_MONO_FONT, DEFAULT_UI_FONT,
 };
@@ -65,10 +69,83 @@ fn choices(names: Vec<String>) -> Vec<(SharedString, SharedString)> {
         .collect()
 }
 
+/// Shells que le système déclare. Le menu ne fait que les proposer : le champ
+/// reste libre, et vide veut toujours dire « le shell de connexion ».
 fn shell_choices() -> Vec<(SharedString, SharedString)> {
-    let mut options = vec![(SharedString::default(), tr!("settings-shell-default"))];
-    options.extend(choices(settings::available_shells()));
-    options
+    choices(settings::available_shells())
+}
+
+/// L'état du champ « shell », gardé d'un rendu à l'autre.
+///
+/// La souscription vit dedans : un `Subscription` lâché se coupe, et le champ
+/// cesserait d'écrire dans les réglages dès la frame suivante.
+struct ShellField {
+    input: Entity<InputState>,
+    _subscription: Subscription,
+}
+
+/// Le shell se saisit librement, et le menu ne fait que proposer.
+///
+/// Une liste fermée conviendrait si `/etc/shells` disait la vérité ; il ignore
+/// tout ce qui n'est pas installé par le système — un shell compilé à la main,
+/// un `nix run`, un `tmux new-session` — et on ne veut pas d'un réglage dont
+/// on sort en éditant un fichier JSON.
+fn shell_item(shells: Vec<(SharedString, SharedString)>) -> SettingItem {
+    SettingItem::new(
+        tr!("settings-shell"),
+        SettingField::render(move |_, window, cx| {
+            let shells = shells.clone();
+            let state = window.use_keyed_state("perch-shell", cx, |window, cx| {
+                let input = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder(tr!("settings-shell-default"))
+                        .default_value(Settings::global(cx).terminal.shell.clone())
+                });
+                let subscription = cx.subscribe(
+                    &input,
+                    |_: &mut ShellField, input, event: &InputEvent, cx| {
+                        if !matches!(event, InputEvent::Change) {
+                            return;
+                        }
+                        let value = input.read(cx).value().to_string();
+                        Settings::update_global(cx, |s| s.terminal.shell = value);
+                    },
+                );
+                ShellField {
+                    input,
+                    _subscription: subscription,
+                }
+            });
+            let input = state.read(cx).input.clone();
+            let for_menu = input.clone();
+            h_flex()
+                .w(px(300.))
+                .gap_1()
+                .child(div().flex_1().child(Input::new(&input).small()))
+                .when(!shells.is_empty(), |el| {
+                    el.child(
+                        Button::new("detected-shells")
+                            .outline()
+                            .small()
+                            .icon(icon("chevron-down"))
+                            .tooltip(tr!("settings-shell-detected"))
+                            .dropdown_menu_with_anchor(Corner::TopRight, move |menu, _, _| {
+                                shells.iter().fold(menu, |menu, (value, label)| {
+                                    let (input, value) = (for_menu.clone(), value.clone());
+                                    menu.item(PopupMenuItem::new(label.clone()).on_click(
+                                        move |_, window, cx| {
+                                            input.update(cx, |state, cx| {
+                                                state.set_value(value.clone(), window, cx)
+                                            });
+                                        },
+                                    ))
+                                })
+                            }),
+                    )
+                })
+        }),
+    )
+    .description(tr!("settings-shell-help"))
 }
 
 fn appearance_page(
@@ -218,22 +295,7 @@ fn terminal_page(
         .group(
             SettingGroup::new()
                 .title(tr!("settings-group-shell"))
-                .item(
-                    SettingItem::new(
-                        tr!("settings-shell"),
-                        SettingField::dropdown(
-                            shells,
-                            |cx: &App| Settings::global(cx).terminal.shell.clone().into(),
-                            |value: SharedString, cx: &mut App| {
-                                Settings::update_global(cx, |s| {
-                                    s.terminal.shell = value.to_string()
-                                })
-                            },
-                        )
-                        .default_value(SharedString::default()),
-                    )
-                    .description(tr!("settings-shell-help")),
-                )
+                .item(shell_item(shells))
                 .item(
                     SettingItem::new(
                         tr!("settings-agent"),
@@ -335,25 +397,17 @@ fn review_page() -> SettingPage {
     )
 }
 
-/// Bornes communes aux tailles de texte.
-///
-/// En dessous de huit points le texte n'est plus lisible et au-dessus de
-/// trente-deux une seule ligne de diff occupe la fenêtre : ce sont les deux
-/// façons de rendre l'interface inutilisable depuis le formulaire, et il n'y a
-/// pas de raccourci pour en revenir tant que la molette ne zoome pas.
+/// Bornes communes aux tailles de texte, les mêmes que celles de la molette.
 fn size_range() -> NumberFieldOptions {
     NumberFieldOptions {
-        min: MIN_SIZE as f64,
-        max: MAX_SIZE as f64,
+        min: settings::MIN_FONT_SIZE as f64,
+        max: settings::MAX_FONT_SIZE as f64,
         step: 1.0,
     }
 }
 
-pub const MIN_SIZE: f32 = 8.0;
-pub const MAX_SIZE: f32 = 32.0;
-
-pub fn clamp_size(value: f64) -> f32 {
-    (value as f32).clamp(MIN_SIZE, MAX_SIZE)
+fn clamp_size(value: f64) -> f32 {
+    settings::clamp_font_size(value as f32)
 }
 
 #[cfg(test)]
@@ -361,15 +415,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sizes_stay_within_readable_bounds() {
-        assert_eq!(clamp_size(0.), MIN_SIZE);
-        assert_eq!(clamp_size(1_000.), MAX_SIZE);
-        assert_eq!(clamp_size(13.), 13.0);
-    }
-
-    #[test]
-    fn the_shell_list_always_offers_the_system_default_first() {
-        let options = shell_choices();
-        assert_eq!(options[0].0, SharedString::default());
+    fn the_detected_shells_are_absolute_paths() {
+        // Le menu remplit un champ qui sera exécuté : une entrée relative y
+        // dépendrait du répertoire courant du worktree.
+        for (value, _) in shell_choices() {
+            assert!(value.starts_with('/'), "{value}");
+        }
     }
 }

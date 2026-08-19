@@ -16,6 +16,21 @@ use crate::tr;
 use crate::ui::app::PerchApp;
 use crate::ui::icons::icon;
 
+/// Ce qu'une ligne de la barre latérale affiche d'un worktree.
+///
+/// Le compte de fichiers modifiés n'est connu que des worktrees déjà visités —
+/// le statut n'est lu qu'à l'ouverture. Il vaut `None` ailleurs, et une pastille
+/// absente se lit « on ne sait pas encore », ce qui est vrai, là où un zéro
+/// affirmerait à tort qu'il n'y a rien à relire.
+struct WorktreeRow {
+    path: PathBuf,
+    label: String,
+    branch: Option<String>,
+    is_main: bool,
+    prunable: bool,
+    dirty: Option<usize>,
+}
+
 impl PerchApp {
     pub(super) fn render_sidebar(
         &mut self,
@@ -34,14 +49,16 @@ impl PerchApp {
                     repo.collapsed,
                     repo.worktrees
                         .iter()
-                        .map(|w| {
-                            (
-                                w.path.clone(),
-                                w.label(),
-                                w.branch.clone(),
-                                w.is_main,
-                                w.prunable,
-                            )
+                        .map(|w| WorktreeRow {
+                            path: w.path.clone(),
+                            label: w.label(),
+                            branch: w.branch.clone(),
+                            is_main: w.is_main,
+                            prunable: w.prunable,
+                            dirty: self
+                                .review
+                                .get(&w.path)
+                                .map(|review| review.status.files.len()),
                         })
                         .collect::<Vec<_>>(),
                 )
@@ -58,8 +75,9 @@ impl PerchApp {
             .border_color(cx.theme().border)
             .child(
                 h_flex()
-                    .h(px(32.))
+                    .py_1()
                     .px_2()
+                    .gap_1()
                     .items_center()
                     .justify_between()
                     .child(
@@ -104,7 +122,7 @@ impl PerchApp {
                                     .child(
                                         h_flex()
                                             .id(("repo", ix))
-                                            .h(px(28.))
+                                            .py_1()
                                             .px_2()
                                             .gap_1()
                                             .items_center()
@@ -151,7 +169,15 @@ impl PerchApp {
                                     )
                                     .when(!collapsed, |el| {
                                         el.children(worktrees.into_iter().enumerate().map(
-                                            |(wix, (path, label, branch, is_main, prunable))| {
+                                            |(wix, worktree)| {
+                                                let WorktreeRow {
+                                                    path,
+                                                    label,
+                                                    branch,
+                                                    is_main,
+                                                    prunable,
+                                                    dirty,
+                                                } = worktree;
                                                 let selected =
                                                     active.as_deref() == Some(path.as_path());
                                                 let for_click = path.clone();
@@ -159,16 +185,27 @@ impl PerchApp {
                                                 let repo_main = main.clone();
                                                 h_flex()
                                                     .id(("worktree", ix * 1000 + wix))
-                                                    .h(px(30.))
+                                                    // Pas de hauteur fixe : la
+                                                    // ligne porte deux lignes de
+                                                    // texte, et une hauteur figée
+                                                    // les faisait déborder sur la
+                                                    // ligne suivante dès qu'on
+                                                    // grossissait la police.
+                                                    .py_1()
                                                     .pl_5()
                                                     .pr_1()
                                                     .gap_1()
                                                     .items_center()
                                                     .cursor_pointer()
+                                                    .border_l_2()
+                                                    .border_color(gpui::transparent_black())
                                                     .when(selected, |el| {
-                                                        el.bg(cx.theme().sidebar_accent).text_color(
-                                                            cx.theme().sidebar_accent_foreground,
-                                                        )
+                                                        el.bg(cx.theme().sidebar_accent)
+                                                            .border_color(cx.theme().primary)
+                                                            .text_color(
+                                                                cx.theme()
+                                                                    .sidebar_accent_foreground,
+                                                            )
                                                     })
                                                     .hover(|s| {
                                                         s.bg(cx.theme().sidebar_accent.opacity(0.5))
@@ -198,6 +235,9 @@ impl PerchApp {
                                                                 div()
                                                                     .truncate()
                                                                     .text_sm()
+                                                                    .when(selected, |el| {
+                                                                        el.font_semibold()
+                                                                    })
                                                                     .child(label),
                                                             )
                                                             .when_some(branch, |el, branch| {
@@ -212,6 +252,28 @@ impl PerchApp {
                                                                         .child(branch),
                                                                 )
                                                             }),
+                                                    )
+                                                    // Combien de fichiers ce
+                                                    // worktree a en chantier : la
+                                                    // question qu'on se pose en
+                                                    // parcourant la liste.
+                                                    .when_some(
+                                                        dirty.filter(|n| *n > 0),
+                                                        |el, count| {
+                                                            el.child(
+                                                                div()
+                                                                    .flex_none()
+                                                                    .px_1()
+                                                                    .rounded(cx.theme().radius)
+                                                                    .bg(cx
+                                                                        .theme()
+                                                                        .primary
+                                                                        .opacity(0.18))
+                                                                    .text_xs()
+                                                                    .text_color(cx.theme().primary)
+                                                                    .child(count.to_string()),
+                                                            )
+                                                        },
                                                     )
                                                     .when(prunable, |el| {
                                                         el.child(

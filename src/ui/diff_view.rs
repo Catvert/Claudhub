@@ -193,6 +193,44 @@ pub fn line_height(font_size: Pixels) -> Pixels {
 }
 
 impl PerchApp {
+    /// Molette avec la touche système : grossir ou réduire le code relu.
+    ///
+    /// La liste a **déjà** défilé quand cet écouteur s'exécute — les deux sont
+    /// en phase de remontée, et l'enfant est traité avant son parent. gpui
+    /// n'expose pas de phase de capture pour la molette : on rend donc le
+    /// décalage plutôt que d'essayer de l'empêcher, sans quoi chaque cran de
+    /// zoom ferait aussi sauter la lecture de trois lignes.
+    pub(super) fn on_diff_scroll(
+        &mut self,
+        event: &gpui::ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !event.modifiers.secondary() {
+            return;
+        }
+        let delta = event.delta.pixel_delta(window.line_height().max(px(1.)));
+        let handle = self.diff_scroll.0.borrow().base_handle.clone();
+        // Un seul axe bouge à la fois : c'est le comportement par défaut de
+        // gpui, qui ne laisse passer que la composante dominante.
+        let undo = if delta.x.abs() > delta.y.abs() {
+            gpui::point(delta.x, px(0.))
+        } else {
+            gpui::point(px(0.), delta.y)
+        };
+        handle.set_offset(handle.offset() - undo);
+
+        let steps = crate::ui::terminal_view::zoom_steps(delta.y);
+        if steps != 0. {
+            crate::ui::settings::Settings::update_global(cx, |s| {
+                s.zoom(crate::ui::settings::Zoom::Diff, steps);
+            });
+        }
+        cx.notify();
+    }
+}
+
+impl PerchApp {
     pub(super) fn render_diff(
         &mut self,
         window: &mut Window,
@@ -211,7 +249,7 @@ impl PerchApp {
         let line_height = line_height(font_size);
 
         let header = h_flex()
-            .h(px(30.))
+            .h(crate::ui::theme::bar_height(cx))
             .w_full()
             .px_2()
             .gap_2()
@@ -285,35 +323,42 @@ impl PerchApp {
             .size_full()
             .child(header)
             .child(
-                div().flex_1().min_h_0().child(
-                    uniform_list("diff-lines", count, move |range, _window, cx| {
-                        range
-                            .map(|ix| {
-                                render_row(
-                                    &rows,
-                                    ix,
-                                    &colors,
-                                    gutter,
-                                    content_width,
-                                    line_height,
-                                    stageable,
-                                    &entity,
-                                    cx,
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .size_full()
-                    .font_family(mono)
-                    .text_size(font_size)
-                    // Sans `Unconstrained`, les lignes sont contraintes à la
-                    // largeur de la vue et le défilement horizontal n'a rien à
-                    // révéler ; la largeur défilable est déduite du seul item
-                    // désigné ci-dessous.
-                    .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
-                    .with_width_from_item(Some(diff.longest_row))
-                    .track_scroll(self.diff_scroll.clone()),
-                ),
+                div()
+                    .id("diff-zoom")
+                    .flex_1()
+                    .min_h_0()
+                    .on_scroll_wheel(cx.listener(Self::on_diff_scroll))
+                    .child(
+                        uniform_list("diff-lines", count, move |range, _window, cx| {
+                            range
+                                .map(|ix| {
+                                    render_row(
+                                        &rows,
+                                        ix,
+                                        &colors,
+                                        gutter,
+                                        content_width,
+                                        line_height,
+                                        stageable,
+                                        &entity,
+                                        cx,
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .size_full()
+                        .font_family(mono)
+                        .text_size(font_size)
+                        // Sans `Unconstrained`, les lignes sont contraintes à la
+                        // largeur de la vue et le défilement horizontal n'a rien à
+                        // révéler ; la largeur défilable est déduite du seul item
+                        // désigné ci-dessous.
+                        .with_horizontal_sizing_behavior(
+                            ListHorizontalSizingBehavior::Unconstrained,
+                        )
+                        .with_width_from_item(Some(diff.longest_row))
+                        .track_scroll(self.diff_scroll.clone()),
+                    ),
             )
             .into_any_element()
     }

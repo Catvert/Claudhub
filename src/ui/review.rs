@@ -229,7 +229,7 @@ impl PerchApp {
         ];
 
         h_flex()
-            .h(px(30.))
+            .h(crate::ui::theme::bar_height(cx))
             .w_full()
             .px_1()
             .gap_1()
@@ -437,7 +437,7 @@ fn render_group(
     let (entity, worktree) = (entity.clone(), worktree.to_path_buf());
 
     h_flex()
-        .h(px(26.))
+        .h(crate::ui::theme::row_height(cx))
         .w_full()
         .px_2()
         .gap_2()
@@ -479,7 +479,7 @@ fn render_file(
 
     h_flex()
         .id(("file", index))
-        .h(px(28.))
+        .h(crate::ui::theme::row_height(cx))
         .px_2()
         .gap_2()
         .items_center()

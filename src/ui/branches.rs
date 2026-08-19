@@ -48,7 +48,7 @@ impl PerchApp {
             .border_color(cx.theme().border)
             .child(
                 h_flex()
-                    .h(px(28.))
+                    .h(crate::ui::theme::bar_height(cx))
                     .px_2()
                     .items_center()
                     .justify_between()
@@ -88,7 +88,7 @@ impl PerchApp {
                             let taken = used_by.is_some() && !is_head;
                             h_flex()
                                 .id(("branch", ix))
-                                .h(px(30.))
+                                .h(crate::ui::theme::row_height(cx))
                                 .px_2()
                                 .gap_2()
                                 .items_center()

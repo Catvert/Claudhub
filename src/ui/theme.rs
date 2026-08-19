@@ -4,7 +4,7 @@
 //! qu'à la marge : les couleurs des diffs et des états git, que la
 //! bibliothèque n'a pas de raison de connaître.
 
-use gpui::{px, App, Hsla, Rgba, Window};
+use gpui::{px, App, Hsla, Pixels, Rgba, Window};
 use gpui_component::Theme;
 
 use super::settings::{Settings, ThemeMode};
@@ -35,6 +35,31 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
     theme.font_size = px(settings.font_size);
 
     cx.refresh_windows();
+}
+
+/// Hauteur d'une ligne de liste.
+///
+/// Elle se déduit de la taille du texte au lieu d'être écrite en dur : une
+/// hauteur figée déborde dès qu'on grossit la police, et les listes
+/// virtualisées ne mesurent rien — elles réservent exactement ce qu'on leur
+/// annonce, si bien qu'une ligne trop haute recouvre la suivante.
+pub fn row_height(cx: &App) -> Pixels {
+    scaled(cx, 1.9, px(22.))
+}
+
+/// Hauteur d'une barre d'en-tête : onglets, titres de panneaux.
+pub fn bar_height(cx: &App) -> Pixels {
+    scaled(cx, 2.2, px(26.))
+}
+
+/// Hauteur de la barre d'outils principale, qui porte des boutons.
+pub fn toolbar_height(cx: &App) -> Pixels {
+    scaled(cx, 2.7, px(32.))
+}
+
+fn scaled(cx: &App, factor: f32, floor: Pixels) -> Pixels {
+    let base = gpui_component::ActiveTheme::theme(cx).font_size;
+    (base * factor).round().max(floor)
 }
 
 fn rgb(hex: u32) -> Hsla {

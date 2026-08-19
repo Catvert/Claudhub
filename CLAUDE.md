@@ -241,6 +241,31 @@ par convention de nommage pour les champs à chasse fixe : gpui n'expose pas
 cette propriété de façon portable. La liste rate donc des familles, et le
 fichier de réglages reste modifiable à la main pour ces cas-là.
 
+### Les hauteurs de ligne
+
+Aucune hauteur de ligne ne s'écrit en dur : elles viennent de
+`theme::row_height` / `bar_height` / `toolbar_height`, qui les déduisent de la
+taille du texte. Une hauteur figée déborde dès qu'on grossit la police — et
+c'est pire dans les listes virtualisées, qui ne mesurent rien et réservent
+exactement ce qu'on leur annonce : la ligne suivante est recouverte, pas
+repoussée. La barre latérale, elle, n'annonce aucune hauteur du tout et se
+laisse dimensionner par son rembourrage, ses lignes portant deux lignes de
+texte.
+
+### Le zoom
+
+Deux zones se règlent séparément — les diffs et le terminal — parce que
+grossir la sortie d'un agent pour la lire ne doit pas déplacer le code relu à
+côté. La molette avec la touche système agit sur la zone survolée, les
+raccourcis (`secondary-=`, `secondary--`, `secondary-0`) sur celle qui a le
+focus.
+
+Piège à connaître dans la vue de diff : gpui n'a **pas de phase de capture pour
+la molette**. Quand notre écouteur s'exécute, la liste a déjà défilé — les deux
+sont en phase de remontée et l'enfant est traité avant son parent.
+`on_diff_scroll` rend donc le décalage au lieu d'essayer de l'empêcher, sans
+quoi chaque cran de zoom ferait aussi sauter la lecture de trois lignes.
+
 ### Quel worktree s'ouvre
 
 `runtime::open_repo` retient le checkout d'où l'ouverture vient, et non le

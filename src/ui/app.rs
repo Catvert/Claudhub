@@ -776,7 +776,7 @@ impl PerchApp {
             .unwrap_or((0, 0));
 
         h_flex()
-            .h(px(38.))
+            .h(super::theme::toolbar_height(cx))
             .w_full()
             .px_2()
             .gap_2()
@@ -923,7 +923,7 @@ impl PerchApp {
             None => (SharedString::default(), false),
         };
         h_flex()
-            .h(px(24.))
+            .h(super::theme::row_height(cx))
             .w_full()
             .px_2()
             .items_center()
@@ -1019,6 +1019,9 @@ impl Render for PerchApp {
             .on_action(cx.listener(super::shortcuts::show_branch))
             .on_action(cx.listener(super::shortcuts::toggle_history))
             .on_action(cx.listener(super::shortcuts::open_settings))
+            .on_action(cx.listener(super::shortcuts::zoom_in))
+            .on_action(cx.listener(super::shortcuts::zoom_out))
+            .on_action(cx.listener(super::shortcuts::zoom_reset))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -1080,6 +1083,41 @@ impl PerchApp {
         if self.show_history {
             self.ensure_history(cx);
         }
+        cx.notify();
+    }
+
+    /// La zone que le zoom au clavier vise.
+    ///
+    /// Le focus décide : un terminal qu'on regarde se grossit tout seul, et
+    /// partout ailleurs c'est le code relu qu'on veut agrandir. Demander à
+    /// l'utilisateur de désigner une zone avant de zoomer serait un geste de
+    /// plus pour une intention qui n'a jamais d'ambiguïté.
+    fn zoom_zone(&self, window: &Window, cx: &App) -> crate::ui::settings::Zoom {
+        let terminal_focused = self
+            .active
+            .as_ref()
+            .and_then(|worktree| self.terminals.get(worktree))
+            .is_some_and(|group| group.read(cx).is_focused(window, cx));
+        if terminal_focused {
+            crate::ui::settings::Zoom::Terminal
+        } else {
+            crate::ui::settings::Zoom::Diff
+        }
+    }
+
+    pub(super) fn zoom(&mut self, steps: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let zone = self.zoom_zone(window, cx);
+        Settings::update_global(cx, |s| {
+            s.zoom(zone, steps);
+        });
+        cx.notify();
+    }
+
+    pub(super) fn reset_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let zone = self.zoom_zone(window, cx);
+        Settings::update_global(cx, |s| {
+            s.reset_zoom(zone);
+        });
         cx.notify();
     }
 

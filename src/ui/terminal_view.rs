@@ -358,6 +358,18 @@ impl TerminalView {
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         let line_height = window.line_height().max(px(1.));
+        // La touche système change le sens de la molette : on grossit le texte
+        // au lieu de remonter l'historique. Le terminal traite lui-même son
+        // défilement, il suffit donc de ne pas le faire.
+        if event.modifiers.secondary() {
+            let steps = zoom_steps(event.delta.pixel_delta(line_height).y);
+            if steps != 0. {
+                Settings::update_global(cx, |s| {
+                    s.zoom(crate::ui::settings::Zoom::Terminal, steps);
+                });
+            }
+            return;
+        }
         let delta = event.delta.pixel_delta(line_height).y / line_height;
         let lines = delta.round() as i32;
         if lines != 0 {
@@ -436,6 +448,21 @@ impl Render for TerminalView {
             .child(measure)
             .child(v_flex().size_full().overflow_hidden().children(lines))
             .children(self.render_cursor(focused, cx))
+    }
+}
+
+/// Un cran de molette vaut un point de taille.
+///
+/// Le nombre de lignes que la molette annonce n'entre pas en compte : trois
+/// points par cran rendrait le réglage inutilisable, et un pavé tactile en
+/// enverrait des dizaines par geste.
+pub fn zoom_steps(delta_y: Pixels) -> f32 {
+    if delta_y > px(0.) {
+        1.
+    } else if delta_y < px(0.) {
+        -1.
+    } else {
+        0.
     }
 }
 
@@ -579,6 +606,14 @@ impl TerminalGroup {
         self.active = self.tabs.len() - 1;
         self.focus_active(window, cx);
         cx.notify();
+    }
+
+    /// Vrai quand l'onglet courant a le focus. C'est ce qui désigne la zone
+    /// que les raccourcis de zoom visent.
+    pub fn is_focused(&self, window: &Window, cx: &App) -> bool {
+        self.tabs
+            .get(self.active)
+            .is_some_and(|tab| tab.read(cx).focus_handle(cx).is_focused(window))
     }
 
     pub fn close(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {

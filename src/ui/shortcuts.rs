@@ -22,7 +22,10 @@ actions!(
         ToggleTerminal,
         NextTerminal,
         Commit,
-        OpenSettings
+        OpenSettings,
+        ZoomIn,
+        ZoomOut,
+        ZoomReset
     ]
 );
 
@@ -78,6 +81,13 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-enter", Commit, Some(PREDICATE)),
         // La convention de tous les éditeurs, y compris sous Linux.
         KeyBinding::new("secondary-,", OpenSettings, Some(PREDICATE)),
+        // Le zoom vise la zone qui a le focus : le terminal quand il l'a, les
+        // diffs sinon. `secondary-=` autant que `secondary-+` parce que le
+        // signe plus demande Maj sur un clavier azerty comme sur un qwerty.
+        KeyBinding::new("secondary-=", ZoomIn, Some(PREDICATE)),
+        KeyBinding::new("secondary-+", ZoomIn, Some(PREDICATE)),
+        KeyBinding::new("secondary--", ZoomOut, Some(PREDICATE)),
+        KeyBinding::new("secondary-0", ZoomReset, Some(PREDICATE)),
         // Les conventions des terminaux : la touche système *avec* Maj, parce
         // que `Ctrl+C` et `Ctrl+V` nus appartiennent au programme.
         KeyBinding::new("secondary-shift-c", CopySelection, Some(TERMINAL_PREDICATE)),
@@ -191,6 +201,33 @@ pub fn open_settings(
     cx: &mut gpui::Context<PerchApp>,
 ) {
     this.open_settings(window, cx);
+}
+
+pub fn zoom_in(
+    this: &mut PerchApp,
+    _: &ZoomIn,
+    window: &mut Window,
+    cx: &mut gpui::Context<PerchApp>,
+) {
+    this.zoom(1., window, cx);
+}
+
+pub fn zoom_out(
+    this: &mut PerchApp,
+    _: &ZoomOut,
+    window: &mut Window,
+    cx: &mut gpui::Context<PerchApp>,
+) {
+    this.zoom(-1., window, cx);
+}
+
+pub fn zoom_reset(
+    this: &mut PerchApp,
+    _: &ZoomReset,
+    window: &mut Window,
+    cx: &mut gpui::Context<PerchApp>,
+) {
+    this.reset_zoom(window, cx);
 }
 
 pub fn commit(
