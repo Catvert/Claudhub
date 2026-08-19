@@ -158,6 +158,21 @@ Deux endroits où cette simplification pourrait mentir, et ce qui l'en empêche 
 - **Les fichiers non suivis**, dont cocher ne veut pas dire la même chose que
   pour un fichier déjà suivi : ils forment leur propre groupe.
 
+La liste est une **arborescence de dossiers**, repliable, comme celle de
+PhpStorm — un bouton bascule vers la liste plate, et le choix est persistant.
+Trois points la font tenir :
+
+- **Les dossiers sans embranchement sont fusionnés** : `app/Http/Livewire/Forms`
+  tient sur une ligne. Sans cela, un projet Laravel coûte six niveaux
+  d'indentation avant le premier fichier.
+- **La liste plate reste la référence.** L'arbre n'est qu'un affichage :
+  `tree_rows` la transforme, mais le compte des fichiers indexés et les cases
+  des groupes travaillent sur elle. Un fichier caché par un dossier replié
+  compte quand même.
+- **La case d'un dossier porte tout son sous-arbre**, y compris ce que le repli
+  cache — d'où `DirRow::paths`, calculé à la construction de l'arbre. Cocher un
+  dossier fermé doit indexer ce qu'il contient, pas ce qu'on en voit.
+
 Corollaire à connaître : le diff affiché va de HEAD au répertoire de travail,
 index compris. Indexer un hunk isolé sur un fichier *déjà partiellement
 indexé* peut donc échouer — `git apply --cached` refuse un patch qui ne

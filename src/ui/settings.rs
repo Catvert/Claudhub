@@ -166,6 +166,8 @@ pub struct Settings {
     pub repositories: Vec<PathBuf>,
     /// Nombre de lignes de contexte autour d'un hunk dans la revue.
     pub diff_context: usize,
+    /// Liste des fichiers en arborescence de dossiers plutôt qu'à plat.
+    pub review_tree: bool,
 }
 
 impl Default for Settings {
@@ -181,6 +183,7 @@ impl Default for Settings {
             terminal: TerminalSettings::default(),
             repositories: Vec::new(),
             diff_context: 3,
+            review_tree: true,
         }
     }
 }

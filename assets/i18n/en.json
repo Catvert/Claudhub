@@ -51,6 +51,8 @@
   "range-branch": "Branch review",
   "range-branch-none": "Branch (no base)",
   "range-working": "Changes",
+  "review-as-list": "Show as flat list",
+  "review-as-tree": "Show as tree",
   "review-binary": "Binary file: nothing to show.",
   "review-clean": "Nothing to review here.",
   "review-loading": "Reading the diff…",

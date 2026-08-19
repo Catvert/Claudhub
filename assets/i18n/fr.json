@@ -51,6 +51,8 @@
   "range-branch": "Revue de branche",
   "range-branch-none": "Branche (aucune base)",
   "range-working": "Modifications",
+  "review-as-list": "Afficher à plat",
+  "review-as-tree": "Afficher en arborescence",
   "review-binary": "Fichier binaire : rien à afficher.",
   "review-clean": "Rien à relire ici.",
   "review-loading": "Lecture du diff…",

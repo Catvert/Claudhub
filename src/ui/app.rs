@@ -71,6 +71,11 @@ pub struct ReviewState {
     /// c'est le sens du geste qui décide de laquelle bouge à la prochaine
     /// extension.
     pub diff_selection: Option<(usize, usize)>,
+    /// Dossiers repliés dans la liste des fichiers.
+    ///
+    /// Un seul jeu pour les deux groupes : replier `src/ui` veut dire replier
+    /// ce dossier, pas « ce dossier parmi les fichiers suivis ».
+    pub collapsed: std::collections::HashSet<PathBuf>,
     /// Base de comparaison de la revue de branche, devinée à l'ouverture.
     pub base: Option<String>,
     /// L'historique et son graphe, chargés à la demande — ouvrir un worktree
@@ -99,6 +104,7 @@ impl Default for ReviewState {
             selected: None,
             diff: None,
             diff_selection: None,
+            collapsed: std::collections::HashSet::new(),
             base: None,
             history: None,
             history_range: LogRange::All,

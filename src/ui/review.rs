@@ -5,6 +5,7 @@
 //! la branche entière depuis sa divergence d'avec sa base. Le dernier est
 //! celui qui sert à relire le travail d'un agent avant de le pousser.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use gpui::{div, prelude::*, px, uniform_list, Context, SharedString, Window};
@@ -32,6 +33,8 @@ use crate::ui::theme::{status_color, DiffColors};
 #[derive(Clone)]
 enum Row {
     Group(Group),
+    /// Un dossier de l'arborescence, repliable.
+    Dir(DirRow),
     File(FileRow),
 }
 
@@ -43,9 +46,38 @@ enum Group {
     Untracked,
 }
 
+/// Un dossier dans la liste des modifications.
+///
+/// Les dossiers intermédiaires vides sont fusionnés avec leur unique enfant :
+/// `app/Http/Livewire/Forms` tient sur une ligne au lieu de quatre, et c'est
+/// ce qui rend l'arborescence lisible sur un projet Laravel ou Symfony, où
+/// l'on descend de six niveaux avant de trouver un fichier.
+#[derive(Clone)]
+struct DirRow {
+    /// Chemin complet, et clé du repli. C'est celui du dossier le plus profond
+    /// de la chaîne fusionnée : replier `app/Http` et replier
+    /// `app/Http/Livewire` sont deux gestes différents, mais une chaîne
+    /// fusionnée n'en offre qu'un.
+    path: PathBuf,
+    /// Ce qui s'affiche : un segment, ou la chaîne fusionnée.
+    label: String,
+    depth: usize,
+    collapsed: bool,
+    /// Tous les fichiers du sous-arbre, y compris ceux qu'un repli cache :
+    /// cocher un dossier fermé doit indexer ce qu'il contient, et non ce qu'on
+    /// en voit.
+    paths: Vec<PathBuf>,
+    /// Vrai quand tout le sous-arbre est déjà indexé.
+    staged: bool,
+    added: usize,
+    removed: usize,
+}
+
 #[derive(Clone)]
 struct FileRow {
     path: PathBuf,
+    /// Profondeur dans l'arborescence. Nulle en liste plate.
+    depth: usize,
     name: String,
     directory: String,
     /// Les deux codes de git, celui de l'index puis celui du répertoire de
@@ -107,11 +139,20 @@ impl PerchApp {
         };
         let range = state.range.clone();
         let selected = state.selected.clone();
-        let rows = self.rows(cx);
-        let staged_count = rows
+        let collapsed = state.collapsed.clone();
+        // La liste plate reste la référence : c'est elle qui compte ce qui est
+        // indexé et qui donne à la case d'un groupe les fichiers sur lesquels
+        // agir, y compris ceux qu'un dossier replié cache.
+        let flat = self.rows(cx);
+        let staged_count = flat
             .iter()
             .filter(|row| matches!(row, Row::File(file) if file.staged))
             .count();
+        let rows = if crate::ui::settings::Settings::global(cx).review_tree {
+            tree_rows(&flat, &collapsed)
+        } else {
+            flat.clone()
+        };
         let can_commit = staged_count > 0 && matches!(range, DiffRange::Working);
 
         v_flex()
@@ -138,6 +179,7 @@ impl PerchApp {
                     // à faire tomber l'interface à quelques images par seconde.
                     .when(!rows.is_empty(), |el| {
                         let rows = std::rc::Rc::new(rows);
+                        let flat = std::rc::Rc::new(flat);
                         let entity = cx.entity();
                         let colors = DiffColors::of(cx);
                         let count = rows.len();
@@ -150,6 +192,7 @@ impl PerchApp {
                                     .map(|ix| {
                                         render_row(
                                             &rows,
+                                            &flat,
                                             ix,
                                             &worktree,
                                             selected.as_deref(),
@@ -223,6 +266,7 @@ impl PerchApp {
         // Un commit choisi dans l'historique n'a pas d'onglet à lui : il
         // occupe la liste jusqu'à ce qu'on revienne à l'un des deux domaines.
         let showing_commit = matches!(range, DiffRange::Commit { .. });
+        let tree = crate::ui::settings::Settings::global(cx).review_tree;
         let tabs: [(DiffRange, SharedString, bool); 2] = [
             (DiffRange::Working, working_label, true),
             (branch_range, branch_label, base.is_some()),
@@ -257,6 +301,18 @@ impl PerchApp {
             // d'intégration devinée est un point de départ, pas une fatalité —
             // on compare aussi bien à `dev`, à une autre branche de travail ou
             // à une distante.
+            .child(
+                Button::new("review-tree")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon(if tree { "list-tree" } else { "list" }))
+                    .tooltip(if tree {
+                        tr!("review-as-list")
+                    } else {
+                        tr!("review-as-tree")
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_review_tree(cx))),
+            )
             .child(
                 Select::new(&self.base_select)
                     .xsmall()
@@ -300,6 +356,26 @@ impl PerchApp {
                             .on_click(cx.listener(|this, _, _, cx| this.commit(false, cx))),
                     ),
             )
+    }
+
+    /// Bascule entre l'arborescence et la liste plate.
+    ///
+    /// Le choix est global et persistant : c'est une habitude de lecture, pas
+    /// une décision qu'on reprend par worktree.
+    pub(super) fn toggle_review_tree(&mut self, cx: &mut Context<Self>) {
+        crate::ui::settings::Settings::update_global(cx, |s| s.review_tree = !s.review_tree);
+        cx.notify();
+    }
+
+    /// Replie ou déplie un dossier de la liste.
+    pub(super) fn toggle_directory(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(state) = self.active_review_mut() else {
+            return;
+        };
+        if !state.collapsed.remove(&path) {
+            state.collapsed.insert(path);
+        }
+        cx.notify();
     }
 
     /// Coche ou décoche des fichiers, c'est-à-dire les indexe ou les retire de
@@ -402,6 +478,7 @@ impl PerchApp {
 #[allow(clippy::too_many_arguments)]
 fn render_row(
     rows: &std::rc::Rc<Vec<Row>>,
+    flat: &std::rc::Rc<Vec<Row>>,
     index: usize,
     worktree: &Path,
     selected: Option<&Path>,
@@ -411,12 +488,121 @@ fn render_row(
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
     match rows.get(index) {
-        Some(Row::Group(group)) => render_group(rows, index, *group, worktree, entity, cx),
+        Some(Row::Group(group)) => render_group(flat, index, *group, worktree, entity, cx),
+        Some(Row::Dir(dir)) => render_dir(dir, index, worktree, colors, checkable, entity, cx),
         Some(Row::File(file)) => render_file(
             file, index, worktree, selected, colors, checkable, entity, cx,
         ),
         None => div().into_any_element(),
     }
+}
+
+/// Décalage d'un niveau d'arborescence.
+///
+/// Proportionnel au texte, comme les hauteurs : une indentation figée disparaît
+/// quand la police grossit, et l'arbre redevient une liste plate.
+fn indent(depth: usize, cx: &gpui::App) -> gpui::Pixels {
+    px(8.) + crate::ui::theme::row_height(cx) * 0.5 * depth as f32
+}
+
+/// Un dossier : le chevron, la case qui indexe tout ce qu'il contient, et le
+/// total de ses lignes.
+fn render_dir(
+    row: &DirRow,
+    index: usize,
+    worktree: &Path,
+    colors: &DiffColors,
+    checkable: bool,
+    entity: &gpui::Entity<PerchApp>,
+    cx: &mut gpui::App,
+) -> gpui::AnyElement {
+    let staged = row.staged;
+    let count = row.paths.len();
+
+    h_flex()
+        .id(("dir", index))
+        .h(crate::ui::theme::row_height(cx))
+        .pl(indent(row.depth, cx))
+        .pr_2()
+        .gap_1()
+        .items_center()
+        .cursor_pointer()
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .hover(|s| s.bg(cx.theme().accent.opacity(0.4)))
+        .on_click({
+            let (entity, path) = (entity.clone(), row.path.clone());
+            move |_, _window, cx| {
+                entity.update(cx, |this, cx| this.toggle_directory(path.clone(), cx));
+            }
+        })
+        .child(
+            icon(if row.collapsed {
+                "chevron-right"
+            } else {
+                "chevron-down"
+            })
+            .xsmall(),
+        )
+        // La case d'un dossier agit sur tout son sous-arbre, replié compris :
+        // cocher un dossier fermé doit indexer ce qu'il contient, et non ce
+        // qu'on en voit.
+        .when(checkable, |el| {
+            let (entity, worktree, paths) =
+                (entity.clone(), worktree.to_path_buf(), row.paths.clone());
+            el.child(
+                Checkbox::new(("stage-dir", index))
+                    .checked(staged)
+                    .on_click(move |_, _window, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.set_staged(worktree.clone(), paths.clone(), !staged, cx)
+                        });
+                    }),
+            )
+        })
+        .child(
+            icon(if row.collapsed {
+                "folder-closed"
+            } else {
+                "folder-open"
+            })
+            .xsmall()
+            .text_color(cx.theme().muted_foreground),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_sm()
+                .child(row.label.clone()),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(count.to_string()),
+        )
+        .when(row.added > 0, |el| {
+            el.child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(colors.added_fg)
+                    .child(format!("+{}", row.added)),
+            )
+        })
+        .when(row.removed > 0, |el| {
+            el.child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(colors.removed_fg)
+                    .child(format!("−{}", row.removed)),
+            )
+        })
+        .into_any_element()
 }
 
 fn render_group(
@@ -480,7 +666,8 @@ fn render_file(
     h_flex()
         .id(("file", index))
         .h(crate::ui::theme::row_height(cx))
-        .px_2()
+        .pl(indent(row.depth, cx))
+        .pr_2()
         .gap_2()
         .items_center()
         .cursor_pointer()
@@ -623,6 +810,7 @@ fn rows_for(range: &DiffRange, status: &Status, files: &[DiffFile]) -> Vec<Row> 
                 let (added, removed) = volume(&file.path);
                 let row = FileRow {
                     path: file.path.clone(),
+                    depth: 0,
                     name: file.file_name(),
                     directory: file.directory(),
                     index: file.index,
@@ -655,6 +843,7 @@ fn rows_for(range: &DiffRange, status: &Status, files: &[DiffFile]) -> Vec<Row> 
             .map(|f| {
                 Row::File(FileRow {
                     path: f.path.clone(),
+                    depth: 0,
                     name: f
                         .path
                         .file_name()
@@ -693,7 +882,7 @@ fn group_paths(rows: &[Row], group: Group) -> Vec<PathBuf> {
         match row {
             Row::Group(g) => inside = *g == group,
             Row::File(file) if inside => paths.push(file.path.clone()),
-            Row::File(_) => {}
+            Row::File(_) | Row::Dir(_) => {}
         }
     }
     paths
@@ -712,10 +901,134 @@ fn group_checked(rows: &[Row], group: Group) -> bool {
                     return false;
                 }
             }
-            Row::File(_) => {}
+            Row::File(_) | Row::Dir(_) => {}
         }
     }
     any
+}
+
+/// Met la liste plate en arborescence.
+///
+/// Les groupes sont conservés tels quels ; chaque bloc de fichiers entre deux
+/// groupes devient un arbre. Fonction libre et testée : c'est là que se
+/// jouent la fusion des dossiers intermédiaires et le calcul de ce qu'un
+/// dossier replié contient encore.
+fn tree_rows(flat: &[Row], collapsed: &HashSet<PathBuf>) -> Vec<Row> {
+    let mut out = Vec::new();
+    let mut block: Vec<FileRow> = Vec::new();
+    for row in flat {
+        match row {
+            Row::Group(group) => {
+                flush(&mut block, collapsed, &mut out);
+                out.push(Row::Group(*group));
+            }
+            Row::File(file) => block.push(file.clone()),
+            // Une liste déjà en arbre ne se remet pas en arbre.
+            Row::Dir(_) => {}
+        }
+    }
+    flush(&mut block, collapsed, &mut out);
+    out
+}
+
+fn flush(block: &mut Vec<FileRow>, collapsed: &HashSet<PathBuf>, out: &mut Vec<Row>) {
+    if block.is_empty() {
+        return;
+    }
+    let mut root = Node::default();
+    for file in block.drain(..) {
+        root.insert(file);
+    }
+    emit(&root, Path::new(""), 0, collapsed, out);
+}
+
+/// Un nœud de l'arbre en construction.
+///
+/// `BTreeMap` et non `HashMap` : l'ordre alphabétique des dossiers vient de
+/// là, et il doit être stable d'un rafraîchissement à l'autre — une liste qui
+/// se réordonne à chaque `git status` est illisible.
+#[derive(Default)]
+struct Node {
+    dirs: std::collections::BTreeMap<String, Node>,
+    files: Vec<FileRow>,
+}
+
+impl Node {
+    fn insert(&mut self, file: FileRow) {
+        let components: Vec<String> = file
+            .path
+            .parent()
+            .map(|parent| {
+                parent
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut node = self;
+        for component in components {
+            node = node.dirs.entry(component).or_default();
+        }
+        node.files.push(file);
+    }
+
+    /// Tous les fichiers du sous-arbre, dans l'ordre où ils s'afficheraient.
+    fn all_files(&self) -> Vec<&FileRow> {
+        let mut files: Vec<&FileRow> = self.dirs.values().flat_map(Node::all_files).collect();
+        files.extend(self.files.iter());
+        files
+    }
+}
+
+fn emit(
+    node: &Node,
+    prefix: &Path,
+    depth: usize,
+    collapsed: &HashSet<PathBuf>,
+    out: &mut Vec<Row>,
+) {
+    for (name, child) in &node.dirs {
+        // Fusion des dossiers intermédiaires : tant qu'un dossier n'a qu'un
+        // sous-dossier et aucun fichier, il n'apporte rien qu'un niveau
+        // d'indentation.
+        let mut label = name.clone();
+        let mut path = prefix.join(name);
+        let mut deepest = child;
+        while deepest.files.is_empty() && deepest.dirs.len() == 1 {
+            let (name, child) = deepest.dirs.iter().next().expect("un seul enfant");
+            label.push('/');
+            label.push_str(name);
+            path = path.join(name);
+            deepest = child;
+        }
+
+        let files = deepest.all_files();
+        let is_collapsed = collapsed.contains(&path);
+        out.push(Row::Dir(DirRow {
+            label,
+            depth,
+            collapsed: is_collapsed,
+            paths: files.iter().map(|f| f.path.clone()).collect(),
+            staged: files.iter().all(|f| f.staged),
+            added: files.iter().map(|f| f.added).sum(),
+            removed: files.iter().map(|f| f.removed).sum(),
+            path: path.clone(),
+        }));
+        if !is_collapsed {
+            emit(deepest, &path, depth + 1, collapsed, out);
+        }
+    }
+
+    let mut files: Vec<&FileRow> = node.files.iter().collect();
+    files.sort_by(|a, b| a.name.cmp(&b.name));
+    for file in files {
+        let mut file = file.clone();
+        file.depth = depth;
+        // Le dossier est porté par la ligne au-dessus : le répéter sur chaque
+        // fichier est exactement le bruit que l'arborescence supprime.
+        file.directory.clear();
+        out.push(Row::File(file));
+    }
 }
 
 #[cfg(test)]
@@ -743,7 +1056,7 @@ mod tests {
         rows.iter()
             .filter_map(|row| match row {
                 Row::File(file) => Some(file),
-                Row::Group(_) => None,
+                Row::Group(_) | Row::Dir(_) => None,
             })
             .collect()
     }
@@ -752,9 +1065,121 @@ mod tests {
         rows.iter()
             .filter_map(|row| match row {
                 Row::Group(group) => Some(*group),
-                Row::File(_) => None,
+                Row::File(_) | Row::Dir(_) => None,
             })
             .collect()
+    }
+
+    fn tree(paths: &[&str], collapsed: &[&str]) -> Vec<Row> {
+        let flat: Vec<Row> = paths
+            .iter()
+            .map(|p| {
+                Row::File(FileRow {
+                    path: PathBuf::from(p),
+                    depth: 0,
+                    name: Path::new(p)
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                    directory: String::new(),
+                    index: StatusCode::Modified,
+                    worktree: StatusCode::Unmodified,
+                    added: 1,
+                    removed: 0,
+                    staged: true,
+                    untracked: false,
+                })
+            })
+            .collect();
+        let collapsed: HashSet<PathBuf> = collapsed.iter().map(PathBuf::from).collect();
+        tree_rows(&flat, &collapsed)
+    }
+
+    fn shape(rows: &[Row]) -> Vec<String> {
+        rows.iter()
+            .map(|row| match row {
+                Row::Group(_) => "groupe".to_string(),
+                Row::Dir(dir) => format!(
+                    "{}[{}] {}",
+                    " ".repeat(dir.depth),
+                    dir.paths.len(),
+                    dir.label
+                ),
+                Row::File(file) => format!("{}{}", " ".repeat(file.depth), file.name),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn lonely_directories_are_merged_into_one_line() {
+        // Le point de l'arborescence sur un projet Laravel : sans fusion,
+        // `app/Http/Livewire/Forms` coûte quatre lignes et quatre niveaux
+        // d'indentation pour un seul fichier.
+        let rows = tree(&["app/Http/Livewire/Forms/BillForm.php"], &[]);
+        assert_eq!(
+            shape(&rows),
+            vec!["[1] app/Http/Livewire/Forms", " BillForm.php"]
+        );
+    }
+
+    #[test]
+    fn a_directory_splits_where_its_contents_split() {
+        let rows = tree(
+            &["src/ui/app.rs", "src/ui/review.rs", "src/git/diff.rs"],
+            &[],
+        );
+        assert_eq!(
+            shape(&rows),
+            vec![
+                "[3] src",
+                " [1] git",
+                "  diff.rs",
+                " [2] ui",
+                "  app.rs",
+                "  review.rs",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_collapsed_directory_hides_its_files_but_still_counts_them() {
+        // Ce compte n'est pas cosmétique : c'est la liste sur laquelle agit la
+        // case du dossier, et cocher un dossier fermé doit indexer ce qu'il
+        // contient, pas ce qu'on en voit.
+        let rows = tree(&["src/ui/app.rs", "src/ui/review.rs"], &["src/ui"]);
+        assert_eq!(shape(&rows), vec!["[2] src/ui"]);
+        let Row::Dir(dir) = &rows[0] else {
+            panic!("un dossier");
+        };
+        assert!(dir.collapsed);
+        assert_eq!(dir.paths.len(), 2);
+        assert_eq!(dir.added, 2);
+    }
+
+    #[test]
+    fn files_at_the_root_come_after_the_directories() {
+        let rows = tree(&["Cargo.toml", "src/main.rs"], &[]);
+        assert_eq!(shape(&rows), vec!["[1] src", " main.rs", "Cargo.toml"]);
+    }
+
+    #[test]
+    fn groups_survive_the_tree() {
+        let flat = rows_for(
+            &DiffRange::Working,
+            &status(vec![
+                file("src/a.rs", StatusCode::Modified, StatusCode::Unmodified),
+                file("src/b.rs", StatusCode::Untracked, StatusCode::Untracked),
+            ]),
+            &[],
+        );
+        let rows = tree_rows(&flat, &HashSet::new());
+        // Un arbre par groupe, et non un arbre unique qui mélangerait le suivi
+        // et le non-suivi sous le même dossier.
+        assert_eq!(
+            shape(&rows),
+            vec!["groupe", "[1] src", " a.rs", "groupe", "[1] src", " b.rs"]
+        );
     }
 
     #[test]
