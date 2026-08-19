@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use crate::git::{
-    Branch, Commit, DiffFile, DiffRange, FileDiff, GraphRow, LogRange, Status, Worktree,
+    Branch, Commit, DiffFile, DiffRange, FileDiff, GraphRow, LogRange, Status, Summary, Worktree,
 };
 
 /// Identifie le checkout concerné. C'est le chemin qui sert de clé partout :
@@ -44,6 +44,18 @@ pub enum Cmd {
     },
     LoadBranches {
         main: PathBuf,
+    },
+    /// Résume l'état de plusieurs checkouts d'un coup, pour la barre
+    /// latérale. Une file à part : ce balayage ne doit jamais passer devant le
+    /// diff qu'on vient de demander.
+    LoadSummaries {
+        worktrees: Vec<WorktreeId>,
+    },
+    /// Cherche les agents de codage qui tournent dans ces checkouts.
+    ScanAgents {
+        worktrees: Vec<WorktreeId>,
+        /// Commande configurée, dont seul le nom du programme sert.
+        program: String,
     },
     /// Charge l'historique d'un checkout, avec la disposition de son graphe.
     LoadHistory {
@@ -154,6 +166,12 @@ pub enum Evt {
         /// existent vraiment). `None` sur un dépôt qui n'en a aucune : la
         /// revue de branche n'a alors rien à quoi se comparer.
         default_base: Option<String>,
+    },
+    Summaries {
+        summaries: Vec<(WorktreeId, Summary)>,
+    },
+    Agents {
+        agents: crate::agent::Agents,
     },
     History {
         worktree: WorktreeId,

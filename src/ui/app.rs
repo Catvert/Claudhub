@@ -182,6 +182,39 @@ fn initial_range(status: &Status, base: Option<&str>) -> Option<DiffRange> {
     })
 }
 
+/// Ce qu'on sait des agents d'un worktree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentState {
+    pub count: usize,
+    /// Vrai quand au moins un agent a consommé du processeur depuis le relevé
+    /// précédent.
+    ///
+    /// C'est une approximation assumée : rien dans un processus ne dit « je
+    /// réfléchis » ou « j'attends une réponse ». Un agent qui travaille redessine
+    /// son affichage plusieurs fois par seconde et se voit ; un agent qui attend
+    /// une réponse de l'utilisateur ne coûte rien.
+    pub working: bool,
+}
+
+/// Consommation en dessous de laquelle un agent est réputé en attente.
+///
+/// Un tic vaut dix millisecondes de processeur. Trois tics sur un intervalle
+/// de trois secondes, c'est un pour cent d'un cœur : au-dessus, il se passe
+/// quelque chose ; en dessous, c'est le clignotement d'un curseur.
+const AGENT_BUSY_TICKS: u64 = 3;
+
+/// Période du relevé des agents. Une lecture de `/proc`, sans processus
+/// lancé : assez court pour qu'un agent qui se met au travail se voie.
+const AGENT_PERIOD: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Un résumé sur cinq relevés.
+///
+/// Le résumé coûte **deux commandes git par worktree** ; à ce prix, le faire
+/// aussi souvent que le relevé des agents ferait tourner un worker en
+/// permanence sur une dizaine de worktrees. Un compte de lignes qui a dix
+/// secondes de retard ne trompe personne.
+const SUMMARY_EVERY: u32 = 5;
+
 /// Le résultat de la dernière action, affiché dans la barre d'état.
 pub struct Toast {
     pub text: SharedString,
@@ -215,6 +248,15 @@ pub struct PerchApp {
     pub(super) dock: Entity<DockArea>,
     /// Vrai quand une écriture différée de la disposition est déjà programmée.
     layout_save_scheduled: bool,
+
+    /// Ce que chaque worktree a en chantier, y compris ceux qu'on n'a pas
+    /// ouverts : c'est la question qu'on se pose en parcourant la liste.
+    pub(super) summaries: HashMap<PathBuf, crate::git::Summary>,
+    /// Les agents trouvés, par worktree, et s'ils travaillent.
+    pub(super) agents: HashMap<PathBuf, AgentState>,
+    /// Temps processeur du relevé précédent, par processus. C'est sa variation
+    /// qui distingue un agent au travail d'un agent qui attend.
+    agent_cpu: HashMap<u32, u64>,
     /// Vrai entre l'enfoncement et le relâchement du bouton dans la vue de
     /// diff : c'est ce qui distingue un glissement de sélection d'un simple
     /// survol, et ce qui empêche un glissement commencé ailleurs — dans la
@@ -360,6 +402,9 @@ impl PerchApp {
             pending_status: std::collections::HashSet::new(),
             dock,
             layout_save_scheduled: false,
+            summaries: HashMap::new(),
+            agents: HashMap::new(),
+            agent_cpu: HashMap::new(),
             diff_dragging: false,
             watcher: None,
             diff_scroll: gpui::UniformListScrollHandle::new(),
@@ -369,6 +414,7 @@ impl PerchApp {
         };
 
         app.pump_events(events, window, cx);
+        app.start_scanning(cx);
         app.start_watching(window, cx);
 
         // Les dépôts de la session précédente, puis le répertoire courant s'il
@@ -384,6 +430,49 @@ impl PerchApp {
             }
         }
         app
+    }
+
+    /// Interroge périodiquement l'état de tous les worktrees ouverts.
+    ///
+    /// Le surveillant de fichiers ne couvre que le worktree affiché ; les
+    /// autres — ceux où un agent travaille pendant qu'on relit ailleurs — ne
+    /// signalent rien. Un balayage régulier est le seul moyen de les voir
+    /// bouger, et c'est justement là que se passe ce qu'on veut voir.
+    fn start_scanning(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let mut tick: u32 = 0;
+            loop {
+                let alive = this
+                    .update(cx, |this, cx| {
+                        this.scan_now(tick.is_multiple_of(SUMMARY_EVERY), cx);
+                    })
+                    .is_ok();
+                if !alive {
+                    return;
+                }
+                tick = tick.wrapping_add(1);
+                cx.background_executor().timer(AGENT_PERIOD).await;
+            }
+        })
+        .detach();
+    }
+
+    fn scan_now(&mut self, with_summaries: bool, cx: &mut Context<Self>) {
+        let worktrees: Vec<PathBuf> = self
+            .repos
+            .iter()
+            .flat_map(|repo| repo.worktrees.iter().map(|w| w.path.clone()))
+            .collect();
+        if worktrees.is_empty() {
+            return;
+        }
+        if with_summaries {
+            self.git.send(Cmd::LoadSummaries {
+                worktrees: worktrees.clone(),
+            });
+        }
+        let program = Settings::global(cx).terminal.agent_command.clone();
+        self.git.send(Cmd::ScanAgents { worktrees, program });
     }
 
     /// Enregistre la disposition, une fois le calme revenu.
@@ -597,6 +686,37 @@ impl PerchApp {
                         state.diff = Some(std::rc::Rc::new(Rendered::new(&path, diff, &theme)));
                     }
                 }
+            }
+            Evt::Summaries { summaries } => {
+                self.summaries.extend(summaries);
+            }
+            Evt::Agents { agents } => {
+                let mut next = HashMap::new();
+                let mut cpu = HashMap::new();
+                for (worktree, processes) in agents {
+                    let working = processes.iter().any(|process| {
+                        let before = self.agent_cpu.get(&process.pid).copied();
+                        // Un processus vu pour la première fois n'a pas de
+                        // variation : on le dit en attente, et le prochain
+                        // relevé tranchera. L'inverse ferait clignoter la
+                        // liste à chaque agent qui démarre.
+                        before.is_some_and(|before| {
+                            process.cpu.saturating_sub(before) >= AGENT_BUSY_TICKS
+                        })
+                    });
+                    for process in &processes {
+                        cpu.insert(process.pid, process.cpu);
+                    }
+                    next.insert(
+                        worktree,
+                        AgentState {
+                            count: processes.len(),
+                            working,
+                        },
+                    );
+                }
+                self.agent_cpu = cpu;
+                self.agents = next;
             }
             Evt::History {
                 worktree,

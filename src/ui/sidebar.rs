@@ -18,9 +18,8 @@ use crate::ui::icons::icon;
 
 /// Ce qu'une ligne de la barre latérale affiche d'un worktree.
 ///
-/// Le compte de fichiers modifiés n'est connu que des worktrees déjà visités —
-/// le statut n'est lu qu'à l'ouverture. Il vaut `None` ailleurs, et une pastille
-/// absente se lit « on ne sait pas encore », ce qui est vrai, là où un zéro
+/// Le résumé vaut `None` tant que le premier balayage n'est pas revenu : une
+/// ligne vide se lit « on ne sait pas encore », ce qui est vrai, là où un zéro
 /// affirmerait à tort qu'il n'y a rien à relire.
 struct WorktreeRow {
     path: PathBuf,
@@ -28,7 +27,77 @@ struct WorktreeRow {
     branch: Option<String>,
     is_main: bool,
     prunable: bool,
-    dirty: Option<usize>,
+    summary: Option<crate::git::Summary>,
+    agent: Option<crate::ui::app::AgentState>,
+}
+
+/// Le volume de travail en cours : lignes ajoutées et retirées.
+///
+/// Le nombre de fichiers n'y figure que faute de mieux — un renommage ou un
+/// binaire ne fait bouger aucune ligne, et ne rien montrer laisserait croire
+/// qu'il n'y a rien.
+fn volume(summary: crate::git::Summary, cx: &gpui::App) -> impl IntoElement {
+    let colors = crate::ui::theme::DiffColors::of(cx);
+    h_flex()
+        .flex_none()
+        .gap_1()
+        .text_xs()
+        .when(summary.added > 0, |el| {
+            el.child(
+                div()
+                    .text_color(colors.added_fg)
+                    .child(format!("+{}", summary.added)),
+            )
+        })
+        .when(summary.removed > 0, |el| {
+            el.child(
+                div()
+                    .text_color(colors.removed_fg)
+                    .child(format!("−{}", summary.removed)),
+            )
+        })
+        .when(summary.added == 0 && summary.removed == 0, |el| {
+            el.child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(summary.files.to_string()),
+            )
+        })
+}
+
+/// La pastille d'un agent : pleine quand il travaille, creuse quand il attend.
+///
+/// Une pastille et non un mot : la ligne porte déjà un nom et une branche, et
+/// c'est une information qu'on lit du coin de l'œil en parcourant la liste.
+fn agent_badge(agent: crate::ui::app::AgentState, cx: &gpui::App) -> impl IntoElement {
+    let color = if agent.working {
+        cx.theme().warning
+    } else {
+        cx.theme().muted_foreground
+    };
+    h_flex()
+        .flex_none()
+        .gap_1()
+        .items_center()
+        .child(
+            div()
+                .size(px(7.))
+                .rounded_full()
+                .when(agent.working, |el| el.bg(color))
+                .when(!agent.working, |el| {
+                    el.border_1().border_color(color.opacity(0.8))
+                }),
+        )
+        // Deux agents dans le même worktree, cela arrive : on le dit plutôt
+        // que de laisser croire qu'il n'y en a qu'un.
+        .when(agent.count > 1, |el| {
+            el.child(
+                div()
+                    .text_xs()
+                    .text_color(color)
+                    .child(agent.count.to_string()),
+            )
+        })
 }
 
 impl PerchApp {
@@ -55,10 +124,8 @@ impl PerchApp {
                             branch: w.branch.clone(),
                             is_main: w.is_main,
                             prunable: w.prunable,
-                            dirty: self
-                                .review
-                                .get(&w.path)
-                                .map(|review| review.status.files.len()),
+                            summary: self.summaries.get(&w.path).copied(),
+                            agent: self.agents.get(&w.path).copied(),
                         })
                         .collect::<Vec<_>>(),
                 )
@@ -198,7 +265,8 @@ impl PerchApp {
                                                     branch,
                                                     is_main,
                                                     prunable,
-                                                    dirty,
+                                                    summary,
+                                                    agent,
                                                 } = worktree;
                                                 let selected =
                                                     active.as_deref() == Some(path.as_path());
@@ -275,27 +343,17 @@ impl PerchApp {
                                                                 )
                                                             }),
                                                     )
-                                                    // Combien de fichiers ce
-                                                    // worktree a en chantier : la
-                                                    // question qu'on se pose en
-                                                    // parcourant la liste.
+                                                    // Ce que ce worktree a en
+                                                    // chantier, et qui y
+                                                    // travaille : les deux
+                                                    // questions qu'on se pose
+                                                    // en parcourant la liste.
+                                                    .when_some(agent, |el, agent| {
+                                                        el.child(agent_badge(agent, cx))
+                                                    })
                                                     .when_some(
-                                                        dirty.filter(|n| *n > 0),
-                                                        |el, count| {
-                                                            el.child(
-                                                                div()
-                                                                    .flex_none()
-                                                                    .px_1()
-                                                                    .rounded(cx.theme().radius)
-                                                                    .bg(cx
-                                                                        .theme()
-                                                                        .primary
-                                                                        .opacity(0.18))
-                                                                    .text_xs()
-                                                                    .text_color(cx.theme().primary)
-                                                                    .child(count.to_string()),
-                                                            )
-                                                        },
+                                                        summary.filter(|s| !s.is_empty()),
+                                                        |el, summary| el.child(volume(summary, cx)),
                                                     )
                                                     .when(prunable, |el| {
                                                         el.child(

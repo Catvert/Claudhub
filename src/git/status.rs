@@ -360,3 +360,63 @@ mod tests {
         assert_eq!(st.conflicted().count(), 1);
     }
 }
+
+/// Le résumé d'un checkout : de quoi le décrire d'une ligne dans la barre
+/// latérale, sans l'ouvrir.
+///
+/// Deux commandes plutôt qu'une parce que git n'en a aucune qui donne les
+/// deux : `--numstat` compte les lignes mais ignore ce qu'il ne suit pas, et
+/// `status` voit les fichiers nouveaux sans savoir ce qu'ils contiennent. Un
+/// worktree d'agent est justement plein de fichiers nouveaux.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Summary {
+    /// Fichiers touchés, les nouveaux compris.
+    pub files: usize,
+    pub added: usize,
+    pub removed: usize,
+}
+
+impl Summary {
+    pub fn is_empty(&self) -> bool {
+        self.files == 0
+    }
+}
+
+/// Au-delà de cette taille, un fichier nouveau n'est pas lu.
+///
+/// Ce résumé tourne en boucle sur tous les worktrees ouverts : un export SQL
+/// ou une archive oubliée dans un coin ne doit pas se relire toutes les dix
+/// secondes. Le fichier compte quand même comme fichier touché.
+const MAX_UNTRACKED_READ: u64 = 1 << 20;
+
+/// Compte les lignes des fichiers nouveaux, que `--numstat` laisse de côté.
+///
+/// Un fichier binaire n'a pas de lignes ; il compte quand même comme fichier
+/// touché, ce que `files` porte déjà.
+fn untracked_lines(dir: &std::path::Path, status: &Status) -> usize {
+    status
+        .files
+        .iter()
+        .filter(|file| file.is_untracked())
+        .map(|file| dir.join(&file.path))
+        .filter(|path| std::fs::metadata(path).is_ok_and(|meta| meta.len() <= MAX_UNTRACKED_READ))
+        .filter_map(|path| std::fs::read(path).ok())
+        .filter(|bytes| !bytes.contains(&0))
+        .map(|bytes| bytes.iter().filter(|b| **b == b'\n').count())
+        .sum()
+}
+
+pub fn summary(dir: &std::path::Path) -> Result<Summary> {
+    let status = status(dir)?;
+    let files = status
+        .files
+        .iter()
+        .filter(|file| !matches!(file.index, StatusCode::Ignored))
+        .count();
+    let changed = super::diff::files(dir, &super::DiffRange::Working)?;
+    Ok(Summary {
+        files,
+        added: changed.iter().map(|f| f.added).sum::<usize>() + untracked_lines(dir, &status),
+        removed: changed.iter().map(|f| f.removed).sum(),
+    })
+}

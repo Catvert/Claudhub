@@ -23,7 +23,7 @@ pub use branch::{Branch, BranchKind, Upstream};
 pub use diff::{DiffFile, DiffLine, DiffLineKind, FileDiff, Hunk, Range as DiffRange};
 pub use history::{Commit, GraphRow, LogRange};
 pub use repo::{Repo, Worktree};
-pub use status::{FileStatus, Status, StatusCode};
+pub use status::{FileStatus, Status, StatusCode, Summary};
 
 use std::ffi::OsStr;
 use std::io::Read;

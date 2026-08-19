@@ -386,6 +386,43 @@ c'est ce qui évite un `git log` que personne ne regardera. D'où
 `history_pending`, sans lequel chaque frame relancerait la commande pendant
 tout le temps de la lecture.
 
+### Le balayage de fond
+
+La barre latérale dit, pour chaque worktree, ce qu'il a en chantier (`+n −m`)
+et si un agent y travaille. Ces deux informations portent sur des worktrees
+**qu'on n'a pas ouverts** : le surveillant de fichiers ne couvre que celui qui
+est affiché, et c'est justement ailleurs que se passe ce qu'on veut voir.
+
+D'où un balayage périodique, dans sa **propre file** (`is_background`) : il
+porte sur tous les worktrees ouverts, il revient toutes les quelques secondes,
+et il ne doit jamais passer devant le diff qu'on vient de demander.
+
+Deux périodes, parce que les deux relevés n'ont pas le même prix. Les agents se
+lisent dans `/proc`, sans lancer de processus : toutes les deux secondes. Le
+résumé coûte **deux commandes git par worktree** — `--numstat` compte les
+lignes mais ignore ce qu'il ne suit pas, `status` voit les fichiers nouveaux
+sans savoir ce qu'ils contiennent, et un worktree d'agent est plein de fichiers
+nouveaux — donc un relevé sur cinq.
+
+La détection des agents passe par `/proc` et non par nos propres onglets : on
+lance un agent depuis Perch, mais aussi depuis un terminal à côté, et c'est le
+même travail qu'on veut voir. Le répertoire courant d'un processus dit dans
+quel worktree il travaille ; le worktree le plus profond l'emporte, faute de
+quoi un worktree imbriqué se verrait attribuer les agents de son parent.
+
+« En cours » veut dire **a consommé du processeur depuis le relevé
+précédent**. C'est une approximation assumée : rien dans un processus ne dit
+« je réfléchis » ou « j'attends une réponse ». Un agent au travail redessine
+son affichage plusieurs fois par seconde et se voit ; un agent devant son
+invite ne coûte rien. Le seuil (`AGENT_BUSY_TICKS`) écarte le clignotement
+d'un curseur.
+
+`parse_cpu_ticks` repart de la **dernière parenthèse fermante** de
+`/proc/<pid>/stat` : le nom du programme est le deuxième champ, entre
+parenthèses, et il peut contenir des espaces et des parenthèses — découper la
+ligne sur les espaces décale tous les champs suivants. C'est le piège que tout
+parseur naïf de `/proc` rate, et un test le verrouille.
+
 ### Quel worktree s'ouvre
 
 `runtime::open_repo` retient le checkout d'où l'ouverture vient, et non le

@@ -37,9 +37,19 @@ fn is_network(cmd: &Cmd) -> bool {
     matches!(cmd, Cmd::Fetch { .. } | Cmd::Pull { .. } | Cmd::Push { .. })
 }
 
+/// Le balayage de fond : résumé de chaque worktree et recherche des agents.
+///
+/// Il a sa propre file pour la même raison que le réseau : il porte sur tous
+/// les worktrees ouverts, il revient toutes les quelques secondes, et il ne
+/// doit jamais passer devant le diff qu'on vient de demander.
+fn is_background(cmd: &Cmd) -> bool {
+    matches!(cmd, Cmd::LoadSummaries { .. } | Cmd::ScanAgents { .. })
+}
+
 pub struct Handle {
     reads: async_channel::Sender<Cmd>,
     network: async_channel::Sender<Cmd>,
+    background: async_channel::Sender<Cmd>,
 }
 
 impl Handle {
@@ -49,6 +59,8 @@ impl Handle {
     pub fn send(&self, cmd: Cmd) {
         let queue = if is_network(&cmd) {
             &self.network
+        } else if is_background(&cmd) {
+            &self.background
         } else {
             &self.reads
         };
@@ -62,6 +74,7 @@ impl Handle {
 pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
     let (read_tx, read_rx) = async_channel::unbounded::<Cmd>();
     let (net_tx, net_rx) = async_channel::unbounded::<Cmd>();
+    let (bg_tx, bg_rx) = async_channel::unbounded::<Cmd>();
     let (evt_tx, evt_rx) = async_channel::unbounded::<Evt>();
 
     for n in 0..READERS {
@@ -69,12 +82,14 @@ pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
     }
     // Un seul pour le réseau : deux `fetch` simultanés sur le même dépôt se
     // disputeraient le verrou des références sans rien accélérer.
-    worker("perch-git-net".into(), net_rx, evt_tx);
+    worker("perch-git-net".into(), net_rx, evt_tx.clone());
+    worker("perch-scan".into(), bg_rx, evt_tx);
 
     (
         Handle {
             reads: read_tx,
             network: net_tx,
+            background: bg_tx,
         },
         evt_rx,
     )
@@ -162,6 +177,23 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
             }
             Err(e) => vec![fail(Some(worktree), Action::History, e)],
         },
+        Cmd::LoadSummaries { worktrees } => {
+            let summaries = worktrees
+                .into_iter()
+                .filter_map(|worktree| {
+                    // Un worktree effacé sous nos pieds n'est pas une erreur à
+                    // afficher : il disparaîtra de la liste au prochain
+                    // `git worktree list`.
+                    status::summary(&worktree)
+                        .ok()
+                        .map(|summary| (worktree, summary))
+                })
+                .collect();
+            vec![Evt::Summaries { summaries }]
+        }
+        Cmd::ScanAgents { worktrees, program } => vec![Evt::Agents {
+            agents: crate::agent::scan(&worktrees, &program),
+        }],
         Cmd::LoadBranches { main } => match branch::list(&main) {
             Ok(branches) => {
                 let default_base = branch::default_base(&main);
