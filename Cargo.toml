@@ -1,0 +1,51 @@
+[package]
+name = "perch"
+version = "0.1.0"
+edition = "2021"
+description = "Poste de travail pour la revue de code et le pilotage d'agents de codage en terminal, par worktree git"
+license = "Apache-2.0"
+readme = "README.md"
+rust-version = "1.90"
+publish = false
+
+[dependencies]
+# UI : gpui (le framework de Zed) et gpui-component (dock, listes virtualisées,
+# sidebar, inputs, thèmes, coloration syntaxique tree-sitter).
+# gpui-component 0.5 est aligné sur gpui 0.2.2 (crates.io).
+gpui = "0.2.2"
+# `tree-sitter-languages` fournit entre autres la grammaire `diff`, qui colore
+# les hunks de la vue de revue sans que nous écrivions un lexer.
+gpui-component = { version = "0.5", features = ["tree-sitter-languages"] }
+# Assets embarqués (icônes Lucide, polices) servis à gpui via AssetSource.
+rust-embed = "8"
+
+# Émulateur de terminal : le même que Zed et Alacritty. Il fournit le parseur
+# VTE, la grille de cellules, le scrollback et l'ouverture du pty ; le rendu
+# gpui des cellules est à nous (src/ui/terminal_element.rs).
+alacritty_terminal = "0.26"
+
+# Rafraîchit l'état d'un worktree quand les fichiers changent sous lui, plutôt
+# que de lancer `git status` sur un minuteur.
+notify = "8"
+notify-debouncer-full = "0.5"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+anyhow = "1"
+directories = "6"
+log = "0.4"
+env_logger = "0.11"
+# Le worker git, la surveillance de fichiers et les terminaux parlent au
+# thread d'interface par des canaux que draine une tâche gpui.
+async-channel = "2"
+# UI en français et en anglais ; toute chaîne visible passe par `tr!`.
+rust-i18n = "4"
+
+[profile.dev]
+# gpui et son graphe (blade, tree-sitter, alacritty) sont insupportables en
+# debug ; seul notre crate reste en opt-level 0 pour garder l'itération rapide.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

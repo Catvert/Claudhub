@@ -1,0 +1,276 @@
+//! Les workers git.
+//!
+//! Un petit groupe de threads OS consomme le même canal de commandes et
+//! répond par des événements. Des threads plutôt qu'un exécuteur async parce
+//! que `std::process::Command` bloque de toute façon : une commande git, c'est
+//! un `fork`, une attente, et rien à entrelacer entre les deux.
+//!
+//! Plusieurs threads plutôt qu'un seul parce qu'un `git fetch` sur un dépôt
+//! distant lent gèlerait sinon le rafraîchissement du statut et l'affichage
+//! des diffs. Git protège lui-même l'index par un verrou `index.lock` ; deux
+//! écritures concurrentes échouent proprement au lieu de se corrompre.
+
+pub mod protocol;
+pub mod watch;
+
+use std::path::{Path, PathBuf};
+
+use anyhow::Result;
+
+pub use protocol::{Action, Cmd, Evt, WorktreeId};
+
+use crate::git::{branch, diff, repo, status};
+
+/// Nombre de workers. Trois suffisent : une opération réseau longue, une
+/// lecture de diff, et un rafraîchissement de statut peuvent se recouvrir,
+/// ce qui couvre tout ce qu'un humain déclenche en même temps.
+const WORKERS: usize = 3;
+
+pub struct Handle {
+    cmd_tx: async_channel::Sender<Cmd>,
+}
+
+impl Handle {
+    /// Envoie une commande. L'échec (canal fermé) n'arrive qu'à l'extinction :
+    /// il n'y a rien à en dire à l'utilisateur, dont la fenêtre se ferme.
+    pub fn send(&self, cmd: Cmd) {
+        if let Err(err) = self.cmd_tx.try_send(cmd) {
+            log::debug!("commande abandonnée : {err}");
+        }
+    }
+}
+
+/// Démarre les workers et rend de quoi leur parler et les écouter.
+pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
+    let (cmd_tx, cmd_rx) = async_channel::unbounded::<Cmd>();
+    let (evt_tx, evt_rx) = async_channel::unbounded::<Evt>();
+
+    for n in 0..WORKERS {
+        let cmd_rx = cmd_rx.clone();
+        let evt_tx = evt_tx.clone();
+        std::thread::Builder::new()
+            .name(format!("perch-git-{n}"))
+            .spawn(move || {
+                while let Ok(cmd) = cmd_rx.recv_blocking() {
+                    for evt in handle(cmd) {
+                        if evt_tx.send_blocking(evt).is_err() {
+                            return; // la fenêtre est partie
+                        }
+                    }
+                }
+            })
+            .expect("le système refuse de créer un thread");
+    }
+
+    (Handle { cmd_tx }, evt_rx)
+}
+
+/// Exécute une commande et rend les événements à publier.
+///
+/// Rendre un `Vec` plutôt que d'émettre au fil de l'eau garde cette fonction
+/// pure et testable : elle ne connaît pas le canal.
+fn handle(cmd: Cmd) -> Vec<Evt> {
+    match cmd {
+        Cmd::OpenRepo(path) => match open_repo(&path) {
+            Ok(evt) => vec![evt],
+            Err(e) => vec![fail(None, Action::Open, e)],
+        },
+        Cmd::RefreshRepo { main } => match (repo::Repo { main: main.clone() }).worktrees() {
+            Ok(worktrees) => vec![Evt::Worktrees { main, worktrees }],
+            Err(e) => vec![fail(None, Action::Refresh, e)],
+        },
+        Cmd::RefreshStatus { worktree } => match status::status(&worktree) {
+            Ok(status) => vec![Evt::Status { worktree, status }],
+            Err(e) => vec![fail(Some(worktree), Action::Refresh, e)],
+        },
+        Cmd::LoadDiffFiles { worktree, range } => match diff::files(&worktree, &range) {
+            Ok(files) => vec![Evt::DiffFiles {
+                worktree,
+                range,
+                files,
+            }],
+            Err(e) => vec![fail(Some(worktree), Action::Diff, e)],
+        },
+        Cmd::LoadFileDiff {
+            worktree,
+            range,
+            path,
+            context,
+            untracked,
+        } => {
+            let result = if untracked {
+                diff::untracked_file(&worktree, &path)
+            } else {
+                diff::file(&worktree, &range, &path, context)
+            };
+            match result {
+                Ok(diff) => vec![Evt::FileDiff {
+                    worktree,
+                    path,
+                    diff,
+                }],
+                Err(e) => vec![fail(Some(worktree), Action::Diff, e)],
+            }
+        }
+        Cmd::LoadBranches { main } => match branch::list(&main) {
+            Ok(branches) => vec![Evt::Branches { main, branches }],
+            Err(e) => vec![fail(None, Action::Branch, e)],
+        },
+
+        Cmd::Stage { worktree, paths } => write_then_refresh(worktree, Action::Stage, |dir| {
+            repo::stage(dir, &paths).map(|_| String::new())
+        }),
+        Cmd::Unstage { worktree, paths } => write_then_refresh(worktree, Action::Unstage, |dir| {
+            repo::unstage(dir, &paths).map(|_| String::new())
+        }),
+        Cmd::Discard { worktree, paths } => write_then_refresh(worktree, Action::Discard, |dir| {
+            repo::discard(dir, &paths).map(|_| String::new())
+        }),
+        Cmd::ApplyHunk {
+            worktree,
+            patch,
+            reverse,
+        } => {
+            let action = if reverse {
+                Action::Unstage
+            } else {
+                Action::Stage
+            };
+            write_then_refresh(worktree, action, |dir| {
+                repo::apply_patch(dir, &patch, reverse).map(|_| String::new())
+            })
+        }
+        Cmd::Commit {
+            worktree,
+            message,
+            amend,
+            all,
+        } => write_then_refresh(worktree, Action::Commit, |dir| {
+            repo::commit(
+                dir,
+                repo::CommitOptions {
+                    message: &message,
+                    amend,
+                    all,
+                },
+            )
+        }),
+        Cmd::Fetch { worktree } => {
+            write_then_refresh(worktree, Action::Fetch, |dir| repo::fetch(dir, true))
+        }
+        Cmd::Pull { worktree } => write_then_refresh(worktree, Action::Pull, repo::pull),
+        Cmd::Push {
+            worktree,
+            force_with_lease,
+        } => write_then_refresh(worktree, Action::Push, |dir| {
+            repo::push(dir, force_with_lease)
+        }),
+        Cmd::Checkout { worktree, branch } => {
+            write_then_refresh(worktree, Action::Checkout, |dir| {
+                repo::checkout(dir, &branch).map(|_| String::new())
+            })
+        }
+        Cmd::CreateBranch {
+            worktree,
+            name,
+            from,
+        } => write_then_refresh(worktree, Action::Branch, |dir| {
+            repo::create_branch(dir, &name, from.as_deref()).map(|_| String::new())
+        }),
+        Cmd::DeleteBranch { main, name, force } => match repo::delete_branch(&main, &name, force) {
+            Ok(()) => {
+                let mut evts = vec![done(None, Action::Branch, String::new())];
+                evts.extend(
+                    branch::list(&main)
+                        .ok()
+                        .map(|branches| Evt::Branches { main, branches }),
+                );
+                evts
+            }
+            Err(e) => vec![fail(None, Action::Branch, e)],
+        },
+        Cmd::AddWorktree {
+            main,
+            path,
+            branch,
+            from,
+        } => {
+            let r = repo::Repo { main: main.clone() };
+            match r.add_worktree(&path, &branch, from.as_deref()) {
+                Ok(()) => worktree_changed(&r, path.display().to_string()),
+                Err(e) => vec![fail(None, Action::Worktree, e)],
+            }
+        }
+        Cmd::RemoveWorktree { main, path, force } => {
+            let r = repo::Repo { main: main.clone() };
+            match r.remove_worktree(&path, force) {
+                Ok(()) => worktree_changed(&r, path.display().to_string()),
+                Err(e) => vec![fail(None, Action::Worktree, e)],
+            }
+        }
+    }
+}
+
+fn open_repo(path: &Path) -> Result<Evt> {
+    let r = repo::Repo::discover(path)?;
+    Ok(Evt::RepoOpened {
+        name: r.name(),
+        worktrees: r.worktrees()?,
+        main: r.main,
+    })
+}
+
+/// Toute écriture est suivie d'une relecture du statut : c'est ce qui garde le
+/// panneau de revue exact sans que la vue ait à savoir quelle commande touche
+/// quoi. Le coût est un `git status` de plus par action déclenchée à la main.
+fn write_then_refresh(
+    worktree: PathBuf,
+    action: Action,
+    op: impl FnOnce(&Path) -> Result<String>,
+) -> Vec<Evt> {
+    match op(&worktree) {
+        Ok(output) => {
+            let mut evts = vec![done(Some(worktree.clone()), action, output)];
+            if let Ok(status) = status::status(&worktree) {
+                evts.push(Evt::Status { worktree, status });
+            }
+            evts
+        }
+        Err(e) => vec![fail(Some(worktree), action, e)],
+    }
+}
+
+fn worktree_changed(r: &repo::Repo, output: String) -> Vec<Evt> {
+    let mut evts = vec![done(None, Action::Worktree, output)];
+    if let Ok(worktrees) = r.worktrees() {
+        evts.push(Evt::Worktrees {
+            main: r.main.clone(),
+            worktrees,
+        });
+    }
+    evts
+}
+
+fn done(worktree: Option<PathBuf>, action: Action, output: String) -> Evt {
+    Evt::Done {
+        worktree,
+        action,
+        output,
+    }
+}
+
+/// Aplatit la chaîne de causes d'`anyhow` en une phrase : la vue affiche un
+/// message, pas une trace.
+fn fail(worktree: Option<PathBuf>, action: Action, err: anyhow::Error) -> Evt {
+    let message = err
+        .chain()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join(" : ");
+    log::warn!("{action:?} : {message}");
+    Evt::Failed {
+        worktree,
+        action,
+        message,
+    }
+}
