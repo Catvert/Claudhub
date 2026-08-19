@@ -106,9 +106,21 @@ impl DiffHighlights {
         // fichier ouvert.
         let mut highlighter = SyntaxHighlighter::new(language);
         for side in [Side::Old, Side::New] {
-            let (text, spans) = build_side(diff, side);
-            if text.is_empty() {
+            let (mut text, mut spans) = build_side(diff, side);
+            if spans.is_empty() {
                 continue;
+            }
+            // Le fragment reçoit d'abord de quoi être reconnu par sa
+            // grammaire. Les positions des lignes suivent le décalage : le
+            // prologue n'appartient à aucune d'elles, ses styles sont donc
+            // ignorés d'eux-mêmes.
+            let prologue = prologue(language, &text);
+            if !prologue.is_empty() {
+                text.insert_str(0, prologue);
+                for span in &mut spans {
+                    span.range.start += prologue.len();
+                    span.range.end += prologue.len();
+                }
             }
             highlighter.update(None, &Rope::from_str(&text));
             let highlighted = highlighter.styles(&(0..text.len()), theme);
@@ -135,6 +147,45 @@ impl Side {
         }
     }
 }
+
+/// Ce qu'il faut écrire devant un fragment pour que sa grammaire le
+/// reconnaisse.
+///
+/// PHP est le cas qui l'impose : sans `<?php`, sa grammaire lit **tout** le
+/// fragment comme du texte HTML, et pas une couleur n'en sort. Or un hunk
+/// commence presque toujours au milieu du fichier, donc après la balise
+/// d'ouverture — c'est le cas courant, pas l'exception, ce qui explique que la
+/// coloration paraissait cassée « très souvent ».
+///
+/// Le prologue n'est ajouté que s'il manque : un fichier Blade ou une vue dont
+/// le hunk contient le début du fichier commence bien par `<?php` ou par du
+/// HTML, et lui en préfixer un second casserait le parse.
+fn prologue(language: &str, fragment: &str) -> &'static str {
+    match language {
+        "php" if !opens_php(fragment) => "<?php\n",
+        _ => "",
+    }
+}
+
+/// Vrai si le fragment porte déjà une balise d'ouverture PHP, ou du HTML qui
+/// en attend une plus loin.
+///
+/// Le HTML compte : une vue commence par `<div>` et bascule en PHP ensuite,
+/// et la grammaire complète est faite pour ce mélange.
+fn opens_php(fragment: &str) -> bool {
+    fragment
+        .lines()
+        .take(PROLOGUE_LOOKAHEAD)
+        .any(|line| line.contains("<?"))
+        || fragment.trim_start().starts_with('<')
+}
+
+/// Combien de lignes on examine avant de conclure qu'il manque la balise.
+///
+/// Tout le fragment serait inutile : une balise qui n'apparaît qu'à la
+/// cinquantième ligne laisse de toute façon les précédentes sans couleur, et
+/// c'est justement ce qu'on veut corriger.
+const PROLOGUE_LOOKAHEAD: usize = 3;
 
 /// Où se trouve une ligne du diff dans le texte reconstruit.
 struct Span {
@@ -375,6 +426,68 @@ mod tests {
 
 #[cfg(test)]
 mod php_tests {
+
+    fn hunk_of(source: &str) -> FileDiff {
+        FileDiff {
+            hunks: vec![Hunk {
+                header: "@@ -40,4 +40,4 @@".into(),
+                old_start: 40,
+                new_start: 40,
+                lines: source
+                    .lines()
+                    .map(|text| DiffLine {
+                        kind: DiffLineKind::Added,
+                        old_no: None,
+                        new_no: Some(40),
+                        text: text.to_string(),
+                    })
+                    .collect(),
+            }],
+            binary: false,
+            empty: false,
+        }
+    }
+
+    fn coloured_lines(diff: &FileDiff) -> usize {
+        let styles = DiffHighlights::compute(
+            Path::new("Facture.php"),
+            diff,
+            &HighlightTheme::default_dark(),
+        );
+        (0..diff.hunks[0].lines.len())
+            .filter(|line| !styles.line(0, *line).is_empty())
+            .count()
+    }
+
+    /// Le cas courant, et celui qui paraissait cassé : un hunk pris au milieu
+    /// d'un fichier ne contient pas `<?php`, et sans lui la grammaire PHP lit
+    /// tout le fragment comme du texte HTML — pas une couleur.
+    #[test]
+    fn a_hunk_taken_mid_file_is_still_coloured() {
+        register_languages();
+        let diff = hunk_of(
+            "    public function total(): int {\n\
+             \x20       return $this->lignes->sum('montant');\n\
+             \x20   }",
+        );
+        assert!(
+            coloured_lines(&diff) > 0,
+            "un fragment sans balise d'ouverture doit être coloré"
+        );
+    }
+
+    /// Et le prologue ne doit pas casser ce qui marchait : un fragment qui
+    /// porte déjà la balise, ou du HTML qui l'attend, n'en reçoit pas un
+    /// second.
+    #[test]
+    fn a_fragment_that_opens_php_keeps_its_own_prologue() {
+        assert_eq!(prologue("php", "class A {}"), "<?php\n");
+        assert_eq!(prologue("php", "<?php\nclass A {}"), "");
+        assert_eq!(prologue("php", "<div>\n<?= $x ?>"), "");
+        assert_eq!(prologue("php", "  <?php echo 1;"), "");
+        // Les autres langages n'ont rien à préfixer.
+        assert_eq!(prologue("rust", "fn main() {}"), "");
+    }
     use super::*;
     use crate::git::{DiffLine, DiffLineKind, Hunk};
 

@@ -561,6 +561,15 @@ en **octets** — indexer en caractères casse dès le premier accent. Les deux
 sont verrouillés par `diff_view::tests::highlight_runs_stay_sorted_and_disjoint`,
 qui a déjà attrapé le doublon des lignes de contexte.
 
+**Un fragment reçoit d'abord de quoi être reconnu** (`highlight::prologue`).
+PHP l'impose : sans `<?php`, sa grammaire lit *tout* le fragment comme du
+texte HTML et pas une couleur n'en sort. Or un hunk commence presque toujours
+au milieu du fichier, donc après la balise d'ouverture — c'est le cas courant,
+pas l'exception. Le prologue n'est ajouté que s'il manque : un fichier Blade
+dont le hunk porte du HTML l'attend déjà, et lui en préfixer un second
+casserait le parse. Les positions des lignes suivent le décalage, si bien que
+les styles du prologue, n'appartenant à aucune d'elles, s'ignorent d'eux-mêmes.
+
 PHP n'est pas dans les grammaires que gpui-component embarque, et c'est le
 langage de la moitié des dépôts qu'on relit : `highlight::register_languages`
 le déclare dans le registre partagé au démarrage, avec ses injections HTML et
