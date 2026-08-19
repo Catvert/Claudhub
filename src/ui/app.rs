@@ -237,6 +237,22 @@ pub struct ReviewState {
     pub history_pending: bool,
     /// Commit sélectionné dans l'historique, dont le diff est affiché.
     pub commit: Option<String>,
+    /// Où poser la sélection quand le diff demandé arrivera.
+    ///
+    /// Une flèche qui déborde sur le fichier voisin ne peut pas le placer
+    /// elle-même : le diff n'arrive qu'après la commande git. Le geste est
+    /// donc noté, et consommé à l'arrivée — seulement pour la navigation au
+    /// clavier, un clic devant ouvrir un fichier sans rien y sélectionner.
+    pub pending_jump: Option<Jump>,
+}
+
+/// De quel bout un fichier ouvert au clavier commence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Jump {
+    /// Descendre : on entre par la première modification.
+    First,
+    /// Remonter : on entre par la dernière, là où la lecture s'arrête.
+    Last,
 }
 
 /// L'historique tel que la vue l'affiche.
@@ -263,6 +279,7 @@ impl Default for ReviewState {
             history_range: LogRange::All,
             history_pending: false,
             commit: None,
+            pending_jump: None,
         }
     }
 }
@@ -753,10 +770,27 @@ impl PerchApp {
                 // Le thème est lu avant l'emprunt mutable de l'état : la
                 // coloration en dépend, et `cx.theme()` emprunte `cx`.
                 let theme = cx.theme().highlight_theme.clone();
+                let split = Settings::global(cx).diff_split;
+                let mut jumped = None;
                 if let Some(state) = self.review.get_mut(&worktree) {
                     if state.selected.as_deref() == Some(path.as_path()) {
-                        state.diff = Some(std::rc::Rc::new(Rendered::new(&path, diff, &theme)));
+                        let rendered = std::rc::Rc::new(Rendered::new(&path, diff, &theme));
+                        // La flèche qui a ouvert ce fichier attend une
+                        // modification, pas le haut du fichier.
+                        if let Some(jump) = state.pending_jump.take() {
+                            let headers = rendered.headers(split);
+                            jumped = match jump {
+                                Jump::First => headers.first().copied(),
+                                Jump::Last => headers.last().copied(),
+                            };
+                            state.diff_selection = jumped.map(|row| (row, row));
+                        }
+                        state.diff = Some(rendered);
                     }
+                }
+                if let Some(row) = jumped {
+                    self.diff_scroll
+                        .scroll_to_item(row, gpui::ScrollStrategy::Top);
                 }
             }
             Evt::Summaries { summaries } => {
@@ -943,6 +977,9 @@ impl PerchApp {
         // n'a rien fait, puis que le contenu change tout seul.
         state.diff = None;
         state.diff_selection = None;
+        // Un saut armé par une flèche ne survit pas à un autre geste : ouvrir
+        // un fichier à la souris doit l'ouvrir en haut.
+        state.pending_jump = None;
         state.range = range.clone();
         let untracked = state
             .status

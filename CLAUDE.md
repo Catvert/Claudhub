@@ -188,10 +188,22 @@ nulle part en mémoire.
 **Les flèches sont les seules touches qui ne passent pas par la touche
 système**, et c'est ce qui les rend délicates : elles appartiennent d'abord à
 qui a le focus. `NAVIGATION_PREDICATE` exclut donc les champs de saisie, les
-terminaux et les couches flottantes, exactement comme la copie. Haut/bas
-déplacent la ligne (Maj étend la sélection, la touche système saute de hunk en
-hunk), gauche/droite changent de fichier — dans l'ordre **affiché**, celui que
-l'œil suit, replis compris. Aux extrémités, tout bute plutôt que de boucler.
+terminaux et les couches flottantes, exactement comme la copie.
+
+Haut/bas vont d'une **modification** à la suivante — c'est le geste de la
+relecture, les lignes de contexte entre deux hunks n'ayant rien à montrer — et
+**débordent sur le fichier voisin** une fois le dernier hunk passé. La touche
+système descend à la ligne, Maj étend la sélection ; gauche/droite changent de
+fichier directement. L'ordre des fichiers est celui qui est **affiché**, celui
+que l'œil suit, replis compris, et la revue bute à ses deux bouts plutôt que de
+boucler.
+
+Un débordement ne peut pas poser lui-même la sélection : le diff du fichier
+voisin n'arrive qu'après la commande git. Le geste est donc noté
+(`ReviewState::pending_jump`) et consommé à l'arrivée du diff — par le premier
+hunk en descendant, par le dernier en remontant, là où la lecture s'arrête. Ce
+drapeau est réservé au clavier : ouvrir un fichier à la souris l'efface, sans
+quoi un clic hériterait d'un saut armé plus tôt.
 
 ### Une seule liste pour l'index et les modifications
 

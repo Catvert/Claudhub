@@ -570,27 +570,52 @@ impl PerchApp {
         self.move_diff_selection(anchor, head, cx);
     }
 
-    /// Saute au hunk précédent ou suivant.
+    /// Saute au hunk précédent ou suivant, et au fichier voisin une fois le
+    /// dernier passé.
     ///
     /// Relire, c'est passer d'une modification à l'autre : les lignes de
-    /// contexte entre deux hunks n'ont, elles, rien à montrer.
+    /// contexte entre deux hunks n'ont, elles, rien à montrer. Et une revue ne
+    /// s'arrête pas au bout d'un fichier — la même flèche continue dans le
+    /// suivant, où elle entre par le bout d'où elle vient.
     pub(super) fn step_diff_hunk(&mut self, delta: isize, cx: &mut Context<Self>) {
         let split = crate::ui::settings::Settings::global(cx).diff_split;
-        let Some(headers) = self
+        let headers = self
             .active_review()
             .and_then(|state| state.diff.as_ref())
             .map(|diff| diff.headers(split))
-        else {
-            return;
-        };
+            .unwrap_or_default();
         let from = self
             .active_review()
             .and_then(|state| state.diff_selection)
             .map(|(_, head)| head);
-        let Some(target) = next_header(&headers, from, delta) else {
+        match next_header(&headers, from, delta) {
+            Some(target) => self.move_diff_selection(target, target, cx),
+            None => self.step_file_to_a_hunk(delta, cx),
+        }
+    }
+
+    /// Passe au fichier voisin et y note par quel bout entrer.
+    ///
+    /// La sélection ne peut pas être posée ici : le diff n'arrivera qu'après
+    /// la commande git. C'est `Evt::FileDiff` qui la consomme.
+    fn step_file_to_a_hunk(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let before = self
+            .active_review()
+            .and_then(|state| state.selected.clone());
+        self.step_file(delta, cx);
+        let Some(state) = self.active_review_mut() else {
             return;
         };
-        self.move_diff_selection(target, target, cx);
+        // Rien n'a bougé — on était déjà au bout de la revue : ne pas armer un
+        // saut qui s'appliquerait au prochain fichier ouvert à la souris.
+        if state.selected == before {
+            return;
+        }
+        state.pending_jump = Some(if delta > 0 {
+            crate::ui::app::Jump::First
+        } else {
+            crate::ui::app::Jump::Last
+        });
     }
 
     fn move_diff_selection(&mut self, anchor: usize, head: usize, cx: &mut Context<Self>) {
@@ -1435,15 +1460,26 @@ mod tests {
         assert_eq!(step(Some(0), 1, 0), None, "rien à parcourir");
     }
 
+    /// `None` n'est pas un refus : c'est le signal qu'il n'y a plus de hunk
+    /// dans ce fichier, et donc qu'il faut passer au voisin.
     #[test]
     fn hunk_jumps_never_stay_put() {
         let headers = [0usize, 12, 40];
         assert_eq!(next_header(&headers, Some(0), 1), Some(12));
         assert_eq!(next_header(&headers, Some(13), 1), Some(40));
-        assert_eq!(next_header(&headers, Some(40), 1), None, "le dernier");
+        assert_eq!(
+            next_header(&headers, Some(40), 1),
+            None,
+            "après le dernier hunk, on change de fichier"
+        );
         assert_eq!(next_header(&headers, Some(13), -1), Some(12));
         assert_eq!(next_header(&headers, Some(12), -1), Some(0));
-        assert_eq!(next_header(&headers, Some(0), -1), None);
+        assert_eq!(
+            next_header(&headers, Some(0), -1),
+            None,
+            "et avant le premier"
+        );
+        assert_eq!(next_header(&[], None, 1), None, "un fichier sans hunk");
         assert_eq!(next_header(&headers, None, 1), Some(0));
         assert_eq!(next_header(&headers, None, -1), Some(40));
     }

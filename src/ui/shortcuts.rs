@@ -117,15 +117,17 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-c", CopyDiff, Some(COPY_PREDICATE)),
         KeyBinding::new("secondary-shift-c", CopyDiffPatch, Some(COPY_PREDICATE)),
         KeyBinding::new("secondary-a", SelectWholeDiff, Some(COPY_PREDICATE)),
-        // Relire au clavier : les flèches parcourent le fichier, Maj étend la
-        // sélection, et la touche système saute de modification en
-        // modification.
-        KeyBinding::new("up", PreviousLine, Some(NAVIGATION_PREDICATE)),
-        KeyBinding::new("down", NextLine, Some(NAVIGATION_PREDICATE)),
+        // Relire au clavier. Les flèches nues vont d'une modification à la
+        // suivante — c'est le geste de la relecture, les lignes de contexte
+        // entre deux hunks n'ayant rien à montrer — et débordent sur le
+        // fichier voisin une fois le dernier hunk passé. La touche système
+        // descend à la ligne, Maj étend la sélection.
+        KeyBinding::new("up", PreviousHunk, Some(NAVIGATION_PREDICATE)),
+        KeyBinding::new("down", NextHunk, Some(NAVIGATION_PREDICATE)),
         KeyBinding::new("shift-up", ExtendUp, Some(NAVIGATION_PREDICATE)),
         KeyBinding::new("shift-down", ExtendDown, Some(NAVIGATION_PREDICATE)),
-        KeyBinding::new("secondary-up", PreviousHunk, Some(NAVIGATION_PREDICATE)),
-        KeyBinding::new("secondary-down", NextHunk, Some(NAVIGATION_PREDICATE)),
+        KeyBinding::new("secondary-up", PreviousLine, Some(NAVIGATION_PREDICATE)),
+        KeyBinding::new("secondary-down", NextLine, Some(NAVIGATION_PREDICATE)),
         KeyBinding::new("left", PreviousFile, Some(NAVIGATION_PREDICATE)),
         KeyBinding::new("right", NextFile, Some(NAVIGATION_PREDICATE)),
         KeyBinding::new("secondary-shift-s", ToggleDiffSplit, Some(PREDICATE)),
