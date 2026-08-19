@@ -176,6 +176,9 @@ impl PerchApp {
         // affiche, et charger les deux domaines d'avance coûterait une
         // commande pour un onglet que personne n'ouvrira.
         self.ensure_files(range.clone(), cx);
+        // Prise avant tout emprunt de l'état : c'est la vue qui la détient, et
+        // la liste ne fait que s'y accrocher.
+        let scroll = self.file_scroll(&range);
         let Some(state) = self.review.get(&worktree) else {
             return div().into_any_element();
         };
@@ -264,7 +267,8 @@ impl PerchApp {
                                         .collect::<Vec<_>>()
                                 },
                             )
-                            .size_full(),
+                            .size_full()
+                            .track_scroll(scroll),
                         )
                     }),
             )
@@ -292,17 +296,9 @@ impl PerchApp {
     /// L'ordre affiché et non l'ordre brut : un dossier replié cache ses
     /// fichiers, et les flèches ne doivent pas ouvrir un fichier que la liste
     /// ne montre pas — le suivant serait alors introuvable à l'œil.
-    fn visible_files(&self, cx: &Context<Self>) -> Vec<PathBuf> {
-        let Some(state) = self.active_review() else {
-            return Vec::new();
-        };
-        let flat = self.rows(&state.range, cx);
-        let rows = if crate::ui::settings::Settings::global(cx).review_tree {
-            tree_rows(&flat, &state.collapsed)
-        } else {
-            flat
-        };
-        rows.into_iter()
+    fn visible_files(&self, range: &DiffRange, cx: &Context<Self>) -> Vec<PathBuf> {
+        self.visible_rows(range, cx)
+            .into_iter()
             .filter_map(|row| match row {
                 Row::File(file) => Some(file.path),
                 _ => None,
@@ -310,19 +306,51 @@ impl PerchApp {
             .collect()
     }
 
+    /// Les entrées telles que la liste les affiche, dossiers compris.
+    fn visible_rows(&self, range: &DiffRange, cx: &Context<Self>) -> Vec<Row> {
+        let Some(state) = self.active_review() else {
+            return Vec::new();
+        };
+        let flat = self.rows(range, cx);
+        if crate::ui::settings::Settings::global(cx).review_tree {
+            tree_rows(&flat, &state.collapsed)
+        } else {
+            flat
+        }
+    }
+
+    /// Amène la liste sur un fichier.
+    ///
+    /// L'indice est celui de la liste **affichée** — dossiers compris, et sans
+    /// ce que les replis cachent : c'est cette liste-là que la vue virtualise,
+    /// et un indice pris ailleurs désignerait une autre ligne.
+    pub(super) fn reveal_file(&mut self, range: &DiffRange, path: &Path, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .visible_rows(range, cx)
+            .iter()
+            .position(|row| matches!(row, Row::File(file) if file.path == path))
+        else {
+            return;
+        };
+        self.file_scroll(range)
+            .scroll_to_item(index, gpui::ScrollStrategy::Center);
+    }
+
     /// Ouvre le fichier précédent ou suivant de la liste.
     ///
     /// Aux extrémités, rien ne se passe : boucler ferait recommencer une revue
     /// qu'on vient de finir sans que rien ne le signale.
     pub(super) fn step_file(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let files = self.visible_files(cx);
         let Some(worktree) = self.active.clone() else {
             return;
         };
+        let Some(range) = self.review.get(&worktree).map(|state| state.range.clone()) else {
+            return;
+        };
+        let files = self.visible_files(&range, cx);
         let Some(state) = self.review.get(&worktree) else {
             return;
         };
-        let range = state.range.clone();
         let current = state
             .selected
             .as_ref()

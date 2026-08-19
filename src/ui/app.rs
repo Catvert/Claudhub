@@ -383,6 +383,10 @@ pub struct PerchApp {
     pub(super) diff_scroll: gpui::UniformListScrollHandle,
     pub(super) history_scroll: gpui::UniformListScrollHandle,
     pub(super) branch_scroll: gpui::UniformListScrollHandle,
+    /// Défilement des listes de fichiers, **une par domaine** : « Revue » et
+    /// « Modifications » sont affichés en même temps, et une seule poignée les
+    /// ferait défiler ensemble.
+    file_scroll: HashMap<DiffRange, gpui::UniformListScrollHandle>,
     /// Filtre du panneau des branches. Une entité créée une fois : recréée par
     /// frame, elle perdrait le curseur et le texte dès la première frappe.
     pub(super) branch_filter: Entity<InputState>,
@@ -500,6 +504,7 @@ impl PerchApp {
             diff_scroll: gpui::UniformListScrollHandle::new(),
             history_scroll: gpui::UniformListScrollHandle::new(),
             branch_scroll: gpui::UniformListScrollHandle::new(),
+            file_scroll: HashMap::new(),
             branch_filter,
             history_split: cx.new(|_| gpui_component::resizable::ResizableState::default()),
             focus: cx.focus_handle(),
@@ -988,12 +993,25 @@ impl PerchApp {
             .any(|f| f.path == path && f.is_untracked());
         self.git.send(Cmd::LoadFileDiff {
             worktree,
-            range,
-            path,
+            range: range.clone(),
+            path: path.clone(),
             context: Settings::global(cx).context_lines(),
             untracked,
         });
+        // La liste suit le fichier ouvert : une flèche qui change de fichier
+        // le laisserait sinon hors de vue, et on relirait sans savoir où on en
+        // est. Le défilement est non strict — un fichier déjà visible ne fait
+        // pas sauter la liste sous les yeux.
+        self.reveal_file(&range, &path, cx);
         cx.notify();
+    }
+
+    /// La poignée de défilement de la liste d'un domaine, créée à la demande.
+    ///
+    /// Jamais reconstruite : une poignée neuve par frame remettrait la liste en
+    /// haut à chaque image.
+    pub(super) fn file_scroll(&mut self, range: &DiffRange) -> gpui::UniformListScrollHandle {
+        self.file_scroll.entry(range.clone()).or_default().clone()
     }
 
     /// Redemande le diff du fichier affiché.

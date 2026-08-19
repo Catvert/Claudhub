@@ -198,6 +198,15 @@ fichier directement. L'ordre des fichiers est celui qui est **affiché**, celui
 que l'œil suit, replis compris, et la revue bute à ses deux bouts plutôt que de
 boucler.
 
+**La liste suit le fichier ouvert.** Elle a une poignée de défilement **par
+domaine** — « Revue » et « Modifications » sont affichés en même temps, et une
+seule poignée les ferait défiler ensemble —, et `reveal_file` l'amène sur le
+fichier à chaque ouverture. L'indice est celui de la liste *affichée*, dossiers
+compris et sans ce qu'un repli cache : c'est cette liste-là que la vue
+virtualise. Le défilement est non strict, si bien qu'un clic sur un fichier
+déjà visible ne fait pas sauter la liste sous les yeux ; seule une flèche qui
+change de fichier la déplace vraiment.
+
 Un débordement ne peut pas poser lui-même la sélection : le diff du fichier
 voisin n'arrive qu'après la commande git. Le geste est donc noté
 (`ReviewState::pending_jump`) et consommé à l'arrivée du diff — par le premier
