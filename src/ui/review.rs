@@ -15,7 +15,7 @@ use gpui_component::{
     v_flex, ActiveTheme, Disableable, Selectable, Sizable, WindowExt,
 };
 
-use crate::git::{DiffRange, StatusCode};
+use crate::git::{DiffFile, DiffRange, Status, StatusCode};
 use crate::runtime::Cmd;
 use crate::tr;
 use crate::ui::app::PerchApp;
@@ -194,71 +194,9 @@ impl PerchApp {
     /// distingue index et répertoire de travail — et `--numstat` pour les deux
     /// autres, qui portent sur des commits et n'ont pas de notion d'index.
     fn rows(&self, _cx: &Context<Self>) -> Vec<Row> {
-        let Some(state) = self.active_review() else {
-            return Vec::new();
-        };
-        let volumes: std::collections::HashMap<&PathBuf, (usize, usize)> = state
-            .files
-            .iter()
-            .map(|f| (&f.path, (f.added, f.removed)))
-            .collect();
-
-        match state.range {
-            DiffRange::Unstaged => state
-                .status
-                .unstaged()
-                .map(|f| Row {
-                    path: f.path.clone(),
-                    name: f.file_name(),
-                    directory: f.directory(),
-                    code: f.worktree,
-                    added: volumes.get(&f.path).map(|v| v.0).unwrap_or(0),
-                    removed: volumes.get(&f.path).map(|v| v.1).unwrap_or(0),
-                    staged: false,
-                })
-                .collect(),
-            DiffRange::Staged => state
-                .status
-                .staged()
-                .map(|f| Row {
-                    path: f.path.clone(),
-                    name: f.file_name(),
-                    directory: f.directory(),
-                    code: f.index,
-                    added: volumes.get(&f.path).map(|v| v.0).unwrap_or(0),
-                    removed: volumes.get(&f.path).map(|v| v.1).unwrap_or(0),
-                    staged: true,
-                })
-                .collect(),
-            _ => state
-                .files
-                .iter()
-                .map(|f| Row {
-                    path: f.path.clone(),
-                    name: f
-                        .path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    directory: f
-                        .path
-                        .parent()
-                        .filter(|p| !p.as_os_str().is_empty())
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default(),
-                    code: if f.removed == 0 {
-                        StatusCode::Added
-                    } else if f.added == 0 {
-                        StatusCode::Deleted
-                    } else {
-                        StatusCode::Modified
-                    },
-                    added: f.added,
-                    removed: f.removed,
-                    // Un commit est déjà écrit : rien à indexer.
-                    staged: true,
-                })
-                .collect(),
+        match self.active_review() {
+            Some(state) => rows_for(&state.range, &state.status, &state.files),
+            None => Vec::new(),
         }
     }
 
@@ -278,9 +216,30 @@ impl PerchApp {
             Some(base) => tr!("range-branch", { base: base }),
             None => tr!("range-branch-none"),
         };
+        // Les deux premiers onglets portent leur compte. C'est ce qui évite
+        // d'ouvrir Perch sur une liste vide sans comprendre que tout attend
+        // dans l'index : le nombre se lit sans cliquer. Les deux autres
+        // portent sur des commits et leur compte demanderait une commande git
+        // de plus par onglet et par rafraîchissement, pour une information
+        // dont on ne se sert pas au même moment.
+        let (unstaged, staged) = self
+            .active_review()
+            .map(|r| (r.status.unstaged().count(), r.status.staged().count()))
+            .unwrap_or((0, 0));
+        let count = |label: SharedString, n: usize| -> SharedString {
+            if n == 0 {
+                label
+            } else {
+                SharedString::from(format!("{label} {n}"))
+            }
+        };
         let tabs: [(DiffRange, SharedString, bool); 4] = [
-            (DiffRange::Unstaged, tr!("range-unstaged"), true),
-            (DiffRange::Staged, tr!("range-staged"), true),
+            (
+                DiffRange::Unstaged,
+                count(tr!("range-unstaged"), unstaged),
+                true,
+            ),
+            (DiffRange::Staged, count(tr!("range-staged"), staged), true),
             (DiffRange::Head, tr!("range-head"), true),
             (branch_range, branch_label, base.is_some()),
         ];
@@ -414,5 +373,188 @@ impl PerchApp {
             reverse: false,
         });
         cx.notify();
+    }
+}
+
+/// Les entrées de la liste pour un domaine de revue donné.
+///
+/// Fonction libre parce que c'est la seule vraie décision de la vue de revue —
+/// quel fichier apparaît de quel côté — et qu'elle se teste sans fenêtre.
+///
+/// Le statut est la source pour les deux premiers domaines : lui seul
+/// distingue l'index du répertoire de travail, et un fichier peut être des
+/// deux côtés à la fois. Les deux autres portent sur des commits, qui n'ont
+/// pas de notion d'index, et viennent donc de `--numstat`.
+fn rows_for(range: &DiffRange, status: &Status, files: &[DiffFile]) -> Vec<Row> {
+    let volumes: std::collections::HashMap<&PathBuf, (usize, usize)> = files
+        .iter()
+        .map(|f| (&f.path, (f.added, f.removed)))
+        .collect();
+    let volume = |path: &PathBuf| volumes.get(path).copied().unwrap_or((0, 0));
+
+    match range {
+        DiffRange::Unstaged => status
+            .unstaged()
+            .map(|f| {
+                let (added, removed) = volume(&f.path);
+                Row {
+                    path: f.path.clone(),
+                    name: f.file_name(),
+                    directory: f.directory(),
+                    code: f.worktree,
+                    added,
+                    removed,
+                    staged: false,
+                }
+            })
+            .collect(),
+        DiffRange::Staged => status
+            .staged()
+            .map(|f| {
+                let (added, removed) = volume(&f.path);
+                Row {
+                    path: f.path.clone(),
+                    name: f.file_name(),
+                    directory: f.directory(),
+                    code: f.index,
+                    added,
+                    removed,
+                    staged: true,
+                }
+            })
+            .collect(),
+        DiffRange::Head | DiffRange::Branch { .. } => files
+            .iter()
+            .map(|f| Row {
+                path: f.path.clone(),
+                name: f
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                directory: f
+                    .path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                code: if f.removed == 0 {
+                    StatusCode::Added
+                } else if f.added == 0 {
+                    StatusCode::Deleted
+                } else {
+                    StatusCode::Modified
+                },
+                added: f.added,
+                removed: f.removed,
+                // Un commit est déjà écrit : rien à indexer.
+                staged: true,
+            })
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::FileStatus;
+
+    fn file(path: &str, index: StatusCode, worktree: StatusCode) -> FileStatus {
+        FileStatus {
+            path: PathBuf::from(path),
+            original: None,
+            index,
+            worktree,
+        }
+    }
+
+    fn status(files: Vec<FileStatus>) -> Status {
+        Status {
+            files,
+            ..Status::default()
+        }
+    }
+
+    #[test]
+    fn a_fully_staged_repository_fills_the_index_tab_and_leaves_the_other_empty() {
+        // Le cas d'un dépôt où tout a été indexé avant d'ouvrir Perch : la vue
+        // par défaut est légitimement vide, et tout doit se trouver dans
+        // l'index — pas l'inverse.
+        let status = status(vec![
+            file("a.php", StatusCode::Modified, StatusCode::Unmodified),
+            file("b.php", StatusCode::Added, StatusCode::Unmodified),
+        ]);
+
+        assert!(rows_for(&DiffRange::Unstaged, &status, &[]).is_empty());
+
+        let staged = rows_for(&DiffRange::Staged, &status, &[]);
+        assert_eq!(staged.len(), 2);
+        assert_eq!(staged[0].code, StatusCode::Modified);
+        assert_eq!(staged[1].code, StatusCode::Added);
+        assert!(staged.iter().all(|r| r.staged));
+    }
+
+    #[test]
+    fn a_file_staged_then_modified_appears_on_both_sides() {
+        let status = status(vec![file(
+            "src/x.rs",
+            StatusCode::Modified,
+            StatusCode::Modified,
+        )]);
+        assert_eq!(rows_for(&DiffRange::Unstaged, &status, &[]).len(), 1);
+        assert_eq!(rows_for(&DiffRange::Staged, &status, &[]).len(), 1);
+    }
+
+    #[test]
+    fn an_untracked_file_is_not_in_the_index() {
+        let status = status(vec![file(
+            "nouveau.txt",
+            StatusCode::Untracked,
+            StatusCode::Untracked,
+        )]);
+        assert_eq!(rows_for(&DiffRange::Unstaged, &status, &[]).len(), 1);
+        assert!(
+            rows_for(&DiffRange::Staged, &status, &[]).is_empty(),
+            "un fichier jamais ajouté n'a rien dans l'index"
+        );
+    }
+
+    #[test]
+    fn volumes_come_from_numstat_and_default_to_zero() {
+        let status = status(vec![file(
+            "a.rs",
+            StatusCode::Modified,
+            StatusCode::Unmodified,
+        )]);
+        let files = vec![DiffFile {
+            path: PathBuf::from("a.rs"),
+            original: None,
+            added: 12,
+            removed: 3,
+            binary: false,
+        }];
+        let rows = rows_for(&DiffRange::Staged, &status, &files);
+        assert_eq!((rows[0].added, rows[0].removed), (12, 3));
+
+        // Sans `--numstat` encore arrivé, la ligne s'affiche quand même.
+        let rows = rows_for(&DiffRange::Staged, &status, &[]);
+        assert_eq!((rows[0].added, rows[0].removed), (0, 0));
+    }
+
+    #[test]
+    fn commit_ranges_come_from_the_file_list_alone() {
+        // Aucun statut : une revue de branche ne parle que de commits.
+        let files = vec![DiffFile {
+            path: PathBuf::from("dossier/ajoute.rs"),
+            original: None,
+            added: 5,
+            removed: 0,
+            binary: false,
+        }];
+        let rows = rows_for(&DiffRange::Head, &Status::default(), &files);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "ajoute.rs");
+        assert_eq!(rows[0].directory, "dossier");
+        assert_eq!(rows[0].code, StatusCode::Added);
     }
 }

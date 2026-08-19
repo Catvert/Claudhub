@@ -53,6 +53,10 @@ pub struct ReviewState {
     pub range: DiffRange,
     pub status: Status,
     pub files: Vec<DiffFile>,
+    /// Faux tant que le premier statut n'est pas arrivé. C'est lui qui décide
+    /// du domaine ouvert par défaut, et il ne doit le faire qu'une fois :
+    /// ensuite, la portée appartient à l'utilisateur.
+    pub range_chosen: bool,
     pub selected: Option<PathBuf>,
     /// Le diff affiché, avec tout ce qui s'en déduit. Un `Rc` parce que le
     /// rendu doit le capturer dans la fermeture de la liste virtualisée, et
@@ -69,10 +73,24 @@ impl Default for ReviewState {
             range: DiffRange::Unstaged,
             status: Status::default(),
             files: Vec::new(),
+            range_chosen: false,
             selected: None,
             diff: None,
             base: None,
         }
+    }
+}
+
+/// Le domaine de revue ouvert au premier statut d'un worktree.
+///
+/// Ouvrir sur un domaine vide alors que l'autre est plein est la façon la plus
+/// sûre de faire croire que Perch ne voit rien — c'est le cas d'un dépôt dont
+/// tout le travail a été indexé avant qu'on l'ouvre.
+fn initial_range(status: &Status) -> DiffRange {
+    if status.unstaged().next().is_none() && status.staged().next().is_some() {
+        DiffRange::Staged
+    } else {
+        DiffRange::Unstaged
     }
 }
 
@@ -285,6 +303,16 @@ impl PerchApp {
                 if state.base.is_none() {
                     state.base = base;
                 }
+                // Ouvrir sur un domaine vide alors que l'autre est plein est la
+                // façon la plus sûre de faire croire que Perch ne voit rien :
+                // c'est le cas d'un dépôt dont tout le travail a été indexé
+                // avant qu'on l'ouvre. Le premier statut choisit donc le
+                // domaine où il y a quelque chose à lire ; après quoi la
+                // portée n'appartient plus qu'à l'utilisateur.
+                if !state.range_chosen {
+                    state.range_chosen = true;
+                    state.range = initial_range(&state.status);
+                }
                 // La liste des fichiers de la revue courante dépend du statut :
                 // la recharger ici évite que la vue affiche un fichier qui
                 // vient d'être indexé du mauvais côté.
@@ -439,7 +467,7 @@ impl PerchApp {
         cx.notify();
     }
 
-    pub(super) fn set_range(&mut self, range: DiffRange, cx: &mut Context<Self>) {
+    pub fn set_range(&mut self, range: DiffRange, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
         };
@@ -470,6 +498,11 @@ impl PerchApp {
     }
 
     // — Accès à l'état ——————————————————————————————————————————
+
+    /// Base de comparaison de la revue courante, si elle en a une.
+    pub(super) fn review_base(&self) -> Option<String> {
+        self.active_review().and_then(|r| r.base.clone())
+    }
 
     pub(super) fn active_review(&self) -> Option<&ReviewState> {
         self.active.as_ref().and_then(|p| self.review.get(p))
@@ -741,6 +774,10 @@ impl Render for PerchApp {
             .on_action(cx.listener(super::shortcuts::toggle_terminal))
             .on_action(cx.listener(super::shortcuts::next_terminal))
             .on_action(cx.listener(super::shortcuts::commit))
+            .on_action(cx.listener(super::shortcuts::show_unstaged))
+            .on_action(cx.listener(super::shortcuts::show_staged))
+            .on_action(cx.listener(super::shortcuts::show_head))
+            .on_action(cx.listener(super::shortcuts::show_branch))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -800,5 +837,52 @@ impl PerchApp {
     pub(super) fn toggle_terminal_panel(&mut self, cx: &mut Context<Self>) {
         self.show_terminal = !self.show_terminal;
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::{FileStatus, StatusCode};
+
+    fn status(files: &[(StatusCode, StatusCode)]) -> Status {
+        Status {
+            files: files
+                .iter()
+                .enumerate()
+                .map(|(ix, (index, worktree))| FileStatus {
+                    path: PathBuf::from(format!("f{ix}.rs")),
+                    original: None,
+                    index: *index,
+                    worktree: *worktree,
+                })
+                .collect(),
+            ..Status::default()
+        }
+    }
+
+    #[test]
+    fn opens_on_the_index_when_everything_is_already_staged() {
+        let status = status(&[
+            (StatusCode::Modified, StatusCode::Unmodified),
+            (StatusCode::Added, StatusCode::Unmodified),
+        ]);
+        assert_eq!(initial_range(&status), DiffRange::Staged);
+    }
+
+    #[test]
+    fn opens_on_the_changes_whenever_there_are_any() {
+        // Un fichier des deux côtés : les modifications restent le point de
+        // départ, c'est là qu'on travaille.
+        let both = status(&[(StatusCode::Modified, StatusCode::Modified)]);
+        assert_eq!(initial_range(&both), DiffRange::Unstaged);
+
+        let untracked = status(&[(StatusCode::Untracked, StatusCode::Untracked)]);
+        assert_eq!(initial_range(&untracked), DiffRange::Unstaged);
+    }
+
+    #[test]
+    fn a_clean_worktree_opens_on_the_changes() {
+        assert_eq!(initial_range(&Status::default()), DiffRange::Unstaged);
     }
 }

@@ -104,6 +104,26 @@ d'indexation, largeur de gouttière — est calculé une fois dans
 fermeture de rendu est appelée pour chaque ligne visible à chaque frame,
 animation de molette comprise : elle ne doit rien y calculer.
 
+### Quel domaine de revue s'ouvre
+
+`app::initial_range` choisit, au **premier** statut d'un worktree, entre les
+modifications et l'index : ouvrir sur un domaine vide alors que l'autre est
+plein est la façon la plus sûre de faire croire que Perch ne voit rien. Ensuite
+la portée appartient à l'utilisateur, d'où le drapeau `range_chosen` — un
+rafraîchissement de statut, et il en arrive un à chaque écriture de fichier, ne
+doit jamais reprendre la main sur son choix.
+
+Pour la même raison, les onglets « Modifications » et « Index » portent leur
+compte : il se lit sans cliquer. Les deux autres portent sur des commits et
+leur compte coûterait une commande git de plus par onglet et par
+rafraîchissement.
+
+`review::rows_for` est la seule vraie décision de cette vue — quel fichier
+apparaît de quel côté. Elle est libre et testée : le statut est la source pour
+les deux premiers domaines (lui seul distingue index et répertoire de travail,
+et un fichier peut être des deux côtés), `--numstat` pour les deux autres, qui
+parlent de commits et n'ont pas de notion d'index.
+
 ### La base de la revue de branche
 
 Elle vient de git — `origin/HEAD`, puis `init.defaultBranch`, puis les noms
