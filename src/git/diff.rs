@@ -1,7 +1,7 @@
 //! Diffs : la liste des fichiers touchés, et le contenu d'un fichier découpé
 //! en hunks pour la vue de revue.
 //!
-//! Perch ne calcule pas de diff lui-même — git le fait mieux, avec la
+//! Claudhub ne calcule pas de diff lui-même — git le fait mieux, avec la
 //! détection de renommage, les règles de `.gitattributes` et les filtres de
 //! l'utilisateur. Ce module ne fait que lire sa sortie unifiée.
 
@@ -23,7 +23,7 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 pub enum Range {
     /// Tout ce qui sépare le répertoire de travail de HEAD, indexé ou non.
     ///
-    /// Perch ne propose pas de comparer séparément l'index et le répertoire de
+    /// Claudhub ne propose pas de comparer séparément l'index et le répertoire de
     /// travail : la distinction est un détail de plomberie git, et la vue de
     /// revue la restitue par une case à cocher par fichier plutôt que par deux
     /// listes qu'il faut mentalement recoudre.
@@ -362,7 +362,7 @@ mod tests {
     }
 
     fn tempdir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("perch-diff-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("claudhub-diff-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("répertoire de test");
         dir

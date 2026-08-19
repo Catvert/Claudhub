@@ -1,7 +1,7 @@
 //! Détection des agents de codage qui tournent dans les worktrees.
 //!
-//! Perch ne lance pas tous les agents : on en démarre depuis un onglet de
-//! Perch, mais aussi depuis un terminal à côté, et c'est le même travail qu'on
+//! Claudhub ne lance pas tous les agents : on en démarre depuis un onglet de
+//! Claudhub, mais aussi depuis un terminal à côté, et c'est le même travail qu'on
 //! veut voir. La détection passe donc par `/proc` — le répertoire courant d'un
 //! processus dit dans quel worktree il travaille — plutôt que par les seuls
 //! onglets que nous avons ouverts.

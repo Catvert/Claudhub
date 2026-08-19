@@ -1,7 +1,7 @@
 //! Terminaux intégrés.
 //!
 //! L'émulation est celle d'alacritty (`alacritty_terminal`) : parseur VTE,
-//! grille de cellules, historique, ouverture du pty et boucle d'E/S. Perch
+//! grille de cellules, historique, ouverture du pty et boucle d'E/S. Claudhub
 //! n'écrit que deux choses par-dessus — la traduction des touches gpui en
 //! octets (`keys`) et un instantané de la grille que la vue sait dessiner
 //! (`Snapshot`).
@@ -197,8 +197,8 @@ impl Terminal {
             .or_insert_with(|| "xterm-256color".into());
         env.entry("COLORTERM".into())
             .or_insert_with(|| "truecolor".into());
-        // Repère pour les scripts et les invites : on est dans Perch.
-        env.insert("PERCH".into(), "1".into());
+        // Repère pour les scripts et les invites : on est dans Claudhub.
+        env.insert("CLAUDHUB".into(), "1".into());
 
         let pty_options = tty::Options {
             shell: options
@@ -482,7 +482,10 @@ mod tests {
             // fichier de configuration de l'utilisateur, une sortie prévisible.
             command: Some((
                 "/bin/sh".into(),
-                vec!["-c".into(), "printf 'perch \\033[31mrouge\\033[0m'".into()],
+                vec![
+                    "-c".into(),
+                    "printf 'claudhub \\033[31mrouge\\033[0m'".into(),
+                ],
             )),
             env: HashMap::new(),
             size: TermSize::new(40, 5, 8, 16),
@@ -494,13 +497,15 @@ mod tests {
         // remplisse, avec une échéance qui fait échouer plutôt que pendre.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut snapshot = terminal.snapshot();
-        while std::time::Instant::now() < deadline && !snapshot.lines[0].text.starts_with("perch") {
+        while std::time::Instant::now() < deadline
+            && !snapshot.lines[0].text.starts_with("claudhub")
+        {
             std::thread::sleep(std::time::Duration::from_millis(25));
             snapshot = terminal.snapshot();
         }
 
         assert_eq!(
-            snapshot.lines[0].text, "perch rouge",
+            snapshot.lines[0].text, "claudhub rouge",
             "la sortie du programme n'est pas arrivée sur la grille"
         );
 

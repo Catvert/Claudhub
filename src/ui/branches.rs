@@ -24,7 +24,7 @@ use gpui_component::{
 use crate::git::{Branch, BranchKind};
 use crate::runtime::Cmd;
 use crate::tr;
-use crate::ui::app::PerchApp;
+use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
 
 /// Une entrée de la liste.
@@ -104,7 +104,7 @@ fn detail(branch: &Branch) -> String {
         .join(" · ")
 }
 
-impl PerchApp {
+impl ClaudhubApp {
     pub(super) fn render_branches(
         &mut self,
         _window: &mut Window,
@@ -270,7 +270,7 @@ fn render_branch(
     worktree: &std::path::Path,
     main: &std::path::Path,
     height: gpui::Pixels,
-    entity: &gpui::Entity<PerchApp>,
+    entity: &gpui::Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
     let muted = cx.theme().muted_foreground;

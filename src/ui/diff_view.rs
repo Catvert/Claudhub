@@ -390,7 +390,7 @@ use gpui_component::{
 
 use crate::git::DiffRange;
 use crate::tr;
-use crate::ui::app::PerchApp;
+use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
 use crate::ui::theme::DiffColors;
 
@@ -406,7 +406,7 @@ pub fn line_height(font_size: Pixels) -> Pixels {
     (font_size * LINE_SPACING).round()
 }
 
-impl PerchApp {
+impl ClaudhubApp {
     /// Sélectionne une ligne, ou étend la sélection jusqu'à elle.
     ///
     /// Clic simple : la ligne devient l'ancre. Maj+clic : l'ancre reste et la
@@ -668,7 +668,7 @@ impl PerchApp {
     }
 }
 
-impl PerchApp {
+impl ClaudhubApp {
     pub(super) fn render_diff(
         &mut self,
         window: &mut Window,
@@ -899,7 +899,7 @@ fn render_row(
     stageable: bool,
     selected: bool,
     selection_bg: gpui::Hsla,
-    entity: &Entity<PerchApp>,
+    entity: &Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
     let Some(row) = diff.rows.get(index).copied() else {
@@ -973,7 +973,7 @@ fn render_header(
     stageable: bool,
     selected: bool,
     selection_bg: gpui::Hsla,
-    entity: &Entity<PerchApp>,
+    entity: &Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
     let patch = diff.patches.get(hunk).cloned().unwrap_or_default();
@@ -1084,7 +1084,7 @@ fn render_split_row(
     stageable: bool,
     selected: bool,
     selection_bg: gpui::Hsla,
-    entity: &Entity<PerchApp>,
+    entity: &Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
     let Some(row) = diff.split.get(index).copied() else {
@@ -1260,7 +1260,7 @@ fn next_header(headers: &[usize], from: Option<usize>, delta: isize) -> Option<u
 /// focus au terminal, et le `Ctrl+C` qui suit part au programme qui y tourne
 /// au lieu de copier ce qu'on vient de sélectionner.
 fn select(
-    entity: &Entity<PerchApp>,
+    entity: &Entity<ClaudhubApp>,
     index: usize,
     extend: bool,
     window: &mut Window,
@@ -1279,7 +1279,12 @@ fn select(
 /// Le bouton est revérifié ici et pas seulement à l'enfoncement : un
 /// relâchement hors de la fenêtre n'envoie aucun événement, et sans cette
 /// condition la sélection continuerait de suivre le curseur après coup.
-fn drag(entity: &Entity<PerchApp>, index: usize, event: &gpui::MouseMoveEvent, cx: &mut gpui::App) {
+fn drag(
+    entity: &Entity<ClaudhubApp>,
+    index: usize,
+    event: &gpui::MouseMoveEvent,
+    cx: &mut gpui::App,
+) {
     if event.pressed_button != Some(gpui::MouseButton::Left) {
         entity.update(cx, |this, _| this.end_diff_drag());
         return;

@@ -21,7 +21,7 @@ use gpui_component::{
 use crate::git::{DiffFile, DiffRange, Status, StatusCode};
 use crate::runtime::Cmd;
 use crate::tr;
-use crate::ui::app::PerchApp;
+use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
 use crate::ui::theme::{status_color, DiffColors};
 
@@ -114,7 +114,7 @@ impl FileRow {
     }
 }
 
-impl PerchApp {
+impl ClaudhubApp {
     /// La liste des modifications en cours, et de quoi les valider.
     pub(super) fn render_changes(
         &mut self,
@@ -506,10 +506,10 @@ impl PerchApp {
     }
 }
 
-impl PerchApp {
+impl ClaudhubApp {
     /// Demande confirmation avant de jeter des modifications.
     ///
-    /// Seule action de Perch qui détruit du travail sans que git en garde une
+    /// Seule action de Claudhub qui détruit du travail sans que git en garde une
     /// copie : ni `reflog` ni `stash` ne rattrapent un `restore --worktree`.
     /// D'où le dialogue, même si tout le reste de l'interface agit au clic.
     fn confirm_removal(
@@ -582,7 +582,7 @@ fn render_row(
     selected: Option<&Path>,
     colors: &DiffColors,
     checkable: bool,
-    entity: &gpui::Entity<PerchApp>,
+    entity: &gpui::Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
     match rows.get(index) {
@@ -611,7 +611,7 @@ fn render_dir(
     worktree: &Path,
     colors: &DiffColors,
     checkable: bool,
-    entity: &gpui::Entity<PerchApp>,
+    entity: &gpui::Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
     let staged = row.staged;
@@ -708,7 +708,7 @@ fn render_group(
     index: usize,
     group: Group,
     worktree: &Path,
-    entity: &gpui::Entity<PerchApp>,
+    entity: &gpui::Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
     let checked = group_checked(rows, group);
@@ -756,7 +756,7 @@ fn render_file(
     selected: Option<&Path>,
     colors: &DiffColors,
     checkable: bool,
-    entity: &gpui::Entity<PerchApp>,
+    entity: &gpui::Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
     let is_selected = selected == Some(row.path.as_path());

@@ -1,6 +1,6 @@
 # TODO — vers un poste de travail agentique
 
-Perch sait aujourd'hui **regarder** : il liste les worktrees, montre ce qu'un
+Claudhub sait aujourd'hui **regarder** : il liste les worktrees, montre ce qu'un
 agent y a écrit, colore le diff, et donne un terminal pour lui reparler. Ce
 qu'il ne sait pas faire, c'est **fermer la boucle** — annoter une relecture et
 la renvoyer, intégrer le travail une fois validé, ouvrir un fichier que le diff
@@ -18,13 +18,13 @@ Elles ne se rediscutent pas à chaque jalon.
 - **`wt` devient une bibliothèque.** Le dépôt est le nôtre
   (`github.com/Catvert/wt`) : on y ajoute un `lib.rs` plutôt que de parser la
   sortie texte, alignée et localisée, de sa CLI.
-- **L'IA passe par l'agent du terminal, jamais par une API depuis Perch.**
-  Perch compose des prompts et les livre à un agent qui, lui, a le dépôt entre
+- **L'IA passe par l'agent du terminal, jamais par une API depuis Claudhub.**
+  Claudhub compose des prompts et les livre à un agent qui, lui, a le dépôt entre
   les mains et peut corriger. Aucune dépendance HTTP, aucune clé à garder.
   « Configurer plusieurs modèles » devient donc **configurer plusieurs profils
   d'agent**.
-- **L'édition reste légère.** Retouche courte dans Perch, vrai travail dans
-  l'éditeur externe de son choix. Perch ne devient pas un IDE.
+- **L'édition reste légère.** Retouche courte dans Claudhub, vrai travail dans
+  l'éditeur externe de son choix. Claudhub ne devient pas un IDE.
 - **Pas d'extensions wasm.** Le `wt.toml` d'un projet est déjà un système
   d'extension — voir la section finale.
 
@@ -63,7 +63,7 @@ rendre la base persistante en est le banc d'essai immédiat.
       écrits une fois par demi-seconde ne valent pas un aller-retour par le
       protocole. La règle vise les commandes git, pas la préférence qu'on range.
 
-**Vérification** : rouvrir Perch retrouve la base choisie sur chaque worktree.
+**Vérification** : rouvrir Claudhub retrouve la base choisie sur chaque worktree.
 
 ---
 
@@ -123,7 +123,7 @@ déjà (`src/git/diff.rs:84`) — **plus l'extrait de code**.
       notes changent — jamais dans la fermeture de `uniform_list` (`:806`), qui
       tourne à chaque frame.
 - [ ] Bouton dans l'en-tête de la vue diff, à côté de `copy-file` (`:717`).
-- [ ] **Panneau `PerchNotes`** (« Relecture ») : les notes du worktree, groupées
+- [ ] **Panneau `ClaudhubNotes`** (« Relecture ») : les notes du worktree, groupées
       par fichier, avec leur extrait. Cliquer ouvre le fichier et défile jusqu'à
       la ligne (`move_diff_selection` sait déjà défiler, `:593`). Cocher marque
       traité ; supprimer ; filtrer sur « non traitées ».
@@ -146,7 +146,7 @@ déjà (`src/git/diff.rs:84`) — **plus l'extrait de code**.
 
 - [ ] `TerminalGroup::send_to_agent(text)` : écrit dans le pty de l'onglet agent
       (`Terminal::write`, `src/terminal/mod.rs:288`), **encadré par les séquences
-      de collage entre crochets** que Perch gère déjà (`mod.rs:426`) — sans quoi
+      de collage entre crochets** que Claudhub gère déjà (`mod.rs:426`) — sans quoi
       un texte multiligne s'exécute ligne à ligne. S'il n'y a pas d'onglet agent,
       en ouvrir un (`open_agent`, `src/ui/terminal_view.rs:801`) et attendre que
       le programme soit prêt.
@@ -205,14 +205,14 @@ envoie du texte à un agent, on veut choisir lequel.
       `git`, `state`, `ops`, `tmpl`, `util`, et laisser `[[bin]]` n'être qu'un
       appelant mince. Le cœur est déjà découplé de l'interface — `ops.rs` le
       revendique — donc l'opération est mécanique.
-- [ ] Perch en dépend (`path` pendant le développement, `git =` ensuite).
-      `src/wt.rs` côté Perch, couche métier sans gpui, lit le `wt.toml` du dépôt.
+- [ ] Claudhub en dépend (`path` pendant le développement, `git =` ensuite).
+      `src/wt.rs` côté Claudhub, couche métier sans gpui, lit le `wt.toml` du dépôt.
 - [ ] **Tout appel à `ops::App` part dans un worker** : il lance des hooks shell
       et peut durer des minutes.
 
 ### Ce que ça donne — et c'est là le système de plugins
 
-Le `wt.toml` d'un projet **ajoute des actions à Perch sans que Perch les
+Le `wt.toml` d'un projet **ajoute des actions à Claudhub sans que Claudhub les
 connaisse**.
 
 - [ ] **Création guidée** : le dialogue de nouveau worktree
@@ -245,7 +245,7 @@ Aucune commande de merge n'existe dans `src/git/`.
 - [ ] **« Intégrer dans `<base>` »** — exécuté **depuis le dépôt principal**,
       après avoir vérifié qu'il est propre et positionné sur la base ; sinon on
       le dit et on refuse. Puis proposer d'enchaîner `wt rm` et la suppression
-      de la branche — `wt` conserve délibérément la branche, c'est donc à Perch
+      de la branche — `wt` conserve délibérément la branche, c'est donc à Claudhub
       de poser la question.
 - [ ] **Conflits** : `Status` connaît déjà l'état `Unmerged`
       (`src/git/status.rs:29`), il n'est qu'affiché. Ajouter un domaine de revue
@@ -256,7 +256,7 @@ Aucune commande de merge n'existe dans `src/git/`.
       et le dire évite de le découvrir à mi-parcours.
 - [ ] **Garde-fou** : un merge interrompu laisse le dépôt à mi-chemin. Tant
       qu'il dure, la barre d'état l'affiche et propose Continuer / Abandonner —
-      sans quoi l'utilisateur se retrouve dans un état que Perch ne nomme pas.
+      sans quoi l'utilisateur se retrouve dans un état que Claudhub ne nomme pas.
 
 ---
 
@@ -278,7 +278,7 @@ Aucune commande de merge n'existe dans `src/git/`.
       (`:243`) sont déjà écrits, testés (`:1220`–`:1290`) et cohérents avec la
       liste de revue. Le travail est de paramétrer `Node`/`emit` sur le type de
       feuille, aujourd'hui soudé à `FileRow`.
-- [ ] Panneau `PerchFiles`. Bonus quasi gratuit une fois l'arbre généralisé :
+- [ ] Panneau `ClaudhubFiles`. Bonus quasi gratuit une fois l'arbre généralisé :
       afficher le statut git, puisque `ReviewState::status` est déjà là.
 - [ ] Actions : ouvrir, renommer, supprimer, nouveau fichier/dossier, copier le
       chemin. Confirmation pour les destructions — modèle : `confirm_removal`
@@ -298,7 +298,7 @@ Aucune commande de merge n'existe dans `src/git/`.
       (cf. `FileDiff::binary`, `src/git/diff.rs:106`).
 - [ ] **Écriture concurrente** : un agent écrit dans les mêmes fichiers pendant
       qu'on les lit. `expect` porte le hachage lu ; si le fichier a changé
-      depuis, l'écriture est refusée et Perch le dit. C'est la seule façon de ne
+      depuis, l'écriture est refusée et Claudhub le dit. C'est la seule façon de ne
       pas effacer le travail d'un agent avec une correction de faute de frappe.
 - [ ] Indicateur de modification non enregistrée, confirmation à la fermeture.
       Le worktree étant surveillé, la sauvegarde rafraîchit le diff toute seule.
@@ -322,7 +322,7 @@ Aucune commande de merge n'existe dans `src/git/`.
 ## Jalon 5 — Sentry
 
 Lire les issues d'un projet, les rapprocher du code, et en faire un point de
-départ pour un agent. Perch n'envoie aucun événement à Sentry. En dernier parce
+départ pour un agent. Claudhub n'envoie aucun événement à Sentry. En dernier parce
 que le clic « aller à la frame fautive » exige le jalon 4.
 
 - [ ] **HTTP** : déclarer `ureq` (bloquant, `rustls`, pas de tokio) — il épouse
@@ -336,7 +336,7 @@ que le clic « aller à la frame fautive » exige le jalon 4.
 - [ ] `Cmd::LoadIssues { org, project, query }` → `Evt::Issues`, sur la **file
       réseau** (celle de fetch/pull/push) : une API distante met parfois
       plusieurs secondes et ne doit pas occuper un worker de lecture.
-- [ ] **Panneau `PerchSentry`** : les issues (titre, culprit, occurrences,
+- [ ] **Panneau `ClaudhubSentry`** : les issues (titre, culprit, occurrences,
       dernière vue, niveau) ; la sélection montre la trace, chaque frame
       `fichier:ligne` cliquable vers l'explorateur.
 - [ ] **« Confier à un agent »** — compose un prompt avec le titre, le message,
@@ -354,10 +354,10 @@ que le clic « aller à la frame fautive » exige le jalon 4.
 À trancher dans `CLAUDE.md`, sinon la question revient à chaque intégration.
 Trois niveaux, du moins cher au plus cher :
 
-1. **Le `wt.toml` du projet** — tâches, prompts, statuts, URLs. Perch les
+1. **Le `wt.toml` du projet** — tâches, prompts, statuts, URLs. Claudhub les
    affiche sans les connaître. C'est le vrai système d'extension, et il ne
    coûte que le jalon 3.
-2. **Des commandes déclarées dans les réglages de Perch** (nom, commande, où
+2. **Des commandes déclarées dans les réglages de Claudhub** (nom, commande, où
    l'exécuter, sortie en terminal ou en toast), pour ce qui n'est pas propre à
    un projet.
 3. **Des extensions wasm, à la Zed — écarté.** Rien dans les besoins listés ne
@@ -374,9 +374,9 @@ autrement ferait payer un mécanisme générique pour deux cas.
   appel réseau depuis un `render` ou un gestionnaire de clic — tout passe par
   `Cmd`/`Evt`.
 - Ajouter une capacité = une variante de `Cmd`, un bras dans `runtime::handle`,
-  une ou plusieurs variantes d'`Evt`, un bras dans `PerchApp::handle_event`, le
+  une ou plusieurs variantes d'`Evt`, un bras dans `ClaudhubApp::handle_event`, le
   plus souvent une variante d'`Action` pour le message de succès.
-- Ajouter un panneau = `render_xxx` sur `PerchApp`, une ligne dans la macro
+- Ajouter un panneau = `render_xxx` sur `ClaudhubApp`, une ligne dans la macro
   `panels!`, la même dans `declare!` de `panels::register`, les clés i18n,
   l'insertion dans `install_default_layout`, et **incrémenter `LAYOUT_VERSION`**
   (`src/ui/app.rs:46`) — sans quoi les dispositions enregistrées reviennent avec

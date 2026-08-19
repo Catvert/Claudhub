@@ -14,7 +14,7 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor};
 
 /// Une couleur de cellule.
 ///
-/// `Default` n'est pas résolue ici : c'est le thème de Perch qui décide de
+/// `Default` n'est pas résolue ici : c'est le thème de Claudhub qui décide de
 /// quoi a l'air « la couleur de texte normale », et il peut changer sans que
 /// le terminal ait rien à réémettre.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

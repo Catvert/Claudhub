@@ -78,12 +78,12 @@ pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
     let (evt_tx, evt_rx) = async_channel::unbounded::<Evt>();
 
     for n in 0..READERS {
-        worker(format!("perch-git-{n}"), read_rx.clone(), evt_tx.clone());
+        worker(format!("claudhub-git-{n}"), read_rx.clone(), evt_tx.clone());
     }
     // Un seul pour le réseau : deux `fetch` simultanés sur le même dépôt se
     // disputeraient le verrou des références sans rien accélérer.
-    worker("perch-git-net".into(), net_rx, evt_tx.clone());
-    worker("perch-scan".into(), bg_rx, evt_tx);
+    worker("claudhub-git-net".into(), net_rx, evt_tx.clone());
+    worker("claudhub-scan".into(), bg_rx, evt_tx);
 
     (
         Handle {

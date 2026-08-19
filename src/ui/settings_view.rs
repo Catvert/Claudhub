@@ -3,7 +3,7 @@
 //! Le formulaire vient de gpui-component : pages, groupes, recherche et bouton
 //! de remise à zéro sont fournis, et chaque champ se déclare par un couple
 //! lire/écrire. Ces fermetures ne reçoivent qu'un `App` — c'est ce qui impose
-//! que les réglages vivent dans un global plutôt que dans `PerchApp`.
+//! que les réglages vivent dans un global plutôt que dans `ClaudhubApp`.
 //!
 //! Il n'y a pas de bouton « Appliquer » : chaque changement prend effet à la
 //! frappe et l'écriture du fichier suit, différée. Un formulaire qui demande
@@ -20,7 +20,7 @@ use gpui_component::setting::{
 use gpui_component::{h_flex, v_flex, Sizable, WindowExt};
 
 use crate::tr;
-use crate::ui::app::PerchApp;
+use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
 use crate::ui::settings::{
     self, LanguageChoice, Settings, ThemeMode, DEFAULT_MONO_FONT, DEFAULT_UI_FONT,
@@ -32,7 +32,7 @@ use crate::ui::settings::{
 const HEIGHT: gpui::Pixels = px(560.);
 const WIDTH: gpui::Pixels = px(880.);
 
-impl PerchApp {
+impl ClaudhubApp {
     pub(super) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Les polices installées sont demandées une fois, à l'ouverture :
         // interroger le système à chaque frame du formulaire coûterait une
@@ -56,7 +56,7 @@ impl PerchApp {
                 .max_w(WIDTH)
                 .child(
                     v_flex().h(HEIGHT).child(
-                        gpui_component::setting::Settings::new("perch-settings")
+                        gpui_component::setting::Settings::new("claudhub-settings")
                             .sidebar_width(px(190.))
                             .page(appearance_page(
                                 ui_fonts,
@@ -105,7 +105,7 @@ fn shell_item(shells: Vec<(SharedString, SharedString)>) -> SettingItem {
         tr!("settings-shell"),
         SettingField::render(move |_, window, cx| {
             let shells = shells.clone();
-            let state = window.use_keyed_state("perch-shell", cx, |window, cx| {
+            let state = window.use_keyed_state("claudhub-shell", cx, |window, cx| {
                 let input = cx.new(|cx| {
                     InputState::new(window, cx)
                         .placeholder(tr!("settings-shell-default"))

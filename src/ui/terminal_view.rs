@@ -31,7 +31,7 @@ use crate::terminal::{
     ViewportPosition,
 };
 use crate::tr;
-use crate::ui::app::PerchApp;
+use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
 use crate::ui::settings::{Settings, TerminalSettings};
 
@@ -955,7 +955,7 @@ impl Render for TerminalGroup {
     }
 }
 
-impl PerchApp {
+impl ClaudhubApp {
     pub(super) fn render_terminals(
         &mut self,
         window: &mut Window,

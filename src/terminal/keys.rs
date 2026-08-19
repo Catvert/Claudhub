@@ -14,7 +14,7 @@ use alacritty_terminal::term::TermMode;
 use gpui::Keystroke;
 
 /// Rend les octets à écrire dans le pty, ou `None` si la frappe n'a rien à y
-/// faire (une touche morte, un modificateur seul, un raccourci de Perch).
+/// faire (une touche morte, un modificateur seul, un raccourci de Claudhub).
 pub fn key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
     let m = &keystroke.modifiers;
     let key = keystroke.key.as_str();
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn platform_shortcuts_stay_in_the_application() {
-        // Cmd/Super+T ouvre un onglet Perch : rien ne doit partir au shell.
+        // Cmd/Super+T ouvre un onglet Claudhub : rien ne doit partir au shell.
         assert_eq!(key_bytes(&stroke("cmd-t"), TermMode::empty()), None);
     }
 }

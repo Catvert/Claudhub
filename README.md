@@ -1,4 +1,4 @@
-# Perch
+# Claudhub
 
 Poste de travail pour la **revue de code** et le **pilotage d'agents de codage
 en terminal**, organisé par **worktree git**. Écrit en Rust sur
@@ -10,7 +10,7 @@ L'idée tient en une phrase : une fenêtre où l'on voit, pour chaque worktree,
 ce qu'un agent a écrit, avec de quoi le relire, le valider et lui reparler,
 sans quitter l'application.
 
-## Ce que fait Perch
+## Ce que fait Claudhub
 
 - **Worktrees** — une barre latérale liste les dépôts ouverts et leurs
   worktrees. Création (`<dépôt>-wt/<nom>`, la convention de l'outil `wt`),
@@ -31,7 +31,7 @@ sans quitter l'application.
   côtés — une ligne supprimée d'après l'ancienne version du fichier, une ligne
   ajoutée d'après la nouvelle — et numéroté des deux côtés. L'affichage est
   virtualisé : un diff de plusieurs milliers de lignes défile sans peiner. À
-  l'ouverture d'un worktree, Perch se place sur le domaine où il y a quelque
+  l'ouverture d'un worktree, Claudhub se place sur le domaine où il y a quelque
   chose à lire — un worktree propre s'ouvre sur la revue de sa branche.
 
   Les modifications en cours tiennent dans **une seule liste, avec une case par
@@ -75,12 +75,12 @@ Sans Nix, les recettes retombent sur `cargo` nu ; à vous d'avoir les
 bibliothèques dans le périmètre. gpui rend via Vulkan : sans `vulkan-loader`
 accessible, rien ne s'affiche.
 
-Lancé depuis un dépôt git, Perch l'ouvre. Les dépôts ouverts sont rouverts au
+Lancé depuis un dépôt git, Claudhub l'ouvre. Les dépôts ouverts sont rouverts au
 démarrage suivant.
 
 ## Sous Windows : par WSL2
 
-Perch est une application Linux ; sous Windows elle se lance **depuis WSL2**,
+Claudhub est une application Linux ; sous Windows elle se lance **depuis WSL2**,
 et WSLg l'affiche comme une fenêtre Windows ordinaire — barre de titre,
 Alt+Tab, presse-papiers partagé. Il n'y a pas de serveur X tiers à installer.
 Il n'y a pas non plus de version native : la détection des agents lit `/proc`,
@@ -103,13 +103,13 @@ Et une règle qui n'est pas un détail de confort : **gardez vos dépôts dans l
 système de fichiers Linux** (`~/projets/…`), jamais sous `/mnt/c`. Sur les
 disques Windows montés par WSL, `inotify` ne remonte aucun événement — la revue
 cesse de se rafraîchir toute seule, sans erreur — et `git status` y est
-plusieurs fois plus lent. Perch reconnaît le cas et l'affiche dans la barre
+plusieurs fois plus lent. Claudhub reconnaît le cas et l'affiche dans la barre
 d'état, mais le remède est de déplacer le dépôt. Les éditeurs Windows y accèdent
 par `\\wsl$\<distribution>\home\…`, et VS Code s'y branche nativement.
 
 ## Réglages
 
-`~/.config/perch/settings.json` (0600), toutes les clés facultatives :
+`~/.config/claudhub/settings.json` (0600), toutes les clés facultatives :
 
 | Clé | Défaut | Rôle |
 | --- | --- | --- |

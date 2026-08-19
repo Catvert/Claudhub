@@ -1,6 +1,6 @@
 //! L'entité racine : l'état de la fenêtre et la pompe d'événements.
 //!
-//! Les sous-vues ne sont pas des entités séparées mais des `impl PerchApp`
+//! Les sous-vues ne sont pas des entités séparées mais des `impl ClaudhubApp`
 //! répartis par fichier (`sidebar`, `review`, `branches`). Tout ce qu'elles
 //! affichent vient du même état, et le faire circuler entre entités coûterait
 //! plus de code qu'il n'en économise. Les terminaux font exception : ils ont
@@ -323,7 +323,7 @@ pub struct Toast {
     pub error: bool,
 }
 
-pub struct PerchApp {
+pub struct ClaudhubApp {
     pub(super) git: runtime::Handle,
     pub(super) repos: Vec<RepoState>,
     /// Worktree sélectionné : la clé de presque tout le reste.
@@ -373,7 +373,7 @@ pub struct PerchApp {
     pub(super) diff_dragging: bool,
 
     /// Surveillance du worktree affiché. `None` si le système refuse de nous
-    /// donner un observateur (limite d'inotify atteinte, par exemple) : Perch
+    /// donner un observateur (limite d'inotify atteinte, par exemple) : Claudhub
     /// marche encore, il faut seulement actualiser à la main.
     watcher: Option<Watcher>,
 
@@ -395,7 +395,7 @@ pub struct PerchApp {
     focus: FocusHandle,
 }
 
-impl PerchApp {
+impl ClaudhubApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (git, events) = runtime::spawn();
 
@@ -431,7 +431,7 @@ impl PerchApp {
         // délèguent à cette entité, dont ils ne gardent qu'une référence
         // faible pour ne pas former de cycle.
         let this = cx.entity();
-        let dock = cx.new(|cx| DockArea::new("perch", Some(LAYOUT_VERSION), window, cx));
+        let dock = cx.new(|cx| DockArea::new("claudhub", Some(LAYOUT_VERSION), window, cx));
         let weak_dock = dock.downgrade();
         crate::ui::panels::register(&this, cx);
 
@@ -518,7 +518,7 @@ impl PerchApp {
         app.start_watching(window, cx);
 
         // Les dépôts de la session précédente, puis le répertoire courant s'il
-        // en est un — c'est ce qu'attend quelqu'un qui lance `perch` depuis son
+        // en est un — c'est ce qu'attend quelqu'un qui lance `claudhub` depuis son
         // projet.
         let remembered = Settings::global(cx).repositories.clone();
         for path in remembered {
@@ -1329,7 +1329,7 @@ impl PerchApp {
             .unwrap_or((0, 0));
         // Sur un disque Windows monté par WSL, la surveillance ne remonte
         // rien : le dire est le seul moyen de distinguer « rien n'a changé »
-        // de « Perch ne voit plus rien ». Le calcul est refait à chaque frame
+        // de « Claudhub ne voit plus rien ». Le calcul est refait à chaque frame
         // parce qu'il ne coûte qu'une comparaison de composants de chemin,
         // l'appartenance à WSL étant retenue une fois pour toutes.
         let unwatched = self
@@ -1378,13 +1378,13 @@ impl PerchApp {
     }
 }
 
-impl Focusable for PerchApp {
+impl Focusable for ClaudhubApp {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus.clone()
     }
 }
 
-impl Render for PerchApp {
+impl Render for ClaudhubApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .key_context(super::shortcuts::context())
@@ -1426,7 +1426,7 @@ impl Render for PerchApp {
     }
 }
 
-impl PerchApp {
+impl ClaudhubApp {
     /// Ouvre un dialogue à une seule ligne de saisie.
     ///
     /// L'`InputState` est créé ici et capturé par la fermeture : une entité
@@ -1458,7 +1458,7 @@ impl PerchApp {
     }
 }
 
-impl PerchApp {
+impl ClaudhubApp {
     pub(super) fn active_path(&self) -> Option<PathBuf> {
         self.active.clone()
     }

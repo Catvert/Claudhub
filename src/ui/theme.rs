@@ -1,6 +1,6 @@
 //! Thème.
 //!
-//! Perch reprend les palettes claire et sombre de gpui-component et n'y touche
+//! Claudhub reprend les palettes claire et sombre de gpui-component et n'y touche
 //! qu'à la marge : les couleurs des diffs et des états git, que la
 //! bibliothèque n'a pas de raison de connaître.
 
@@ -11,27 +11,26 @@ use gpui_component::{Theme, ThemeRegistry};
 
 use super::settings::{Settings, ThemeMode};
 
-/// Les thèmes livrés avec Perch.
+/// Les thèmes livrés avec Claudhub.
 ///
 /// Ils sont embarqués dans le binaire, puis **écrits sur le disque** au
 /// démarrage : le registre de gpui-component ne se charge que depuis un
 /// répertoire, qu'il surveille. L'effet de bord est heureux — le même
 /// répertoire accueille les thèmes que l'utilisateur ajoute, et un fichier
-/// modifié est rechargé sans relancer Perch.
+/// modifié est rechargé sans relancer Claudhub.
 #[derive(rust_embed::RustEmbed)]
 #[folder = "assets/themes"]
 #[include = "*.json"]
 struct BundledThemes;
 
 pub fn themes_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("be", "acetics", "perch")
-        .map(|dirs| dirs.config_dir().join("themes"))
+    super::settings::config_dir().map(|dir| dir.join("themes"))
 }
 
 /// Installe les thèmes livrés et met le registre à leur écoute.
 ///
-/// Les fichiers `perch-*.json` sont réécrits à chaque démarrage : c'est ce qui
-/// fait qu'une mise à jour de Perch corrige un thème sans demander une
+/// Les fichiers `claudhub-*.json` sont réécrits à chaque démarrage : c'est ce qui
+/// fait qu'une mise à jour de Claudhub corrige un thème sans demander une
 /// manœuvre. Pour en modifier un, il faut donc le copier sous un autre nom —
 /// tout fichier `.json` du répertoire est chargé.
 pub fn install(cx: &mut App) {
@@ -274,7 +273,7 @@ mod tests {
     /// blanche au milieu de la fenêtre, et rien ne le signale.
     #[test]
     fn no_bundled_theme_leaves_a_colour_unset() {
-        let reference: std::collections::BTreeSet<String> = keys_of("perch-nord.json");
+        let reference: std::collections::BTreeSet<String> = keys_of("claudhub-nord.json");
         for name in BundledThemes::iter() {
             let keys = keys_of(&name);
             let missing: Vec<_> = reference.difference(&keys).collect();

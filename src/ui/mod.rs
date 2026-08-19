@@ -79,6 +79,9 @@ fn install_fonts(cx: &mut App) {
 }
 
 pub fn run() {
+    // Avant toute lecture : ce que l'utilisateur avait réglé sous l'ancien nom
+    // du projet est repris ici, sans quoi il retrouverait une fenêtre neuve.
+    settings::migrate_from_perch();
     let settings = Settings::load();
     set_language(settings.language);
 
@@ -108,11 +111,11 @@ pub fn run() {
             WindowOptions {
                 window_bounds: Some(window_bounds),
                 titlebar: Some(gpui_component::TitleBar::title_bar_options()),
-                app_id: Some("perch".into()),
+                app_id: Some("claudhub".into()),
                 ..Default::default()
             },
             |window, cx| {
-                let main = cx.new(|cx| app::PerchApp::new(window, cx));
+                let main = cx.new(|cx| app::ClaudhubApp::new(window, cx));
                 cx.new(|cx| Root::new(main, window, cx))
             },
         );

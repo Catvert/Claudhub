@@ -41,7 +41,7 @@ src/
     keys.rs     frappe gpui → octets (séquences xterm)
   ui/           tout gpui
     mod.rs      `run()`, `AssetSource`, polices, i18n
-    app.rs      `PerchApp` : l'état, la pompe d'événements, le chrome
+    app.rs      `ClaudhubApp` : l'état, la pompe d'événements, le chrome
     diff_view.rs   la vue de diff, virtualisée
     history_view.rs  l'historique et son graphe peint
     highlight.rs   coloration tree-sitter d'un diff
@@ -55,13 +55,13 @@ src/
 
 Le thread d'interface envoie des `Cmd` par `runtime::Handle::send`. Trois
 threads workers les consomment (`async_channel` est un canal MPMC, ils partagent
-le même récepteur) et répondent par des `Evt`. `PerchApp::pump_events` les
+le même récepteur) et répondent par des `Evt`. `ClaudhubApp::pump_events` les
 draine par lots de 64 dans une tâche gpui de premier plan : un `update_in` par
 événement forcerait un cycle d'effets à chaque fois.
 
 Ajouter une opération, c'est : une variante de `Cmd`, un bras dans
 `runtime::handle`, une ou plusieurs variantes d'`Evt`, un bras dans
-`PerchApp::handle_event`. Jamais un appel à git depuis un `render` ou un
+`ClaudhubApp::handle_event`. Jamais un appel à git depuis un `render` ou un
 gestionnaire de clic — la plus rapide des commandes coûte déjà une frame.
 
 Toute écriture git est suivie d'une relecture du statut (`write_then_refresh`),
@@ -255,7 +255,7 @@ s'applique pas —, et le message le dit.
 
 `app::initial_range` choisit, au **premier** statut d'un worktree, entre les
 modifications, l'index et la revue de branche : ouvrir sur un domaine vide alors que l'autre est
-plein est la façon la plus sûre de faire croire que Perch ne voit rien — un
+plein est la façon la plus sûre de faire croire que Claudhub ne voit rien — un
 worktree d'agent est propre et n'a que des commits à relire, d'où le repli sur
 la revue de branche, qui attend que la base soit connue (`initial_range` rend
 alors `None` plutôt que de trancher). Ensuite
@@ -303,7 +303,7 @@ masquerait la bibliothèque de journalisation du même nom.
 ### Les réglages
 
 Ils vivent dans un **global gpui** (`settings::SettingsStore`) et non dans
-`PerchApp`. Ce n'est pas un choix de style : le formulaire de gpui-component
+`ClaudhubApp`. Ce n'est pas un choix de style : le formulaire de gpui-component
 déclare chaque champ par un couple lire/écrire dont les fermetures ne reçoivent
 qu'un `App`, sans accès à l'entité racine. `Settings::global(cx)` lit,
 `Settings::update_global(cx, |s| …)` écrit.
@@ -373,7 +373,7 @@ raison.
 
 Un clic sur une ligne **prend le focus**. Sans cela le focus reste au terminal,
 et le `Ctrl+C` qui suit part au programme qui y tourne au lieu de copier. Pour
-la même raison, la liaison de copie exclut `Input` et `PerchTerminal` de son
+la même raison, la liaison de copie exclut `Input` et `ClaudhubTerminal` de son
 prédicat : le champ de message de commit a sa propre copie.
 
 ### La répartition du chrome
@@ -407,7 +407,7 @@ Le registre de gpui-component ne se charge **que depuis un répertoire**, qu'il
 surveille. Les thèmes sont donc embarqués dans le binaire puis écrits dans
 `<config>/themes/` au démarrage. L'effet de bord est heureux : le même
 répertoire accueille les thèmes de l'utilisateur, et un fichier modifié est
-rechargé sans relancer Perch. Corollaire à dire : les fichiers `perch-*.json`
+rechargé sans relancer Claudhub. Corollaire à dire : les fichiers `claudhub-*.json`
 sont réécrits à chaque démarrage — pour en modifier un, il faut le copier sous
 un autre nom.
 
@@ -426,12 +426,12 @@ glissement d'un panneau d'une zone à l'autre, les onglets et les zones
 d'accueil. Chaque zone est donc une **entité à part** — `ui/panels.rs` — parce
 que le dock ne sait déplacer que des entités.
 
-Les panneaux ne portent aucun état : ils délèguent à `PerchApp`, dont ils ne
+Les panneaux ne portent aucun état : ils délèguent à `ClaudhubApp`, dont ils ne
 gardent qu'une référence **faible** — forte, elle formerait un cycle,
 l'application tenant le dock qui tient les panneaux. Ils l'observent, sans quoi
 ils garderaient l'image de l'état au moment de leur construction.
 
-Rendre depuis un `update` sur `PerchApp` est licite : le rendu d'une vue enfant
+Rendre depuis un `update` sur `ClaudhubApp` est licite : le rendu d'une vue enfant
 a lieu *après* que la fermeture de rendu du parent a rendu la main, donc hors
 de cet emprunt.
 
@@ -499,7 +499,7 @@ de `/proc`, ce qui se lit comme une détection cassée au lieu d'une absence
 assumée. C'est aussi ce qui fixe la cible Windows à WSL2 plutôt qu'au natif.
 
 La détection des agents passe par `/proc` et non par nos propres onglets : on
-lance un agent depuis Perch, mais aussi depuis un terminal à côté, et c'est le
+lance un agent depuis Claudhub, mais aussi depuis un terminal à côté, et c'est le
 même travail qu'on veut voir. Le répertoire courant d'un processus dit dans
 quel worktree il travaille ; le worktree le plus profond l'emporte, faute de
 quoi un worktree imbriqué se verrait attribuer les agents de son parent.
@@ -564,7 +564,7 @@ la vue ne peut pas détruire un fichier versionné.
 ### Quel worktree s'ouvre
 
 `runtime::open_repo` retient le checkout d'où l'ouverture vient, et non le
-premier de la liste — qui est toujours le dépôt principal. Lancer `perch` dans
+premier de la liste — qui est toujours le dépôt principal. Lancer `claudhub` dans
 un worktree doit ouvrir *ce* worktree. Le worktree retenu est le plus profond
 dont le chemin est un préfixe de celui demandé, faute de quoi un worktree
 imbriqué dans un autre serait attribué au mauvais.
@@ -647,7 +647,7 @@ qu'en créer une seconde doublait le coût fixe de chaque fichier ouvert.
 ### Le terminal
 
 `alacritty_terminal` fournit le parseur VTE, la grille, l'historique et le pty.
-Perch écrit deux choses : `keys::key_bytes` (frappe → octets) et
+Claudhub écrit deux choses : `keys::key_bytes` (frappe → octets) et
 `snapshot::capture` (grille → lignes stylées). Le rendu est du texte — un
 `StyledText` par ligne avec ses runs — et non un canevas : une police à chasse
 fixe suffit à aligner les colonnes, et gpui garde la charge du façonnage.
@@ -725,7 +725,7 @@ Elles viennent d'Aviary, et les enfreindre produit des bugs silencieux.
   notifications) à la fin de son `render`, sinon elles ne s'affichent nulle
   part.
 - **`key_context` prend un identifiant, pas un prédicat.** Passer
-  `"Perch && !Dialog"` à `key_context` fait boucler le parseur et déborder la
+  `"Claudhub && !Dialog"` à `key_context` fait boucler le parseur et déborder la
   pile au premier rendu. L'expression va dans le troisième argument de
   `KeyBinding::new` ; le contexte va dans `shortcuts::context()`.
 - Les raccourcis de l'application passent tous par `secondary-` : le reste du

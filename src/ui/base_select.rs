@@ -2,7 +2,7 @@
 //!
 //! Une entrée n'est pas qu'un nom. Choisir entre `dev`, `origin/dev` et
 //! `wt/dev-2` demande de savoir laquelle a bougé en dernier et ce qu'elle
-//! porte — sans quoi il faut sortir de Perch pour interroger git avant de
+//! porte — sans quoi il faut sortir de Claudhub pour interroger git avant de
 //! pouvoir cliquer. Ces informations sont déjà lues avec la liste des
 //! branches : les afficher ne coûte aucune commande de plus.
 //!

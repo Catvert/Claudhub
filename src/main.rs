@@ -1,4 +1,4 @@
-//! Perch — poste de travail de revue de code et de pilotage d'agents de
+//! Claudhub — poste de travail de revue de code et de pilotage d'agents de
 //! codage en terminal, organisé par worktree git.
 
 // rust-i18n lit les catalogues à la compilation via sa macro procédurale ;

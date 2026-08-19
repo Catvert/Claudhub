@@ -13,7 +13,7 @@ use gpui_component::{
 
 use crate::runtime::Cmd;
 use crate::tr;
-use crate::ui::app::PerchApp;
+use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
 
 /// Ce qu'une ligne de la barre latérale affiche d'un worktree.
@@ -100,7 +100,7 @@ fn agent_badge(agent: crate::ui::app::AgentState, cx: &gpui::App) -> impl IntoEl
         })
 }
 
-impl PerchApp {
+impl ClaudhubApp {
     pub(super) fn render_sidebar(
         &mut self,
         _window: &mut Window,

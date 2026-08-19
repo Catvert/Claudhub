@@ -8,9 +8,9 @@ use anyhow::{anyhow, bail, Context, Result};
 
 use super::{git, git_ok, git_opt, split_nul};
 
-/// Un dépôt tel que Perch le voit : le dépôt principal et ses worktrees liés.
+/// Un dépôt tel que Claudhub le voit : le dépôt principal et ses worktrees liés.
 ///
-/// `main` est toujours le dépôt d'origine, même si Perch a été ouvert sur un
+/// `main` est toujours le dépôt d'origine, même si Claudhub a été ouvert sur un
 /// worktree : `--git-common-dir` pointe sur le `.git` partagé quel que soit le
 /// checkout d'où on l'interroge.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,7 +257,7 @@ pub fn pull(dir: &Path) -> Result<String> {
 }
 
 /// Pousse la branche courante. `--set-upstream` couvre le premier envoi d'une
-/// branche créée par Perch, dont la remote n'existe pas encore.
+/// branche créée par Claudhub, dont la remote n'existe pas encore.
 pub fn push(dir: &Path, force_with_lease: bool) -> Result<String> {
     let branch = super::branch::current(dir).ok_or_else(|| anyhow!("HEAD est détachée"))?;
     let mut args: Vec<OsString> = vec!["push".into(), "--set-upstream".into(), "origin".into()];

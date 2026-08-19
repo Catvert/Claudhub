@@ -1,7 +1,7 @@
 //! Coloration syntaxique des diffs.
 //!
 //! Le contenu d'un diff est du code, et c'est le code qu'on relit — pas les
-//! marqueurs `+`/`-`. Perch colore donc les lignes avec la grammaire du
+//! marqueurs `+`/`-`. Claudhub colore donc les lignes avec la grammaire du
 //! *fichier*, pas avec la grammaire `diff`.
 //!
 //! Le problème que cela pose : un hunk n'est pas un fichier. Il commence au
@@ -32,7 +32,7 @@ use crate::git::{DiffLineKind, FileDiff};
 /// Enregistre les grammaires que gpui-component n'embarque pas.
 ///
 /// PHP en est absent, alors que c'est le langage de la moitié des dépôts que
-/// Perch sert à relire ; sa grammaire est donc liée en direct et déclarée dans
+/// Claudhub sert à relire ; sa grammaire est donc liée en direct et déclarée dans
 /// le registre partagé, d'où le reste de la bibliothèque la retrouvera sous le
 /// nom `php` comme n'importe quelle autre.
 ///

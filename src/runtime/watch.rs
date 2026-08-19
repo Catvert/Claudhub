@@ -59,7 +59,7 @@ impl Watcher {
         // Un thread pour poser et retirer les surveillances, opérations longues
         // sur une grosse arborescence.
         std::thread::Builder::new()
-            .name("perch-watch-orders".into())
+            .name("claudhub-watch-orders".into())
             .spawn(move || {
                 let mut watched: HashSet<PathBuf> = HashSet::new();
                 while let Ok(order) = order_rx.recv() {
@@ -99,7 +99,7 @@ impl Watcher {
         // Un thread de traduction : il ne garde d'un lot que les chemins qui
         // changent quelque chose, dédoublonnés.
         std::thread::Builder::new()
-            .name("perch-watch".into())
+            .name("claudhub-watch".into())
             .spawn(move || {
                 while let Ok(result) = raw_rx.recv() {
                     let Ok(events) = result else { continue };
@@ -357,7 +357,7 @@ fn git_dir(worktree: &Path) -> Option<PathBuf> {
 mod tests {
     use notify::event::{AccessKind, CreateKind, EventKind, MetadataKind, ModifyKind};
 
-    /// Le défaut qui faisait tourner Perch en boucle : inotify signale chaque
+    /// Le défaut qui faisait tourner Claudhub en boucle : inotify signale chaque
     /// ouverture de fichier, `git status` en ouvre des milliers, et chaque
     /// événement relançait un `git status`.
     #[test]
@@ -420,7 +420,7 @@ mod tests {
 
     #[test]
     fn a_linked_worktree_points_at_its_own_git_directory() {
-        let root = std::env::temp_dir().join(format!("perch-gitdir-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("claudhub-gitdir-{}", std::process::id()));
         let main = root.join("depot/.git/worktrees/feature");
         let linked = root.join("feature");
         std::fs::create_dir_all(&main).unwrap();
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn only_the_directories_git_knows_are_watched() {
         // Un vrai petit dépôt : du code suivi, et un dossier ignoré qui pèse.
-        let root = std::env::temp_dir().join(format!("perch-tracked-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("claudhub-tracked-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("src/interne")).unwrap();
         std::fs::create_dir_all(root.join("vendor/paquet/profond")).unwrap();
@@ -494,7 +494,7 @@ mod tests {
     /// le filtre.
     #[test]
     fn a_real_write_reaches_the_receiver() {
-        let dir = std::env::temp_dir().join(format!("perch-watch-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("claudhub-watch-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("répertoire temporaire");
 
         let (mut watcher, changes) = Watcher::new().expect("observateur disponible");

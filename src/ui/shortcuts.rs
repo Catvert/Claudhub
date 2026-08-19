@@ -1,17 +1,17 @@
 //! Raccourcis clavier.
 //!
 //! Un terminal a besoin de presque toutes les combinaisons : Ctrl+C, Ctrl+D,
-//! Ctrl+L appartiennent au programme qui tourne dedans, pas à Perch. Les
+//! Ctrl+L appartiennent au programme qui tourne dedans, pas à Claudhub. Les
 //! raccourcis de l'application passent donc tous par la touche système
 //! (`secondary-`, c'est-à-dire Ctrl sous Linux et Windows, Cmd sous macOS),
 //! que `key_bytes` refuse justement de transmettre au pty.
 
 use gpui::{actions, App, KeyBinding, KeyContext, Window};
 
-use crate::ui::app::PerchApp;
+use crate::ui::app::ClaudhubApp;
 
 actions!(
-    perch,
+    claudhub,
     [
         Refresh,
         NewTerminal,
@@ -46,7 +46,7 @@ actions!(
 /// À ne pas confondre avec `context()` : ceci est une *expression*, évaluée
 /// contre la pile de contextes du nœud focalisé, et elle n'a de sens que dans
 /// `KeyBinding::new`. La passer à `key_context` fait boucler le parseur.
-const PREDICATE: &str = "Perch && !Dialog && !PopupMenu && !Popover";
+const PREDICATE: &str = "Claudhub && !Dialog && !PopupMenu && !Popover";
 
 /// Prédicat de la copie depuis le diff.
 ///
@@ -55,11 +55,11 @@ const PREDICATE: &str = "Perch && !Dialog && !PopupMenu && !Popover";
 /// tourne. Sans ces deux exclusions, copier une ligne saisie dans le message de
 /// commit rendrait le diff à la place.
 const COPY_PREDICATE: &str =
-    "Perch && !Dialog && !PopupMenu && !Popover && !Input && !PerchTerminal";
+    "Claudhub && !Dialog && !PopupMenu && !Popover && !Input && !ClaudhubTerminal";
 
 /// Prédicat de la navigation au clavier.
 ///
-/// Les flèches nues sont les seules touches de Perch qui ne passent pas par la
+/// Les flèches nues sont les seules touches de Claudhub qui ne passent pas par la
 /// touche système, et c'est ce qui les rend délicates : elles appartiennent à
 /// qui a le focus. Un champ de saisie déplace son curseur, un terminal les
 /// transmet au programme, un menu change d'entrée — ces trois-là sont donc
@@ -70,7 +70,7 @@ const NAVIGATION_PREDICATE: &str = COPY_PREDICATE;
 /// nom auquel `PREDICATE` se réfère.
 pub fn context() -> KeyContext {
     let mut context = KeyContext::default();
-    context.add("Perch");
+    context.add("Claudhub");
     context
 }
 
@@ -79,18 +79,18 @@ pub fn context() -> KeyContext {
 // nommée `Copy` entrerait en collision avec le trait du même nom, que tout
 // module Rust a dans son périmètre.
 actions!(
-    perch_terminal,
+    claudhub_terminal,
     [CopySelection, PasteClipboard, SelectAllText]
 );
 
 /// Contexte déclaré par une vue de terminal. Les trois raccourcis ci-dessous
 /// n'existent que là : `Ctrl+Maj+C` ailleurs dans l'interface n'aurait rien à
 /// copier, et `Ctrl+C` tout court appartient au programme qui tourne.
-const TERMINAL_PREDICATE: &str = "PerchTerminal";
+const TERMINAL_PREDICATE: &str = "ClaudhubTerminal";
 
 pub fn terminal_context() -> KeyContext {
     let mut context = KeyContext::default();
-    context.add("PerchTerminal");
+    context.add("ClaudhubTerminal");
     context
 }
 
@@ -145,19 +145,19 @@ pub fn init(cx: &mut App) {
 }
 
 pub fn refresh(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &Refresh,
     _window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.refresh_active(cx);
 }
 
 pub fn new_terminal(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &NewTerminal,
     window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     let Some(worktree) = this.active_path() else {
         return;
@@ -170,10 +170,10 @@ pub fn new_terminal(
 }
 
 pub fn close_terminal(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &CloseTerminal,
     window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     let Some(worktree) = this.active_path() else {
         return;
@@ -186,19 +186,19 @@ pub fn close_terminal(
 }
 
 pub fn toggle_terminal(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &ToggleTerminal,
     window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.toggle_terminal_panel(window, cx);
 }
 
 pub fn next_terminal(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &NextTerminal,
     window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     let Some(worktree) = this.active_path() else {
         return;
@@ -208,163 +208,163 @@ pub fn next_terminal(
 }
 
 pub fn open_settings(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &OpenSettings,
     window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.open_settings(window, cx);
 }
 
 pub fn zoom_in(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &ZoomIn,
     window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.zoom(1., window, cx);
 }
 
 pub fn zoom_out(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &ZoomOut,
     window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.zoom(-1., window, cx);
 }
 
 pub fn zoom_reset(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &ZoomReset,
     window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.reset_zoom(window, cx);
 }
 
 pub fn copy_diff(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &CopyDiff,
     _window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.copy_diff(false, cx);
 }
 
 pub fn copy_diff_patch(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &CopyDiffPatch,
     _window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.copy_diff(true, cx);
 }
 
 pub fn select_whole_diff(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &SelectWholeDiff,
     _window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.select_whole_diff(cx);
 }
 
 pub fn previous_line(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &PreviousLine,
     _window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.step_diff_row(-1, false, cx);
 }
 
 pub fn next_line(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &NextLine,
     _window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.step_diff_row(1, false, cx);
 }
 
 pub fn extend_up(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &ExtendUp,
     _window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.step_diff_row(-1, true, cx);
 }
 
 pub fn extend_down(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &ExtendDown,
     _window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.step_diff_row(1, true, cx);
 }
 
 pub fn previous_hunk(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &PreviousHunk,
     _window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.step_diff_hunk(-1, cx);
 }
 
 pub fn next_hunk(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &NextHunk,
     _window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.step_diff_hunk(1, cx);
 }
 
 pub fn previous_file(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &PreviousFile,
     _window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.step_file(-1, cx);
 }
 
 pub fn next_file(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &NextFile,
     _window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.step_file(1, cx);
 }
 
 pub fn toggle_diff_split(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &ToggleDiffSplit,
     _window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.toggle_diff_split(cx);
 }
 
 pub fn toggle_whole_file(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &ToggleWholeFile,
     _window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.toggle_whole_file(cx);
 }
 
 pub fn commit(
-    this: &mut PerchApp,
+    this: &mut ClaudhubApp,
     _: &Commit,
     _window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
+    cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.commit(false, cx);
 }

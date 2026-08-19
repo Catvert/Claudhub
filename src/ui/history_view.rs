@@ -23,7 +23,7 @@ use gpui_component::{
 use crate::git::{DiffRange, GraphRow, LogRange};
 use crate::runtime::Cmd;
 use crate::tr;
-use crate::ui::app::{History, PerchApp};
+use crate::ui::app::{ClaudhubApp, History};
 
 /// Largeur d'une colonne du graphe.
 const LANE: Pixels = px(14.);
@@ -52,7 +52,7 @@ fn lane_color(column: usize, cx: &gpui::App) -> Hsla {
     }
 }
 
-impl PerchApp {
+impl ClaudhubApp {
     /// Charge l'historique du worktree courant s'il ne l'est pas déjà.
     pub(super) fn ensure_history(&mut self, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
@@ -241,7 +241,7 @@ impl PerchApp {
         let Some(range) = commit_range else {
             return graph.into_any_element();
         };
-        v_resizable("perch-history-split")
+        v_resizable("claudhub-history-split")
             .with_state(&self.history_split)
             .child(resizable_panel().size(px(420.)).child(graph))
             .child(
@@ -259,7 +259,7 @@ fn render_commit(
     gutter: Pixels,
     selected: Option<&str>,
     row_height: Pixels,
-    entity: &Entity<PerchApp>,
+    entity: &Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
     let (Some(commit), Some(row)) = (history.commits.get(index), history.graph.get(index)) else {

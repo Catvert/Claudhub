@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Génère les thèmes de Perch au format de gpui-component.
+"""Génère les thèmes de Claudhub au format de gpui-component.
 
 Un thème complet compte une centaine de couleurs. Les écrire à la main pour
 chaque palette serait une source d'erreurs muettes — une clé oubliée reprend
@@ -316,7 +316,7 @@ def main():
     for palette in PALETTES:
         document = {
             "name": palette.name,
-            "author": "Perch",
+            "author": "Claudhub",
             "themes": [
                 {
                     "name": palette.name,
@@ -326,7 +326,7 @@ def main():
                 }
             ],
         }
-        path = OUT / f"perch-{slug(palette.name)}.json"
+        path = OUT / f"claudhub-{slug(palette.name)}.json"
         path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
         print(path.name)
 

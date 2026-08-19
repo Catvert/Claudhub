@@ -3,9 +3,9 @@
 //! Un seul fichier JSON dans le répertoire de configuration de l'utilisateur.
 //! Tout y est optionnel : une clé absente reprend sa valeur par défaut, ce qui
 //! rend l'ajout d'un réglage compatible avec les fichiers déjà écrits, et un
-//! fichier illisible n'empêche jamais Perch de démarrer.
+//! fichier illisible n'empêche jamais Claudhub de démarrer.
 //!
-//! Les réglages vivent dans un global gpui plutôt que dans `PerchApp` : le
+//! Les réglages vivent dans un global gpui plutôt que dans `ClaudhubApp` : le
 //! formulaire de gpui-component lit et écrit chaque champ à travers des
 //! fermetures qui ne reçoivent qu'un `App`, sans accès à l'entité racine.
 //! Passer par un global est ce qui permet d'écrire un réglage depuis
@@ -147,7 +147,7 @@ impl TerminalSettings {
     /// Rend `None` pour un réglage vide, ce qui laisse alacritty ouvrir le
     /// shell de connexion tel que `/etc/passwd` le déclare. Le réglage accepte
     /// une ligne de commande entière — `fish -l`, `tmux new-session -A -s
-    /// perch` — parce qu'un shell nu n'est pas toujours ce qu'on veut ouvrir.
+    /// claudhub` — parce qu'un shell nu n'est pas toujours ce qu'on veut ouvrir.
     pub fn program(&self) -> Option<(String, Vec<String>)> {
         let mut parts = self.shell.split_whitespace().map(str::to_string);
         let program = parts.next()?;
@@ -502,14 +502,64 @@ pub fn available_shells() -> Vec<String> {
 /// À part des réglages : ce n'est pas une préférence qu'on écrit à la main
 /// mais l'état d'une fenêtre, volumineux et illisible, et un utilisateur qui
 /// ouvre `settings.json` n'a pas à le trouver là.
+/// Le répertoire où Claudhub range ce qu'il retient : réglages, disposition
+/// des panneaux, thèmes.
+pub fn config_dir() -> Option<PathBuf> {
+    directories::ProjectDirs::from("be", "acetics", "claudhub")
+        .map(|dirs| dirs.config_dir().to_path_buf())
+}
+
 pub fn layout_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("be", "acetics", "perch")
-        .map(|dirs| dirs.config_dir().join("layout.json"))
+    config_dir().map(|dir| dir.join("layout.json"))
 }
 
 fn settings_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("be", "acetics", "perch")
-        .map(|dirs| dirs.config_dir().join("settings.json"))
+    config_dir().map(|dir| dir.join("settings.json"))
+}
+
+/// Reprend la configuration écrite sous l'ancien nom du projet.
+///
+/// Perch est devenu Claudhub, et le répertoire de configuration porte le nom
+/// du projet : sans reprise, un utilisateur retrouverait au lancement une
+/// fenêtre neuve, ses dépôts et sa disposition oubliés. Le déplacement est
+/// fait une seule fois — s'il existe déjà un répertoire au nouveau nom, c'est
+/// que la reprise a eu lieu, ou que l'utilisateur a commencé avec Claudhub.
+///
+/// À appeler avant la première lecture des réglages. Ce code n'a de raison
+/// d'être que le temps que les installations existantes soient passées.
+pub fn migrate_from_perch() {
+    let (Some(new), Some(old)) = (
+        config_dir(),
+        directories::ProjectDirs::from("be", "acetics", "perch")
+            .map(|d| d.config_dir().to_path_buf()),
+    ) else {
+        return;
+    };
+    if new == old || new.exists() || !old.exists() {
+        return;
+    }
+    if let Err(e) = std::fs::rename(&old, &new) {
+        log::warn!("reprise de l'ancienne configuration : {e}");
+        return;
+    }
+    // La disposition nomme ses panneaux, et ces noms ont changé avec le
+    // projet : sans cette réécriture, le dock ne retrouverait aucun de ses
+    // panneaux et repartirait de la disposition par défaut.
+    if let Some(path) = layout_path() {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let _ = std::fs::write(&path, text.replace("Perch", "Claudhub"));
+        }
+    }
+    // Les thèmes livrés sont réécrits sous leur nouveau nom au démarrage : les
+    // anciens feraient double emploi dans la liste, avec les mêmes noms.
+    if let Ok(entries) = std::fs::read_dir(new.join("themes")) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with("perch-") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    log::info!("configuration reprise depuis {}", old.display());
 }
 
 /// Écrit en 0600 sous Unix : le fichier porte les chemins des dépôts et la
@@ -629,7 +679,7 @@ mod tests {
         // Une ligne de commande entière : ouvrir directement une session tmux
         // est un usage courant, et un shell nu n'est pas toujours ce qu'on
         // veut.
-        s.shell = "tmux new-session -A -s perch".into();
+        s.shell = "tmux new-session -A -s claudhub".into();
         assert_eq!(
             s.program(),
             Some((
@@ -638,7 +688,7 @@ mod tests {
                     "new-session".into(),
                     "-A".into(),
                     "-s".into(),
-                    "perch".into()
+                    "claudhub".into()
                 ]
             ))
         );

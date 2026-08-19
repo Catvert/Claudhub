@@ -1,7 +1,7 @@
-//! Couche git de Perch.
+//! Couche git de Claudhub.
 //!
 //! Tout passe par le binaire `git` en sous-processus, jamais par libgit2. Un
-//! utilisateur qui lance Perch attend que ses `credential.helper`,
+//! utilisateur qui lance Claudhub attend que ses `credential.helper`,
 //! `includeIf`, hooks, `commit.gpgsign` et alias s'appliquent — c'est-à-dire
 //! sa configuration, pas une réimplémentation qui en couvrirait la moitié.
 //! Le coût est un `fork` par commande ; à l'échelle d'un panneau de revue qui
@@ -64,7 +64,7 @@ fn timeout() -> Duration {
 /// ligne final.
 ///
 /// `stdin` est fermé : sans cela une commande qui décide de demander un mot de
-/// passe hérite du terminal depuis lequel Perch a été lancé — au mieux rien ne
+/// passe hérite du terminal depuis lequel Claudhub a été lancé — au mieux rien ne
 /// s'affiche, au pire le worker se bloque pour toujours sur une invite que
 /// personne ne voit. `GIT_TERMINAL_PROMPT=0` fait dire non à git plutôt que de
 /// le laisser essayer, et l'échec remonte comme un message d'erreur normal.

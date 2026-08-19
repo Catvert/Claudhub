@@ -3,13 +3,13 @@
 //! Chaque zone de l'interface est une entité à part, ce que le dock de
 //! gpui-component exige pour la déplacer : c'est lui qui gère le glissement,
 //! les onglets et les zones d'accueil. Les panneaux ne portent aucun état —
-//! ils délèguent à `PerchApp`, qui reste la seule source.
+//! ils délèguent à `ClaudhubApp`, qui reste la seule source.
 //!
-//! La référence à `PerchApp` est **faible**. Forte, elle formerait un cycle —
+//! La référence à `ClaudhubApp` est **faible**. Forte, elle formerait un cycle —
 //! l'application tient le dock, qui tient les panneaux — et rien ne serait
 //! libéré à la fermeture de la fenêtre.
 //!
-//! Rendre depuis un `update` sur `PerchApp` est licite parce que le rendu d'une
+//! Rendre depuis un `update` sur `ClaudhubApp` est licite parce que le rendu d'une
 //! vue enfant a lieu *après* que la fermeture de rendu du parent a rendu la
 //! main : la mise en page est faite hors de cet emprunt.
 
@@ -22,7 +22,7 @@ use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::dock::{register_panel, PanelView};
 
 use crate::tr;
-use crate::ui::app::PerchApp;
+use crate::ui::app::ClaudhubApp;
 
 /// Déclare les panneaux au registre du dock.
 ///
@@ -30,7 +30,7 @@ use crate::ui::app::PerchApp;
 /// contient que des noms, et le registre dit comment fabriquer l'entité qui va
 /// avec. Sans cette déclaration, une disposition relue affiche des panneaux
 /// « inconnus » à la place des nôtres.
-pub fn register(app: &Entity<PerchApp>, cx: &mut App) {
+pub fn register(app: &Entity<ClaudhubApp>, cx: &mut App) {
     macro_rules! declare {
         ($($name:ident => $id:literal),* $(,)?) => { $(
             let handle = app.clone();
@@ -41,27 +41,27 @@ pub fn register(app: &Entity<PerchApp>, cx: &mut App) {
         )* };
     }
     declare! {
-        SidebarPanel => "PerchSidebar",
-        BranchesPanel => "PerchBranches",
-        ChangesPanel => "PerchChanges",
-        BranchPanel => "PerchBranch",
-        HistoryPanel => "PerchHistory",
-        DiffPanel => "PerchDiff",
-        TerminalPanel => "PerchTerminal",
+        SidebarPanel => "ClaudhubSidebar",
+        BranchesPanel => "ClaudhubBranches",
+        ChangesPanel => "ClaudhubChanges",
+        BranchPanel => "ClaudhubBranch",
+        HistoryPanel => "ClaudhubHistory",
+        DiffPanel => "ClaudhubDiff",
+        TerminalPanel => "ClaudhubTerminal",
     }
 }
 
 macro_rules! panels {
     ($($name:ident => ($id:literal, $title:literal, $render:ident)),* $(,)?) => { $(
         pub struct $name {
-            app: WeakEntity<PerchApp>,
+            app: WeakEntity<ClaudhubApp>,
             focus: FocusHandle,
         }
 
         impl $name {
-            pub fn new(app: &Entity<PerchApp>, cx: &mut Context<Self>) -> Self {
+            pub fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
                 // Sans cette observation, le panneau garderait l'image de
-                // l'état au moment où il a été construit : c'est `PerchApp`
+                // l'état au moment où il a été construit : c'est `ClaudhubApp`
                 // qui change, pas lui.
                 cx.observe(app, |_, _, cx| cx.notify()).detach();
                 Self {
@@ -107,11 +107,11 @@ macro_rules! panels {
 }
 
 panels! {
-    SidebarPanel => ("PerchSidebar", "panel-repositories", render_sidebar),
-    BranchesPanel => ("PerchBranches", "panel-branches", render_branches),
-    ChangesPanel => ("PerchChanges", "range-working", render_changes),
-    BranchPanel => ("PerchBranch", "range-branch", render_branch_review),
-    DiffPanel => ("PerchDiff", "panel-diff", render_diff),
+    SidebarPanel => ("ClaudhubSidebar", "panel-repositories", render_sidebar),
+    BranchesPanel => ("ClaudhubBranches", "panel-branches", render_branches),
+    ChangesPanel => ("ClaudhubChanges", "range-working", render_changes),
+    BranchPanel => ("ClaudhubBranch", "range-branch", render_branch_review),
+    DiffPanel => ("ClaudhubDiff", "panel-diff", render_diff),
 }
 
 /// Les terminaux se masquent sans se fermer.
@@ -120,12 +120,12 @@ panels! {
 /// interdit de déplacer le dernier panneau d'une zone, et les terminaux
 /// seraient alors figés là où ils sont.
 pub struct TerminalPanel {
-    app: WeakEntity<PerchApp>,
+    app: WeakEntity<ClaudhubApp>,
     focus: FocusHandle,
 }
 
 impl TerminalPanel {
-    pub fn new(app: &Entity<PerchApp>, cx: &mut Context<Self>) -> Self {
+    pub fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
         cx.observe(app, |_, _, cx| cx.notify()).detach();
         Self {
             app: app.downgrade(),
@@ -144,7 +144,7 @@ impl EventEmitter<PanelEvent> for TerminalPanel {}
 
 impl Panel for TerminalPanel {
     fn panel_name(&self) -> &'static str {
-        "PerchTerminal"
+        "ClaudhubTerminal"
     }
 
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -179,12 +179,12 @@ impl Render for TerminalPanel {
 /// sur un onglet que personne n'ouvrira ; `ensure_history` ne demande qu'une
 /// fois, sans quoi chaque frame relancerait la commande.
 pub struct HistoryPanel {
-    app: WeakEntity<PerchApp>,
+    app: WeakEntity<ClaudhubApp>,
     focus: FocusHandle,
 }
 
 impl HistoryPanel {
-    pub fn new(app: &Entity<PerchApp>, cx: &mut Context<Self>) -> Self {
+    pub fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
         cx.observe(app, |_, _, cx| cx.notify()).detach();
         Self {
             app: app.downgrade(),
@@ -203,7 +203,7 @@ impl EventEmitter<PanelEvent> for HistoryPanel {}
 
 impl Panel for HistoryPanel {
     fn panel_name(&self) -> &'static str {
-        "PerchHistory"
+        "ClaudhubHistory"
     }
 
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
