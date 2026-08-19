@@ -55,6 +55,69 @@ impl Rendered {
         }
     }
 
+    /// Le texte d'une plage de lignes, prêt à coller.
+    ///
+    /// Sans les marqueurs, c'est du **code** qui sort : ni `+`/`-`, ni numéros
+    /// de ligne, ni en-têtes `@@`. C'est ce qu'on veut coller dans un éditeur
+    /// ou dans l'invite d'un agent, et le nettoyer à la main après coup est
+    /// exactement la corvée que cette vue doit éviter.
+    ///
+    /// Avec les marqueurs, c'est un extrait de patch : les signes de git —
+    /// `-` et non le vrai signe moins de l'affichage, qui ne s'applique pas.
+    pub fn copy_text(&self, from: usize, to: usize, with_markers: bool) -> String {
+        let (from, to) = (from.min(to), from.max(to));
+        let mut out = String::new();
+        for index in from..=to {
+            let Some(row) = self.rows.get(index).copied() else {
+                continue;
+            };
+            match row {
+                Row::Header { .. } => {
+                    if !with_markers {
+                        continue;
+                    }
+                    out.push_str(self.row_text(row));
+                    out.push('\n');
+                }
+                Row::Line { hunk, line } => {
+                    let Some(source) = self
+                        .file
+                        .hunks
+                        .get(hunk)
+                        .and_then(|hunk| hunk.lines.get(line))
+                    else {
+                        continue;
+                    };
+                    // « \ No newline at end of file » est une annotation de
+                    // patch, pas une ligne du fichier.
+                    if source.kind == DiffLineKind::NoNewline && !with_markers {
+                        continue;
+                    }
+                    if with_markers {
+                        out.push_str(patch_sign(source.kind));
+                    }
+                    out.push_str(&source.text);
+                    out.push('\n');
+                }
+            }
+        }
+        out
+    }
+
+    /// Les indices de la première et de la dernière ligne d'un hunk.
+    pub fn hunk_bounds(&self, hunk: usize) -> Option<(usize, usize)> {
+        let first = self
+            .rows
+            .iter()
+            .position(|row| matches!(row, Row::Header { hunk: h } if *h == hunk))?;
+        let last = self
+            .rows
+            .iter()
+            .rposition(|row| matches!(row, Row::Line { hunk: h, .. } if *h == hunk))
+            .unwrap_or(first);
+        Some((first, last))
+    }
+
     /// Le texte d'une entrée, pour la mesure comme pour le rendu.
     pub fn row_text(&self, row: Row) -> &str {
         match row {
@@ -149,6 +212,16 @@ pub fn sign(kind: DiffLineKind) -> &'static str {
     }
 }
 
+/// Le signe de git, celui qui fait qu'un extrait reste un patch applicable.
+fn patch_sign(kind: DiffLineKind) -> &'static str {
+    match kind {
+        DiffLineKind::Added => "+",
+        DiffLineKind::Removed => "-",
+        DiffLineKind::Context => " ",
+        DiffLineKind::NoNewline => "",
+    }
+}
+
 /// Les patchs d'indexation, un par hunk.
 ///
 /// Ils sont construits une fois par diff affiché plutôt qu'au clic : un
@@ -166,8 +239,8 @@ pub fn hunk_patches(path: &Path, diff: &FileDiff) -> Vec<String> {
 use std::rc::Rc;
 
 use gpui::{
-    div, prelude::*, px, uniform_list, Context, Entity, ListHorizontalSizingBehavior, Pixels,
-    SharedString, StyledText, Window,
+    div, prelude::*, px, uniform_list, Context, Entity, Focusable, ListHorizontalSizingBehavior,
+    Pixels, SharedString, StyledText, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
@@ -193,6 +266,78 @@ pub fn line_height(font_size: Pixels) -> Pixels {
 }
 
 impl PerchApp {
+    /// Sélectionne une ligne, ou étend la sélection jusqu'à elle.
+    ///
+    /// Clic simple : la ligne devient l'ancre. Maj+clic : l'ancre reste et la
+    /// tête se déplace, ce qui est la convention de toutes les listes et évite
+    /// d'avoir à glisser sur trois cents lignes pour en attraper un bloc.
+    pub(super) fn select_diff_row(&mut self, index: usize, extend: bool, cx: &mut Context<Self>) {
+        let Some(state) = self.active_review_mut() else {
+            return;
+        };
+        state.diff_selection = match (extend, state.diff_selection) {
+            (true, Some((anchor, _))) => Some((anchor, index)),
+            _ => Some((index, index)),
+        };
+        cx.notify();
+    }
+
+    /// Copie la sélection, ou tout le fichier s'il n'y en a pas.
+    ///
+    /// Sans sélection, `Ctrl+C` sur un diff ne peut vouloir dire qu'une chose,
+    /// et refuser d'agir serait un refus poli sans raison.
+    pub(super) fn copy_diff(&mut self, with_markers: bool, cx: &mut Context<Self>) {
+        let Some(state) = self.active_review() else {
+            return;
+        };
+        let Some(diff) = state.diff.clone() else {
+            return;
+        };
+        let (from, to) = state
+            .diff_selection
+            .unwrap_or((0, diff.rows.len().saturating_sub(1)));
+        self.copy_rows(&diff, from, to, with_markers, cx);
+    }
+
+    pub(super) fn copy_hunk(&mut self, hunk: usize, with_markers: bool, cx: &mut Context<Self>) {
+        let Some(diff) = self.active_review().and_then(|state| state.diff.clone()) else {
+            return;
+        };
+        let Some((from, to)) = diff.hunk_bounds(hunk) else {
+            return;
+        };
+        self.copy_rows(&diff, from, to, with_markers, cx);
+    }
+
+    fn copy_rows(
+        &mut self,
+        diff: &Rc<Rendered>,
+        from: usize,
+        to: usize,
+        with_markers: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let text = diff.copy_text(from, to, with_markers);
+        if text.is_empty() {
+            return;
+        }
+        let lines = text.lines().count();
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        self.announce(tr!("copy-done", { count: lines }), cx);
+    }
+
+    pub(super) fn copy_diff_path(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self
+            .active_review()
+            .and_then(|state| state.selected.clone())
+        else {
+            return;
+        };
+        let path = path.display().to_string();
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(path));
+        self.announce(tr!("copy-path-done"), cx);
+    }
+
     /// Molette avec la touche système : grossir ou réduire le code relu.
     ///
     /// La liste a **déjà** défilé quand cet écouteur s'exécute — les deux sont
@@ -259,11 +404,26 @@ impl PerchApp {
             .child(icon("file-diff").xsmall())
             .child(
                 div()
+                    .id("diff-path")
                     .flex_1()
                     .truncate()
                     .text_sm()
+                    .cursor_pointer()
                     .font_family(mono.clone())
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new(tr!("action-copy-path"))
+                            .build(window, cx)
+                    })
+                    .on_click(cx.listener(|this, _, _window, cx| this.copy_diff_path(cx)))
                     .child(path.display().to_string()),
+            )
+            .child(
+                Button::new("copy-file")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("copy"))
+                    .tooltip(tr!("action-copy-file"))
+                    .on_click(cx.listener(|this, _, _window, cx| this.copy_diff(false, cx))),
             );
 
         let Some(diff) = diff else {
@@ -318,6 +478,11 @@ impl PerchApp {
         let entity = cx.entity();
         let rows = diff.clone();
         let count = diff.rows.len();
+        let selection = self
+            .active_review()
+            .and_then(|state| state.diff_selection)
+            .map(|(a, b)| (a.min(b), a.max(b)));
+        let selection_bg = cx.theme().selection;
 
         v_flex()
             .size_full()
@@ -340,6 +505,8 @@ impl PerchApp {
                                         content_width,
                                         line_height,
                                         stageable,
+                                        selection.is_some_and(|(a, b)| ix >= a && ix <= b),
+                                        selection_bg,
                                         &entity,
                                         cx,
                                     )
@@ -373,6 +540,8 @@ fn render_row(
     content_width: Pixels,
     line_height: Pixels,
     stageable: bool,
+    selected: bool,
+    selection_bg: gpui::Hsla,
     entity: &Entity<PerchApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
@@ -383,18 +552,38 @@ fn render_row(
         Row::Header { hunk } => {
             let patch = diff.patches.get(hunk).cloned().unwrap_or_default();
             let entity = entity.clone();
+            let for_copy = entity.clone();
+            let for_click = entity.clone();
             h_flex()
+                .id(("hunk", index))
                 .h(line_height)
                 .min_w(content_width)
                 .px_2()
                 .gap_2()
                 .items_center()
                 .whitespace_nowrap()
-                .bg(colors.hunk_bg)
+                .bg(if selected {
+                    selection_bg
+                } else {
+                    colors.hunk_bg
+                })
+                .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+                    select(&for_click, index, event.modifiers.shift, window, cx);
+                })
                 .child(
                     div()
                         .text_color(cx.theme().muted_foreground)
                         .child(SharedString::from(diff.row_text(row).to_string())),
+                )
+                .child(
+                    Button::new(("copy-hunk", index))
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("copy"))
+                        .tooltip(tr!("action-copy-hunk"))
+                        .on_click(move |_, _window, cx| {
+                            for_copy.update(cx, |this, cx| this.copy_hunk(hunk, false, cx));
+                        }),
                 )
                 // Indexer un hunk seul n'a de sens que depuis les
                 // modifications non indexées : ailleurs, ou bien tout est déjà
@@ -439,12 +628,22 @@ fn render_row(
                     .into_any_element()
             };
 
+            let entity = entity.clone();
             h_flex()
+                .id(("line", index))
                 .h(line_height)
                 .min_w(content_width)
                 .items_center()
                 .whitespace_nowrap()
-                .when_some(bg, |el, bg| el.bg(bg))
+                // La sélection remplace le fond de la ligne plutôt que de s'y
+                // ajouter : gpui n'empile pas deux fonds sur un même nœud, et
+                // une sélection qu'on distingue mal de l'ajout qu'elle
+                // recouvre ne sert à rien.
+                .when_some(bg.filter(|_| !selected), |el, bg| el.bg(bg))
+                .when(selected, |el| el.bg(selection_bg))
+                .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+                    select(&entity, index, event.modifiers.shift, window, cx);
+                })
                 .child(number(source.old_no, gutter, colors))
                 .child(number(source.new_no, gutter, colors))
                 .child(
@@ -459,6 +658,23 @@ fn render_row(
                 .into_any_element()
         }
     }
+}
+
+/// Sélectionne une ligne **et prend le focus**.
+///
+/// Le second point n'est pas un détail : sans lui, cliquer une ligne laisse le
+/// focus au terminal, et le `Ctrl+C` qui suit part au programme qui y tourne
+/// au lieu de copier ce qu'on vient de sélectionner.
+fn select(
+    entity: &Entity<PerchApp>,
+    index: usize,
+    extend: bool,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
+    let handle = entity.read(cx).focus_handle(cx);
+    window.focus(&handle);
+    entity.update(cx, |this, cx| this.select_diff_row(index, extend, cx));
 }
 
 fn number(value: Option<usize>, width: Pixels, colors: &DiffColors) -> impl IntoElement {
@@ -536,6 +752,63 @@ mod tests {
                 Row::Line { hunk: 1, line: 0 },
             ]
         );
+    }
+
+    #[test]
+    fn copying_yields_code_and_not_a_patch() {
+        let mut diff = FileDiff::default();
+        diff.hunks.push(hunk(
+            "@@ -1,3 +1,3 @@",
+            &[
+                DiffLineKind::Context,
+                DiffLineKind::Removed,
+                DiffLineKind::Added,
+                DiffLineKind::NoNewline,
+            ],
+        ));
+        for (ix, text) in ["garde", "avant", "après", "\\ No newline"]
+            .iter()
+            .enumerate()
+        {
+            diff.hunks[0].lines[ix].text = (*text).into();
+        }
+        let rendered = Rendered::new(Path::new("a.rs"), diff, &HighlightTheme::default_dark());
+
+        // Tout le fichier, en code : ni en-tête `@@`, ni signes, ni
+        // l'annotation de fin de fichier — c'est ce qu'on colle dans un
+        // éditeur.
+        let all = rendered.copy_text(0, rendered.rows.len() - 1, false);
+        assert_eq!(all, "garde\navant\naprès\n");
+
+        // La même plage en patch garde de quoi être appliquée.
+        let patch = rendered.copy_text(0, rendered.rows.len() - 1, true);
+        assert_eq!(
+            patch,
+            "@@ -1,3 +1,3 @@\n garde\n-avant\n+après\n\\ No newline\n"
+        );
+
+        // Une plage prise à l'envers vaut la même chose : on sélectionne
+        // parfois de bas en haut.
+        assert_eq!(
+            rendered.copy_text(3, 1, false),
+            rendered.copy_text(1, 3, false)
+        );
+    }
+
+    #[test]
+    fn a_hunk_knows_where_it_begins_and_ends() {
+        let mut diff = FileDiff::default();
+        diff.hunks
+            .push(hunk("@@ -1 +1 @@", &[DiffLineKind::Context]));
+        diff.hunks.push(hunk(
+            "@@ -9 +9 @@",
+            &[DiffLineKind::Added, DiffLineKind::Added],
+        ));
+        let rendered = Rendered::new(Path::new("a.rs"), diff, &HighlightTheme::default_dark());
+        // Deux entrées pour le premier hunk, trois pour le second.
+        assert_eq!(rendered.hunk_bounds(0), Some((0, 1)));
+        assert_eq!(rendered.hunk_bounds(1), Some((2, 4)));
+        assert_eq!(rendered.hunk_bounds(2), None);
     }
 
     #[test]

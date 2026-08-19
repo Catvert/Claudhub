@@ -266,6 +266,25 @@ sont en phase de remontée et l'enfant est traité avant son parent.
 `on_diff_scroll` rend donc le décalage au lieu d'essayer de l'empêcher, sans
 quoi chaque cran de zoom ferait aussi sauter la lecture de trois lignes.
 
+### Copier depuis un diff
+
+Ce qui sort du presse-papiers est du **code** : ni `+`/`-`, ni numéros de
+ligne, ni en-tête `@@`. C'est ce qu'on colle dans un éditeur ou dans l'invite
+d'un agent, et le nettoyer après coup est précisément la corvée que cette vue
+doit épargner. `Ctrl+Maj+C` donne l'autre forme, un extrait de patch avec les
+signes de git — le vrai signe moins de l'affichage n'y a pas sa place, il ne
+s'applique pas.
+
+La sélection se fait au clic, s'étend au Maj+clic, et `Rendered::copy_text` est
+libre et testée. Sans sélection, `Ctrl+C` prend le fichier entier : sur un
+diff, le geste n'a pas d'autre sens et refuser d'agir serait un refus poli sans
+raison.
+
+Un clic sur une ligne **prend le focus**. Sans cela le focus reste au terminal,
+et le `Ctrl+C` qui suit part au programme qui y tourne au lieu de copier. Pour
+la même raison, la liaison de copie exclut `Input` et `PerchTerminal` de son
+prédicat : le champ de message de commit a sa propre copie.
+
 ### Quel worktree s'ouvre
 
 `runtime::open_repo` retient le checkout d'où l'ouverture vient, et non le

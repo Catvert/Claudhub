@@ -25,7 +25,9 @@ actions!(
         OpenSettings,
         ZoomIn,
         ZoomOut,
-        ZoomReset
+        ZoomReset,
+        CopyDiff,
+        CopyDiffPatch
     ]
 );
 
@@ -37,6 +39,15 @@ actions!(
 /// contre la pile de contextes du nœud focalisé, et elle n'a de sens que dans
 /// `KeyBinding::new`. La passer à `key_context` fait boucler le parseur.
 const PREDICATE: &str = "Perch && !Dialog && !PopupMenu && !Popover";
+
+/// Prédicat de la copie depuis le diff.
+///
+/// `Ctrl+C` appartient d'abord à qui a le focus : le champ de message de commit
+/// a sa propre copie, et le terminal transmet la touche au programme qui
+/// tourne. Sans ces deux exclusions, copier une ligne saisie dans le message de
+/// commit rendrait le diff à la place.
+const COPY_PREDICATE: &str =
+    "Perch && !Dialog && !PopupMenu && !Popover && !Input && !PerchTerminal";
 
 /// Le contexte que la vue racine déclare. Un simple identifiant : c'est le
 /// nom auquel `PREDICATE` se réfère.
@@ -88,6 +99,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-+", ZoomIn, Some(PREDICATE)),
         KeyBinding::new("secondary--", ZoomOut, Some(PREDICATE)),
         KeyBinding::new("secondary-0", ZoomReset, Some(PREDICATE)),
+        // Copier le code relu, et sa variante qui garde les marqueurs de
+        // patch.
+        KeyBinding::new("secondary-c", CopyDiff, Some(COPY_PREDICATE)),
+        KeyBinding::new("secondary-shift-c", CopyDiffPatch, Some(COPY_PREDICATE)),
         // Les conventions des terminaux : la touche système *avec* Maj, parce
         // que `Ctrl+C` et `Ctrl+V` nus appartiennent au programme.
         KeyBinding::new("secondary-shift-c", CopySelection, Some(TERMINAL_PREDICATE)),
@@ -228,6 +243,24 @@ pub fn zoom_reset(
     cx: &mut gpui::Context<PerchApp>,
 ) {
     this.reset_zoom(window, cx);
+}
+
+pub fn copy_diff(
+    this: &mut PerchApp,
+    _: &CopyDiff,
+    _window: &mut Window,
+    cx: &mut gpui::Context<PerchApp>,
+) {
+    this.copy_diff(false, cx);
+}
+
+pub fn copy_diff_patch(
+    this: &mut PerchApp,
+    _: &CopyDiffPatch,
+    _window: &mut Window,
+    cx: &mut gpui::Context<PerchApp>,
+) {
+    this.copy_diff(true, cx);
 }
 
 pub fn commit(

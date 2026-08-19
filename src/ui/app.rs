@@ -64,6 +64,11 @@ pub struct ReviewState {
     /// qu'en copier plusieurs milliers de lignes par frame reviendrait à
     /// annuler le bénéfice de la virtualisation.
     pub diff: Option<std::rc::Rc<Rendered>>,
+    /// Lignes sélectionnées dans le diff : l'ancre et la tête, en indices de
+    /// la liste mise à plat. Deux indices et non une plage triée, parce que
+    /// c'est le sens du geste qui décide de laquelle bouge à la prochaine
+    /// extension.
+    pub diff_selection: Option<(usize, usize)>,
     /// Base de comparaison de la revue de branche, devinée à l'ouverture.
     pub base: Option<String>,
     /// L'historique et son graphe, chargés à la demande — ouvrir un worktree
@@ -91,6 +96,7 @@ impl Default for ReviewState {
             range_chosen: false,
             selected: None,
             diff: None,
+            diff_selection: None,
             base: None,
             history: None,
             history_range: LogRange::All,
@@ -414,6 +420,7 @@ impl PerchApp {
                 if !still_there {
                     state.selected = None;
                     state.diff = None;
+                    state.diff_selection = None;
                     let next = state.files.first().map(|f| f.path.clone());
                     if let Some(path) = next {
                         self.open_file(worktree, path, cx);
@@ -584,6 +591,7 @@ impl PerchApp {
         // fichier le temps de la lecture donnerait l'impression que le clic
         // n'a rien fait, puis que le contenu change tout seul.
         state.diff = None;
+        state.diff_selection = None;
         let range = state.range.clone();
         let untracked = state
             .status
@@ -614,6 +622,7 @@ impl PerchApp {
         state.files.clear();
         state.selected = None;
         state.diff = None;
+        state.diff_selection = None;
         self.git.send(Cmd::LoadDiffFiles { worktree, range });
         cx.notify();
     }
@@ -687,6 +696,7 @@ impl PerchApp {
         state.files.clear();
         state.selected = None;
         state.diff = None;
+        state.diff_selection = None;
         self.git.send(Cmd::LoadDiffFiles {
             worktree: worktree.clone(),
             range,
@@ -708,6 +718,19 @@ impl PerchApp {
 
     pub(super) fn active_review(&self) -> Option<&ReviewState> {
         self.active.as_ref().and_then(|p| self.review.get(p))
+    }
+
+    pub(super) fn active_review_mut(&mut self) -> Option<&mut ReviewState> {
+        let path = self.active.clone()?;
+        self.review.get_mut(&path)
+    }
+
+    /// Dit quelque chose dans la barre d'état. Pour les gestes qui réussissent
+    /// sans rien changer à l'écran — copier, par exemple — c'est le seul
+    /// accusé de réception qu'on puisse donner.
+    pub(super) fn announce(&mut self, text: SharedString, cx: &mut Context<Self>) {
+        self.toast = Some(Toast { text, error: false });
+        cx.notify();
     }
 
     pub(super) fn main_of(&self, worktree: &Path) -> Option<PathBuf> {
@@ -1022,6 +1045,8 @@ impl Render for PerchApp {
             .on_action(cx.listener(super::shortcuts::zoom_in))
             .on_action(cx.listener(super::shortcuts::zoom_out))
             .on_action(cx.listener(super::shortcuts::zoom_reset))
+            .on_action(cx.listener(super::shortcuts::copy_diff))
+            .on_action(cx.listener(super::shortcuts::copy_diff_patch))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)

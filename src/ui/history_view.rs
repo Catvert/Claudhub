@@ -119,6 +119,7 @@ impl PerchApp {
         state.files.clear();
         state.selected = None;
         state.diff = None;
+        state.diff_selection = None;
         let range = state.range.clone();
         self.git.send(Cmd::LoadDiffFiles { worktree, range });
         cx.notify();
