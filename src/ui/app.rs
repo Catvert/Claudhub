@@ -84,7 +84,7 @@ pub struct History {
 impl Default for ReviewState {
     fn default() -> Self {
         Self {
-            range: DiffRange::Unstaged,
+            range: DiffRange::Working,
             status: Status::default(),
             files: Vec::new(),
             range_chosen: false,
@@ -107,11 +107,9 @@ impl Default for ReviewState {
 /// connaît pas la base : mieux vaut réessayer à l'arrivée des branches que de
 /// se figer sur un domaine vide.
 fn initial_range(status: &Status, base: Option<&str>) -> Option<DiffRange> {
-    if status.unstaged().next().is_some() {
-        return Some(DiffRange::Unstaged);
-    }
-    if status.staged().next().is_some() {
-        return Some(DiffRange::Staged);
+    // Quelque chose est en cours : c'est ce qu'on vient voir.
+    if !status.is_clean() {
+        return Some(DiffRange::Working);
     }
     // Rien en cours : ce qu'on vient relire dans un worktree d'agent, c'est le
     // travail de sa branche. Ouvrir sur « Modifications » y affiche « rien à
@@ -163,6 +161,7 @@ pub struct PerchApp {
     /// Défilement de la liste des fichiers, virtualisée elle aussi.
     pub(super) file_scroll: gpui::UniformListScrollHandle,
     pub(super) history_scroll: gpui::UniformListScrollHandle,
+    history_split: Entity<ResizableState>,
 
     sidebar_resize: Entity<ResizableState>,
     center_resize: Entity<ResizableState>,
@@ -197,6 +196,7 @@ impl PerchApp {
             diff_scroll: gpui::UniformListScrollHandle::new(),
             file_scroll: gpui::UniformListScrollHandle::new(),
             history_scroll: gpui::UniformListScrollHandle::new(),
+            history_split: cx.new(|_| ResizableState::default()),
             sidebar_resize: cx.new(|_| ResizableState::default()),
             center_resize: cx.new(|_| ResizableState::default()),
             bottom_resize: cx.new(|_| ResizableState::default()),
@@ -858,7 +858,23 @@ impl Render for PerchApp {
                     })
                     .size_range(px(220.)..px(900.))
                     .child(if self.show_history {
-                        self.render_history(window, cx).into_any_element()
+                        // Le graphe seul ne dit pas ce qu'un commit a touché :
+                        // la liste de ses fichiers va dessous, sinon
+                        // sélectionner un commit n'ouvre que son premier
+                        // fichier et les autres restent invisibles.
+                        v_resizable("perch-history")
+                            .with_state(&self.history_split)
+                            .child(
+                                resizable_panel()
+                                    .size(px(420.))
+                                    .size_range(px(140.)..px(1200.))
+                                    .child(self.render_history(window, cx).into_any_element()),
+                            )
+                            .child(
+                                resizable_panel()
+                                    .child(self.render_file_list(window, cx).into_any_element()),
+                            )
+                            .into_any_element()
                     } else {
                         self.render_file_list(window, cx).into_any_element()
                     }),
@@ -897,9 +913,7 @@ impl Render for PerchApp {
             .on_action(cx.listener(super::shortcuts::toggle_terminal))
             .on_action(cx.listener(super::shortcuts::next_terminal))
             .on_action(cx.listener(super::shortcuts::commit))
-            .on_action(cx.listener(super::shortcuts::show_unstaged))
-            .on_action(cx.listener(super::shortcuts::show_staged))
-            .on_action(cx.listener(super::shortcuts::show_head))
+            .on_action(cx.listener(super::shortcuts::show_working))
             .on_action(cx.listener(super::shortcuts::show_branch))
             .on_action(cx.listener(super::shortcuts::toggle_history))
             .size_full()
@@ -994,32 +1008,19 @@ mod tests {
     }
 
     #[test]
-    fn opens_on_the_index_when_everything_is_already_staged() {
-        let status = status(&[
-            (StatusCode::Modified, StatusCode::Unmodified),
-            (StatusCode::Added, StatusCode::Unmodified),
-        ]);
-        assert_eq!(
-            initial_range(&status, Some("main")),
-            Some(DiffRange::Staged)
-        );
-    }
-
-    #[test]
     fn opens_on_the_changes_whenever_there_are_any() {
-        // Un fichier des deux côtés : les modifications restent le point de
-        // départ, c'est là qu'on travaille.
-        let both = status(&[(StatusCode::Modified, StatusCode::Modified)]);
-        assert_eq!(
-            initial_range(&both, Some("main")),
-            Some(DiffRange::Unstaged)
-        );
-
-        let untracked = status(&[(StatusCode::Untracked, StatusCode::Untracked)]);
-        assert_eq!(
-            initial_range(&untracked, Some("main")),
-            Some(DiffRange::Unstaged)
-        );
+        // Indexé, non indexé, non suivi : tout se regarde au même endroit
+        // désormais, et la présence de quoi que ce soit suffit.
+        for files in [
+            &[(StatusCode::Modified, StatusCode::Unmodified)][..],
+            &[(StatusCode::Modified, StatusCode::Modified)][..],
+            &[(StatusCode::Untracked, StatusCode::Untracked)][..],
+        ] {
+            assert_eq!(
+                initial_range(&status(files), Some("main")),
+                Some(DiffRange::Working)
+            );
+        }
     }
 
     #[test]

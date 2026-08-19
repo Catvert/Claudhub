@@ -139,6 +139,28 @@ d'indexation, largeur de gouttière — est calculé une fois dans
 fermeture de rendu est appelée pour chaque ligne visible à chaque frame,
 animation de molette comprise : elle ne doit rien y calculer.
 
+### Une seule liste pour l'index et les modifications
+
+`DiffRange` n'a plus de `Unstaged` ni de `Staged` : la distinction est un
+détail de plomberie git, et la vue la restitue par **une case à cocher par
+fichier** plutôt que par deux listes qu'il faut recoudre mentalement. Cocher
+appelle `git add`, décocher `git restore --staged`, et ce qui est coché part au
+commit.
+
+Deux endroits où cette simplification pourrait mentir, et ce qui l'en empêche :
+
+- **L'indexation partielle** (`MM`). La case seule laisserait croire que tout
+  le fichier part. La ligne affiche donc les deux codes de git et la mention
+  « partiel » ; `FileRow::partial` est ce qui la déclenche, et un test la
+  verrouille.
+- **Les fichiers non suivis**, dont cocher ne veut pas dire la même chose que
+  pour un fichier déjà suivi : ils forment leur propre groupe.
+
+Corollaire à connaître : le diff affiché va de HEAD au répertoire de travail,
+index compris. Indexer un hunk isolé sur un fichier *déjà partiellement
+indexé* peut donc échouer — `git apply --cached` refuse un patch qui ne
+s'applique pas —, et le message le dit.
+
 ### Quel domaine de revue s'ouvre
 
 `app::initial_range` choisit, au **premier** statut d'un worktree, entre les
@@ -157,10 +179,10 @@ leur compte coûterait une commande git de plus par onglet et par
 rafraîchissement.
 
 `review::rows_for` est la seule vraie décision de cette vue — quel fichier
-apparaît de quel côté. Elle est libre et testée : le statut est la source pour
-les deux premiers domaines (lui seul distingue index et répertoire de travail,
-et un fichier peut être des deux côtés), `--numstat` pour les deux autres, qui
-parlent de commits et n'ont pas de notion d'index.
+apparaît, dans quel groupe, coché ou non. Elle est libre et testée : le statut
+est la source pour les modifications en cours (lui seul distingue index et
+répertoire de travail), `--numstat` pour les domaines qui parlent de commits et
+n'ont pas de notion d'index.
 
 ### Le graphe d'historique
 
@@ -175,6 +197,10 @@ graphe étroit.
 `layout` rend **exactement autant d'entrées que de commits** : la vue les
 affiche côte à côte, et un décalage d'une ligne ferait pointer chaque trait sur
 le mauvais commit.
+
+Sélectionner un commit remplit la liste des fichiers sous le graphe : le graphe
+seul ne dit pas ce qu'un commit a touché, et sans cette liste seul le premier
+fichier s'ouvrait — les autres restaient invisibles.
 
 Le graphe est peint par un `canvas` **par ligne**, ce qui est ce qui permet à la
 liste de rester virtualisée : une ligne se dessine à partir de son seul

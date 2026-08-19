@@ -14,9 +14,7 @@ actions!(
     perch,
     [
         ToggleHistory,
-        ShowUnstaged,
-        ShowStaged,
-        ShowHead,
+        ShowWorking,
         ShowBranch,
         Refresh,
         NewTerminal,
@@ -74,10 +72,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-tab", NextTerminal, Some(PREDICATE)),
         // Les quatre domaines de revue, dans l'ordre des onglets.
         KeyBinding::new("secondary-h", ToggleHistory, Some(PREDICATE)),
-        KeyBinding::new("secondary-1", ShowUnstaged, Some(PREDICATE)),
-        KeyBinding::new("secondary-2", ShowStaged, Some(PREDICATE)),
-        KeyBinding::new("secondary-3", ShowHead, Some(PREDICATE)),
-        KeyBinding::new("secondary-4", ShowBranch, Some(PREDICATE)),
+        KeyBinding::new("secondary-1", ShowWorking, Some(PREDICATE)),
+        KeyBinding::new("secondary-2", ShowBranch, Some(PREDICATE)),
         KeyBinding::new("secondary-enter", Commit, Some(PREDICATE)),
         // Les conventions des terminaux : la touche système *avec* Maj, parce
         // que `Ctrl+C` et `Ctrl+V` nus appartiennent au programme.
@@ -163,31 +159,13 @@ pub fn toggle_history(
     this.toggle_history_panel(cx);
 }
 
-pub fn show_unstaged(
+pub fn show_working(
     this: &mut PerchApp,
-    _: &ShowUnstaged,
+    _: &ShowWorking,
     _window: &mut Window,
     cx: &mut gpui::Context<PerchApp>,
 ) {
-    this.set_range(crate::git::DiffRange::Unstaged, cx);
-}
-
-pub fn show_staged(
-    this: &mut PerchApp,
-    _: &ShowStaged,
-    _window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
-) {
-    this.set_range(crate::git::DiffRange::Staged, cx);
-}
-
-pub fn show_head(
-    this: &mut PerchApp,
-    _: &ShowHead,
-    _window: &mut Window,
-    cx: &mut gpui::Context<PerchApp>,
-) {
-    this.set_range(crate::git::DiffRange::Head, cx);
+    this.set_range(crate::git::DiffRange::Working, cx);
 }
 
 /// Sans base connue, il n'y a rien à comparer : le raccourci ne fait rien,

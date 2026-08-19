@@ -17,12 +17,13 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 /// Ce que la revue compare.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Range {
-    /// Répertoire de travail contre index : les modifications non indexées.
-    Unstaged,
-    /// Index contre HEAD : ce qui partira au prochain commit.
-    Staged,
-    /// Tout ce qui sépare le checkout de HEAD.
-    Head,
+    /// Tout ce qui sépare le répertoire de travail de HEAD, indexé ou non.
+    ///
+    /// Perch ne propose pas de comparer séparément l'index et le répertoire de
+    /// travail : la distinction est un détail de plomberie git, et la vue de
+    /// revue la restitue par une case à cocher par fichier plutôt que par deux
+    /// listes qu'il faut mentalement recoudre.
+    Working,
     /// Un commit précis, comparé à son premier parent.
     ///
     /// `parent` est explicite plutôt que déduit d'un `^` : un commit racine
@@ -41,9 +42,7 @@ pub enum Range {
 impl Range {
     fn args(&self) -> Vec<String> {
         match self {
-            Self::Unstaged => vec![],
-            Self::Staged => vec!["--cached".into()],
-            Self::Head => vec!["HEAD".into()],
+            Self::Working => vec!["HEAD".into()],
             Self::Branch { base } => vec![format!("{base}...HEAD")],
             Self::Commit { id, parent } => match parent {
                 Some(parent) => vec![parent.clone(), id.clone()],

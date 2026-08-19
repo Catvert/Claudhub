@@ -201,7 +201,7 @@ impl PerchApp {
         let Some(path) = state.selected.clone() else {
             return centered_message(tr!("review-pick-a-file"), cx);
         };
-        let stageable = state.range == DiffRange::Unstaged;
+        let stageable = state.range == DiffRange::Working;
         let diff = state.diff.clone();
 
         let header = h_flex()

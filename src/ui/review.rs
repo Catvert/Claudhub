@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use gpui::{div, prelude::*, px, uniform_list, Context, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonVariants},
+    checkbox::Checkbox,
     h_flex,
     input::Input,
     v_flex, ActiveTheme, Disableable, Selectable, Sizable, WindowExt,
@@ -22,16 +23,62 @@ use crate::ui::app::PerchApp;
 use crate::ui::icons::icon;
 use crate::ui::theme::{status_color, DiffColors};
 
-/// Ce que montre une entrée de la liste : le fichier, ses deux codes d'état,
-/// et de quel côté il peut basculer.
-struct Row {
+/// Une entrée de la liste des modifications.
+///
+/// Les fichiers sont groupés comme dans les clients qui masquent l'index :
+/// ce qui est suivi d'un côté, ce qui ne l'est pas encore de l'autre. Le
+/// groupe porte sa propre case, qui indexe ou dés-indexe tout d'un coup.
+#[derive(Clone)]
+enum Row {
+    Group(Group),
+    File(FileRow),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Group {
+    /// Fichiers que git suit déjà.
+    Tracked,
+    /// Fichiers jamais ajoutés. Les cocher, c'est les faire suivre.
+    Untracked,
+}
+
+#[derive(Clone)]
+struct FileRow {
     path: PathBuf,
     name: String,
     directory: String,
-    code: StatusCode,
+    /// Les deux codes de git, celui de l'index puis celui du répertoire de
+    /// travail : c'est l'information exacte, et elle tient en deux caractères
+    /// là où une seule case à cocher devrait mentir sur les fichiers
+    /// partiellement indexés.
+    index: StatusCode,
+    worktree: StatusCode,
     added: usize,
     removed: usize,
+    /// Ce fichier ira dans le prochain commit, au moins en partie.
     staged: bool,
+    untracked: bool,
+}
+
+impl FileRow {
+    /// Une partie seulement du fichier est indexée : ce que git écrit `MM`.
+    fn partial(&self) -> bool {
+        self.staged && !matches!(self.worktree, StatusCode::Unmodified)
+    }
+
+    fn codes(&self) -> String {
+        let index = self.index.letter();
+        let worktree = self.worktree.letter();
+        if self.untracked {
+            "?".into()
+        } else if index.trim().is_empty() {
+            worktree.to_string()
+        } else if worktree.trim().is_empty() {
+            index.to_string()
+        } else {
+            format!("{index}{worktree}")
+        }
+    }
 }
 
 impl PerchApp {
@@ -60,8 +107,11 @@ impl PerchApp {
         let range = state.range.clone();
         let selected = state.selected.clone();
         let rows = self.rows(cx);
-        let staged_count = rows.iter().filter(|r| r.staged).count();
-        let can_commit = staged_count > 0;
+        let staged_count = rows
+            .iter()
+            .filter(|row| matches!(row, Row::File(file) if file.staged))
+            .count();
+        let can_commit = staged_count > 0 && matches!(range, DiffRange::Working);
 
         v_flex()
             .size_full()
@@ -90,16 +140,20 @@ impl PerchApp {
                         let entity = cx.entity();
                         let colors = DiffColors::of(cx);
                         let count = rows.len();
+                        // Seules les modifications en cours se cochent : sur un
+                        // commit déjà écrit, il n'y a rien à indexer.
+                        let checkable = matches!(range, DiffRange::Working);
                         el.child(
-                            uniform_list("file-list", count, move |range, _window, cx| {
-                                range
+                            uniform_list("file-list", count, move |visible, _window, cx| {
+                                visible
                                     .map(|ix| {
-                                        render_file_row(
+                                        render_row(
                                             &rows,
                                             ix,
                                             &worktree,
                                             selected.as_deref(),
                                             &colors,
+                                            checkable,
                                             &entity,
                                             cx,
                                         )
@@ -133,43 +187,43 @@ impl PerchApp {
         // premier clic. Tant qu'elle est inconnue — ou que c'est la branche
         // déployée ici, qui n'aurait rien à se comparer — l'onglet reste
         // présent mais inactif, plutôt que de disparaître et de faire sauter
-        // les trois autres.
+        // l'autre.
         let base = self.active_review().and_then(|r| r.base.clone());
         let branch_range = base
             .clone()
             .map(|base| DiffRange::Branch { base })
-            .unwrap_or(DiffRange::Head);
+            .unwrap_or(DiffRange::Working);
         let branch_label = match &base {
             Some(base) => tr!("range-branch", { base: base }),
             None => tr!("range-branch-none"),
         };
-        // Les deux premiers onglets portent leur compte. C'est ce qui évite
-        // d'ouvrir Perch sur une liste vide sans comprendre que tout attend
-        // dans l'index : le nombre se lit sans cliquer. Les deux autres
-        // portent sur des commits et leur compte demanderait une commande git
-        // de plus par onglet et par rafraîchissement, pour une information
-        // dont on ne se sert pas au même moment.
-        let (unstaged, staged) = self
+        // Le compte se lit sans cliquer : c'est ce qui évite d'ouvrir Perch
+        // sur une liste vide sans comprendre où sont passées les
+        // modifications.
+        let changed = self
             .active_review()
-            .map(|r| (r.status.unstaged().count(), r.status.staged().count()))
-            .unwrap_or((0, 0));
-        let count = |label: SharedString, n: usize| -> SharedString {
-            if n == 0 {
-                label
-            } else {
-                SharedString::from(format!("{label} {n}"))
-            }
+            .map(|r| {
+                r.status
+                    .files
+                    .iter()
+                    .filter(|f| !matches!(f.index, StatusCode::Ignored))
+                    .count()
+            })
+            .unwrap_or(0);
+        let working_label = if changed == 0 {
+            tr!("range-working")
+        } else {
+            SharedString::from(format!("{} {changed}", tr!("range-working")))
         };
-        let tabs: [(DiffRange, SharedString, bool); 4] = [
-            (
-                DiffRange::Unstaged,
-                count(tr!("range-unstaged"), unstaged),
-                true,
-            ),
-            (DiffRange::Staged, count(tr!("range-staged"), staged), true),
-            (DiffRange::Head, tr!("range-head"), true),
+
+        // Un commit choisi dans l'historique n'a pas d'onglet à lui : il
+        // occupe la liste jusqu'à ce qu'on revienne à l'un des deux domaines.
+        let showing_commit = matches!(range, DiffRange::Commit { .. });
+        let tabs: [(DiffRange, SharedString, bool); 2] = [
+            (DiffRange::Working, working_label, true),
             (branch_range, branch_label, base.is_some()),
         ];
+
         h_flex()
             .h(px(30.))
             .w_full()
@@ -182,7 +236,7 @@ impl PerchApp {
                 tabs.into_iter()
                     .enumerate()
                     .map(|(ix, (target, label, enabled))| {
-                        let selected = enabled && *range == target;
+                        let selected = enabled && !showing_commit && *range == target;
                         Button::new(("range", ix))
                             .ghost()
                             .xsmall()
@@ -230,6 +284,27 @@ impl PerchApp {
                             .on_click(cx.listener(|this, _, _, cx| this.commit(false, cx))),
                     ),
             )
+    }
+
+    /// Coche ou décoche des fichiers, c'est-à-dire les indexe ou les retire de
+    /// l'index. C'est le seul geste d'indexation que l'interface propose : la
+    /// case remplace les deux listes que git distingue.
+    pub(super) fn set_staged(
+        &mut self,
+        worktree: PathBuf,
+        paths: Vec<PathBuf>,
+        staged: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        self.git.send(if staged {
+            Cmd::Stage { worktree, paths }
+        } else {
+            Cmd::Unstage { worktree, paths }
+        });
+        cx.notify();
     }
 
     /// Valide ce qui est dans l'index. `amend` reprend le commit précédent.
@@ -303,24 +378,86 @@ impl PerchApp {
     }
 }
 
-/// Rend une ligne de la liste des fichiers.
+/// Rend une ligne de la liste : un en-tête de groupe ou un fichier.
 ///
 /// Fonction libre parce que la fermeture d'une liste virtualisée ne reçoit pas
 /// la vue : elle capture l'entité et repasse par `update` pour agir, comme le
 /// font les gestionnaires de dialogue.
 #[allow(clippy::too_many_arguments)]
-fn render_file_row(
+fn render_row(
     rows: &std::rc::Rc<Vec<Row>>,
     index: usize,
     worktree: &Path,
     selected: Option<&Path>,
     colors: &DiffColors,
+    checkable: bool,
     entity: &gpui::Entity<PerchApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
-    let Some(row) = rows.get(index) else {
-        return div().into_any_element();
+    match rows.get(index) {
+        Some(Row::Group(group)) => render_group(rows, index, *group, worktree, entity, cx),
+        Some(Row::File(file)) => render_file(
+            file, index, worktree, selected, colors, checkable, entity, cx,
+        ),
+        None => div().into_any_element(),
+    }
+}
+
+fn render_group(
+    rows: &std::rc::Rc<Vec<Row>>,
+    index: usize,
+    group: Group,
+    worktree: &Path,
+    entity: &gpui::Entity<PerchApp>,
+    cx: &mut gpui::App,
+) -> gpui::AnyElement {
+    let checked = group_checked(rows, group);
+    let paths = group_paths(rows, group);
+    let count = paths.len();
+    let label = match group {
+        Group::Tracked => tr!("group-tracked"),
+        Group::Untracked => tr!("group-untracked"),
     };
+    let (entity, worktree) = (entity.clone(), worktree.to_path_buf());
+
+    h_flex()
+        .h(px(26.))
+        .w_full()
+        .px_2()
+        .gap_2()
+        .items_center()
+        .bg(cx.theme().secondary)
+        .child(
+            Checkbox::new(("group", index))
+                .checked(checked)
+                .on_click(move |_, _window, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.set_staged(worktree.clone(), paths.clone(), !checked, cx)
+                    });
+                }),
+        )
+        .child(
+            div()
+                .flex_1()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(cx.theme().muted_foreground)
+                .child(format!("{label} ({count})")),
+        )
+        .into_any_element()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_file(
+    row: &FileRow,
+    index: usize,
+    worktree: &Path,
+    selected: Option<&Path>,
+    colors: &DiffColors,
+    checkable: bool,
+    entity: &gpui::Entity<PerchApp>,
+    cx: &mut gpui::App,
+) -> gpui::AnyElement {
     let is_selected = selected == Some(row.path.as_path());
     let staged = row.staged;
 
@@ -331,6 +468,8 @@ fn render_file_row(
         .gap_2()
         .items_center()
         .cursor_pointer()
+        .whitespace_nowrap()
+        .overflow_hidden()
         .when(is_selected, |el| el.bg(cx.theme().accent))
         .hover(|s| s.bg(cx.theme().accent.opacity(0.5)))
         .on_click({
@@ -342,14 +481,36 @@ fn render_file_row(
                 });
             }
         })
+        // Cocher, c'est indexer. Les domaines qui portent sur des commits déjà
+        // écrits n'ont rien à cocher : la case y serait un bouton qui ment.
+        .when(checkable, |el| {
+            let (entity, worktree, path) =
+                (entity.clone(), worktree.to_path_buf(), row.path.clone());
+            el.child(Checkbox::new(("stage", index)).checked(staged).on_click(
+                move |_, _window, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.set_staged(worktree.clone(), vec![path.clone()], !staged, cx)
+                    });
+                },
+            ))
+        })
         .child(
             div()
-                .w(px(12.))
+                .w(px(20.))
                 .flex_none()
                 .text_xs()
                 .font_family("JetBrains Mono")
-                .text_color(status_color(row.code, cx))
-                .child(row.code.letter()),
+                .text_color(status_color(
+                    if row.untracked {
+                        StatusCode::Untracked
+                    } else if staged {
+                        row.index
+                    } else {
+                        row.worktree
+                    },
+                    cx,
+                ))
+                .child(row.codes()),
         )
         .child(
             h_flex()
@@ -366,6 +527,21 @@ fn render_file_row(
                         .child(row.directory.clone()),
                 ),
         )
+        // Un fichier dont une partie seulement est indexée : la case cochée ne
+        // suffit pas à le dire, et c'est précisément le cas où l'on croit
+        // valider tout un fichier alors qu'on n'en valide que la moitié.
+        .when(row.partial(), |el| {
+            el.child(
+                div()
+                    .flex_none()
+                    .px_1()
+                    .rounded(cx.theme().radius)
+                    .bg(cx.theme().warning.opacity(0.18))
+                    .text_xs()
+                    .text_color(cx.theme().warning)
+                    .child(tr!("file-partially-staged")),
+            )
+        })
         .when(row.added > 0, |el| {
             el.child(
                 div()
@@ -384,7 +560,7 @@ fn render_file_row(
                     .child(format!("−{}", row.removed)),
             )
         })
-        .when(!staged, |el| {
+        .when(checkable && !row.untracked, |el| {
             let (entity, worktree, path) =
                 (entity.clone(), worktree.to_path_buf(), row.path.clone());
             el.child(
@@ -400,43 +576,19 @@ fn render_file_row(
                     }),
             )
         })
-        .child({
-            let (entity, worktree, path) =
-                (entity.clone(), worktree.to_path_buf(), row.path.clone());
-            Button::new(("toggle-stage", index))
-                .ghost()
-                .xsmall()
-                .icon(icon(if staged { "arrow-down-to-line" } else { "plus" }))
-                .tooltip(if staged {
-                    tr!("action-unstage")
-                } else {
-                    tr!("action-stage")
-                })
-                .on_click(move |_, _window, cx| {
-                    entity.update(cx, |this, cx| {
-                        let paths = vec![path.clone()];
-                        let worktree = worktree.clone();
-                        this.git.send(if staged {
-                            Cmd::Unstage { worktree, paths }
-                        } else {
-                            Cmd::Stage { worktree, paths }
-                        });
-                        cx.notify();
-                    });
-                })
-        })
         .into_any_element()
 }
 
 /// Les entrées de la liste pour un domaine de revue donné.
 ///
-/// Fonction libre parce que c'est la seule vraie décision de la vue de revue —
-/// quel fichier apparaît de quel côté — et qu'elle se teste sans fenêtre.
+/// Fonction libre parce que c'est la seule vraie décision de cette vue — quel
+/// fichier apparaît, dans quel groupe, coché ou non — et qu'elle se teste sans
+/// fenêtre.
 ///
-/// Le statut est la source pour les deux premiers domaines : lui seul
-/// distingue l'index du répertoire de travail, et un fichier peut être des
-/// deux côtés à la fois. Les deux autres portent sur des commits, qui n'ont
-/// pas de notion d'index, et viennent donc de `--numstat`.
+/// Le statut est la source pour les modifications en cours : lui seul
+/// distingue ce qui est indexé de ce qui ne l'est pas, distinction que la case
+/// à cocher restitue. Les autres domaines portent sur des commits, qui n'ont
+/// pas de notion d'index, et viennent de `--numstat`.
 fn rows_for(range: &DiffRange, status: &Status, files: &[DiffFile]) -> Vec<Row> {
     let volumes: std::collections::HashMap<&PathBuf, (usize, usize)> = files
         .iter()
@@ -445,65 +597,109 @@ fn rows_for(range: &DiffRange, status: &Status, files: &[DiffFile]) -> Vec<Row> 
     let volume = |path: &PathBuf| volumes.get(path).copied().unwrap_or((0, 0));
 
     match range {
-        DiffRange::Unstaged => status
-            .unstaged()
-            .map(|f| {
-                let (added, removed) = volume(&f.path);
-                Row {
-                    path: f.path.clone(),
-                    name: f.file_name(),
-                    directory: f.directory(),
-                    code: f.worktree,
+        DiffRange::Working => {
+            let mut tracked = Vec::new();
+            let mut untracked = Vec::new();
+            for file in &status.files {
+                if matches!(file.index, StatusCode::Ignored) {
+                    continue;
+                }
+                let (added, removed) = volume(&file.path);
+                let row = FileRow {
+                    path: file.path.clone(),
+                    name: file.file_name(),
+                    directory: file.directory(),
+                    index: file.index,
+                    worktree: file.worktree,
                     added,
                     removed,
-                    staged: false,
-                }
-            })
-            .collect(),
-        DiffRange::Staged => status
-            .staged()
-            .map(|f| {
-                let (added, removed) = volume(&f.path);
-                Row {
-                    path: f.path.clone(),
-                    name: f.file_name(),
-                    directory: f.directory(),
-                    code: f.index,
-                    added,
-                    removed,
-                    staged: true,
-                }
-            })
-            .collect(),
-        DiffRange::Head | DiffRange::Branch { .. } | DiffRange::Commit { .. } => files
-            .iter()
-            .map(|f| Row {
-                path: f.path.clone(),
-                name: f
-                    .path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                directory: f
-                    .path
-                    .parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default(),
-                code: if f.removed == 0 {
-                    StatusCode::Added
-                } else if f.added == 0 {
-                    StatusCode::Deleted
+                    staged: file.is_staged(),
+                    untracked: file.is_untracked(),
+                };
+                if row.untracked {
+                    untracked.push(row);
                 } else {
-                    StatusCode::Modified
-                },
-                added: f.added,
-                removed: f.removed,
-                // Un commit est déjà écrit : rien à indexer.
-                staged: true,
+                    tracked.push(row);
+                }
+            }
+
+            let mut rows = Vec::new();
+            if !tracked.is_empty() {
+                rows.push(Row::Group(Group::Tracked));
+                rows.extend(tracked.into_iter().map(Row::File));
+            }
+            if !untracked.is_empty() {
+                rows.push(Row::Group(Group::Untracked));
+                rows.extend(untracked.into_iter().map(Row::File));
+            }
+            rows
+        }
+        DiffRange::Branch { .. } | DiffRange::Commit { .. } => files
+            .iter()
+            .map(|f| {
+                Row::File(FileRow {
+                    path: f.path.clone(),
+                    name: f
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    directory: f
+                        .path
+                        .parent()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default(),
+                    index: if f.removed == 0 {
+                        StatusCode::Added
+                    } else if f.added == 0 {
+                        StatusCode::Deleted
+                    } else {
+                        StatusCode::Modified
+                    },
+                    worktree: StatusCode::Unmodified,
+                    added: f.added,
+                    removed: f.removed,
+                    // Un commit est déjà écrit : rien à cocher.
+                    staged: true,
+                    untracked: false,
+                })
             })
             .collect(),
     }
+}
+
+/// Les fichiers d'un groupe, pour les cases qui agissent sur tout le lot.
+fn group_paths(rows: &[Row], group: Group) -> Vec<PathBuf> {
+    let mut inside = false;
+    let mut paths = Vec::new();
+    for row in rows {
+        match row {
+            Row::Group(g) => inside = *g == group,
+            Row::File(file) if inside => paths.push(file.path.clone()),
+            Row::File(_) => {}
+        }
+    }
+    paths
+}
+
+/// Vrai si tout le groupe est déjà indexé.
+fn group_checked(rows: &[Row], group: Group) -> bool {
+    let mut inside = false;
+    let mut any = false;
+    for row in rows {
+        match row {
+            Row::Group(g) => inside = *g == group,
+            Row::File(file) if inside => {
+                any = true;
+                if !file.staged {
+                    return false;
+                }
+            }
+            Row::File(_) => {}
+        }
+    }
+    any
 }
 
 #[cfg(test)]
@@ -527,47 +723,130 @@ mod tests {
         }
     }
 
+    fn files_of(rows: &[Row]) -> Vec<&FileRow> {
+        rows.iter()
+            .filter_map(|row| match row {
+                Row::File(file) => Some(file),
+                Row::Group(_) => None,
+            })
+            .collect()
+    }
+
+    fn groups_of(rows: &[Row]) -> Vec<Group> {
+        rows.iter()
+            .filter_map(|row| match row {
+                Row::Group(group) => Some(*group),
+                Row::File(_) => None,
+            })
+            .collect()
+    }
+
     #[test]
-    fn a_fully_staged_repository_fills_the_index_tab_and_leaves_the_other_empty() {
-        // Le cas d'un dépôt où tout a été indexé avant d'ouvrir Perch : la vue
-        // par défaut est légitimement vide, et tout doit se trouver dans
-        // l'index — pas l'inverse.
+    fn staged_and_unstaged_files_share_one_list() {
+        // Le point de la fusion : plus deux domaines à recoudre mentalement,
+        // une seule liste où la case dit ce qui partira au prochain commit.
         let status = status(vec![
-            file("a.php", StatusCode::Modified, StatusCode::Unmodified),
-            file("b.php", StatusCode::Added, StatusCode::Unmodified),
+            file("indexe.rs", StatusCode::Modified, StatusCode::Unmodified),
+            file("modifie.rs", StatusCode::Unmodified, StatusCode::Modified),
+            file("nouveau.rs", StatusCode::Untracked, StatusCode::Untracked),
         ]);
+        let rows = rows_for(&DiffRange::Working, &status, &[]);
+        let files = files_of(&rows);
 
-        assert!(rows_for(&DiffRange::Unstaged, &status, &[]).is_empty());
-
-        let staged = rows_for(&DiffRange::Staged, &status, &[]);
-        assert_eq!(staged.len(), 2);
-        assert_eq!(staged[0].code, StatusCode::Modified);
-        assert_eq!(staged[1].code, StatusCode::Added);
-        assert!(staged.iter().all(|r| r.staged));
-    }
-
-    #[test]
-    fn a_file_staged_then_modified_appears_on_both_sides() {
-        let status = status(vec![file(
-            "src/x.rs",
-            StatusCode::Modified,
-            StatusCode::Modified,
-        )]);
-        assert_eq!(rows_for(&DiffRange::Unstaged, &status, &[]).len(), 1);
-        assert_eq!(rows_for(&DiffRange::Staged, &status, &[]).len(), 1);
-    }
-
-    #[test]
-    fn an_untracked_file_is_not_in_the_index() {
-        let status = status(vec![file(
-            "nouveau.txt",
-            StatusCode::Untracked,
-            StatusCode::Untracked,
-        )]);
-        assert_eq!(rows_for(&DiffRange::Unstaged, &status, &[]).len(), 1);
+        assert_eq!(files.len(), 3);
+        assert!(files.iter().find(|f| f.name == "indexe.rs").unwrap().staged);
         assert!(
-            rows_for(&DiffRange::Staged, &status, &[]).is_empty(),
-            "un fichier jamais ajouté n'a rien dans l'index"
+            !files
+                .iter()
+                .find(|f| f.name == "modifie.rs")
+                .unwrap()
+                .staged
+        );
+        assert!(
+            !files
+                .iter()
+                .find(|f| f.name == "nouveau.rs")
+                .unwrap()
+                .staged
+        );
+
+        // Les fichiers jamais ajoutés forment leur propre groupe : les cocher
+        // ne veut pas dire la même chose que pour un fichier déjà suivi.
+        assert_eq!(groups_of(&rows), vec![Group::Tracked, Group::Untracked]);
+    }
+
+    #[test]
+    fn a_partially_staged_file_says_so() {
+        // `MM` : une case cochée laisserait croire que tout le fichier part.
+        let status = status(vec![file(
+            "moitie.rs",
+            StatusCode::Modified,
+            StatusCode::Modified,
+        )]);
+        let rows = rows_for(&DiffRange::Working, &status, &[]);
+        let file = files_of(&rows)[0];
+        assert!(file.staged);
+        assert!(file.partial(), "l'indexation partielle doit être signalée");
+        assert_eq!(file.codes(), "MM");
+    }
+
+    #[test]
+    fn the_codes_show_what_git_says() {
+        let status = status(vec![
+            file("ajoute.rs", StatusCode::Added, StatusCode::Unmodified),
+            file("efface.rs", StatusCode::Unmodified, StatusCode::Deleted),
+            file("neuf.rs", StatusCode::Untracked, StatusCode::Untracked),
+        ]);
+        let rows = rows_for(&DiffRange::Working, &status, &[]);
+        let files = files_of(&rows);
+        assert_eq!(files[0].codes(), "A");
+        assert_eq!(files[1].codes(), "D");
+        assert_eq!(files[2].codes(), "?");
+    }
+
+    #[test]
+    fn an_empty_group_is_not_shown() {
+        let status = status(vec![file(
+            "suivi.rs",
+            StatusCode::Modified,
+            StatusCode::Unmodified,
+        )]);
+        let rows = rows_for(&DiffRange::Working, &status, &[]);
+        assert_eq!(groups_of(&rows), vec![Group::Tracked]);
+    }
+
+    #[test]
+    fn a_group_is_checked_only_when_all_of_it_is() {
+        let mixed = status(vec![
+            file("un.rs", StatusCode::Modified, StatusCode::Unmodified),
+            file("deux.rs", StatusCode::Unmodified, StatusCode::Modified),
+        ]);
+        let rows = rows_for(&DiffRange::Working, &mixed, &[]);
+        assert!(!group_checked(&rows, Group::Tracked));
+        assert_eq!(group_paths(&rows, Group::Tracked).len(), 2);
+
+        let everything = status(vec![
+            file("un.rs", StatusCode::Modified, StatusCode::Unmodified),
+            file("deux.rs", StatusCode::Added, StatusCode::Unmodified),
+        ]);
+        let rows = rows_for(&DiffRange::Working, &everything, &[]);
+        assert!(group_checked(&rows, Group::Tracked));
+    }
+
+    #[test]
+    fn a_group_checkbox_only_covers_its_own_files() {
+        let status = status(vec![
+            file("suivi.rs", StatusCode::Modified, StatusCode::Unmodified),
+            file("neuf.rs", StatusCode::Untracked, StatusCode::Untracked),
+        ]);
+        let rows = rows_for(&DiffRange::Working, &status, &[]);
+        assert_eq!(
+            group_paths(&rows, Group::Untracked),
+            vec![PathBuf::from("neuf.rs")]
+        );
+        assert_eq!(
+            group_paths(&rows, Group::Tracked),
+            vec![PathBuf::from("suivi.rs")]
         );
     }
 
@@ -585,17 +864,22 @@ mod tests {
             removed: 3,
             binary: false,
         }];
-        let rows = rows_for(&DiffRange::Staged, &status, &files);
-        assert_eq!((rows[0].added, rows[0].removed), (12, 3));
+        let rows = rows_for(&DiffRange::Working, &status, &files);
+        let row = files_of(&rows)[0];
+        assert_eq!((row.added, row.removed), (12, 3));
 
         // Sans `--numstat` encore arrivé, la ligne s'affiche quand même.
-        let rows = rows_for(&DiffRange::Staged, &status, &[]);
-        assert_eq!((rows[0].added, rows[0].removed), (0, 0));
+        let rows = rows_for(&DiffRange::Working, &status, &[]);
+        assert_eq!(
+            (files_of(&rows)[0].added, files_of(&rows)[0].removed),
+            (0, 0)
+        );
     }
 
     #[test]
     fn commit_ranges_come_from_the_file_list_alone() {
-        // Aucun statut : une revue de branche ne parle que de commits.
+        // Aucun statut : une revue de commits ne parle que de ce que git a
+        // déjà écrit, et rien n'y est à cocher.
         let files = vec![DiffFile {
             path: PathBuf::from("dossier/ajoute.rs"),
             original: None,
@@ -603,10 +887,19 @@ mod tests {
             removed: 0,
             binary: false,
         }];
-        let rows = rows_for(&DiffRange::Head, &Status::default(), &files);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].name, "ajoute.rs");
-        assert_eq!(rows[0].directory, "dossier");
-        assert_eq!(rows[0].code, StatusCode::Added);
+        let rows = rows_for(
+            &DiffRange::Commit {
+                id: "abc".into(),
+                parent: None,
+            },
+            &Status::default(),
+            &files,
+        );
+        assert!(groups_of(&rows).is_empty(), "pas de groupes sur un commit");
+        let row = files_of(&rows)[0];
+        assert_eq!(row.name, "ajoute.rs");
+        assert_eq!(row.directory, "dossier");
+        assert_eq!(row.index, StatusCode::Added);
+        assert!(!row.partial());
     }
 }
