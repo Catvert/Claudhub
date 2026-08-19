@@ -13,6 +13,7 @@ use gpui_component::{
     checkbox::Checkbox,
     h_flex,
     input::Input,
+    select::Select,
     v_flex, ActiveTheme, Disableable, Selectable, Sizable, WindowExt,
 };
 
@@ -193,8 +194,11 @@ impl PerchApp {
             .clone()
             .map(|base| DiffRange::Branch { base })
             .unwrap_or(DiffRange::Working);
+        // L'onglet ne nomme plus la base : le sélecteur juste à côté la porte,
+        // et la répéter donnait deux fois la même information sur une ligne
+        // qui n'en a pas la place.
         let branch_label = match &base {
-            Some(base) => tr!("range-branch", { base: base }),
+            Some(_) => tr!("range-branch"),
             None => tr!("range-branch-none"),
         };
         // Le compte se lit sans cliquer : c'est ce qui évite d'ouvrir Perch
@@ -247,6 +251,18 @@ impl PerchApp {
                                 this.set_range(target.clone(), cx);
                             }))
                     }),
+            )
+            .child(div().flex_1())
+            // Le choix de la base vit à côté de son onglet : la branche
+            // d'intégration devinée est un point de départ, pas une fatalité —
+            // on compare aussi bien à `dev`, à une autre branche de travail ou
+            // à une distante.
+            .child(
+                Select::new(&self.base_select)
+                    .xsmall()
+                    .title_prefix(tr!("range-base-prefix"))
+                    .placeholder(tr!("range-base-placeholder"))
+                    .menu_width(px(280.)),
             )
     }
 

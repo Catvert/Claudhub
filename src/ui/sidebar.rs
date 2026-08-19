@@ -173,9 +173,15 @@ impl PerchApp {
                                                     .hover(|s| {
                                                         s.bg(cx.theme().sidebar_accent.opacity(0.5))
                                                     })
-                                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                                        this.select_worktree(for_click.clone(), cx);
-                                                    }))
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            this.select_worktree(
+                                                                for_click.clone(),
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    ))
                                                     .child(
                                                         icon(if is_main {
                                                             "folder"

@@ -220,9 +220,18 @@ imbriqué dans un autre serait attribué au mauvais.
 
 ### La base de la revue de branche
 
-Elle vient de git — `origin/HEAD`, puis `init.defaultBranch`, puis les noms
-usuels *qui existent vraiment* (`branch::default_base`) — et jamais d'un nom
-supposé. Un `main` codé en dur produit un `unknown revision` au premier clic
+La base **par défaut** vient de git — `origin/HEAD`, puis `init.defaultBranch`,
+puis les noms usuels *qui existent vraiment* (`branch::default_base`) — et
+jamais d'un nom supposé. Ce n'est qu'un point de départ : un sélecteur avec
+recherche (`base_select`, un `SelectState<SearchableVec<SharedString>>`) laisse
+comparer à n'importe quelle branche, locale ou distante. Le choix est **propre
+au worktree** : comparer un worktree d'agent à `dev` et un autre à la branche
+d'où il est parti est le cas normal, pas l'exception — d'où le rafraîchissement
+du sélecteur à chaque changement de worktree.
+
+Choisir une base bascule sur la revue de branche : le faire en regardant ses
+modifications en cours n'aurait aucun effet visible, ce qui ferait croire que le
+sélecteur ne marche pas. Un `main` codé en dur produit un `unknown revision` au premier clic
 sur tout dépôt qui s'appelle autrement, ce qui est le cas de la moitié d'entre
 eux. Tant que la base est inconnue, ou que c'est la branche déployée dans ce
 worktree (qui n'aurait rien à se comparer), l'onglet reste affiché mais

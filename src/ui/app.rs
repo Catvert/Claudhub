@@ -17,6 +17,7 @@ use gpui_component::{
     h_flex,
     input::InputState,
     resizable::{h_resizable, resizable_panel, v_resizable, ResizableState},
+    select::{SearchableVec, SelectEvent, SelectState},
     v_flex, ActiveTheme, Disableable, Root, Selectable, Sizable, StyledExt, WindowExt,
 };
 
@@ -134,6 +135,11 @@ pub struct PerchApp {
     pub(super) review: HashMap<PathBuf, ReviewState>,
     pub(super) terminals: HashMap<PathBuf, Entity<TerminalGroup>>,
     pub(super) commit_input: Entity<InputState>,
+    /// Sélecteur de la base de comparaison. Il est searchable : un dépôt
+    /// vivant a des dizaines de branches, et faire défiler une liste de
+    /// soixante-dix entrées pour en trouver une dont on connaît le nom est
+    /// exactement ce qu'un champ de recherche évite.
+    pub(super) base_select: Entity<SelectState<SearchableVec<SharedString>>>,
     pub(super) toast: Option<Toast>,
     /// Worktrees dont une lecture de statut est déjà partie.
     ///
@@ -179,6 +185,25 @@ impl PerchApp {
                 .placeholder(tr!("commit-placeholder"))
         });
 
+        let base_select = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(Vec::<SharedString>::new()),
+                None,
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
+        // Souscrit une fois, dans le constructeur : une souscription posée
+        // pendant un rendu s'accumulerait à chaque frame.
+        cx.subscribe(&base_select, |this, _, event, cx| {
+            let SelectEvent::Confirm(Some(base)) = event else {
+                return;
+            };
+            this.set_base(base.to_string(), cx);
+        })
+        .detach();
+
         let mut app = Self {
             settings,
             git,
@@ -187,6 +212,7 @@ impl PerchApp {
             review: HashMap::new(),
             terminals: HashMap::new(),
             commit_input,
+            base_select,
             toast: None,
             pending_status: std::collections::HashSet::new(),
             show_terminal: true,
@@ -324,7 +350,7 @@ impl PerchApp {
                 self.git.send(Cmd::LoadBranches { main });
                 if self.active.is_none() {
                     if let Some(path) = first {
-                        self.select_worktree(path, cx);
+                        self.select_worktree(path, window, cx);
                     }
                 }
             }
@@ -339,7 +365,7 @@ impl PerchApp {
                         self.review.remove(&active);
                         self.terminals.remove(&active);
                         if let Some(first) = self.first_worktree() {
-                            self.select_worktree(first, cx);
+                            self.select_worktree(first, window, cx);
                         }
                     }
                 }
@@ -468,6 +494,9 @@ impl PerchApp {
                 for (worktree, range) in reload {
                     self.git.send(Cmd::LoadDiffFiles { worktree, range });
                 }
+                // Après la propagation, pas avant : le sélecteur doit montrer
+                // la base retenue, et elle vient d'être décidée.
+                self.refresh_base_choices(window, cx);
             }
             Evt::Done {
                 worktree,
@@ -525,7 +554,12 @@ impl PerchApp {
         }
     }
 
-    pub(super) fn select_worktree(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    pub(super) fn select_worktree(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.active.as_deref() == Some(path.as_path()) {
             return;
         }
@@ -538,6 +572,9 @@ impl PerchApp {
         self.active = Some(path.clone());
         self.review.entry(path.clone()).or_default();
         self.request_status(path);
+        // Chaque worktree a sa base : le sélecteur doit montrer celle-ci, pas
+        // celle du worktree qu'on vient de quitter.
+        self.refresh_base_choices(window, cx);
         cx.notify();
     }
 
@@ -597,6 +634,75 @@ impl PerchApp {
     }
 
     // — Accès à l'état ——————————————————————————————————————————
+
+    /// Remplit le sélecteur de base avec les branches du dépôt courant.
+    ///
+    /// Les locales d'abord, puis les distantes : c'est l'ordre dans lequel on
+    /// les cherche, et `branch::list` les rend déjà ainsi.
+    fn refresh_base_choices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let Some(repo) = self.repo_of(&worktree) else {
+            return;
+        };
+        let names: Vec<SharedString> = repo
+            .branches
+            .iter()
+            .map(|b| SharedString::from(b.name.clone()))
+            .collect();
+        let current = self
+            .review
+            .get(&worktree)
+            .and_then(|state| state.base.clone())
+            .map(SharedString::from);
+
+        self.base_select.update(cx, |select, cx| {
+            select.set_items(SearchableVec::new(names), window, cx);
+            if let Some(current) = current {
+                select.set_selected_value(&current, window, cx);
+            }
+        });
+    }
+
+    /// Change la base de comparaison du worktree courant.
+    ///
+    /// Le choix est propre au worktree : comparer un worktree d'agent à `dev`
+    /// et un autre à la branche d'où il est parti est le cas normal, pas
+    /// l'exception.
+    pub(super) fn set_base(&mut self, base: String, cx: &mut Context<Self>) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let Some(state) = self.review.get_mut(&worktree) else {
+            return;
+        };
+        if state.base.as_deref() == Some(base.as_str()) {
+            return;
+        }
+        state.base = Some(base.clone());
+        // Bascule sur la revue de branche : choisir une base en regardant ses
+        // modifications en cours n'aurait aucun effet visible, ce qui ferait
+        // croire que le sélecteur ne marche pas.
+        let range = DiffRange::Branch { base };
+        state.range = range.clone();
+        state.range_chosen = true;
+        state.files.clear();
+        state.selected = None;
+        state.diff = None;
+        self.git.send(Cmd::LoadDiffFiles {
+            worktree: worktree.clone(),
+            range,
+        });
+        // L'historique de branche dépend de la même base.
+        if let Some(state) = self.review.get_mut(&worktree) {
+            state.history = None;
+        }
+        if self.show_history {
+            self.ensure_history(cx);
+        }
+        cx.notify();
+    }
 
     /// Base de comparaison de la revue courante, si elle en a une.
     pub(super) fn review_base(&self) -> Option<String> {

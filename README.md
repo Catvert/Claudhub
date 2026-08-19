@@ -24,7 +24,9 @@ sans quitter l'application.
   tout seul. Un bouton lance directement l'agent de codage configuré dans un
   onglet neuf.
 - **Revue** — deux domaines : les modifications en cours, et la branche entière
-  depuis sa divergence d'avec sa base (`base...HEAD`, donc sans le bruit de ce qui a
+  depuis sa divergence d'avec une base **que l'on choisit** — la branche
+  d'intégration est devinée au départ, le sélecteur (avec recherche) permet de
+  comparer à `dev`, à une autre branche de travail ou à une distante (`base...HEAD`, donc sans le bruit de ce qui a
   atterri sur la base entre-temps). Le code est coloré par tree-sitter des deux
   côtés — une ligne supprimée d'après l'ancienne version du fichier, une ligne
   ajoutée d'après la nouvelle — et numéroté des deux côtés. L'affichage est
