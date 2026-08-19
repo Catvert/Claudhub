@@ -94,6 +94,20 @@ produisait un réveil, donc un `git status`, donc un rechargement de la revue.
 Un dossier créé plus tard est signalé par son parent, ce qui suffit à
 déclencher le rafraîchissement qui le découvrira.
 
+**On ne réagit qu'aux événements qui changent le contenu**
+(`watch::changes_content`). inotify signale chaque **ouverture** de fichier —
+`Access(Open)` — et c'est nous qui les ouvrons : `git status` lisait le
+worktree, chaque lecture produisait un événement, chaque événement déclenchait
+un `git status`. Une boucle à plein régime, quelques centaines de `git status`
+par minute, invisible tant que la liste ne se vidait pas entre deux réponses —
+et devenue un clignotement le jour où elle s'est vidée. Les métadonnées sont
+écartées pour la même raison ; `Any` et `Other` sont gardés, c'est ainsi que
+`notify` signale un débordement de sa file.
+
+Dans le même esprit, toutes les commandes git tournent avec
+`GIT_OPTIONAL_LOCKS=0` : `git status` rafraîchit sinon le cache de `stat` qu'il
+garde dans `.git/index`, qui est justement l'un des fichiers surveillés.
+
 **Poser les surveillances ne se fait jamais dans le thread d'interface** :
 c'était une demi-seconde de fenêtre figée à chaque changement de worktree.
 `Watcher::watch` n'envoie qu'un ordre à un thread dédié et rend la main
@@ -433,6 +447,11 @@ parseur naïf de `/proc` rate, et un test le verrouille.
 « Modifications » et « Revue de branche » sont **deux panneaux**, pas deux
 onglets d'une même vue : on les regarde ensemble, l'un montrant ce qui change
 maintenant, l'autre ce que la branche a écrit.
+
+Une liste ne se vide jamais avant d'avoir de quoi la remplacer : à l'arrivée
+d'un statut, les domaines connus sont **redemandés** et l'ancien contenu reste
+à l'écran jusqu'à la réponse. L'inverse fait clignoter la liste à chaque
+écriture de fichier.
 
 Conséquence sur l'état : `ReviewState::files` est une **table par domaine**.
 Une seule liste ferait clignoter l'un des deux panneaux chaque fois que l'autre

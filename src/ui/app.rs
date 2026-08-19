@@ -656,12 +656,21 @@ impl PerchApp {
                 if state.base.is_none() {
                     state.base = base;
                 }
-                // Les listes dépendent du statut : les redemander ici évite
-                // qu'un fichier qu'on vient d'indexer reste affiché du mauvais
-                // côté. Chaque panneau redemandera la sienne au prochain
-                // rendu, d'où le simple oubli de ce qu'on avait.
-                state.files.clear();
-                state.pending_files.clear();
+                // Les listes dépendent du statut : un fichier qu'on vient
+                // d'indexer ne doit pas rester affiché du mauvais côté. On les
+                // **redemande** sans les vider : effacer ce qui est à l'écran
+                // avant d'avoir de quoi le remplacer fait clignoter la liste à
+                // chaque rafraîchissement, et il en arrive un par écriture de
+                // fichier.
+                let stale: Vec<DiffRange> = state.files.keys().cloned().collect();
+                for range in stale {
+                    if state.pending_files.insert(range.clone()) {
+                        self.git.send(Cmd::LoadDiffFiles {
+                            worktree: worktree.clone(),
+                            range,
+                        });
+                    }
+                }
             }
             Evt::DiffFiles {
                 worktree,

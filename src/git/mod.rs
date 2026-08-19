@@ -205,7 +205,18 @@ fn command<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Command {
         // Les sorties porcelain sont stables, mais les messages d'erreur que
         // nous affichons tels quels ne le sont pas : les lire en anglais évite
         // de dépendre de la locale de la machine pour les reconnaître.
-        .env("LC_ALL", "C");
+        .env("LC_ALL", "C")
+        // **Ne pas réécrire l'index en passant.** `git status` rafraîchit les
+        // informations de `stat` qu'il y garde en cache, ce qui touche
+        // `.git/index` — que nous surveillons. Chaque lecture provoquait donc
+        // la suivante : un `git status` toutes les soixante millisecondes, en
+        // boucle, et la liste des fichiers qui clignotait au même rythme.
+        //
+        // C'est le verrou que git qualifie lui-même d'optionnel, et cette
+        // variable est prévue pour les outils qui interrogent un dépôt en
+        // continu. Les écritures, elles, prennent le vrai verrou et ne sont
+        // pas concernées.
+        .env("GIT_OPTIONAL_LOCKS", "0");
     cmd
 }
 

@@ -126,12 +126,37 @@ impl Watcher {
 
 /// Les chemins d'un événement qui méritent un rafraîchissement.
 fn interesting_paths(event: &DebouncedEvent) -> Vec<PathBuf> {
+    if !changes_content(&event.kind) {
+        return Vec::new();
+    }
     event
         .paths
         .iter()
         .filter(|p| is_interesting(p))
         .cloned()
         .collect()
+}
+
+/// Vrai pour un événement susceptible de changer ce que `git status` répond.
+///
+/// Le filtre décisif est `Access` : inotify signale chaque **ouverture** de
+/// fichier, et c'est nous qui les ouvrons. `git status` lisait le worktree,
+/// chaque lecture produisait un événement, chaque événement déclenchait un
+/// `git status` — une boucle qui tournait à plein régime, invisible tant que la
+/// liste ne se vidait pas entre deux réponses.
+///
+/// Les métadonnées sont écartées pour la même raison : une date d'accès ou un
+/// mode qui change ne change rien à ce que git voit. `Any` et `Other` sont
+/// gardés — c'est ainsi que `notify` signale un débordement de sa file, après
+/// lequel on a justement tout à relire.
+fn changes_content(kind: &notify::EventKind) -> bool {
+    use notify::event::{EventKind, ModifyKind};
+    match kind {
+        EventKind::Access(_) => false,
+        EventKind::Modify(ModifyKind::Metadata(_)) => false,
+        EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(_) => true,
+        EventKind::Any | EventKind::Other => true,
+    }
 }
 
 /// Tout ce qui est sous `.git/` est écarté sauf les quelques références dont
@@ -270,6 +295,33 @@ fn git_dir(worktree: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use notify::event::{AccessKind, CreateKind, EventKind, MetadataKind, ModifyKind};
+
+    /// Le défaut qui faisait tourner Perch en boucle : inotify signale chaque
+    /// ouverture de fichier, `git status` en ouvre des milliers, et chaque
+    /// événement relançait un `git status`.
+    #[test]
+    fn opening_a_file_is_not_a_change() {
+        assert!(!changes_content(&EventKind::Access(AccessKind::Open(
+            notify::event::AccessMode::Any
+        ))));
+        assert!(!changes_content(&EventKind::Access(AccessKind::Read)));
+        // Une date d'accès n'apprend rien non plus à git.
+        assert!(!changes_content(&EventKind::Modify(ModifyKind::Metadata(
+            MetadataKind::AccessTime
+        ))));
+
+        assert!(changes_content(&EventKind::Create(CreateKind::File)));
+        assert!(changes_content(&EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Content
+        ))));
+        assert!(changes_content(&EventKind::Remove(
+            notify::event::RemoveKind::File
+        )));
+        // Le signal de débordement de la file : on a tout à relire.
+        assert!(changes_content(&EventKind::Any));
+    }
+
     use super::*;
 
     #[test]
