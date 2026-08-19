@@ -54,6 +54,10 @@ pub struct TerminalView {
     /// Vrai entre l'enfoncement et le relâchement du bouton : c'est ce qui
     /// distingue un glissement de sélection d'un simple survol.
     selecting: bool,
+    /// Géométrie demandée par la mise en page, pas encore transmise.
+    pending_size: Option<TermSize>,
+    /// Vrai quand une transmission différée est déjà programmée.
+    resize_scheduled: bool,
     label: SharedString,
 }
 
@@ -127,6 +131,8 @@ impl TerminalView {
             bounds: Bounds::default(),
             cell: gpui::size(px(8.), px(16.)),
             selecting: false,
+            pending_size: None,
+            resize_scheduled: false,
             label,
         }
     }
@@ -169,7 +175,7 @@ impl TerminalView {
     /// choisie, pas devinée : une chasse fixe ne veut pas dire une largeur
     /// connue, et un écart d'un pixel décale la dernière colonne d'une ligne
     /// de quatre-vingts.
-    fn sync_size(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+    fn sync_size(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         if bounds == self.bounds {
             return;
         }
@@ -189,18 +195,51 @@ impl TerminalView {
             .map(|s| s.width)
             .unwrap_or(self.font_size * 0.6);
         let line_height = window.line_height().max(px(1.));
-        let _ = cx;
 
         self.cell = gpui::size(cell_width.max(px(1.)), line_height);
-        let columns = (bounds.size.width / cell_width.max(px(1.))) as usize;
-        let lines = (bounds.size.height / line_height) as usize;
-        self.terminal.resize(TermSize::new(
-            columns,
-            lines,
-            f32::from(cell_width) as u16,
-            f32::from(line_height) as u16,
-        ));
-        self.snapshot = self.terminal.snapshot();
+        let (columns, lines) = grid_size(bounds.size, self.cell);
+        self.request_size(
+            TermSize::new(
+                columns,
+                lines,
+                f32::from(cell_width) as u16,
+                f32::from(line_height) as u16,
+            ),
+            cx,
+        );
+    }
+
+    /// Transmet la nouvelle géométrie, une fois le glissement calmé.
+    ///
+    /// Un redimensionnement à la souris passe par toutes les largeurs
+    /// intermédiaires. Les transmettre toutes revient à envoyer un `SIGWINCH`
+    /// par image : le programme redessine à chaque fois, et comme il redessine
+    /// *en place*, ses invites successives s'empilent au lieu de se remplacer.
+    /// On attend donc que la taille se stabilise ; pendant ce temps, le
+    /// panneau rogne l'ancienne grille, exactement comme le fait une fenêtre
+    /// qu'on redimensionne.
+    fn request_size(&mut self, size: TermSize, cx: &mut Context<Self>) {
+        if self.terminal.size() == size {
+            self.pending_size = None;
+            return;
+        }
+        self.pending_size = Some(size);
+        if self.resize_scheduled {
+            return;
+        }
+        self.resize_scheduled = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RESIZE_QUIET).await;
+            let _ = this.update(cx, |this, cx| {
+                this.resize_scheduled = false;
+                if let Some(size) = this.pending_size.take() {
+                    this.terminal.resize(size);
+                    this.snapshot = this.terminal.snapshot();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -298,6 +337,17 @@ impl TerminalView {
             self.snapshot = self.terminal.snapshot();
             cx.notify();
         }
+    }
+
+    /// Vide l'historique et l'écran.
+    ///
+    /// La sortie de secours quand un programme a laissé le terminal dans un
+    /// état illisible : le shell a bien un `clear`, mais il faut encore que
+    /// son invite réponde.
+    pub fn clear_scrollback(&mut self, cx: &mut Context<Self>) {
+        self.terminal.clear();
+        self.snapshot = self.terminal.snapshot();
+        cx.notify();
     }
 
     pub fn copy_selection(&mut self, cx: &mut Context<Self>) {
@@ -474,7 +524,8 @@ impl Render for TerminalView {
             .context_menu({
                 let entity = cx.entity();
                 move |menu, _window, _cx| {
-                    let (copy, paste, all) = (entity.clone(), entity.clone(), entity.clone());
+                    let (copy, paste) = (entity.clone(), entity.clone());
+                    let (all, clear) = (entity.clone(), entity.clone());
                     menu.item(PopupMenuItem::new(tr!("terminal-copy")).on_click(
                         move |_, _window, cx| {
                             copy.update(cx, |this, cx| this.copy_selection(cx));
@@ -486,13 +537,16 @@ impl Render for TerminalView {
                         },
                     ))
                     .separator()
-                    .item(
-                        PopupMenuItem::new(tr!("terminal-select-all")).on_click(
-                            move |_, _window, cx| {
-                                all.update(cx, |this, cx| this.select_all(cx));
-                            },
-                        ),
-                    )
+                    .item(PopupMenuItem::new(tr!("terminal-select-all")).on_click(
+                        move |_, _window, cx| {
+                            all.update(cx, |this, cx| this.select_all(cx));
+                        },
+                    ))
+                    .item(PopupMenuItem::new(tr!("terminal-clear")).on_click(
+                        move |_, _window, cx| {
+                            clear.update(cx, |this, cx| this.clear_scrollback(cx));
+                        },
+                    ))
                 }
             })
             .child(measure)
@@ -500,6 +554,27 @@ impl Render for TerminalView {
             .children(self.render_cursor(focused, cx))
     }
 }
+
+/// Plancher de la grille : en deçà, le panneau rogne au lieu de demander au
+/// programme de se replier dans un espace où il ne peut rien afficher.
+const MIN_COLUMNS: usize = 20;
+const MIN_LINES: usize = 3;
+
+/// Combien de cellules tiennent dans cette place.
+///
+/// Le plancher n'est pas cosmétique : un panneau réduit à rien demanderait un
+/// terminal de deux colonnes, où la moindre invite occupe cinquante lignes. Le
+/// programme redessine, l'historique déborde, et il ne reste que des
+/// fragments. En dessous, le panneau rogne — ce que fait aussi une fenêtre de
+/// terminal qu'on rétrécit trop.
+pub fn grid_size(space: gpui::Size<Pixels>, cell: gpui::Size<Pixels>) -> (usize, usize) {
+    let columns = (space.width / cell.width.max(px(1.))) as usize;
+    let lines = (space.height / cell.height.max(px(1.))) as usize;
+    (columns.max(MIN_COLUMNS), lines.max(MIN_LINES))
+}
+
+/// Délai d'immobilité avant de transmettre une nouvelle géométrie au pty.
+const RESIZE_QUIET: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// Un cran de molette vaut un point de taille.
 ///
@@ -865,6 +940,22 @@ impl PerchApp {
 
 #[cfg(test)]
 mod tests {
+
+    /// Le plancher n'est pas cosmétique : sous vingt colonnes, une invite de
+    /// shell occupe des dizaines de lignes, le programme redessine, et le
+    /// glissement de redimensionnement ne laisse que des fragments empilés.
+    #[test]
+    fn a_squeezed_panel_still_gets_a_usable_grid() {
+        let cell = gpui::size(px(8.), px(16.));
+        assert_eq!(grid_size(gpui::size(px(800.), px(320.)), cell), (100, 20));
+        // Réduit à rien : on rogne plutôt que de demander deux colonnes.
+        assert_eq!(grid_size(gpui::size(px(10.), px(4.)), cell), (20, 3));
+        // Une cellule de largeur nulle ne divise pas par zéro.
+        assert_eq!(
+            grid_size(gpui::size(px(800.), px(320.)), gpui::size(px(0.), px(0.))),
+            (800, 320)
+        );
+    }
     use super::*;
 
     fn cell() -> gpui::Size<Pixels> {

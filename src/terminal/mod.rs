@@ -315,6 +315,14 @@ impl Terminal {
         self.term.lock().scroll_display(Scroll::Delta(lines));
     }
 
+    /// Vide l'écran et tout l'historique.
+    pub fn clear(&self) {
+        use alacritty_terminal::vte::ansi::{ClearMode, Handler};
+        let mut term = self.term.lock();
+        term.clear_screen(ClearMode::All);
+        term.clear_screen(ClearMode::Saved);
+    }
+
     /// Ramène la vue en bas — ce que fait toute frappe dans un terminal.
     pub fn scroll_to_bottom(&self) {
         use alacritty_terminal::grid::Scroll;

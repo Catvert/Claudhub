@@ -582,6 +582,23 @@ fixe suffit à aligner les colonnes, et gpui garde la charge du façonnage.
 Le verrou de la grille est partagé avec la boucle d'E/S : **ne jamais dessiner
 sous ce verrou**, d'où l'instantané.
 
+**Le redimensionnement est différé et planchérisé.** Un glissement à la souris
+passe par toutes les largeurs intermédiaires ; transmettre chacune revient à
+envoyer un `SIGWINCH` par image, et comme un shell redessine son invite *en
+place*, ses redessins successifs s'empilent au lieu de se remplacer — l'écran
+finit en fragments. La géométrie n'est donc transmise qu'après un temps
+d'immobilité. Le plancher (`grid_size`) sert la même cause : sous vingt
+colonnes, la moindre invite occupe des dizaines de lignes et fait déborder
+l'historique. En dessous, le panneau rogne, ce que fait aussi une fenêtre de
+terminal qu'on rétrécit trop.
+
+**Une ligne de terminal a une hauteur fixe et ne revient pas à la ligne.**
+Sans cela, une ligne plus large que le panneau est repliée par gpui : elle
+occupe deux hauteurs, pousse tout ce qui suit vers le bas, et la grille ne
+correspond plus à ce que le programme croit afficher. La géométrie étant
+mesurée après la mise en page, la grille reste trop large pendant une frame
+après chaque rétrécissement — précisément le moment où le repli s'installe.
+
 Le curseur est un rectangle translucide posé par-dessus la grille, et non une
 cellule inversée : l'inversion demanderait de redessiner le glyphe à l'envers,
 alors qu'un fond translucide laisse lire ce qui est dessous. Il ne clignote
