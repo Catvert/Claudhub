@@ -122,6 +122,15 @@ pub fn row_height(cx: &App) -> Pixels {
     scaled(cx, 1.9, px(22.))
 }
 
+/// Hauteur d'une ligne de liste qui porte deux étages de texte.
+///
+/// Une hauteur d'une seule ligne y ferait déborder le second étage sur la
+/// ligne suivante — les listes virtualisées ne mesurent rien et réservent
+/// exactement ce qu'on leur annonce.
+pub fn tall_row_height(cx: &App) -> Pixels {
+    scaled(cx, 3.0, px(34.))
+}
+
 /// Hauteur d'une barre d'en-tête : onglets, titres de panneaux.
 pub fn bar_height(cx: &App) -> Pixels {
     scaled(cx, 2.2, px(26.))

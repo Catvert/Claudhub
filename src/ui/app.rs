@@ -337,6 +337,10 @@ pub struct PerchApp {
     /// chaque image.
     pub(super) diff_scroll: gpui::UniformListScrollHandle,
     pub(super) history_scroll: gpui::UniformListScrollHandle,
+    pub(super) branch_scroll: gpui::UniformListScrollHandle,
+    /// Filtre du panneau des branches. Une entité créée une fois : recréée par
+    /// frame, elle perdrait le curseur et le texte dès la première frappe.
+    pub(super) branch_filter: Entity<InputState>,
     /// Partage entre le graphe et la liste des fichiers du commit choisi.
     pub(super) history_split: Entity<gpui_component::resizable::ResizableState>,
     focus: FocusHandle,
@@ -351,6 +355,9 @@ impl PerchApp {
                 .multi_line(true)
                 .placeholder(tr!("commit-placeholder"))
         });
+
+        let branch_filter =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("branch-filter-placeholder")));
 
         let base_select = cx.new(|cx| {
             SelectState::new(
@@ -438,6 +445,8 @@ impl PerchApp {
             watcher: None,
             diff_scroll: gpui::UniformListScrollHandle::new(),
             history_scroll: gpui::UniformListScrollHandle::new(),
+            branch_scroll: gpui::UniformListScrollHandle::new(),
+            branch_filter,
             history_split: cx.new(|_| gpui_component::resizable::ResizableState::default()),
             focus: cx.focus_handle(),
         };

@@ -273,8 +273,10 @@ fichier de réglages reste modifiable à la main pour ces cas-là.
 ### Les hauteurs de ligne
 
 Aucune hauteur de ligne ne s'écrit en dur : elles viennent de
-`theme::row_height` / `bar_height` / `toolbar_height`, qui les déduisent de la
-taille du texte. Une hauteur figée déborde dès qu'on grossit la police — et
+`theme::row_height` / `tall_row_height` / `bar_height` / `toolbar_height`, qui
+les déduisent de la taille du texte. `tall_row_height` est pour les lignes à
+deux étages — un nom et son détail — qu'une hauteur d'une seule ligne fait
+déborder sur la suivante. Une hauteur figée déborde dès qu'on grossit la police — et
 c'est pire dans les listes virtualisées, qui ne mesurent rien et réservent
 exactement ce qu'on leur annonce : la ligne suivante est recouverte, pas
 repoussée. La barre latérale, elle, n'annonce aucune hauteur du tout et se
