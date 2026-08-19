@@ -275,10 +275,45 @@ impl PerchApp {
         let Some(state) = self.active_review_mut() else {
             return;
         };
-        state.diff_selection = match (extend, state.diff_selection) {
+        let next = match (extend, state.diff_selection) {
             (true, Some((anchor, _))) => Some((anchor, index)),
             _ => Some((index, index)),
         };
+        // Un glissement passe par cette fonction à chaque ligne survolée :
+        // sans ce garde, chaque pixel de mouvement redemanderait un rendu de
+        // toute la liste pour une sélection qui n'a pas bougé.
+        if state.diff_selection == next {
+            return;
+        }
+        state.diff_selection = next;
+        cx.notify();
+    }
+
+    /// Étend la sélection pendant un glissement.
+    pub(super) fn drag_diff_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        if !self.diff_dragging {
+            return;
+        }
+        self.select_diff_row(index, true, cx);
+    }
+
+    pub(super) fn end_diff_drag(&mut self) {
+        self.diff_dragging = false;
+    }
+
+    /// Sélectionne tout le diff affiché.
+    pub(super) fn select_whole_diff(&mut self, cx: &mut Context<Self>) {
+        let Some(last) = self
+            .active_review()
+            .and_then(|state| state.diff.as_ref())
+            .map(|diff| diff.rows.len().saturating_sub(1))
+        else {
+            return;
+        };
+        let Some(state) = self.active_review_mut() else {
+            return;
+        };
+        state.diff_selection = Some((0, last));
         cx.notify();
     }
 
@@ -493,6 +528,10 @@ impl PerchApp {
                     .flex_1()
                     .min_h_0()
                     .on_scroll_wheel(cx.listener(Self::on_diff_scroll))
+                    .on_mouse_up(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, _window, _cx| this.end_diff_drag()),
+                    )
                     .child(
                         uniform_list("diff-lines", count, move |range, _window, cx| {
                             range
@@ -554,6 +593,7 @@ fn render_row(
             let entity = entity.clone();
             let for_copy = entity.clone();
             let for_click = entity.clone();
+            let for_drag = entity.clone();
             h_flex()
                 .id(("hunk", index))
                 .h(line_height)
@@ -570,6 +610,7 @@ fn render_row(
                 .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
                     select(&for_click, index, event.modifiers.shift, window, cx);
                 })
+                .on_mouse_move(move |event, _window, cx| drag(&for_drag, index, event, cx))
                 .child(
                     div()
                         .text_color(cx.theme().muted_foreground)
@@ -628,6 +669,7 @@ fn render_row(
                     .into_any_element()
             };
 
+            let for_drag = entity.clone();
             let entity = entity.clone();
             h_flex()
                 .id(("line", index))
@@ -644,6 +686,7 @@ fn render_row(
                 .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
                     select(&entity, index, event.modifiers.shift, window, cx);
                 })
+                .on_mouse_move(move |event, _window, cx| drag(&for_drag, index, event, cx))
                 .child(number(source.old_no, gutter, colors))
                 .child(number(source.new_no, gutter, colors))
                 .child(
@@ -674,7 +717,23 @@ fn select(
 ) {
     let handle = entity.read(cx).focus_handle(cx);
     window.focus(&handle);
-    entity.update(cx, |this, cx| this.select_diff_row(index, extend, cx));
+    entity.update(cx, |this, cx| {
+        this.diff_dragging = true;
+        this.select_diff_row(index, extend, cx);
+    });
+}
+
+/// Étend la sélection au passage de la souris, bouton enfoncé.
+///
+/// Le bouton est revérifié ici et pas seulement à l'enfoncement : un
+/// relâchement hors de la fenêtre n'envoie aucun événement, et sans cette
+/// condition la sélection continuerait de suivre le curseur après coup.
+fn drag(entity: &Entity<PerchApp>, index: usize, event: &gpui::MouseMoveEvent, cx: &mut gpui::App) {
+    if event.pressed_button != Some(gpui::MouseButton::Left) {
+        entity.update(cx, |this, _| this.end_diff_drag());
+        return;
+    }
+    entity.update(cx, |this, cx| this.drag_diff_row(index, cx));
 }
 
 fn number(value: Option<usize>, width: Pixels, colors: &DiffColors) -> impl IntoElement {

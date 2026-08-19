@@ -167,6 +167,12 @@ pub struct PerchApp {
     /// deux répondent à la même question — que regarde-t-on — et les montrer
     /// ensemble couperait la place en deux pour rien.
     pub(super) show_history: bool,
+    /// Vrai entre l'enfoncement et le relâchement du bouton dans la vue de
+    /// diff : c'est ce qui distingue un glissement de sélection d'un simple
+    /// survol, et ce qui empêche un glissement commencé ailleurs — dans la
+    /// barre latérale, sur une poignée de redimensionnement — d'étendre la
+    /// sélection en passant au-dessus du code.
+    pub(super) diff_dragging: bool,
 
     /// Surveillance du worktree affiché. `None` si le système refuse de nous
     /// donner un observateur (limite d'inotify atteinte, par exemple) : Perch
@@ -230,6 +236,7 @@ impl PerchApp {
             show_terminal: true,
             show_branches: false,
             show_history: false,
+            diff_dragging: false,
             watcher: None,
             diff_scroll: gpui::UniformListScrollHandle::new(),
             file_scroll: gpui::UniformListScrollHandle::new(),
@@ -1054,6 +1061,7 @@ impl Render for PerchApp {
             .on_action(cx.listener(super::shortcuts::zoom_reset))
             .on_action(cx.listener(super::shortcuts::copy_diff))
             .on_action(cx.listener(super::shortcuts::copy_diff_patch))
+            .on_action(cx.listener(super::shortcuts::select_whole_diff))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)

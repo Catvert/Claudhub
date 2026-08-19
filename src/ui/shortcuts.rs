@@ -27,7 +27,8 @@ actions!(
         ZoomOut,
         ZoomReset,
         CopyDiff,
-        CopyDiffPatch
+        CopyDiffPatch,
+        SelectWholeDiff
     ]
 );
 
@@ -103,6 +104,7 @@ pub fn init(cx: &mut App) {
         // patch.
         KeyBinding::new("secondary-c", CopyDiff, Some(COPY_PREDICATE)),
         KeyBinding::new("secondary-shift-c", CopyDiffPatch, Some(COPY_PREDICATE)),
+        KeyBinding::new("secondary-a", SelectWholeDiff, Some(COPY_PREDICATE)),
         // Les conventions des terminaux : la touche système *avec* Maj, parce
         // que `Ctrl+C` et `Ctrl+V` nus appartiennent au programme.
         KeyBinding::new("secondary-shift-c", CopySelection, Some(TERMINAL_PREDICATE)),
@@ -261,6 +263,15 @@ pub fn copy_diff_patch(
     cx: &mut gpui::Context<PerchApp>,
 ) {
     this.copy_diff(true, cx);
+}
+
+pub fn select_whole_diff(
+    this: &mut PerchApp,
+    _: &SelectWholeDiff,
+    _window: &mut Window,
+    cx: &mut gpui::Context<PerchApp>,
+) {
+    this.select_whole_diff(cx);
 }
 
 pub fn commit(

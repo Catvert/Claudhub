@@ -23,6 +23,11 @@ pub const DEFAULT_UI_FONT: &str = "Inter";
 /// Police à chasse fixe embarquée, celle du terminal et des diffs.
 pub const DEFAULT_MONO_FONT: &str = "JetBrains Mono";
 
+/// Palettes de repli : celles que gpui-component fournit, et qui existent donc
+/// même si le répertoire de thèmes est vide ou illisible.
+pub const DEFAULT_LIGHT_THEME: &str = "Default Light";
+pub const DEFAULT_DARK_THEME: &str = "Default Dark";
+
 /// Délai avant écriture du fichier après une modification.
 ///
 /// Un champ de saisie émet une valeur par frappe et la molette un cran par
@@ -151,6 +156,11 @@ impl TerminalSettings {
 #[serde(default)]
 pub struct Settings {
     pub theme: ThemeMode,
+    /// Palettes nommées, une par apparence. Deux réglages et non un seul :
+    /// `theme` dit s'il fait clair ou sombre — le système peut en décider —
+    /// et ceux-ci disent *quelle* palette porte chacune des deux apparences.
+    pub light_theme: String,
+    pub dark_theme: String,
     pub language: LanguageChoice,
     /// Police de l'interface : libellés, menus, listes.
     pub ui_font_family: String,
@@ -174,6 +184,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: ThemeMode::default(),
+            light_theme: DEFAULT_LIGHT_THEME.into(),
+            dark_theme: DEFAULT_DARK_THEME.into(),
             language: LanguageChoice::default(),
             ui_font_family: DEFAULT_UI_FONT.into(),
             mono_font_family: DEFAULT_MONO_FONT.into(),

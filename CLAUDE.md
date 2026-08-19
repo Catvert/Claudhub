@@ -290,7 +290,8 @@ doit épargner. `Ctrl+Maj+C` donne l'autre forme, un extrait de patch avec les
 signes de git — le vrai signe moins de l'affichage n'y a pas sa place, il ne
 s'applique pas.
 
-La sélection se fait au clic, s'étend au Maj+clic, et `Rendered::copy_text` est
+La sélection se fait au clic, s'étend au glissement ou au Maj+clic, `Ctrl+A`
+prend tout le fichier, et `Rendered::copy_text` est
 libre et testée. Sans sélection, `Ctrl+C` prend le fichier entier : sur un
 diff, le geste n'a pas d'autre sens et refuser d'agir serait un refus poli sans
 raison.
@@ -312,6 +313,36 @@ réseau, l'agent, les panneaux — par des filets verticaux.
 Les états vides portent une icône et, quand une action s'impose, un bouton :
 au premier lancement la barre latérale vide est la première chose qu'on voit,
 et une phrase grise ne dit pas quoi faire.
+
+### Les thèmes
+
+Une douzaine de palettes sont livrées — One Dark, Nord, Dracula, Tokyo Night,
+Gruvbox, Catppuccin, Solarized, Synthwave '84. Les couleurs sont celles que
+leurs auteurs publient ; seule la répartition des rôles est de nous.
+
+Elles sont **générées** par `tools/gen_themes.py` à partir d'une palette d'une
+quinzaine de couleurs. Un thème complet en compte une centaine, et les écrire à
+la main serait une source d'erreurs muettes : une clé absente ne provoque pas
+d'erreur, elle reprend la valeur par défaut, qui est *claire* — soit une tache
+blanche au milieu d'un thème sombre que rien ne signale. Deux tests
+verrouillent cela : chaque fichier livré doit se lire, et aucun ne doit avoir
+moins de clés que les autres.
+
+Le registre de gpui-component ne se charge **que depuis un répertoire**, qu'il
+surveille. Les thèmes sont donc embarqués dans le binaire puis écrits dans
+`<config>/themes/` au démarrage. L'effet de bord est heureux : le même
+répertoire accueille les thèmes de l'utilisateur, et un fichier modifié est
+rechargé sans relancer Perch. Corollaire à dire : les fichiers `perch-*.json`
+sont réécrits à chaque démarrage — pour en modifier un, il faut le copier sous
+un autre nom.
+
+Deux réglages et non un seul : `theme` dit s'il fait clair ou sombre (le
+système peut en décider), `light_theme` et `dark_theme` disent *quelle* palette
+porte chacune des deux apparences. C'est la structure de `Theme` lui-même, et
+la seule qui ne mente pas quand l'apparence suit le système.
+
+Le chargement du registre est asynchrone : au premier `apply`, le thème choisi
+n'y est pas encore, d'où la ré-application dans le rappel de `watch_dir`.
 
 ### Quel worktree s'ouvre
 

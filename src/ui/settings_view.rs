@@ -41,9 +41,14 @@ impl PerchApp {
         let ui_fonts = choices(settings::font_choices(&installed, false, DEFAULT_UI_FONT));
         let mono_fonts = choices(settings::font_choices(&installed, true, DEFAULT_MONO_FONT));
         let shells = shell_choices();
+        // Le registre est peuplé de façon asynchrone au démarrage ; à
+        // l'ouverture du formulaire il l'est depuis longtemps.
+        let light_themes = theme_choices(gpui_component::ThemeMode::Light, cx);
+        let dark_themes = theme_choices(gpui_component::ThemeMode::Dark, cx);
 
         window.open_dialog(cx, move |dialog, _window, _cx| {
             let (ui_fonts, shells) = (ui_fonts.clone(), shells.clone());
+            let (light_themes, dark_themes) = (light_themes.clone(), dark_themes.clone());
             let (mono_fonts, terminal_fonts) = (mono_fonts.clone(), mono_fonts.clone());
             dialog
                 .title(tr!("settings-title"))
@@ -53,7 +58,12 @@ impl PerchApp {
                     v_flex().h(HEIGHT).child(
                         gpui_component::setting::Settings::new("perch-settings")
                             .sidebar_width(px(190.))
-                            .page(appearance_page(ui_fonts, mono_fonts))
+                            .page(appearance_page(
+                                ui_fonts,
+                                mono_fonts,
+                                light_themes,
+                                dark_themes,
+                            ))
                             .page(terminal_page(shells, terminal_fonts))
                             .page(review_page()),
                     ),
@@ -148,9 +158,21 @@ fn shell_item(shells: Vec<(SharedString, SharedString)>) -> SettingItem {
     .description(tr!("settings-shell-help"))
 }
 
+/// Les palettes du registre pour une apparence donnée.
+fn theme_choices(mode: gpui_component::ThemeMode, cx: &App) -> Vec<(SharedString, SharedString)> {
+    gpui_component::ThemeRegistry::global(cx)
+        .sorted_themes()
+        .into_iter()
+        .filter(|theme| theme.mode == mode)
+        .map(|theme| (theme.name.clone(), theme.name.clone()))
+        .collect()
+}
+
 fn appearance_page(
     ui_fonts: Vec<(SharedString, SharedString)>,
     mono_fonts: Vec<(SharedString, SharedString)>,
+    light_themes: Vec<(SharedString, SharedString)>,
+    dark_themes: Vec<(SharedString, SharedString)>,
 ) -> SettingPage {
     let themes = vec![
         (SharedString::from("dark"), tr!("settings-theme-dark")),
@@ -187,6 +209,31 @@ fn appearance_page(
                     )
                     .description(tr!("settings-theme-help")),
                 )
+                .item(
+                    SettingItem::new(
+                        tr!("settings-dark-theme"),
+                        SettingField::dropdown(
+                            dark_themes,
+                            |cx: &App| Settings::global(cx).dark_theme.clone().into(),
+                            |value: SharedString, cx: &mut App| {
+                                Settings::update_global(cx, |s| s.dark_theme = value.to_string())
+                            },
+                        )
+                        .default_value(SharedString::from(settings::DEFAULT_DARK_THEME)),
+                    )
+                    .description(tr!("settings-palette-help")),
+                )
+                .item(SettingItem::new(
+                    tr!("settings-light-theme"),
+                    SettingField::dropdown(
+                        light_themes,
+                        |cx: &App| Settings::global(cx).light_theme.clone().into(),
+                        |value: SharedString, cx: &mut App| {
+                            Settings::update_global(cx, |s| s.light_theme = value.to_string())
+                        },
+                    )
+                    .default_value(SharedString::from(settings::DEFAULT_LIGHT_THEME)),
+                ))
                 .item(
                     SettingItem::new(
                         tr!("settings-language"),

@@ -84,10 +84,12 @@ pub fn run() {
         highlight::register_languages();
         shortcuts::init(cx);
         install_fonts(cx);
-        theme::apply(&settings, None, cx);
-        // Les réglages passent en global avant l'ouverture de la fenêtre : le
-        // formulaire les écrit depuis des fermetures qui n'ont qu'un `App`.
+        // Les réglages passent en global avant tout le reste : le formulaire
+        // les écrit depuis des fermetures qui n'ont qu'un `App`, et
+        // l'installation des thèmes les relit pour savoir quoi appliquer.
         settings.clone().init_global(cx);
+        theme::install(cx);
+        theme::apply(&settings, None, cx);
 
         let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
         // `Maximized` porte quand même ces dimensions : elles deviennent la
