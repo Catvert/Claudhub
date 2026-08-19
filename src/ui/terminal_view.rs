@@ -54,6 +54,8 @@ pub struct TerminalView {
     /// Vrai entre l'enfoncement et le relâchement du bouton : c'est ce qui
     /// distingue un glissement de sélection d'un simple survol.
     selecting: bool,
+    /// Fraction de ligne non consommée par le dernier événement de molette.
+    scroll_remainder: f32,
     /// Géométrie demandée par la mise en page, pas encore transmise.
     pending_size: Option<TermSize>,
     /// Vrai quand une transmission différée est déjà programmée.
@@ -131,6 +133,7 @@ impl TerminalView {
             bounds: Bounds::default(),
             cell: gpui::size(px(8.), px(16.)),
             selecting: false,
+            scroll_remainder: 0.,
             pending_size: None,
             resize_scheduled: false,
             label,
@@ -425,13 +428,39 @@ impl TerminalView {
             }
             return;
         }
-        let delta = event.delta.pixel_delta(line_height).y / line_height;
-        let lines = delta.round() as i32;
-        if lines != 0 {
-            self.terminal.scroll(lines);
-            self.snapshot = self.terminal.snapshot();
-            cx.notify();
+        // La hauteur d'une cellule, et non celle du texte ambiant : c'est
+        // elle qui donne le nombre de lignes d'un déplacement en pixels, et
+        // elles diffèrent dès que le terminal n'a pas la taille de
+        // l'interface.
+        let cell = self.cell.height.max(px(1.));
+        let lines = take_lines(
+            &mut self.scroll_remainder,
+            f32::from(event.delta.pixel_delta(cell).y),
+            f32::from(cell),
+        );
+        if lines == 0 {
+            return;
         }
+
+        // Dans l'écran secondaire — un agent, `less`, `vim` — il n'y a pas
+        // d'historique à remonter : la grille est ce que le programme dessine,
+        // et lui seul sait ce qu'il y a au-dessus. La molette s'y traduit donc
+        // en flèches, comme dans tous les terminaux ; sans quoi elle ne fait
+        // rien du tout, ce qui est exactement ce qu'on nous a signalé.
+        if self.terminal.in_alternate_screen() {
+            let key = if lines > 0 { "up" } else { "down" };
+            let repeats = lines.unsigned_abs() as usize * ALT_SCREEN_LINES;
+            if let Some(bytes) = arrow_bytes(key, self.terminal.mode()) {
+                for _ in 0..repeats {
+                    self.terminal.write(bytes.clone());
+                }
+            }
+            return;
+        }
+
+        self.terminal.scroll(lines);
+        self.snapshot = self.terminal.snapshot();
+        cx.notify();
     }
 }
 
@@ -553,6 +582,29 @@ impl Render for TerminalView {
             .child(v_flex().size_full().overflow_hidden().children(lines))
             .children(self.render_cursor(focused, cx))
     }
+}
+
+/// Convertit un déplacement en pixels en lignes entières.
+///
+/// Le reliquat est conservé d'un événement à l'autre : un pavé tactile envoie
+/// des fractions de ligne, et les arrondir chacune à zéro rend le défilement
+/// inerte alors qu'elles finissent par faire des lignes.
+pub fn take_lines(remainder: &mut f32, pixels: f32, cell: f32) -> i32 {
+    *remainder += pixels / cell.max(1.);
+    let lines = remainder.trunc();
+    *remainder -= lines;
+    lines as i32
+}
+
+/// Lignes envoyées par cran de molette dans l'écran secondaire.
+///
+/// Trois : la convention des terminaux, et ce que `less` comme `vim` traitent
+/// comme un déplacement naturel.
+const ALT_SCREEN_LINES: usize = 3;
+
+/// Les octets d'une flèche, tels que le programme les attend.
+fn arrow_bytes(key: &str, mode: alacritty_terminal::term::TermMode) -> Option<Vec<u8>> {
+    crate::terminal::key_bytes(&gpui::Keystroke::parse(key).ok()?, mode)
 }
 
 /// Plancher de la grille : en deçà, le panneau rogne au lieu de demander au
@@ -940,6 +992,27 @@ impl PerchApp {
 
 #[cfg(test)]
 mod tests {
+
+    /// Un pavé tactile envoie des fractions de ligne : les perdre une à une
+    /// rend le défilement inerte.
+    #[test]
+    fn fractions_of_a_line_add_up_instead_of_vanishing() {
+        let mut remainder = 0.;
+        assert_eq!(take_lines(&mut remainder, 6., 16.), 0);
+        assert_eq!(take_lines(&mut remainder, 6., 16.), 0);
+        assert_eq!(take_lines(&mut remainder, 6., 16.), 1);
+        // Le trop-plein reste pour la suite plutôt que d'être jeté.
+        assert!(remainder > 0.1 && remainder < 0.2);
+
+        // Vers le bas, la même chose en négatif.
+        let mut remainder = 0.;
+        assert_eq!(take_lines(&mut remainder, -32., 16.), -2);
+        assert_eq!(remainder, 0.);
+
+        // Une hauteur de cellule absurde ne divise pas par zéro.
+        let mut remainder = 0.;
+        assert_eq!(take_lines(&mut remainder, 5., 0.), 5);
+    }
 
     /// Le plancher n'est pas cosmétique : sous vingt colonnes, une invite de
     /// shell occupe des dizaines de lignes, le programme redessine, et le

@@ -315,6 +315,15 @@ impl Terminal {
         self.term.lock().scroll_display(Scroll::Delta(lines));
     }
 
+    /// Vrai quand un programme plein écran occupe la grille.
+    ///
+    /// Il n'y a alors pas d'historique : ce qui est affiché est ce que le
+    /// programme dessine, et ce qui précède n'appartient qu'à lui.
+    pub fn in_alternate_screen(&self) -> bool {
+        self.mode()
+            .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+    }
+
     /// Vide l'écran et tout l'historique.
     pub fn clear(&self) {
         use alacritty_terminal::vte::ansi::{ClearMode, Handler};

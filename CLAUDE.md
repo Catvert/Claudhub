@@ -582,6 +582,22 @@ fixe suffit à aligner les colonnes, et gpui garde la charge du façonnage.
 Le verrou de la grille est partagé avec la boucle d'E/S : **ne jamais dessiner
 sous ce verrou**, d'où l'instantané.
 
+**La molette n'a pas le même sens selon l'écran.** Dans l'écran secondaire —
+un agent, `less`, `vim` — il n'y a pas d'historique : la grille est ce que le
+programme dessine, et ce qui précède n'appartient qu'à lui. La molette s'y
+traduit donc en flèches, trois lignes par cran, comme dans tous les terminaux ;
+la faire défiler l'historique n'y produirait rien du tout. Ailleurs, elle
+déplace bien l'affichage.
+
+Les fractions de ligne sont **accumulées** (`take_lines`) : un pavé tactile en
+envoie par dixièmes, et les arrondir chacune à zéro rend le défilement inerte.
+La conversion se fait sur la hauteur d'une cellule, pas sur celle du texte
+ambiant — elles diffèrent dès que le terminal n'a pas la taille de l'interface.
+
+Limite connue : le rapport de souris (`MOUSE_MODE`) n'est pas implémenté. Un
+programme qui demande à recevoir les événements de molette reçoit des flèches
+à la place.
+
 **Le redimensionnement est différé et planchérisé.** Un glissement à la souris
 passe par toutes les largeurs intermédiaires ; transmettre chacune revient à
 envoyer un `SIGWINCH` par image, et comme un shell redessine son invite *en
