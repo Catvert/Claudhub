@@ -86,12 +86,22 @@ impl Default for ReviewState {
 /// Ouvrir sur un domaine vide alors que l'autre est plein est la façon la plus
 /// sûre de faire croire que Perch ne voit rien — c'est le cas d'un dépôt dont
 /// tout le travail a été indexé avant qu'on l'ouvre.
-fn initial_range(status: &Status) -> DiffRange {
-    if status.unstaged().next().is_none() && status.staged().next().is_some() {
-        DiffRange::Staged
-    } else {
-        DiffRange::Unstaged
+/// Rend `None` quand rien ne tranche encore — un worktree propre dont on ne
+/// connaît pas la base : mieux vaut réessayer à l'arrivée des branches que de
+/// se figer sur un domaine vide.
+fn initial_range(status: &Status, base: Option<&str>) -> Option<DiffRange> {
+    if status.unstaged().next().is_some() {
+        return Some(DiffRange::Unstaged);
     }
+    if status.staged().next().is_some() {
+        return Some(DiffRange::Staged);
+    }
+    // Rien en cours : ce qu'on vient relire dans un worktree d'agent, c'est le
+    // travail de sa branche. Ouvrir sur « Modifications » y affiche « rien à
+    // relire » alors qu'il y a parfois des centaines de fichiers à lire.
+    base.map(|base| DiffRange::Branch {
+        base: base.to_string(),
+    })
 }
 
 /// Le résultat de la dernière action, affiché dans la barre d'état.
@@ -122,6 +132,8 @@ pub struct PerchApp {
     /// jamais reconstruit : le recréer par frame remettrait le diff en haut à
     /// chaque image.
     pub(super) diff_scroll: gpui::UniformListScrollHandle,
+    /// Défilement de la liste des fichiers, virtualisée elle aussi.
+    pub(super) file_scroll: gpui::UniformListScrollHandle,
 
     sidebar_resize: Entity<ResizableState>,
     center_resize: Entity<ResizableState>,
@@ -152,6 +164,7 @@ impl PerchApp {
             show_branches: false,
             watcher: None,
             diff_scroll: gpui::UniformListScrollHandle::new(),
+            file_scroll: gpui::UniformListScrollHandle::new(),
             sidebar_resize: cx.new(|_| ResizableState::default()),
             center_resize: cx.new(|_| ResizableState::default()),
             bottom_resize: cx.new(|_| ResizableState::default()),
@@ -258,11 +271,14 @@ impl PerchApp {
                 main,
                 name,
                 worktrees,
+                opened_at,
             } => {
                 if self.repos.iter().any(|r| r.main == main) {
                     return; // déjà ouvert : rouvrir ne doit pas dupliquer
                 }
-                let first = worktrees.first().map(|w| w.path.clone());
+                // À défaut du checkout d'où l'ouverture vient, le premier de la
+                // liste, qui est le dépôt principal.
+                let first = opened_at.or_else(|| worktrees.first().map(|w| w.path.clone()));
                 self.repos.push(RepoState {
                     main: main.clone(),
                     name,
@@ -310,8 +326,10 @@ impl PerchApp {
                 // domaine où il y a quelque chose à lire ; après quoi la
                 // portée n'appartient plus qu'à l'utilisateur.
                 if !state.range_chosen {
-                    state.range_chosen = true;
-                    state.range = initial_range(&state.status);
+                    if let Some(range) = initial_range(&state.status, state.base.as_deref()) {
+                        state.range_chosen = true;
+                        state.range = range;
+                    }
                 }
                 // La liste des fichiers de la revue courante dépend du statut :
                 // la recharger ici évite que la vue affiche un fichier qui
@@ -377,12 +395,26 @@ impl PerchApp {
                     .keys()
                     .map(|worktree| (worktree.clone(), self.default_base_for(worktree)))
                     .collect();
+                let mut reload: Vec<(PathBuf, DiffRange)> = Vec::new();
                 for (worktree, base) in bases {
                     if let Some(state) = self.review.get_mut(&worktree) {
                         if state.base.is_none() {
                             state.base = base;
                         }
+                        // Un worktree propre attendait sa base pour savoir quoi
+                        // ouvrir : c'est maintenant possible.
+                        if !state.range_chosen {
+                            if let Some(range) = initial_range(&state.status, state.base.as_deref())
+                            {
+                                state.range_chosen = true;
+                                state.range = range.clone();
+                                reload.push((worktree.clone(), range));
+                            }
+                        }
                     }
+                }
+                for (worktree, range) in reload {
+                    self.git.send(Cmd::LoadDiffFiles { worktree, range });
                 }
             }
             Evt::Done {
@@ -867,7 +899,10 @@ mod tests {
             (StatusCode::Modified, StatusCode::Unmodified),
             (StatusCode::Added, StatusCode::Unmodified),
         ]);
-        assert_eq!(initial_range(&status), DiffRange::Staged);
+        assert_eq!(
+            initial_range(&status, Some("main")),
+            Some(DiffRange::Staged)
+        );
     }
 
     #[test]
@@ -875,14 +910,34 @@ mod tests {
         // Un fichier des deux côtés : les modifications restent le point de
         // départ, c'est là qu'on travaille.
         let both = status(&[(StatusCode::Modified, StatusCode::Modified)]);
-        assert_eq!(initial_range(&both), DiffRange::Unstaged);
+        assert_eq!(
+            initial_range(&both, Some("main")),
+            Some(DiffRange::Unstaged)
+        );
 
         let untracked = status(&[(StatusCode::Untracked, StatusCode::Untracked)]);
-        assert_eq!(initial_range(&untracked), DiffRange::Unstaged);
+        assert_eq!(
+            initial_range(&untracked, Some("main")),
+            Some(DiffRange::Unstaged)
+        );
     }
 
     #[test]
-    fn a_clean_worktree_opens_on_the_changes() {
-        assert_eq!(initial_range(&Status::default()), DiffRange::Unstaged);
+    fn a_clean_worktree_opens_on_its_branch_review() {
+        // Le cas d'un worktree d'agent : rien en cours, mais des commits à
+        // relire. C'est là que « rien à relire ici » était le plus faux.
+        assert_eq!(
+            initial_range(&Status::default(), Some("master")),
+            Some(DiffRange::Branch {
+                base: "master".into()
+            })
+        );
+    }
+
+    #[test]
+    fn nothing_is_decided_before_the_base_is_known() {
+        // Le statut arrive avant les branches : sans base, on ne tranche pas
+        // et on réessaiera plutôt que de se figer sur un domaine vide.
+        assert_eq!(initial_range(&Status::default(), None), None);
     }
 }

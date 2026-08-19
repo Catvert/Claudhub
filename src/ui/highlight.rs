@@ -72,12 +72,19 @@ impl DiffHighlights {
             .map(|hunk| vec![LineStyles::new(); hunk.lines.len()])
             .collect();
 
+        // Une seule instance pour les deux passes : `SyntaxHighlighter::new`
+        // compile les requêtes de la grammaire — près de quarante
+        // millisecondes pour JavaScript — alors que `update` ne fait que
+        // reparser un texte. En créer deux doublait le coût fixe de chaque
+        // fichier ouvert.
+        let mut highlighter = SyntaxHighlighter::new(language);
         for side in [Side::Old, Side::New] {
             let (text, spans) = build_side(diff, side);
             if text.is_empty() {
                 continue;
             }
-            let highlighted = highlight(&text, language, theme);
+            highlighter.update(None, &Rope::from_str(&text));
+            let highlighted = highlighter.styles(&(0..text.len()), theme);
             distribute(&highlighted, &spans, &mut styles);
         }
 
@@ -129,16 +136,6 @@ fn build_side(diff: &FileDiff, side: Side) -> (String, Vec<Span>) {
         }
     }
     (text, spans)
-}
-
-fn highlight(
-    text: &str,
-    language: &str,
-    theme: &HighlightTheme,
-) -> Vec<(Range<usize>, HighlightStyle)> {
-    let mut highlighter = SyntaxHighlighter::new(language);
-    highlighter.update(None, &Rope::from_str(text));
-    highlighter.styles(&(0..text.len()), theme)
 }
 
 /// Redistribue les styles du texte reconstruit vers les lignes du diff.

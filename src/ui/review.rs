@@ -5,9 +5,9 @@
 //! la branche entière depuis sa divergence d'avec sa base. Le dernier est
 //! celui qui sert à relire le travail d'un agent avant de le pousser.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use gpui::{div, prelude::*, px, Context, SharedString, Window};
+use gpui::{div, prelude::*, px, uniform_list, Context, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
@@ -70,10 +70,8 @@ impl PerchApp {
             .child(self.render_range_tabs(&range, cx))
             .child(
                 div()
-                    .id("file-list")
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
                     .when(rows.is_empty(), |el| {
                         el.child(
                             div()
@@ -83,106 +81,35 @@ impl PerchApp {
                                 .child(tr!("review-clean")),
                         )
                     })
-                    .children(rows.into_iter().enumerate().map(|(ix, row)| {
-                        let is_selected = selected.as_deref() == Some(row.path.as_path());
-                        let for_click = row.path.clone();
-                        let for_toggle = row.path.clone();
-                        let worktree_click = worktree.clone();
-                        let worktree_toggle = worktree.clone();
-                        let worktree_discard = worktree.clone();
-                        let staged = row.staged;
-                        h_flex()
-                            .id(("file", ix))
-                            .h(px(28.))
-                            .px_2()
-                            .gap_2()
-                            .items_center()
-                            .cursor_pointer()
-                            .when(is_selected, |el| el.bg(cx.theme().accent))
-                            .hover(|s| s.bg(cx.theme().accent.opacity(0.5)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_file(worktree_click.clone(), for_click.clone(), cx);
-                            }))
-                            .child(
-                                div()
-                                    .w(px(12.))
-                                    .text_xs()
-                                    .font_family("JetBrains Mono")
-                                    .text_color(status_color(row.code, cx))
-                                    .child(row.code.letter()),
-                            )
-                            .child(
-                                h_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap_1()
-                                    .items_baseline()
-                                    .child(div().truncate().text_sm().child(row.name))
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(row.directory),
-                                    ),
-                            )
-                            .when(row.added > 0, |el| {
-                                el.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(DiffColors::of(cx).added_fg)
-                                        .child(format!("+{}", row.added)),
-                                )
-                            })
-                            .when(row.removed > 0, |el| {
-                                el.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(DiffColors::of(cx).removed_fg)
-                                        .child(format!("−{}", row.removed)),
-                                )
-                            })
-                            .when(!staged, |el| {
-                                let for_discard = row.path.clone();
-                                let worktree = worktree_discard.clone();
-                                el.child(
-                                    Button::new(("discard", ix))
-                                        .ghost()
-                                        .xsmall()
-                                        .icon(icon("undo-2"))
-                                        .tooltip(tr!("action-discard"))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.confirm_discard(
-                                                worktree.clone(),
-                                                for_discard.clone(),
-                                                window,
-                                                cx,
-                                            );
-                                        })),
-                                )
-                            })
-                            .child(
-                                Button::new(("toggle-stage", ix))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(icon(if staged { "arrow-down-to-line" } else { "plus" }))
-                                    .tooltip(if staged {
-                                        tr!("action-unstage")
-                                    } else {
-                                        tr!("action-stage")
+                    // Liste virtualisée : une revue de branche touche couramment
+                    // plusieurs centaines de fichiers, et reconstruire autant de
+                    // lignes — chacune avec ses deux boutons — à chaque frame suffit
+                    // à faire tomber l'interface à quelques images par seconde.
+                    .when(!rows.is_empty(), |el| {
+                        let rows = std::rc::Rc::new(rows);
+                        let entity = cx.entity();
+                        let colors = DiffColors::of(cx);
+                        let count = rows.len();
+                        el.child(
+                            uniform_list("file-list", count, move |range, _window, cx| {
+                                range
+                                    .map(|ix| {
+                                        render_file_row(
+                                            &rows,
+                                            ix,
+                                            &worktree,
+                                            selected.as_deref(),
+                                            &colors,
+                                            &entity,
+                                            cx,
+                                        )
                                     })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        let paths = vec![for_toggle.clone()];
-                                        let worktree = worktree_toggle.clone();
-                                        this.git.send(if staged {
-                                            Cmd::Unstage { worktree, paths }
-                                        } else {
-                                            Cmd::Stage { worktree, paths }
-                                        });
-                                        cx.notify();
-                                    })),
-                            )
-                    })),
+                                    .collect::<Vec<_>>()
+                            })
+                            .size_full()
+                            .track_scroll(self.file_scroll.clone()),
+                        )
+                    }),
             )
             .child(self.render_commit_box(can_commit, staged_count, cx))
             .into_any_element()
@@ -374,6 +301,131 @@ impl PerchApp {
         });
         cx.notify();
     }
+}
+
+/// Rend une ligne de la liste des fichiers.
+///
+/// Fonction libre parce que la fermeture d'une liste virtualisée ne reçoit pas
+/// la vue : elle capture l'entité et repasse par `update` pour agir, comme le
+/// font les gestionnaires de dialogue.
+#[allow(clippy::too_many_arguments)]
+fn render_file_row(
+    rows: &std::rc::Rc<Vec<Row>>,
+    index: usize,
+    worktree: &Path,
+    selected: Option<&Path>,
+    colors: &DiffColors,
+    entity: &gpui::Entity<PerchApp>,
+    cx: &mut gpui::App,
+) -> gpui::AnyElement {
+    let Some(row) = rows.get(index) else {
+        return div().into_any_element();
+    };
+    let is_selected = selected == Some(row.path.as_path());
+    let staged = row.staged;
+
+    h_flex()
+        .id(("file", index))
+        .h(px(28.))
+        .px_2()
+        .gap_2()
+        .items_center()
+        .cursor_pointer()
+        .when(is_selected, |el| el.bg(cx.theme().accent))
+        .hover(|s| s.bg(cx.theme().accent.opacity(0.5)))
+        .on_click({
+            let (entity, worktree, path) =
+                (entity.clone(), worktree.to_path_buf(), row.path.clone());
+            move |_, _window, cx| {
+                entity.update(cx, |this, cx| {
+                    this.open_file(worktree.clone(), path.clone(), cx)
+                });
+            }
+        })
+        .child(
+            div()
+                .w(px(12.))
+                .flex_none()
+                .text_xs()
+                .font_family("JetBrains Mono")
+                .text_color(status_color(row.code, cx))
+                .child(row.code.letter()),
+        )
+        .child(
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .items_baseline()
+                .child(div().truncate().text_sm().child(row.name.clone()))
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(row.directory.clone()),
+                ),
+        )
+        .when(row.added > 0, |el| {
+            el.child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(colors.added_fg)
+                    .child(format!("+{}", row.added)),
+            )
+        })
+        .when(row.removed > 0, |el| {
+            el.child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(colors.removed_fg)
+                    .child(format!("−{}", row.removed)),
+            )
+        })
+        .when(!staged, |el| {
+            let (entity, worktree, path) =
+                (entity.clone(), worktree.to_path_buf(), row.path.clone());
+            el.child(
+                Button::new(("discard", index))
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("undo-2"))
+                    .tooltip(tr!("action-discard"))
+                    .on_click(move |_, window, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.confirm_discard(worktree.clone(), path.clone(), window, cx)
+                        });
+                    }),
+            )
+        })
+        .child({
+            let (entity, worktree, path) =
+                (entity.clone(), worktree.to_path_buf(), row.path.clone());
+            Button::new(("toggle-stage", index))
+                .ghost()
+                .xsmall()
+                .icon(icon(if staged { "arrow-down-to-line" } else { "plus" }))
+                .tooltip(if staged {
+                    tr!("action-unstage")
+                } else {
+                    tr!("action-stage")
+                })
+                .on_click(move |_, _window, cx| {
+                    entity.update(cx, |this, cx| {
+                        let paths = vec![path.clone()];
+                        let worktree = worktree.clone();
+                        this.git.send(if staged {
+                            Cmd::Unstage { worktree, paths }
+                        } else {
+                            Cmd::Stage { worktree, paths }
+                        });
+                        cx.notify();
+                    });
+                })
+        })
+        .into_any_element()
 }
 
 /// Les entrées de la liste pour un domaine de revue donné.

@@ -115,6 +115,10 @@ pub enum Evt {
         main: PathBuf,
         name: String,
         worktrees: Vec<Worktree>,
+        /// Le checkout d'où l'ouverture a été demandée, quand c'en est un.
+        /// Lancer `perch` depuis un worktree doit ouvrir *ce* worktree, pas le
+        /// dépôt principal qui se trouve en tête de la liste.
+        opened_at: Option<WorktreeId>,
     },
     Worktrees {
         main: PathBuf,

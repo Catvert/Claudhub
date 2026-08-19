@@ -32,7 +32,8 @@ src/
   runtime/      les workers
     protocol.rs `Cmd` / `Evt` — des données, aucune logique
     mod.rs      trois threads consommant le même canal de commandes
-    watch.rs    surveillance de fichiers (notify), debounce 250 ms
+    watch.rs    surveillance de fichiers (notify), debounce 250 ms,
+                limitée aux dossiers que git connaît
   terminal/     émulation
     mod.rs      pty + `Term` alacritty derrière un `FairMutex`
     snapshot.rs grille → lignes et runs de style, sans tenir le verrou
@@ -73,7 +74,39 @@ invite de mot de passe bloque un worker pour toujours), `LC_ALL=C` pour que les
 messages d'erreur soient reconnaissables, et les formats `-z` partout où un
 chemin apparaît — un fichier peut contenir un saut de ligne.
 
+### La surveillance de fichiers
+
+Deux règles, et les enfreindre se paie en fenêtre figée puis en rafraîchissement
+en boucle.
+
+**Ce qu'on surveille vient de `git ls-files --cached --others
+--exclude-standard`** : les dossiers contenant un fichier suivi ou un fichier
+nouveau non ignoré, chacun **sans récursion**. Surveiller le worktree en bloc
+prend un appel système par répertoire, et un projet Laravel en a quarante mille
+dont sept cents contiennent du code — le reste est `vendor/`, `node_modules/`
+et surtout `storage/`, que Laravel n'ignore pas dossier par dossier et qu'un
+serveur de développement réécrit sans arrêt. Chacune de ces écritures
+produisait un réveil, donc un `git status`, donc un rechargement de la revue.
+Un dossier créé plus tard est signalé par son parent, ce qui suffit à
+déclencher le rafraîchissement qui le découvrira.
+
+**Poser les surveillances ne se fait jamais dans le thread d'interface** :
+c'était une demi-seconde de fenêtre figée à chaque changement de worktree.
+`Watcher::watch` n'envoie qu'un ordre à un thread dédié et rend la main
+immédiatement. Corollaire à connaître : la surveillance n'est pas effective au
+retour de l'appel — sans importance, puisque la sélection d'un worktree
+déclenche de toute façon une lecture du statut.
+
+Dans un worktree lié, `.git` est un *fichier* qui pointe vers
+`<principal>/.git/worktrees/<nom>` : c'est là que vivent son `HEAD` et son
+`index`, et les surveiller au mauvais endroit revient à ne rien surveiller.
+
 ### La vue de diff
+
+**La liste des fichiers est virtualisée elle aussi** : une revue de branche en
+touche couramment plusieurs centaines, et reconstruire autant de lignes — deux
+boutons chacune — à chaque frame suffit à faire tomber l'interface à quelques
+images par seconde.
 
 Un diff de relecture d'agent fait couramment plusieurs milliers de lignes.
 L'affichage repose donc sur `uniform_list` (gpui), et non sur le
@@ -107,8 +140,11 @@ animation de molette comprise : elle ne doit rien y calculer.
 ### Quel domaine de revue s'ouvre
 
 `app::initial_range` choisit, au **premier** statut d'un worktree, entre les
-modifications et l'index : ouvrir sur un domaine vide alors que l'autre est
-plein est la façon la plus sûre de faire croire que Perch ne voit rien. Ensuite
+modifications, l'index et la revue de branche : ouvrir sur un domaine vide alors que l'autre est
+plein est la façon la plus sûre de faire croire que Perch ne voit rien — un
+worktree d'agent est propre et n'a que des commits à relire, d'où le repli sur
+la revue de branche, qui attend que la base soit connue (`initial_range` rend
+alors `None` plutôt que de trancher). Ensuite
 la portée appartient à l'utilisateur, d'où le drapeau `range_chosen` — un
 rafraîchissement de statut, et il en arrive un à chaque écriture de fichier, ne
 doit jamais reprendre la main sur son choix.
@@ -123,6 +159,14 @@ apparaît de quel côté. Elle est libre et testée : le statut est la source po
 les deux premiers domaines (lui seul distingue index et répertoire de travail,
 et un fichier peut être des deux côtés), `--numstat` pour les deux autres, qui
 parlent de commits et n'ont pas de notion d'index.
+
+### Quel worktree s'ouvre
+
+`runtime::open_repo` retient le checkout d'où l'ouverture vient, et non le
+premier de la liste — qui est toujours le dépôt principal. Lancer `perch` dans
+un worktree doit ouvrir *ce* worktree. Le worktree retenu est le plus profond
+dont le chemin est un préfixe de celui demandé, faute de quoi un worktree
+imbriqué dans un autre serait attribué au mauvais.
 
 ### La base de la revue de branche
 
@@ -157,8 +201,10 @@ en **octets** — indexer en caractères casse dès le premier accent. Les deux
 sont verrouillés par `diff_view::tests::highlight_runs_stay_sorted_and_disjoint`,
 qui a déjà attrapé le doublon des lignes de contexte.
 
-`SyntaxHighlighter::new` compile les requêtes de la grammaire : jamais dans un
-`render`.
+`SyntaxHighlighter::new` compile les requêtes de la grammaire — près de
+quarante millisecondes pour JavaScript. Jamais dans un `render`, et **une seule
+instance pour les deux passes** : `update` ne fait que reparser un texte, alors
+qu'en créer une seconde doublait le coût fixe de chaque fichier ouvert.
 
 ### Le terminal
 

@@ -16,7 +16,13 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use notify::RecursiveMode;
-use notify_debouncer_full::{new_debouncer, DebouncedEvent, Debouncer, RecommendedCache};
+use notify_debouncer_full::{new_debouncer, DebouncedEvent};
+
+/// Ce que le thread de surveillance sait faire.
+enum Order {
+    Watch(PathBuf),
+    Unwatch(PathBuf),
+}
 
 /// Fenêtre de regroupement. Une compilation touche des milliers de fichiers ;
 /// rafraîchir à chaque écriture reviendrait à lancer `git status` en boucle.
@@ -24,9 +30,15 @@ use notify_debouncer_full::{new_debouncer, DebouncedEvent, Debouncer, Recommende
 /// rafraîchissement.
 const DEBOUNCE: Duration = Duration::from_millis(250);
 
+/// La façade côté interface : elle ne fait qu'envoyer des ordres.
+///
+/// Poser une surveillance récursive coûte un appel système par dossier — près
+/// d'une demi-seconde sur une arborescence de quarante mille répertoires, ce
+/// qui est une demi-seconde de fenêtre figée si on le fait dans le thread qui
+/// dessine. L'ordre part donc dans un thread dédié et le sélecteur de worktree
+/// rend la main tout de suite.
 pub struct Watcher {
-    debouncer: Debouncer<notify::RecommendedWatcher, RecommendedCache>,
-    watched: HashSet<PathBuf>,
+    orders: mpsc::Sender<Order>,
 }
 
 impl Watcher {
@@ -40,7 +52,40 @@ impl Watcher {
         // se permettre d'attendre sur un `recv` bloquant.
         let (tx, rx) = async_channel::unbounded::<PathBuf>();
         let (raw_tx, raw_rx) = mpsc::channel();
-        let debouncer = new_debouncer(DEBOUNCE, None, raw_tx)?;
+        let mut debouncer = new_debouncer(DEBOUNCE, None, raw_tx)?;
+        let (order_tx, order_rx) = mpsc::channel::<Order>();
+
+        // Un thread pour poser et retirer les surveillances, opérations longues
+        // sur une grosse arborescence.
+        std::thread::Builder::new()
+            .name("perch-watch-orders".into())
+            .spawn(move || {
+                let mut watched: HashSet<PathBuf> = HashSet::new();
+                while let Ok(order) = order_rx.recv() {
+                    match order {
+                        Order::Watch(path) => {
+                            if !watched.insert(path.clone()) {
+                                continue;
+                            }
+                            for (dir, mode) in watchable_directories(&path) {
+                                if let Err(e) = debouncer.watch(&dir, mode) {
+                                    log::warn!(
+                                        "surveillance de {} impossible : {e}",
+                                        dir.display()
+                                    );
+                                }
+                            }
+                        }
+                        Order::Unwatch(path) => {
+                            if watched.remove(&path) {
+                                for (dir, _) in watchable_directories(&path) {
+                                    let _ = debouncer.unwatch(&dir);
+                                }
+                            }
+                        }
+                    }
+                }
+            })?;
 
         // Un thread de traduction : il ne garde d'un lot que les chemins qui
         // changent quelque chose, dédoublonnés.
@@ -65,31 +110,17 @@ impl Watcher {
                 }
             })?;
 
-        Ok((
-            Self {
-                debouncer,
-                watched: HashSet::new(),
-            },
-            rx,
-        ))
+        Ok((Self { orders: order_tx }, rx))
     }
 
-    /// Surveille un worktree. Appeler deux fois est sans effet.
+    /// Surveille un worktree. Appeler deux fois est sans effet, et l'appel rend
+    /// la main immédiatement : le travail se fait ailleurs.
     pub fn watch(&mut self, worktree: &Path) {
-        if self.watched.contains(worktree) {
-            return;
-        }
-        if let Err(e) = self.debouncer.watch(worktree, RecursiveMode::Recursive) {
-            log::warn!("surveillance de {} impossible : {e}", worktree.display());
-            return;
-        }
-        self.watched.insert(worktree.to_path_buf());
+        let _ = self.orders.send(Order::Watch(worktree.to_path_buf()));
     }
 
     pub fn unwatch(&mut self, worktree: &Path) {
-        if self.watched.remove(worktree) {
-            let _ = self.debouncer.unwatch(worktree);
-        }
+        let _ = self.orders.send(Order::Unwatch(worktree.to_path_buf()));
     }
 }
 
@@ -127,6 +158,116 @@ fn is_interesting(path: &Path) -> bool {
         || inside.starts_with("refs/")
 }
 
+/// Les dossiers d'un worktree qui valent la peine d'être surveillés.
+///
+/// Ce sont ceux que git connaît : les dossiers contenant un fichier suivi, ou
+/// un fichier nouveau qui n'est pas ignoré. C'est `git ls-files` qui les
+/// donne, en une commande et quelques dizaines de millisecondes.
+///
+/// Surveiller le worktree en bloc coûterait cent fois plus cher pour rien. Sur
+/// l'application qui a motivé ce filtre, quarante mille répertoires existent
+/// mais sept cent vingt et un contiennent du code : le reste est `vendor/`,
+/// `node_modules/` et surtout `storage/`, que Laravel ne déclare pas ignoré
+/// dossier par dossier et qu'un serveur de développement réécrit sans arrêt.
+/// Chacune de ces écritures produisait un réveil, donc un `git status`, donc
+/// un rechargement de la revue — en boucle.
+///
+/// Chaque dossier est surveillé **sans récursion** : ses sous-dossiers sont
+/// déjà dans la liste s'ils contiennent quelque chose, et un dossier créé plus
+/// tard est signalé par son parent, ce qui suffit à déclencher le
+/// rafraîchissement qui le découvrira.
+///
+/// `.git` est ajouté à part : sa racine pour `HEAD` et `index`, et `refs/`
+/// récursivement puisqu'il est petit. Le prendre en entier ramènerait les
+/// milliers de répertoires d'objets.
+fn watchable_directories(worktree: &Path) -> Vec<(PathBuf, RecursiveMode)> {
+    let mut dirs: Vec<(PathBuf, RecursiveMode)> = Vec::new();
+
+    match tracked_directories(worktree) {
+        Some(tracked) => {
+            dirs.extend(
+                tracked
+                    .into_iter()
+                    .map(|dir| (dir, RecursiveMode::NonRecursive)),
+            );
+            dirs.push((worktree.to_path_buf(), RecursiveMode::NonRecursive));
+        }
+        // Sans git sous la main, tout surveiller reste juste, seulement lent.
+        None => dirs.push((worktree.to_path_buf(), RecursiveMode::Recursive)),
+    }
+
+    if let Some(git_dir) = git_dir(worktree) {
+        let refs = git_dir.join("refs");
+        dirs.push((git_dir, RecursiveMode::NonRecursive));
+        if refs.is_dir() {
+            dirs.push((refs, RecursiveMode::Recursive));
+        }
+    }
+    dirs
+}
+
+/// Les dossiers contenant un fichier que git suit, ou un fichier nouveau qu'il
+/// n'ignore pas.
+fn tracked_directories(worktree: &Path) -> Option<HashSet<PathBuf>> {
+    use std::process::{Command, Stdio};
+
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut dirs = HashSet::new();
+    for file in text.split('\0').filter(|s| !s.is_empty()) {
+        // Chaque ancêtre, pas seulement le parent : un dossier intermédiaire
+        // qui ne contient que des sous-dossiers doit être surveillé lui aussi,
+        // sans quoi la création d'un fichier à ce niveau passerait inaperçue.
+        let mut current = Path::new(file).parent();
+        while let Some(dir) = current.filter(|d| !d.as_os_str().is_empty()) {
+            if !dirs.insert(worktree.join(dir)) {
+                break; // déjà vu : ses ancêtres le sont aussi
+            }
+            current = dir.parent();
+        }
+    }
+    Some(dirs)
+}
+
+/// Le répertoire git d'un checkout.
+///
+/// Dans le dépôt principal c'est `.git/`. Dans un worktree lié, `.git` est un
+/// *fichier* qui pointe vers `<principal>/.git/worktrees/<nom>` : c'est là que
+/// vivent le `HEAD` et l'`index` de ce checkout, et les surveiller au mauvais
+/// endroit revient à ne rien surveiller du tout.
+fn git_dir(worktree: &Path) -> Option<PathBuf> {
+    let entry = worktree.join(".git");
+    if entry.is_dir() {
+        return Some(entry);
+    }
+    let text = std::fs::read_to_string(&entry).ok()?;
+    let target = text.strip_prefix("gitdir:")?.trim();
+    let path = PathBuf::from(target);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        worktree.join(path)
+    };
+    path.is_dir().then_some(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +293,76 @@ mod tests {
         assert!(!is_interesting(Path::new("/repo/.git/COMMIT_EDITMSG")));
     }
 
+    #[test]
+    fn a_linked_worktree_points_at_its_own_git_directory() {
+        let root = std::env::temp_dir().join(format!("perch-gitdir-{}", std::process::id()));
+        let main = root.join("depot/.git/worktrees/feature");
+        let linked = root.join("feature");
+        std::fs::create_dir_all(&main).unwrap();
+        std::fs::create_dir_all(&linked).unwrap();
+        // Ce que git écrit dans un worktree lié.
+        std::fs::write(linked.join(".git"), format!("gitdir: {}\n", main.display())).unwrap();
+
+        assert_eq!(git_dir(&linked).as_deref(), Some(main.as_path()));
+
+        // Et le dépôt principal, dont le `.git` est un vrai répertoire.
+        let plain = root.join("depot");
+        assert_eq!(git_dir(&plain), Some(plain.join(".git")));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn only_the_directories_git_knows_are_watched() {
+        // Un vrai petit dépôt : du code suivi, et un dossier ignoré qui pèse.
+        let root = std::env::temp_dir().join(format!("perch-tracked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src/interne")).unwrap();
+        std::fs::create_dir_all(root.join("vendor/paquet/profond")).unwrap();
+        std::fs::write(root.join("src/interne/code.rs"), "fn main() {}").unwrap();
+        std::fs::write(root.join("vendor/paquet/profond/gros.php"), "<?php").unwrap();
+        std::fs::write(root.join(".gitignore"), "vendor/\n").unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "T"],
+            vec!["add", "."],
+        ] {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(&args)
+                .output()
+                .unwrap();
+        }
+
+        let dirs = watchable_directories(&root);
+        let watched: Vec<&Path> = dirs.iter().map(|(p, _)| p.as_path()).collect();
+
+        assert!(
+            watched.contains(&root.join("src/interne").as_path()),
+            "un dossier de code doit être surveillé : {watched:?}"
+        );
+        assert!(
+            watched.contains(&root.join("src").as_path()),
+            "les dossiers intermédiaires aussi"
+        );
+        assert!(
+            !watched.iter().any(|p| p.starts_with(root.join("vendor"))),
+            "rien d'ignoré ne doit être surveillé : {watched:?}"
+        );
+        // Aucune surveillance récursive de l'arborescence de travail : c'est
+        // elle qui ramènerait les dossiers écartés.
+        assert!(
+            dirs.iter()
+                .filter(|(p, _)| !p.starts_with(root.join(".git")))
+                .all(|(_, m)| matches!(m, RecursiveMode::NonRecursive)),
+            "aucune surveillance récursive hors de .git"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Le seul test qui prouve que la chaîne complète marche : un vrai
     /// observateur du système de fichiers, une vraie écriture, et le chemin
     /// qui ressort à l'autre bout. Les deux tests précédents ne valident que
@@ -165,18 +376,21 @@ mod tests {
         watcher.watch(&dir);
 
         let file = dir.join("écrit pendant la surveillance.txt");
-        std::fs::write(&file, b"contenu").expect("écriture");
 
-        // Le débounce est de 250 ms ; la marge couvre une machine chargée sans
-        // rendre l'échec silencieux — au-delà, c'est que rien n'est arrivé.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        // `watch` rend la main avant que la surveillance soit posée — c'est
+        // tout l'intérêt, le thread d'interface ne doit pas attendre les
+        // milliers d'appels système que cela demande sur un vrai projet. Le
+        // test réécrit donc le fichier à chaque tour : dès que la surveillance
+        // est en place, l'écriture suivante est vue.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut received = None;
         while std::time::Instant::now() < deadline {
+            std::fs::write(&file, b"contenu").expect("écriture");
+            std::thread::sleep(Duration::from_millis(100));
             if let Ok(path) = changes.try_recv() {
                 received = Some(path);
                 break;
             }
-            std::thread::sleep(Duration::from_millis(50));
         }
 
         let _ = std::fs::remove_dir_all(&dir);

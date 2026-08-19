@@ -221,9 +221,20 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
 
 fn open_repo(path: &Path) -> Result<Evt> {
     let r = repo::Repo::discover(path)?;
+    let worktrees = r.worktrees()?;
+    // Le chemin demandé peut être un sous-dossier du checkout ; on retient le
+    // worktree le plus profond qui le contient, sinon un worktree imbriqué
+    // dans un autre serait attribué au mauvais.
+    let requested = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let opened_at = worktrees
+        .iter()
+        .filter(|w| requested.starts_with(&w.path))
+        .max_by_key(|w| w.path.as_os_str().len())
+        .map(|w| w.path.clone());
     Ok(Evt::RepoOpened {
         name: r.name(),
-        worktrees: r.worktrees()?,
+        worktrees,
+        opened_at,
         main: r.main,
     })
 }
