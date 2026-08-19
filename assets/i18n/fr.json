@@ -124,6 +124,7 @@
   "terminal-agent": "Lancer l'agent de codage dans un terminal",
   "terminal-new": "Nouveau terminal",
   "terminal-shell": "shell",
+  "watch-windows-filesystem": "Dépôt sur un disque Windows : rafraîchissement automatique inactif",
   "worktree-new-placeholder": "nom du worktree",
   "worktree-new-title": "Nouveau worktree",
   "worktree-remove-title": "Supprimer ce worktree ?"

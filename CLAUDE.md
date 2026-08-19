@@ -115,6 +115,15 @@ immédiatement. Corollaire à connaître : la surveillance n'est pas effective a
 retour de l'appel — sans importance, puisque la sélection d'un worktree
 déclenche de toute façon une lecture du statut.
 
+**Sur un disque Windows monté par WSL, la surveillance ne marche pas et ne le
+dit pas.** `notify` pose ses surveillances sur drvfs (`/mnt/c`) sans erreur et
+ne livre jamais un événement : les écritures ont lieu côté Windows, le noyau WSL
+n'a rien à traduire. C'est le seul échec silencieux de cette couche, d'où
+`watch::on_windows_filesystem`, que la barre d'état affiche. Pas de repli par
+sondage : `git status` coûte déjà plusieurs fois plus cher sur ces montages, et
+le mettre sur un minuteur ferait payer en permanence ce que déplacer le dépôt
+vers `~` supprime d'un coup.
+
 Dans un worktree lié, `.git` est un *fichier* qui pointe vers
 `<principal>/.git/worktrees/<nom>` : c'est là que vivent son `HEAD` et son
 `index`, et les surveiller au mauvais endroit revient à ne rien surveiller.
@@ -424,6 +433,11 @@ résumé coûte **deux commandes git par worktree** — `--numstat` compte les
 lignes mais ignore ce qu'il ne suit pas, `status` voit les fichiers nouveaux
 sans savoir ce qu'ils contiennent, et un worktree d'agent est plein de fichiers
 nouveaux — donc un relevé sur cinq.
+
+`agent::scan` est **Linux seulement**, par un `cfg` explicite et non par
+accident : le parcours compile partout et échouerait en silence à l'ouverture
+de `/proc`, ce qui se lit comme une détection cassée au lieu d'une absence
+assumée. C'est aussi ce qui fixe la cible Windows à WSL2 plutôt qu'au natif.
 
 La détection des agents passe par `/proc` et non par nos propres onglets : on
 lance un agent depuis Perch, mais aussi depuis un terminal à côté, et c'est le

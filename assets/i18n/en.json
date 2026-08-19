@@ -124,6 +124,7 @@
   "terminal-agent": "Run the coding agent in a terminal",
   "terminal-new": "New terminal",
   "terminal-shell": "shell",
+  "watch-windows-filesystem": "Repository on a Windows drive: no automatic refresh",
   "worktree-new-placeholder": "worktree name",
   "worktree-new-title": "New worktree",
   "worktree-remove-title": "Remove this worktree?"

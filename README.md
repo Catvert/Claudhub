@@ -78,6 +78,35 @@ accessible, rien ne s'affiche.
 Lancé depuis un dépôt git, Perch l'ouvre. Les dépôts ouverts sont rouverts au
 démarrage suivant.
 
+## Sous Windows : par WSL2
+
+Perch est une application Linux ; sous Windows elle se lance **depuis WSL2**,
+et WSLg l'affiche comme une fenêtre Windows ordinaire — barre de titre,
+Alt+Tab, presse-papiers partagé. Il n'y a pas de serveur X tiers à installer.
+Il n'y a pas non plus de version native : la détection des agents lit `/proc`,
+les terminaux sont de vrais pty, et le build passe par Nix.
+
+Prérequis :
+
+- **Windows 11**, ou Windows 10 21H2 et plus avec WSL installé depuis le
+  Microsoft Store — l'ancien WSL2 intégré à Windows 10 n'a pas WSLg.
+- Un pilote **Vulkan** dans la distribution : gpui rend par Vulkan et n'a pas
+  de repli. `sudo apt install mesa-vulkan-drivers libvulkan1 vulkan-tools`,
+  puis `vulkaninfo --summary` doit nommer un pilote — `Microsoft Direct3D12`
+  (le GPU, par Mesa/dozen) ou `llvmpipe` (le rendu logiciel, lent mais
+  suffisant pour relire du code).
+- Quelques **polices** : une distribution WSL nue en a presque aucune, et les
+  listes de familles des réglages s'en ressentent
+  (`sudo apt install fonts-jetbrains-mono fonts-dejavu`).
+
+Et une règle qui n'est pas un détail de confort : **gardez vos dépôts dans le
+système de fichiers Linux** (`~/projets/…`), jamais sous `/mnt/c`. Sur les
+disques Windows montés par WSL, `inotify` ne remonte aucun événement — la revue
+cesse de se rafraîchir toute seule, sans erreur — et `git status` y est
+plusieurs fois plus lent. Perch reconnaît le cas et l'affiche dans la barre
+d'état, mais le remède est de déplacer le dépôt. Les éditeurs Windows y accèdent
+par `\\wsl$\<distribution>\home\…`, et VS Code s'y branche nativement.
+
 ## Réglages
 
 `~/.config/perch/settings.json` (0600), toutes les clés facultatives :

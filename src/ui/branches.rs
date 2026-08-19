@@ -160,8 +160,12 @@ impl PerchApp {
 
         let entity = cx.entity();
         let count = rows.len();
-        let tall = crate::ui::theme::tall_row_height(cx);
-        let bar = crate::ui::theme::row_height(cx);
+        // **Une seule hauteur pour toutes les entrées**, en-têtes de groupe
+        // compris. `uniform_list` mesure un élément et réserve sa hauteur pour
+        // tous : donner une hauteur d'une ligne à l'en-tête et de deux aux
+        // branches faisait déborder chaque branche sur la suivante, les noms
+        // venant se dessiner par-dessus les détails de la ligne précédente.
+        let height = crate::ui::theme::tall_row_height(cx);
 
         v_flex()
             .size_full()
@@ -171,9 +175,9 @@ impl PerchApp {
                     uniform_list("branch-list", count, move |visible, _window, cx| {
                         visible
                             .map(|ix| match rows.get(ix) {
-                                Some(Row::Group(kind)) => render_group(*kind, bar, cx),
+                                Some(Row::Group(kind)) => render_group(*kind, height, cx),
                                 Some(Row::Branch(row)) => {
-                                    render_branch(row, ix, &worktree, &main, tall, &entity, cx)
+                                    render_branch(row, ix, &worktree, &main, height, &entity, cx)
                                 }
                                 None => div().into_any_element(),
                             })
@@ -239,11 +243,15 @@ impl PerchApp {
 }
 
 fn render_group(kind: BranchKind, height: gpui::Pixels, cx: &mut gpui::App) -> gpui::AnyElement {
+    // Le titre se pose en bas de sa bande plutôt qu'en son milieu : il annonce
+    // ce qui suit, et le coller à sa liste dit mieux ce qu'il regroupe qu'un
+    // texte flottant au centre d'une hauteur qu'il n'occupe pas.
     h_flex()
         .h(height)
         .w_full()
         .px_2()
-        .items_center()
+        .pb_1()
+        .items_end()
         .bg(cx.theme().secondary)
         .text_xs()
         .font_semibold()

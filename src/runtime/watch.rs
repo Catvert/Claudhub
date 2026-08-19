@@ -11,8 +11,9 @@
 //! laisserait le panneau afficher des fichiers qui ne sont plus modifiés.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use notify::RecursiveMode;
@@ -66,6 +67,14 @@ impl Watcher {
                         Order::Watch(path) => {
                             if !watched.insert(path.clone()) {
                                 continue;
+                            }
+                            if on_windows_filesystem(&path) {
+                                log::warn!(
+                                    "{} est sur un disque Windows : inotify n'y \
+                                     remonte rien, la revue ne se rafraîchira pas \
+                                     toute seule",
+                                    path.display()
+                                );
                             }
                             for (dir, mode) in watchable_directories(&path) {
                                 if let Err(e) = debouncer.watch(&dir, mode) {
@@ -197,6 +206,57 @@ fn is_interesting(path: &Path) -> bool {
 /// Chacune de ces écritures produisait un réveil, donc un `git status`, donc
 /// un rechargement de la revue — en boucle.
 ///
+/// Vrai si ce chemin est sur un disque Windows monté par WSL.
+///
+/// C'est le seul cas où la surveillance échoue **sans rien dire** : sur drvfs
+/// (`/mnt/c`, `/mnt/d`…), `notify` pose ses surveillances sans erreur et ne
+/// livre jamais un événement, parce que le noyau WSL n'a rien à traduire — les
+/// écritures ont lieu côté Windows. Toute la promesse « la revue suit sans
+/// qu'on lui demande » disparaît alors en silence, et c'est à l'interface de
+/// le dire.
+///
+/// Le repli par sondage serait pire : `git status` y coûte déjà plusieurs fois
+/// ce qu'il coûte sur le système de fichiers Linux, et le lancer sur un
+/// minuteur ferait payer en permanence ce que le déplacement du dépôt vers
+/// `~` supprime d'un coup.
+pub fn on_windows_filesystem(path: &Path) -> bool {
+    running_under_wsl() && is_windows_mount(path)
+}
+
+/// Le noyau de WSL porte « microsoft » dans sa version, sous WSL1 comme sous
+/// WSL2 ; c'est la façon dont tout le monde le reconnaît, faute d'autre
+/// marqueur stable.
+fn running_under_wsl() -> bool {
+    static WSL: OnceLock<bool> = OnceLock::new();
+    *WSL.get_or_init(|| {
+        std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .map(|release| release.to_ascii_lowercase().contains("microsoft"))
+            .unwrap_or(false)
+    })
+}
+
+/// `/mnt/c`, `/mnt/d`… — la façon dont WSL monte les lecteurs Windows.
+///
+/// La racine d'automontage se configure (`/etc/wsl.conf`), donc la
+/// reconnaissance rate les installations qui l'ont déplacée. C'est assumé :
+/// ce test ne sert qu'à afficher un avertissement, et un avertissement qui
+/// manque vaut mieux qu'un avertissement qui ment.
+fn is_windows_mount(path: &Path) -> bool {
+    let mut parts = path.components();
+    if parts.next() != Some(Component::RootDir) {
+        return false;
+    }
+    if parts.next() != Some(Component::Normal("mnt".as_ref())) {
+        return false;
+    }
+    match parts.next() {
+        Some(Component::Normal(drive)) => drive
+            .to_str()
+            .is_some_and(|d| d.len() == 1 && d.chars().all(|c| c.is_ascii_alphabetic())),
+        _ => false,
+    }
+}
+
 /// Chaque dossier est surveillé **sans récursion** : ses sous-dossiers sont
 /// déjà dans la liste s'ils contiennent quelque chose, et un dossier créé plus
 /// tard est signalé par son parent, ce qui suffit à déclencher le
@@ -323,6 +383,19 @@ mod tests {
     }
 
     use super::*;
+
+    /// Un dépôt sur `/mnt/c` ne remonte aucun événement ; c'est ce test qui
+    /// tient la reconnaissance, la partie « suis-je sous WSL » n'étant pas
+    /// vérifiable ailleurs que sous WSL.
+    #[test]
+    fn windows_drives_are_recognised_by_their_mount_point() {
+        assert!(is_windows_mount(Path::new("/mnt/c/Users/ami/projet")));
+        assert!(is_windows_mount(Path::new("/mnt/d")));
+        assert!(!is_windows_mount(Path::new("/home/ami/projet")));
+        // Un point de montage à nous qui commence pareil n'en est pas un.
+        assert!(!is_windows_mount(Path::new("/mnt/data/projet")));
+        assert!(!is_windows_mount(Path::new("/mnt")));
+    }
 
     #[test]
     fn work_tree_changes_are_interesting() {

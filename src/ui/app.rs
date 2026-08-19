@@ -1226,6 +1226,15 @@ impl PerchApp {
             .active_review()
             .map(|r| (r.status.ahead, r.status.behind))
             .unwrap_or((0, 0));
+        // Sur un disque Windows monté par WSL, la surveillance ne remonte
+        // rien : le dire est le seul moyen de distinguer « rien n'a changé »
+        // de « Perch ne voit plus rien ». Le calcul est refait à chaque frame
+        // parce qu'il ne coûte qu'une comparaison de composants de chemin,
+        // l'appartenance à WSL étant retenue une fois pour toutes.
+        let unwatched = self
+            .active
+            .as_deref()
+            .is_some_and(crate::runtime::watch::on_windows_filesystem);
         let muted = cx.theme().muted_foreground;
 
         h_flex()
@@ -1247,6 +1256,16 @@ impl PerchApp {
                     .when(behind > 0, |el| el.child(format!("↓{behind}")))
                     .when(ahead > 0, |el| el.child(format!("↑{ahead}")))
                     .child(Divider::vertical().h(px(12.)))
+            })
+            .when(unwatched, |el| {
+                el.child(
+                    h_flex()
+                        .gap_1()
+                        .text_color(cx.theme().warning)
+                        .child(icon("triangle-alert").xsmall())
+                        .child(tr!("watch-windows-filesystem")),
+                )
+                .child(Divider::vertical().h(px(12.)))
             })
             .child(
                 div()

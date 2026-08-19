@@ -28,10 +28,22 @@ pub struct Process {
 /// Les agents trouvés, par worktree.
 pub type Agents = HashMap<PathBuf, Vec<Process>>;
 
+/// Ailleurs que sous Linux, il n'y a pas de `/proc` : la liste est vide, et la
+/// barre latérale n'affiche simplement aucun agent.
+///
+/// Le stub est explicite plutôt qu'accidentel : le parcours ci-dessous
+/// compilerait partout et échouerait en silence à l'ouverture de `/proc`, ce
+/// qui se lit comme une détection cassée plutôt que comme une absence assumée.
+#[cfg(not(target_os = "linux"))]
+pub fn scan(_worktrees: &[PathBuf], _program: &str) -> Agents {
+    Agents::new()
+}
+
 /// Parcourt `/proc` à la recherche des agents lancés dans ces worktrees.
 ///
 /// `program` est le nom de la commande configurée — `claude` par défaut, mais
 /// rien n'oblige à ce que ce soit celle-là.
+#[cfg(target_os = "linux")]
 pub fn scan(worktrees: &[PathBuf], program: &str) -> Agents {
     let mut found: Agents = HashMap::new();
     let program = command_name(program);
@@ -85,6 +97,7 @@ pub fn command_name(command: &str) -> &str {
 /// Le nom seul (`comm`) ne suffit pas : un agent lancé par un script ou par un
 /// gestionnaire de versions de node s'appelle `node`, et c'est sa ligne de
 /// commande qui porte `claude`.
+#[cfg(target_os = "linux")]
 fn matches_program(proc_dir: &Path, program: &str) -> bool {
     if let Ok(comm) = std::fs::read_to_string(proc_dir.join("comm")) {
         if comm.trim() == program {
@@ -98,6 +111,7 @@ fn matches_program(proc_dir: &Path, program: &str) -> bool {
 }
 
 /// `/proc/<pid>/cmdline` sépare les arguments par des octets nuls.
+#[cfg(target_os = "linux")]
 fn cmdline_matches(cmdline: &[u8], program: &str) -> bool {
     cmdline
         .split(|b| *b == 0)
@@ -109,6 +123,7 @@ fn cmdline_matches(cmdline: &[u8], program: &str) -> bool {
 ///
 /// Le plus profond, et non le premier trouvé : un worktree imbriqué dans un
 /// autre attribuerait sinon ses agents au mauvais.
+#[cfg(target_os = "linux")]
 fn owning_worktree(worktrees: &[PathBuf], cwd: &Path) -> Option<PathBuf> {
     worktrees
         .iter()
@@ -123,6 +138,7 @@ fn owning_worktree(worktrees: &[PathBuf], cwd: &Path) -> Option<PathBuf> {
 /// contenir des espaces et des parenthèses** : découper la ligne sur les
 /// espaces donne des champs décalés dès qu'un programme s'appelle « (mon
 /// agent) ». On repart donc de la dernière parenthèse fermante.
+#[cfg(target_os = "linux")]
 pub fn parse_cpu_ticks(stat: &str) -> Option<u64> {
     let rest = &stat[stat.rfind(')')? + 1..];
     let fields: Vec<&str> = rest.split_whitespace().collect();
@@ -144,6 +160,13 @@ mod tests {
         assert_eq!(command_name("/usr/bin/claude --resume"), "claude");
         assert_eq!(command_name(""), "");
     }
+}
+
+/// Ce qui parle le format de `/proc` ne se compile — et ne se teste — que là
+/// où `/proc` existe.
+#[cfg(all(test, target_os = "linux"))]
+mod proc_tests {
+    use super::*;
 
     #[test]
     fn the_command_line_is_matched_argument_by_argument() {
