@@ -7,6 +7,8 @@
 
 mod app;
 mod branches;
+mod diff_view;
+mod highlight;
 mod icons;
 mod review;
 mod settings;

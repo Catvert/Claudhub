@@ -40,6 +40,7 @@
   "review-binary": "Binary file: nothing to show.",
   "review-clean": "Nothing to review here.",
   "review-loading": "Reading the diff…",
+  "review-no-change": "No change in this file.",
   "review-pick-a-file": "Pick a file to review.",
   "sidebar-empty": "No repository open. Use “+” to add one.",
   "sidebar-new-worktree": "New worktree",

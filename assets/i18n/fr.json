@@ -40,6 +40,7 @@
   "review-binary": "Fichier binaire : rien à afficher.",
   "review-clean": "Rien à relire ici.",
   "review-loading": "Lecture du diff…",
+  "review-no-change": "Aucune modification dans ce fichier.",
   "review-pick-a-file": "Choisissez un fichier à relire.",
   "sidebar-empty": "Aucun dépôt ouvert. Utilisez « + » pour en ajouter un.",
   "sidebar-new-worktree": "Nouveau worktree",

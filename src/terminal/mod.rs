@@ -14,6 +14,7 @@
 mod keys;
 mod snapshot;
 
+pub use alacritty_terminal::index::Side;
 pub use keys::key_bytes;
 pub use snapshot::{Cursor, Line, Paint, Segment, Snapshot};
 
@@ -25,6 +26,8 @@ use std::sync::Arc;
 use alacritty_terminal::event::{Event as AlacEvent, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
 use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::{Column, Point};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::tty;
@@ -42,6 +45,27 @@ pub enum TerminalEvent {
     /// Le processus est sorti ; la session est morte mais son contenu reste
     /// lisible, ce qui est exactement ce qu'on veut après un test échoué.
     Exited,
+}
+
+/// Une position dans la zone visible, en cellules.
+///
+/// `side` dit de quel côté de la cellule le pointeur se trouve ; c'est ce qui
+/// permet de sélectionner un caractère en partant de sa moitié droite sans
+/// l'inclure, comme le fait un éditeur de texte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewportPosition {
+    pub line: usize,
+    pub column: usize,
+    pub side: Side,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionKind {
+    Simple,
+    /// Double-clic : étend jusqu'aux frontières du mot.
+    Word,
+    /// Triple-clic : la ligne entière.
+    Line,
 }
 
 /// Taille de la grille. Les dimensions en pixels comptent : les programmes
@@ -267,6 +291,109 @@ impl Terminal {
         self.term.lock().scroll_display(Scroll::Bottom);
     }
 
+    // — Sélection ————————————————————————————————————————————————
+
+    /// Ouvre une sélection à une position du viewport.
+    ///
+    /// `kind` distingue le glissement simple, le double-clic (mot) et le
+    /// triple-clic (ligne) : alacritty se charge lui-même d'étendre aux
+    /// frontières sémantiques, avec les mêmes règles que dans un terminal
+    /// ordinaire.
+    pub fn start_selection(&self, position: ViewportPosition, kind: SelectionKind) {
+        let mut term = self.term.lock();
+        let point = self.grid_point(&term, position);
+        let ty = match kind {
+            SelectionKind::Simple => SelectionType::Simple,
+            SelectionKind::Word => SelectionType::Semantic,
+            SelectionKind::Line => SelectionType::Lines,
+        };
+        term.selection = Some(Selection::new(ty, point, position.side));
+    }
+
+    /// Étend la sélection en cours. Sans appel préalable à `start_selection`,
+    /// ne fait rien — un glissement qui n'a pas commencé dans le terminal ne
+    /// doit pas y sélectionner quoi que ce soit.
+    pub fn update_selection(&self, position: ViewportPosition) {
+        let mut term = self.term.lock();
+        let point = self.grid_point(&term, position);
+        if let Some(selection) = term.selection.as_mut() {
+            selection.update(point, position.side);
+        }
+    }
+
+    /// Sélectionne tout, historique compris.
+    pub fn select_all(&self) {
+        let mut term = self.term.lock();
+        let total = term.grid().total_lines();
+        let columns = self.size.columns.saturating_sub(1);
+        // La première ligne de l'historique porte l'indice le plus négatif ;
+        // la dernière ligne visible est à `lines - 1`.
+        let top = Point::new(
+            alacritty_terminal::index::Line(-((total - self.size.lines) as i32)),
+            Column(0),
+        );
+        let bottom = Point::new(
+            alacritty_terminal::index::Line(self.size.lines as i32 - 1),
+            Column(columns),
+        );
+        let mut selection = Selection::new(SelectionType::Simple, top, Side::Left);
+        selection.update(bottom, Side::Right);
+        term.selection = Some(selection);
+    }
+
+    pub fn clear_selection(&self) {
+        self.term.lock().selection = None;
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.term
+            .lock()
+            .selection
+            .as_ref()
+            .is_some_and(|s| !s.is_empty())
+    }
+
+    /// Le texte sélectionné, tel qu'il sera collé ailleurs.
+    ///
+    /// C'est alacritty qui le reconstitue : il sait quelles lignes sont la
+    /// continuation d'une ligne trop longue et ne doivent donc pas être
+    /// coupées par un saut de ligne, ce qu'un assemblage naïf des lignes
+    /// visibles ne saurait pas.
+    pub fn selection_text(&self) -> Option<String> {
+        self.term.lock().selection_to_string()
+    }
+
+    /// Convertit une position du viewport en point de la grille, historique
+    /// compris : sans cette translation, une sélection faite après avoir
+    /// remonté l'historique désignerait les lignes du bas.
+    fn grid_point(&self, term: &Term<Proxy>, position: ViewportPosition) -> Point {
+        let offset = term.grid().display_offset();
+        let line = position.line.min(self.size.lines.saturating_sub(1));
+        let column = position.column.min(self.size.columns.saturating_sub(1));
+        alacritty_terminal::term::viewport_to_point(offset, Point::new(line, Column(column)))
+    }
+
+    /// Colle du texte.
+    ///
+    /// En mode « collage entre crochets », le contenu est encadré par les
+    /// séquences que le programme attend : sans elles, un shell interprète un
+    /// texte multiligne collé comme autant de commandes validées, ce qui est
+    /// la façon classique d'exécuter par accident ce qu'on voulait seulement
+    /// relire.
+    pub fn paste(&self, text: &str) {
+        use alacritty_terminal::term::TermMode;
+        if self.mode().contains(TermMode::BRACKETED_PASTE) {
+            self.write_str("\x1b[200~");
+            self.write_str(&text.replace('\x1b', ""));
+            self.write_str("\x1b[201~");
+        } else {
+            // Hors de ce mode, un retour chariot vaut validation : c'est le
+            // comportement de tous les terminaux, et le changer casserait un
+            // collage volontaire de commandes.
+            self.write_str(&text.replace("\r\n", "\r").replace('\n', "\r"));
+        }
+    }
+
     /// Instantané de la grille pour une frame.
     ///
     /// Le verrou n'est tenu que le temps de la copie : dessiner sous le verrou
@@ -289,5 +416,57 @@ impl Drop for Terminal {
         // groupe de processus : sans cela, fermer un onglet laisserait tourner
         // ce qu'il exécutait.
         let _ = self.sender.send(Msg::Shutdown);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fait tourner un vrai programme dans un vrai pty et lit le résultat sur
+    /// la grille. C'est le seul test qui prouve la chaîne complète — pty,
+    /// boucle d'entrées-sorties, parseur, instantané ; tout le reste vérifie
+    /// des morceaux isolés.
+    #[test]
+    fn a_real_command_reaches_the_grid() {
+        let terminal = Terminal::spawn(Spawn {
+            working_directory: &std::env::temp_dir(),
+            // `printf` plutôt qu'un shell interactif : pas d'invite, pas de
+            // fichier de configuration de l'utilisateur, une sortie prévisible.
+            command: Some((
+                "/bin/sh".into(),
+                vec!["-c".into(), "printf 'perch \\033[31mrouge\\033[0m'".into()],
+            )),
+            env: HashMap::new(),
+            size: TermSize::new(40, 5, 8, 16),
+            scrollback: 100,
+        })
+        .expect("le système doit pouvoir ouvrir un pty");
+
+        // La lecture est asynchrone : on attend que la première ligne se
+        // remplisse, avec une échéance qui fait échouer plutôt que pendre.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut snapshot = terminal.snapshot();
+        while std::time::Instant::now() < deadline && !snapshot.lines[0].text.starts_with("perch") {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            snapshot = terminal.snapshot();
+        }
+
+        assert_eq!(
+            snapshot.lines[0].text, "perch rouge",
+            "la sortie du programme n'est pas arrivée sur la grille"
+        );
+
+        // Et la couleur émise par le programme est bien portée par le run.
+        let red = snapshot.lines[0]
+            .segments
+            .iter()
+            .find(|s| &snapshot.lines[0].text[s.start..s.end] == "rouge")
+            .expect("le mot coloré doit former son propre run");
+        assert!(
+            matches!(red.fg, Paint::Rgb(..)),
+            "le rouge du programme n'a pas été résolu : {:?}",
+            red.fg
+        );
     }
 }

@@ -40,6 +40,8 @@ src/
   ui/           tout gpui
     mod.rs      `run()`, `AssetSource`, polices, i18n
     app.rs      `PerchApp` : l'état, la pompe d'événements, le chrome
+    diff_view.rs   la vue de diff, virtualisée
+    highlight.rs   coloration tree-sitter d'un diff
     sidebar.rs / review.rs / branches.rs / terminal_view.rs
     settings.rs / theme.rs / shortcuts.rs / icons.rs
 ```
@@ -71,6 +73,59 @@ invite de mot de passe bloque un worker pour toujours), `LC_ALL=C` pour que les
 messages d'erreur soient reconnaissables, et les formats `-z` partout où un
 chemin apparaît — un fichier peut contenir un saut de ligne.
 
+### La vue de diff
+
+Un diff de relecture d'agent fait couramment plusieurs milliers de lignes.
+L'affichage repose donc sur `uniform_list` (gpui), et non sur le
+`v_virtual_list` de gpui-component : toutes les entrées ont exactement la même
+hauteur, `uniform_list` trouve l'intervalle visible par une division au lieu de
+parcourir un vecteur de tailles, et surtout c'est le seul des deux qui sache
+défiler horizontalement.
+
+Quatre contraintes tiennent ensemble, et en relâcher une casse une autre :
+
+- **`.h(LINE_HEIGHT)` explicite** sur chaque entrée. Une hauteur mesurée
+  dépendrait du texte, et la liste réserve la hauteur d'un seul item mesuré.
+- **`.whitespace_nowrap()`**. Sans cela le texte est shapé à la largeur du
+  viewport pendant le rendu réel mais à largeur infinie pendant la mesure : les
+  lignes longues passent sur deux lignes et débordent de la place réservée.
+- **`ListHorizontalSizingBehavior::Unconstrained` + `with_width_from_item`**.
+  La largeur défilable vient d'un seul item ; `Rendered::longest_row` désigne
+  la ligne la plus large, sans quoi le défilement s'arrête à la largeur de la
+  première ligne du fichier — presque toujours courte.
+- **pas de `w_full` sur une entrée**, mais un `min_w(content_width)`. `w_full`
+  étire l'entrée à la largeur disponible et il n'y a plus rien à révéler ;
+  `min_w` laisse la largeur intrinsèque remonter tout en garantissant que le
+  fond coloré d'une ligne modifiée traverse toute la vue.
+
+Tout ce qui se déduit d'un diff — mise à plat, coloration, patchs
+d'indexation, largeur de gouttière — est calculé une fois dans
+`diff_view::Rendered`, à l'arrivée du diff, et rangé derrière un `Rc`. La
+fermeture de rendu est appelée pour chaque ligne visible à chaque frame,
+animation de molette comprise : elle ne doit rien y calculer.
+
+### La coloration syntaxique
+
+C'est le *code* qu'on relit, pas les marqueurs `+`/`-` : les lignes sont
+colorées avec la grammaire du fichier, pas avec la grammaire `diff`.
+
+Un hunk n'étant pas un fichier, `highlight.rs` reconstruit les deux versions —
+ancienne (contexte + supprimées), nouvelle (contexte + ajoutées) — colore
+chacune en un seul appel, puis redistribue les styles ligne par ligne. Une
+ligne de contexte appartient aux deux : la seconde passe **remplace** la
+première (`target.clear()`), elle ne s'y ajoute pas.
+
+Deux invariants que gpui ne vérifie pas et dont la violation est silencieuse :
+les plages doivent être **triées et disjointes** (`with_highlights` les
+convertit en longueurs de runs consécutives, en les parcourant dans l'ordre
+donné : une plage désordonnée décale tout ce qui suit), et les décalages sont
+en **octets** — indexer en caractères casse dès le premier accent. Les deux
+sont verrouillés par `diff_view::tests::highlight_runs_stay_sorted_and_disjoint`,
+qui a déjà attrapé le doublon des lignes de contexte.
+
+`SyntaxHighlighter::new` compile les requêtes de la grammaire : jamais dans un
+`render`.
+
 ### Le terminal
 
 `alacritty_terminal` fournit le parseur VTE, la grille, l'historique et le pty.
@@ -81,6 +136,11 @@ fixe suffit à aligner les colonnes, et gpui garde la charge du façonnage.
 
 Le verrou de la grille est partagé avec la boucle d'E/S : **ne jamais dessiner
 sous ce verrou**, d'où l'instantané.
+
+La sélection est un attribut de style de `Segment`, comme le gras ou la
+couleur. Ce n'est pas un détail d'implémentation : la fusion des runs la prend
+alors en compte toute seule, et une sélection découpe les runs exactement où il
+faut sans une ligne de code dédiée.
 
 ## Conventions gpui
 

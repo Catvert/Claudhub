@@ -15,15 +15,19 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    div, prelude::*, px, App, Bounds, Context, Entity, FocusHandle, Focusable, Hsla, KeyDownEvent,
-    MouseButton, Pixels, Render, ScrollWheelEvent, SharedString, StyledText, TextRun, Window,
+    div, prelude::*, px, App, Bounds, ClipboardItem, Context, Entity, FocusHandle, Focusable, Hsla,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
+    ScrollWheelEvent, SharedString, StyledText, TextRun, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex, v_flex, ActiveTheme, Sizable,
 };
 
-use crate::terminal::{key_bytes, Paint, Snapshot, Spawn, TermSize, Terminal, TerminalEvent};
+use crate::terminal::{
+    key_bytes, Paint, SelectionKind, Side, Snapshot, Spawn, TermSize, Terminal, TerminalEvent,
+    ViewportPosition,
+};
 use crate::tr;
 use crate::ui::app::PerchApp;
 use crate::ui::icons::icon;
@@ -38,6 +42,12 @@ pub struct TerminalView {
     /// Dernière taille connue de la zone de rendu, pour ne redimensionner le
     /// pty que quand la géométrie change vraiment.
     bounds: Bounds<Pixels>,
+    /// Géométrie d'une cellule, mesurée sur la police effective. Elle sert à
+    /// retraduire une position de souris en ligne et colonne.
+    cell: gpui::Size<Pixels>,
+    /// Vrai entre l'enfoncement et le relâchement du bouton : c'est ce qui
+    /// distingue un glissement de sélection d'un simple survol.
+    selecting: bool,
     label: SharedString,
 }
 
@@ -95,6 +105,8 @@ impl TerminalView {
             focus: cx.focus_handle(),
             font_size,
             bounds: Bounds::default(),
+            cell: gpui::size(px(8.), px(16.)),
+            selecting: false,
             label,
         })
     }
@@ -140,6 +152,7 @@ impl TerminalView {
         let line_height = window.line_height().max(px(1.));
         let _ = cx;
 
+        self.cell = gpui::size(cell_width.max(px(1.)), line_height);
         let columns = (bounds.size.width / cell_width.max(px(1.))) as usize;
         let lines = (bounds.size.height / line_height) as usize;
         self.terminal.resize(TermSize::new(
@@ -153,6 +166,9 @@ impl TerminalView {
 
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(bytes) = key_bytes(&event.keystroke, self.terminal.mode()) {
+            // Taper invalide la sélection : ce qu'elle désignait aura bougé
+            // dès que le programme aura répondu.
+            self.terminal.clear_selection();
             // Toute frappe ramène en bas : c'est ce que fait un terminal, et
             // taper en ayant remonté l'historique sans que la vue suive serait
             // déroutant.
@@ -161,6 +177,114 @@ impl TerminalView {
             self.snapshot = self.terminal.snapshot();
             cx.notify();
         }
+    }
+
+    /// Traduit une position de la fenêtre en cellule du viewport.
+    ///
+    /// Le côté (`Side`) vient de la moitié de cellule où tombe le pointeur :
+    /// sélectionner en partant de la moitié droite d'un caractère ne doit pas
+    /// l'inclure, comme dans un éditeur.
+    fn position_at(&self, point: Point<Pixels>) -> ViewportPosition {
+        viewport_position(point - self.bounds.origin, self.cell)
+    }
+
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus);
+        if event.button != MouseButton::Left {
+            return;
+        }
+        let kind = match event.click_count {
+            1 => SelectionKind::Simple,
+            2 => SelectionKind::Word,
+            // Au-delà de trois, c'est encore la ligne : personne ne compte les
+            // clics au-delà, et réinitialiser serait déroutant.
+            _ => SelectionKind::Line,
+        };
+        self.terminal
+            .start_selection(self.position_at(event.position), kind);
+        self.selecting = true;
+        self.snapshot = self.terminal.snapshot();
+        cx.notify();
+    }
+
+    fn on_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.selecting {
+            return;
+        }
+        self.terminal
+            .update_selection(self.position_at(event.position));
+        self.snapshot = self.terminal.snapshot();
+        cx.notify();
+    }
+
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if event.button != MouseButton::Left {
+            return;
+        }
+        self.selecting = false;
+        // Une sélection vide est un simple clic : la garder laisserait un
+        // reliquat invisible qui ferait échouer la copie suivante.
+        if !self.terminal.has_selection() {
+            self.terminal.clear_selection();
+            self.snapshot = self.terminal.snapshot();
+            cx.notify();
+        }
+    }
+
+    /// Bouton du milieu : colle la sélection primaire d'X11/Wayland, comme
+    /// tout terminal Unix.
+    fn on_middle_click(
+        &mut self,
+        _event: &MouseDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(text) = cx
+            .read_from_primary()
+            .and_then(|item| item.text())
+            .filter(|t| !t.is_empty())
+        {
+            self.terminal.paste(&text);
+            self.terminal.scroll_to_bottom();
+            self.snapshot = self.terminal.snapshot();
+            cx.notify();
+        }
+    }
+
+    pub fn copy_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = self.terminal.selection_text().filter(|t| !t.is_empty()) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    pub fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .filter(|t| !t.is_empty())
+        {
+            self.terminal.paste(&text);
+            self.terminal.scroll_to_bottom();
+            self.snapshot = self.terminal.snapshot();
+            cx.notify();
+        }
+    }
+
+    /// Sélectionne tout le contenu visible et l'historique.
+    pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.terminal.select_all();
+        self.snapshot = self.terminal.snapshot();
+        cx.notify();
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -199,16 +323,33 @@ impl Render for TerminalView {
         .absolute()
         .size_full();
 
+        let selection_bg = cx.theme().selection;
         let lines: Vec<_> = self
             .snapshot
             .lines
             .iter()
-            .map(|line| styled_line(line, default_fg, font_size))
+            .map(|line| styled_line(line, default_fg, selection_bg))
             .collect();
 
         v_flex()
             .id("terminal")
+            .key_context(crate::ui::shortcuts::terminal_context())
             .track_focus(&self.focus)
+            .on_action(
+                cx.listener(|this, _: &crate::ui::shortcuts::CopySelection, _, cx| {
+                    this.copy_selection(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::ui::shortcuts::PasteClipboard, _, cx| {
+                    this.paste_from_clipboard(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::ui::shortcuts::SelectAllText, _, cx| {
+                    this.select_all(cx)
+                }),
+            )
             .size_full()
             .relative()
             .bg(cx.theme().background)
@@ -216,17 +357,17 @@ impl Render for TerminalView {
             .text_size(font_size)
             .on_key_down(cx.listener(Self::on_key))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, _| window.focus(&this.focus)),
-            )
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_middle_click))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .child(measure)
             .child(v_flex().size_full().overflow_hidden().children(lines))
     }
 }
 
 /// Convertit une ligne de l'instantané en texte stylé.
-fn styled_line(line: &crate::terminal::Line, default_fg: Hsla, font_size: Pixels) -> StyledText {
+fn styled_line(line: &crate::terminal::Line, default_fg: Hsla, selection_bg: Hsla) -> StyledText {
     let text = SharedString::from(line.text.clone());
     let mut runs: Vec<TextRun> = Vec::with_capacity(line.segments.len());
     for seg in &line.segments {
@@ -255,18 +396,49 @@ fn styled_line(line: &crate::terminal::Line, default_fg: Hsla, font_size: Pixels
                 Paint::Default => default_fg,
                 Paint::Rgb(r, g, b) => rgb(r, g, b),
             },
-            background_color: match seg.bg {
-                // Le fond par défaut est celui de la fenêtre : ne rien peindre
-                // évite un rectangle par cellule.
-                Paint::Default => None,
-                Paint::Rgb(r, g, b) => Some(rgb(r, g, b)),
+            background_color: if seg.selected {
+                // La sélection l'emporte sur la couleur de fond de la cellule,
+                // sinon elle disparaîtrait sur une ligne colorée.
+                Some(selection_bg)
+            } else {
+                match seg.bg {
+                    // Le fond par défaut est celui de la fenêtre : ne rien
+                    // peindre évite un rectangle par cellule.
+                    Paint::Default => None,
+                    Paint::Rgb(r, g, b) => Some(rgb(r, g, b)),
+                }
             },
             underline: seg.underline.then(gpui::UnderlineStyle::default),
             strikethrough: seg.strikethrough.then(gpui::StrikethroughStyle::default),
         });
     }
-    let _ = font_size;
     StyledText::new(text).with_runs(runs)
+}
+
+/// Traduit un décalage en pixels depuis le coin de la zone de rendu en
+/// coordonnées de cellule.
+///
+/// Fonction libre plutôt que méthode : c'est de l'arithmétique dont l'erreur
+/// d'une demi-cellule ne se voit pas à l'œil mais rend la sélection
+/// désagréable, et qui se teste sans fenêtre.
+fn viewport_position(offset: Point<Pixels>, cell: gpui::Size<Pixels>) -> ViewportPosition {
+    let width = f32::from(cell.width).max(1.0);
+    let height = f32::from(cell.height).max(1.0);
+    let column_f = f32::from(offset.x.max(px(0.))) / width;
+    let line_f = f32::from(offset.y.max(px(0.))) / height;
+    let column = column_f as usize;
+    ViewportPosition {
+        line: line_f as usize,
+        column,
+        // La moitié droite d'une cellule désigne la frontière suivante : c'est
+        // ce qui permet de sélectionner « abc » en partant du milieu du `a`
+        // sans l'inclure, comme dans un éditeur de texte.
+        side: if column_f - column as f32 > 0.5 {
+            Side::Right
+        } else {
+            Side::Left
+        },
+    }
 }
 
 fn rgb(r: u8, g: u8, b: u8) -> Hsla {
@@ -491,5 +663,45 @@ impl PerchApp {
         });
         self.show_terminal = true;
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cell() -> gpui::Size<Pixels> {
+        gpui::size(px(8.), px(16.))
+    }
+
+    #[test]
+    fn maps_pixels_to_the_cell_under_them() {
+        let p = viewport_position(gpui::point(px(0.), px(0.)), cell());
+        assert_eq!((p.line, p.column), (0, 0));
+
+        // Colonne 3, ligne 2 : 3×8 et 2×16, plus un poil.
+        let p = viewport_position(gpui::point(px(25.), px(33.)), cell());
+        assert_eq!((p.line, p.column), (2, 3));
+    }
+
+    #[test]
+    fn the_half_of_the_cell_decides_the_side() {
+        // Premier tiers de la cellule 2 : on vise sa frontière gauche.
+        let p = viewport_position(gpui::point(px(18.), px(0.)), cell());
+        assert_eq!(p.column, 2);
+        assert_eq!(p.side, Side::Left);
+
+        // Dernier tiers de la même cellule : frontière droite.
+        let p = viewport_position(gpui::point(px(22.), px(0.)), cell());
+        assert_eq!(p.column, 2);
+        assert_eq!(p.side, Side::Right);
+    }
+
+    #[test]
+    fn a_pointer_above_or_left_of_the_view_clamps_to_the_origin() {
+        // Un glissement qui sort de la zone ne doit pas produire d'indice
+        // négatif : la conversion en `usize` déborderait.
+        let p = viewport_position(gpui::point(px(-40.), px(-90.)), cell());
+        assert_eq!((p.line, p.column), (0, 0));
     }
 }

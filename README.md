@@ -17,12 +17,19 @@ sans quitter l'application.
   suppression, bascule instantanée de l'un à l'autre.
 - **Terminaux multiplexés par worktree** — chaque worktree a son groupe
   d'onglets, lancés dans son répertoire. Émulation complète (alacritty), donc
-  `vim`, `htop` et les interfaces plein écran fonctionnent. Un bouton lance
-  directement l'agent de codage configuré dans un onglet neuf.
+  `vim`, `htop` et les interfaces plein écran fonctionnent. Sélection à la
+  souris (glisser, double-clic pour un mot, triple-clic pour une ligne), copie
+  et collage — encadré par les séquences de « collage entre crochets » quand le
+  programme les comprend, pour qu'un texte multiligne collé ne s'exécute pas
+  tout seul. Un bouton lance directement l'agent de codage configuré dans un
+  onglet neuf.
 - **Revue** — quatre domaines de comparaison : modifications non indexées,
   index, tout le checkout contre HEAD, et la branche entière depuis sa
   divergence d'avec sa base (`base...HEAD`, donc sans le bruit de ce qui a
-  atterri sur la base entre-temps). Diff coloré, numéroté des deux côtés.
+  atterri sur la base entre-temps). Le code est coloré par tree-sitter des deux
+  côtés — une ligne supprimée d'après l'ancienne version du fichier, une ligne
+  ajoutée d'après la nouvelle — et numéroté des deux côtés. L'affichage est
+  virtualisé : un diff de plusieurs milliers de lignes défile sans peiner.
 - **Git** — indexer/dés-indexer un fichier ou un seul bloc, abandonner des
   modifications (avec confirmation, c'est la seule action que git ne rattrape
   pas), valider, récupérer, tirer en avance rapide, publier avec
@@ -87,16 +94,16 @@ le terminal.
 | ``Ctrl+` `` | afficher/masquer le panneau des terminaux |
 | `Ctrl+Tab` | onglet de terminal suivant |
 | `Ctrl+Entrée` | valider |
+| `Ctrl+Maj+C` | copier la sélection du terminal |
+| `Ctrl+Maj+V` | coller dans le terminal |
+| `Ctrl+Maj+A` | tout sélectionner dans le terminal |
 
 ## Ce qui n'y est pas encore
 
-- Sélection à la souris et copier-coller dans le terminal.
-- Coloration syntaxique du contenu des diffs (la grammaire `diff` de
-  tree-sitter est déjà dans le graphe de dépendances, elle n'est pas branchée).
 - Écran de préférences : le fichier de réglages s'édite à la main.
 - Résolution de conflits — les fichiers en conflit sont signalés, pas outillés.
-- Défilement virtualisé des très gros diffs : au-delà de quelques milliers de
-  lignes, le rendu peine.
+- Recherche dans un diff ou dans l'historique d'un terminal.
+- Les langages sans grammaire embarquée s'affichent en texte nu.
 
 ## Licence
 

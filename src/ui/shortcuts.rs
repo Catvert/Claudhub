@@ -39,6 +39,26 @@ pub fn context() -> KeyContext {
     context
 }
 
+// Actions traitées par le terminal qui a le focus, et non par la fenêtre.
+// Les noms portent leur objet (`CopySelection` plutôt que `Copy`) : une action
+// nommée `Copy` entrerait en collision avec le trait du même nom, que tout
+// module Rust a dans son périmètre.
+actions!(
+    perch_terminal,
+    [CopySelection, PasteClipboard, SelectAllText]
+);
+
+/// Contexte déclaré par une vue de terminal. Les trois raccourcis ci-dessous
+/// n'existent que là : `Ctrl+Maj+C` ailleurs dans l'interface n'aurait rien à
+/// copier, et `Ctrl+C` tout court appartient au programme qui tourne.
+const TERMINAL_PREDICATE: &str = "PerchTerminal";
+
+pub fn terminal_context() -> KeyContext {
+    let mut context = KeyContext::default();
+    context.add("PerchTerminal");
+    context
+}
+
 pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("f5", Refresh, Some(PREDICATE)),
@@ -48,6 +68,15 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-`", ToggleTerminal, Some(PREDICATE)),
         KeyBinding::new("secondary-tab", NextTerminal, Some(PREDICATE)),
         KeyBinding::new("secondary-enter", Commit, Some(PREDICATE)),
+        // Les conventions des terminaux : la touche système *avec* Maj, parce
+        // que `Ctrl+C` et `Ctrl+V` nus appartiennent au programme.
+        KeyBinding::new("secondary-shift-c", CopySelection, Some(TERMINAL_PREDICATE)),
+        KeyBinding::new(
+            "secondary-shift-v",
+            PasteClipboard,
+            Some(TERMINAL_PREDICATE),
+        ),
+        KeyBinding::new("secondary-shift-a", SelectAllText, Some(TERMINAL_PREDICATE)),
     ]);
 }
 

@@ -44,6 +44,12 @@ pub struct Segment {
     /// Inversion vidéo : c'est ici qu'elle est appliquée, en échangeant `fg`
     /// et `bg`, pour que la vue n'ait pas à connaître la notion.
     pub inverse: bool,
+    /// Cellule prise dans la sélection de l'utilisateur.
+    ///
+    /// C'est un attribut de style comme les autres, ce qui n'est pas un
+    /// détail : la fusion des runs le prend en compte toute seule, donc une
+    /// sélection découpe les runs exactement où il faut, sans code dédié.
+    pub selected: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -75,6 +81,7 @@ pub(crate) fn capture<T: EventListener>(term: &Term<T>) -> Snapshot {
     let content = term.renderable_content();
     let colors = content.colors;
     let display_offset = content.display_offset;
+    let selection = content.selection;
 
     let mut lines: Vec<Line> = Vec::new();
     let mut line = Line::default();
@@ -101,7 +108,8 @@ pub(crate) fn capture<T: EventListener>(term: &Term<T>) -> Snapshot {
             continue;
         }
 
-        let style = style_of(cell, colors);
+        let mut style = style_of(cell, colors);
+        style.selected = selection.is_some_and(|range| range.contains(indexed.point));
         let start = line.text.len();
         line.text.push(cell.c);
         // Les combinants d'une cellule (accents, sélecteurs d'émoji) font
@@ -177,6 +185,7 @@ fn same_style(a: &Segment, b: &Segment) -> bool {
         && a.strikethrough == b.strikethrough
         && a.hidden == b.hidden
         && a.inverse == b.inverse
+        && a.selected == b.selected
 }
 
 fn style_of(
@@ -207,6 +216,7 @@ fn style_of(
         strikethrough: flags.contains(Flags::STRIKEOUT),
         hidden: flags.contains(Flags::HIDDEN),
         inverse,
+        selected: false,
     }
 }
 
@@ -364,6 +374,37 @@ mod tests {
         let cursor = snap.cursor.unwrap();
         assert_eq!(cursor.line, Some(0));
         assert_eq!(cursor.column, 3);
+    }
+
+    #[test]
+    fn a_selection_splits_the_runs_it_covers() {
+        use alacritty_terminal::index::{Column, Line, Point, Side};
+        use alacritty_terminal::selection::{Selection, SelectionType};
+
+        let size = TermSize::new(20, 4, 8, 16);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        parser.advance(&mut term, b"abcdef");
+
+        // Sélectionne « bcd ».
+        let mut selection = Selection::new(
+            SelectionType::Simple,
+            Point::new(Line(0), Column(1)),
+            Side::Left,
+        );
+        selection.update(Point::new(Line(0), Column(3)), Side::Right);
+        term.selection = Some(selection);
+
+        let snap = capture(&term);
+        let line = &snap.lines[0];
+        assert_eq!(line.text, "abcdef");
+        let selected: String = line
+            .segments
+            .iter()
+            .filter(|s| s.selected)
+            .map(|s| &line.text[s.start..s.end])
+            .collect();
+        assert_eq!(selected, "bcd", "runs = {:?}", line.segments);
     }
 
     #[test]

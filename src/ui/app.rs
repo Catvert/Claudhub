@@ -20,10 +20,11 @@ use gpui_component::{
     v_flex, ActiveTheme, Disableable, Root, Selectable, Sizable, StyledExt, WindowExt,
 };
 
-use crate::git::{Branch, DiffFile, DiffRange, FileDiff, Status, Worktree};
+use crate::git::{Branch, DiffFile, DiffRange, Status, Worktree};
 use crate::runtime::watch::Watcher;
 use crate::runtime::{self, Action, Cmd, Evt};
 use crate::tr;
+use crate::ui::diff_view::Rendered;
 use crate::ui::icons::icon;
 use crate::ui::settings::Settings;
 use crate::ui::terminal_view::TerminalGroup;
@@ -47,7 +48,11 @@ pub struct ReviewState {
     pub status: Status,
     pub files: Vec<DiffFile>,
     pub selected: Option<PathBuf>,
-    pub diff: Option<FileDiff>,
+    /// Le diff affiché, avec tout ce qui s'en déduit. Un `Rc` parce que le
+    /// rendu doit le capturer dans la fermeture de la liste virtualisée, et
+    /// qu'en copier plusieurs milliers de lignes par frame reviendrait à
+    /// annuler le bénéfice de la virtualisation.
+    pub diff: Option<std::rc::Rc<Rendered>>,
     /// Base de comparaison de la revue de branche, devinée à l'ouverture.
     pub base: Option<String>,
 }
@@ -89,6 +94,11 @@ pub struct PerchApp {
     /// marche encore, il faut seulement actualiser à la main.
     watcher: Option<Watcher>,
 
+    /// Défilement de la liste virtualisée du diff. Il vit sur la vue et n'est
+    /// jamais reconstruit : le recréer par frame remettrait le diff en haut à
+    /// chaque image.
+    pub(super) diff_scroll: gpui::UniformListScrollHandle,
+
     sidebar_resize: Entity<ResizableState>,
     center_resize: Entity<ResizableState>,
     bottom_resize: Entity<ResizableState>,
@@ -117,6 +127,7 @@ impl PerchApp {
             show_terminal: true,
             show_branches: false,
             watcher: None,
+            diff_scroll: gpui::UniformListScrollHandle::new(),
             sidebar_resize: cx.new(|_| ResizableState::default()),
             center_resize: cx.new(|_| ResizableState::default()),
             bottom_resize: cx.new(|_| ResizableState::default()),
@@ -305,9 +316,12 @@ impl PerchApp {
                 path,
                 diff,
             } => {
+                // Le thème est lu avant l'emprunt mutable de l'état : la
+                // coloration en dépend, et `cx.theme()` emprunte `cx`.
+                let theme = cx.theme().highlight_theme.clone();
                 if let Some(state) = self.review.get_mut(&worktree) {
                     if state.selected.as_deref() == Some(path.as_path()) {
-                        state.diff = Some(diff);
+                        state.diff = Some(std::rc::Rc::new(Rendered::new(&path, diff, &theme)));
                     }
                 }
             }

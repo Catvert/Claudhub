@@ -15,7 +15,7 @@ use gpui_component::{
     v_flex, ActiveTheme, Disableable, Selectable, Sizable, WindowExt,
 };
 
-use crate::git::{DiffLineKind, DiffRange, StatusCode};
+use crate::git::{DiffRange, StatusCode};
 use crate::runtime::Cmd;
 use crate::tr;
 use crate::ui::app::PerchApp;
@@ -350,202 +350,6 @@ impl PerchApp {
         });
         cx.notify();
     }
-
-    pub(super) fn render_diff(
-        &mut self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let colors = DiffColors::of(cx);
-        let Some(state) = self.active_review() else {
-            return div().into_any_element();
-        };
-        let Some(path) = state.selected.clone() else {
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr!("review-pick-a-file")),
-                )
-                .into_any_element();
-        };
-
-        let header = h_flex()
-            .h(px(30.))
-            .w_full()
-            .px_2()
-            .gap_2()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(icon("file-diff").xsmall())
-            .child(
-                div()
-                    .flex_1()
-                    .truncate()
-                    .text_sm()
-                    .font_family("JetBrains Mono")
-                    .child(path.display().to_string()),
-            );
-
-        let Some(diff) = state.diff.as_ref() else {
-            return v_flex()
-                .size_full()
-                .child(header)
-                .child(
-                    div()
-                        .p_3()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr!("review-loading")),
-                )
-                .into_any_element();
-        };
-
-        if diff.binary {
-            return v_flex()
-                .size_full()
-                .child(header)
-                .child(
-                    div()
-                        .p_3()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr!("review-binary")),
-                )
-                .into_any_element();
-        }
-
-        // Largeur de la gouttière : deux numéros de ligne en chasse fixe. Elle
-        // est calculée sur le plus grand numéro du fichier, sinon un fichier de
-        // mille lignes décale sa gouttière à mi-parcours.
-        let stageable_hunks = state.range == DiffRange::Unstaged;
-        // Les patchs sont construits ici, hors des fermetures de rendu : elles
-        // ne peuvent pas emprunter `state` et le diff en même temps.
-        let patches: Vec<String> = diff
-            .hunks
-            .iter()
-            .map(|hunk| crate::git::diff::hunk_patch(&path, None, hunk, false))
-            .collect();
-
-        let width = diff
-            .hunks
-            .iter()
-            .flat_map(|h| h.lines.iter())
-            .filter_map(|l| l.new_no.or(l.old_no))
-            .max()
-            .unwrap_or(1)
-            .to_string()
-            .len();
-        let gutter = px(width as f32 * 8.0 + 8.0);
-
-        v_flex()
-            .size_full()
-            .child(header)
-            .child(
-                div()
-                    .id("diff-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_scroll()
-                    .font_family("JetBrains Mono")
-                    .text_size(px(12.))
-                    .children(diff.hunks.iter().enumerate().map(|(hix, hunk)| {
-                        v_flex()
-                            .w_full()
-                            .child(
-                                h_flex()
-                                    .w_full()
-                                    .px_2()
-                                    .py_0p5()
-                                    .items_center()
-                                    .gap_2()
-                                    .bg(colors.hunk_bg)
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .truncate()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(hunk.header.clone()),
-                                    )
-                                    // Indexer un hunk seul n'a de sens que
-                                    // depuis les modifications non indexées :
-                                    // ailleurs, ou bien tout est déjà dans
-                                    // l'index, ou bien on regarde des commits.
-                                    .when(stageable_hunks, |el| {
-                                        let patch = patches[hix].clone();
-                                        el.child(
-                                            Button::new(("stage-hunk", hix))
-                                                .ghost()
-                                                .xsmall()
-                                                .icon(icon("plus"))
-                                                .tooltip(tr!("action-stage-hunk"))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.apply_hunk(patch.clone(), cx);
-                                                })),
-                                        )
-                                    }),
-                            )
-                            .children(hunk.lines.iter().enumerate().map(|(lix, line)| {
-                                let (bg, fg, sign) = match line.kind {
-                                    DiffLineKind::Added => {
-                                        (Some(colors.added_bg), Some(colors.added_fg), "+")
-                                    }
-                                    DiffLineKind::Removed => {
-                                        (Some(colors.removed_bg), Some(colors.removed_fg), "−")
-                                    }
-                                    DiffLineKind::Context => (None, None, " "),
-                                    DiffLineKind::NoNewline => (None, None, " "),
-                                };
-                                h_flex()
-                                    .id(("line", hix * 10_000 + lix))
-                                    .w_full()
-                                    .when_some(bg, |el, bg| el.bg(bg))
-                                    .child(
-                                        div()
-                                            .w(gutter)
-                                            .flex_none()
-                                            .text_right()
-                                            .pr_1()
-                                            .text_color(colors.line_number)
-                                            .child(
-                                                line.old_no
-                                                    .map(|n| n.to_string())
-                                                    .unwrap_or_default(),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(gutter)
-                                            .flex_none()
-                                            .text_right()
-                                            .pr_1()
-                                            .text_color(colors.line_number)
-                                            .child(
-                                                line.new_no
-                                                    .map(|n| n.to_string())
-                                                    .unwrap_or_default(),
-                                            ),
-                                    )
-                                    .child(div().w(px(12.)).flex_none().child(sign))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .when_some(fg, |el, fg| el.text_color(fg))
-                                            // Les espaces significatifs d'un
-                                            // diff ne doivent pas être avalés
-                                            // par le rendu.
-                                            .child(line.text.replace('\t', "    ")),
-                                    )
-                            }))
-                    })),
-            )
-            .into_any_element()
-    }
 }
 
 impl PerchApp {
@@ -587,7 +391,7 @@ impl PerchApp {
         });
     }
 
-    fn apply_hunk(&mut self, patch: String, cx: &mut Context<Self>) {
+    pub(super) fn apply_hunk(&mut self, patch: String, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
         };
