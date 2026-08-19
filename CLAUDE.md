@@ -104,6 +104,20 @@ d'indexation, largeur de gouttière — est calculé une fois dans
 fermeture de rendu est appelée pour chaque ligne visible à chaque frame,
 animation de molette comprise : elle ne doit rien y calculer.
 
+### La base de la revue de branche
+
+Elle vient de git — `origin/HEAD`, puis `init.defaultBranch`, puis les noms
+usuels *qui existent vraiment* (`branch::default_base`) — et jamais d'un nom
+supposé. Un `main` codé en dur produit un `unknown revision` au premier clic
+sur tout dépôt qui s'appelle autrement, ce qui est le cas de la moitié d'entre
+eux. Tant que la base est inconnue, ou que c'est la branche déployée dans ce
+worktree (qui n'aurait rien à se comparer), l'onglet reste affiché mais
+inactif : le faire disparaître décalerait les trois autres à chaque changement
+de worktree.
+
+Le statut arrive avant les branches : `Evt::Branches` repropage donc la base
+aux revues déjà ouvertes, faute de quoi la première ouverte n'en aurait jamais.
+
 ### La coloration syntaxique
 
 C'est le *code* qu'on relit, pas les marqueurs `+`/`-` : les lignes sont
@@ -136,6 +150,13 @@ fixe suffit à aligner les colonnes, et gpui garde la charge du façonnage.
 
 Le verrou de la grille est partagé avec la boucle d'E/S : **ne jamais dessiner
 sous ce verrou**, d'où l'instantané.
+
+Le curseur est un rectangle translucide posé par-dessus la grille, et non une
+cellule inversée : l'inversion demanderait de redessiner le glyphe à l'envers,
+alors qu'un fond translucide laisse lire ce qui est dessous. Il ne clignote
+pas — un clignotement réveillerait l'interface deux fois par seconde et par
+onglet, en permanence, pour une information que la position et le contraste
+donnent déjà.
 
 La sélection est un attribut de style de `Segment`, comme le gras ou la
 couleur. Ce n'est pas un détail d'implémentation : la fusion des runs la prend

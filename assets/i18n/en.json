@@ -34,6 +34,7 @@
   "panel-branches": "Branches",
   "panel-terminal": "Terminals",
   "range-branch": "Branch vs %{base}",
+  "range-branch-none": "Branch (no base)",
   "range-head": "All vs HEAD",
   "range-staged": "Index",
   "range-unstaged": "Changes",

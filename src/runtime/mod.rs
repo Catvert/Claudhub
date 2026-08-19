@@ -113,7 +113,14 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
             }
         }
         Cmd::LoadBranches { main } => match branch::list(&main) {
-            Ok(branches) => vec![Evt::Branches { main, branches }],
+            Ok(branches) => {
+                let default_base = branch::default_base(&main);
+                vec![Evt::Branches {
+                    main,
+                    branches,
+                    default_base,
+                }]
+            }
             Err(e) => vec![fail(None, Action::Branch, e)],
         },
 
@@ -180,11 +187,12 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
         Cmd::DeleteBranch { main, name, force } => match repo::delete_branch(&main, &name, force) {
             Ok(()) => {
                 let mut evts = vec![done(None, Action::Branch, String::new())];
-                evts.extend(
-                    branch::list(&main)
-                        .ok()
-                        .map(|branches| Evt::Branches { main, branches }),
-                );
+                let default_base = branch::default_base(&main);
+                evts.extend(branch::list(&main).ok().map(|branches| Evt::Branches {
+                    main,
+                    branches,
+                    default_base,
+                }));
                 evts
             }
             Err(e) => vec![fail(None, Action::Branch, e)],

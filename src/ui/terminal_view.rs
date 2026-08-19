@@ -287,6 +287,41 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Dessine le curseur.
+    ///
+    /// Un rectangle semi-transparent posé par-dessus la grille plutôt qu'une
+    /// cellule inversée : l'inversion demanderait de redessiner le glyphe
+    /// dans l'autre sens, alors qu'un fond translucide laisse lire le
+    /// caractère qui est dessous, ce qui est tout ce qu'on demande à un
+    /// curseur de bloc.
+    ///
+    /// Il ne clignote pas. Un clignotement réveille l'interface deux fois par
+    /// seconde et par onglet, en permanence, pour une information que la
+    /// position et le contraste donnent déjà ; hors du focus, le contour seul
+    /// dit assez que la frappe irait ailleurs.
+    fn render_cursor(&self, focused: bool, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let cursor = self.snapshot.cursor?;
+        // Hors de la zone visible : on a remonté l'historique, et le curseur
+        // est resté en bas avec le programme.
+        let line = cursor.line?;
+        if !cursor.visible || self.terminal.has_exited() {
+            return None;
+        }
+
+        let color = cx.theme().caret;
+        let element = div()
+            .absolute()
+            .left(self.cell.width * cursor.column as f32)
+            .top(self.cell.height * line as f32)
+            .w(self.cell.width)
+            .h(self.cell.height)
+            .when(focused, |el| el.bg(color.opacity(0.55)))
+            .when(!focused, |el| {
+                el.border_1().border_color(color.opacity(0.7))
+            });
+        Some(element)
+    }
+
     fn on_scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         let line_height = window.line_height().max(px(1.));
         let delta = event.delta.pixel_delta(line_height).y / line_height;
@@ -306,7 +341,8 @@ impl Focusable for TerminalView {
 }
 
 impl Render for TerminalView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focused = self.focus.is_focused(window);
         let default_fg = cx.theme().foreground;
         let font_size = self.font_size;
         let entity = cx.entity();
@@ -363,6 +399,7 @@ impl Render for TerminalView {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .child(measure)
             .child(v_flex().size_full().overflow_hidden().children(lines))
+            .children(self.render_cursor(focused, cx))
     }
 }
 

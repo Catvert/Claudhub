@@ -137,6 +137,11 @@ pub enum Evt {
     Branches {
         main: PathBuf,
         branches: Vec<Branch>,
+        /// Branche d'intégration du dépôt, telle que git la déclare
+        /// (`origin/HEAD`, puis `init.defaultBranch`, puis les noms usuels qui
+        /// existent vraiment). `None` sur un dépôt qui n'en a aucune : la
+        /// revue de branche n'a alors rien à quoi se comparer.
+        default_base: Option<String>,
     },
     /// Une opération d'écriture a abouti. `output` est la sortie de git, que
     /// la vue affiche telle quelle : c'est elle qui dit ce qui a été poussé,

@@ -35,6 +35,12 @@ pub struct RepoState {
     pub name: String,
     pub worktrees: Vec<Worktree>,
     pub branches: Vec<Branch>,
+    /// Branche d'intégration, telle que git la déclare. Elle n'est connue
+    /// qu'après la réponse du worker : jusque-là, la revue de branche n'a pas
+    /// de base et son onglet reste inactif — proposer un `main` supposé
+    /// produirait un « unknown revision » sur tout dépôt qui ne s'appelle pas
+    /// ainsi.
+    pub default_base: Option<String>,
     pub collapsed: bool,
 }
 
@@ -244,6 +250,7 @@ impl PerchApp {
                     name,
                     worktrees,
                     branches: Vec::new(),
+                    default_base: None,
                     collapsed: false,
                 });
                 self.settings.remember_repository(&main);
@@ -325,9 +332,29 @@ impl PerchApp {
                     }
                 }
             }
-            Evt::Branches { main, branches } => {
+            Evt::Branches {
+                main,
+                branches,
+                default_base,
+            } => {
                 if let Some(repo) = self.repos.iter_mut().find(|r| r.main == main) {
                     repo.branches = branches;
+                    repo.default_base = default_base;
+                }
+                // Les revues déjà ouvertes attendaient peut-être cette base :
+                // le statut arrive avant les branches, et rien ne les
+                // rafraîchira une seconde fois.
+                let bases: Vec<(PathBuf, Option<String>)> = self
+                    .review
+                    .keys()
+                    .map(|worktree| (worktree.clone(), self.default_base_for(worktree)))
+                    .collect();
+                for (worktree, base) in bases {
+                    if let Some(state) = self.review.get_mut(&worktree) {
+                        if state.base.is_none() {
+                            state.base = base;
+                        }
+                    }
                 }
             }
             Evt::Done {
@@ -483,21 +510,18 @@ impl PerchApp {
             .map(|w| w.path.clone())
     }
 
-    /// Base de comparaison par défaut d'un worktree : la branche
-    /// d'intégration du dépôt, sauf si c'est celle qui y est déployée.
+    /// Base de comparaison d'un worktree : la branche d'intégration du dépôt,
+    /// sauf quand c'est justement celle qui y est déployée — comparer une
+    /// branche à elle-même ne montre rien.
     fn default_base_for(&self, worktree: &Path) -> Option<String> {
         let repo = self.repo_of(worktree)?;
+        let base = repo.default_base.as_deref()?;
         let current = repo
             .worktrees
             .iter()
             .find(|w| w.path == worktree)
-            .and_then(|w| w.branch.clone());
-        let candidates = ["main", "master", "develop"];
-        repo.branches
-            .iter()
-            .map(|b| b.name.as_str())
-            .find(|name| candidates.contains(name) && Some(*name) != current.as_deref())
-            .map(str::to_string)
+            .and_then(|w| w.branch.as_deref());
+        (Some(base) != current).then(|| base.to_string())
     }
 
     // — Rendu ——————————————————————————————————————————————————

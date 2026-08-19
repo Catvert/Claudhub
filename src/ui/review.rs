@@ -263,18 +263,26 @@ impl PerchApp {
     }
 
     fn render_range_tabs(&self, range: &DiffRange, cx: &mut Context<Self>) -> impl IntoElement {
-        let base = self
-            .active_review()
-            .and_then(|r| r.base.clone())
-            .unwrap_or_else(|| "main".into());
-        let tabs: [(DiffRange, SharedString); 4] = [
-            (DiffRange::Unstaged, tr!("range-unstaged")),
-            (DiffRange::Staged, tr!("range-staged")),
-            (DiffRange::Head, tr!("range-head")),
-            (
-                DiffRange::Branch { base: base.clone() },
-                tr!("range-branch", { base: base }),
-            ),
+        // La base vient de git, jamais d'un nom supposé : proposer « main » à
+        // un dépôt qui s'appelle autrement produit un `unknown revision` au
+        // premier clic. Tant qu'elle est inconnue — ou que c'est la branche
+        // déployée ici, qui n'aurait rien à se comparer — l'onglet reste
+        // présent mais inactif, plutôt que de disparaître et de faire sauter
+        // les trois autres.
+        let base = self.active_review().and_then(|r| r.base.clone());
+        let branch_range = base
+            .clone()
+            .map(|base| DiffRange::Branch { base })
+            .unwrap_or(DiffRange::Head);
+        let branch_label = match &base {
+            Some(base) => tr!("range-branch", { base: base }),
+            None => tr!("range-branch-none"),
+        };
+        let tabs: [(DiffRange, SharedString, bool); 4] = [
+            (DiffRange::Unstaged, tr!("range-unstaged"), true),
+            (DiffRange::Staged, tr!("range-staged"), true),
+            (DiffRange::Head, tr!("range-head"), true),
+            (branch_range, branch_label, base.is_some()),
         ];
         h_flex()
             .h(px(30.))
@@ -284,17 +292,22 @@ impl PerchApp {
             .items_center()
             .border_b_1()
             .border_color(cx.theme().border)
-            .children(tabs.into_iter().enumerate().map(|(ix, (target, label))| {
-                let selected = *range == target;
-                Button::new(("range", ix))
-                    .ghost()
-                    .xsmall()
-                    .label(label)
-                    .selected(selected)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_range(target.clone(), cx);
-                    }))
-            }))
+            .children(
+                tabs.into_iter()
+                    .enumerate()
+                    .map(|(ix, (target, label, enabled))| {
+                        let selected = enabled && *range == target;
+                        Button::new(("range", ix))
+                            .ghost()
+                            .xsmall()
+                            .label(label)
+                            .selected(selected)
+                            .disabled(!enabled)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_range(target.clone(), cx);
+                            }))
+                    }),
+            )
     }
 
     fn render_commit_box(
