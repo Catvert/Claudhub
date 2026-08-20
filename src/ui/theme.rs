@@ -148,11 +148,26 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
     // bibliothèque ne saurait pas faire d'elle-même, son `TabPanel::render`
     // étant un `size_full()` sans rayon ni marge.
     let base = theme.background;
-    theme.tab_bar = Hsla {
+    let gutter = Hsla {
         l: (base.l - 0.05).max(0.),
         ..base
     };
+    theme.tab_bar = gutter;
     theme.tab_active = base;
+    // L'onglet actif est un bloc de la couleur de la carte : son libellé doit
+    // donc porter la couleur du texte ordinaire, et les autres rester en
+    // retrait — sans quoi les cinq onglets se lisent tous pareil et l'actif ne
+    // se distingue que par un fond.
+    theme.tab_active_foreground = theme.foreground;
+    theme.tab_foreground = theme.muted_foreground;
+    theme.tab = gutter;
+
+    // **Les jetons se recalculent après.** `Theme::tokens` est dérivé des
+    // couleurs, mais une seule fois, à l'application de la palette : les
+    // composants récents — la barre d'onglets du dock en fait partie — lisent
+    // `tokens` et non `colors`, et une couleur changée ici sans ce rappel ne
+    // se voit nulle part. C'est la panne muette de cette version.
+    theme.tokens = gpui_component::ThemeTokens::from(&theme.colors);
 
     cx.refresh_windows();
 }
