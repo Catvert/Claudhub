@@ -346,8 +346,7 @@ impl ClaudhubApp {
         if let Some(state) = self.active_review_mut() {
             state.diff_selection = Some((from, to));
         }
-        self.diff_scroll
-            .scroll_to_item(from, gpui::ScrollStrategy::Center);
+        self.reveal_diff_row(from, gpui::ScrollStrategy::Center, cx);
         cx.notify();
     }
 

@@ -387,6 +387,16 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
         Cmd::FileOp { worktree, op } => write_then_refresh(worktree, Action::FileOp, |dir| {
             crate::files::apply(dir, &op).map(|_| op.target().display().to_string())
         }),
+        Cmd::ReadNotes { worktree, dir } => match crate::files::read_notes(&dir) {
+            Ok(files) => vec![Evt::NotesRead { worktree, files }],
+            Err(e) => vec![fail(Some(worktree), Action::Notes, e)],
+        },
+        // Sans réponse quand tout va bien : la vue tient déjà ce qu'elle vient
+        // d'écrire, et un événement de plus ne ferait que la redessiner.
+        Cmd::WriteNotes { dir, files } => match crate::files::sync_notes(&dir, &files) {
+            Ok(()) => Vec::new(),
+            Err(e) => vec![fail(None, Action::Notes, e)],
+        },
         Cmd::OpenExternal {
             worktree,
             path,

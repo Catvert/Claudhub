@@ -226,9 +226,107 @@ pub fn open_external(worktree: &Path, template: &str, path: &Path, line: usize) 
     Ok(program)
 }
 
+// — Le dossier de notes ————————————————————————————————————————————
+
+/// La marque d'un fichier écrit par Claudhub, en tête de son frontmatter.
+///
+/// Elle décide de ce que `sync_notes` a le droit d'effacer : un dossier de
+/// coffre contient les notes de son propriétaire, et une note de relecture
+/// supprimée ne doit pas emporter le journal de la semaine.
+const MARK: &str = "\nclaudhub:";
+
+/// Les fichiers Markdown d'un dossier de notes, nom et contenu.
+///
+/// Un dossier absent n'est pas une erreur : c'est l'état d'un worktree qu'on
+/// n'a pas encore annoté.
+pub fn read_notes(dir: &Path) -> Result<Vec<(String, String)>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("lecture de {}", dir.display())),
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        out.push((name, text));
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Aligne le dossier sur cette liste, et sur elle seule.
+///
+/// Trois règles, et chacune se paie si on l'oublie :
+///
+/// - **On ne réécrit pas ce qui n'a pas changé.** Un coffre est souvent
+///   synchronisé, et toucher la date d'un fichier à chaque clic ferait
+///   travailler la synchronisation pour rien.
+/// - **On n'efface que ce qui porte notre marque.** Le dossier peut contenir
+///   des notes que nous n'avons pas écrites.
+/// - **Ce qui n'est plus dans la liste disparaît**, y compris sous un autre
+///   nom : c'est ainsi qu'une note supprimée s'en va, et qu'un fichier renommé
+///   dans le coffre ne laisse pas un doublon derrière lui.
+pub fn sync_notes(dir: &Path, files: &[(String, String)]) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("création de {}", dir.display()))?;
+    for (name, content) in files {
+        let path = dir.join(name);
+        if std::fs::read_to_string(&path).is_ok_and(|old| old == *content) {
+            continue;
+        }
+        std::fs::write(&path, content)
+            .with_context(|| format!("écriture de {}", path.display()))?;
+    }
+    for (name, text) in read_notes(dir)? {
+        if files.iter().any(|(kept, _)| *kept == name) {
+            continue;
+        }
+        if text.starts_with("---") && text.contains(MARK) {
+            let _ = std::fs::remove_file(dir.join(name));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// La chaîne complète du dossier de notes : ce qu'on écrit se relit, ce
+    /// qui n'est plus dans la liste s'en va, et ce que nous n'avons pas écrit
+    /// reste. Le seul test de ce module qui touche au disque, comme celui de
+    /// la surveillance : c'est la seule façon de prouver l'effacement.
+    #[test]
+    fn the_notes_folder_keeps_what_is_not_ours() {
+        let dir = std::env::temp_dir().join(format!("claudhub-notes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let ours = (
+            "0001 a.rs.md".to_string(),
+            "---\nclaudhub: note\n---\n\nx\n".to_string(),
+        );
+        sync_notes(&dir, std::slice::from_ref(&ours)).expect("écriture");
+        std::fs::write(dir.join("Journal.md"), "---\ntags: [moi]\n---\n\nÀ moi.\n").unwrap();
+
+        let read = read_notes(&dir).expect("lecture");
+        assert_eq!(read.len(), 2);
+
+        // La note s'en va, le journal reste.
+        sync_notes(&dir, &[]).expect("effacement");
+        let read = read_notes(&dir).expect("lecture");
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].0, "Journal.md");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn an_editor_command_places_the_file_and_the_line() {

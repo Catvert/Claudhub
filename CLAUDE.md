@@ -61,6 +61,8 @@ src/
     store.rs        ce qu'on retient par worktree : base, replis, notes
     notes.rs        le modèle des notes, leur ancrage et leur prompt
     notes_view.rs   les gestes de la relecture annotée et son panneau
+    vault.rs        les notes et le suivi de relecture en Markdown,
+                    rendus et relus — aucune entrée-sortie ici
     find.rs         la recherche d'un panneau, et son routage
     motion.rs       le lissage de la molette, sans rien de gpui dedans
     scroll.rs       la barre de défilement d'un panneau, et son lissage
@@ -158,7 +160,9 @@ L'affichage repose donc sur `uniform_list` (gpui), et non sur le
 `v_virtual_list` de gpui-component : toutes les entrées ont exactement la même
 hauteur, `uniform_list` trouve l'intervalle visible par une division au lieu de
 parcourir un vecteur de tailles, et surtout c'est le seul des deux qui sache
-défiler horizontalement.
+défiler horizontalement. La seule exception est la vue à deux colonnes
+repliée, où les entrées n'ont plus la même hauteur et où il n'y a plus rien à
+défiler en largeur — voir « Le repli des lignes longues ».
 
 Quatre contraintes tiennent ensemble, et en relâcher une casse une autre :
 
@@ -192,10 +196,67 @@ bien décider laquelle vient d'abord. Conséquence à ne pas oublier : les indic
 de `diff_selection` désignent la liste **affichée**, donc basculer de mode
 abandonne la sélection.
 
-Chaque colonne est taillée pour la plus longue ligne du fichier, et non pour la
-moitié de la vue : les tailler à la vue couperait le code ou le renverrait à la
-ligne, alors qu'un défilement horizontal emmène les deux colonnes ensemble et
-garde les versions en regard.
+Sans repli, chaque colonne est taillée pour la plus longue ligne **du
+fichier** : le défilement horizontal emmène alors les deux colonnes ensemble et
+garde les versions en regard. C'est aussi ce qui rendait la vue pénible, une
+seule ligne longue donnant sa largeur à tout le fichier — d'où le repli, qui
+est le défaut.
+
+### Le repli des lignes longues
+
+`Settings::diff_wrap`, vrai par défaut, et **en deux colonnes seulement** :
+c'est là que ça se joue, une colonne ne faisant que la moitié de la vue. En une
+seule colonne la ligne dispose de toute la largeur, et le repli n'aurait pas de
+quoi se justifier.
+
+**Le repli se fait à la colonne, comme dans un terminal, et non aux espaces.**
+C'est ce qui rend la hauteur d'une entrée calculable **avant** de la peindre :
+la police du diff est à chasse fixe, un caractère vaut une colonne, et
+`wrapped_lines` est une division. Le shaper de gpui, lui, coupe aux mots — une
+hauteur devinée qui ne tombe pas juste laisserait les entrées se recouvrir,
+puisqu'une liste virtualisée réserve exactement ce qu'on lui annonce.
+
+Cinq points qui ne se devinent pas :
+
+- **`v_virtual_list` remplace `uniform_list` ici, et là seulement.** Les
+  entrées n'ont plus la même hauteur — une ligne longue en occupe trois, celle
+  d'en face une seule —, et c'est le seul cas où parcourir un vecteur de
+  tailles vaut son prix. Le vecteur est reconstruit à chaque frame : il ne
+  coûte qu'une division par entrée, `Rendered::row_chars` ayant déjà compté les
+  caractères de chaque ligne une fois pour toutes. C'est ce champ qui évite de
+  reparcourir le texte du fichier à chaque changement de largeur — un
+  glissement de séparateur en produit un par image.
+- **Une seconde poignée de défilement** (`diff_wrap_scroll`) : `v_virtual_list`
+  ne sait défiler qu'avec la sienne. Les deux listes n'étant jamais affichées
+  ensemble, tout ce qui vise « la » liste passe par `diff_base_handle` et
+  `reveal_diff_row`, qui choisissent — viser la mauvaise ferait défiler une
+  liste qui n'est pas là.
+- **Une paire fait la hauteur de sa plus haute moitié.** Les deux versions
+  restent en regard, ce qui est tout l'intérêt de cette vue ; la moitié la plus
+  courte complète avec des lignes vides.
+- **Le texte est découpé, ses styles avec.** `char_span` et `slice_runs`
+  ramènent la coloration et les surlignages de recherche au début de chaque
+  tranche. Le découpage se compte en **caractères** — en octets, une ligne
+  accentuée se couperait une colonne trop tôt et au milieu d'un caractère, ce
+  qui panique — et les plages rendues restent **triées et disjointes**,
+  l'invariant que gpui ne vérifie pas.
+- **La marge de note appartient à l'entrée, pas aux colonnes.** L'oublier fait
+  déborder la ligne de trois pixels, et le repli ayant supprimé la barre
+  horizontale, rien ne le révélerait.
+- **La largeur mesurée n'existe pas à la première frame**, et rien ne
+  redessine tout seul. Les bornes d'une vue ne valent quelque chose qu'une
+  fois la mise en page faite : au tout premier diff, le repli calculerait ses
+  colonnes sur zéro, et l'affichage resterait faux jusqu'au prochain
+  événement — le balayage de fond, deux secondes plus tard. D'où
+  `window.request_animation_frame` tant que la mesure manque, borné à quelques
+  frames pour qu'un panneau rétréci à zéro ne fasse pas tourner l'interface à
+  plein régime, et `ClaudhubApp::diff_width` qui retient la dernière largeur
+  connue — c'est elle qui fait que les diffs suivants s'ouvrent d'emblée à la
+  bonne largeur.
+
+Ce que le repli ne corrige pas : `page_rows` (Ctrl+D/U) compte des entrées et
+non des lignes visibles, donc une page déborde un peu quand les lignes se
+replient.
 
 **« Tout le fichier » est un contexte, pas un mode.** `git diff` n'a pas
 d'option pour cela : `Settings::context_lines` demande un contexte plus grand
@@ -480,10 +541,22 @@ fichier de réglages reste modifiable à la main pour ces cas-là.
 
 Les réglages disent comment Claudhub s'affiche ; le magasin
 (`store::StateStore`, `<config>/state.json`) dit où l'on en est — la base à
-laquelle on compare *ce* worktree, les dossiers qu'on y a repliés, les notes de
-relecture qu'on y a prises. Deux fichiers et non un seul : le premier se
-modifie à la main, le second compterait quelques centaines de lignes par dépôt
-et n'y survivrait pas.
+laquelle on compare *ce* worktree, les dossiers qu'on y a repliés, le prochain
+numéro de note. Deux fichiers et non un seul : le premier se modifie à la
+main, le second compterait quelques centaines de lignes par dépôt et n'y
+survivrait pas.
+
+Ce qui **n'y est plus** : les notes de relecture, parties dans un dossier de
+fichiers Markdown (voir « Les notes sur le disque »). Le magasin garde
+`next_note`, qui ne se déduit pas d'elles — une note supprimée libérerait son
+numéro, et une note déjà envoyée à l'agent y serait désignée par un numéro qui
+vaudrait pour une autre.
+
+Pas de SQLite, et la question revient : le magasin fait moins d'un kilo-octet,
+une base achèterait l'écriture partielle, la requête et la concurrence entre
+processus, et rien ici n'en demande. Elle coûterait une dépendance C, un schéma
+et ses migrations, et surtout elle ne s'ouvre pas dans l'éditeur de notes de
+l'utilisateur — ce qui est justement là où les notes devaient aller.
 
 Il est écrit **depuis le thread d'interface**, ce qui déroge à « `src/ui/` ne
 fait jamais d'entrée-sortie ». C'est le précédent de `settings.rs` et la même
@@ -763,6 +836,87 @@ dépôt entre les mains. Deux détails qui se paient cher si on les rate :
 Les notes envoyées passent à `sent`, pas à `done` : c'est la relecture de la
 réponse qui les clôt.
 
+### Les notes sur le disque
+
+Une note est du texte qu'on écrit à propos d'un bout de code. La ranger dans un
+JSON d'état revenait à l'enfermer là où rien d'autre ne sait la lire : elle vit
+donc dans un **dossier de fichiers Markdown**, un fichier par note, sous la
+racine que dit `Settings::notes_dir` — vide, `<config>/notes`. Pointée sur un
+coffre Obsidian, la relecture d'une branche s'y lit, s'y cherche et s'y relie
+comme n'importe quelle note.
+
+**Le dossier est la source de vérité.** Ce qu'on corrige dans Obsidian revient
+dans Claudhub au chargement suivant du worktree. C'est ce qui décide de tout le
+reste : le format doit être **relu** et pas seulement écrit, d'où le
+frontmatter plat de `ui::vault` — un sous-ensemble de YAML assumé, nos clés
+n'étant que des scalaires — et l'extrait cité dans un bloc de code dont la
+clôture est calculée (un diff de Markdown contient des accents graves, et trois
+suffiraient à refermer le bloc au milieu de l'extrait).
+
+Six points, et chacun se paie :
+
+- **`ui::vault` ne touche pas au disque** : il rend du texte et le relit, donc
+  il se teste. Les fichiers passent par un worker (`Cmd::ReadNotes`,
+  `Cmd::WriteNotes`, `files::read_notes` / `files::sync_notes`) — c'est la
+  règle de `src/ui/`, et ici elle a une raison de plus que d'habitude : un
+  coffre vit souvent sur un disque synchronisé, parfois sur un montage drvfs de
+  WSL, et un `read_dir` dans le thread d'interface s'y paierait en fenêtre
+  figée. Le magasin d'état, lui, garde sa dérogation : c'est notre fichier, et
+  il fait un kilo-octet.
+- **On n'efface que ce qui porte notre marque** (`claudhub:` en tête du
+  frontmatter). Le dossier d'un coffre contient les notes de son propriétaire,
+  et supprimer une remarque de relecture ne doit pas emporter son journal.
+  `sync_notes` aligne le dossier sur la liste **entière** : c'est ainsi qu'une
+  note supprimée s'en va, et qu'un fichier renommé dans le coffre ne laisse pas
+  un doublon derrière lui.
+- **On ne réécrit pas ce qui n'a pas changé.** Un coffre se synchronise, et
+  toucher la date d'un fichier à chaque clic ferait travailler la
+  synchronisation pour rien.
+- **Le nom d'un fichier ne porte que l'identifiant et le fichier relu**, jamais
+  les numéros de ligne : une note qui glisse de dix lignes garderait sinon un
+  nom différent à chaque écriture, et les liens du coffre pointeraient dans le
+  vide.
+- **Rien ne s'écrit avant d'avoir lu** (`ReviewState::notes_loaded`). Écrire la
+  liste vide qu'on a en mémoire au démarrage effacerait le dossier avant même
+  de l'avoir ouvert. Et rien ne s'écrit pour un worktree qu'on n'a pas annoté
+  (`notes_on_disk`), sans quoi ouvrir un dépôt sèmerait des dossiers vides dans
+  le coffre.
+- **La reprise de l'ancien magasin passe par le même chemin que
+  l'installation neuve**, comme `migrate_agents` : les notes d'un `state.json`
+  antérieur sont versées à l'arrivée du dossier, puis effacées du magasin. Une
+  seule fois, et les identifiants déjà pris sont respectés.
+
+### Marquer un fichier relu
+
+Une revue de branche fait couramment plusieurs centaines de fichiers, et rien
+ne disait où l'on en était. Une coche par ligne le dit, et **un clic sur un
+dossier vaut pour tout son sous-arbre**, replié compris — c'est le geste qui
+vaut le détour, on relit un dossier entier bien plus souvent qu'un fichier
+isolé.
+
+**Une coche et non une case.** La case à cocher de cette liste veut déjà dire
+« indexer » ; deux cases côte à côte pour deux gestes sans rapport se
+confondraient au premier coup d'œil. La coche vit à droite, après le volume ;
+une ligne relue prend un **fond vert** et son nom s'éteint — c'est ce qui fait
+que la liste dit d'un coup d'œil ce qu'il reste à lire, là où une colonne de
+coches se parcourt. La sélection passe devant le vert : perdre de vue l'endroit
+où l'on est est pire qu'oublier une ligne déjà lue.
+
+**Le volume retenu est ce qui périme la coche.** `vault::Reviewed` garde
+`+n −m` au moment du clic, et `review::rows_for` n'allume la coche que si le
+fichier les porte encore ; `Evt::DiffFiles` purge celles qui ne valent plus.
+Sans cela, un agent qui réécrit un fichier laisserait une liste qui dit « relu »
+d'un contenu que personne n'a lu — c'est le même garde que l'empreinte repassée
+à l'écriture d'un fichier. L'approximation est assumée, comme celle des agents
+« en cours » : une modification qui laisse le volume inchangé passe au travers.
+
+Le suivi vit dans le même dossier que les notes, en cases à cocher Markdown
+(`vault::INDEX`) : Obsidian les rend cliquables, et **décocher là rend le
+fichier à relire ici**. Seuls les fichiers cochés y figurent — l'autre liste
+n'a pas de bord. Le titre d'une section est la clé du domaine (`working`,
+`branch master`) et non son libellé traduit : changer la langue de l'interface
+ne doit pas rendre illisible ce qu'on a déjà écrit.
+
 ### Les profils d'agent
 
 Un seul `agent_command` ne suffisait plus dès qu'annoter une relecture veut
@@ -886,6 +1040,11 @@ Quatre pièges, tous rencontrés :
 - **L'état se relit au moment d'écrire**, pas à l'appel : l'ouverture d'une
   zone est différée d'une frame, et le capturer tout de suite enregistrerait
   l'état d'avant le geste.
+- **Le zoom d'un panneau est un bouton, pas une entrée de menu**
+  (`panels::zoom_in_toolbar`, `PanelControl::Toolbar`) : deux clics pour une
+  ligne unique n'en valent pas un. Le bouton `…` reste affiché malgré tout —
+  `TabPanel::render_toolbar` le pose sans condition, et le retirer demanderait
+  de vendorer gpui-component —, d'où l'entrée qu'il porte désormais.
 
 La disposition est enregistrée dans `<config>/layout.json`, à part des
 réglages : c'est l'état d'une fenêtre, volumineux et illisible, pas une
@@ -899,6 +1058,50 @@ L'historique se charge au **rendu** de son onglet et non à la construction :
 c'est ce qui évite un `git log` que personne ne regardera. D'où
 `history_pending`, sans lequel chaque frame relancerait la commande pendant
 tout le temps de la lecture.
+
+### Masquer une vue
+
+Le menu `…` d'un panneau ne contient qu'une chose : **masquer cette vue**.
+Tout le reste de ce qu'un panneau sait faire vit dans sa propre barre — l'arbre
+de la revue, les deux colonnes du diff, le repli de l'explorateur — et le
+dupliquer là ferait deux chemins pour un même geste. Masquer, lui, ne parle pas
+du contenu du panneau mais de sa place dans la fenêtre, et c'est le dock qui la
+tient.
+
+On revient par le **menu principal**, sous-menu « Vues » (`panels::VIEWS`) :
+une vue masquée n'a plus d'onglet, donc plus rien à cliquer, et ce sous-menu
+est du même coup le seul endroit qui dise ce que la fenêtre ne montre pas.
+
+Cinq points qui ne se devinent pas :
+
+- **`Panel::visible`, jamais une zone d'accueil repliée.** C'est déjà le
+  mécanisme des terminaux et des conflits, et pour la raison donnée plus haut :
+  le dernier panneau d'une zone ne se déplace plus. `TabPanel::visible` rend
+  faux quand aucun de ses onglets n'est visible, et `StackPanel` l'honore : une
+  zone entièrement masquée se referme d'elle-même.
+- **L'état vit dans `ClaudhubApp::hidden_panels`, sa copie dans les réglages.**
+  Les panneaux observent l'application ; `Settings::update_global` ne notifie
+  personne. `Settings::hidden_panels` est ce qui survit à la fermeture — et
+  non `layout.json`, que `LAYOUT_VERSION` jette au premier renommage de
+  panneau, alors que « je ne me sers pas de Sentry » n'a pas à disparaître avec
+  la géométrie d'une fenêtre.
+- **Chaque panneau met sa visibilité en cache**, comme les conflits :
+  `Panel::visible` est appelé pendant la construction de la disposition, donc
+  au milieu de `ClaudhubApp::new`, où lire l'entité racine est une panique. La
+  valeur initiale se lit donc dans les réglages (`visible_at_startup`), et
+  l'observation prend le relais. Un changement émet `PanelEvent::LayoutChanged`
+  — c'est l'aire, pas le panneau, qui fait disparaître un onglet.
+- **`VIEWS` est bâtie sur les constantes `Panel::NAME`**, pas sur des
+  littéraux : un nom recopié se serait désaccordé au premier renommage, et un
+  nom qui ne désigne plus rien ne masque plus rien, en silence. Les conflits
+  n'y sont pas — leur visibilité se décide toute seule, et les masquer
+  cacherait le seul endroit d'où l'on termine une fusion.
+- **Les lignes du sous-menu sont des `PopupMenuItem::element`.** On bascule
+  plusieurs vues à la suite, or `PopupMenu::confirm` referme le menu après
+  chaque entrée sans qu'on puisse s'y opposer : la ligne consomme donc son clic
+  (`stop_propagation`) et l'entrée qui la porte ne le voit jamais. Un `checked`
+  aurait de toute façon menti, étant figé à la construction du menu ; la coche
+  est peinte par la ligne, qui relit l'état à chaque frame.
 
 ### Le balayage de fond
 

@@ -84,6 +84,12 @@ fn install_default_layout(
     // les branches, mesuré sur la fenêtre plutôt que fixé en pixels : la
     // proportion tient d'un écran à l'autre, là où un nombre de pixels
     // occuperait la moitié d'une petite fenêtre.
+    //
+    // Les fichiers du projet sont l'onglet voisin des dépôts, et non celui des
+    // branches : ce sont deux façons de désigner ce qu'on veut ouvrir — un
+    // worktree, un fichier dedans —, et l'arbre d'un projet est ce qui a le
+    // plus besoin des deux tiers du haut. Les branches, elles, sont une liste
+    // courte qu'on filtre.
     // Les deux tailles sont données explicitement : un `None` laisse la pile
     // partager la hauteur en parts égales, et la proportion demandée passe à
     // la trappe.
@@ -93,11 +99,8 @@ fn install_default_layout(
         split(
             gpui::Axis::Vertical,
             vec![
-                DockItem::tabs(vec![panels.sidebar], weak_dock, window, cx),
-                // Les branches et les fichiers du projet en onglets : deux
-                // façons de désigner ce qu'on veut voir, et on n'en regarde
-                // qu'une à la fois.
-                DockItem::tabs(vec![panels.branches, panels.files], weak_dock, window, cx),
+                DockItem::tabs(vec![panels.sidebar, panels.files], weak_dock, window, cx),
+                DockItem::tabs(vec![panels.branches], weak_dock, window, cx),
             ],
             vec![Some(height - third), Some(third)],
             weak_dock,
@@ -272,6 +275,20 @@ pub struct ReviewState {
     /// Prochain identifiant. Il ne se déduit pas de `notes` : une note
     /// supprimée libérerait son numéro, et deux notes le porteraient.
     pub next_note: u64,
+    /// Les fichiers qu'on a marqués relus, avec le volume qu'ils avaient
+    /// alors. Comme les notes, ils vivent dans le dossier de notes et non dans
+    /// le magasin d'état : c'est la même relecture, et elle se lit d'un coup.
+    pub reviewed: Vec<crate::ui::vault::Reviewed>,
+    /// Le dossier de notes a répondu. Tant qu'il n'a pas répondu, il n'y a
+    /// rien à écrire : le faire effacerait ce qu'on n'a pas encore lu.
+    pub notes_loaded: bool,
+    /// Ce worktree a déjà un dossier de notes.
+    ///
+    /// Sans ce drapeau, ouvrir un worktree suffirait à créer son dossier et un
+    /// index vide : un coffre finirait avec une arborescence de dossiers vides
+    /// pour des worktrees que personne n'a annotés. Il reste vrai une fois la
+    /// dernière note supprimée, sans quoi l'effacement ne partirait jamais.
+    pub notes_on_disk: bool,
     /// Les lignes annotées du diff affiché, une case par entrée de liste.
     ///
     /// Calculé **en amont**, à l'arrivée du diff et à chaque modification des
@@ -334,6 +351,9 @@ impl Default for ReviewState {
             commit: None,
             notes: Vec::new(),
             next_note: 1,
+            reviewed: Vec::new(),
+            notes_loaded: false,
+            notes_on_disk: false,
             note_marks: std::rc::Rc::new(crate::ui::notes::Marks::default()),
             drifted: std::collections::HashSet::new(),
             pending_jump: None,
@@ -455,12 +475,17 @@ pub struct ClaudhubApp {
     pub(super) dock: Entity<DockArea>,
     /// Vrai quand une écriture différée de la disposition est déjà programmée.
     layout_save_scheduled: bool,
-    /// Le panneau des terminaux est-il affiché.
+    /// Les vues que l'utilisateur a masquées, par nom de panneau.
     ///
-    /// Un drapeau et non une zone d'accueil repliable : les terminaux vivent
-    /// dans le centre pour rester déplaçables, et c'est `Panel::visible` qui
-    /// les fait disparaître.
-    pub(super) show_terminal: bool,
+    /// Un ensemble et non un drapeau par panneau : c'est `Panel::visible` qui
+    /// fait disparaître une vue — une zone d'accueil repliable interdirait de
+    /// déplacer le dernier panneau qui y reste —, et le mécanisme est le même
+    /// pour les terminaux que pour la revue.
+    ///
+    /// Ici et non dans les réglages seuls : les panneaux l'observent, et
+    /// `Settings::update_global` ne notifie personne. Les réglages en gardent
+    /// la copie qui survit à la fermeture.
+    pub(super) hidden_panels: std::collections::HashSet<String>,
 
     /// Ce que chaque worktree a en chantier, y compris ceux qu'on n'a pas
     /// ouverts : c'est la question qu'on se pose en parcourant la liste.
@@ -486,6 +511,28 @@ pub struct ClaudhubApp {
     /// jamais reconstruit : le recréer par frame remettrait le diff en haut à
     /// chaque image.
     pub(super) diff_scroll: gpui::UniformListScrollHandle,
+    /// La largeur mesurée de la vue de diff à la frame précédente.
+    ///
+    /// Une vue qu'on vient d'ouvrir n'a pas de bornes : elles ne valent
+    /// quelque chose qu'une fois la première mise en page faite. Les prendre
+    /// pour la largeur réelle replie le fichier à huit colonnes — et comme
+    /// rien ne redessine tant qu'il ne se passe rien, l'affichage reste faux
+    /// jusqu'au prochain événement, soit le balayage de fond, deux secondes
+    /// plus tard. On garde donc la dernière largeur connue, qui vaut pour tous
+    /// les diffs suivants.
+    pub(super) diff_width: gpui::Pixels,
+    /// Frames demandées en attendant cette première mesure.
+    ///
+    /// Bornées : un panneau qu'on aurait rétréci à zéro ne serait jamais
+    /// mesuré, et redemander une frame à chaque frame ferait tourner
+    /// l'interface à plein régime pour une vue que personne ne voit.
+    pub(super) diff_measures: u8,
+    /// La poignée de la vue en deux colonnes repliée.
+    ///
+    /// Une seconde poignée et non la même : les entrées n'y ont plus la même
+    /// hauteur, c'est `v_virtual_list` qui les peint, et il ne sait défiler
+    /// qu'avec la sienne. Les deux ne sont jamais affichées en même temps.
+    pub(super) diff_wrap_scroll: gpui_component::VirtualListScrollHandle,
     pub(super) history_scroll: gpui::UniformListScrollHandle,
     pub(super) branch_scroll: gpui::UniformListScrollHandle,
     /// Défilement des listes de fichiers, **une par domaine** : « Revue » et
@@ -518,6 +565,43 @@ pub struct ClaudhubApp {
     /// Partage entre le graphe et la liste des fichiers du commit choisi.
     pub(super) history_split: Entity<gpui_component::resizable::ResizableState>,
     focus: FocusHandle,
+}
+
+/// Une ligne du menu des vues : la coche, le nom, et le geste qui bascule.
+///
+/// Un `PopupMenuItem::element` et non une entrée ordinaire, pour deux raisons
+/// qui tiennent toutes deux à la même chose — **on en bascule plusieurs à la
+/// suite** :
+///
+/// - `PopupMenu::confirm` **referme le menu** après avoir appelé le
+///   gestionnaire d'une entrée, sans qu'on puisse s'y opposer. La ligne
+///   consomme donc le clic elle-même (`stop_propagation`) : l'entrée qui la
+///   porte ne le voit jamais, et rien ne se referme.
+/// - Un `checked` est figé à la construction du menu, qui n'a lieu qu'une
+///   fois. La coche est donc peinte par la ligne, qui relit l'état à chaque
+///   frame.
+fn view_toggle(app: Entity<ClaudhubApp>, name: &'static str, title: &'static str) -> PopupMenuItem {
+    PopupMenuItem::element(move |_window, cx| {
+        let visible = app.read(cx).panel_visible(name);
+        let app = app.clone();
+        h_flex()
+            .id(name)
+            .w_full()
+            .gap_2()
+            .items_center()
+            // La colonne de la coche est réservée en permanence : sans elle,
+            // les noms danseraient d'un cran à chaque bascule.
+            .child(
+                div()
+                    .w(px(14.))
+                    .when(visible, |this| this.child(icon("check").xsmall())),
+            )
+            .child(tr!(title))
+            .on_click(move |_, _window, cx| {
+                cx.stop_propagation();
+                app.update(cx, |this, cx| this.toggle_panel(name, cx));
+            })
+    })
 }
 
 impl ClaudhubApp {
@@ -650,13 +734,16 @@ impl ClaudhubApp {
             pending_status: std::collections::HashSet::new(),
             dock,
             layout_save_scheduled: false,
-            show_terminal: true,
+            hidden_panels: Settings::global(cx).hidden_panels.iter().cloned().collect(),
             summaries: HashMap::new(),
             agents: HashMap::new(),
             agent_cpu: HashMap::new(),
             diff_dragging: false,
             watcher: None,
             diff_scroll: gpui::UniformListScrollHandle::new(),
+            diff_width: gpui::px(0.),
+            diff_measures: 0,
+            diff_wrap_scroll: gpui_component::VirtualListScrollHandle::new(),
             history_scroll: gpui::UniformListScrollHandle::new(),
             branch_scroll: gpui::UniformListScrollHandle::new(),
             file_scroll: HashMap::new(),
@@ -939,11 +1026,28 @@ impl ClaudhubApp {
                         .selected
                         .as_ref()
                         .is_some_and(|path| !files.iter().any(|f| &f.path == path));
+                // Une relecture périmée s'en va avec la liste qui l'infirme :
+                // le fichier a disparu du domaine, ou il a rechangé depuis
+                // qu'on l'a coché. La garder ferait dire « relu » d'un contenu
+                // que personne n'a lu.
+                let before = state.reviewed.len();
+                state.reviewed.retain(|item| {
+                    item.range != range
+                        || files.iter().any(|file| {
+                            file.path == item.path
+                                && file.added == item.added
+                                && file.removed == item.removed
+                        })
+                });
+                let pruned = state.reviewed.len() != before;
                 state.files.insert(range, files);
                 if gone {
                     state.selected = None;
                     state.diff = None;
                     state.diff_selection = None;
+                }
+                if pruned {
+                    self.persist_notes(&worktree, cx);
                 }
             }
             Evt::FileDiff {
@@ -984,8 +1088,7 @@ impl ClaudhubApp {
                 if let Some(id) = note {
                     self.select_note_rows(id, cx);
                 } else if let Some(row) = jumped {
-                    self.diff_scroll
-                        .scroll_to_item(row, gpui::ScrollStrategy::Top);
+                    self.reveal_diff_row(row, gpui::ScrollStrategy::Top, cx);
                 }
             }
             Evt::Summaries { summaries } => {
@@ -1016,6 +1119,59 @@ impl ClaudhubApp {
                 path,
                 content,
             } => self.file_content_arrived(worktree, path, content, window, cx),
+            // Le dossier de notes a répondu : c'est lui la source, et ce qu'on
+            // avait en mémoire n'était qu'une attente.
+            Evt::NotesRead { worktree, files } => {
+                let mut notes = Vec::new();
+                let mut reviewed = Vec::new();
+                let on_disk = !files.is_empty();
+                for (name, text) in files {
+                    if name == crate::ui::vault::INDEX {
+                        reviewed = crate::ui::vault::parse_index(&text);
+                    } else if let Some(note) = crate::ui::vault::parse_note(&text) {
+                        notes.push(note);
+                    }
+                }
+                notes.sort_by_key(|note| note.id);
+                // La reprise de l'ancien magasin passe par le même chemin que
+                // l'installation neuve, comme `migrate_agents` : un fichier
+                // d'état antérieur porte ses notes, et elles n'ont personne
+                // d'autre pour les écrire dans le dossier. Une seule fois —
+                // le magasin est vidé dans la foulée.
+                let legacy = Store::global(cx)
+                    .worktree(&worktree)
+                    .map(|saved| saved.notes.clone())
+                    .unwrap_or_default();
+                let migrating = !legacy.is_empty();
+                if migrating {
+                    let known: std::collections::HashSet<u64> =
+                        notes.iter().map(|note| note.id).collect();
+                    notes.extend(legacy.into_iter().filter(|note| !known.contains(&note.id)));
+                    notes.sort_by_key(|note| note.id);
+                    if let Some(main) = self.main_of(&worktree) {
+                        Store::update_global(cx, |store| {
+                            store.worktree_mut(&worktree, &main).notes = Vec::new();
+                        });
+                    }
+                }
+                self.ensure_review(&worktree, cx);
+                if let Some(state) = self.review.get_mut(&worktree) {
+                    // Un identifiant déjà pris par une note du dossier ferait
+                    // deux notes du même numéro, et le prompt en désignerait
+                    // une pour l'autre.
+                    let highest = notes.iter().map(|note| note.id).max().unwrap_or(0);
+                    state.next_note = state.next_note.max(highest + 1);
+                    state.notes = notes;
+                    state.reviewed = reviewed;
+                    state.notes_loaded = true;
+                    state.notes_on_disk = on_disk;
+                }
+                self.refresh_note_marks(&worktree);
+                if migrating {
+                    self.persist_notes(&worktree, cx);
+                }
+                cx.notify();
+            }
             Evt::Agents { agents } => {
                 let mut next = HashMap::new();
                 let mut cpu = HashMap::new();
@@ -1380,12 +1536,27 @@ impl ClaudhubApp {
         if let Some(saved) = saved {
             state.base = saved.base;
             state.collapsed = saved.collapsed.into_iter().collect();
-            state.notes = saved.notes;
             // Un fichier écrit avant que ce champ existe porte zéro, et une
             // note d'identifiant nul se confondrait avec l'absence de note.
             state.next_note = saved.next_note.max(1);
         }
         self.review.insert(worktree.to_path_buf(), state);
+        // Les notes vivent dans un dossier, et un dossier se lit dans un
+        // worker : un coffre sur un disque lent figerait la fenêtre le temps
+        // d'un `read_dir`.
+        if let Some(dir) = self.notes_dir(worktree, cx) {
+            self.git.send(Cmd::ReadNotes {
+                worktree: worktree.to_path_buf(),
+                dir,
+            });
+        }
+    }
+
+    /// Le dossier de notes d'un worktree, sous la racine des réglages.
+    pub(super) fn notes_dir(&self, worktree: &Path, cx: &App) -> Option<PathBuf> {
+        let main = self.main_of(worktree)?;
+        let root = Settings::global(cx).notes_root()?;
+        Some(crate::ui::vault::dir_for(&root, &main, worktree))
     }
 
     /// Écrit dans le magasin ce que le worktree courant a de persistant.
@@ -1404,14 +1575,125 @@ impl ClaudhubApp {
         // écriture ferait un fichier qui change sans que rien n'ait changé.
         let mut collapsed: Vec<PathBuf> = state.collapsed.iter().cloned().collect();
         collapsed.sort();
-        let (base, notes, next_note) = (state.base.clone(), state.notes.clone(), state.next_note);
+        let (base, next_note) = (state.base.clone(), state.next_note);
         Store::update_global(cx, |store| {
             let saved = store.worktree_mut(worktree, &main);
             saved.base = base;
             saved.collapsed = collapsed;
-            saved.notes = notes;
             saved.next_note = next_note;
         });
+        self.persist_notes(worktree, cx);
+    }
+
+    /// Aligne le dossier de notes du worktree sur ce qu'on a en mémoire.
+    ///
+    /// Sans minuterie, contrairement aux réglages et au magasin : ce qu'on
+    /// envoie est un ordre à un worker, pas une écriture, et une note se
+    /// valide au dialogue là où un champ de réglage émet une valeur par
+    /// frappe. Le worker, lui, ne réécrit pas un fichier dont le contenu n'a
+    /// pas bougé.
+    pub(super) fn persist_notes(&mut self, worktree: &Path, cx: &App) {
+        let Some(dir) = self.notes_dir(worktree, cx) else {
+            return;
+        };
+        let Some(state) = self.review.get_mut(worktree) else {
+            return;
+        };
+        // Rien tant que le dossier n'a pas répondu : écrire une liste vide
+        // effacerait des notes qu'on n'a pas encore lues.
+        if !state.notes_loaded {
+            return;
+        }
+        let something = !state.notes.is_empty() || !state.reviewed.is_empty();
+        if !something && !state.notes_on_disk {
+            return;
+        }
+        state.notes_on_disk |= something;
+        let mut files: Vec<(String, String)> = state
+            .notes
+            .iter()
+            .map(|note| {
+                (
+                    crate::ui::vault::note_file(note),
+                    crate::ui::vault::render_note(note),
+                )
+            })
+            .collect();
+        files.push((
+            crate::ui::vault::INDEX.to_string(),
+            crate::ui::vault::render_index(worktree, &state.reviewed),
+        ));
+        self.git.send(Cmd::WriteNotes { dir, files });
+    }
+
+    /// La vue en deux colonnes est-elle repliée ?
+    ///
+    /// La question décide de **quelle liste est affichée**, donc de quelle
+    /// poignée porte le défilement : les deux ne sont jamais peintes en même
+    /// temps, et viser la mauvaise ferait défiler une liste qui n'est pas là.
+    pub(super) fn diff_wrapped(&self, cx: &App) -> bool {
+        let settings = Settings::global(cx);
+        settings.diff_split && settings.diff_wrap
+    }
+
+    /// La poignée que gpui anime réellement pour le diff affiché.
+    pub(super) fn diff_base_handle(&self, cx: &App) -> gpui::ScrollHandle {
+        use crate::ui::scroll::Scrollable;
+        if self.diff_wrapped(cx) {
+            self.diff_wrap_scroll.base()
+        } else {
+            self.diff_scroll.base()
+        }
+    }
+
+    /// Amène une entrée du diff dans la vue.
+    pub(super) fn reveal_diff_row(&self, row: usize, strategy: gpui::ScrollStrategy, cx: &App) {
+        if self.diff_wrapped(cx) {
+            self.diff_wrap_scroll.scroll_to_item(row, strategy);
+        } else {
+            self.diff_scroll.scroll_to_item(row, strategy);
+        }
+    }
+
+    /// Marque des fichiers relus, ou rend leur relecture.
+    ///
+    /// Le volume est retenu au moment du clic : c'est lui qui périme la coche
+    /// quand un agent réécrit le fichier.
+    pub(super) fn set_reviewed(
+        &mut self,
+        worktree: PathBuf,
+        range: DiffRange,
+        paths: Vec<PathBuf>,
+        reviewed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.review.get_mut(&worktree) else {
+            return;
+        };
+        let volumes: HashMap<&PathBuf, (usize, usize)> = state
+            .files
+            .get(&range)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .map(|file| (&file.path, (file.added, file.removed)))
+            .collect();
+        for path in &paths {
+            state
+                .reviewed
+                .retain(|item| item.range != range || item.path != *path);
+            if reviewed {
+                let (added, removed) = volumes.get(path).copied().unwrap_or((0, 0));
+                state.reviewed.push(crate::ui::vault::Reviewed {
+                    range: range.clone(),
+                    path: path.clone(),
+                    added,
+                    removed,
+                });
+            }
+        }
+        self.persist_review(&worktree, cx);
+        cx.notify();
     }
 
     /// Oublie ce qu'on retenait de worktrees que git ne liste plus.
@@ -1589,10 +1871,11 @@ impl ClaudhubApp {
             .small()
             .icon(icon("menu"))
             .tooltip(tr!("menu-title"))
-            .dropdown_menu(move |menu, _window, _cx| {
+            .dropdown_menu(move |menu, window, cx| {
                 let entity = entity.clone();
                 let for_reset = entity.clone();
                 let for_shortcuts = entity.clone();
+                let for_views = entity.clone();
                 menu.item(PopupMenuItem::new(tr!("settings-title")).on_click(
                     move |_, window, cx| {
                         entity.update(cx, |this, cx| this.open_settings(window, cx));
@@ -1606,6 +1889,16 @@ impl ClaudhubApp {
                         for_shortcuts.update(cx, |this, cx| this.open_shortcuts(window, cx));
                     }),
                 )
+                // Les vues masquées n'ont plus d'onglet : c'est le seul
+                // endroit d'où les rappeler, et donc le seul endroit qui dise
+                // ce que la fenêtre ne montre pas.
+                .submenu(tr!("menu-views"), window, cx, move |menu, _window, _cx| {
+                    super::panels::VIEWS
+                        .iter()
+                        .fold(menu, |menu, &(name, title)| {
+                            menu.item(view_toggle(for_views.clone(), name, title))
+                        })
+                })
                 .item(PopupMenuItem::new(tr!("menu-reset-layout")).on_click(
                     move |_, window, cx| {
                         for_reset.update(cx, |this, cx| this.reset_layout(window, cx));
@@ -1859,12 +2152,43 @@ impl ClaudhubApp {
     }
 
     pub(super) fn terminal_visible(&self, _cx: &App) -> bool {
-        self.show_terminal
+        self.panel_visible(super::panels::TerminalPanel::NAME)
     }
 
     pub(super) fn show_terminal_panel(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.show_terminal = true;
+        self.set_panel_visible(super::panels::TerminalPanel::NAME, true, cx);
+    }
+
+    /// Une vue est visible tant qu'on ne l'a pas masquée.
+    ///
+    /// La question se pose par la négative : un panneau qu'on vient d'ajouter
+    /// s'affiche sans que rien n'ait à le déclarer, et un nom inconnu du
+    /// fichier de réglages — un panneau renommé — ne cache plus rien.
+    pub(super) fn panel_visible(&self, name: &str) -> bool {
+        !self.hidden_panels.contains(name)
+    }
+
+    pub(super) fn set_panel_visible(&mut self, name: &str, visible: bool, cx: &mut Context<Self>) {
+        let changed = if visible {
+            self.hidden_panels.remove(name)
+        } else {
+            self.hidden_panels.insert(name.to_string())
+        };
+        if !changed {
+            return;
+        }
+        // Trié avant d'être écrit, comme les replis du magasin : un ensemble
+        // sérialisé dans un ordre différent à chaque fois ferait un fichier de
+        // réglages qui change sans que rien n'ait changé.
+        let mut hidden: Vec<String> = self.hidden_panels.iter().cloned().collect();
+        hidden.sort();
+        Settings::update_global(cx, |s| s.hidden_panels = hidden);
         cx.notify();
+    }
+
+    pub(super) fn toggle_panel(&mut self, name: &str, cx: &mut Context<Self>) {
+        let visible = self.panel_visible(name);
+        self.set_panel_visible(name, !visible, cx);
     }
 
     /// La zone que le zoom au clavier vise.
@@ -1903,8 +2227,7 @@ impl ClaudhubApp {
     }
 
     pub(super) fn toggle_terminal_panel(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.show_terminal = !self.show_terminal;
-        cx.notify();
+        self.toggle_panel(super::panels::TerminalPanel::NAME, cx);
     }
 
     /// Affiche ou masque la zone de gauche — dépôts, branches, fichiers.

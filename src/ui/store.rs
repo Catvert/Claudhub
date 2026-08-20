@@ -3,7 +3,7 @@
 //! À part des réglages, et pour la même raison qu'eux : ce n'est pas une
 //! préférence qu'on écrit à la main mais l'état d'un travail en cours — la
 //! base à laquelle on compare un worktree d'agent, les dossiers qu'on a
-//! repliés, les notes de relecture. Un `settings.json` où l'on trouverait
+//! repliés, le prochain numéro de note. Un `settings.json` où l'on trouverait
 //! quelques centaines de lignes par dépôt ne serait plus modifiable.
 //!
 //! Ce fichier est écrit **depuis le thread d'interface**, ce qui déroge à
@@ -52,7 +52,11 @@ pub struct WorktreeState {
     /// Un `Vec` et non un `HashSet` : c'est la forme que JSON sait écrire, et
     /// la vue en refait un ensemble à la lecture.
     pub collapsed: Vec<PathBuf>,
-    /// Notes de relecture prises sur ce worktree.
+    /// Notes de relecture d'un fichier d'état antérieur, et rien d'autre.
+    ///
+    /// Elles vivent désormais dans un dossier de fichiers Markdown : ce champ
+    /// n'existe que pour les y verser une fois, à l'arrivée du dossier, après
+    /// quoi il est vidé. Rien ne l'écrit plus.
     pub notes: Vec<Note>,
     /// Prochain identifiant de note. Il ne se déduit pas de `notes` : une note
     /// supprimée libérerait son numéro, et une note envoyée à l'agent y serait

@@ -729,6 +729,19 @@ fn files_page() -> SettingPage {
             )
             .item(
                 SettingItem::new(
+                    tr!("settings-notes-dir"),
+                    SettingField::input(
+                        |cx: &App| Settings::global(cx).notes_dir.clone().into(),
+                        |value: SharedString, cx: &mut App| {
+                            Settings::update_global(cx, |s| s.notes_dir = value.to_string())
+                        },
+                    )
+                    .default_value(SharedString::default()),
+                )
+                .description(tr!("settings-notes-dir-help")),
+            )
+            .item(
+                SettingItem::new(
                     tr!("settings-show-ignored"),
                     SettingField::switch(
                         |cx: &App| Settings::global(cx).show_ignored_files,

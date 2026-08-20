@@ -398,6 +398,15 @@ pub struct Settings {
     /// Afficher le fichier entier autour des modifications, et non seulement
     /// leurs quelques lignes de contexte.
     pub diff_whole_file: bool,
+    /// Renvoyer les lignes longues à la ligne, en vue à deux colonnes.
+    ///
+    /// Vrai par défaut, et c'est là que ça compte : une colonne fait la moitié
+    /// de la vue, et la moindre ligne un peu longue obligeait à défiler
+    /// horizontalement tout le fichier — la largeur étant celle de la plus
+    /// longue ligne, une seule suffisait à la donner à toutes. En une seule
+    /// colonne, la ligne dispose de toute la largeur et le repli se discute ;
+    /// il n'a donc pas lieu.
+    pub diff_wrap: bool,
     /// « Mettre à jour depuis la base » rejoue la branche au lieu de fusionner.
     ///
     /// Les deux se défendent et le choix est une habitude d'équipe : un
@@ -435,6 +444,24 @@ pub struct Settings {
     /// a rien à éditer dans un diff — mais la main gauche sur la rangée de
     /// repos pour relire.
     pub vim_mode: bool,
+    /// Où les notes de relecture sont écrites, un fichier Markdown par note.
+    ///
+    /// Vide : `<config>/notes`. Le champ existe pour pointer un coffre —
+    /// Obsidian, ou n'importe quel dossier qu'on tient déjà — parce qu'une
+    /// note de relecture est du texte qu'on écrit, et qu'elle n'a rien à faire
+    /// enfermée dans un JSON d'état que rien d'autre ne sait lire.
+    pub notes_dir: String,
+    /// Vues que l'utilisateur a masquées, par nom de panneau du dock.
+    ///
+    /// Ici et non dans `layout.json` : c'est un choix qu'on fait une fois — je
+    /// ne me sers pas de Sentry, je ne veux pas des branches — pas la
+    /// géométrie d'une fenêtre. `LAYOUT_VERSION` jette la disposition dès que
+    /// les panneaux changent de nom, et ce choix-là n'a pas à disparaître
+    /// avec elle.
+    ///
+    /// Une liste de noms plutôt qu'un booléen par panneau : un panneau ajouté
+    /// est visible sans que ce fichier ait à le savoir.
+    pub hidden_panels: Vec<String>,
 }
 
 impl Default for Settings {
@@ -455,6 +482,7 @@ impl Default for Settings {
             review_tree: true,
             diff_split: false,
             diff_whole_file: false,
+            diff_wrap: true,
             update_with_rebase: false,
             integrate_no_ff: true,
             external_editor: String::new(),
@@ -463,6 +491,26 @@ impl Default for Settings {
             sentry_token: String::new(),
             sentry_query: String::new(),
             vim_mode: false,
+            notes_dir: String::new(),
+            hidden_panels: Vec::new(),
+        }
+    }
+}
+
+impl Settings {
+    /// La racine des notes, `~` développé.
+    ///
+    /// Un chemin qu'on saisit dans un formulaire s'écrit `~/Coffre/…` — c'est
+    /// ainsi qu'on le donne à un shell —, et le passer tel quel à `std::fs`
+    /// créerait un dossier nommé `~` dans le répertoire courant.
+    pub fn notes_root(&self) -> Option<PathBuf> {
+        let text = self.notes_dir.trim();
+        if text.is_empty() {
+            return config_dir().map(|dir| dir.join("notes"));
+        }
+        match text.strip_prefix("~/") {
+            Some(rest) => directories::UserDirs::new().map(|dirs| dirs.home_dir().join(rest)),
+            None => Some(PathBuf::from(text)),
         }
     }
 }

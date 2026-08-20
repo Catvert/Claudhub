@@ -383,6 +383,11 @@ table!(STANDARD, standard_bindings, [
     Terminal "secondary-shift-t" => NewTerminal, PREDICATE, "shortcut-new-terminal";
     Terminal "secondary-shift-w" => CloseTerminal, PREDICATE, "shortcut-close-terminal";
     Terminal "secondary-`" => ToggleTerminal, PREDICATE, "shortcut-toggle-terminal";
+    // La même chose sous une touche qu'on trouve sans regarder. Une lettre
+    // avec la touche système, donc hors du terminal (`WINDOW_PREDICATE`) : là,
+    // `Ctrl+T` appartient au programme qui tourne. C'est l'accent grave qui
+    // sert à le refermer quand on y a le focus.
+    Terminal "secondary-t" => ToggleTerminal, WINDOW_PREDICATE, "shortcut-toggle-terminal";
     Terminal "secondary-tab" => NextTerminal, PREDICATE, "shortcut-next-terminal";
     Terminal "secondary-shift-tab" => PreviousTerminal, PREDICATE, "shortcut-previous-terminal";
     // Les conventions des terminaux : la touche système *avec* Maj, parce que

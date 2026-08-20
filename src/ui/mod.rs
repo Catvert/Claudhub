@@ -34,6 +34,7 @@ mod store;
 mod terminal_view;
 mod theme;
 mod tree;
+mod vault;
 mod worktree_ops;
 
 use gpui::{px, size, App, AppContext, Application, Bounds, WindowBounds, WindowOptions};
@@ -170,6 +171,17 @@ mod i18n_tests {
             missing_fr.is_empty() && missing_en.is_empty(),
             "absentes de fr.json : {missing_fr:?}\nabsentes de en.json : {missing_en:?}"
         );
+    }
+
+    /// Le menu des vues rend la clé brute quand elle manque, et une entrée
+    /// nommée « panel-sentry » au milieu du menu est tout ce qu'on verrait.
+    #[test]
+    fn every_view_has_a_title_in_both_catalogs() {
+        let (en, fr) = (keys(EN), keys(FR));
+        for (_, title) in crate::ui::panels::VIEWS {
+            assert!(en.contains(*title), "absente de en.json : {title}");
+            assert!(fr.contains(*title), "absente de fr.json : {title}");
+        }
     }
 
     #[test]

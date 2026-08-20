@@ -43,13 +43,25 @@ pub struct Rendered {
     /// toujours courte.
     pub longest_row: usize,
     pub longest_chars: usize,
+    /// La longueur de chaque entrée, en caractères, dans l'ordre de `rows`.
+    ///
+    /// C'est ce qui donne la hauteur d'une ligne repliée sans retoucher au
+    /// texte : la police du diff est à chasse fixe, un caractère vaut une
+    /// colonne, et le nombre de lignes visibles d'une ligne longue est une
+    /// division. Calculée une fois ici parce que la hauteur se recalcule à
+    /// chaque changement de largeur — un glissement de séparateur en produit
+    /// une par image — et que reparcourir le texte du fichier à chaque fois
+    /// coûterait ce que la virtualisation économise.
+    pub row_chars: Vec<usize>,
 }
 
 impl Rendered {
     pub fn new(path: &Path, file: FileDiff, theme: &HighlightTheme) -> Self {
         let rows = rows(&file);
         let (longest_row, longest_chars) = longest(&file, &rows);
+        let row_chars = rows.iter().map(|row| row_width(&file, *row)).collect();
         Self {
+            row_chars,
             highlights: DiffHighlights::compute(path, &file, theme),
             patches: hunk_patches(path, &file),
             gutter_digits: gutter_digits(&file),
@@ -222,20 +234,98 @@ impl Rendered {
 fn longest(file: &FileDiff, rows: &[Row]) -> (usize, usize) {
     let mut best = (0usize, 0usize);
     for (index, row) in rows.iter().enumerate() {
-        let text = match row {
-            Row::Header { hunk } => file.hunks.get(*hunk).map(|h| h.header.as_str()),
-            Row::Line { hunk, line } => file
-                .hunks
-                .get(*hunk)
-                .and_then(|h| h.lines.get(*line))
-                .map(|l| l.text.as_str()),
-        };
-        let width = text.map(|t| t.chars().count()).unwrap_or(0);
+        let width = row_width(file, *row);
         if width > best.1 {
             best = (index, width);
         }
     }
     best
+}
+
+/// La longueur d'une entrée, en caractères et non en octets : c'est une
+/// largeur à l'écran, et un accent y compte pour un.
+fn row_width(file: &FileDiff, row: Row) -> usize {
+    let text = match row {
+        Row::Header { hunk } => file.hunks.get(hunk).map(|h| h.header.as_str()),
+        Row::Line { hunk, line } => file
+            .hunks
+            .get(hunk)
+            .and_then(|h| h.lines.get(line))
+            .map(|l| l.text.as_str()),
+    };
+    text.map(|t| t.chars().count()).unwrap_or(0)
+}
+
+// — Le retour à la ligne des deux colonnes ————————————————————————————
+
+/// Combien de lignes visibles occupe une entrée large de `chars` caractères.
+///
+/// Le repli se fait **à la colonne**, comme dans un terminal, et non aux
+/// espaces : c'est ce qui rend la hauteur calculable à l'avance. Le shaper de
+/// gpui, lui, coupe aux mots, et une hauteur devinée qui ne tombe pas juste
+/// laisserait les lignes se recouvrir — la liste virtualisée réserve
+/// exactement ce qu'on lui annonce.
+pub fn wrapped_lines(chars: usize, cols: usize) -> usize {
+    if cols == 0 {
+        return 1;
+    }
+    chars.div_ceil(cols).max(1)
+}
+
+/// La hauteur de chaque entrée de la vue en deux colonnes, en lignes.
+///
+/// Une paire fait la hauteur de la plus haute de ses deux moitiés : les deux
+/// versions restent en regard, ce qui est tout l'intérêt de cette vue.
+pub fn split_heights(diff: &Rendered, cols: usize) -> Vec<usize> {
+    diff.split
+        .iter()
+        .map(|row| match row {
+            SplitRow::Header { .. } => 1,
+            SplitRow::Pair { old, new } => [old, new]
+                .into_iter()
+                .flatten()
+                .map(|index| wrapped_lines(diff.row_chars.get(*index).copied().unwrap_or(0), cols))
+                .max()
+                .unwrap_or(1),
+        })
+        .collect()
+}
+
+/// Les octets d'une tranche de colonnes.
+///
+/// En caractères et non en octets : une ligne accentuée se replierait sinon
+/// une colonne trop tôt, et au milieu d'un caractère.
+fn char_span(text: &str, from: usize, to: usize) -> std::ops::Range<usize> {
+    let mut start = text.len();
+    let mut end = text.len();
+    for (count, (offset, _)) in text.char_indices().enumerate() {
+        if count == from {
+            start = offset;
+        }
+        if count == to {
+            end = offset;
+            break;
+        }
+    }
+    start.min(end)..end
+}
+
+/// Les plages d'une tranche, ramenées au début de celle-ci.
+///
+/// Elles restent **triées et disjointes**, l'invariant que gpui ne vérifie pas
+/// et dont la violation décale tout ce qui suit — le découpage ne fait que
+/// rogner des plages déjà dans cet ordre.
+fn slice_runs<T: Clone>(
+    runs: &[(std::ops::Range<usize>, T)],
+    span: &std::ops::Range<usize>,
+) -> Vec<(std::ops::Range<usize>, T)> {
+    runs.iter()
+        .filter_map(|(range, style)| {
+            let start = range.start.max(span.start);
+            let end = range.end.min(span.end);
+            (start < end).then(|| (start - span.start..end - span.start, style.clone()))
+        })
+        .collect()
 }
 
 /// Une entrée de la liste.
@@ -406,7 +496,7 @@ use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
     menu::ContextMenuExt,
-    v_flex, ActiveTheme, Sizable,
+    v_flex, v_virtual_list, ActiveTheme, Selectable, Sizable,
 };
 
 use crate::git::DiffRange;
@@ -486,6 +576,15 @@ impl ClaudhubApp {
         if let Some(state) = self.active_review_mut() {
             state.diff_selection = None;
         }
+        cx.notify();
+    }
+
+    /// Renvoie les lignes longues à la ligne, ou les laisse courir.
+    ///
+    /// La sélection tombe, comme au changement de mode : ses indices désignent
+    /// la liste affichée, et les deux listes n'ont pas la même géométrie.
+    pub(super) fn toggle_diff_wrap(&mut self, cx: &mut Context<Self>) {
+        crate::ui::settings::Settings::update_global(cx, |s| s.diff_wrap = !s.diff_wrap);
         cx.notify();
     }
 
@@ -656,8 +755,7 @@ impl ClaudhubApp {
         if let Some(state) = self.active_review_mut() {
             state.diff_selection = Some((row, row));
         }
-        self.diff_scroll
-            .scroll_to_item(row, gpui::ScrollStrategy::Center);
+        self.reveal_diff_row(row, gpui::ScrollStrategy::Center, cx);
         cx.notify();
     }
 
@@ -724,7 +822,7 @@ impl ClaudhubApp {
     /// Au moins une : une vue jamais peinte n'a pas de bornes, et une page de
     /// zéro ligne ferait d'une touche un geste sans effet.
     fn page_rows(&self, cx: &App) -> usize {
-        let height = self.diff_scroll.0.borrow().base_handle.bounds().size.height;
+        let height = self.diff_base_handle(cx).bounds().size.height;
         let line = line_height(px(crate::ui::settings::Settings::global(cx).diff_font_size));
         ((f32::from(height) / f32::from(line)) as usize).max(1)
     }
@@ -785,8 +883,7 @@ impl ClaudhubApp {
         // Défilement non strict : une ligne déjà visible ne fait pas sauter la
         // vue, ce qui laisse le regard où il est tant qu'on ne sort pas de
         // l'écran.
-        self.diff_scroll
-            .scroll_to_item(head, gpui::ScrollStrategy::Top);
+        self.reveal_diff_row(head, gpui::ScrollStrategy::Top, cx);
         cx.notify();
     }
 
@@ -808,7 +905,7 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let handle = self.diff_scroll.0.borrow().base_handle.clone();
+        let handle = self.diff_base_handle(cx);
         if !event.modifiers.secondary() {
             if self
                 .motion(DIFF_SCROLL.into(), crate::ui::motion::Axes::Both)
@@ -870,6 +967,7 @@ impl ClaudhubApp {
         let diff = state.diff.clone();
         let settings = crate::ui::settings::Settings::global(cx);
         let (split, whole_file) = (settings.diff_split, settings.diff_whole_file);
+        let wrap = split && settings.diff_wrap;
         let mono = cx.theme().mono_font_family.clone();
         let font_size = px(crate::ui::settings::Settings::global(cx).diff_font_size);
         let line_height = line_height(font_size);
@@ -925,6 +1023,24 @@ impl ClaudhubApp {
                     })
                     .on_click(cx.listener(|this, _, _window, cx| this.toggle_diff_split(cx))),
             )
+            // Le repli n'a de sens qu'en deux colonnes : en une seule, la
+            // ligne dispose de toute la largeur. Un bouton qui ne changerait
+            // rien vaut mieux caché qu'inerte.
+            .when(split, |el| {
+                el.child(
+                    Button::new("diff-wrap")
+                        .ghost()
+                        .xsmall()
+                        .selected(wrap)
+                        .icon(icon("wrap-text"))
+                        .tooltip(if wrap {
+                            tr!("diff-nowrap")
+                        } else {
+                            tr!("diff-wrap")
+                        })
+                        .on_click(cx.listener(|this, _, _window, cx| this.toggle_diff_wrap(cx))),
+                )
+            })
             .child(
                 Button::new("copy-file")
                     .ghost()
@@ -999,25 +1115,62 @@ impl ClaudhubApp {
         let gutter = cell * diff.gutter_digits as f32 + px(6.);
         // Le lissage avance d'une frame. L'ordre avec la construction de la
         // liste est libre : le décalage n'est lu qu'à la mise en page.
-        let base = self.diff_scroll.0.borrow().base_handle.clone();
+        let base = self.diff_base_handle(cx);
         self.motion(DIFF_SCROLL.into(), crate::ui::motion::Axes::Both)
             .advance(&base, window);
         // La largeur du contenu tient compte du viewport mesuré à la frame
         // précédente : sans ce plancher, le fond coloré d'une ligne modifiée
         // s'arrêterait au bout de son texte au lieu de traverser la vue.
-        let viewport = self.diff_scroll.0.borrow().base_handle.bounds().size.width;
+        //
+        // Au tout premier diff, cette mesure n'existe pas encore. On redemande
+        // alors une frame : sans elle, la vue garde sa largeur de départ
+        // jusqu'au prochain événement — le balayage de fond, deux secondes
+        // plus tard —, ce qui se voit d'autant plus que le repli calcule ses
+        // colonnes dessus. Les diffs suivants partent de la largeur retenue.
+        let measured = base.bounds().size.width;
+        if measured > px(1.) {
+            self.diff_width = measured;
+            self.diff_measures = 0;
+        } else if self.diff_measures < 4 {
+            self.diff_measures += 1;
+            window.request_animation_frame();
+        }
+        let viewport = if measured > px(1.) {
+            measured
+        } else {
+            self.diff_width
+        };
         let text_width = cell * diff.longest_chars as f32 + px(24.);
         // En deux colonnes, chacune est taillée pour la plus longue ligne du
         // fichier — et non pour la moitié de la vue. Les tailler à la vue
         // couperait le code ou le renverrait à la ligne, alors que le tout
         // reste atteignable par le défilement horizontal, qui emmène les deux
         // colonnes ensemble et garde donc les versions en regard.
-        let column = ((text_width + gutter).max(viewport / 2.)).max(px(80.));
+        // Repliées, les colonnes font la moitié de la vue et rien d'autre :
+        // c'est tout l'objet du repli, ne plus avoir à défiler pour lire une
+        // ligne longue.
+        let column = if wrap {
+            // La marge de note (3 px) appartient à l'entrée, pas aux
+            // colonnes : l'oublier ferait déborder la ligne de trois pixels,
+            // qu'aucune barre ne révélerait puisque le repli en supprime une.
+            ((viewport - px(3.)) / 2.).max(px(80.))
+        } else {
+            ((text_width + gutter).max(viewport / 2.)).max(px(80.))
+        };
         let content_width = if split {
             column * 2.
         } else {
             (text_width + gutter * 2.).max(viewport)
         };
+        // Les colonnes de texte d'une moitié : ce qui reste une fois la
+        // gouttière, le signe et la marge de note pris. Zéro quand rien ne se
+        // replie, ce que `half` lit comme « laisse la ligne courir ».
+        let cols = if wrap {
+            (f32::from((column - gutter - px(20.)).max(px(0.))) / f32::from(cell)) as usize
+        } else {
+            0
+        };
+        let cols = if wrap { cols.max(8) } else { 0 };
 
         let colors = DiffColors::of(cx);
         let entity = cx.entity();
@@ -1046,6 +1199,90 @@ impl ClaudhubApp {
             current_color: crate::ui::find::highlight_color(true, cx),
         };
 
+        // Une entrée, quelle que soit la liste qui la demande : les deux
+        // branches ci-dessous ne diffèrent que par la façon de réserver la
+        // hauteur, pas par ce qu'elles peignent.
+        let build = move |ix: usize, cx: &mut gpui::App| {
+            let selected = selection.is_some_and(|(a, b)| ix >= a && ix <= b);
+            let style = RowStyle {
+                line_height,
+                gutter,
+                stageable,
+                selected,
+                selection_bg,
+                annotated: marks.at(ix, split),
+                note_color,
+            };
+            if split {
+                render_split_row(
+                    &rows, ix, &colors, column, cols, &style, &search, &entity, cx,
+                )
+            } else {
+                render_row(
+                    &rows,
+                    ix,
+                    &colors,
+                    content_width,
+                    &style,
+                    &search,
+                    &entity,
+                    cx,
+                )
+            }
+        };
+
+        // Repliée, la vue en deux colonnes n'a plus des entrées de même
+        // hauteur : une ligne longue en occupe trois, celle d'en face une
+        // seule. `uniform_list` trouve l'intervalle visible par une division
+        // et ne sait donc pas la peindre ; `v_virtual_list` parcourt un
+        // vecteur de tailles, qu'on lui donne. C'est le seul endroit où le
+        // surcoût se justifie — et il n'y a plus rien à défiler
+        // horizontalement, ce que cette liste ne saurait pas faire.
+        let list = if wrap {
+            let heights = split_heights(&diff, cols);
+            let sizes = std::rc::Rc::new(
+                heights
+                    .into_iter()
+                    .map(|lines| gpui::size(px(0.), line_height * lines as f32))
+                    .collect::<Vec<_>>(),
+            );
+            crate::ui::scroll::vertical(
+                DIFF_SCROLL,
+                &self.diff_wrap_scroll,
+                v_virtual_list(
+                    cx.entity(),
+                    "diff-lines-wrapped",
+                    sizes,
+                    move |_, range, _window, cx| range.map(|ix| build(ix, cx)).collect::<Vec<_>>(),
+                )
+                .size_full()
+                .font_family(mono)
+                .text_size(font_size)
+                .track_scroll(&self.diff_wrap_scroll),
+            )
+        } else {
+            crate::ui::scroll::both(
+                DIFF_SCROLL,
+                &self.diff_scroll,
+                uniform_list("diff-lines", count, move |range, _window, cx| {
+                    range.map(|ix| build(ix, cx)).collect::<Vec<_>>()
+                })
+                .size_full()
+                .font_family(mono)
+                .text_size(font_size)
+                // Sans `Unconstrained`, les lignes sont contraintes à la
+                // largeur de la vue et le défilement horizontal n'a rien à
+                // révéler ; la largeur défilable est déduite du seul item
+                // désigné ci-dessous.
+                .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+                // En deux colonnes, toutes les entrées ont la même largeur —
+                // celle des deux colonnes réunies — et n'importe laquelle
+                // mesure donc la bonne.
+                .with_width_from_item(Some(if split { 0 } else { diff.longest_row }))
+                .track_scroll(self.diff_scroll.clone()),
+            )
+        };
+
         v_flex()
             .size_full()
             .child(header)
@@ -1060,59 +1297,7 @@ impl ClaudhubApp {
                         gpui::MouseButton::Left,
                         cx.listener(|this, _, _window, _cx| this.end_diff_drag()),
                     )
-                    .child(crate::ui::scroll::both(
-                        DIFF_SCROLL,
-                        &self.diff_scroll,
-                        uniform_list("diff-lines", count, move |range, _window, cx| {
-                            range
-                                .map(|ix| {
-                                    let selected =
-                                        selection.is_some_and(|(a, b)| ix >= a && ix <= b);
-                                    let style = RowStyle {
-                                        line_height,
-                                        gutter,
-                                        stageable,
-                                        selected,
-                                        selection_bg,
-                                        annotated: marks.at(ix, split),
-                                        note_color,
-                                    };
-                                    if split {
-                                        render_split_row(
-                                            &rows, ix, &colors, column, &style, &search, &entity,
-                                            cx,
-                                        )
-                                    } else {
-                                        render_row(
-                                            &rows,
-                                            ix,
-                                            &colors,
-                                            content_width,
-                                            &style,
-                                            &search,
-                                            &entity,
-                                            cx,
-                                        )
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .size_full()
-                        .font_family(mono)
-                        .text_size(font_size)
-                        // Sans `Unconstrained`, les lignes sont contraintes à la
-                        // largeur de la vue et le défilement horizontal n'a rien à
-                        // révéler ; la largeur défilable est déduite du seul item
-                        // désigné ci-dessous.
-                        .with_horizontal_sizing_behavior(
-                            ListHorizontalSizingBehavior::Unconstrained,
-                        )
-                        // En deux colonnes, toutes les entrées ont la même
-                        // largeur — celle des deux colonnes réunies — et
-                        // n'importe laquelle mesure donc la bonne.
-                        .with_width_from_item(Some(if split { 0 } else { diff.longest_row }))
-                        .track_scroll(self.diff_scroll.clone()),
-                    ))
+                    .child(list)
                     // Le clic droit porte les gestes qui n'ont pas de bouton
                     // sous la main : on vient de sélectionner des lignes, et
                     // remonter à la barre d'en-tête pour agir dessus est un
@@ -1247,7 +1432,7 @@ fn render_row(
                 return div().into_any_element();
             };
             let (bg, fg) = line_colors(source.kind, colors);
-            let content = line_content(diff, hunk, line, fg, &search.marks(hunk, line));
+            let content = line_content(diff, hunk, line, fg, &search.marks(hunk, line), None);
 
             let for_drag = entity.clone();
             let entity = entity.clone();
@@ -1386,12 +1571,28 @@ fn line_content(
     line: usize,
     fg: Option<gpui::Hsla>,
     marks: &[(std::ops::Range<usize>, gpui::Hsla)],
+    // `span` : la tranche de colonnes à montrer, quand la ligne est repliée.
+    span: Option<(usize, usize)>,
 ) -> gpui::AnyElement {
     let Some(source) = diff.file.hunks.get(hunk).and_then(|h| h.lines.get(line)) else {
         return div().into_any_element();
     };
-    let text = SharedString::from(source.text.clone());
-    let styles = diff.highlights.line(hunk, line);
+    let (text, styles, marks) = match span {
+        None => (
+            SharedString::from(source.text.clone()),
+            diff.highlights.line(hunk, line).to_vec(),
+            marks.to_vec(),
+        ),
+        Some((from, to)) => {
+            let bytes = char_span(&source.text, from, to);
+            (
+                SharedString::from(source.text[bytes.clone()].to_string()),
+                slice_runs(diff.highlights.line(hunk, line), &bytes),
+                slice_runs(marks, &bytes),
+            )
+        }
+    };
+    let (styles, marks) = (styles.as_slice(), marks.as_slice());
     if marks.is_empty() {
         return if styles.is_empty() {
             div()
@@ -1420,6 +1621,7 @@ fn render_split_row(
     index: usize,
     colors: &DiffColors,
     column: Pixels,
+    cols: usize,
     style: &RowStyle,
     search: &SearchPaint,
     entity: &Entity<ClaudhubApp>,
@@ -1428,7 +1630,6 @@ fn render_split_row(
     let Some(row) = diff.split.get(index).copied() else {
         return div().into_any_element();
     };
-    let (selected, selection_bg) = (style.selected, style.selection_bg);
     let (old, new) = match row {
         SplitRow::Header { hunk, .. } => {
             return render_header(diff, index, hunk, colors, column * 2., style, entity, cx)
@@ -1436,12 +1637,25 @@ fn render_split_row(
         SplitRow::Pair { old, new } => (old, new),
     };
 
+    // La hauteur de l'entrée est celle de la plus haute des deux moitiés :
+    // c'est elle qu'on a annoncée à la liste, qui réserve exactement ce qu'on
+    // lui dit.
+    let lines = if cols == 0 {
+        1
+    } else {
+        [old, new]
+            .into_iter()
+            .flatten()
+            .map(|index| wrapped_lines(diff.row_chars.get(index).copied().unwrap_or(0), cols))
+            .max()
+            .unwrap_or(1)
+    };
     let for_drag = entity.clone();
     let for_click = entity.clone();
     h_flex()
         .id(("pair", index))
-        .h(style.line_height)
-        .items_center()
+        .h(style.line_height * lines as f32)
+        .items_start()
         .whitespace_nowrap()
         .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
             select(&for_click, index, event.modifiers.shift, window, cx);
@@ -1453,10 +1667,10 @@ fn render_split_row(
             old,
             Column::Old,
             colors,
-            style.gutter,
+            style,
             column,
-            selected,
-            selection_bg,
+            cols,
+            lines,
             search,
         ))
         .child(half(
@@ -1464,10 +1678,10 @@ fn render_split_row(
             new,
             Column::New,
             colors,
-            style.gutter,
+            style,
             column,
-            selected,
-            selection_bg,
+            cols,
+            lines,
             search,
         ))
         .into_any_element()
@@ -1503,12 +1717,16 @@ fn half(
     row: Option<usize>,
     side: Column,
     colors: &DiffColors,
-    gutter: Pixels,
+    style: &RowStyle,
     column: Pixels,
-    selected: bool,
-    selection_bg: gpui::Hsla,
+    // `cols` : colonnes de texte avant le repli, zéro quand la ligne ne se
+    // replie pas et que le défilement horizontal s'en charge.
+    cols: usize,
+    // `lines` : lignes visibles de l'entrée, la plus haute des deux moitiés.
+    lines: usize,
     search: &SearchPaint,
 ) -> gpui::AnyElement {
+    let (gutter, selected, selection_bg) = (style.gutter, style.selected, style.selection_bg);
     let source = row
         .and_then(|index| diff.rows.get(index).copied())
         .and_then(|row| match row {
@@ -1542,11 +1760,24 @@ fn half(
         Column::New => source.new_no.or(source.old_no),
     };
     let kind = source.kind;
+    let marks = search.marks(hunk, line);
+    let line_height = style.line_height;
+    // Repliée, la moitié devient une pile de lignes de hauteur fixe : la
+    // gouttière et le signe restent sur la première, alignés en haut, et les
+    // suivantes sont la suite du texte. La hauteur de l'entrée est ainsi
+    // exactement celle qu'on a annoncée à la liste.
+    let wrapped = cols > 0;
     h_flex()
         .w(column)
         .flex_none()
         .h_full()
-        .items_center()
+        .map(|el| {
+            if wrapped {
+                el.items_start()
+            } else {
+                el.items_center()
+            }
+        })
         .whitespace_nowrap()
         .overflow_hidden()
         .when_some(bg.filter(|_| !selected), |el, bg| el.bg(bg))
@@ -1554,22 +1785,49 @@ fn half(
         // Une seule gouttière par colonne : chacune montre sa propre version,
         // et y répéter les deux numéros ferait payer deux fois la largeur pour
         // une information que la colonne d'en face porte déjà.
-        .child(number(number_of, gutter, colors))
+        .child(number(number_of, gutter, colors).when(wrapped, |el| el.h(line_height)))
         .child(
             div()
                 .w(px(14.))
                 .flex_none()
                 .text_center()
+                .when(wrapped, |el| el.h(line_height))
                 .when_some(fg, |el, fg| el.text_color(fg))
                 .child(sign(kind)),
         )
-        .child(line_content(
-            diff,
-            hunk,
-            line,
-            fg,
-            &search.marks(hunk, line),
-        ))
+        .map(|el| {
+            if !wrapped {
+                return el.child(line_content(diff, hunk, line, fg, &marks, None));
+            }
+            // L'indice de l'entrée, que `row_chars` indexe : le retrouver en
+            // parcourant `rows` coûterait un balayage du fichier par moitié
+            // de ligne visible, à chaque frame.
+            let chars = row
+                .and_then(|index| diff.row_chars.get(index).copied())
+                .unwrap_or(0);
+            let own = wrapped_lines(chars, cols);
+            el.child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .children((0..lines).map(|segment| {
+                        div().h(line_height).map(|el| {
+                            if segment < own {
+                                el.child(line_content(
+                                    diff,
+                                    hunk,
+                                    line,
+                                    fg,
+                                    &marks,
+                                    Some((segment * cols, (segment + 1) * cols)),
+                                ))
+                            } else {
+                                el
+                            }
+                        })
+                    })),
+            )
+        })
         .into_any_element()
 }
 
@@ -1641,7 +1899,7 @@ fn drag(
     entity.update(cx, |this, cx| this.drag_diff_row(index, cx));
 }
 
-fn number(value: Option<usize>, width: Pixels, colors: &DiffColors) -> impl IntoElement {
+fn number(value: Option<usize>, width: Pixels, colors: &DiffColors) -> gpui::Div {
     div()
         .w(width)
         .flex_none()
@@ -1901,6 +2159,67 @@ mod tests {
         assert!(rows(&diff).is_empty());
         // La gouttière garde une largeur utilisable même sans ligne.
         assert_eq!(gutter_digits(&diff), 1);
+    }
+
+    /// La hauteur annoncée à la liste doit tomber juste : elle réserve
+    /// exactement ce qu'on lui dit, et une ligne de trop recouvre la suivante.
+    #[test]
+    fn a_long_line_takes_as_many_lines_as_it_needs() {
+        assert_eq!(wrapped_lines(0, 80), 1, "une ligne vide occupe sa ligne");
+        assert_eq!(wrapped_lines(80, 80), 1);
+        assert_eq!(wrapped_lines(81, 80), 2);
+        assert_eq!(wrapped_lines(240, 80), 3);
+        // Sans colonne connue — la vue n'a pas encore été peinte —, rien ne se
+        // replie plutôt que de diviser par zéro.
+        assert_eq!(wrapped_lines(240, 0), 1);
+    }
+
+    /// Une paire fait la hauteur de la plus haute de ses deux moitiés : les
+    /// deux versions doivent rester en regard, ce qui est tout l'intérêt de
+    /// cette vue.
+    #[test]
+    fn a_pair_is_as_tall_as_its_tallest_half() {
+        let mut hunk = hunk("@@ a @@", &[DiffLineKind::Removed, DiffLineKind::Added]);
+        hunk.lines[0].text = "x".repeat(10);
+        hunk.lines[1].text = "x".repeat(45);
+        let diff = FileDiff {
+            hunks: vec![hunk],
+            binary: false,
+            empty: false,
+        };
+        let rendered = Rendered::new(Path::new("x.txt"), diff, &Theme::default_dark());
+        // L'en-tête, puis la paire : la suppression tient sur une ligne, son
+        // ajout en demande trois, et l'entière en fait trois.
+        assert_eq!(split_heights(&rendered, 20), vec![1, 3]);
+        assert_eq!(
+            split_heights(&rendered, 0),
+            vec![1, 1],
+            "sans repli, une ligne"
+        );
+    }
+
+    /// Une tranche se compte en **caractères** : en octets, une ligne
+    /// accentuée se couperait une colonne trop tôt, et au milieu d'un
+    /// caractère — ce qui panique.
+    #[test]
+    fn a_slice_counts_characters_and_not_bytes() {
+        let text = "éàü1234";
+        assert_eq!(char_span(text, 0, 3), 0..6);
+        assert_eq!(&text[char_span(text, 0, 3)], "éàü");
+        assert_eq!(&text[char_span(text, 3, 5)], "12");
+        // Au-delà de la fin, la tranche s'arrête au texte.
+        assert_eq!(&text[char_span(text, 5, 99)], "34");
+        assert_eq!(char_span(text, 99, 120), text.len()..text.len());
+    }
+
+    /// Les plages d'une tranche restent triées et disjointes, et repartent de
+    /// zéro : c'est l'invariant que gpui ne vérifie pas.
+    #[test]
+    fn sliced_runs_are_moved_back_to_the_start() {
+        let runs = vec![(0..4, 'a'), (6..10, 'b'), (12..20, 'c')];
+        assert_eq!(slice_runs(&runs, &(5..14)), vec![(1..5, 'b'), (7..9, 'c')]);
+        assert!(slice_runs(&runs, &(4..6)).is_empty(), "rien à cheval");
+        assert_eq!(slice_runs(&runs, &(0..2)), vec![(0..2, 'a')]);
     }
 
     #[test]

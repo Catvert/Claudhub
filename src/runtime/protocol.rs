@@ -213,6 +213,25 @@ pub enum Cmd {
         worktree: WorktreeId,
         op: crate::files::Op,
     },
+    /// Lit le dossier de notes d'un worktree — un fichier Markdown par note,
+    /// plus l'index de relecture.
+    ///
+    /// Le worker ne rend que du texte : c'est `ui::vault` qui sait ce qu'un
+    /// fichier contient, et l'analyse se teste sans toucher au disque.
+    ReadNotes {
+        worktree: WorktreeId,
+        dir: PathBuf,
+    },
+    /// Aligne le dossier de notes sur ce que Claudhub a en mémoire.
+    ///
+    /// La liste est **exhaustive** : le worker écrit ce qui a changé et efface
+    /// ce qui porte notre marque sans y figurer plus — c'est ainsi qu'une note
+    /// supprimée disparaît, et qu'un fichier renommé dans le coffre ne fait
+    /// pas un doublon. Ce qu'un autre a écrit n'est jamais touché.
+    WriteNotes {
+        dir: PathBuf,
+        files: Vec<(String, String)>,
+    },
     /// Lance l'éditeur externe sur un fichier, à une ligne donnée.
     OpenExternal {
         worktree: WorktreeId,
@@ -368,6 +387,11 @@ pub enum Evt {
     Agents {
         agents: crate::agent::Agents,
     },
+    /// Le contenu du dossier de notes : nom de fichier et texte.
+    NotesRead {
+        worktree: WorktreeId,
+        files: Vec<(String, String)>,
+    },
     History {
         worktree: WorktreeId,
         range: LogRange,
@@ -432,6 +456,7 @@ pub enum Action {
     FileOp,
     OpenExternal,
     Sentry,
+    Notes,
 }
 
 impl Action {
@@ -466,6 +491,7 @@ impl Action {
             Self::OpenExternal => "action-open-external-ok",
             Self::Sentry => "action-sentry-ok",
             Self::Resolve => "action-resolve-ok",
+            Self::Notes => "action-notes-ok",
         }
     }
 }

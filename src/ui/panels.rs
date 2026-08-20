@@ -17,13 +17,15 @@ use gpui::{
     div, prelude::*, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
     IntoElement, Render, WeakEntity, Window,
 };
-use gpui_component::dock::{Panel, PanelEvent};
+use gpui_component::dock::{Panel, PanelControl, PanelEvent};
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 
 use gpui_component::dock::{register_panel, PanelView};
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::find::Pane;
+use crate::ui::settings::Settings;
 
 /// Enveloppe le contenu d'un panneau de quoi noter qu'on vient d'y cliquer.
 ///
@@ -76,22 +78,108 @@ pub fn register(app: &Entity<ClaudhubApp>, cx: &mut App) {
     }
 }
 
+/// Les vues qui se masquent, dans l'ordre où le menu principal les propose.
+///
+/// Un nom de panneau et la clé i18n de son titre. Les noms viennent des
+/// constantes des panneaux eux-mêmes : une table de littéraux se serait
+/// désaccordée au premier renommage, et un nom qui ne désigne plus rien ne
+/// masque plus rien — en silence.
+///
+/// Les conflits n'y sont pas. Leur visibilité se décide toute seule — il y a
+/// une opération en cours, ou il n'y en a pas — et les masquer à la main
+/// reviendrait à cacher le seul endroit d'où l'on peut la terminer.
+pub const VIEWS: &[(&str, &str)] = &[
+    (SidebarPanel::NAME, "panel-repositories"),
+    (BranchesPanel::NAME, "panel-branches"),
+    (FilesPanel::NAME, "panel-files"),
+    (ChangesPanel::NAME, "range-working"),
+    (BranchPanel::NAME, "range-branch"),
+    (HistoryPanel::NAME, "panel-history"),
+    (NotesPanel::NAME, "panel-notes"),
+    (SentryPanel::NAME, "panel-sentry"),
+    (DiffPanel::NAME, "panel-diff"),
+    (TerminalPanel::NAME, "panel-terminal"),
+];
+
+/// « Masquer cette vue », la seule entrée que le menu `…` du dock mérite.
+///
+/// Tout le reste de ce qu'un panneau sait faire vit dans sa propre barre —
+/// l'arbre de la revue, les deux colonnes du diff, le repli de l'explorateur —
+/// et le dupliquer ici ferait deux chemins pour un même geste. Masquer, lui,
+/// ne concerne pas le contenu du panneau mais sa place dans la fenêtre : c'est
+/// le dock qui l'accueille, et le menu du dock est le seul endroit où le geste
+/// se trouve pour chacune des vues.
+///
+/// On revient par le menu principal (`VIEWS`) : une vue masquée n'a plus
+/// d'onglet, donc plus rien à cliquer.
+fn hide_view(app: &WeakEntity<ClaudhubApp>, name: &'static str, menu: PopupMenu) -> PopupMenu {
+    let app = app.clone();
+    menu.item(
+        PopupMenuItem::new(tr!("action-hide-view")).on_click(move |_, _window, cx| {
+            let _ = app.update(cx, |this, cx| this.set_panel_visible(name, false, cx));
+        }),
+    )
+}
+
+/// La visibilité d'une vue au moment où son panneau est construit.
+///
+/// Lue dans les réglages et non dans `ClaudhubApp` : les panneaux sont bâtis
+/// **pendant** `ClaudhubApp::new`, et y lire l'entité racine pendant qu'elle
+/// se met à jour est ce que gpui refuse par une panique. Les deux disent la
+/// même chose — l'application tient sa liste des réglages.
+fn visible_at_startup(name: &str, cx: &App) -> bool {
+    !Settings::global(cx).hidden_panels.iter().any(|n| n == name)
+}
+
+/// Le zoom est un **bouton**, pas une entrée de menu.
+///
+/// C'est la seule action que le dock met dans son menu `…` — aucun de nos
+/// panneaux ne se ferme —, et un menu déroulant qui ne contient qu'une ligne
+/// coûte deux clics pour ce qui en vaut un. `PanelControl::Toolbar` le sort
+/// dans la barre d'onglets, à côté du titre.
+///
+/// Ce qu'on ne peut pas faire, et qu'il ne faut pas chercher :
+/// `TabPanel::render_toolbar` de gpui-component 0.5.1 pose le bouton `…`
+/// **sans condition**. Il reste donc affiché, son entrée de zoom grisée. Le
+/// retirer demanderait de vendorer la bibliothèque pour un bouton.
+fn zoom_in_toolbar() -> Option<PanelControl> {
+    Some(PanelControl::Toolbar)
+}
+
 macro_rules! panels {
     ($($name:ident => ($id:literal, $title:literal, $render:ident, $pane:ident)),* $(,)?) => { $(
         pub struct $name {
             app: WeakEntity<ClaudhubApp>,
             focus: FocusHandle,
+            /// Mise en cache pour la même raison que celle des conflits :
+            /// `visible` est appelé pendant la construction de la disposition,
+            /// donc au milieu de `ClaudhubApp::new`.
+            visible: bool,
         }
 
         impl $name {
+            pub const NAME: &'static str = $id;
+
             pub fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
                 // Sans cette observation, le panneau garderait l'image de
                 // l'état au moment où il a été construit : c'est `ClaudhubApp`
                 // qui change, pas lui.
-                cx.observe(app, |_, _, cx| cx.notify()).detach();
+                cx.observe(app, |this: &mut Self, app, cx| {
+                    let visible = app.read(cx).panel_visible(Self::NAME);
+                    if this.visible != visible {
+                        this.visible = visible;
+                        // C'est l'aire qui relit la visibilité de ses onglets :
+                        // la notification du panneau seul ne la ferait pas
+                        // disparaître.
+                        cx.emit(PanelEvent::LayoutChanged);
+                    }
+                    cx.notify();
+                })
+                .detach();
                 Self {
                     app: app.downgrade(),
                     focus: cx.focus_handle(),
+                    visible: visible_at_startup(Self::NAME, cx),
                 }
             }
         }
@@ -117,6 +205,23 @@ macro_rules! panels {
             /// et une revue sans sa liste de fichiers n'est plus une revue.
             fn closable(&self, _: &App) -> bool {
                 false
+            }
+
+            fn zoomable(&self, _: &App) -> Option<PanelControl> {
+                zoom_in_toolbar()
+            }
+
+            fn visible(&self, _: &App) -> bool {
+                self.visible
+            }
+
+            fn dropdown_menu(
+                &mut self,
+                menu: PopupMenu,
+                _: &mut Window,
+                _: &mut Context<Self>,
+            ) -> PopupMenu {
+                hide_view(&self.app, Self::NAME, menu)
             }
         }
 
@@ -158,14 +263,20 @@ pub struct DiffPanel {
     app: WeakEntity<ClaudhubApp>,
     focus: FocusHandle,
     editing: bool,
+    visible: bool,
 }
 
 impl DiffPanel {
+    pub const NAME: &'static str = "ClaudhubDiff";
+
     pub fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
         cx.observe(app, |this: &mut Self, app, cx| {
-            let editing = app.read(cx).is_editing();
-            if this.editing != editing {
+            let app = app.read(cx);
+            let editing = app.is_editing();
+            let visible = app.panel_visible(Self::NAME);
+            if this.editing != editing || this.visible != visible {
                 this.editing = editing;
+                this.visible = visible;
                 // C'est la barre d'onglets qui porte le titre, pas le panneau :
                 // sa propre notification ne suffit pas à la faire redessiner.
                 cx.emit(PanelEvent::LayoutChanged);
@@ -177,6 +288,7 @@ impl DiffPanel {
             app: app.downgrade(),
             focus: cx.focus_handle(),
             editing: false,
+            visible: visible_at_startup(Self::NAME, cx),
         }
     }
 }
@@ -191,7 +303,7 @@ impl EventEmitter<PanelEvent> for DiffPanel {}
 
 impl Panel for DiffPanel {
     fn panel_name(&self) -> &'static str {
-        "ClaudhubDiff"
+        Self::NAME
     }
 
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -204,6 +316,23 @@ impl Panel for DiffPanel {
 
     fn closable(&self, _: &App) -> bool {
         false
+    }
+
+    fn zoomable(&self, _: &App) -> Option<PanelControl> {
+        zoom_in_toolbar()
+    }
+
+    fn visible(&self, _: &App) -> bool {
+        self.visible
+    }
+
+    fn dropdown_menu(
+        &mut self,
+        menu: PopupMenu,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> PopupMenu {
+        hide_view(&self.app, Self::NAME, menu)
     }
 }
 
@@ -282,6 +411,10 @@ impl Panel for ConflictsPanel {
         false
     }
 
+    fn zoomable(&self, _: &App) -> Option<PanelControl> {
+        zoom_in_toolbar()
+    }
+
     fn visible(&self, _: &App) -> bool {
         self.visible
     }
@@ -314,6 +447,8 @@ pub struct TerminalPanel {
 }
 
 impl TerminalPanel {
+    pub const NAME: &'static str = "ClaudhubTerminal";
+
     pub fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
         cx.observe(app, |this: &mut Self, app, cx| {
             let visible = app.read(cx).terminal_visible(cx);
@@ -327,8 +462,7 @@ impl TerminalPanel {
         Self {
             app: app.downgrade(),
             focus: cx.focus_handle(),
-            // Le panneau est affiché au démarrage, comme `show_terminal`.
-            visible: true,
+            visible: visible_at_startup(Self::NAME, cx),
         }
     }
 }
@@ -343,7 +477,7 @@ impl EventEmitter<PanelEvent> for TerminalPanel {}
 
 impl Panel for TerminalPanel {
     fn panel_name(&self) -> &'static str {
-        "ClaudhubTerminal"
+        Self::NAME
     }
 
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -354,8 +488,21 @@ impl Panel for TerminalPanel {
         false
     }
 
+    fn zoomable(&self, _: &App) -> Option<PanelControl> {
+        zoom_in_toolbar()
+    }
+
     fn visible(&self, _: &App) -> bool {
         self.visible
+    }
+
+    fn dropdown_menu(
+        &mut self,
+        menu: PopupMenu,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> PopupMenu {
+        hide_view(&self.app, Self::NAME, menu)
     }
 }
 
@@ -378,14 +525,26 @@ impl Render for TerminalPanel {
 pub struct HistoryPanel {
     app: WeakEntity<ClaudhubApp>,
     focus: FocusHandle,
+    visible: bool,
 }
 
 impl HistoryPanel {
+    pub const NAME: &'static str = "ClaudhubHistory";
+
     pub fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
-        cx.observe(app, |_, _, cx| cx.notify()).detach();
+        cx.observe(app, |this: &mut Self, app, cx| {
+            let visible = app.read(cx).panel_visible(Self::NAME);
+            if this.visible != visible {
+                this.visible = visible;
+                cx.emit(PanelEvent::LayoutChanged);
+            }
+            cx.notify();
+        })
+        .detach();
         Self {
             app: app.downgrade(),
             focus: cx.focus_handle(),
+            visible: visible_at_startup(Self::NAME, cx),
         }
     }
 }
@@ -400,7 +559,7 @@ impl EventEmitter<PanelEvent> for HistoryPanel {}
 
 impl Panel for HistoryPanel {
     fn panel_name(&self) -> &'static str {
-        "ClaudhubHistory"
+        Self::NAME
     }
 
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -409,6 +568,23 @@ impl Panel for HistoryPanel {
 
     fn closable(&self, _: &App) -> bool {
         false
+    }
+
+    fn zoomable(&self, _: &App) -> Option<PanelControl> {
+        zoom_in_toolbar()
+    }
+
+    fn visible(&self, _: &App) -> bool {
+        self.visible
+    }
+
+    fn dropdown_menu(
+        &mut self,
+        menu: PopupMenu,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> PopupMenu {
+        hide_view(&self.app, Self::NAME, menu)
     }
 }
 

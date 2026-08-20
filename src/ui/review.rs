@@ -69,6 +69,9 @@ struct DirRow {
     paths: Vec<PathBuf>,
     /// Vrai quand tout le sous-arbre est déjà indexé.
     staged: bool,
+    /// Vrai quand tout le sous-arbre est déjà relu — c'est ce qui fait d'un
+    /// clic sur un dossier une relecture de tout ce qu'il contient.
+    reviewed: bool,
     added: usize,
     removed: usize,
 }
@@ -91,6 +94,8 @@ struct FileRow {
     /// Ce fichier ira dans le prochain commit, au moins en partie.
     staged: bool,
     untracked: bool,
+    /// On l'a marqué relu, et il n'a pas changé depuis.
+    reviewed: bool,
 }
 
 impl FileRow {
@@ -323,7 +328,7 @@ impl ClaudhubApp {
             return Vec::new();
         };
         let files = state.files.get(range).map(Vec::as_slice).unwrap_or(&[]);
-        rows_for(range, &state.status, files)
+        rows_for(range, &state.status, files, &state.reviewed)
     }
 
     /// Les fichiers de la liste, dans l'ordre où ils s'affichent.
@@ -625,7 +630,9 @@ fn render_row(
 ) -> gpui::AnyElement {
     match rows.get(index) {
         Some(Row::Group(group)) => render_group(flat, index, *group, worktree, entity, cx),
-        Some(Row::Dir(dir)) => render_dir(dir, index, worktree, colors, checkable, entity, cx),
+        Some(Row::Dir(dir)) => {
+            render_dir(dir, index, worktree, range, colors, checkable, entity, cx)
+        }
         Some(Row::File(file)) => render_file(
             file, index, worktree, range, selected, colors, checkable, entity, cx,
         ),
@@ -643,10 +650,12 @@ fn indent(depth: usize, cx: &gpui::App) -> gpui::Pixels {
 
 /// Un dossier : le chevron, la case qui indexe tout ce qu'il contient, et le
 /// total de ses lignes.
+#[allow(clippy::too_many_arguments)]
 fn render_dir(
     row: &DirRow,
     index: usize,
     worktree: &Path,
+    range: &DiffRange,
     colors: &DiffColors,
     checkable: bool,
     entity: &gpui::Entity<ClaudhubApp>,
@@ -665,6 +674,9 @@ fn render_dir(
         .cursor_pointer()
         .whitespace_nowrap()
         .overflow_hidden()
+        // Un dossier vert est un dossier entièrement relu : c'est ce que sa
+        // coche promet en un clic.
+        .when(row.reviewed, |el| el.bg(cx.theme().success.opacity(0.12)))
         .hover(|s| s.bg(cx.theme().accent.opacity(0.4)))
         .on_click({
             let (entity, path) = (entity.clone(), row.path.clone());
@@ -738,6 +750,15 @@ fn render_dir(
                     .child(format!("−{}", row.removed)),
             )
         })
+        .child(render_reviewed(
+            ("reviewed-dir", index),
+            row.reviewed,
+            worktree,
+            range,
+            row.paths.clone(),
+            entity,
+            cx,
+        ))
         .into_any_element()
 }
 
@@ -810,6 +831,13 @@ fn render_file(
         .cursor_pointer()
         .whitespace_nowrap()
         .overflow_hidden()
+        // Relu : un fond vert, qui se voit d'un coup d'œil là où la seule
+        // coche à droite demande de parcourir une colonne. La sélection passe
+        // devant — c'est l'endroit où l'on est, et le perdre de vue est pire
+        // que d'oublier une ligne déjà lue.
+        .when(row.reviewed && !is_selected, |el| {
+            el.bg(cx.theme().success.opacity(0.12))
+        })
         .when(is_selected, |el| el.bg(cx.theme().accent))
         .hover(|s| s.bg(cx.theme().accent.opacity(0.5)))
         .on_click({
@@ -872,7 +900,18 @@ fn render_file(
                 .min_w_0()
                 .gap_1()
                 .items_baseline()
-                .child(div().truncate().text_sm().child(row.name.clone()))
+                // Un fichier relu s'éteint : c'est ce qui fait que la liste
+                // dit d'un coup d'œil ce qu'il reste à lire, là où la seule
+                // coche à droite demande de parcourir une colonne.
+                .child(
+                    div()
+                        .truncate()
+                        .text_sm()
+                        .when(row.reviewed, |el| {
+                            el.text_color(cx.theme().muted_foreground)
+                        })
+                        .child(row.name.clone()),
+                )
                 .child(
                     div()
                         .truncate()
@@ -944,7 +983,68 @@ fn render_file(
                     }),
             )
         })
+        // Un fichier se marque relu tout seul, comme un dossier se marque
+        // entier : c'est le geste de base, le dossier n'en étant que le
+        // raccourci.
+        .child(render_reviewed(
+            ("reviewed", index),
+            row.reviewed,
+            worktree,
+            range,
+            vec![row.path.clone()],
+            entity,
+            cx,
+        ))
         .into_any_element()
+}
+
+/// Le bouton qui marque un fichier — ou tout un dossier — relu.
+///
+/// Une coche et non une case : la case à cocher de cette liste veut déjà dire
+/// « indexer », et deux cases côte à côte pour deux gestes sans rapport se
+/// confondraient au premier coup d'œil. Elle vit à droite, après le volume, où
+/// rien ne la dispute à la lecture du nom.
+///
+/// Sur un dossier, elle porte tout le sous-arbre, replié compris — comme la
+/// case d'indexation, et pour la même raison : c'est le geste qui vaut le
+/// détour, une revue de branche ayant plus de dossiers relus d'un bloc que de
+/// fichiers relus un par un.
+fn render_reviewed(
+    id: (&'static str, usize),
+    reviewed: bool,
+    worktree: &Path,
+    range: &DiffRange,
+    paths: Vec<PathBuf>,
+    entity: &gpui::Entity<ClaudhubApp>,
+    cx: &gpui::App,
+) -> Button {
+    let (entity, worktree, range) = (entity.clone(), worktree.to_path_buf(), range.clone());
+    Button::new(id)
+        .ghost()
+        .xsmall()
+        .icon(
+            icon(if reviewed { "check-check" } else { "check" }).text_color(if reviewed {
+                cx.theme().success
+            } else {
+                cx.theme().muted_foreground.opacity(0.5)
+            }),
+        )
+        .tooltip(if reviewed {
+            tr!("action-unreview")
+        } else {
+            tr!("action-review")
+        })
+        .on_click(move |_, _window, cx| {
+            entity.update(cx, |this, cx| {
+                this.set_reviewed(
+                    worktree.clone(),
+                    range.clone(),
+                    paths.clone(),
+                    !reviewed,
+                    cx,
+                )
+            });
+        })
 }
 
 /// Les entrées de la liste pour un domaine de revue donné.
@@ -973,12 +1073,28 @@ fn step_index(current: Option<usize>, delta: isize, len: usize) -> Option<usize>
 /// distingue ce qui est indexé de ce qui ne l'est pas, distinction que la case
 /// à cocher restitue. Les autres domaines portent sur des commits, qui n'ont
 /// pas de notion d'index, et viennent de `--numstat`.
-fn rows_for(range: &DiffRange, status: &Status, files: &[DiffFile]) -> Vec<Row> {
+fn rows_for(
+    range: &DiffRange,
+    status: &Status,
+    files: &[DiffFile],
+    reviewed: &[crate::ui::vault::Reviewed],
+) -> Vec<Row> {
     let volumes: std::collections::HashMap<&PathBuf, (usize, usize)> = files
         .iter()
         .map(|f| (&f.path, (f.added, f.removed)))
         .collect();
     let volume = |path: &PathBuf| volumes.get(path).copied().unwrap_or((0, 0));
+    // Relu **et** inchangé depuis : le volume retenu est ce qui périme la
+    // coche, faute de quoi elle dirait « relu » d'un fichier qu'un agent vient
+    // de réécrire.
+    let is_reviewed = |path: &PathBuf, added: usize, removed: usize| {
+        reviewed.iter().any(|item| {
+            item.range == *range
+                && item.path == *path
+                && item.added == added
+                && item.removed == removed
+        })
+    };
 
     match range {
         DiffRange::Working => {
@@ -1000,6 +1116,7 @@ fn rows_for(range: &DiffRange, status: &Status, files: &[DiffFile]) -> Vec<Row> 
                     removed,
                     staged: file.is_staged(),
                     untracked: file.is_untracked(),
+                    reviewed: is_reviewed(&file.path, added, removed),
                 };
                 if row.untracked {
                     untracked.push(row);
@@ -1049,6 +1166,7 @@ fn rows_for(range: &DiffRange, status: &Status, files: &[DiffFile]) -> Vec<Row> 
                     // Un commit est déjà écrit : rien à cocher.
                     staged: true,
                     untracked: false,
+                    reviewed: is_reviewed(&f.path, f.added, f.removed),
                 })
             })
             .collect(),
@@ -1139,6 +1257,7 @@ fn flush(block: &mut Vec<FileRow>, collapsed: &HashSet<PathBuf>, out: &mut Vec<R
                     collapsed,
                     paths: inside.iter().map(|file| file.path.clone()).collect(),
                     staged: inside.iter().all(|file| file.staged),
+                    reviewed: inside.iter().all(|file| file.reviewed),
                     added: inside.iter().map(|file| file.added).sum(),
                     removed: inside.iter().map(|file| file.removed).sum(),
                 }));
@@ -1214,6 +1333,7 @@ mod tests {
                     removed: 0,
                     staged: true,
                     untracked: false,
+                    reviewed: false,
                 })
             })
             .collect();
@@ -1297,6 +1417,7 @@ mod tests {
                 file("src/b.rs", StatusCode::Untracked, StatusCode::Untracked),
             ]),
             &[],
+            &[],
         );
         let rows = tree_rows(&flat, &HashSet::new());
         // Un arbre par groupe, et non un arbre unique qui mélangerait le suivi
@@ -1316,7 +1437,7 @@ mod tests {
             file("modifie.rs", StatusCode::Unmodified, StatusCode::Modified),
             file("nouveau.rs", StatusCode::Untracked, StatusCode::Untracked),
         ]);
-        let rows = rows_for(&DiffRange::Working, &status, &[]);
+        let rows = rows_for(&DiffRange::Working, &status, &[], &[]);
         let files = files_of(&rows);
 
         assert_eq!(files.len(), 3);
@@ -1349,7 +1470,7 @@ mod tests {
             StatusCode::Modified,
             StatusCode::Modified,
         )]);
-        let rows = rows_for(&DiffRange::Working, &status, &[]);
+        let rows = rows_for(&DiffRange::Working, &status, &[], &[]);
         let file = files_of(&rows)[0];
         assert!(file.staged);
         assert!(file.partial(), "l'indexation partielle doit être signalée");
@@ -1363,11 +1484,115 @@ mod tests {
             file("efface.rs", StatusCode::Unmodified, StatusCode::Deleted),
             file("neuf.rs", StatusCode::Untracked, StatusCode::Untracked),
         ]);
-        let rows = rows_for(&DiffRange::Working, &status, &[]);
+        let rows = rows_for(&DiffRange::Working, &status, &[], &[]);
         let files = files_of(&rows);
         assert_eq!(files[0].codes(), "A");
         assert_eq!(files[1].codes(), "D");
         assert_eq!(files[2].codes(), "?");
+    }
+
+    fn diff_file(path: &str, added: usize, removed: usize) -> DiffFile {
+        DiffFile {
+            path: PathBuf::from(path),
+            original: None,
+            added,
+            removed,
+            binary: false,
+        }
+    }
+
+    fn reviewed(path: &str, added: usize, removed: usize) -> crate::ui::vault::Reviewed {
+        crate::ui::vault::Reviewed {
+            range: DiffRange::Working,
+            path: PathBuf::from(path),
+            added,
+            removed,
+        }
+    }
+
+    /// Le volume retenu est ce qui périme la coche : un agent qui réécrit un
+    /// fichier annule sa relecture, sans quoi la liste dirait « relu » d'un
+    /// contenu que personne n'a lu.
+    #[test]
+    fn a_file_that_changed_since_is_no_longer_reviewed() {
+        let status = status(vec![file(
+            "a.rs",
+            StatusCode::Modified,
+            StatusCode::Unmodified,
+        )]);
+        let rows = rows_for(
+            &DiffRange::Working,
+            &status,
+            &[diff_file("a.rs", 12, 3)],
+            &[reviewed("a.rs", 12, 3)],
+        );
+        assert!(files_of(&rows)[0].reviewed);
+
+        let rows = rows_for(
+            &DiffRange::Working,
+            &status,
+            &[diff_file("a.rs", 13, 3)],
+            &[reviewed("a.rs", 12, 3)],
+        );
+        assert!(!files_of(&rows)[0].reviewed, "le fichier a rechangé depuis");
+    }
+
+    /// Une relecture prise dans un domaine ne vaut pas dans l'autre : ce n'est
+    /// pas le même diff qu'on a lu.
+    #[test]
+    fn a_review_belongs_to_its_range() {
+        let status = status(vec![file(
+            "a.rs",
+            StatusCode::Modified,
+            StatusCode::Unmodified,
+        )]);
+        let rows = rows_for(
+            &DiffRange::Branch {
+                base: "master".into(),
+            },
+            &status,
+            &[diff_file("a.rs", 1, 0)],
+            &[reviewed("a.rs", 1, 0)],
+        );
+        assert!(!files_of(&rows)[0].reviewed);
+    }
+
+    /// La coche d'un dossier ne s'allume que quand tout son sous-arbre est lu,
+    /// replié compris — c'est ce qu'elle promet en un clic.
+    #[test]
+    fn a_directory_is_reviewed_only_when_all_of_it_is() {
+        let status = status(vec![
+            file("src/un.rs", StatusCode::Modified, StatusCode::Unmodified),
+            file("src/deux.rs", StatusCode::Modified, StatusCode::Unmodified),
+        ]);
+        let files = [diff_file("src/un.rs", 1, 0), diff_file("src/deux.rs", 2, 0)];
+        let flat = rows_for(
+            &DiffRange::Working,
+            &status,
+            &files,
+            &[reviewed("src/un.rs", 1, 0)],
+        );
+        let dirs = tree_rows(&flat, &HashSet::new());
+        let dir = dirs
+            .iter()
+            .find_map(|row| match row {
+                Row::Dir(dir) => Some(dir),
+                _ => None,
+            })
+            .expect("un dossier");
+        assert!(!dir.reviewed);
+        assert_eq!(dir.paths.len(), 2, "la coche porte tout le sous-arbre");
+
+        let flat = rows_for(
+            &DiffRange::Working,
+            &status,
+            &files,
+            &[reviewed("src/un.rs", 1, 0), reviewed("src/deux.rs", 2, 0)],
+        );
+        let dirs = tree_rows(&flat, &HashSet::new());
+        assert!(dirs
+            .iter()
+            .any(|row| matches!(row, Row::Dir(dir) if dir.reviewed)));
     }
 
     #[test]
@@ -1377,7 +1602,7 @@ mod tests {
             StatusCode::Modified,
             StatusCode::Unmodified,
         )]);
-        let rows = rows_for(&DiffRange::Working, &status, &[]);
+        let rows = rows_for(&DiffRange::Working, &status, &[], &[]);
         assert_eq!(groups_of(&rows), vec![Group::Tracked]);
     }
 
@@ -1387,7 +1612,7 @@ mod tests {
             file("un.rs", StatusCode::Modified, StatusCode::Unmodified),
             file("deux.rs", StatusCode::Unmodified, StatusCode::Modified),
         ]);
-        let rows = rows_for(&DiffRange::Working, &mixed, &[]);
+        let rows = rows_for(&DiffRange::Working, &mixed, &[], &[]);
         assert!(!group_checked(&rows, Group::Tracked));
         assert_eq!(group_paths(&rows, Group::Tracked).len(), 2);
 
@@ -1395,7 +1620,7 @@ mod tests {
             file("un.rs", StatusCode::Modified, StatusCode::Unmodified),
             file("deux.rs", StatusCode::Added, StatusCode::Unmodified),
         ]);
-        let rows = rows_for(&DiffRange::Working, &everything, &[]);
+        let rows = rows_for(&DiffRange::Working, &everything, &[], &[]);
         assert!(group_checked(&rows, Group::Tracked));
     }
 
@@ -1405,7 +1630,7 @@ mod tests {
             file("suivi.rs", StatusCode::Modified, StatusCode::Unmodified),
             file("neuf.rs", StatusCode::Untracked, StatusCode::Untracked),
         ]);
-        let rows = rows_for(&DiffRange::Working, &status, &[]);
+        let rows = rows_for(&DiffRange::Working, &status, &[], &[]);
         assert_eq!(
             group_paths(&rows, Group::Untracked),
             vec![PathBuf::from("neuf.rs")]
@@ -1440,12 +1665,12 @@ mod tests {
             removed: 3,
             binary: false,
         }];
-        let rows = rows_for(&DiffRange::Working, &status, &files);
+        let rows = rows_for(&DiffRange::Working, &status, &files, &[]);
         let row = files_of(&rows)[0];
         assert_eq!((row.added, row.removed), (12, 3));
 
         // Sans `--numstat` encore arrivé, la ligne s'affiche quand même.
-        let rows = rows_for(&DiffRange::Working, &status, &[]);
+        let rows = rows_for(&DiffRange::Working, &status, &[], &[]);
         assert_eq!(
             (files_of(&rows)[0].added, files_of(&rows)[0].removed),
             (0, 0)
@@ -1470,6 +1695,7 @@ mod tests {
             },
             &Status::default(),
             &files,
+            &[],
         );
         assert!(groups_of(&rows).is_empty(), "pas de groupes sur un commit");
         let row = files_of(&rows)[0];

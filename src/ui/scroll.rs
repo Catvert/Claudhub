@@ -112,6 +112,12 @@ impl Scrollable for gpui::UniformListScrollHandle {
     }
 }
 
+impl Scrollable for gpui_component::VirtualListScrollHandle {
+    fn base(&self) -> gpui::ScrollHandle {
+        self.base_handle().clone()
+    }
+}
+
 impl ClaudhubApp {
     /// Le lissage d'un panneau, créé à sa première molette.
     ///
