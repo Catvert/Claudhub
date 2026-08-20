@@ -867,7 +867,9 @@ impl ClaudhubApp {
                         gpui::MouseButton::Left,
                         cx.listener(|this, _, _window, _cx| this.end_diff_drag()),
                     )
-                    .child(
+                    .child(crate::ui::scroll::both(
+                        "diff-lines-bar",
+                        &self.diff_scroll,
                         uniform_list("diff-lines", count, move |range, _window, cx| {
                             range
                                 .map(|ix| {
@@ -915,7 +917,7 @@ impl ClaudhubApp {
                         // n'importe laquelle mesure donc la bonne.
                         .with_width_from_item(Some(if split { 0 } else { diff.longest_row }))
                         .track_scroll(self.diff_scroll.clone()),
-                    )
+                    ))
                     // Le clic droit porte les gestes qui n'ont pas de bouton
                     // sous la main : on vient de sélectionner des lignes, et
                     // remonter à la barre d'en-tête pour agir dessus est un

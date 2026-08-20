@@ -214,7 +214,9 @@ impl ClaudhubApp {
             .filter(|range| matches!(range, DiffRange::Commit { .. }));
 
         let graph = v_flex().size_full().child(header).child(
-            div().flex_1().min_h_0().child(
+            div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
+                "history-bar",
+                &self.history_scroll,
                 uniform_list("history", count, move |visible, _window, cx| {
                     visible
                         .map(|ix| {
@@ -232,7 +234,7 @@ impl ClaudhubApp {
                 })
                 .size_full()
                 .track_scroll(self.history_scroll.clone()),
-            ),
+            )),
         );
 
         // Le graphe seul ne dit pas ce qu'un commit a touché : la liste de ses

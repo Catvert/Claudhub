@@ -21,6 +21,7 @@ mod notes;
 pub(crate) mod notes_view;
 mod panels;
 mod review;
+mod scroll;
 mod sentry_view;
 mod settings;
 mod settings_view;

@@ -116,6 +116,7 @@ impl ClaudhubApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let sidebar_scroll = self.scroll_of("sidebar");
         // Le `wt.toml` de chaque dépôt, demandé une fois : c'est lui qui
         // décide de ce que le menu d'un worktree propose.
         let mains: Vec<PathBuf> = self.repos.iter().map(|repo| repo.main.clone()).collect();
@@ -182,46 +183,47 @@ impl ClaudhubApp {
                     ),
             )
             .child(
-                div()
-                    .id("sidebar-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    // Au premier lancement, c'est tout ce qu'on voit : un
-                    // texte gris ne dit pas quoi faire, un bouton si.
-                    .when(empty, |el| {
-                        el.child(
-                            v_flex()
-                                .p_4()
-                                .gap_2()
-                                .items_center()
-                                .child(
-                                    icon("folder")
-                                        .large()
-                                        .text_color(cx.theme().muted_foreground.opacity(0.4)),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_center()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(tr!("sidebar-empty")),
-                                )
-                                .child(
-                                    Button::new("open-first-repo")
-                                        .outline()
-                                        .small()
-                                        .label(tr!("sidebar-open-repository"))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.prompt_open_repository(window, cx);
-                                        })),
-                                ),
-                        )
-                    })
-                    .children(
-                        repos
-                            .into_iter()
-                            .map(|(ix, main, name, collapsed, worktrees)| {
+                div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
+                    "sidebar-bar",
+                    &sidebar_scroll,
+                    div()
+                        .id("sidebar-scroll")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&sidebar_scroll)
+                        // Au premier lancement, c'est tout ce qu'on voit : un
+                        // texte gris ne dit pas quoi faire, un bouton si.
+                        .when(empty, |el| {
+                            el.child(
+                                v_flex()
+                                    .p_4()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        icon("folder")
+                                            .large()
+                                            .text_color(cx.theme().muted_foreground.opacity(0.4)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_center()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(tr!("sidebar-empty")),
+                                    )
+                                    .child(
+                                        Button::new("open-first-repo")
+                                            .outline()
+                                            .small()
+                                            .label(tr!("sidebar-open-repository"))
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.prompt_open_repository(window, cx);
+                                            })),
+                                    ),
+                            )
+                        })
+                        .children(repos.into_iter().map(
+                            |(ix, main, name, collapsed, worktrees)| {
                                 let main_for_add = main.clone();
                                 v_flex()
                                     .child(
@@ -435,8 +437,9 @@ impl ClaudhubApp {
                                             },
                                         ))
                                     })
-                            }),
-                    ),
+                            },
+                        )),
+                )),
             )
     }
 

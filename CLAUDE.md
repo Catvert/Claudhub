@@ -61,6 +61,7 @@ src/
     store.rs        ce qu'on retient par worktree : base, replis, notes
     notes.rs        le modèle des notes, leur ancrage et leur prompt
     notes_view.rs   les gestes de la relecture annotée et son panneau
+    scroll.rs       la barre de défilement d'un panneau
     theme.rs / shortcuts.rs / icons.rs
 ```
 
@@ -468,6 +469,37 @@ Trois points qui ne se devinent pas :
   champ. Les replis sont triés avant d'être écrits : un `HashSet` sérialisé
   dans un ordre différent à chaque fois ferait un fichier qui change sans que
   rien n'ait changé.
+
+### Les barres de défilement
+
+Tout panneau qui défile en porte une (`ui::scroll`). Une liste virtualisée ne
+dit rien d'elle-même : `uniform_list` ne peint que ses entrées, et rien ne
+distingue « il reste trois lignes » de « il en reste trois mille ». La barre
+est le seul repère de position qu'ait ce genre de liste, et les nôtres font
+couramment plusieurs milliers d'entrées — un diff de relecture d'agent,
+l'explorateur d'un projet Laravel.
+
+Trois choix à connaître :
+
+- **Elle se pose par-dessus le contenu**, en absolu, d'où le `relative` du
+  conteneur. Lui réserver une colonne rognerait dix pixels de largeur utile
+  dans chaque panneau, alors que la moitié d'entre eux n'ont pas de quoi
+  défiler la plupart du temps.
+- **L'identifiant est donné explicitement.** `Scrollbar::new` le déduit sinon
+  de la ligne d'appel, qui serait celle de notre helper : tous les panneaux
+  partageraient l'état d'une seule barre — survol, glissement, minuterie.
+- **`ScrollbarShow::Hover`**, posé dans `theme::apply`. Le défaut efface la
+  barre deux secondes après le dernier cran de molette ; on relit un diff en
+  s'arrêtant à chaque hunk, et elle aurait disparu à chaque fois qu'on se
+  demande où l'on en est.
+
+Les panneaux non virtualisés — notes, conflits, Sentry, barre latérale —
+n'avaient pas de poignée du tout : elle vient de `ClaudhubApp::scroll_of`, une
+table plutôt qu'un champ par panneau. Créée au rendu, elle remettrait la liste
+en haut à chaque frame.
+
+Le terminal fait exception : son défilement n'est pas celui de gpui mais le
+`display_offset` de la grille alacritty, qu'aucune `ScrollHandle` ne décrit.
 
 ### Les hauteurs de ligne
 

@@ -467,6 +467,7 @@ impl ClaudhubApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let notes_scroll = self.scroll_of("notes");
         let Some(state) = self.active_review() else {
             return empty_notes(tr!("no-worktree"), cx).into_any_element();
         };
@@ -577,12 +578,16 @@ impl ClaudhubApp {
             .size_full()
             .child(bar)
             .child(
-                v_flex()
-                    .id("notes-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .children(sections),
+                div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
+                    "notes-bar",
+                    &notes_scroll,
+                    v_flex()
+                        .id("notes-list")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&notes_scroll)
+                        .children(sections),
+                )),
             )
             .into_any_element()
     }

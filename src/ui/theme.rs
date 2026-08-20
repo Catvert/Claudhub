@@ -107,6 +107,13 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
     theme.font_family = settings.ui_font().to_string().into();
     theme.mono_font_family = settings.mono_font().to_string().into();
     theme.font_size = px(settings.font_size);
+    // Les barres de défilement apparaissent au **survol** du panneau, et non
+    // seulement pendant qu'on fait défiler. Le défaut de gpui-component les
+    // efface deux secondes après le dernier cran de molette : on relit un
+    // diff de plusieurs milliers de lignes en s'arrêtant à chaque hunk, et la
+    // barre — qui est ici le seul repère de position d'une liste virtualisée —
+    // aurait disparu à chaque fois qu'on se demande où l'on en est.
+    theme.scrollbar_show = gpui_component::scroll::ScrollbarShow::Hover;
 
     cx.refresh_windows();
 }

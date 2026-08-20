@@ -85,6 +85,7 @@ impl ClaudhubApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let list_scroll = self.scroll_of("conflicts");
         let pending = self.pending_operation();
         let files = self.conflicted_files();
         let range = crate::git::DiffRange::Working;
@@ -147,12 +148,16 @@ impl ClaudhubApp {
             .size_full()
             .child(bar)
             .child(
-                v_flex()
-                    .id("conflict-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .children(rows),
+                div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
+                    "conflict-bar",
+                    &list_scroll,
+                    v_flex()
+                        .id("conflict-list")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&list_scroll)
+                        .children(rows),
+                )),
             )
             .into_any_element()
     }

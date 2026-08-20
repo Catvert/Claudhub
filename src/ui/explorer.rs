@@ -404,7 +404,9 @@ impl ClaudhubApp {
             .size_full()
             .child(bar)
             .child(
-                div().flex_1().min_h_0().child(
+                div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
+                    "project-files-bar",
+                    &scroll,
                     uniform_list("project-files", count, move |visible, _window, cx| {
                         visible
                             .map(|ix| {
@@ -422,8 +424,8 @@ impl ClaudhubApp {
                             .collect::<Vec<_>>()
                     })
                     .size_full()
-                    .track_scroll(scroll),
-                ),
+                    .track_scroll(scroll.clone()),
+                )),
             )
             .into_any_element()
     }

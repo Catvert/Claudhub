@@ -203,6 +203,7 @@ impl ClaudhubApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let issues_scroll = self.scroll_of("sentry-issues");
         let org = Settings::global(cx).sentry_org.trim().to_string();
         let project = self.sentry_project(cx);
         let muted = cx.theme().muted_foreground;
@@ -286,12 +287,16 @@ impl ClaudhubApp {
             .size_full()
             .child(bar)
             .child(
-                v_flex()
-                    .id("sentry-issues")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .children(rows),
+                div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
+                    "sentry-issues-bar",
+                    &issues_scroll,
+                    v_flex()
+                        .id("sentry-issues")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&issues_scroll)
+                        .children(rows),
+                )),
             )
             .children(self.render_trace(cx))
             .into_any_element()
@@ -351,6 +356,7 @@ impl ClaudhubApp {
 
     /// La trace de l'issue choisie, avec ses frames cliquables.
     fn render_trace(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let trace_scroll = self.scroll_of("sentry-trace");
         let worktree = self.active.clone()?;
         let event = self.sentry.event.clone()?;
         let (muted, mono) = (
@@ -431,12 +437,16 @@ impl ClaudhubApp {
                         ),
                 )
                 .child(
-                    v_flex()
-                        .id("sentry-trace")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .children(frames),
+                    div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
+                        "sentry-trace-bar",
+                        &trace_scroll,
+                        v_flex()
+                            .id("sentry-trace")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&trace_scroll)
+                            .children(frames),
+                    )),
                 ),
         )
     }

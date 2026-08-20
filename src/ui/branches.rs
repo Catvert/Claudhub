@@ -171,7 +171,9 @@ impl ClaudhubApp {
             .size_full()
             .child(header)
             .child(
-                div().flex_1().min_h_0().child(
+                div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
+                    "branch-list-bar",
+                    &self.branch_scroll,
                     uniform_list("branch-list", count, move |visible, _window, cx| {
                         visible
                             .map(|ix| match rows.get(ix) {
@@ -185,7 +187,7 @@ impl ClaudhubApp {
                     })
                     .size_full()
                     .track_scroll(self.branch_scroll.clone()),
-                ),
+                )),
             )
             .into_any_element()
     }

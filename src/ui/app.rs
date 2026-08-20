@@ -485,6 +485,12 @@ pub struct ClaudhubApp {
     /// « Modifications » sont affichés en même temps, et une seule poignée les
     /// ferait défiler ensemble.
     file_scroll: HashMap<DiffRange, gpui::UniformListScrollHandle>,
+    /// Poignées de défilement des panneaux qui ne sont **pas** virtualisés —
+    /// les notes, les conflits, Sentry, la barre latérale. Une table plutôt
+    /// qu'un champ par panneau : ce sont toutes la même chose, et elles ne
+    /// servent qu'à donner une position à la barre de défilement. Créées ici
+    /// et non au rendu, sans quoi la liste remonterait en haut à chaque frame.
+    scrolls: HashMap<&'static str, gpui::ScrollHandle>,
     /// Filtre du panneau des branches. Une entité créée une fois : recréée par
     /// frame, elle perdrait le curseur et le texte dès la première frappe.
     pub(super) branch_filter: Entity<InputState>,
@@ -633,6 +639,7 @@ impl ClaudhubApp {
             history_scroll: gpui::UniformListScrollHandle::new(),
             branch_scroll: gpui::UniformListScrollHandle::new(),
             file_scroll: HashMap::new(),
+            scrolls: HashMap::new(),
             branch_filter,
             history_split: cx.new(|_| gpui_component::resizable::ResizableState::default()),
             focus: cx.focus_handle(),
@@ -1207,6 +1214,11 @@ impl ClaudhubApp {
     /// haut à chaque image.
     pub(super) fn file_scroll(&mut self, range: &DiffRange) -> gpui::UniformListScrollHandle {
         self.file_scroll.entry(range.clone()).or_default().clone()
+    }
+
+    /// La poignée de défilement d'un panneau non virtualisé.
+    pub(super) fn scroll_of(&mut self, key: &'static str) -> gpui::ScrollHandle {
+        self.scrolls.entry(key).or_default().clone()
     }
 
     /// Redemande le diff du fichier affiché.
