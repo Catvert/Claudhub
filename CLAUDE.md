@@ -925,9 +925,10 @@ Deux détails s'y paient :
 
 ### Le panneau « Notes »
 
-Il s'appelait « Relecture » et ne portait que les remarques. Trois choses se
+Il s'appelait « Relecture » et ne portait que les remarques. Quatre choses se
 gèrent au même endroit désormais, parce qu'elles vivent déjà dans le même
-dossier : les **tâches**, les **remarques**, les **fichiers relus**.
+dossier : les **tâches**, la **note libre**, les **remarques**, les **fichiers
+relus**.
 
 **Des sections repliables, ni trois panneaux ni des sous-onglets.** Trois
 panneaux feraient trois onglets pour un seul sujet — et « Modifications » et
@@ -981,13 +982,49 @@ entier**.
   marque `claudhub:` mais sur sa **valeur** (`files::is_ours` : `note` et
   `review`) : `claudhub: todo` porte notre marque sans nous appartenir, et une
   note supprimée emportait sinon la liste de tâches en cours.
-- **Claudhub ne le crée pas tout seul** : un geste explicite, comme le dossier
-  de notes lui-même que `notes_on_disk` retient de semer. Le fichier posé
-  explique son propre format — il finit dans un coffre, ouvert par quelqu'un
-  qui n'a pas lu ceci.
+- **Claudhub ne le crée pas tout seul** : il naît de la première tâche qu'on
+  ajoute, comme le dossier de notes que `notes_on_disk` retient de semer.
+  « Créer une liste vide » n'est pas un geste qu'on a envie de faire, et
+  l'agent, lui, crée le sien par `$CLAUDHUB_TODO`. Le fichier posé explique son
+  propre format — il finit dans un coffre, ouvert par quelqu'un qui n'a pas lu
+  ceci.
+- **Une tâche s'ajoute après la dernière**, pas à la fin du fichier
+  (`vault::append_task`) : un agent écrit sous sa liste — ce qu'il a compris,
+  ce qui reste à décider —, et une tâche posée après cette prose ne se lirait
+  plus comme faisant partie de la liste.
 - Il s'affiche **au-dessus** des notes et hors de leur défilement : c'est ce
   qu'on regarde pour savoir où en est l'agent, et le faire descendre avec une
   revue de trois cents notes reviendrait à ne jamais le voir.
+
+### La note libre d'un worktree
+
+`NOTES.md`, à côté des tâches et des remarques : ce qu'on écrit *sur* le
+travail en cours et qui ne porte sur aucune ligne — une piste, une décision, ce
+qu'on reprendra demain. Elle s'édite sur place dans le panneau, sans dialogue
+ni bouton « enregistrer » : c'est un bloc-notes, et devoir le valider est le
+meilleur moyen d'y perdre trois phrases.
+
+Quatre choses, et trois d'entre elles la distinguent de tout le reste du
+coffre :
+
+- **Pas de frontmatter.** C'est du Markdown ordinaire, celui qu'on tiendrait de
+  toute façon dans son coffre. Son absence de marque la met du même coup hors
+  de portée de la purge de `sync_notes`.
+- **Vide, elle n'existe pas.** Un fichier vide et un fichier absent ne se
+  distinguent pas dans un coffre, et laisser une coquille par worktree ouvert
+  est exactement ce que `notes_on_disk` évite ailleurs — d'où
+  `files::write_vault_file`, où un texte vide **efface**, sous la même
+  empreinte que l'écriture.
+- **L'écriture est différée d'une seconde**, comme les réglages et pour la même
+  raison : une zone de saisie émet une valeur par frappe, et un coffre se
+  synchronise.
+- **Une seule zone de saisie pour tous les worktrees**, dont le contenu suit
+  celui qui est affiché. Elle n'est **jamais** rechargée pendant qu'on y écrit :
+  le coffre est relu à chaque écriture — la nôtre comprise —, et remettre le
+  texte du disque sous les doigts déplacerait le curseur au milieu d'une
+  phrase. Ce qui arrive d'ailleurs pendant qu'on tape attend le prochain
+  chargement, et c'est le bon arbitrage : deux mains sur le même paragraphe
+  n'ont pas de fusion.
 
 ### Marquer un fichier relu
 

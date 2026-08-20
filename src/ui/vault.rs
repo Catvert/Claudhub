@@ -169,6 +169,45 @@ pub const INDEX: &str = "Relecture.md";
 /// tâches — sans que la prochaine écriture de note l'efface.
 pub const TODO: &str = "TODO.md";
 
+/// La note libre d'un worktree : ce qu'on écrit *à côté* du code, et qui ne
+/// porte sur aucune ligne en particulier.
+///
+/// Elle n'a **pas de frontmatter** : c'est du Markdown ordinaire, celui qu'on
+/// tiendrait de toute façon dans son coffre, et une note de coffre n'a pas à
+/// porter nos clés pour être lisible. Le nom suffit à la retrouver, et son
+/// absence de marque la met du même coup hors de portée de la purge.
+///
+/// Vide, elle **n'existe pas** : un fichier vide et un fichier absent ne se
+/// distinguent pas dans un coffre, et laisser une coquille par worktree ouvert
+/// est exactement ce que `notes_on_disk` évite ailleurs.
+pub const NOTES: &str = "NOTES.md";
+
+/// Ajoute une tâche à un `TODO.md`, après la dernière qu'il porte.
+///
+/// Après la dernière tâche et non à la fin du fichier : un agent écrit sous sa
+/// liste — ce qu'il a compris, ce qui reste à décider —, et une tâche ajoutée
+/// après cette prose ne se lirait plus comme faisant partie de la liste.
+pub fn append_task(text: &str, label: &str) -> String {
+    let label = label.trim();
+    let entry = format!("- [ ] {label}");
+    let tasks = parse_todo(text).tasks;
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    match tasks.last() {
+        Some(last) => lines.insert(last.line + 1, entry),
+        None => {
+            // Une ligne vide avant la première tâche : elle suit de la prose,
+            // et Markdown ne commence pas une liste collée à un paragraphe.
+            if lines.last().is_some_and(|line| !line.trim().is_empty()) {
+                lines.push(String::new());
+            }
+            lines.push(entry);
+        }
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
 /// Le dossier d'un worktree : `<racine>/<dépôt>/<worktree>`.
 ///
 /// Deux niveaux et non un chemin aplati : un coffre se parcourt à la main, et
@@ -677,6 +716,27 @@ mod tests {
     fn a_line_that_is_no_longer_a_box_refuses_the_toggle() {
         assert!(toggle_task("- [ ] une tâche\ndu texte\n", 1, true).is_none());
         assert!(toggle_task("- [ ] une tâche\n", 9, true).is_none());
+    }
+
+    /// Une tâche s'ajoute à la liste, pas sous ce que l'agent a écrit après.
+    #[test]
+    fn a_task_lands_after_the_last_one() {
+        let text = "# À faire\n\n- [x] lire\n- [ ] écrire\n\nCe qui reste à décider.\n";
+        let after = append_task(text, "  relire  ");
+        assert_eq!(
+            after,
+            "# À faire\n\n- [x] lire\n- [ ] écrire\n- [ ] relire\n\nCe qui reste à décider.\n"
+        );
+        assert_eq!(parse_todo(&after).tasks.len(), 3);
+    }
+
+    /// Sans tâche, la liste commence — mais pas collée au paragraphe qui la
+    /// précède, que Markdown ne lirait pas comme une liste.
+    #[test]
+    fn the_first_task_opens_the_list() {
+        let after = append_task(&seed_todo(Path::new("/tmp/wt")), "lire le diff");
+        assert_eq!(parse_todo(&after).tasks.len(), 1);
+        assert!(after.ends_with("\n- [ ] lire le diff\n"));
     }
 
     /// Le fichier qu'on pose doit se relire : c'est le même contrat que les

@@ -403,12 +403,12 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
             Ok(()) => vec![Evt::VaultWritten { worktree }],
             Err(e) => vec![fail(None, Action::Notes, e)],
         },
-        Cmd::WriteTodo {
+        Cmd::WriteVaultFile {
             worktree,
             path,
             text,
             expect,
-        } => match crate::files::write_at(&path, &text, expect) {
+        } => match crate::files::write_vault_file(&path, &text, expect) {
             Ok(()) => vec![Evt::VaultWritten { worktree }],
             Err(e) => vec![fail(None, Action::Notes, e)],
         },

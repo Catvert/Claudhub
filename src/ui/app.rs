@@ -279,6 +279,12 @@ pub struct ReviewState {
     /// alors. Comme les notes, ils vivent dans le dossier de notes et non dans
     /// le magasin d'état : c'est la même relecture, et elle se lit d'un coup.
     pub reviewed: Vec<crate::ui::vault::Reviewed>,
+    /// La note libre du worktree : `NOTES.md`, tel qu'il est sur le disque.
+    ///
+    /// Une chaîne et non un `Option` : vide veut dire « pas de fichier », et
+    /// les deux ne s'affichent pas différemment — la zone de saisie est là de
+    /// toute façon, c'est justement ce qui la rend disponible sans geste.
+    pub journal: String,
     /// La liste de tâches du worktree, si le coffre en porte une.
     ///
     /// `None` veut dire « pas de `TODO.md` », pas « aucune tâche » : les deux
@@ -359,6 +365,7 @@ impl Default for ReviewState {
             notes: Vec::new(),
             next_note: 1,
             reviewed: Vec::new(),
+            journal: String::new(),
             todo: None,
             notes_loaded: false,
             notes_on_disk: false,
@@ -434,6 +441,16 @@ pub struct ClaudhubApp {
     pub(super) note_input: Entity<InputState>,
     /// Le prompt qui part à l'agent, avant qu'il parte.
     pub(super) prompt_input: Entity<InputState>,
+    /// La saisie d'une tâche à ajouter à `TODO.md`.
+    pub(super) task_input: Entity<InputState>,
+    /// La zone de saisie de la note libre du worktree.
+    ///
+    /// Une seule pour tous les worktrees, dont le contenu suit celui qui est
+    /// affiché : une par worktree ouvert garderait autant d'états d'édition
+    /// vivants, et il n'y en a jamais qu'un sous les yeux.
+    pub(super) journal_input: Entity<InputState>,
+    /// Une écriture de la note libre est déjà programmée.
+    pub(super) journal_save: bool,
     /// La note en cours de rédaction : son ancrage, arrêté au moment du geste.
     ///
     /// Il est arrêté là et non à la validation parce que le diff peut changer
@@ -652,6 +669,18 @@ impl ClaudhubApp {
                 .auto_grow(8, 20)
         });
 
+        let task_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("todo-add-placeholder")));
+
+        // La note libre : elle grandit avec ce qu'on y écrit, dans les limites
+        // que la section peut donner sans repousser le reste hors de vue.
+        let journal_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .auto_grow(3, 14)
+                .placeholder(tr!("journal-placeholder"))
+        });
+
         let base_select = cx.new(|cx| {
             SelectState::new(
                 SearchableVec::new(Vec::<BaseChoice>::new()),
@@ -745,6 +774,9 @@ impl ClaudhubApp {
             base_select,
             note_input,
             prompt_input,
+            task_input,
+            journal_input,
+            journal_save: false,
             notes_collapsed: std::collections::HashSet::new(),
             note_draft: None,
             notes_only_open: false,
@@ -793,6 +825,7 @@ impl ClaudhubApp {
         app.pump_events(events, window, cx);
         app.start_scanning(cx);
         app.start_watching(window, cx);
+        app.watch_journal_input(cx);
 
         // Les dépôts de la session précédente, puis le répertoire courant s'il
         // en est un — c'est ce qu'attend quelqu'un qui lance `claudhub` depuis son
@@ -941,6 +974,99 @@ impl ClaudhubApp {
             }
         })
         .detach();
+    }
+
+    // — La note libre d'un worktree ————————————————————————————————
+
+    /// Programme l'écriture de la note libre à chaque frappe.
+    ///
+    /// Différée d'une seconde, comme les réglages et pour la même raison : une
+    /// zone de saisie émet une valeur par frappe, et un coffre se synchronise —
+    /// écrire à chaque caractère ferait travailler la synchronisation en
+    /// permanence. Pas de bouton « enregistrer » : c'est un bloc-notes, et
+    /// devoir le valider serait le meilleur moyen d'y perdre trois phrases.
+    fn watch_journal_input(&mut self, cx: &mut Context<Self>) {
+        cx.subscribe(&self.journal_input.clone(), |this, _, event, cx| {
+            if !matches!(event, gpui_component::input::InputEvent::Change) {
+                return;
+            }
+            this.schedule_journal_save(cx);
+        })
+        .detach();
+    }
+
+    fn schedule_journal_save(&mut self, cx: &mut Context<Self>) {
+        if self.journal_save {
+            return;
+        }
+        self.journal_save = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(1))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.journal_save = false;
+                this.persist_journal(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Écrit la note libre du worktree affiché, ou l'efface si elle est vide.
+    fn persist_journal(&mut self, cx: &mut Context<Self>) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let Some(dir) = self.notes_dir(&worktree, cx) else {
+            return;
+        };
+        let text = self.journal_input.read(cx).value().to_string();
+        let Some(state) = self.review.get_mut(&worktree) else {
+            return;
+        };
+        // Rien tant que le dossier n'a pas répondu : ce qu'on a en mémoire au
+        // démarrage est une page blanche, et l'écrire effacerait la note qu'on
+        // n'a pas encore lue.
+        if !state.notes_loaded || state.journal == text {
+            return;
+        }
+        let expect = (!state.journal.is_empty()).then(|| crate::files::digest(&state.journal));
+        state.journal = text.clone();
+        self.git.send(Cmd::WriteVaultFile {
+            worktree,
+            path: dir.join(crate::ui::vault::NOTES),
+            text,
+            expect,
+        });
+    }
+
+    /// Remet dans la zone de saisie la note du worktree affiché.
+    ///
+    /// Jamais pendant qu'on y écrit : le coffre est relu à chaque écriture —
+    /// la nôtre comprise —, et remettre le texte du disque sous les doigts
+    /// déplacerait le curseur au milieu d'une phrase. Ce qui arrive d'ailleurs
+    /// pendant qu'on tape attendra donc le prochain chargement, et c'est le bon
+    /// arbitrage : deux mains sur le même paragraphe n'ont pas de fusion.
+    fn sync_journal_input(&mut self, worktree: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active.as_deref() != Some(worktree) {
+            return;
+        }
+        if self
+            .journal_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+        {
+            return;
+        }
+        let Some(text) = self.review.get(worktree).map(|state| state.journal.clone()) else {
+            return;
+        };
+        if self.journal_input.read(cx).value() == text.as_str() {
+            return;
+        }
+        self.journal_input
+            .update(cx, |input, cx| input.set_value(text, window, cx));
     }
 
     fn file_changed(&mut self, path: &Path, cx: &mut Context<Self>) {
@@ -1174,12 +1300,15 @@ impl ClaudhubApp {
                 let mut notes = Vec::new();
                 let mut reviewed = Vec::new();
                 let mut todo = None;
+                let mut journal = String::new();
                 let on_disk = !files.is_empty();
                 for (name, text) in files {
                     if name == crate::ui::vault::INDEX {
                         reviewed = crate::ui::vault::parse_index(&text);
                     } else if name == crate::ui::vault::TODO {
                         todo = Some(crate::ui::vault::parse_todo(&text));
+                    } else if name == crate::ui::vault::NOTES {
+                        journal = text;
                     } else if let Some(note) = crate::ui::vault::parse_note(&text) {
                         notes.push(note);
                     }
@@ -1216,10 +1345,12 @@ impl ClaudhubApp {
                     state.notes = notes;
                     state.reviewed = reviewed;
                     state.todo = todo;
+                    state.journal = journal;
                     state.notes_loaded = true;
                     state.notes_on_disk = on_disk;
                 }
                 self.refresh_note_marks(&worktree);
+                self.sync_journal_input(&worktree, window, cx);
                 if migrating {
                     self.persist_notes(&worktree, cx);
                 }
@@ -1411,6 +1542,9 @@ impl ClaudhubApp {
         }
         self.active = Some(path.clone());
         self.ensure_review(&path, cx);
+        // La note libre suit le worktree affiché : la zone de saisie est
+        // unique, et garder le texte du précédent le ferait écrire ici.
+        self.sync_journal_input(&path, window, cx);
         self.request_status(path);
         // Chaque worktree a sa base : le sélecteur doit montrer celle-ci, pas
         // celle du worktree qu'on vient de quitter.

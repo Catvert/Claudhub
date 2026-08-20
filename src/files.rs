@@ -247,6 +247,35 @@ fn is_ours(text: &str) -> bool {
     text.starts_with("---") && OURS.iter().any(|mark| text.contains(mark))
 }
 
+/// Écrit un fichier du coffre, ou l'efface si son texte est vide.
+///
+/// Vide veut dire absent : un fichier vide dans un coffre est une coquille que
+/// personne n'ouvrira deux fois, et la note libre d'un worktree qu'on vide doit
+/// disparaître plutôt que de rester en travers d'une recherche.
+///
+/// L'empreinte garde l'effacement comme elle garde l'écriture : le fichier peut
+/// avoir changé depuis qu'on l'a lu.
+pub fn write_vault_file(path: &Path, text: &str, expect: Option<u64>) -> Result<()> {
+    if !text.trim().is_empty() {
+        return write_at(path, text, expect);
+    }
+    match std::fs::read_to_string(path) {
+        Ok(current) => {
+            if expect.is_some_and(|expected| digest(&current) != expected) {
+                bail!(
+                    "{} a changé depuis son ouverture : rechargez-le avant d'enregistrer",
+                    path.display()
+                );
+            }
+            std::fs::remove_file(path)
+                .with_context(|| format!("suppression de {} impossible", path.display()))
+        }
+        // Rien à effacer : c'est l'état qu'on demandait.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("lecture de {}", path.display())),
+    }
+}
+
 /// Les fichiers Markdown d'un dossier de notes, nom et contenu.
 ///
 /// Un dossier absent n'est pas une erreur : c'est l'état d'un worktree qu'on

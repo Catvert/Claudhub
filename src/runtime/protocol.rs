@@ -233,16 +233,19 @@ pub enum Cmd {
         dir: PathBuf,
         files: Vec<(String, String)>,
     },
-    /// Écrit la liste de tâches d'un worktree, sauf si elle a changé depuis
-    /// qu'on l'a lue.
+    /// Écrit un fichier du coffre, sauf s'il a changé depuis qu'on l'a lu.
     ///
-    /// Une commande à part de `WriteNotes`, et conditionnelle, parce que ce
-    /// fichier n'est **pas à nous** : l'agent du worktree y coche ce qu'il
-    /// vient de faire pendant qu'on le regarde. L'empreinte est celle de ce
-    /// qu'on avait sous les yeux ; un écart veut dire qu'il a écrit entre-temps,
-    /// et cocher au jugé effacerait son travail. C'est le garde de
-    /// `files::write`, pour la même raison.
-    WriteTodo {
+    /// Une commande à part de `WriteNotes`, et conditionnelle, parce que ces
+    /// fichiers-là ne sont **pas à nous** : l'agent du worktree coche dans
+    /// `TODO.md` pendant qu'on le regarde. L'empreinte est celle de ce qu'on
+    /// avait sous les yeux ; un écart veut dire qu'il a écrit entre-temps, et
+    /// écrire au jugé effacerait son travail. C'est le garde de `files::write`,
+    /// pour la même raison.
+    ///
+    /// **Un texte vide efface le fichier.** Dans un coffre, un fichier vide ne
+    /// se distingue pas d'un fichier absent, et en laisser un par worktree
+    /// ouvert est précisément ce que `notes_on_disk` évite ailleurs.
+    WriteVaultFile {
         worktree: WorktreeId,
         /// Le chemin complet du fichier : il vit dans le coffre, hors du
         /// worktree, et n'a pas de chemin relatif à lui donner.

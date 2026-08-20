@@ -275,7 +275,7 @@ impl ClaudhubApp {
         };
         let expect = Some(crate::files::digest(&todo.text));
         state.todo = Some(crate::ui::vault::parse_todo(&text));
-        self.git.send(Cmd::WriteTodo {
+        self.git.send(Cmd::WriteVaultFile {
             worktree,
             path: dir.join(crate::ui::vault::TODO),
             text,
@@ -284,33 +284,62 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Pose un `TODO.md` dans le coffre du worktree.
+    /// Demande une tâche et l'ajoute à la liste.
     ///
-    /// Un geste explicite, jamais automatique : ouvrir un dépôt sèmerait sinon
-    /// une liste vide dans le coffre de chacun de ses worktrees, comme le
-    /// dossier de notes lui-même que `notes_on_disk` retient de créer.
-    /// L'empreinte est `None` — on écrit là où il n'y a rien —, et c'est la
-    /// surveillance du dossier qui ramènera le fichier.
-    pub(super) fn create_todo(&mut self, cx: &mut Context<Self>) {
+    /// Le dialogue crée le fichier au besoin : « créer une liste vide » n'est
+    /// pas un geste qu'on a envie de faire, et l'agent, lui, crée le sien tout
+    /// seul par `$CLAUDHUB_TODO`.
+    pub(super) fn prompt_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active.is_none() {
+            return;
+        }
+        let input = self.task_input.clone();
+        let entity = cx.entity();
+        input.update(cx, |input, cx| input.set_value("", window, cx));
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let (input, entity) = (input.clone(), entity.clone());
+            dialog
+                .title(tr!("todo-add"))
+                .child(v_flex().w(px(420.)).child(Input::new(&input)))
+                .confirm()
+                .on_ok(move |_, _window, cx| {
+                    let label = input.read(cx).value().to_string();
+                    entity.update(cx, |this, cx| this.add_task(&label, cx));
+                    true
+                })
+        });
+    }
+
+    /// Ajoute une tâche au `TODO.md` du worktree, en le créant s'il n'y en a
+    /// pas.
+    fn add_task(&mut self, label: &str, cx: &mut Context<Self>) {
+        if label.trim().is_empty() {
+            return;
+        }
         let Some(worktree) = self.active.clone() else {
             return;
         };
         let Some(dir) = self.notes_dir(&worktree, cx) else {
             return;
         };
-        if self
+        let current = self
             .review
             .get(&worktree)
-            .is_some_and(|state| state.todo.is_some())
-        {
-            return;
+            .and_then(|state| state.todo.as_ref())
+            .map(|todo| todo.text.clone());
+        let expect = current.as_deref().map(crate::files::digest);
+        let base = current.unwrap_or_else(|| crate::ui::vault::seed_todo(&worktree));
+        let text = crate::ui::vault::append_task(&base, label);
+        if let Some(state) = self.review.get_mut(&worktree) {
+            state.todo = Some(crate::ui::vault::parse_todo(&text));
         }
-        self.git.send(Cmd::WriteTodo {
-            path: dir.join(crate::ui::vault::TODO),
-            text: crate::ui::vault::seed_todo(&worktree),
-            expect: None,
+        self.git.send(Cmd::WriteVaultFile {
             worktree,
+            path: dir.join(crate::ui::vault::TODO),
+            text,
+            expect,
         });
+        cx.notify();
     }
 
     /// Rend tous les fichiers d'un worktree à relire.
@@ -623,6 +652,7 @@ impl ClaudhubApp {
         }
         let bar = self.render_vault_bar(cx);
         let todo = self.render_todo_section(cx);
+        let journal = self.render_journal_section(cx);
         let notes = self.render_notes_section(cx);
         let reviewed = self.render_reviewed_section(cx);
 
@@ -643,6 +673,7 @@ impl ClaudhubApp {
                             .overflow_y_scroll()
                             .track_scroll(&notes_scroll)
                             .child(todo)
+                            .child(journal)
                             .child(notes)
                             .children(reviewed),
                         cx,
@@ -878,6 +909,29 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
+    /// La note libre du worktree : `NOTES.md`, éditable sur place.
+    ///
+    /// Toujours là, sans geste pour l'ouvrir : c'est un bloc-notes, et un
+    /// bloc-notes qu'il faut créer ne sert à personne. Vide, il n'existe pas
+    /// sur le disque — la zone de saisie ne raconte donc pas qu'un fichier
+    /// attend quelque part, elle attend simplement qu'on y écrive.
+    fn render_journal_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let header = self.section_header(
+            "journal",
+            "file-text",
+            tr!("journal-title"),
+            SharedString::default(),
+            cx,
+        );
+        if self.collapsed("journal") {
+            return v_flex().w_full().child(header);
+        }
+        v_flex()
+            .w_full()
+            .child(header)
+            .child(div().p_2().child(Input::new(&self.journal_input)))
+    }
+
     /// Les fichiers cochés comme relus, et de quoi les rendre à relire.
     ///
     /// Ils se cochent dans les listes de fichiers ; ils ne se **décochaient**
@@ -980,16 +1034,14 @@ impl ClaudhubApp {
         };
         let header = self
             .section_header("todo", "check-check", tr!("todo-title"), count, cx)
-            .when(todo.is_none(), |el| {
-                el.child(
-                    Button::new("todo-create")
-                        .ghost()
-                        .xsmall()
-                        .icon(icon("file-plus"))
-                        .tooltip(tr!("todo-create"))
-                        .on_click(cx.listener(|this, _, _window, cx| this.create_todo(cx))),
-                )
-            });
+            .child(
+                Button::new("todo-add")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("plus"))
+                    .tooltip(tr!("todo-add"))
+                    .on_click(cx.listener(|this, _, window, cx| this.prompt_new_task(window, cx))),
+            );
         let Some(todo) = todo.filter(|_| !self.collapsed("todo")) else {
             return v_flex().w_full().child(header);
         };
