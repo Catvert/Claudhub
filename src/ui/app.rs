@@ -96,6 +96,11 @@ fn install_default_layout(
     // worktree, un fichier dedans —, et l'arbre d'un projet est ce qui a le
     // plus besoin des deux tiers du haut. Les branches, elles, sont une liste
     // courte qu'on filtre.
+    // La moitié **fixe** d'une division est celle du bas, jamais celle du
+    // haut : l'aire du dock est plus petite que la fenêtre — barres,
+    // rembourrage, gouttières — et deux tailles fixes qui somment à la hauteur
+    // de la fenêtre débordent. Le bas de la colonne se faisait couper les
+    // coins, et la gouttière au-dessus des terminaux était avalée.
     let height = window.viewport_size().height.max(px(600.));
     let third = height / 3.;
     let left = DockLayout::v_split()
@@ -103,7 +108,7 @@ fn install_default_layout(
             DockLayout::tabs()
                 .panel_view(panels.sidebar, cx)
                 .panel_view(panels.files, cx),
-            Some(height - third),
+            None,
         )
         .child(
             DockLayout::tabs().panel_view(panels.branches, cx),
@@ -139,7 +144,7 @@ fn install_default_layout(
                     Some(px(420.)),
                 )
                 .child(DockLayout::tabs().panel_view(panels.diff, cx), None),
-            Some(height - TERMINAL_HEIGHT),
+            None,
         )
         // Les terminaux vivent dans le centre et non dans une zone d'accueil :
         // le dernier panneau d'une zone ne se déplace pas, et une zone qui n'en

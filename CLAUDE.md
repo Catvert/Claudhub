@@ -1171,6 +1171,16 @@ clarté en moins : c'est la couleur que le `split_frame` du fork peint entre
 les cartes, et que la vue racine peint derrière tout — poignées de
 redimensionnement, zones repliées appartiennent à ce plan-là.
 
+**Le masque de contenu de gpui est rectangulaire.** L'arrondi d'un élément ne
+rogne que son propre fond et sa bordure, jamais ses enfants : la carte
+arrondie du groupe tenait en haut parce que le rail des onglets est en
+retrait, et perdait ses coins bas sous le fond carré du contenu. D'où le
+`rounded_b` du fond de `pane_root` — en bas, c'est lui qui a le dernier mot.
+Corollaire pour la disposition par défaut : la moitié **fixe** d'une division
+est celle du bas, jamais celle du haut — l'aire du dock est plus petite que la
+fenêtre, et deux tailles fixes qui somment à sa hauteur font déborder la
+colonne, coins coupés et gouttière avalée.
+
 **La vue racine rembourre le dock des mêmes quatre pixels** que le fork met
 entre les cartes : sans ce `p(4.)`, les zones touchent les bords de la
 fenêtre, la barre du haut et la barre d'état, et les cartes ne respirent que
@@ -1203,15 +1213,18 @@ rembourrage que le rayon ne doit pas recouper.
 du dock, `Tab`, a un rayon **codé en dur à zéro** et rien dans le thème ne
 l'atteint ; `Tab::with_variant` et `TabBar::with_variant` existent pourtant,
 c'est seulement le panneau d'onglets du dock qui ne les transmettait pas. D'où
-le **fork** (voir `Cargo.toml`) : quatre commits au-dessus de leur `main` — le
+le **fork** (voir `Cargo.toml`) : cinq commits au-dessus de leur `main` — le
 `TabVariant` que `DockSkin` fait passer jusqu'au `TabBar` ; les coins en boîte
 bordée du bandeau réservés au variant classique, dont ils épousent les
 rectangles ; le groupe lu comme une carte hors variant classique — cadre
 arrondi, splits espacés, pastille Segmented sur le jeton `tab_active` au lieu
-d'un `background` codé en dur — ; et la même gouttière entre les **zones** du
-dock (gauche, bas, centre), qui restaient collées pendant que les splits
-respiraient. Les commits ont vocation à partir en PR, et le fork à disparaître
-avec elle.
+d'un `background` codé en dur — ; la même gouttière entre les **zones** du
+dock (gauche, bas, centre) ; et `split_gap`, un crochet du rendu que l'aire
+prend en **rembourrage** dans chaque case d'un split sauf la première — un
+`gap` CSS sur le cadre du split n'espaçait rien, ce cadre n'ayant qu'un
+enfant (le groupe redimensionnable), et une marge aurait faussé les tailles
+que la mécanique de redimensionnement distribue. Les commits ont vocation à
+partir en PR, et le fork à disparaître avec elle.
 
 **`PanelStyle::TabBar`, et non le défaut `Auto`** : `Auto` rend un titre plat
 dès qu'un groupe n'a qu'un panneau, et « Branches » ou « Terminaux » n'avaient

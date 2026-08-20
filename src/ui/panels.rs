@@ -50,8 +50,14 @@ fn pane_root(
     // gouttière, si bien que la barre d'onglets et le contenu partagent la
     // même surface, sans couture ni bordure entre eux. Redessiner une carte
     // à l'intérieur remettrait la couture qu'on vient d'enlever.
+    // `rounded_b` : le masque de contenu de gpui est **rectangulaire** —
+    // l'arrondi du cadre du groupe ne rogne pas ses enfants, et un fond carré
+    // peint ici couvrirait les coins bas de la carte. En haut, le rail des
+    // onglets est en retrait et laisse le cadre paraître ; en bas, c'est ce
+    // fond-ci qui a le dernier mot.
     div()
         .size_full()
+        .rounded_b(cx.theme().radius_lg)
         .bg(cx.theme().background)
         .capture_any_mouse_down(move |_, _window, cx| {
             app.update(cx, |app, cx| app.touch_pane(pane, cx));
