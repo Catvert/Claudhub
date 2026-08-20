@@ -28,6 +28,7 @@ use gpui_component::{
 };
 
 use crate::git::DiffRange;
+use crate::runtime::protocol::Cmd;
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
@@ -243,6 +244,73 @@ impl ClaudhubApp {
         self.refresh_note_marks(&worktree);
         self.persist_review(&worktree, cx);
         cx.notify();
+    }
+
+    // — La liste de tâches du worktree ————————————————————————————
+
+    /// Coche ou décoche une tâche de `TODO.md`.
+    ///
+    /// L'écriture est **conditionnelle**, et c'est tout l'intérêt : ce fichier
+    /// est celui de l'agent, qui y coche ce qu'il vient de finir pendant qu'on
+    /// le lit. L'empreinte de ce qu'on avait sous les yeux repart avec
+    /// l'écriture, et un fichier qui a bougé depuis la fait refuser plutôt que
+    /// d'écraser son travail. La liste affichée, elle, se met à jour tout de
+    /// suite : la surveillance du coffre ramènera de toute façon la vérité du
+    /// disque un quart de seconde plus tard.
+    pub(super) fn toggle_task(&mut self, line: usize, done: bool, cx: &mut Context<Self>) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let Some(dir) = self.notes_dir(&worktree, cx) else {
+            return;
+        };
+        let Some(state) = self.review.get_mut(&worktree) else {
+            return;
+        };
+        let Some(todo) = state.todo.as_ref() else {
+            return;
+        };
+        let Some(text) = crate::ui::vault::toggle_task(&todo.text, line, done) else {
+            return;
+        };
+        let expect = Some(crate::files::digest(&todo.text));
+        state.todo = Some(crate::ui::vault::parse_todo(&text));
+        self.git.send(Cmd::WriteTodo {
+            worktree,
+            path: dir.join(crate::ui::vault::TODO),
+            text,
+            expect,
+        });
+        cx.notify();
+    }
+
+    /// Pose un `TODO.md` dans le coffre du worktree.
+    ///
+    /// Un geste explicite, jamais automatique : ouvrir un dépôt sèmerait sinon
+    /// une liste vide dans le coffre de chacun de ses worktrees, comme le
+    /// dossier de notes lui-même que `notes_on_disk` retient de créer.
+    /// L'empreinte est `None` — on écrit là où il n'y a rien —, et c'est la
+    /// surveillance du dossier qui ramènera le fichier.
+    pub(super) fn create_todo(&mut self, cx: &mut Context<Self>) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let Some(dir) = self.notes_dir(&worktree, cx) else {
+            return;
+        };
+        if self
+            .review
+            .get(&worktree)
+            .is_some_and(|state| state.todo.is_some())
+        {
+            return;
+        }
+        self.git.send(Cmd::WriteTodo {
+            path: dir.join(crate::ui::vault::TODO),
+            text: crate::ui::vault::seed_todo(&worktree),
+            expect: None,
+            worktree,
+        });
     }
 
     pub(super) fn toggle_notes_filter(&mut self, cx: &mut Context<Self>) {
@@ -489,7 +557,9 @@ impl ClaudhubApp {
             .collect();
         let total = state.notes.len();
         let pending = state.notes.iter().filter(|note| !note.done).count();
+        let no_todo = state.todo.is_none();
         let mono = cx.theme().mono_font_family.clone();
+        let todo = self.render_todo(window, cx);
 
         let bar = h_flex()
             .h(crate::ui::theme::bar_height(cx))
@@ -516,6 +586,16 @@ impl ClaudhubApp {
                     .tooltip(tr!("note-only-open"))
                     .on_click(cx.listener(|this, _, _window, cx| this.toggle_notes_filter(cx))),
             )
+            .when(no_todo, |el| {
+                el.child(
+                    Button::new("todo-create")
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("list"))
+                        .tooltip(tr!("todo-create"))
+                        .on_click(cx.listener(|this, _, _window, cx| this.create_todo(cx))),
+                )
+            })
             .child(
                 Button::new("notes-send-all")
                     .ghost()
@@ -531,6 +611,7 @@ impl ClaudhubApp {
                 .size_full()
                 .child(bar)
                 .children(find)
+                .children(todo)
                 .child(empty_notes(
                     if total == 0 {
                         tr!("note-empty")
@@ -587,6 +668,7 @@ impl ClaudhubApp {
             .size_full()
             .child(bar)
             .children(find)
+            .children(todo)
             .child(
                 div().flex_1().min_h_0().child(
                     self.scrolled(
@@ -605,6 +687,97 @@ impl ClaudhubApp {
                 ),
             )
             .into_any_element()
+    }
+
+    /// La liste de tâches du worktree, quand le coffre en porte une.
+    ///
+    /// Elle est **au-dessus** des notes et hors de leur défilement : c'est ce
+    /// qu'on regarde pour savoir où en est l'agent, et le faire descendre avec
+    /// une revue de trois cents notes reviendrait à ne jamais le voir. Sa
+    /// hauteur est bornée, avec son propre défilement : une liste de tâches
+    /// n'a pas de bord non plus.
+    fn render_todo(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let scroll = self.scroll_of("todo");
+        let todo = self.active_review()?.todo.clone()?;
+        let (done, total) = (todo.done(), todo.tasks.len());
+        let (muted, secondary) = (cx.theme().muted_foreground, cx.theme().secondary);
+
+        let rows: Vec<_> = todo
+            .tasks
+            .iter()
+            .map(|task| {
+                let (line, done) = (task.line, task.done);
+                h_flex()
+                    .w_full()
+                    .px_2()
+                    .py_0p5()
+                    .gap_2()
+                    .items_start()
+                    // Deux espaces d'indentation dans le fichier valent un
+                    // décrochement ici : une sous-tâche d'agent en est une.
+                    .pl(px(8. + 12. * task.depth.min(4) as f32))
+                    .child(
+                        Checkbox::new(("todo", line))
+                            .checked(done)
+                            .on_click(cx.listener(move |this, checked: &bool, _window, cx| {
+                                this.toggle_task(line, *checked, cx)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .when(done, |el| el.text_color(muted).line_through())
+                            .child(task.label.clone()),
+                    )
+            })
+            .collect();
+
+        let header = h_flex()
+            .w_full()
+            .px_2()
+            .py_1()
+            .gap_2()
+            .items_center()
+            .bg(secondary)
+            .child(icon("check-check").xsmall())
+            .child(
+                div()
+                    .flex_1()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(tr!("todo-progress", { done: done, total: total })),
+            );
+
+        Some(
+            v_flex()
+                .w_full()
+                .flex_shrink_0()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .child(header)
+                .child(
+                    self.scrolled(
+                        "todo-bar",
+                        &scroll,
+                        crate::ui::motion::Axes::Vertical,
+                        window,
+                        v_flex()
+                            .id("todo-list")
+                            .w_full()
+                            .max_h(px(160.))
+                            .py_1()
+                            .overflow_y_scroll()
+                            .track_scroll(&scroll)
+                            .children(rows),
+                        cx,
+                    ),
+                ),
+        )
     }
 
     fn render_note(

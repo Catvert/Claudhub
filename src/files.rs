@@ -76,23 +76,28 @@ pub fn read(worktree: &Path, path: &Path) -> Result<Content> {
 /// comme un changement : le recréer par une sauvegarde ferait revenir ce qu'un
 /// `git restore` venait d'enlever.
 pub fn write(worktree: &Path, path: &Path, text: &str, expect: Option<u64>) -> Result<()> {
-    let full = worktree.join(path);
+    write_at(&worktree.join(path), text, expect)
+}
+
+/// La même écriture conditionnelle, sur un chemin absolu.
+///
+/// Ce qu'on écrit hors du worktree n'a pas de chemin relatif à lui donner : le
+/// `TODO.md` d'un coffre vit ailleurs, et le garde d'empreinte lui sert autant
+/// — c'est l'agent qui écrit dedans pendant qu'on le regarde.
+pub fn write_at(full: &Path, text: &str, expect: Option<u64>) -> Result<()> {
     if let Some(expected) = expect {
-        let current = std::fs::read_to_string(&full)
-            .map(|text| digest(&text))
-            .ok();
+        let current = std::fs::read_to_string(full).map(|text| digest(&text)).ok();
         if current != Some(expected) {
             bail!(
                 "{} a changé depuis son ouverture : rechargez-le avant d'enregistrer",
-                path.display()
+                full.display()
             );
         }
     }
     if let Some(parent) = full.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&full, text)
-        .with_context(|| format!("écriture de {} impossible", full.display()))
+    std::fs::write(full, text).with_context(|| format!("écriture de {} impossible", full.display()))
 }
 
 /// Ce qu'on fait à un fichier depuis l'explorateur.
@@ -228,12 +233,19 @@ pub fn open_external(worktree: &Path, template: &str, path: &Path, line: usize) 
 
 // — Le dossier de notes ————————————————————————————————————————————
 
-/// La marque d'un fichier écrit par Claudhub, en tête de son frontmatter.
+/// Ce que `sync_notes` a le droit d'effacer, par la marque du frontmatter.
 ///
-/// Elle décide de ce que `sync_notes` a le droit d'effacer : un dossier de
-/// coffre contient les notes de son propriétaire, et une note de relecture
-/// supprimée ne doit pas emporter le journal de la semaine.
-const MARK: &str = "\nclaudhub:";
+/// Un dossier de coffre contient les notes de son propriétaire, et une note de
+/// relecture supprimée ne doit pas emporter le journal de la semaine. La
+/// valeur compte autant que la clé : `claudhub: todo` porte notre marque mais
+/// **ne nous appartient pas** — c'est l'agent, ou son lecteur, qui le tient, et
+/// une écriture de note ne doit pas emporter la liste de tâches en cours.
+const OURS: [&str; 2] = ["\nclaudhub: note", "\nclaudhub: review"];
+
+/// Vrai pour un fichier que Claudhub écrit en entier, donc qu'il peut effacer.
+fn is_ours(text: &str) -> bool {
+    text.starts_with("---") && OURS.iter().any(|mark| text.contains(mark))
+}
 
 /// Les fichiers Markdown d'un dossier de notes, nom et contenu.
 ///
@@ -270,8 +282,9 @@ pub fn read_notes(dir: &Path) -> Result<Vec<(String, String)>> {
 /// - **On ne réécrit pas ce qui n'a pas changé.** Un coffre est souvent
 ///   synchronisé, et toucher la date d'un fichier à chaque clic ferait
 ///   travailler la synchronisation pour rien.
-/// - **On n'efface que ce qui porte notre marque.** Le dossier peut contenir
-///   des notes que nous n'avons pas écrites.
+/// - **On n'efface que ce que nous écrivons en entier** (`is_ours`). Le
+///   dossier peut contenir les notes de son propriétaire, et un `TODO.md` que
+///   l'agent tient à jour.
 /// - **Ce qui n'est plus dans la liste disparaît**, y compris sous un autre
 ///   nom : c'est ainsi qu'une note supprimée s'en va, et qu'un fichier renommé
 ///   dans le coffre ne laisse pas un doublon derrière lui.
@@ -289,7 +302,7 @@ pub fn sync_notes(dir: &Path, files: &[(String, String)]) -> Result<()> {
         if files.iter().any(|(kept, _)| *kept == name) {
             continue;
         }
-        if text.starts_with("---") && text.contains(MARK) {
+        if is_ours(&text) {
             let _ = std::fs::remove_file(dir.join(name));
         }
     }
@@ -315,15 +328,18 @@ mod tests {
         );
         sync_notes(&dir, std::slice::from_ref(&ours)).expect("écriture");
         std::fs::write(dir.join("Journal.md"), "---\ntags: [moi]\n---\n\nÀ moi.\n").unwrap();
+        // Notre marque, mais pas notre fichier : la liste de tâches appartient
+        // à l'agent qui la coche, et une note supprimée ne l'emporte pas.
+        std::fs::write(dir.join("TODO.md"), "---\nclaudhub: todo\n---\n\n- [ ] x\n").unwrap();
 
         let read = read_notes(&dir).expect("lecture");
-        assert_eq!(read.len(), 2);
+        assert_eq!(read.len(), 3);
 
-        // La note s'en va, le journal reste.
+        // La note s'en va, le journal et la liste restent.
         sync_notes(&dir, &[]).expect("effacement");
         let read = read_notes(&dir).expect("lecture");
-        assert_eq!(read.len(), 1);
-        assert_eq!(read[0].0, "Journal.md");
+        let names: Vec<&str> = read.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["Journal.md", "TODO.md"]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

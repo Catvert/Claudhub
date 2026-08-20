@@ -604,27 +604,35 @@ impl Render for TerminalView {
                 move |menu, _window, _cx| {
                     let (copy, paste) = (entity.clone(), entity.clone());
                     let (all, clear) = (entity.clone(), entity.clone());
-                    menu.item(PopupMenuItem::new(tr!("terminal-copy")).on_click(
-                        move |_, _window, cx| {
-                            copy.update(cx, |this, cx| this.copy_selection(cx));
-                        },
-                    ))
-                    .item(PopupMenuItem::new(tr!("terminal-paste")).on_click(
-                        move |_, _window, cx| {
-                            paste.update(cx, |this, cx| this.paste_from_clipboard(cx));
-                        },
-                    ))
+                    menu.item(
+                        PopupMenuItem::new(tr!("terminal-copy"))
+                            .icon(icon("copy"))
+                            .on_click(move |_, _window, cx| {
+                                copy.update(cx, |this, cx| this.copy_selection(cx));
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new(tr!("terminal-paste"))
+                            .icon(icon("clipboard-paste"))
+                            .on_click(move |_, _window, cx| {
+                                paste.update(cx, |this, cx| this.paste_from_clipboard(cx));
+                            }),
+                    )
                     .separator()
-                    .item(PopupMenuItem::new(tr!("terminal-select-all")).on_click(
-                        move |_, _window, cx| {
-                            all.update(cx, |this, cx| this.select_all(cx));
-                        },
-                    ))
-                    .item(PopupMenuItem::new(tr!("terminal-clear")).on_click(
-                        move |_, _window, cx| {
-                            clear.update(cx, |this, cx| this.clear_scrollback(cx));
-                        },
-                    ))
+                    .item(
+                        PopupMenuItem::new(tr!("terminal-select-all"))
+                            .icon(icon("text-select"))
+                            .on_click(move |_, _window, cx| {
+                                all.update(cx, |this, cx| this.select_all(cx));
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new(tr!("terminal-clear"))
+                            .icon(icon("eraser"))
+                            .on_click(move |_, _window, cx| {
+                                clear.update(cx, |this, cx| this.clear_scrollback(cx));
+                            }),
+                    )
                 }
             })
             .child(measure)
@@ -827,6 +835,13 @@ impl Launch {
 /// Les onglets d'un worktree.
 pub struct TerminalGroup {
     worktree: PathBuf,
+    /// Le dossier de notes de ce worktree, s'il y en a un.
+    ///
+    /// Il est ici pour finir dans l'environnement du pty : un agent lancé
+    /// depuis Claudhub doit savoir où sont les remarques qu'on lui envoie et
+    /// la liste de tâches qu'il tient. Il est relu par l'application à chaque
+    /// rendu, la racine des notes étant un réglage qui peut changer sous nous.
+    vault: Option<PathBuf>,
     tabs: Vec<Entity<TerminalView>>,
     active: usize,
     /// Pourquoi le dernier onglet n'a pas pu s'ouvrir, s'il y a lieu.
@@ -837,17 +852,46 @@ impl TerminalGroup {
     pub fn new(worktree: PathBuf) -> Self {
         Self {
             worktree,
+            vault: None,
             tabs: Vec::new(),
             active: 0,
             error: None,
         }
     }
 
+    /// Le dossier de notes à annoncer aux prochains onglets.
+    ///
+    /// Sans `cx.notify` : ce n'est pas ce qui est affiché qui change, mais ce
+    /// que le prochain pty recevra, et redessiner le groupe à chaque rendu
+    /// serait une boucle.
+    pub fn set_vault(&mut self, vault: Option<PathBuf>) {
+        self.vault = vault;
+    }
+
     /// Ouvre un onglet. `command` vide lance le shell de l'utilisateur.
     ///
     /// `agent` dit si ce qu'on lance est un agent de codage : c'est à cet
     /// onglet-là que les notes de relecture seront livrées.
-    pub fn open(&mut self, launch: Launch, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open(&mut self, mut launch: Launch, window: &mut Window, cx: &mut Context<Self>) {
+        // Ce que l'agent a besoin de savoir de Claudhub, et qu'aucune API ne
+        // lui dira : où il travaille, où sont les notes de relecture qu'on lui
+        // envoie, et quel fichier porte sa liste de tâches. Des variables
+        // d'environnement plutôt qu'un protocole — un shell les voit aussi,
+        // et un agent qu'on lance dans un terminal à côté n'a qu'à les
+        // recopier.
+        launch.env.insert(
+            "CLAUDHUB_WORKTREE".into(),
+            self.worktree.display().to_string(),
+        );
+        if let Some(vault) = &self.vault {
+            launch
+                .env
+                .insert("CLAUDHUB_NOTES_DIR".into(), vault.display().to_string());
+            launch.env.insert(
+                "CLAUDHUB_TODO".into(),
+                vault.join(crate::ui::vault::TODO).display().to_string(),
+            );
+        }
         // Un pty qu'on n'arrive pas à ouvrir est un problème système : limite
         // de descripteurs atteinte, `/dev/pts` absent. On renonce à l'onglet et
         // on le dit, plutôt que de paniquer au milieu d'un rendu — ce que
@@ -1087,13 +1131,13 @@ impl Render for TerminalGroup {
                                     let shell = entity.clone();
                                     let profiles = Settings::global(cx).terminal.agents.clone();
                                     let menu = menu.item(
-                                        PopupMenuItem::new(tr!("terminal-new")).on_click(
-                                            move |_, window, cx| {
+                                        PopupMenuItem::new(tr!("terminal-new"))
+                                            .icon(icon("plus"))
+                                            .on_click(move |_, window, cx| {
                                                 shell.update(cx, |this, cx| {
                                                     this.open(Launch::shell(), window, cx)
                                                 });
-                                            },
-                                        ),
+                                            }),
                                     );
                                     if profiles.is_empty() {
                                         return menu;
@@ -1104,13 +1148,15 @@ impl Render for TerminalGroup {
                                             let entity = entity.clone();
                                             let label =
                                                 SharedString::from(profile.label().to_string());
-                                            menu.item(PopupMenuItem::new(label).on_click(
-                                                move |_, window, cx| {
-                                                    entity.update(cx, |this, cx| {
-                                                        this.open_profile(&profile, window, cx)
-                                                    });
-                                                },
-                                            ))
+                                            menu.item(
+                                                PopupMenuItem::new(label)
+                                                    .icon(icon("bot"))
+                                                    .on_click(move |_, window, cx| {
+                                                        entity.update(cx, |this, cx| {
+                                                            this.open_profile(&profile, window, cx)
+                                                        });
+                                                    }),
+                                            )
                                         })
                                 }
                             }),
@@ -1157,12 +1203,18 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalGroup> {
-        if let Some(group) = self.terminals.get(worktree) {
-            return group.clone();
+        // Relu à chaque appel, donc à chaque rendu du panneau : la racine des
+        // notes est un réglage, et un onglet ouvert après l'avoir changée doit
+        // recevoir le bon dossier.
+        let vault = self.notes_dir(worktree, cx);
+        if let Some(group) = self.terminals.get(worktree).cloned() {
+            group.update(cx, |group, _| group.set_vault(vault));
+            return group;
         }
         let path = worktree.to_path_buf();
         let group = cx.new(|_| TerminalGroup::new(path));
         group.update(cx, |group, cx| {
+            group.set_vault(vault);
             group.open(Launch::shell(), window, cx);
         });
         self.terminals.insert(worktree.to_path_buf(), group.clone());

@@ -1309,16 +1309,17 @@ impl ClaudhubApp {
                             let edit = entity.clone();
                             let (copy, patch) = (entity.clone(), entity.clone());
                             menu.item(
-                                gpui_component::menu::PopupMenuItem::new(tr!("note-add")).on_click(
-                                    move |_, window, cx| {
+                                gpui_component::menu::PopupMenuItem::new(tr!("note-add"))
+                                    .icon(icon("message-square-plus"))
+                                    .on_click(move |_, window, cx| {
                                         note.update(cx, |this, cx| {
                                             this.annotate_selection(window, cx)
                                         });
-                                    },
-                                ),
+                                    }),
                             )
                             .item(
                                 gpui_component::menu::PopupMenuItem::new(tr!("note-ask-title"))
+                                    .icon(icon("bot"))
                                     .on_click(move |_, window, cx| {
                                         ask.update(cx, |this, cx| {
                                             this.ask_about_selection(window, cx)
@@ -1327,6 +1328,7 @@ impl ClaudhubApp {
                             )
                             .item(
                                 gpui_component::menu::PopupMenuItem::new(tr!("editor-external"))
+                                    .icon(icon("external-link"))
                                     .on_click(move |_, _window, cx| {
                                         edit.update(cx, |this, cx| this.open_diff_externally(cx));
                                     }),
@@ -1334,12 +1336,14 @@ impl ClaudhubApp {
                             .separator()
                             .item(
                                 gpui_component::menu::PopupMenuItem::new(tr!("action-copy-file"))
+                                    .icon(icon("copy"))
                                     .on_click(move |_, _window, cx| {
                                         copy.update(cx, |this, cx| this.copy_diff(false, cx));
                                     }),
                             )
                             .item(
                                 gpui_component::menu::PopupMenuItem::new(tr!("action-copy-patch"))
+                                    .icon(icon("file-diff"))
                                     .on_click(move |_, _window, cx| {
                                         patch.update(cx, |this, cx| this.copy_diff(true, cx));
                                     }),

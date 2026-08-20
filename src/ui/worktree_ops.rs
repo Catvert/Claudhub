@@ -687,17 +687,21 @@ impl ClaudhubApp {
             let (update, integrate) = (entity.clone(), entity.clone());
             let (for_update, for_integrate) = (worktree.clone(), worktree.clone());
             menu.item(
-                PopupMenuItem::new(tr!("worktree-update")).on_click(move |_, window, cx| {
-                    update.update(cx, |this, cx| {
-                        this.select_worktree(for_update.clone(), window, cx);
-                        this.update_from_base(cx);
-                    });
-                }),
+                PopupMenuItem::new(tr!("worktree-update"))
+                    .icon(icon("arrow-down-to-line"))
+                    .on_click(move |_, window, cx| {
+                        update.update(cx, |this, cx| {
+                            this.select_worktree(for_update.clone(), window, cx);
+                            this.update_from_base(cx);
+                        });
+                    }),
             )
             .item(
-                PopupMenuItem::new(tr!("worktree-integrate")).on_click(move |_, _window, cx| {
-                    integrate.update(cx, |this, cx| this.integrate(for_integrate.clone(), cx));
-                }),
+                PopupMenuItem::new(tr!("worktree-integrate"))
+                    .icon(icon("git-merge"))
+                    .on_click(move |_, _window, cx| {
+                        integrate.update(cx, |this, cx| this.integrate(for_integrate.clone(), cx));
+                    }),
             )
         };
 
@@ -708,27 +712,33 @@ impl ClaudhubApp {
         menu = menu.separator();
         if project.has_up {
             let (entity, main, worktree) = (entity.clone(), main.clone(), worktree.clone());
-            menu = menu.item(PopupMenuItem::new(tr!("worktree-up")).on_click(
-                move |_, _window, cx| {
-                    entity.update(cx, |this, cx| this.wt_up(main.clone(), &worktree, cx));
-                },
-            ));
+            menu = menu.item(
+                PopupMenuItem::new(tr!("worktree-up"))
+                    .icon(icon("play"))
+                    .on_click(move |_, _window, cx| {
+                        entity.update(cx, |this, cx| this.wt_up(main.clone(), &worktree, cx));
+                    }),
+            );
         }
         if project.has_down {
             let (entity, main, worktree) = (entity.clone(), main.clone(), worktree.clone());
-            menu = menu.item(PopupMenuItem::new(tr!("worktree-down")).on_click(
-                move |_, _window, cx| {
-                    entity.update(cx, |this, cx| this.wt_down(main.clone(), &worktree, cx));
-                },
-            ));
+            menu = menu.item(
+                PopupMenuItem::new(tr!("worktree-down"))
+                    .icon(icon("circle-stop"))
+                    .on_click(move |_, _window, cx| {
+                        entity.update(cx, |this, cx| this.wt_down(main.clone(), &worktree, cx));
+                    }),
+            );
         }
         {
             let (entity, main, worktree) = (entity.clone(), main.clone(), worktree.clone());
-            menu = menu.item(PopupMenuItem::new(tr!("worktree-remove")).on_click(
-                move |_, _window, cx| {
-                    entity.update(cx, |this, cx| this.wt_remove(main.clone(), &worktree, cx));
-                },
-            ));
+            menu = menu.item(
+                PopupMenuItem::new(tr!("worktree-remove"))
+                    .icon(icon("trash-2"))
+                    .on_click(move |_, _window, cx| {
+                        entity.update(cx, |this, cx| this.wt_remove(main.clone(), &worktree, cx));
+                    }),
+            );
         }
 
         // Les tâches du projet, telles qu'il les déclare. Claudhub ne sait pas
@@ -745,13 +755,15 @@ impl ClaudhubApp {
             } else {
                 format!("{} — {}", task.name, task.description)
             };
-            menu.item(PopupMenuItem::new(SharedString::from(label)).on_click(
-                move |_, _window, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.wt_task(main.clone(), worktree.clone(), name.clone(), cx)
-                    });
-                },
-            ))
+            menu.item(
+                PopupMenuItem::new(SharedString::from(label))
+                    .icon(icon("terminal"))
+                    .on_click(move |_, _window, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.wt_task(main.clone(), worktree.clone(), name.clone(), cx)
+                        });
+                    }),
+            )
         })
     }
 

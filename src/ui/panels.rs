@@ -115,9 +115,11 @@ pub const VIEWS: &[(&str, &str)] = &[
 fn hide_view(app: &WeakEntity<ClaudhubApp>, name: &'static str, menu: PopupMenu) -> PopupMenu {
     let app = app.clone();
     menu.item(
-        PopupMenuItem::new(tr!("action-hide-view")).on_click(move |_, _window, cx| {
-            let _ = app.update(cx, |this, cx| this.set_panel_visible(name, false, cx));
-        }),
+        PopupMenuItem::new(tr!("action-hide-view"))
+            .icon(crate::ui::icons::icon("eye-off"))
+            .on_click(move |_, _window, cx| {
+                let _ = app.update(cx, |this, cx| this.set_panel_visible(name, false, cx));
+            }),
     )
 }
 

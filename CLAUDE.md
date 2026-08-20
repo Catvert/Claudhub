@@ -61,8 +61,8 @@ src/
     store.rs        ce qu'on retient par worktree : base, replis, notes
     notes.rs        le modèle des notes, leur ancrage et leur prompt
     notes_view.rs   les gestes de la relecture annotée et son panneau
-    vault.rs        les notes et le suivi de relecture en Markdown,
-                    rendus et relus — aucune entrée-sortie ici
+    vault.rs        les notes, le suivi de relecture et la liste de tâches
+                    en Markdown, rendus et relus — aucune entrée-sortie ici
     find.rs         la recherche d'un panneau, et son routage
     motion.rs       le lissage de la molette, sans rien de gpui dedans
     scroll.rs       la barre de défilement d'un panneau, et son lissage
@@ -886,6 +886,69 @@ Six points, et chacun se paie :
   antérieur sont versées à l'arrivée du dossier, puis effacées du magasin. Une
   seule fois, et les identifiants déjà pris sont respectés.
 
+### Ce que l'agent sait de Claudhub
+
+L'agent tourne dans un pty, avec le dépôt entre les mains ; ce qui lui manquait
+n'était pas un protocole mais une **adresse**. Trois variables la lui donnent,
+posées par `TerminalGroup::open` sur tous les onglets — un shell les voit
+aussi, et un agent lancé dans un terminal à côté n'a qu'à les recopier :
+`CLAUDHUB_WORKTREE`, `CLAUDHUB_NOTES_DIR`, `CLAUDHUB_TODO`.
+
+**Pas de serveur MCP, et c'est une décision.** Les notes sont déjà des fichiers
+Markdown dans un dossier dont le disque fait foi : un serveur qui les
+exposerait serait un habillage typé de `cat` et de `write`, pour un agent qui
+sait ouvrir un fichier. MCP ne gagnerait son prix que sur ce qu'un fichier ne
+dit pas — l'état vivant de la fenêtre, les actions sur elle — et rien de ce qui
+est listé ici n'en demande. C'est le même raisonnement que « Ce qui tient lieu
+de système d'extension » : le niveau le moins cher qui suffit.
+
+Le prompt envoyé avec les notes (`notes-prompt-outro`) dit **où répondre et à
+quoi ne pas toucher** : dans le corps du fichier, jamais dans le frontmatter.
+Un agent qui passerait une note à `done` défairait la seule chose que cette
+liste garantit — c'est la relecture de la réponse qui clôt une note, pas son
+envoi. Les variables n'y sont pas développées : elles partent telles quelles,
+ce qui garde `notes::prompt` pur et testable.
+
+**Le coffre est surveillé comme le worktree** (`Watcher::watch_dir`, un dossier
+sans récursion et sans passer par git). Sans cela, ce que l'agent écrit
+n'apparaîtrait qu'au prochain changement de worktree — un aller sans retour.
+Deux détails s'y paient :
+
+- **Un dossier qui n'existe pas n'entre pas dans `watched`.** Le coffre d'un
+  worktree qu'on n'a pas annoté n'existe pas encore ; s'il y entrait quand
+  même, l'ordre renvoyé après sa création serait pris pour un doublon et ne
+  poserait rien.
+- **C'est l'écriture qui dit que le dossier est là.** `Evt::VaultWritten` ne
+  porte pas de contenu — la vue tient ce qu'elle vient d'écrire — mais le fait
+  que le dossier existe désormais ; il repose la surveillance et relit, ce qui
+  rend aussi la vue à la vérité du disque quand une écriture a été refusée.
+
+### La liste de tâches d'un worktree
+
+`TODO.md`, dans le même dossier que les notes. C'est là que l'agent tient sa
+progression, et c'est le seul fichier du coffre que Claudhub **n'écrit pas en
+entier**.
+
+- **Cocher retourne un caractère**, à une ligne connue (`vault::toggle_task`).
+  Le reste du fichier est recopié tel quel : les sous-listes, les liens et la
+  prose que l'agent met entre les tâches survivent, ce qu'un rendu à partir de
+  nos seules structures ne garantirait jamais.
+- **L'écriture est conditionnelle**, comme celle d'un fichier ouvert dans
+  l'éditeur : l'empreinte de ce qu'on avait sous les yeux repart avec
+  l'écriture, et un fichier que l'agent a touché entre-temps la fait refuser.
+  C'est la seule façon de ne pas effacer d'un clic ce qu'il vient de cocher.
+- **`sync_notes` ne l'efface pas.** La purge du dossier ne porte plus sur la
+  marque `claudhub:` mais sur sa **valeur** (`files::is_ours` : `note` et
+  `review`) : `claudhub: todo` porte notre marque sans nous appartenir, et une
+  note supprimée emportait sinon la liste de tâches en cours.
+- **Claudhub ne le crée pas tout seul** : un geste explicite, comme le dossier
+  de notes lui-même que `notes_on_disk` retient de semer. Le fichier posé
+  explique son propre format — il finit dans un coffre, ouvert par quelqu'un
+  qui n'a pas lu ceci.
+- Il s'affiche **au-dessus** des notes et hors de leur défilement : c'est ce
+  qu'on regarde pour savoir où en est l'agent, et le faire descendre avec une
+  revue de trois cents notes reviendrait à ne jamais le voir.
+
 ### Marquer un fichier relu
 
 Une revue de branche fait couramment plusieurs centaines de fichiers, et rien
@@ -967,6 +1030,16 @@ réseau, l'agent, les panneaux — par des filets verticaux.
 Les états vides portent une icône et, quand une action s'impose, un bouton :
 au premier lancement la barre latérale vide est la première chose qu'on voit,
 et une phrase grise ne dit pas quoi faire.
+
+**Toute entrée de menu porte une icône** — clic droit comme menu déroulant.
+Un menu contextuel se parcourt à la verticale et se choisit au geste, pas à la
+lecture : l'icône est ce qui rend une entrée reconnaissable avant d'avoir lu
+son libellé, et une seule entrée sans icône décale toutes les autres. Deux
+entrées qui font la même chose sur deux objets — copier un chemin relatif, en
+copier un absolu — portent la même : le libellé les distingue, l'icône dit de
+quelle famille de gestes il s'agit. Les glyphes manquants sont pris chez
+Lucide, à la version que porte déjà `assets/icons/` ; un nom d'icône qui ne
+désigne aucun fichier ne provoque **aucune erreur**, il peint un vide.
 
 ### Les thèmes
 

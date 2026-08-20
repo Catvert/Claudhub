@@ -391,10 +391,25 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
             Ok(files) => vec![Evt::NotesRead { worktree, files }],
             Err(e) => vec![fail(Some(worktree), Action::Notes, e)],
         },
-        // Sans réponse quand tout va bien : la vue tient déjà ce qu'elle vient
-        // d'écrire, et un événement de plus ne ferait que la redessiner.
-        Cmd::WriteNotes { dir, files } => match crate::files::sync_notes(&dir, &files) {
-            Ok(()) => Vec::new(),
+        // La réponse ne porte pas le contenu — la vue tient déjà ce qu'elle
+        // vient d'écrire — mais le fait que le dossier existe : il peut venir
+        // de naître avec ce fichier, et jusque-là il n'y avait rien à
+        // surveiller.
+        Cmd::WriteNotes {
+            worktree,
+            dir,
+            files,
+        } => match crate::files::sync_notes(&dir, &files) {
+            Ok(()) => vec![Evt::VaultWritten { worktree }],
+            Err(e) => vec![fail(None, Action::Notes, e)],
+        },
+        Cmd::WriteTodo {
+            worktree,
+            path,
+            text,
+            expect,
+        } => match crate::files::write_at(&path, &text, expect) {
+            Ok(()) => vec![Evt::VaultWritten { worktree }],
             Err(e) => vec![fail(None, Action::Notes, e)],
         },
         Cmd::OpenExternal {

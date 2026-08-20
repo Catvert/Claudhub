@@ -23,6 +23,11 @@ use notify_debouncer_full::{new_debouncer, DebouncedEvent};
 enum Order {
     Watch(PathBuf),
     Unwatch(PathBuf),
+    /// Un dossier seul, sans récursion et sans passer par git : le coffre de
+    /// notes d'un worktree, qui n'est pas un dépôt et dont `ls-files` ne dirait
+    /// rien.
+    WatchDir(PathBuf),
+    UnwatchDir(PathBuf),
 }
 
 /// Fenêtre de regroupement. Une compilation touche des milliers de fichiers ;
@@ -92,6 +97,31 @@ impl Watcher {
                                 }
                             }
                         }
+                        Order::WatchDir(path) => {
+                            // Un dossier qui n'existe pas encore n'est pas une
+                            // erreur : c'est un worktree qu'on n'a pas annoté.
+                            // Il n'entre dans `watched` que si la surveillance
+                            // a réellement été posée, faute de quoi l'ordre
+                            // qu'on renverra après l'avoir créé serait pris
+                            // pour un doublon et ne poserait rien.
+                            if watched.contains(&path) || !path.is_dir() {
+                                continue;
+                            }
+                            match debouncer.watch(&path, RecursiveMode::NonRecursive) {
+                                Ok(()) => {
+                                    watched.insert(path);
+                                }
+                                Err(e) => log::warn!(
+                                    "surveillance de {} impossible : {e}",
+                                    path.display()
+                                ),
+                            }
+                        }
+                        Order::UnwatchDir(path) => {
+                            if watched.remove(&path) {
+                                let _ = debouncer.unwatch(&path);
+                            }
+                        }
                     }
                 }
             })?;
@@ -130,6 +160,19 @@ impl Watcher {
 
     pub fn unwatch(&mut self, worktree: &Path) {
         let _ = self.orders.send(Order::Unwatch(worktree.to_path_buf()));
+    }
+
+    /// Surveille un dossier tel quel, sans récursion.
+    ///
+    /// C'est ce qu'il faut pour un coffre de notes : ni git, ni sous-dossiers,
+    /// et un seul appel système. Ce qui en revient passe par le même canal —
+    /// l'appelant sait, lui, à quel worktree ce dossier appartient.
+    pub fn watch_dir(&mut self, dir: &Path) {
+        let _ = self.orders.send(Order::WatchDir(dir.to_path_buf()));
+    }
+
+    pub fn unwatch_dir(&mut self, dir: &Path) {
+        let _ = self.orders.send(Order::UnwatchDir(dir.to_path_buf()));
     }
 }
 

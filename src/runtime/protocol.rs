@@ -229,8 +229,26 @@ pub enum Cmd {
     /// supprimée disparaît, et qu'un fichier renommé dans le coffre ne fait
     /// pas un doublon. Ce qu'un autre a écrit n'est jamais touché.
     WriteNotes {
+        worktree: WorktreeId,
         dir: PathBuf,
         files: Vec<(String, String)>,
+    },
+    /// Écrit la liste de tâches d'un worktree, sauf si elle a changé depuis
+    /// qu'on l'a lue.
+    ///
+    /// Une commande à part de `WriteNotes`, et conditionnelle, parce que ce
+    /// fichier n'est **pas à nous** : l'agent du worktree y coche ce qu'il
+    /// vient de faire pendant qu'on le regarde. L'empreinte est celle de ce
+    /// qu'on avait sous les yeux ; un écart veut dire qu'il a écrit entre-temps,
+    /// et cocher au jugé effacerait son travail. C'est le garde de
+    /// `files::write`, pour la même raison.
+    WriteTodo {
+        worktree: WorktreeId,
+        /// Le chemin complet du fichier : il vit dans le coffre, hors du
+        /// worktree, et n'a pas de chemin relatif à lui donner.
+        path: PathBuf,
+        text: String,
+        expect: Option<u64>,
     },
     /// Lance l'éditeur externe sur un fichier, à une ligne donnée.
     OpenExternal {
@@ -386,6 +404,15 @@ pub enum Evt {
     },
     Agents {
         agents: crate::agent::Agents,
+    },
+    /// Le coffre d'un worktree vient d'être écrit.
+    ///
+    /// La vue tient déjà ce qu'elle a écrit ; ce que cet événement porte est
+    /// autre chose : le **dossier peut venir de naître** avec ce fichier, et
+    /// tant qu'il n'existait pas il n'y avait rien à surveiller. C'est le seul
+    /// moment où l'on sait qu'il est là.
+    VaultWritten {
+        worktree: WorktreeId,
     },
     /// Le contenu du dossier de notes : nom de fichier et texte.
     NotesRead {

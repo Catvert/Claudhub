@@ -302,6 +302,15 @@ pub fn prompt(branch: &str, notes: &[Note]) -> String {
         }
         out.push('\n');
     }
+    // Où répondre, et à quoi ne pas toucher.
+    //
+    // Les variables ne sont pas développées ici : elles sont dans
+    // l'environnement du pty (`CLAUDHUB_NOTES_DIR`, `CLAUDHUB_TODO`), et c'est
+    // l'agent qui les lit — ce qui garde cette fonction pure et testable, et
+    // fait qu'un prompt collé dans un autre terminal du même worktree marche
+    // aussi.
+    out.push_str(&crate::tr!("notes-prompt-outro"));
+    out.push('\n');
     // Le dernier saut de ligne n'apporte rien et se voit dans l'invite d'un
     // agent, qui l'affiche tel quel.
     while out.ends_with('\n') {

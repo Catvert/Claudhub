@@ -279,6 +279,13 @@ pub struct ReviewState {
     /// alors. Comme les notes, ils vivent dans le dossier de notes et non dans
     /// le magasin d'état : c'est la même relecture, et elle se lit d'un coup.
     pub reviewed: Vec<crate::ui::vault::Reviewed>,
+    /// La liste de tâches du worktree, si le coffre en porte une.
+    ///
+    /// `None` veut dire « pas de `TODO.md` », pas « aucune tâche » : les deux
+    /// ne s'affichent pas pareil, et Claudhub ne pose pas ce fichier tout seul
+    /// — c'est celui de l'agent, on ne sème pas une liste vide dans le coffre
+    /// de tout worktree qu'on ouvre.
+    pub todo: Option<crate::ui::vault::Todo>,
     /// Le dossier de notes a répondu. Tant qu'il n'a pas répondu, il n'y a
     /// rien à écrire : le faire effacerait ce qu'on n'a pas encore lu.
     pub notes_loaded: bool,
@@ -352,6 +359,7 @@ impl Default for ReviewState {
             notes: Vec::new(),
             next_note: 1,
             reviewed: Vec::new(),
+            todo: None,
             notes_loaded: false,
             notes_on_disk: false,
             note_marks: std::rc::Rc::new(crate::ui::notes::Marks::default()),
@@ -920,6 +928,17 @@ impl ClaudhubApp {
         let Some(active) = self.active.clone() else {
             return;
         };
+        // Le coffre n'est pas dans le worktree, et ce qui y change ne se lit
+        // pas avec `git status` : c'est le dossier lui-même qu'il faut relire.
+        if let Some(vault) = self.notes_dir(&active, cx) {
+            if path.starts_with(&vault) {
+                self.git.send(Cmd::ReadNotes {
+                    worktree: active,
+                    dir: vault,
+                });
+                return;
+            }
+        }
         // Un worktree lié vit à l'intérieur d'un autre chez certains agencements ;
         // ne réagir que pour le checkout affiché évite un rafraîchissement en
         // double et une liste qui clignote.
@@ -1121,13 +1140,27 @@ impl ClaudhubApp {
             } => self.file_content_arrived(worktree, path, content, window, cx),
             // Le dossier de notes a répondu : c'est lui la source, et ce qu'on
             // avait en mémoire n'était qu'une attente.
+            // Le coffre a été écrit : il existe, donc il se surveille. Le
+            // relire dans la foulée n'est pas un luxe — c'est le disque qui
+            // fait foi, et une écriture refusée (l'agent avait touché au
+            // fichier entre-temps) doit rendre la vue à ce qui est vraiment
+            // là plutôt qu'à ce qu'on croyait y avoir mis.
+            Evt::VaultWritten { worktree } => {
+                self.watch_vault(&worktree, cx);
+                if let Some(dir) = self.notes_dir(&worktree, cx) {
+                    self.git.send(Cmd::ReadNotes { worktree, dir });
+                }
+            }
             Evt::NotesRead { worktree, files } => {
                 let mut notes = Vec::new();
                 let mut reviewed = Vec::new();
+                let mut todo = None;
                 let on_disk = !files.is_empty();
                 for (name, text) in files {
                     if name == crate::ui::vault::INDEX {
                         reviewed = crate::ui::vault::parse_index(&text);
+                    } else if name == crate::ui::vault::TODO {
+                        todo = Some(crate::ui::vault::parse_todo(&text));
                     } else if let Some(note) = crate::ui::vault::parse_note(&text) {
                         notes.push(note);
                     }
@@ -1163,6 +1196,7 @@ impl ClaudhubApp {
                     state.next_note = state.next_note.max(highest + 1);
                     state.notes = notes;
                     state.reviewed = reviewed;
+                    state.todo = todo;
                     state.notes_loaded = true;
                     state.notes_on_disk = on_disk;
                 }
@@ -1335,11 +1369,26 @@ impl ClaudhubApp {
         if self.active.as_deref() == Some(path.as_path()) {
             return;
         }
+        // Le coffre est surveillé comme le worktree, et pour la même raison :
+        // le travail s'y fait ailleurs. Un agent qui coche une tâche dans
+        // `TODO.md` ou qui répond dans une note doit se voir tout de suite,
+        // sans quoi il faudrait changer de worktree et revenir.
+        let previous_vault = self
+            .active
+            .as_deref()
+            .and_then(|previous| self.notes_dir(previous, cx));
+        let vault = self.notes_dir(&path, cx);
         if let Some(watcher) = self.watcher.as_mut() {
             if let Some(previous) = self.active.as_deref() {
                 watcher.unwatch(previous);
             }
+            if let Some(previous) = previous_vault {
+                watcher.unwatch_dir(&previous);
+            }
             watcher.watch(&path);
+            if let Some(vault) = vault {
+                watcher.watch_dir(&vault);
+            }
         }
         self.active = Some(path.clone());
         self.ensure_review(&path, cx);
@@ -1623,7 +1672,27 @@ impl ClaudhubApp {
             crate::ui::vault::INDEX.to_string(),
             crate::ui::vault::render_index(worktree, &state.reviewed),
         ));
-        self.git.send(Cmd::WriteNotes { dir, files });
+        self.git.send(Cmd::WriteNotes {
+            worktree: worktree.to_path_buf(),
+            dir,
+            files,
+        });
+    }
+
+    /// (Re)pose la surveillance du coffre du worktree affiché.
+    ///
+    /// Sans effet s'il est déjà surveillé, et sans effet si le dossier n'existe
+    /// pas encore — l'ordre est simplement à renvoyer après l'avoir créé.
+    fn watch_vault(&mut self, worktree: &Path, cx: &App) {
+        if self.active.as_deref() != Some(worktree) {
+            return;
+        }
+        let Some(vault) = self.notes_dir(worktree, cx) else {
+            return;
+        };
+        if let Some(watcher) = self.watcher.as_mut() {
+            watcher.watch_dir(&vault);
+        }
     }
 
     /// La vue en deux colonnes est-elle repliée ?

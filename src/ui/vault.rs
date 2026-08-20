@@ -46,8 +46,128 @@ pub struct Reviewed {
     pub removed: usize,
 }
 
+/// Une tâche de `TODO.md` : une case à cocher Markdown, et sa ligne.
+///
+/// La ligne est retenue parce que c'est **elle** qu'on modifie : cocher ne
+/// réécrit pas le fichier, il retourne un caractère à un endroit connu. Tout
+/// ce qu'il y a autour — le texte d'un agent, ses sous-listes, ses liens —
+/// survit intact, ce qu'un rendu à partir de nos seules structures ne
+/// garantirait jamais.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Task {
+    pub done: bool,
+    pub label: String,
+    /// Indice de la ligne dans le fichier, à partir de zéro.
+    pub line: usize,
+    /// Profondeur d'imbrication, en niveaux de deux espaces.
+    pub depth: usize,
+}
+
+/// `TODO.md` tel qu'il est sur le disque, et les tâches qu'on y a reconnues.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Todo {
+    pub text: String,
+    pub tasks: Vec<Task>,
+}
+
+impl Todo {
+    pub fn done(&self) -> usize {
+        self.tasks.iter().filter(|task| task.done).count()
+    }
+}
+
+/// Les cases à cocher d'un `TODO.md`.
+///
+/// Tout le reste est ignoré et **conservé** : un titre, un paragraphe, une
+/// liste ordinaire. On ne lit pas un format à nous, on repère des cases dans
+/// du Markdown que quelqu'un d'autre écrit.
+pub fn parse_todo(text: &str) -> Todo {
+    let mut tasks = Vec::new();
+    for (line, raw) in text.lines().enumerate() {
+        let indent = raw.len() - raw.trim_start().len();
+        let trimmed = raw.trim_start();
+        let Some(rest) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+            .or_else(|| trimmed.strip_prefix("+ "))
+        else {
+            continue;
+        };
+        let done = match rest.get(..3) {
+            Some("[ ]") => false,
+            Some("[x]") | Some("[X]") => true,
+            _ => continue,
+        };
+        tasks.push(Task {
+            done,
+            label: rest[3..].trim().to_string(),
+            line,
+            depth: indent / 2,
+        });
+    }
+    Todo {
+        text: text.to_string(),
+        tasks,
+    }
+}
+
+/// Coche ou décoche la tâche d'une ligne, et rend le fichier entier.
+///
+/// `None` quand la ligne n'est plus une case à cocher : le fichier a changé
+/// sous nos pieds — un agent écrit dedans pendant qu'on le regarde — et
+/// écrire au jugé retournerait la mauvaise case.
+pub fn toggle_task(text: &str, line: usize, done: bool) -> Option<String> {
+    let raw = text.lines().nth(line)?;
+    let at = ["[ ]", "[x]", "[X]"]
+        .iter()
+        .filter_map(|box_| raw.find(box_))
+        .min()?;
+    let replaced = format!(
+        "{}{}{}",
+        &raw[..at],
+        if done { "[x]" } else { "[ ]" },
+        &raw[at + 3..]
+    );
+    let mut out = String::with_capacity(text.len() + 1);
+    for (i, current) in text.lines().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(if i == line { &replaced } else { current });
+    }
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    Some(out)
+}
+
+/// Le `TODO.md` qu'on pose quand il n'y en a pas.
+///
+/// Il explique son propre format : le fichier finit dans un coffre, ouvert par
+/// quelqu'un — ou par un agent — qui n'a pas lu notre documentation.
+pub fn seed_todo(worktree: &Path) -> String {
+    format!(
+        "---\nclaudhub: todo\nworktree: {}\n---\n\n# À faire\n\n\
+         Une tâche est une case à cocher Markdown — `- [ ] …` — et rien d'autre \
+         n'est interprété : le texte autour est à qui l'écrit. Claudhub affiche \
+         ces cases dans son panneau de notes, et l'agent de ce worktree tient la \
+         liste à jour ; le fichier lui est donné par `$CLAUDHUB_TODO`.\n\n",
+        scalar(&worktree.display().to_string())
+    )
+}
+
 /// Le nom du fichier d'index, dans le dossier d'un worktree.
 pub const INDEX: &str = "Relecture.md";
+
+/// La liste de tâches d'un worktree, dans le même dossier.
+///
+/// Elle n'est **pas** écrite par Claudhub au fil de l'eau, contrairement aux
+/// notes et à l'index : elle appartient à qui la tient — l'agent qui coche ce
+/// qu'il vient de faire, ou soi-même dans Obsidian. Claudhub la lit, l'affiche,
+/// et ne touche qu'à la case qu'on clique. C'est ce qui permet à un agent d'y
+/// écrire ce qu'il veut — des sous-listes, des liens, du texte entre les
+/// tâches — sans que la prochaine écriture de note l'efface.
+pub const TODO: &str = "TODO.md";
 
 /// Le dossier d'un worktree : `<racine>/<dépôt>/<worktree>`.
 ///
@@ -529,6 +649,43 @@ mod tests {
     #[test]
     fn a_line_without_a_section_is_ignored() {
         assert!(parse_index("- [x] a.rs +1 −0\n").is_empty());
+    }
+
+    /// Ce qui entoure les cases appartient à qui l'écrit, et le rendu ne
+    /// passe pas par nos structures : cocher retourne un caractère, tout le
+    /// reste du fichier est recopié tel quel.
+    #[test]
+    fn checking_a_box_leaves_the_rest_of_the_file_alone() {
+        let text = "# À faire\n\nUn paragraphe d'agent.\n\n- [ ] lire le diff\n  - [x] sous-tâche\n- [ ] écrire le test\n";
+        let todo = parse_todo(text);
+        assert_eq!(todo.tasks.len(), 3);
+        assert_eq!(todo.done(), 1);
+        assert_eq!(todo.tasks[0].label, "lire le diff");
+        assert_eq!(todo.tasks[1].depth, 1);
+
+        let after = toggle_task(text, todo.tasks[0].line, true).expect("la case existe");
+        assert_eq!(
+            after,
+            text.replace("- [ ] lire le diff", "- [x] lire le diff")
+        );
+        assert_eq!(parse_todo(&after).done(), 2);
+    }
+
+    /// Une ligne qui n'est plus une case veut dire que le fichier a changé
+    /// sous nos pieds : mieux vaut ne rien écrire que retourner la mauvaise.
+    #[test]
+    fn a_line_that_is_no_longer_a_box_refuses_the_toggle() {
+        assert!(toggle_task("- [ ] une tâche\ndu texte\n", 1, true).is_none());
+        assert!(toggle_task("- [ ] une tâche\n", 9, true).is_none());
+    }
+
+    /// Le fichier qu'on pose doit se relire : c'est le même contrat que les
+    /// notes, et il n'y a personne pour le vérifier à notre place.
+    #[test]
+    fn the_seeded_list_reads_back_as_an_empty_one() {
+        let todo = parse_todo(&seed_todo(Path::new("/tmp/wt")));
+        assert!(todo.tasks.is_empty());
+        assert!(todo.text.contains("claudhub: todo"));
     }
 
     #[test]

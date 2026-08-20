@@ -855,23 +855,28 @@ impl ClaudhubApp {
                     .tooltip(tr!("files-more"))
                     .dropdown_menu(move |menu, _window, _cx| {
                         let (file, dir, hidden) = (entity.clone(), entity.clone(), entity.clone());
-                        menu.item(PopupMenuItem::new(tr!("files-new-file")).on_click(
-                            move |_, window, cx| {
-                                file.update(cx, |this, cx| {
-                                    this.prompt_new_path(None, false, window, cx)
-                                });
-                            },
-                        ))
-                        .item(PopupMenuItem::new(tr!("files-new-dir")).on_click(
-                            move |_, window, cx| {
-                                dir.update(cx, |this, cx| {
-                                    this.prompt_new_path(None, true, window, cx)
-                                });
-                            },
-                        ))
+                        menu.item(
+                            PopupMenuItem::new(tr!("files-new-file"))
+                                .icon(icon("file-plus"))
+                                .on_click(move |_, window, cx| {
+                                    file.update(cx, |this, cx| {
+                                        this.prompt_new_path(None, false, window, cx)
+                                    });
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new(tr!("files-new-dir"))
+                                .icon(icon("folder-plus"))
+                                .on_click(move |_, window, cx| {
+                                    dir.update(cx, |this, cx| {
+                                        this.prompt_new_path(None, true, window, cx)
+                                    });
+                                }),
+                        )
                         .separator()
                         .item(
                             PopupMenuItem::new(tr!("files-show-ignored"))
+                                .icon(icon("eye"))
                                 .icon(icon(if ignored { "eye" } else { "eye-off" }))
                                 .on_click(move |_, _window, cx| {
                                     hidden.update(cx, |this, cx| this.toggle_ignored_files(cx));
@@ -1247,35 +1252,45 @@ fn dir_menu(
         path.to_path_buf(),
     );
     menu.item(
-        PopupMenuItem::new(tr!("files-new-here")).on_click(move |_, window, cx| {
-            new_file.update(cx, |this, cx| {
-                this.prompt_new_path(Some(p1.clone()), false, window, cx)
-            });
-        }),
+        PopupMenuItem::new(tr!("files-new-here"))
+            .icon(icon("file-plus"))
+            .on_click(move |_, window, cx| {
+                new_file.update(cx, |this, cx| {
+                    this.prompt_new_path(Some(p1.clone()), false, window, cx)
+                });
+            }),
     )
     .item(
-        PopupMenuItem::new(tr!("files-new-dir-here")).on_click(move |_, window, cx| {
-            new_dir.update(cx, |this, cx| {
-                this.prompt_new_path(Some(p2.clone()), true, window, cx)
-            });
-        }),
-    )
-    .separator()
-    .item(
-        PopupMenuItem::new(tr!("files-expand-under")).on_click(move |_, _window, cx| {
-            expand.update(cx, |this, cx| this.expand_project_dir(p3.clone(), cx));
-        }),
-    )
-    .item(
-        PopupMenuItem::new(tr!("files-collapse-under")).on_click(move |_, _window, cx| {
-            collapse.update(cx, |this, cx| this.collapse_project_dir(p4.clone(), cx));
-        }),
+        PopupMenuItem::new(tr!("files-new-dir-here"))
+            .icon(icon("folder-plus"))
+            .on_click(move |_, window, cx| {
+                new_dir.update(cx, |this, cx| {
+                    this.prompt_new_path(Some(p2.clone()), true, window, cx)
+                });
+            }),
     )
     .separator()
     .item(
-        PopupMenuItem::new(tr!("action-copy-path")).on_click(move |_, _window, cx| {
-            copy.update(cx, |this, cx| this.copy_project_path(&p5, false, cx));
-        }),
+        PopupMenuItem::new(tr!("files-expand-under"))
+            .icon(icon("chevrons-up-down"))
+            .on_click(move |_, _window, cx| {
+                expand.update(cx, |this, cx| this.expand_project_dir(p3.clone(), cx));
+            }),
+    )
+    .item(
+        PopupMenuItem::new(tr!("files-collapse-under"))
+            .icon(icon("chevrons-down-up"))
+            .on_click(move |_, _window, cx| {
+                collapse.update(cx, |this, cx| this.collapse_project_dir(p4.clone(), cx));
+            }),
+    )
+    .separator()
+    .item(
+        PopupMenuItem::new(tr!("action-copy-path"))
+            .icon(icon("copy"))
+            .on_click(move |_, _window, cx| {
+                copy.update(cx, |this, cx| this.copy_project_path(&p5, false, cx));
+            }),
     )
 }
 
@@ -1296,40 +1311,52 @@ fn file_menu(
         path.to_path_buf(),
     );
     menu.item(
-        PopupMenuItem::new(tr!("editor-external")).on_click(move |_, _window, cx| {
-            external.update(cx, |this, cx| this.open_externally(p1.clone(), 1, cx));
-        }),
+        PopupMenuItem::new(tr!("editor-external"))
+            .icon(icon("external-link"))
+            .on_click(move |_, _window, cx| {
+                external.update(cx, |this, cx| this.open_externally(p1.clone(), 1, cx));
+            }),
     )
     .separator()
     .item(
-        PopupMenuItem::new(tr!("action-copy-path")).on_click(move |_, _window, cx| {
-            copy.update(cx, |this, cx| this.copy_project_path(&p2, false, cx));
-        }),
+        PopupMenuItem::new(tr!("action-copy-path"))
+            .icon(icon("copy"))
+            .on_click(move |_, _window, cx| {
+                copy.update(cx, |this, cx| this.copy_project_path(&p2, false, cx));
+            }),
     )
     .item(
-        PopupMenuItem::new(tr!("files-copy-absolute")).on_click(move |_, _window, cx| {
-            absolute.update(cx, |this, cx| this.copy_project_path(&p3, true, cx));
-        }),
+        PopupMenuItem::new(tr!("files-copy-absolute"))
+            .icon(icon("copy"))
+            .on_click(move |_, _window, cx| {
+                absolute.update(cx, |this, cx| this.copy_project_path(&p3, true, cx));
+            }),
     )
     .separator()
     // « Ici » veut dire dans le dossier du fichier : on clique droit sur un
     // voisin de ce qu'on veut créer, jamais sur le dossier lui-même quand la
     // liste en montre déjà le contenu.
     .item(
-        PopupMenuItem::new(tr!("files-new-here")).on_click(move |_, window, cx| {
-            new_file.update(cx, |this, cx| {
-                this.prompt_new_path(Some(parent.clone()), false, window, cx)
-            });
-        }),
+        PopupMenuItem::new(tr!("files-new-here"))
+            .icon(icon("file-plus"))
+            .on_click(move |_, window, cx| {
+                new_file.update(cx, |this, cx| {
+                    this.prompt_new_path(Some(parent.clone()), false, window, cx)
+                });
+            }),
     )
     .item(
-        PopupMenuItem::new(tr!("files-rename")).on_click(move |_, window, cx| {
-            rename.update(cx, |this, cx| this.prompt_rename(p4.clone(), window, cx));
-        }),
+        PopupMenuItem::new(tr!("files-rename"))
+            .icon(icon("pencil"))
+            .on_click(move |_, window, cx| {
+                rename.update(cx, |this, cx| this.prompt_rename(p4.clone(), window, cx));
+            }),
     )
     .item(
-        PopupMenuItem::new(tr!("files-delete")).on_click(move |_, window, cx| {
-            delete.update(cx, |this, cx| this.confirm_delete(p5.clone(), window, cx));
-        }),
+        PopupMenuItem::new(tr!("files-delete"))
+            .icon(icon("trash-2"))
+            .on_click(move |_, window, cx| {
+                delete.update(cx, |this, cx| this.confirm_delete(p5.clone(), window, cx));
+            }),
     )
 }
