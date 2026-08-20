@@ -676,6 +676,12 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // Un fichier ouvert pour retouche prend la place du diff : on regarde
+        // l'un *ou* l'autre, et deux onglets à faire basculer pour un geste
+        // qui vient de l'explorateur seraient un aller-retour de trop.
+        if let Some(editor) = self.render_editor(window, cx) {
+            return editor.into_any_element();
+        }
         let Some(state) = self.active_review() else {
             return div().into_any_element();
         };
@@ -918,6 +924,7 @@ impl ClaudhubApp {
                         let entity = cx.entity();
                         move |menu, _window, _cx| {
                             let (note, ask) = (entity.clone(), entity.clone());
+                            let edit = entity.clone();
                             let (copy, patch) = (entity.clone(), entity.clone());
                             menu.item(
                                 gpui_component::menu::PopupMenuItem::new(tr!("note-add")).on_click(
@@ -934,6 +941,12 @@ impl ClaudhubApp {
                                         ask.update(cx, |this, cx| {
                                             this.ask_about_selection(window, cx)
                                         });
+                                    }),
+                            )
+                            .item(
+                                gpui_component::menu::PopupMenuItem::new(tr!("editor-external"))
+                                    .on_click(move |_, _window, cx| {
+                                        edit.update(cx, |this, cx| this.open_diff_externally(cx));
                                     }),
                             )
                             .separator()

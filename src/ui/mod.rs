@@ -11,6 +11,7 @@ mod blade;
 mod branches;
 mod conflicts;
 mod diff_view;
+mod explorer;
 mod highlight;
 mod history_view;
 mod icons;
@@ -26,13 +27,14 @@ mod sidebar;
 mod store;
 mod terminal_view;
 mod theme;
+mod tree;
 mod worktree_ops;
 
 use gpui::{px, size, App, AppContext, Application, Bounds, WindowBounds, WindowOptions};
 use gpui_component::Root;
 use rust_embed::RustEmbed;
 
-pub use settings::{LanguageChoice, Settings, ThemeMode};
+pub use settings::{split_command, LanguageChoice, Settings, ThemeMode};
 
 /// Interface et texte courant.
 const INTER_FONT: &[u8] = include_bytes!("../../assets/fonts/Inter.ttf");

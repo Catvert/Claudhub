@@ -33,8 +33,8 @@ use crate::ui::base_select::BaseChoice;
 use crate::ui::diff_view::Rendered;
 use crate::ui::icons::icon;
 use crate::ui::panels::{
-    BranchPanel, BranchesPanel, ChangesPanel, ConflictsPanel, DiffPanel, HistoryPanel, NotesPanel,
-    SidebarPanel, TerminalPanel,
+    BranchPanel, BranchesPanel, ChangesPanel, ConflictsPanel, DiffPanel, FilesPanel, HistoryPanel,
+    NotesPanel, SidebarPanel, TerminalPanel,
 };
 use crate::ui::settings::Settings;
 use crate::ui::store::Store;
@@ -46,12 +46,13 @@ const TERMINAL_HEIGHT: gpui::Pixels = px(280.);
 /// Version de la disposition enregistrée. À incrémenter quand les panneaux
 /// changent de nom ou de nature, pour que gpui-component écarte une
 /// disposition qu'il ne saurait plus reconstruire.
-const LAYOUT_VERSION: usize = 5;
+const LAYOUT_VERSION: usize = 6;
 
 /// Les panneaux de la disposition par défaut.
 struct DefaultPanels {
     sidebar: Arc<dyn gpui_component::dock::PanelView>,
     branches: Arc<dyn gpui_component::dock::PanelView>,
+    files: Arc<dyn gpui_component::dock::PanelView>,
     changes: Arc<dyn gpui_component::dock::PanelView>,
     branch: Arc<dyn gpui_component::dock::PanelView>,
     history: Arc<dyn gpui_component::dock::PanelView>,
@@ -92,7 +93,10 @@ fn install_default_layout(
             gpui::Axis::Vertical,
             vec![
                 DockItem::tabs(vec![panels.sidebar], weak_dock, window, cx),
-                DockItem::tabs(vec![panels.branches], weak_dock, window, cx),
+                // Les branches et les fichiers du projet en onglets : deux
+                // façons de désigner ce qu'on veut voir, et on n'en regarde
+                // qu'une à la fois.
+                DockItem::tabs(vec![panels.branches, panels.files], weak_dock, window, cx),
             ],
             vec![Some(height - third), Some(third)],
             weak_dock,
@@ -413,6 +417,11 @@ pub struct ClaudhubApp {
     /// Le worktree dont l'intégration est partie, et sa branche : c'est à
     /// l'arrivée du succès qu'on propose de faire le ménage.
     pub(super) integrated: Option<(PathBuf, String)>,
+    /// Les fichiers de chaque worktree et leur arborescence.
+    pub(super) explorers: HashMap<PathBuf, crate::ui::explorer::Explorer>,
+    /// Le fichier ouvert dans l'éditeur intégré, s'il y en a un.
+    pub(super) editing: Option<crate::ui::explorer::Editing>,
+    pub(super) files_scroll: gpui::UniformListScrollHandle,
     pub(super) toast: Option<Toast>,
     /// Worktrees dont une lecture de statut est déjà partie.
     ///
@@ -536,6 +545,7 @@ impl ClaudhubApp {
             .is_some();
         let sidebar = cx.new(|cx| SidebarPanel::new(&this, cx));
         let branches = cx.new(|cx| BranchesPanel::new(&this, cx));
+        let files = cx.new(|cx| FilesPanel::new(&this, cx));
         let changes = cx.new(|cx| ChangesPanel::new(&this, cx));
         let branch = cx.new(|cx| BranchPanel::new(&this, cx));
         let history = cx.new(|cx| HistoryPanel::new(&this, cx));
@@ -548,6 +558,7 @@ impl ClaudhubApp {
             let panels = DefaultPanels {
                 sidebar: Arc::new(sidebar),
                 branches: Arc::new(branches),
+                files: Arc::new(files),
                 changes: Arc::new(changes),
                 branch: Arc::new(branch),
                 history: Arc::new(history),
@@ -589,6 +600,9 @@ impl ClaudhubApp {
             wt_states: HashMap::new(),
             creation: None,
             integrated: None,
+            explorers: HashMap::new(),
+            editing: None,
+            files_scroll: gpui::UniformListScrollHandle::new(),
             toast: None,
             pending_status: std::collections::HashSet::new(),
             dock,
@@ -937,6 +951,12 @@ impl ClaudhubApp {
             Evt::WtStates { states } => {
                 self.wt_states.extend(states);
             }
+            Evt::ProjectFiles { worktree, files } => self.project_files_arrived(worktree, files),
+            Evt::FileContent {
+                worktree,
+                path,
+                content,
+            } => self.file_content_arrived(worktree, path, content, window, cx),
             Evt::Agents { agents } => {
                 let mut next = HashMap::new();
                 let mut cpu = HashMap::new();
@@ -1633,6 +1653,7 @@ impl Render for ClaudhubApp {
             .on_action(cx.listener(super::shortcuts::annotate_selection))
             .on_action(cx.listener(super::shortcuts::ask_agent))
             .on_action(cx.listener(super::shortcuts::send_notes))
+            .on_action(cx.listener(super::shortcuts::save_file))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -1698,6 +1719,7 @@ impl ClaudhubApp {
         let panels = DefaultPanels {
             sidebar: Arc::new(cx.new(|cx| SidebarPanel::new(&this, cx))),
             branches: Arc::new(cx.new(|cx| BranchesPanel::new(&this, cx))),
+            files: Arc::new(cx.new(|cx| FilesPanel::new(&this, cx))),
             changes: Arc::new(cx.new(|cx| ChangesPanel::new(&this, cx))),
             branch: Arc::new(cx.new(|cx| BranchPanel::new(&this, cx))),
             history: Arc::new(cx.new(|cx| HistoryPanel::new(&this, cx))),

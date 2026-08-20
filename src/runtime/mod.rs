@@ -331,6 +331,40 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
             repo::resolve(dir, &path, ours).map(|_| String::new())
         }),
 
+        Cmd::ListFiles { worktree, ignored } => match repo::list_files(&worktree, ignored) {
+            Ok(files) => vec![Evt::ProjectFiles { worktree, files }],
+            Err(e) => vec![fail(Some(worktree), Action::Read, e)],
+        },
+        Cmd::ReadFile { worktree, path } => match crate::files::read(&worktree, &path) {
+            Ok(content) => vec![Evt::FileContent {
+                worktree,
+                path,
+                content,
+            }],
+            Err(e) => vec![fail(Some(worktree), Action::Read, e)],
+        },
+        Cmd::WriteFile {
+            worktree,
+            path,
+            content,
+            expect,
+        } => write_then_refresh(worktree, Action::Write, |dir| {
+            crate::files::write(dir, &path, &content, expect).map(|_| String::new())
+        }),
+        Cmd::FileOp { worktree, op } => write_then_refresh(worktree, Action::FileOp, |dir| {
+            crate::files::apply(dir, &op).map(|_| op.target().display().to_string())
+        }),
+        Cmd::OpenExternal {
+            worktree,
+            path,
+            line,
+        } => {
+            let template = editor_template();
+            match crate::files::open_external(&worktree, &template, &path, line) {
+                Ok(program) => vec![done(Some(worktree), Action::OpenExternal, program)],
+                Err(e) => vec![fail(Some(worktree), Action::OpenExternal, e)],
+            }
+        }
         Cmd::WtLoad { main } => {
             let project = crate::wt::snapshot(&main);
             vec![Evt::WtProject { main, project }]
@@ -445,6 +479,16 @@ fn integrate(main: &Path, branch: &str, base: &str, no_ff: bool) -> Result<Strin
         );
     }
     repo::merge(main, branch, no_ff)
+}
+
+/// La commande de l'éditeur externe, telle que les réglages la portent.
+///
+/// Lue ici et non passée dans la commande : c'est un réglage global, et le
+/// faire voyager dans chaque `Cmd::OpenExternal` reviendrait à le recopier
+/// pour rien. Le worker n'a pas accès au global gpui — il passe donc par le
+/// fichier, ce que fait déjà `Settings::load`.
+fn editor_template() -> String {
+    crate::ui::Settings::load().external_editor
 }
 
 fn open_repo(path: &Path) -> Result<Evt> {

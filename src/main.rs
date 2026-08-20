@@ -10,6 +10,7 @@ const _: &str = include_str!("../assets/i18n/fr.json");
 rust_i18n::i18n!("assets/i18n", fallback = "en");
 
 pub mod agent;
+pub mod files;
 pub mod git;
 pub mod logging;
 pub mod runtime;

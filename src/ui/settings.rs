@@ -408,6 +408,14 @@ pub struct Settings {
     /// Intégrer force un commit de fusion, même quand l'avance rapide serait
     /// possible : c'est ce qui garde une trace de la branche d'agent.
     pub integrate_no_ff: bool,
+    /// Commande de l'éditeur externe, avec `{path}` et `{line}`.
+    ///
+    /// L'édition dans Claudhub reste légère : une retouche courte ici, le vrai
+    /// travail dans l'éditeur de son choix. Vide, le geste disparaît des menus
+    /// plutôt que d'échouer.
+    pub external_editor: String,
+    /// Montrer aussi les fichiers que `.gitignore` écarte, dans l'explorateur.
+    pub show_ignored_files: bool,
 }
 
 impl Default for Settings {
@@ -430,6 +438,8 @@ impl Default for Settings {
             diff_whole_file: false,
             update_with_rebase: false,
             integrate_no_ff: true,
+            external_editor: String::new(),
+            show_ignored_files: false,
         }
     }
 }

@@ -38,7 +38,8 @@ actions!(
         ToggleWholeFile,
         AnnotateSelection,
         AskAgent,
-        SendNotes
+        SendNotes,
+        SaveFile
     ]
 );
 
@@ -139,6 +140,9 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-shift-n", AnnotateSelection, Some(COPY_PREDICATE)),
         KeyBinding::new("secondary-shift-k", AskAgent, Some(COPY_PREDICATE)),
         KeyBinding::new("secondary-shift-e", SendNotes, Some(PREDICATE)),
+        // Enregistrer vise l'éditeur intégré, et n'existe que quand il est
+        // ouvert : ailleurs, il n'y a rien à écrire.
+        KeyBinding::new("secondary-s", SaveFile, Some(PREDICATE)),
         KeyBinding::new("secondary-shift-s", ToggleDiffSplit, Some(PREDICATE)),
         KeyBinding::new("secondary-shift-f", ToggleWholeFile, Some(PREDICATE)),
         // Les conventions des terminaux : la touche système *avec* Maj, parce
@@ -403,4 +407,13 @@ pub fn send_notes(
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.send_notes(None, window, cx);
+}
+
+pub fn save_file(
+    this: &mut ClaudhubApp,
+    _: &SaveFile,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.save_file(cx);
 }

@@ -171,6 +171,38 @@ pub enum Cmd {
         ours: bool,
     },
 
+    // — Fichiers du projet ————————————————————————————————————————
+    /// Liste les fichiers du worktree, suivis et nouveaux non ignorés.
+    ListFiles {
+        worktree: WorktreeId,
+        ignored: bool,
+    },
+    /// Lit un fichier pour l'éditer.
+    ReadFile {
+        worktree: WorktreeId,
+        path: PathBuf,
+    },
+    /// Écrit un fichier, sauf si son empreinte a changé depuis la lecture.
+    WriteFile {
+        worktree: WorktreeId,
+        path: PathBuf,
+        content: String,
+        /// Empreinte du contenu lu. `None` écrase sans regarder — réservé à
+        /// une sauvegarde qu'on a explicitement confirmée.
+        expect: Option<u64>,
+    },
+    /// Renomme, supprime ou crée un fichier ou un dossier.
+    FileOp {
+        worktree: WorktreeId,
+        op: crate::files::Op,
+    },
+    /// Lance l'éditeur externe sur un fichier, à une ligne donnée.
+    OpenExternal {
+        worktree: WorktreeId,
+        path: PathBuf,
+        line: usize,
+    },
+
     // — `wt` : ce que le `wt.toml` du projet ajoute ————————————————
     /// Lit le `wt.toml` d'un dépôt. Une lecture de fichier, mais elle a sa
     /// commande : la vue n'a le droit de toucher au disque nulle part.
@@ -300,6 +332,15 @@ pub enum Evt {
     WtStates {
         states: Vec<(WorktreeId, WtWorktree)>,
     },
+    ProjectFiles {
+        worktree: WorktreeId,
+        files: Vec<PathBuf>,
+    },
+    FileContent {
+        worktree: WorktreeId,
+        path: PathBuf,
+        content: crate::files::Content,
+    },
     Agents {
         agents: crate::agent::Agents,
     },
@@ -362,6 +403,10 @@ pub enum Action {
     WtUp,
     WtDown,
     Resolve,
+    Read,
+    Write,
+    FileOp,
+    OpenExternal,
 }
 
 impl Action {
@@ -390,6 +435,10 @@ impl Action {
             Self::Resume => "action-resume-ok",
             Self::WtUp => "action-wt-up-ok",
             Self::WtDown => "action-wt-down-ok",
+            Self::Read => "action-read-ok",
+            Self::Write => "action-write-ok",
+            Self::FileOp => "action-file-op-ok",
+            Self::OpenExternal => "action-open-external-ok",
             Self::Resolve => "action-resolve-ok",
         }
     }

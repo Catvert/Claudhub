@@ -48,6 +48,7 @@ pub fn register(app: &Entity<ClaudhubApp>, cx: &mut App) {
         HistoryPanel => "ClaudhubHistory",
         NotesPanel => "ClaudhubNotes",
         ConflictsPanel => "ClaudhubConflicts",
+        FilesPanel => "ClaudhubFiles",
         DiffPanel => "ClaudhubDiff",
         TerminalPanel => "ClaudhubTerminal",
     }
@@ -114,6 +115,7 @@ panels! {
     ChangesPanel => ("ClaudhubChanges", "range-working", render_changes),
     BranchPanel => ("ClaudhubBranch", "range-branch", render_branch_review),
     NotesPanel => ("ClaudhubNotes", "panel-notes", render_notes),
+    FilesPanel => ("ClaudhubFiles", "panel-files", render_files),
     DiffPanel => ("ClaudhubDiff", "panel-diff", render_diff),
 }
 

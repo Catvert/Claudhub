@@ -122,6 +122,8 @@ par `\\wsl$\<distribution>\home\…`, et VS Code s'y branche nativement.
 | `terminal.scrollback` | 10000 | lignes d'historique par onglet |
 | `terminal.agents` | un profil `claude` | profils d'agent : `name`, `command`, `args`, `env` |
 | `terminal.default_agent` | le premier | profil lancé par le bouton « agent » |
+| `external_editor` | vide | commande avec `{path}` et `{line}` |
+| `update_with_rebase` | `false` | mettre à jour depuis la base par rebase |
 | `repositories` | `[]` | dépôts rouverts au démarrage |
 
 `terminal.agent_command` a été remplacé par `terminal.agents` ; s'il est encore
@@ -151,6 +153,7 @@ le terminal.
 | `Ctrl+Entrée` | valider |
 | `Ctrl+1` / `Ctrl+2` | modifications / revue de branche |
 | `Ctrl+H` | afficher/masquer l'historique |
+| `Ctrl+S` | enregistrer le fichier ouvert |
 | `Ctrl+Maj+N` | annoter les lignes sélectionnées |
 | `Ctrl+Maj+K` | poser une question à l'agent sur la sélection |
 | `Ctrl+Maj+E` | envoyer les remarques non traitées à l'agent |

@@ -65,7 +65,8 @@ impl ClaudhubApp {
                                 dark_themes,
                             ))
                             .page(terminal_page(shells, terminal_fonts))
-                            .page(review_page()),
+                            .page(review_page())
+                            .page(files_page()),
                     ),
                 )
         });
@@ -684,6 +685,38 @@ fn review_page() -> SettingPage {
                     .description(tr!("settings-diff-split-help")),
                 ),
         )
+}
+
+fn files_page() -> SettingPage {
+    SettingPage::new(tr!("settings-page-files")).group(
+        SettingGroup::new()
+            .item(
+                SettingItem::new(
+                    tr!("settings-external-editor"),
+                    SettingField::input(
+                        |cx: &App| Settings::global(cx).external_editor.clone().into(),
+                        |value: SharedString, cx: &mut App| {
+                            Settings::update_global(cx, |s| s.external_editor = value.to_string())
+                        },
+                    )
+                    .default_value(SharedString::default()),
+                )
+                .description(tr!("settings-external-editor-help")),
+            )
+            .item(
+                SettingItem::new(
+                    tr!("settings-show-ignored"),
+                    SettingField::switch(
+                        |cx: &App| Settings::global(cx).show_ignored_files,
+                        |value: bool, cx: &mut App| {
+                            Settings::update_global(cx, |s| s.show_ignored_files = value)
+                        },
+                    )
+                    .default_value(false),
+                )
+                .description(tr!("settings-show-ignored-help")),
+            ),
+    )
 }
 
 /// Bornes communes aux tailles de texte, les mêmes que celles de la molette.

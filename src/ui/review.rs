@@ -1046,9 +1046,10 @@ fn group_checked(rows: &[Row], group: Group) -> bool {
 /// Met la liste plate en arborescence.
 ///
 /// Les groupes sont conservés tels quels ; chaque bloc de fichiers entre deux
-/// groupes devient un arbre. Fonction libre et testée : c'est là que se
-/// jouent la fusion des dossiers intermédiaires et le calcul de ce qu'un
-/// dossier replié contient encore.
+/// groupes devient un arbre. La construction est déléguée à `ui::tree`, qui ne
+/// connaît que des chemins — ce qu'une ligne affiche est décidé ici, et c'est
+/// ce qui permet à l'explorateur de projet d'utiliser le même arbre avec
+/// d'autres feuilles.
 fn tree_rows(flat: &[Row], collapsed: &HashSet<PathBuf>) -> Vec<Row> {
     let mut out = Vec::new();
     let mut block: Vec<FileRow> = Vec::new();
@@ -1071,99 +1072,42 @@ fn flush(block: &mut Vec<FileRow>, collapsed: &HashSet<PathBuf>, out: &mut Vec<R
     if block.is_empty() {
         return;
     }
-    let mut root = Node::default();
-    for file in block.drain(..) {
-        root.insert(file);
-    }
-    emit(&root, Path::new(""), 0, collapsed, out);
-}
-
-/// Un nœud de l'arbre en construction.
-///
-/// `BTreeMap` et non `HashMap` : l'ordre alphabétique des dossiers vient de
-/// là, et il doit être stable d'un rafraîchissement à l'autre — une liste qui
-/// se réordonne à chaque `git status` est illisible.
-#[derive(Default)]
-struct Node {
-    dirs: std::collections::BTreeMap<String, Node>,
-    files: Vec<FileRow>,
-}
-
-impl Node {
-    fn insert(&mut self, file: FileRow) {
-        let components: Vec<String> = file
-            .path
-            .parent()
-            .map(|parent| {
-                parent
-                    .components()
-                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut node = self;
-        for component in components {
-            node = node.dirs.entry(component).or_default();
+    let files: Vec<FileRow> = std::mem::take(block);
+    let paths: Vec<PathBuf> = files.iter().map(|file| file.path.clone()).collect();
+    for entry in crate::ui::tree::build(&paths, collapsed) {
+        match entry {
+            crate::ui::tree::Entry::Dir {
+                path,
+                label,
+                depth,
+                collapsed,
+                leaves,
+            } => {
+                // Les agrégats d'un dossier portent sur **tout** son
+                // sous-arbre, replié compris : c'est ce que la case à cocher
+                // indexe, et ce que le volume annonce.
+                let inside: Vec<&FileRow> = leaves.iter().map(|index| &files[*index]).collect();
+                out.push(Row::Dir(DirRow {
+                    path,
+                    label,
+                    depth,
+                    collapsed,
+                    paths: inside.iter().map(|file| file.path.clone()).collect(),
+                    staged: inside.iter().all(|file| file.staged),
+                    added: inside.iter().map(|file| file.added).sum(),
+                    removed: inside.iter().map(|file| file.removed).sum(),
+                }));
+            }
+            crate::ui::tree::Entry::Leaf { index, depth } => {
+                let mut file = files[index].clone();
+                file.depth = depth;
+                // Le dossier est porté par la ligne au-dessus : le répéter sur
+                // chaque fichier est exactement le bruit que l'arborescence
+                // supprime.
+                file.directory.clear();
+                out.push(Row::File(file));
+            }
         }
-        node.files.push(file);
-    }
-
-    /// Tous les fichiers du sous-arbre, dans l'ordre où ils s'afficheraient.
-    fn all_files(&self) -> Vec<&FileRow> {
-        let mut files: Vec<&FileRow> = self.dirs.values().flat_map(Node::all_files).collect();
-        files.extend(self.files.iter());
-        files
-    }
-}
-
-fn emit(
-    node: &Node,
-    prefix: &Path,
-    depth: usize,
-    collapsed: &HashSet<PathBuf>,
-    out: &mut Vec<Row>,
-) {
-    for (name, child) in &node.dirs {
-        // Fusion des dossiers intermédiaires : tant qu'un dossier n'a qu'un
-        // sous-dossier et aucun fichier, il n'apporte rien qu'un niveau
-        // d'indentation.
-        let mut label = name.clone();
-        let mut path = prefix.join(name);
-        let mut deepest = child;
-        while deepest.files.is_empty() && deepest.dirs.len() == 1 {
-            let (name, child) = deepest.dirs.iter().next().expect("un seul enfant");
-            label.push('/');
-            label.push_str(name);
-            path = path.join(name);
-            deepest = child;
-        }
-
-        let files = deepest.all_files();
-        let is_collapsed = collapsed.contains(&path);
-        out.push(Row::Dir(DirRow {
-            label,
-            depth,
-            collapsed: is_collapsed,
-            paths: files.iter().map(|f| f.path.clone()).collect(),
-            staged: files.iter().all(|f| f.staged),
-            added: files.iter().map(|f| f.added).sum(),
-            removed: files.iter().map(|f| f.removed).sum(),
-            path: path.clone(),
-        }));
-        if !is_collapsed {
-            emit(deepest, &path, depth + 1, collapsed, out);
-        }
-    }
-
-    let mut files: Vec<&FileRow> = node.files.iter().collect();
-    files.sort_by(|a, b| a.name.cmp(&b.name));
-    for file in files {
-        let mut file = file.clone();
-        file.depth = depth;
-        // Le dossier est porté par la ligne au-dessus : le répéter sur chaque
-        // fichier est exactement le bruit que l'arborescence supprime.
-        file.directory.clear();
-        out.push(Row::File(file));
     }
 }
 

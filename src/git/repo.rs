@@ -412,6 +412,32 @@ pub fn resolve(dir: &Path, path: &Path, ours: bool) -> Result<()> {
     stage(dir, std::slice::from_ref(&path.to_path_buf()))
 }
 
+/// Tous les fichiers suivis et les nouveaux non ignorés, en **un seul appel**.
+///
+/// C'est déjà ce que fait la surveillance de fichiers pour décider quoi
+/// observer, et pour la même raison : un projet Laravel a quarante mille
+/// répertoires, et un parcours de disque dossier par dossier coûterait un
+/// appel système par répertoire pour arriver aux sept cents qui portent du
+/// code.
+///
+/// `ignored` ajoute ce que `.gitignore` écarte — `vendor/`, `node_modules/`,
+/// `target/` : c'est un choix explicite, parce que la liste change alors
+/// d'ordre de grandeur.
+pub fn list_files(dir: &Path, ignored: bool) -> Result<Vec<PathBuf>> {
+    let mut args: Vec<&str> = vec!["ls-files", "-z", "--cached", "--others"];
+    if ignored {
+        args.push("--ignored");
+    } else {
+        args.push("--exclude-standard");
+    }
+    let out = git(dir, &args)?;
+    let mut files: Vec<PathBuf> = split_nul(&out).map(PathBuf::from).collect();
+    // `--cached --others` peut rendre deux fois le même chemin ; la liste est
+    // déjà triée par git, donc un dédoublonnage local suffit.
+    files.dedup();
+    Ok(files)
+}
+
 /// Vrai si le checkout a des modifications non validées, suivies ou non.
 pub fn is_dirty(dir: &Path) -> bool {
     git_opt(dir, &["status", "--porcelain"])

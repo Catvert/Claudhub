@@ -23,6 +23,7 @@ elle ne fait jamais d'entrée-sortie**.
 
 ```
 src/
+  files.rs      lire, écrire (sous condition), ranger, éditeur externe
   wt.rs         le `wt.toml` d'un projet : questions, tâches, statut, URLs
   git/          couche git — sous-processus `git`, testable sans gpui
     mod.rs      exécution des commandes (stdin fermé, LC_ALL=C, pas de pager)
@@ -49,6 +50,8 @@ src/
     sidebar.rs / review.rs / branches.rs / terminal_view.rs
     settings.rs     les réglages et leur global
     settings_view.rs  le formulaire, bâti sur `gpui_component::setting`
+    tree.rs         chemins → arborescence repliable, en indices
+    explorer.rs     l'explorateur de projet et l'éditeur intégré
     conflicts.rs    les conflits et le garde-fou d'une opération à mi-chemin
     worktree_ops.rs création guidée, tâches du projet, intégration
     store.rs        ce qu'on retient par worktree : base, replis, notes
@@ -256,6 +259,58 @@ Corollaire à connaître : le diff affiché va de HEAD au répertoire de travail
 index compris. Indexer un hunk isolé sur un fichier *déjà partiellement
 indexé* peut donc échouer — `git apply --cached` refuse un patch qui ne
 s'applique pas —, et le message le dit.
+
+### L'explorateur de projet
+
+**L'arbre vient d'un seul appel git** — `ls-files --cached --others
+--exclude-standard` —, jamais d'un parcours de disque. C'est déjà ce que fait
+la surveillance de fichiers, et pour la même raison : un projet Laravel a
+quarante mille répertoires, et les ouvrir un par un coûterait un appel système
+chacun pour arriver aux sept cents qui portent du code.
+
+**`ui::tree` ne connaît que des chemins et rend des indices.** Deux listes s'en
+servent — la revue et l'explorateur — et elles n'affichent pas les mêmes
+choses : cases à cocher et volumes d'un côté, statut git de l'autre. Rendre des
+indices plutôt que des valeurs n'est pas un détail : la même feuille apparaît
+dans le sous-arbre de chacun de ses dossiers parents, et un explorateur de
+quarante mille fichiers ferait sinon des centaines de milliers de clones de
+`PathBuf` par reconstruction.
+
+**L'arbre de l'explorateur est construit une fois**, à l'arrivée de la liste et
+à chaque repli, et rangé derrière un `Rc`. La liste de revue, elle, se
+reconstruit au rendu : quelques centaines d'entrées le permettent, des dizaines
+de milliers non.
+
+### Lire et retoucher un fichier
+
+`InputState::code_editor(langue).line_number(true)` fournit la coloration,
+l'auto-indentation, les numéros et la recherche. Le langage vient de la même
+table que la coloration des diffs, PHP compris. Au-delà de `files::MAX_LINES`,
+l'ouverture est **refusée** avec un message qui renvoie à l'éditeur externe :
+une fenêtre figée est un pire service qu'un refus.
+
+**L'écriture est conditionnelle** (`files::write`, `expect`). Un agent écrit
+dans les mêmes fichiers pendant qu'on les relit : l'empreinte de ce qu'on avait
+lu est repassée à l'écriture, et un fichier qui a changé depuis la fait
+refuser. C'est la seule façon de ne pas effacer une heure de travail avec une
+correction de faute de frappe. Corollaire : après un enregistrement réussi,
+l'empreinte retenue suit ce qu'on vient d'écrire — sinon le deuxième
+enregistrement d'affilée échouerait, le fichier ayant changé par notre faute.
+
+L'éditeur **prend la place du diff** plutôt que d'occuper un panneau à lui : on
+regarde l'un ou l'autre, et deux onglets à faire basculer pour un geste qui
+vient de l'explorateur seraient un aller-retour de trop.
+
+L'éditeur externe se déclare par une commande avec `{path}` et `{line}`
+(`code -g {path}:{line}`, `phpstorm --line {line} {path}`,
+`zed {path}:{line}`). Il est lancé **détaché**, ses sorties jetées : un éditeur
+graphique ne rend la main qu'à sa fermeture, et un `vim` lancé dans le vide
+n'en rendrait jamais. Le geste existe **depuis une ligne de diff** — on relit,
+quelque chose cloche, on l'ouvre là où c'est.
+
+Les chemins de l'explorateur sont **ramenés dans le worktree** avant toute
+opération : un `../` saisi dans un dialogue de renommage en sortirait, et une
+suppression y ferait des dégâts que git ne rattrape pas.
 
 ### Quel domaine de revue s'ouvre
 
