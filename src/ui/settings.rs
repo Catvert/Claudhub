@@ -112,6 +112,157 @@ impl LanguageChoice {
     }
 }
 
+/// Un agent de codage qu'on sait lancer.
+///
+/// Plusieurs profils et non un seul réglage : dès qu'on envoie du texte à un
+/// agent, on veut choisir lequel. `env` est ce qui porte le modèle
+/// (`ANTHROPIC_MODEL`, une clé par profil…) — « configurer plusieurs modèles »
+/// n'appelle donc aucune dépendance HTTP, seulement une variable de plus.
+///
+/// `command` et `args` sont **séparés** : découper une ligne de commande sur
+/// les espaces casse sur tout chemin qui en contient un, et c'est le genre de
+/// panne qu'on ne comprend qu'après avoir lu le code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AgentProfile {
+    /// Ce que le menu affiche. Vide, c'est le nom du programme qui sert.
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    /// Variables ajoutées à l'environnement du pty.
+    ///
+    /// `BTreeMap` et non `HashMap` : JSON sérialisé dans un ordre différent à
+    /// chaque écriture ferait un fichier qui change sans que rien n'ait changé.
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+impl AgentProfile {
+    /// Le profil livré par défaut, celui qui donne son nom au projet.
+    pub fn claude() -> Self {
+        Self {
+            name: "claude".into(),
+            command: "claude".into(),
+            args: Vec::new(),
+            env: Default::default(),
+        }
+    }
+
+    /// Un profil bâti à partir d'une ligne de commande entière.
+    pub fn from_command_line(line: &str) -> Option<Self> {
+        let mut parts = split_command(line).into_iter();
+        let command = parts.next()?;
+        let name = command_name(&command).to_string();
+        Some(Self {
+            name,
+            command,
+            args: parts.collect(),
+            env: Default::default(),
+        })
+    }
+
+    /// Le nom affiché : le sien, sinon celui du programme.
+    pub fn label(&self) -> &str {
+        non_empty(&self.name, &self.command)
+    }
+
+    pub fn spawn(&self) -> (String, Vec<String>) {
+        (self.command.clone(), self.args.clone())
+    }
+
+    /// La ligne de commande telle qu'on la saisit, guillemets remis.
+    pub fn command_line(&self) -> String {
+        join_command(
+            std::iter::once(self.command.as_str()).chain(self.args.iter().map(String::as_str)),
+        )
+    }
+
+    /// L'environnement tel qu'on le saisit : `CLÉ=valeur`, séparés par des
+    /// espaces, avec les mêmes règles de guillemets que la ligne de commande.
+    pub fn env_line(&self) -> String {
+        join_command(self.env.iter().map(|(key, value)| format!("{key}={value}")))
+    }
+
+    pub fn set_env_line(&mut self, line: &str) {
+        self.env = split_command(line)
+            .into_iter()
+            .filter_map(|pair| {
+                let (key, value) = pair.split_once('=')?;
+                (!key.is_empty()).then(|| (key.to_string(), value.to_string()))
+            })
+            .collect();
+    }
+}
+
+/// Le nom d'un programme, dépouillé de son chemin.
+fn command_name(command: &str) -> &str {
+    command.rsplit('/').next().unwrap_or(command)
+}
+
+/// Découpe une ligne de commande en honorant les guillemets.
+///
+/// `split_whitespace` casse sur tout chemin contenant une espace — et sous
+/// Windows comme sous macOS, c'est le cas courant. Les règles sont celles d'un
+/// shell POSIX réduites à l'essentiel : `'…'` littéral, `"…"` avec échappement
+/// par contre-oblique, contre-oblique hors guillemets.
+pub fn split_command(line: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut started = false;
+    let mut chars = line.chars().peekable();
+    let mut quote: Option<char> = None;
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('\''), c) => current.push(c),
+            (Some(_), '\\') => current.push(chars.next().unwrap_or('\\')),
+            (Some(_), c) => current.push(c),
+            (None, '\'') | (None, '"') => {
+                quote = Some(c);
+                // Un argument vide est un argument : `--sep ''` en est un.
+                started = true;
+            }
+            (None, '\\') => current.push(chars.next().unwrap_or('\\')),
+            (None, c) if c.is_whitespace() => {
+                if started || !current.is_empty() {
+                    parts.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            (None, c) => current.push(c),
+        }
+    }
+    if started || !current.is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
+/// Recompose une ligne de commande à partir de ses morceaux.
+///
+/// L'aller-retour avec `split_command` doit être fidèle : le formulaire écrit
+/// des morceaux et les relit en une ligne, et un chemin avec une espace ne
+/// doit pas se scinder en deux au premier passage.
+pub fn join_command(parts: impl IntoIterator<Item = impl AsRef<str>>) -> String {
+    parts
+        .into_iter()
+        .map(|part| {
+            let part = part.as_ref();
+            // La contre-oblique aussi : hors guillemets elle échappe, et un
+            // chemin Windows perdrait les siennes au premier aller-retour.
+            if part.is_empty()
+                || part
+                    .chars()
+                    .any(|c| c.is_whitespace() || c == '\'' || c == '"' || c == '\\')
+            {
+                format!("\"{}\"", part.replace('\\', "\\\\").replace('"', "\\\""))
+            } else {
+                part.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerminalSettings {
@@ -122,9 +273,14 @@ pub struct TerminalSettings {
     pub font_family: String,
     pub font_size: f32,
     pub scrollback: usize,
-    /// Commande de l'agent de codage, lancée par le bouton dédié dans un
-    /// onglet du worktree sélectionné.
+    /// Ancien réglage, remplacé par `agents`. Il n'est plus lu qu'une fois, à
+    /// la migration, puis vidé — mais il reste déclaré, faute de quoi le
+    /// fichier d'un utilisateur qui n'a pas encore migré perdrait sa commande.
     pub agent_command: String,
+    /// Les agents qu'on sait lancer, dans l'ordre du menu.
+    pub agents: Vec<AgentProfile>,
+    /// Nom du profil lancé par défaut. Vide, ou inconnu : le premier.
+    pub default_agent: String,
 }
 
 impl Default for TerminalSettings {
@@ -137,6 +293,11 @@ impl Default for TerminalSettings {
             // sans que la mémoire d'une dizaine d'onglets se remarque.
             scrollback: 10_000,
             agent_command: "claude".into(),
+            // Vide par défaut : `migrate_agents` la remplit, ce qui fait du
+            // même code le chemin de l'installation neuve et celui de la
+            // reprise d'un fichier écrit par une version antérieure.
+            agents: Vec::new(),
+            default_agent: String::new(),
         }
     }
 }
@@ -149,9 +310,50 @@ impl TerminalSettings {
     /// une ligne de commande entière — `fish -l`, `tmux new-session -A -s
     /// claudhub` — parce qu'un shell nu n'est pas toujours ce qu'on veut ouvrir.
     pub fn program(&self) -> Option<(String, Vec<String>)> {
-        let mut parts = self.shell.split_whitespace().map(str::to_string);
+        let mut parts = split_command(&self.shell).into_iter();
         let program = parts.next()?;
         Some((program, parts.collect()))
+    }
+
+    /// Reprend `agent_command` sous forme de profil.
+    ///
+    /// Sans risque : `#[serde(default)]` fait qu'un fichier sans `agents` est
+    /// lu avec une liste vide, et c'est exactement le cas qu'on rattrape ici.
+    /// L'ancien champ est vidé pour que la reprise n'ait lieu qu'une fois.
+    pub fn migrate_agents(&mut self) {
+        if !self.agents.is_empty() {
+            self.agent_command.clear();
+            return;
+        }
+        self.agents = AgentProfile::from_command_line(&self.agent_command)
+            .map(|profile| vec![profile])
+            .unwrap_or_else(|| vec![AgentProfile::claude()]);
+        self.agent_command.clear();
+    }
+
+    /// Le profil lancé quand on ne dit pas lequel.
+    pub fn default_profile(&self) -> Option<&AgentProfile> {
+        self.agents
+            .iter()
+            .find(|profile| profile.label() == self.default_agent)
+            .or_else(|| self.agents.first())
+    }
+
+    /// Les noms de programme à chercher dans `/proc`.
+    ///
+    /// Tous les profils et non le seul courant : un agent lancé depuis un
+    /// terminal à côté compte autant que celui qu'on a démarré ici, et n'en
+    /// chercher qu'un n'en verrait qu'un sur deux.
+    pub fn agent_programs(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .agents
+            .iter()
+            .map(|profile| command_name(&profile.command).to_string())
+            .filter(|name| !name.is_empty())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Police effective : la sienne, sinon celle des diffs.
@@ -238,6 +440,12 @@ impl Settings {
     }
 
     pub fn load() -> Self {
+        let mut settings = Self::read();
+        settings.terminal.migrate_agents();
+        settings
+    }
+
+    fn read() -> Self {
         let Some(path) = settings_path() else {
             return Self::default();
         };
@@ -695,6 +903,111 @@ mod tests {
                 ]
             ))
         );
+    }
+
+    #[test]
+    fn a_command_line_survives_quotes_and_spaces() {
+        // Le défaut que ce découpage corrige : un chemin contenant une espace.
+        assert_eq!(
+            split_command(r#""/opt/mon agent/bin/agent" --model "gpt 5""#),
+            vec!["/opt/mon agent/bin/agent", "--model", "gpt 5"]
+        );
+        // Guillemets simples, littéraux.
+        assert_eq!(
+            split_command("sh -c 'echo un deux'"),
+            vec!["sh", "-c", "echo un deux"]
+        );
+        // Un argument vide en est un.
+        assert_eq!(split_command("agent --sep ''"), vec!["agent", "--sep", ""]);
+        assert_eq!(split_command("   "), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_command_line_round_trips() {
+        for line in [
+            "claude",
+            r#""/opt/mon agent/bin/agent" --model "gpt 5""#,
+            r#"agent --say "il dit \"non\"""#,
+            r#""C:\Program Files\agent.exe""#,
+        ] {
+            let parts = split_command(line);
+            assert_eq!(split_command(&join_command(&parts)), parts, "{line}");
+        }
+    }
+
+    #[test]
+    fn the_old_agent_command_becomes_a_profile() {
+        // Le fichier d'un utilisateur qui n'a jamais vu les profils. Le chemin
+        // y est entre guillemets, ce que l'ancien découpage ne savait pas
+        // lire : la reprise en profite pour le remettre d'aplomb.
+        let mut terminal: TerminalSettings =
+            serde_json::from_str(r#"{"agent_command":"\"/opt/a b/claude\" --resume"}"#).unwrap();
+        terminal.migrate_agents();
+        assert_eq!(terminal.agents.len(), 1);
+        assert_eq!(terminal.agents[0].command, "/opt/a b/claude");
+        assert_eq!(terminal.agents[0].args, vec!["--resume"]);
+        assert_eq!(terminal.agents[0].label(), "claude");
+        // Vidé : la reprise n'a lieu qu'une fois.
+        assert!(terminal.agent_command.is_empty());
+
+        // Une installation neuve passe par le même chemin.
+        let mut fresh = TerminalSettings::default();
+        fresh.migrate_agents();
+        assert_eq!(fresh.agents, vec![AgentProfile::claude()]);
+
+        // Un fichier qui a déjà des profils n'est pas touché.
+        let mut kept = TerminalSettings {
+            agents: vec![AgentProfile {
+                name: "aider".into(),
+                command: "aider".into(),
+                ..Default::default()
+            }],
+            agent_command: "claude".into(),
+            ..Default::default()
+        };
+        kept.migrate_agents();
+        assert_eq!(kept.agents.len(), 1);
+        assert_eq!(kept.agents[0].name, "aider");
+    }
+
+    #[test]
+    fn the_programs_to_look_for_are_all_the_profiles() {
+        let terminal = TerminalSettings {
+            agents: vec![
+                AgentProfile {
+                    name: "opus".into(),
+                    command: "/usr/bin/claude".into(),
+                    ..Default::default()
+                },
+                AgentProfile {
+                    name: "sonnet".into(),
+                    command: "claude".into(),
+                    ..Default::default()
+                },
+                AgentProfile {
+                    name: "aider".into(),
+                    command: "aider".into(),
+                    ..Default::default()
+                },
+            ],
+            default_agent: "sonnet".into(),
+            ..Default::default()
+        };
+        // Dédoublonné sur le nom du programme : deux profils du même agent ne
+        // le font pas compter deux fois dans /proc.
+        assert_eq!(terminal.agent_programs(), vec!["aider", "claude"]);
+        assert_eq!(terminal.default_profile().unwrap().name, "sonnet");
+    }
+
+    #[test]
+    fn an_environment_line_round_trips() {
+        let mut profile = AgentProfile::claude();
+        profile.set_env_line(r#"ANTHROPIC_MODEL=opus PROMPT="deux mots""#);
+        assert_eq!(profile.env.get("ANTHROPIC_MODEL").unwrap(), "opus");
+        assert_eq!(profile.env.get("PROMPT").unwrap(), "deux mots");
+        let mut again = AgentProfile::claude();
+        again.set_env_line(&profile.env_line());
+        assert_eq!(again.env, profile.env);
     }
 
     #[test]

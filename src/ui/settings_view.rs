@@ -11,7 +11,7 @@
 //! impossible autrement qu'à l'aveugle.
 
 use gpui::{div, prelude::*, px, App, Context, Corner, Entity, SharedString, Subscription, Window};
-use gpui_component::button::Button;
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::setting::{
@@ -156,6 +156,204 @@ fn shell_item(shells: Vec<(SharedString, SharedString)>) -> SettingItem {
         }),
     )
     .description(tr!("settings-shell-help"))
+}
+
+/// L'état d'une ligne de la table des profils, gardé d'un rendu à l'autre.
+///
+/// Les trois souscriptions vivent dedans : lâchées, elles se couperaient et
+/// les champs cesseraient d'écrire dans les réglages à la frame suivante.
+struct AgentField {
+    name: Entity<InputState>,
+    command: Entity<InputState>,
+    env: Entity<InputState>,
+    _subscriptions: Vec<Subscription>,
+}
+
+/// La table des profils d'agent.
+///
+/// Un champ sur mesure parce qu'il n'y a rien d'approchant dans le formulaire
+/// de gpui-component : ce sont des lignes qu'on ajoute et qu'on retire, avec
+/// trois saisies chacune.
+///
+/// **La clé d'état porte le nombre de profils** (`claudhub-agent-{n}-{i}`).
+/// `use_keyed_state` garde un état par clé : sans le compte, supprimer le
+/// premier profil laisserait les champs de la ligne 0 remplis avec l'ancien,
+/// et l'on écrirait dans les réglages ce qu'on croyait avoir supprimé.
+/// Renommer un profil, lui, ne change pas le compte — les champs gardent donc
+/// leur curseur pendant la frappe.
+fn agents_item() -> SettingItem {
+    SettingItem::new(
+        tr!("settings-agents"),
+        SettingField::render(move |_, window, cx| {
+            let profiles = Settings::global(cx).terminal.agents.clone();
+            let count = profiles.len();
+            let rows: Vec<_> = profiles
+                .iter()
+                .enumerate()
+                .map(|(index, profile)| agent_row(index, count, profile, window, cx))
+                .collect();
+            v_flex().w(px(460.)).gap_1().children(rows).child(
+                h_flex().child(
+                    Button::new("add-agent")
+                        .outline()
+                        .small()
+                        .icon(icon("plus"))
+                        .label(tr!("settings-agent-add"))
+                        .on_click(|_, _window, cx| {
+                            Settings::update_global(cx, |s| {
+                                s.terminal.agents.push(settings::AgentProfile::default())
+                            });
+                        }),
+                ),
+            )
+        }),
+    )
+    .description(tr!("settings-agents-help"))
+}
+
+fn agent_row(
+    index: usize,
+    count: usize,
+    profile: &settings::AgentProfile,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement {
+    let key = format!("claudhub-agent-{count}-{index}");
+    let (name, command, env) = (
+        profile.name.clone(),
+        profile.command_line(),
+        profile.env_line(),
+    );
+    let state = window.use_keyed_state(SharedString::from(key), cx, move |window, cx| {
+        let name_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(tr!("settings-agent-name"))
+                .default_value(name)
+        });
+        let command_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(tr!("settings-agent-command"))
+                .default_value(command)
+        });
+        let env_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(tr!("settings-agent-env"))
+                .default_value(env)
+        });
+        let subscriptions = vec![
+            cx.subscribe(
+                &name_input,
+                move |_: &mut AgentField, input, event: &InputEvent, cx| {
+                    if !matches!(event, InputEvent::Change) {
+                        return;
+                    }
+                    let value = input.read(cx).value().to_string();
+                    edit_agent(index, cx, |profile| profile.name = value);
+                },
+            ),
+            cx.subscribe(
+                &command_input,
+                move |_: &mut AgentField, input, event: &InputEvent, cx| {
+                    if !matches!(event, InputEvent::Change) {
+                        return;
+                    }
+                    let value = input.read(cx).value().to_string();
+                    edit_agent(index, cx, |profile| {
+                        // La ligne est découpée en honorant les guillemets :
+                        // un chemin contenant une espace ne doit pas devenir
+                        // deux arguments.
+                        let mut parts = settings::split_command(&value).into_iter();
+                        profile.command = parts.next().unwrap_or_default();
+                        profile.args = parts.collect();
+                    });
+                },
+            ),
+            cx.subscribe(
+                &env_input,
+                move |_: &mut AgentField, input, event: &InputEvent, cx| {
+                    if !matches!(event, InputEvent::Change) {
+                        return;
+                    }
+                    let value = input.read(cx).value().to_string();
+                    edit_agent(index, cx, |profile| profile.set_env_line(&value));
+                },
+            ),
+        ];
+        AgentField {
+            name: name_input,
+            command: command_input,
+            env: env_input,
+            _subscriptions: subscriptions,
+        }
+    });
+    let field = state.read(cx);
+    let (name, command, env) = (field.name.clone(), field.command.clone(), field.env.clone());
+    h_flex()
+        .gap_1()
+        .items_center()
+        .child(div().w(px(90.)).child(Input::new(&name).small()))
+        .child(div().flex_1().child(Input::new(&command).small()))
+        .child(div().w(px(130.)).child(Input::new(&env).small()))
+        .child(
+            Button::new(("remove-agent", index))
+                .ghost()
+                .small()
+                .icon(icon("trash-2"))
+                .tooltip(tr!("settings-agent-remove"))
+                .on_click(move |_, _window, cx| {
+                    Settings::update_global(cx, |s| {
+                        if index < s.terminal.agents.len() {
+                            s.terminal.agents.remove(index);
+                        }
+                    });
+                }),
+        )
+}
+
+/// Le profil lancé quand on ne dit pas lequel.
+///
+/// La liste des choix est relue à chaque rendu du formulaire : elle change
+/// pendant qu'on édite la table juste au-dessus.
+fn default_agent_item() -> SettingItem {
+    SettingItem::new(
+        tr!("settings-default-agent"),
+        SettingField::render(|_, _window, cx| {
+            let profiles = Settings::global(cx).terminal.agents.clone();
+            let current = Settings::global(cx)
+                .terminal
+                .default_profile()
+                .map(|profile| profile.label().to_string())
+                .unwrap_or_default();
+            Button::new("default-agent")
+                .outline()
+                .small()
+                .label(SharedString::from(current))
+                .dropdown_menu_with_anchor(Corner::TopRight, move |menu, _, _| {
+                    profiles.iter().fold(menu, |menu, profile| {
+                        let label = SharedString::from(profile.label().to_string());
+                        let chosen = label.clone();
+                        menu.item(PopupMenuItem::new(label).on_click(move |_, _window, cx| {
+                            let chosen = chosen.to_string();
+                            Settings::update_global(cx, |s| s.terminal.default_agent = chosen);
+                        }))
+                    })
+                })
+        }),
+    )
+    .description(tr!("settings-default-agent-help"))
+}
+
+/// Modifie un profil en place, si l'indice existe encore.
+///
+/// L'indice peut être périmé d'une frame : une souscription posée pour la
+/// ligne 2 survit à la disparition de la ligne 2, et écrire hors des bornes
+/// paniquerait au milieu d'un rendu.
+fn edit_agent(index: usize, cx: &mut App, edit: impl FnOnce(&mut settings::AgentProfile)) {
+    Settings::update_global(cx, |s| {
+        if let Some(profile) = s.terminal.agents.get_mut(index) {
+            edit(profile);
+        }
+    });
 }
 
 /// Les palettes du registre pour une apparence donnée.
@@ -343,21 +541,8 @@ fn terminal_page(
             SettingGroup::new()
                 .title(tr!("settings-group-shell"))
                 .item(shell_item(shells))
-                .item(
-                    SettingItem::new(
-                        tr!("settings-agent"),
-                        SettingField::input(
-                            |cx: &App| Settings::global(cx).terminal.agent_command.clone().into(),
-                            |value: SharedString, cx: &mut App| {
-                                Settings::update_global(cx, |s| {
-                                    s.terminal.agent_command = value.to_string()
-                                })
-                            },
-                        )
-                        .default_value(SharedString::from("claude")),
-                    )
-                    .description(tr!("settings-agent-help")),
-                ),
+                .item(agents_item())
+                .item(default_agent_item()),
         )
         .group(
             SettingGroup::new()

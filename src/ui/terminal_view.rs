@@ -87,7 +87,7 @@ impl TerminalView {
     /// pour seul message.
     pub fn open(
         working_directory: &Path,
-        command: Option<(String, Vec<String>)>,
+        launch: &Launch,
         settings: &TerminalSettings,
     ) -> anyhow::Result<Terminal> {
         Terminal::spawn(Spawn {
@@ -95,8 +95,8 @@ impl TerminalView {
             // Un onglet ordinaire prend le programme des réglages ; une
             // commande explicite — l'agent — passe avant, elle est justement
             // ce qu'on a demandé à lancer.
-            command: command.or_else(|| settings.program()),
-            env: HashMap::new(),
+            command: launch.command.clone().or_else(|| settings.program()),
+            env: launch.env.clone(),
             // La vraie taille arrive au premier rendu ; celle-ci ne sert qu'à
             // ce que le shell ait une géométrie plausible avant sa première
             // invite.
@@ -782,6 +782,48 @@ fn rgb(r: u8, g: u8, b: u8) -> Hsla {
     .into()
 }
 
+/// Ce qu'il faut pour ouvrir un onglet.
+///
+/// Un agrégat plutôt que quatre paramètres : un profil d'agent porte une
+/// commande, des arguments, un environnement et un nom, et les faire voyager
+/// séparément jusqu'au pty multipliait les occasions d'en oublier un.
+pub struct Launch {
+    /// `None` = le shell de connexion, ce qu'attend quelqu'un qui ouvre « un
+    /// terminal ».
+    pub command: Option<(String, Vec<String>)>,
+    /// Variables ajoutées à l'environnement du pty. C'est par là que passe le
+    /// modèle d'un profil d'agent.
+    pub env: HashMap<String, String>,
+    pub label: SharedString,
+    /// Vrai quand cet onglet exécute un agent : c'est à lui que les notes de
+    /// relecture seront livrées.
+    pub agent: bool,
+}
+
+impl Launch {
+    pub fn shell() -> Self {
+        Self {
+            command: None,
+            env: HashMap::new(),
+            label: tr!("terminal-shell"),
+            agent: false,
+        }
+    }
+
+    pub fn agent(profile: &crate::ui::settings::AgentProfile) -> Self {
+        Self {
+            command: Some(profile.spawn()),
+            env: profile
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            label: SharedString::from(profile.label().to_string()),
+            agent: true,
+        }
+    }
+}
+
 /// Les onglets d'un worktree.
 pub struct TerminalGroup {
     worktree: PathBuf,
@@ -805,14 +847,7 @@ impl TerminalGroup {
     ///
     /// `agent` dit si ce qu'on lance est un agent de codage : c'est à cet
     /// onglet-là que les notes de relecture seront livrées.
-    pub fn open(
-        &mut self,
-        command: Option<(String, Vec<String>)>,
-        label: SharedString,
-        agent: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn open(&mut self, launch: Launch, window: &mut Window, cx: &mut Context<Self>) {
         // Un pty qu'on n'arrive pas à ouvrir est un problème système : limite
         // de descripteurs atteinte, `/dev/pts` absent. On renonce à l'onglet et
         // on le dit, plutôt que de paniquer au milieu d'un rendu — ce que
@@ -821,7 +856,7 @@ impl TerminalGroup {
         // construction : changer le shell ou le défilement arrière doit valoir
         // pour le prochain onglet, sans avoir à fermer les autres.
         let settings = Settings::global(cx).terminal.clone();
-        let terminal = match TerminalView::open(&self.worktree, command, &settings) {
+        let terminal = match TerminalView::open(&self.worktree, &launch, &settings) {
             Ok(terminal) => terminal,
             Err(e) => {
                 log::error!("ouverture du terminal : {e:#}");
@@ -830,7 +865,8 @@ impl TerminalGroup {
                 return;
             }
         };
-        let view = cx.new(|cx| TerminalView::attach(terminal, label, agent, window, cx));
+        let view =
+            cx.new(|cx| TerminalView::attach(terminal, launch.label, launch.agent, window, cx));
         self.error = None;
         self.tabs.push(view);
         self.active = self.tabs.len() - 1;
@@ -852,20 +888,23 @@ impl TerminalGroup {
     /// bouton « + » — et non dans la barre d'outils de la fenêtre : c'est un
     /// terminal de plus dans *ce* worktree, pas une action sur le dépôt.
     pub fn open_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let command = Settings::global(cx).terminal.agent_command.clone();
-        if command.trim().is_empty() {
+        let Some(profile) = Settings::global(cx).terminal.default_profile().cloned() else {
+            return;
+        };
+        self.open_profile(&profile, window, cx);
+    }
+
+    /// Ouvre un profil nommé.
+    pub fn open_profile(
+        &mut self,
+        profile: &crate::ui::settings::AgentProfile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if profile.command.trim().is_empty() {
             return;
         }
-        let mut parts = command.split_whitespace().map(str::to_string);
-        let Some(program) = parts.next() else { return };
-        let args: Vec<String> = parts.collect();
-        self.open(
-            Some((program.clone(), args)),
-            SharedString::from(program),
-            true,
-            window,
-            cx,
-        );
+        self.open(Launch::agent(profile), window, cx);
     }
 
     /// Livre un texte à l'agent de ce worktree, et le valide.
@@ -1029,32 +1068,41 @@ impl Render for TerminalGroup {
                             .xsmall()
                             .icon(icon("plus"))
                             .tooltip(tr!("terminal-new"))
+                            // Un profil d'agent par entrée : le menu est le
+                            // seul endroit où le choix se pose, et une liste
+                            // qui vient des réglages évite d'avoir à les
+                            // rouvrir pour lancer autre chose.
                             .dropdown_menu({
                                 let entity = cx.entity();
-                                move |menu, _window, _cx| {
-                                    let (shell, agent) = (entity.clone(), entity.clone());
-                                    menu.item(PopupMenuItem::new(tr!("terminal-new")).on_click(
-                                        move |_, window, cx| {
-                                            shell.update(cx, |this, cx| {
-                                                this.open(
-                                                    None,
-                                                    tr!("terminal-shell"),
-                                                    false,
-                                                    window,
-                                                    cx,
-                                                )
-                                            });
-                                        },
-                                    ))
-                                    .item(
-                                        PopupMenuItem::new(tr!("terminal-agent")).on_click(
+                                move |menu, _window, cx| {
+                                    let shell = entity.clone();
+                                    let profiles = Settings::global(cx).terminal.agents.clone();
+                                    let menu = menu.item(
+                                        PopupMenuItem::new(tr!("terminal-new")).on_click(
                                             move |_, window, cx| {
-                                                agent.update(cx, |this, cx| {
-                                                    this.open_agent(window, cx)
+                                                shell.update(cx, |this, cx| {
+                                                    this.open(Launch::shell(), window, cx)
                                                 });
                                             },
                                         ),
-                                    )
+                                    );
+                                    if profiles.is_empty() {
+                                        return menu;
+                                    }
+                                    profiles
+                                        .into_iter()
+                                        .fold(menu.separator(), |menu, profile| {
+                                            let entity = entity.clone();
+                                            let label =
+                                                SharedString::from(profile.label().to_string());
+                                            menu.item(PopupMenuItem::new(label).on_click(
+                                                move |_, window, cx| {
+                                                    entity.update(cx, |this, cx| {
+                                                        this.open_profile(&profile, window, cx)
+                                                    });
+                                                },
+                                            ))
+                                        })
                                 }
                             }),
                     )
@@ -1106,7 +1154,7 @@ impl ClaudhubApp {
         let path = worktree.to_path_buf();
         let group = cx.new(|_| TerminalGroup::new(path));
         group.update(cx, |group, cx| {
-            group.open(None, tr!("terminal-shell"), false, window, cx);
+            group.open(Launch::shell(), window, cx);
         });
         self.terminals.insert(worktree.to_path_buf(), group.clone());
         group

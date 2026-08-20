@@ -403,11 +403,11 @@ autrement ferait payer un mécanisme générique pour deux cas.
 
 ## Dette relevée en chemin
 
-- [ ] `split_whitespace()` sur des commandes utilisateur casse sur tout chemin
-      contenant une espace — `src/ui/settings.rs:151` et
-      `src/ui/terminal_view.rs:806`. Corrigé par le jalon 2 pour l'agent, reste
-      le shell.
-- [ ] `Cargo.toml` renvoie à `src/ui/terminal_element.rs`, qui n'existe pas : le
+- [x] `split_whitespace()` sur des commandes utilisateur casse sur tout chemin
+      contenant une espace. Corrigé pour l'agent **et** pour le shell :
+      `settings::split_command` honore les guillemets, et les deux appelants y
+      passent.
+- [x] `Cargo.toml` renvoie à `src/ui/terminal_element.rs`, qui n'existe pas : le
       rendu est dans `src/ui/terminal_view.rs`.
-- [ ] Le README annonce encore « écran de préférences » parmi les manques,
+- [x] Le README annonce encore « écran de préférences » parmi les manques,
       alors que `src/ui/settings_view.rs` existe.

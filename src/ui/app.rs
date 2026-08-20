@@ -329,9 +329,15 @@ impl Default for ReviewState {
 }
 
 /// Ce qu'on sait des agents d'un worktree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentState {
     pub count: usize,
+    /// Les agents trouvés, par nom de programme et sans doublon.
+    ///
+    /// La barre latérale dit *quel* agent tourne : à deux profils près, « un
+    /// agent travaille ici » ne dit pas lequel, et c'est justement ce qu'on
+    /// regarde en parcourant la liste.
+    pub programs: Vec<String>,
     /// Vrai quand au moins un agent a consommé du processeur depuis le relevé
     /// précédent.
     ///
@@ -642,8 +648,11 @@ impl ClaudhubApp {
                 worktrees: worktrees.clone(),
             });
         }
-        let program = Settings::global(cx).terminal.agent_command.clone();
-        self.git.send(Cmd::ScanAgents { worktrees, program });
+        let programs = Settings::global(cx).terminal.agent_programs();
+        self.git.send(Cmd::ScanAgents {
+            worktrees,
+            programs,
+        });
     }
 
     /// Enregistre la disposition, une fois le calme revenu.
@@ -902,10 +911,17 @@ impl ClaudhubApp {
                     for process in &processes {
                         cpu.insert(process.pid, process.cpu);
                     }
+                    let mut programs: Vec<String> = processes
+                        .iter()
+                        .map(|process| process.program.clone())
+                        .collect();
+                    programs.sort();
+                    programs.dedup();
                     next.insert(
                         worktree,
                         AgentState {
                             count: processes.len(),
+                            programs,
                             working,
                         },
                     );

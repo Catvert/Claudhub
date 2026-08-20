@@ -120,8 +120,20 @@ par `\\wsl$\<distribution>\home\…`, et VS Code s'y branche nativement.
 | `terminal.shell` | vide | vide = le shell de connexion |
 | `terminal.font_size` | 13 | |
 | `terminal.scrollback` | 10000 | lignes d'historique par onglet |
-| `terminal.agent_command` | `claude` | ce que lance le bouton « agent » |
+| `terminal.agents` | un profil `claude` | profils d'agent : `name`, `command`, `args`, `env` |
+| `terminal.default_agent` | le premier | profil lancé par le bouton « agent » |
 | `repositories` | `[]` | dépôts rouverts au démarrage |
+
+`terminal.agent_command` a été remplacé par `terminal.agents` ; s'il est encore
+là, il est repris en profil au premier lancement puis effacé.
+
+L'`env` d'un profil est ce qui porte le modèle — `{"ANTHROPIC_MODEL": "…"}` —
+plutôt qu'un réglage à part : Claudhub ne parle à aucune API, il lance un agent
+qui, lui, a le dépôt entre les mains.
+
+`~/.config/claudhub/state.json` (0600) range à côté ce qui n'est pas une
+préférence : par worktree, la base de comparaison choisie, les dossiers repliés
+et les remarques de relecture.
 
 ## Raccourcis
 
@@ -139,13 +151,15 @@ le terminal.
 | `Ctrl+Entrée` | valider |
 | `Ctrl+1` / `Ctrl+2` | modifications / revue de branche |
 | `Ctrl+H` | afficher/masquer l'historique |
+| `Ctrl+Maj+N` | annoter les lignes sélectionnées |
+| `Ctrl+Maj+K` | poser une question à l'agent sur la sélection |
+| `Ctrl+Maj+E` | envoyer les remarques non traitées à l'agent |
 | `Ctrl+Maj+C` | copier la sélection du terminal |
 | `Ctrl+Maj+V` | coller dans le terminal |
 | `Ctrl+Maj+A` | tout sélectionner dans le terminal |
 
 ## Ce qui n'y est pas encore
 
-- Écran de préférences : le fichier de réglages s'édite à la main.
 - Résolution de conflits — les fichiers en conflit sont signalés, pas outillés.
 - Recherche dans un diff ou dans l'historique d'un terminal.
 - Les langages sans grammaire embarquée s'affichent en texte nu. PHP est lié en

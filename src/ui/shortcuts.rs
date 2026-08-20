@@ -173,7 +173,7 @@ pub fn new_terminal(
     };
     let group = this.terminal_group(&worktree, window, cx);
     group.update(cx, |group, cx| {
-        group.open(None, crate::tr!("terminal-shell"), false, window, cx);
+        group.open(crate::ui::terminal_view::Launch::shell(), window, cx);
     });
     this.show_terminal_panel(window, cx);
 }

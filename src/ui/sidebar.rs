@@ -69,7 +69,7 @@ fn volume(summary: crate::git::Summary, cx: &gpui::App) -> impl IntoElement {
 ///
 /// Une pastille et non un mot : la ligne porte déjà un nom et une branche, et
 /// c'est une information qu'on lit du coin de l'œil en parcourant la liste.
-fn agent_badge(agent: crate::ui::app::AgentState, cx: &gpui::App) -> impl IntoElement {
+fn agent_badge(agent: &crate::ui::app::AgentState, cx: &gpui::App) -> impl IntoElement {
     let color = if agent.working {
         cx.theme().warning
     } else {
@@ -98,6 +98,14 @@ fn agent_badge(agent: crate::ui::app::AgentState, cx: &gpui::App) -> impl IntoEl
                     .child(agent.count.to_string()),
             )
         })
+        // Le nom de l'agent dès qu'il y a plus d'un profil à distinguer : la
+        // pastille dit qu'il s'en passe quelque chose, elle ne dit pas qui.
+        .child(
+            div()
+                .text_xs()
+                .text_color(color)
+                .child(agent.programs.join(", ")),
+        )
 }
 
 impl ClaudhubApp {
@@ -125,7 +133,7 @@ impl ClaudhubApp {
                             is_main: w.is_main,
                             prunable: w.prunable,
                             summary: self.summaries.get(&w.path).copied(),
-                            agent: self.agents.get(&w.path).copied(),
+                            agent: self.agents.get(&w.path).cloned(),
                         })
                         .collect::<Vec<_>>(),
                 )
@@ -349,7 +357,7 @@ impl ClaudhubApp {
                                                     // questions qu'on se pose
                                                     // en parcourant la liste.
                                                     .when_some(agent, |el, agent| {
-                                                        el.child(agent_badge(agent, cx))
+                                                        el.child(agent_badge(&agent, cx))
                                                     })
                                                     .when_some(
                                                         summary.filter(|s| !s.is_empty()),

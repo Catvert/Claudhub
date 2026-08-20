@@ -54,8 +54,11 @@ pub enum Cmd {
     /// Cherche les agents de codage qui tournent dans ces checkouts.
     ScanAgents {
         worktrees: Vec<WorktreeId>,
-        /// Commande configurée, dont seul le nom du programme sert.
-        program: String,
+        /// Les programmes de **tous** les profils d'agent, dont seul le nom
+        /// sert. La liste entière et non le seul profil courant : un agent
+        /// lancé depuis un terminal à côté compte autant, et n'en chercher
+        /// qu'un n'en verrait qu'un sur deux.
+        programs: Vec<String>,
     },
     /// Charge l'historique d'un checkout, avec la disposition de son graphe.
     LoadHistory {

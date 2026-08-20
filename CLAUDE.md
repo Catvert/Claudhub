@@ -462,6 +462,44 @@ dépôt entre les mains. Deux détails qui se paient cher si on les rate :
 Les notes envoyées passent à `sent`, pas à `done` : c'est la relecture de la
 réponse qui les clôt.
 
+### Les profils d'agent
+
+Un seul `agent_command` ne suffisait plus dès qu'annoter une relecture veut
+dire l'envoyer : on veut choisir à qui. `Settings::terminal.agents` est donc une
+liste de profils — nom, commande, arguments, environnement — et
+`default_agent` désigne celui que le bouton lance.
+
+**L'environnement est ce qui porte le modèle.** `ANTHROPIC_MODEL`, une clé par
+profil : « configurer plusieurs modèles » n'appelle aucune dépendance HTTP,
+seulement une variable de plus dans le pty. C'est le corollaire de la décision
+de cadrage — l'IA passe par l'agent du terminal, jamais par une API depuis
+Claudhub.
+
+**`command` et `args` sont séparés**, et une ligne de commande se découpe par
+`settings::split_command`, qui honore les guillemets. `split_whitespace` cassait
+sur tout chemin contenant une espace, et c'est le genre de panne qu'on ne
+comprend qu'après avoir lu le code. `join_command` refait le chemin inverse ;
+l'aller-retour est testé, parce que le formulaire écrit des morceaux et les
+relit en une ligne.
+
+**La reprise de l'ancien réglage passe par le même code que l'installation
+neuve** : `migrate_agents` ne fait quelque chose que si `agents` est vide, et
+`#[serde(default)]` fait justement qu'un fichier antérieur est lu ainsi.
+`agent_command` est vidé après coup, pour que la reprise n'ait lieu qu'une fois.
+
+**`Cmd::ScanAgents` prend la liste entière des programmes.** Un agent lancé
+depuis un terminal à côté compte autant que celui qu'on a démarré ici ; n'en
+chercher qu'un n'en verrait qu'un sur deux. `agent::Process` retient lequel a
+été reconnu, et la barre latérale le nomme — à deux profils près, « un agent
+travaille ici » ne dit pas lequel.
+
+Piège du formulaire : la clé d'état d'une ligne de la table porte **le nombre
+de profils** (`claudhub-agent-{n}-{i}`). `use_keyed_state` garde un état par
+clé ; sans le compte, supprimer le premier profil laisserait les champs de la
+ligne 0 remplis avec l'ancien, et l'on écrirait dans les réglages ce qu'on
+croyait avoir supprimé. Renommer, lui, ne change pas le compte — les champs
+gardent donc leur curseur pendant la frappe.
+
 ### La répartition du chrome
 
 La barre d'outils ne porte que des **actions** ; ce qui décrit l'endroit où

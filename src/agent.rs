@@ -17,6 +17,12 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Process {
     pub pid: u32,
+    /// Le programme reconnu, tel que les profils le nomment.
+    ///
+    /// La barre latérale dit *quel* agent tourne et pas seulement combien : à
+    /// deux profils près, « un agent travaille ici » ne dit pas lequel, et
+    /// c'est justement ce qu'on regarde en parcourant la liste.
+    pub program: String,
     /// Temps processeur consommé depuis le démarrage, en tics d'horloge.
     ///
     /// C'est une mesure cumulée, sans intérêt en soi : c'est sa *variation*
@@ -35,19 +41,25 @@ pub type Agents = HashMap<PathBuf, Vec<Process>>;
 /// compilerait partout et échouerait en silence à l'ouverture de `/proc`, ce
 /// qui se lit comme une détection cassée plutôt que comme une absence assumée.
 #[cfg(not(target_os = "linux"))]
-pub fn scan(_worktrees: &[PathBuf], _program: &str) -> Agents {
+pub fn scan(_worktrees: &[PathBuf], _programs: &[String]) -> Agents {
     Agents::new()
 }
 
 /// Parcourt `/proc` à la recherche des agents lancés dans ces worktrees.
 ///
-/// `program` est le nom de la commande configurée — `claude` par défaut, mais
-/// rien n'oblige à ce que ce soit celle-là.
+/// `programs` sont les noms de commande de **tous** les profils configurés, et
+/// non celui d'un seul : un agent lancé depuis un terminal à côté compte
+/// autant que celui qu'on a démarré ici, et n'en chercher qu'un n'en verrait
+/// qu'un sur deux.
 #[cfg(target_os = "linux")]
-pub fn scan(worktrees: &[PathBuf], program: &str) -> Agents {
+pub fn scan(worktrees: &[PathBuf], programs: &[String]) -> Agents {
     let mut found: Agents = HashMap::new();
-    let program = command_name(program);
-    if program.is_empty() {
+    let programs: Vec<&str> = programs
+        .iter()
+        .map(|program| command_name(program))
+        .filter(|program| !program.is_empty())
+        .collect();
+    if programs.is_empty() {
         return found;
     }
     let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -62,9 +74,13 @@ pub fn scan(worktrees: &[PathBuf], program: &str) -> Agents {
             continue;
         };
         let dir = entry.path();
-        if !matches_program(&dir, program) {
+        let Some(program) = programs
+            .iter()
+            .find(|program| matches_program(&dir, program))
+            .map(|program| program.to_string())
+        else {
             continue;
-        }
+        };
         // Le répertoire courant d'un processus est le worktree où il
         // travaille ; un lien symbolique non résolu — processus disparu,
         // permissions — le fait simplement ignorer.
@@ -81,7 +97,7 @@ pub fn scan(worktrees: &[PathBuf], program: &str) -> Agents {
         found
             .entry(worktree)
             .or_default()
-            .push(Process { pid, cpu });
+            .push(Process { pid, program, cpu });
     }
     found
 }

@@ -191,8 +191,11 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
                 .collect();
             vec![Evt::Summaries { summaries }]
         }
-        Cmd::ScanAgents { worktrees, program } => vec![Evt::Agents {
-            agents: crate::agent::scan(&worktrees, &program),
+        Cmd::ScanAgents {
+            worktrees,
+            programs,
+        } => vec![Evt::Agents {
+            agents: crate::agent::scan(&worktrees, &programs),
         }],
         Cmd::LoadBranches { main } => match branch::list(&main) {
             Ok(branches) => {
