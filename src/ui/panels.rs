@@ -49,6 +49,7 @@ pub fn register(app: &Entity<ClaudhubApp>, cx: &mut App) {
         NotesPanel => "ClaudhubNotes",
         ConflictsPanel => "ClaudhubConflicts",
         FilesPanel => "ClaudhubFiles",
+        SentryPanel => "ClaudhubSentry",
         DiffPanel => "ClaudhubDiff",
         TerminalPanel => "ClaudhubTerminal",
     }
@@ -116,6 +117,7 @@ panels! {
     BranchPanel => ("ClaudhubBranch", "range-branch", render_branch_review),
     NotesPanel => ("ClaudhubNotes", "panel-notes", render_notes),
     FilesPanel => ("ClaudhubFiles", "panel-files", render_files),
+    SentryPanel => ("ClaudhubSentry", "panel-sentry", render_sentry),
     DiffPanel => ("ClaudhubDiff", "panel-diff", render_diff),
 }
 

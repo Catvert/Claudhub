@@ -171,6 +171,23 @@ pub enum Cmd {
         ours: bool,
     },
 
+    // — Sentry ————————————————————————————————————————————————————
+    /// Les issues d'un projet. **File réseau** : une API distante met parfois
+    /// plusieurs secondes et ne doit pas occuper un worker de lecture.
+    ///
+    /// Le jeton n'y figure pas : le worker le lit lui-même, dans
+    /// `SENTRY_TOKEN` puis dans les réglages. Un secret n'a rien à faire dans
+    /// une commande que l'on journalise.
+    LoadIssues {
+        org: String,
+        project: String,
+        query: String,
+    },
+    /// L'événement le plus récent d'une issue : sa pile et son message.
+    LoadIssueEvent {
+        issue: String,
+    },
+
     // — Fichiers du projet ————————————————————————————————————————
     /// Liste les fichiers du worktree, suivis et nouveaux non ignorés.
     ListFiles {
@@ -332,6 +349,13 @@ pub enum Evt {
     WtStates {
         states: Vec<(WorktreeId, WtWorktree)>,
     },
+    Issues {
+        issues: Vec<crate::sentry::Issue>,
+    },
+    IssueEvent {
+        issue: String,
+        event: crate::sentry::Event,
+    },
     ProjectFiles {
         worktree: WorktreeId,
         files: Vec<PathBuf>,
@@ -407,6 +431,7 @@ pub enum Action {
     Write,
     FileOp,
     OpenExternal,
+    Sentry,
 }
 
 impl Action {
@@ -439,6 +464,7 @@ impl Action {
             Self::Write => "action-write-ok",
             Self::FileOp => "action-file-op-ok",
             Self::OpenExternal => "action-open-external-ok",
+            Self::Sentry => "action-sentry-ok",
             Self::Resolve => "action-resolve-ok",
         }
     }

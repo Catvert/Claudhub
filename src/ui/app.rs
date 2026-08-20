@@ -34,7 +34,7 @@ use crate::ui::diff_view::Rendered;
 use crate::ui::icons::icon;
 use crate::ui::panels::{
     BranchPanel, BranchesPanel, ChangesPanel, ConflictsPanel, DiffPanel, FilesPanel, HistoryPanel,
-    NotesPanel, SidebarPanel, TerminalPanel,
+    NotesPanel, SentryPanel, SidebarPanel, TerminalPanel,
 };
 use crate::ui::settings::Settings;
 use crate::ui::store::Store;
@@ -46,7 +46,7 @@ const TERMINAL_HEIGHT: gpui::Pixels = px(280.);
 /// Version de la disposition enregistrée. À incrémenter quand les panneaux
 /// changent de nom ou de nature, pour que gpui-component écarte une
 /// disposition qu'il ne saurait plus reconstruire.
-const LAYOUT_VERSION: usize = 6;
+const LAYOUT_VERSION: usize = 7;
 
 /// Les panneaux de la disposition par défaut.
 struct DefaultPanels {
@@ -57,6 +57,7 @@ struct DefaultPanels {
     branch: Arc<dyn gpui_component::dock::PanelView>,
     history: Arc<dyn gpui_component::dock::PanelView>,
     notes: Arc<dyn gpui_component::dock::PanelView>,
+    sentry: Arc<dyn gpui_component::dock::PanelView>,
     conflicts: Arc<dyn gpui_component::dock::PanelView>,
     diff: Arc<dyn gpui_component::dock::PanelView>,
     terminal: Arc<dyn gpui_component::dock::PanelView>,
@@ -131,6 +132,10 @@ fn install_default_layout(
                                 // dire. Elle se lit au même endroit que ce
                                 // qu'elle commente.
                                 panels.notes,
+                                // Les issues sont un point de départ comme un
+                                // autre, souvent meilleur qu'une intention :
+                                // elles se lisent où l'on choisit quoi relire.
+                                panels.sentry,
                                 // Masqué tant qu'il n'y a rien à résoudre : un
                                 // onglet permanent décalerait les autres pour
                                 // servir une fois sur cent.
@@ -422,6 +427,13 @@ pub struct ClaudhubApp {
     /// Le fichier ouvert dans l'éditeur intégré, s'il y en a un.
     pub(super) editing: Option<crate::ui::explorer::Editing>,
     pub(super) files_scroll: gpui::UniformListScrollHandle,
+    /// Les issues Sentry du dépôt courant, et celle qu'on regarde.
+    pub(super) sentry: crate::ui::sentry_view::SentryState,
+    /// Un worktree qu'on attend, et le prompt à y livrer une fois créé.
+    ///
+    /// La création de `wt` lance des hooks qui durent des minutes ; rien
+    /// d'autre que l'arrivée de la liste des worktrees ne dit qu'elle a fini.
+    pub(super) awaiting_agent: Option<(PathBuf, String)>,
     pub(super) toast: Option<Toast>,
     /// Worktrees dont une lecture de statut est déjà partie.
     ///
@@ -550,6 +562,7 @@ impl ClaudhubApp {
         let branch = cx.new(|cx| BranchPanel::new(&this, cx));
         let history = cx.new(|cx| HistoryPanel::new(&this, cx));
         let notes = cx.new(|cx| NotesPanel::new(&this, cx));
+        let sentry = cx.new(|cx| SentryPanel::new(&this, cx));
         let conflicts = cx.new(|cx| ConflictsPanel::new(&this, cx));
         let diff = cx.new(|cx| DiffPanel::new(&this, cx));
         let terminal = cx.new(|cx| TerminalPanel::new(&this, cx));
@@ -563,6 +576,7 @@ impl ClaudhubApp {
                 branch: Arc::new(branch),
                 history: Arc::new(history),
                 notes: Arc::new(notes),
+                sentry: Arc::new(sentry),
                 conflicts: Arc::new(conflicts),
                 diff: Arc::new(diff),
                 terminal: Arc::new(terminal),
@@ -603,6 +617,8 @@ impl ClaudhubApp {
             explorers: HashMap::new(),
             editing: None,
             files_scroll: gpui::UniformListScrollHandle::new(),
+            sentry: Default::default(),
+            awaiting_agent: None,
             toast: None,
             pending_status: std::collections::HashSet::new(),
             dock,
@@ -831,6 +847,9 @@ impl ClaudhubApp {
                 // git vient d'énumérer : c'est le seul moment où la liste est
                 // sûre, donc le seul où oublier une entrée est sans risque.
                 self.forget_missing_worktrees(&main, cx);
+                // Un worktree créé pour une issue attend son prompt : c'est le
+                // seul signal qui dise que `wt` a fini ses hooks.
+                self.deliver_awaited_agent(window, cx);
                 // Le worktree actif peut avoir été retiré sous nos pieds.
                 if let Some(active) = self.active.clone() {
                     if !self.worktree_exists(&active) {
@@ -951,6 +970,8 @@ impl ClaudhubApp {
             Evt::WtStates { states } => {
                 self.wt_states.extend(states);
             }
+            Evt::Issues { issues } => self.issues_arrived(issues, cx),
+            Evt::IssueEvent { issue, event } => self.issue_event_arrived(issue, event, cx),
             Evt::ProjectFiles { worktree, files } => self.project_files_arrived(worktree, files),
             Evt::FileContent {
                 worktree,
@@ -1724,6 +1745,7 @@ impl ClaudhubApp {
             branch: Arc::new(cx.new(|cx| BranchPanel::new(&this, cx))),
             history: Arc::new(cx.new(|cx| HistoryPanel::new(&this, cx))),
             notes: Arc::new(cx.new(|cx| NotesPanel::new(&this, cx))),
+            sentry: Arc::new(cx.new(|cx| SentryPanel::new(&this, cx))),
             conflicts: Arc::new(cx.new(|cx| ConflictsPanel::new(&this, cx))),
             diff: Arc::new(cx.new(|cx| DiffPanel::new(&this, cx))),
             terminal: Arc::new(cx.new(|cx| TerminalPanel::new(&this, cx))),

@@ -24,6 +24,7 @@ elle ne fait jamais d'entrée-sortie**.
 ```
 src/
   files.rs      lire, écrire (sous condition), ranger, éditeur externe
+  sentry.rs     issues et traces Sentry, testées sur fixture
   wt.rs         le `wt.toml` d'un projet : questions, tâches, statut, URLs
   git/          couche git — sous-processus `git`, testable sans gpui
     mod.rs      exécution des commandes (stdin fermé, LC_ALL=C, pas de pager)
@@ -52,6 +53,7 @@ src/
     settings_view.rs  le formulaire, bâti sur `gpui_component::setting`
     tree.rs         chemins → arborescence repliable, en indices
     explorer.rs     l'explorateur de projet et l'éditeur intégré
+    sentry_view.rs  les issues, leur trace, et de quoi les confier
     conflicts.rs    les conflits et le garde-fou d'une opération à mi-chemin
     worktree_ops.rs création guidée, tâches du projet, intégration
     store.rs        ce qu'on retient par worktree : base, replis, notes
@@ -958,6 +960,36 @@ La sélection est un attribut de style de `Segment`, comme le gras ou la
 couleur. Ce n'est pas un détail d'implémentation : la fusion des runs la prend
 alors en compte toute seule, et une sélection découpe les runs exactement où il
 faut sans une ligne de code dédiée.
+
+### Sentry
+
+Claudhub **lit** Sentry ; il ne lui envoie jamais rien. Un rapport d'erreur est
+un point de départ souvent meilleur qu'une intention — il porte déjà la trace
+et le fichier fautif — et le geste utile est de le confier à un agent avec le
+code autour des frames de l'application.
+
+- **Le jeton ne circule pas dans une `Cmd`.** Le worker le lit lui-même
+  (`SENTRY_TOKEN`, puis les réglages) : un secret n'a rien à faire dans une
+  énumération qu'on journalise. Le fichier de réglages est en 0600, ce qui ne
+  fait pas de lui un coffre — d'où la priorité donnée à l'environnement.
+- **L'organisation est un réglage, le projet appartient au dépôt**
+  (`Store::repos`) : deux dépôts d'une même organisation n'ont pas les mêmes
+  erreurs.
+- **File réseau**, celle de fetch/pull/push : une API distante met parfois
+  plusieurs secondes et ne doit pas occuper un worker de lecture.
+- **Le code cité vient de l'événement**, pas du disque : c'est le code
+  *déployé* au moment de l'erreur, et le relire aujourd'hui donnerait autre
+  chose. `sentry::prompt` cite la pile entière — c'est le chemin qui a mené là
+  — mais le code des seules frames `in_app` : une pile de framework fait cent
+  lignes, et le bug n'y est pas.
+- Deux formes de pile existent selon le SDK (`exception` et `stacktrace`
+  dans `entries`), et le compte d'occurrences arrive tantôt en nombre, tantôt
+  en chaîne. Les deux sont lues, et une fixture le verrouille.
+
+« Ouvrir un worktree pour cette issue » est la boucle complète : `wt` crée le
+worktree avec les copies et les hooks du projet, et le prompt est livré à
+l'agent **quand la liste des worktrees revient** — c'est le seul signal qui
+dise que les hooks ont fini.
 
 ## Conventions gpui
 

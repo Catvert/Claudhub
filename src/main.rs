@@ -14,6 +14,7 @@ pub mod files;
 pub mod git;
 pub mod logging;
 pub mod runtime;
+pub mod sentry;
 pub mod terminal;
 pub mod ui;
 pub mod wt;

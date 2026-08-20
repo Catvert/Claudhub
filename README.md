@@ -124,6 +124,8 @@ par `\\wsl$\<distribution>\home\…`, et VS Code s'y branche nativement.
 | `terminal.default_agent` | le premier | profil lancé par le bouton « agent » |
 | `external_editor` | vide | commande avec `{path}` et `{line}` |
 | `update_with_rebase` | `false` | mettre à jour depuis la base par rebase |
+| `sentry_org` | vide | organisation Sentry ; le projet se règle par dépôt |
+| `sentry_token` | vide | jeton d'API, à défaut de `SENTRY_TOKEN` |
 | `repositories` | `[]` | dépôts rouverts au démarrage |
 
 `terminal.agent_command` a été remplacé par `terminal.agents` ; s'il est encore
@@ -135,7 +137,10 @@ qui, lui, a le dépôt entre les mains.
 
 `~/.config/claudhub/state.json` (0600) range à côté ce qui n'est pas une
 préférence : par worktree, la base de comparaison choisie, les dossiers repliés
-et les remarques de relecture.
+et les remarques de relecture ; par dépôt, son projet Sentry.
+
+Le jeton Sentry se lit **d'abord dans `SENTRY_TOKEN`**. Le fichier de réglages
+est en 0600, ce qui ne fait pas de lui un coffre : préférez l'environnement.
 
 ## Raccourcis
 

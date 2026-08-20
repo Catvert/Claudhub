@@ -20,6 +20,7 @@ mod notes;
 pub(crate) mod notes_view;
 mod panels;
 mod review;
+mod sentry_view;
 mod settings;
 mod settings_view;
 mod shortcuts;

@@ -34,7 +34,14 @@ const READERS: usize = 3;
 /// l'interface entière — plus de statut, plus de diff, plus rien, sans que
 /// personne puisse relier cela au bouton qui l'a déclenché.
 fn is_network(cmd: &Cmd) -> bool {
-    matches!(cmd, Cmd::Fetch { .. } | Cmd::Pull { .. } | Cmd::Push { .. })
+    matches!(
+        cmd,
+        Cmd::Fetch { .. }
+            | Cmd::Pull { .. }
+            | Cmd::Push { .. }
+            | Cmd::LoadIssues { .. }
+            | Cmd::LoadIssueEvent { .. }
+    )
 }
 
 /// Le balayage de fond : résumé de chaque worktree et recherche des agents.
@@ -331,6 +338,32 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
             repo::resolve(dir, &path, ours).map(|_| String::new())
         }),
 
+        Cmd::LoadIssues {
+            org,
+            project,
+            query,
+        } => match sentry_token() {
+            Some(token) => match crate::sentry::issues(&org, &project, &query, &token) {
+                Ok(issues) => vec![Evt::Issues { issues }],
+                Err(e) => vec![fail(None, Action::Sentry, e)],
+            },
+            None => vec![fail(
+                None,
+                Action::Sentry,
+                anyhow::anyhow!("aucun jeton Sentry : SENTRY_TOKEN ou les réglages"),
+            )],
+        },
+        Cmd::LoadIssueEvent { issue } => match sentry_token() {
+            Some(token) => match crate::sentry::latest_event(&issue, &token) {
+                Ok(event) => vec![Evt::IssueEvent { issue, event }],
+                Err(e) => vec![fail(None, Action::Sentry, e)],
+            },
+            None => vec![fail(
+                None,
+                Action::Sentry,
+                anyhow::anyhow!("aucun jeton Sentry : SENTRY_TOKEN ou les réglages"),
+            )],
+        },
         Cmd::ListFiles { worktree, ignored } => match repo::list_files(&worktree, ignored) {
             Ok(files) => vec![Evt::ProjectFiles { worktree, files }],
             Err(e) => vec![fail(Some(worktree), Action::Read, e)],
@@ -479,6 +512,14 @@ fn integrate(main: &Path, branch: &str, base: &str, no_ff: bool) -> Result<Strin
         );
     }
     repo::merge(main, branch, no_ff)
+}
+
+/// Le jeton Sentry, lu **dans le worker** et jamais transporté par une
+/// commande : un secret n'a rien à faire dans une énumération qu'on
+/// journalise. `SENTRY_TOKEN` l'emporte sur le fichier de réglages, qui est en
+/// 0600 mais n'est pas un coffre pour autant.
+fn sentry_token() -> Option<String> {
+    crate::sentry::token(&crate::ui::Settings::load().sentry_token)
 }
 
 /// La commande de l'éditeur externe, telle que les réglages la portent.

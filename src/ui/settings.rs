@@ -416,6 +416,17 @@ pub struct Settings {
     pub external_editor: String,
     /// Montrer aussi les fichiers que `.gitignore` écarte, dans l'explorateur.
     pub show_ignored_files: bool,
+    /// Organisation Sentry. Le *projet*, lui, dépend du dépôt et vit dans le
+    /// magasin d'état, pas ici.
+    pub sentry_org: String,
+    /// Jeton d'API, à défaut de `SENTRY_TOKEN`.
+    ///
+    /// L'environnement l'emporte : ce fichier est en 0600, ce qui ne fait pas
+    /// de lui un coffre, et un jeton qui traîne dans une sauvegarde de
+    /// configuration est un jeton qui fuit.
+    pub sentry_token: String,
+    /// Requête envoyée à Sentry. Vide : les issues non résolues.
+    pub sentry_query: String,
 }
 
 impl Default for Settings {
@@ -440,6 +451,9 @@ impl Default for Settings {
             integrate_no_ff: true,
             external_editor: String::new(),
             show_ignored_files: false,
+            sentry_org: String::new(),
+            sentry_token: String::new(),
+            sentry_query: String::new(),
         }
     }
 }

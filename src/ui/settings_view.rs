@@ -66,7 +66,8 @@ impl ClaudhubApp {
                             ))
                             .page(terminal_page(shells, terminal_fonts))
                             .page(review_page())
-                            .page(files_page()),
+                            .page(files_page())
+                            .page(sentry_page()),
                     ),
                 )
         });
@@ -715,6 +716,54 @@ fn files_page() -> SettingPage {
                     .default_value(false),
                 )
                 .description(tr!("settings-show-ignored-help")),
+            ),
+    )
+}
+
+/// Sentry : l'organisation et le jeton. Le **projet** dépend du dépôt et vit
+/// dans le magasin d'état, pas ici — deux dépôts d'une même organisation n'ont
+/// pas les mêmes erreurs.
+fn sentry_page() -> SettingPage {
+    SettingPage::new(tr!("settings-page-sentry")).group(
+        SettingGroup::new()
+            .item(
+                SettingItem::new(
+                    tr!("settings-sentry-org"),
+                    SettingField::input(
+                        |cx: &App| Settings::global(cx).sentry_org.clone().into(),
+                        |value: SharedString, cx: &mut App| {
+                            Settings::update_global(cx, |s| s.sentry_org = value.to_string())
+                        },
+                    )
+                    .default_value(SharedString::default()),
+                )
+                .description(tr!("settings-sentry-org-help")),
+            )
+            .item(
+                SettingItem::new(
+                    tr!("settings-sentry-token"),
+                    SettingField::input(
+                        |cx: &App| Settings::global(cx).sentry_token.clone().into(),
+                        |value: SharedString, cx: &mut App| {
+                            Settings::update_global(cx, |s| s.sentry_token = value.to_string())
+                        },
+                    )
+                    .default_value(SharedString::default()),
+                )
+                .description(tr!("settings-sentry-token-help")),
+            )
+            .item(
+                SettingItem::new(
+                    tr!("settings-sentry-query"),
+                    SettingField::input(
+                        |cx: &App| Settings::global(cx).sentry_query.clone().into(),
+                        |value: SharedString, cx: &mut App| {
+                            Settings::update_global(cx, |s| s.sentry_query = value.to_string())
+                        },
+                    )
+                    .default_value(SharedString::default()),
+                )
+                .description(tr!("settings-sentry-query-help")),
             ),
     )
 }
