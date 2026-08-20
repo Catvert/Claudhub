@@ -496,6 +496,14 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    /// Un fichier est-il ouvert dans l'éditeur intégré ?
+    ///
+    /// L'onglet du panneau central s'en sert pour dire lequel des deux il
+    /// montre — un diff, ou un fichier qu'on retouche.
+    pub(super) fn is_editing(&self) -> bool {
+        self.editing.is_some()
+    }
+
     pub(super) fn save_file(&mut self, cx: &mut Context<Self>) {
         let Some(editing) = self.editing.as_ref() else {
             return;

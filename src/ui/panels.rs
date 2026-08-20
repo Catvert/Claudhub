@@ -140,7 +140,81 @@ panels! {
     NotesPanel => ("ClaudhubNotes", "panel-notes", render_notes, Notes),
     FilesPanel => ("ClaudhubFiles", "panel-files", render_files, Files),
     SentryPanel => ("ClaudhubSentry", "panel-sentry", render_sentry, Sentry),
-    DiffPanel => ("ClaudhubDiff", "panel-diff", render_diff, Diff),
+}
+
+/// Le panneau central : un diff, ou le fichier qu'on est en train de retoucher.
+///
+/// **Son titre suit son contenu.** L'éditeur intégré prend la place du diff —
+/// on regarde l'un *ou* l'autre, et deux onglets à faire basculer pour un
+/// geste qui vient de l'explorateur seraient un aller-retour de trop — mais un
+/// onglet qui annonce « Diff » pendant qu'il montre un éditeur ment sur ce
+/// qu'on a sous les yeux.
+///
+/// Le titre est **mis en cache**, pour la même raison que la visibilité des
+/// conflits : `Panel::title` est appelé par le dock au fil du rendu de la
+/// barre d'onglets, et y lire l'entité racine pendant qu'elle se met à jour
+/// est ce que gpui refuse par une panique.
+pub struct DiffPanel {
+    app: WeakEntity<ClaudhubApp>,
+    focus: FocusHandle,
+    editing: bool,
+}
+
+impl DiffPanel {
+    pub fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
+        cx.observe(app, |this: &mut Self, app, cx| {
+            let editing = app.read(cx).is_editing();
+            if this.editing != editing {
+                this.editing = editing;
+                // C'est la barre d'onglets qui porte le titre, pas le panneau :
+                // sa propre notification ne suffit pas à la faire redessiner.
+                cx.emit(PanelEvent::LayoutChanged);
+            }
+            cx.notify();
+        })
+        .detach();
+        Self {
+            app: app.downgrade(),
+            focus: cx.focus_handle(),
+            editing: false,
+        }
+    }
+}
+
+impl Focusable for DiffPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl EventEmitter<PanelEvent> for DiffPanel {}
+
+impl Panel for DiffPanel {
+    fn panel_name(&self) -> &'static str {
+        "ClaudhubDiff"
+    }
+
+    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        if self.editing {
+            tr!("panel-editor")
+        } else {
+            tr!("panel-diff")
+        }
+    }
+
+    fn closable(&self, _: &App) -> bool {
+        false
+    }
+}
+
+impl Render for DiffPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(app) = self.app.upgrade() else {
+            return div().into_any_element();
+        };
+        let content = app.update(cx, |app, cx| app.render_diff(window, cx).into_any_element());
+        pane_root(&app, Pane::Diff, content).into_any_element()
+    }
 }
 
 /// Les conflits n'apparaissent que quand il y en a.

@@ -377,7 +377,12 @@ enregistrement d'affilée échouerait, le fichier ayant changé par notre faute.
 
 L'éditeur **prend la place du diff** plutôt que d'occuper un panneau à lui : on
 regarde l'un ou l'autre, et deux onglets à faire basculer pour un geste qui
-vient de l'explorateur seraient un aller-retour de trop.
+vient de l'explorateur seraient un aller-retour de trop. **L'onglet dit alors
+« Éditeur »** : le titre suit le contenu, sans quoi un onglet nommé « Diff »
+ment sur ce qu'on a sous les yeux. Il est mis en cache dans `DiffPanel`, pour
+la même raison que la visibilité des conflits — `Panel::title` est appelé par
+le dock au fil du rendu de sa barre d'onglets, et y lire l'entité racine
+pendant qu'elle se met à jour est ce que gpui refuse par une panique.
 
 L'éditeur externe se déclare par une commande avec `{path}` et `{line}`
 (`code -g {path}:{line}`, `phpstorm --line {line} {path}`,
@@ -561,19 +566,33 @@ est le seul repère de position qu'ait ce genre de liste, et les nôtres font
 couramment plusieurs milliers d'entrées — un diff de relecture d'agent,
 l'explorateur d'un projet Laravel.
 
-Trois choix à connaître :
+Elle se pose **par-dessus** le contenu, en absolu, d'où le `relative` du
+conteneur : lui réserver une colonne rognerait seize pixels de largeur utile
+dans chaque panneau, alors que la moitié d'entre eux n'ont pas de quoi défiler
+la plupart du temps.
 
-- **Elle se pose par-dessus le contenu**, en absolu, d'où le `relative` du
-  conteneur. Lui réserver une colonne rognerait dix pixels de largeur utile
-  dans chaque panneau, alors que la moitié d'entre eux n'ont pas de quoi
-  défiler la plupart du temps.
-- **L'identifiant est donné explicitement.** `Scrollbar::new` le déduit sinon
-  de la ligne d'appel, qui serait celle de notre helper : tous les panneaux
-  partageraient l'état d'une seule barre — survol, glissement, minuterie.
-- **`ScrollbarShow::Hover`**, posé dans `theme::apply`. Le défaut efface la
-  barre deux secondes après le dernier cran de molette ; on relit un diff en
-  s'arrêtant à chaque hunk, et elle aurait disparu à chaque fois qu'on se
-  demande où l'on en est.
+Quatre points, tous constatés à l'écran et aucun deviné — une barre qui ne se
+peint pas ne provoque aucune erreur :
+
+- **`min_h_0` et `min_w_0` sur le conteneur.** C'est un élément flex, dont la
+  taille minimale vaut par défaut celle de son contenu : sans eux il prend la
+  hauteur des huit mille lignes de l'arbre et la largeur du plus long nom de
+  fichier. La liste, elle, garde la bonne taille — c'est la barre qui va se
+  peindre trois cents pixels à droite du panneau, hors de vue.
+- **`overflow_hidden`**, pour la même raison en aval.
+- **`scrollbar()` de gpui-component plutôt qu'un enfant `Scrollbar` nu.**
+  L'extension enveloppe la barre d'une couche absolue calée sur les quatre
+  bords ; posée nue, elle ne reçoit pas de bornes utilisables et ne peint rien.
+  C'est le seul de ces points qui ne se déduise pas de la mise en page.
+- **L'identifiant va au conteneur**, distinct par appel : la couche que pose
+  `scrollbar()` s'appelle toujours `scrollbar_layer`, et sans parent identifié
+  les panneaux partageraient l'état d'une seule barre.
+
+**`ScrollbarShow::Always`**, posé dans `theme::apply`. Ni `Scrolling`, le
+défaut, qui efface la barre deux secondes après le dernier cran de molette —
+on relit un diff en s'arrêtant à chaque hunk, et elle aurait disparu chaque
+fois qu'on se demande où l'on en est ; ni `Hover`, qui ne la montre qu'une fois
+le pointeur **sur la barre**, laquelle est invisible, donc introuvable.
 
 Les panneaux non virtualisés — notes, conflits, Sentry, barre latérale —
 n'avaient pas de poignée du tout : elle vient de `ClaudhubApp::scroll_of`, une
