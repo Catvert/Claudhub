@@ -399,8 +399,8 @@ pub fn hunk_patches(path: &Path, diff: &FileDiff) -> Vec<String> {
 use std::rc::Rc;
 
 use gpui::{
-    div, prelude::*, px, uniform_list, Context, Entity, Focusable, ListHorizontalSizingBehavior,
-    Pixels, SharedString, StyledText, Window,
+    div, prelude::*, px, uniform_list, App, Context, Entity, Focusable,
+    ListHorizontalSizingBehavior, Pixels, SharedString, StyledText, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
@@ -426,6 +426,16 @@ const LINE_SPACING: f32 = 1.5;
 /// La barre de défilement du diff, et donc la clé de son lissage : une seule
 /// valeur pour les deux, voir `ui::scroll`.
 const DIFF_SCROLL: &str = "diff-lines-bar";
+
+/// Un déplacement qui ne dépend pas de la ligne courante — ou qui n'en dépend
+/// que par une hauteur de vue.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Jump {
+    Start,
+    End,
+    PageUp,
+    PageDown,
+}
 
 pub fn line_height(font_size: Pixels) -> Pixels {
     (font_size * LINE_SPACING).round()
@@ -673,6 +683,50 @@ impl ClaudhubApp {
             _ => head,
         };
         self.move_diff_selection(anchor, head, cx);
+    }
+
+    /// Va d'un bout du fichier à l'autre, ou d'une hauteur de vue.
+    ///
+    /// La hauteur d'une page est celle du panneau, mesurée à la frame
+    /// précédente : c'est ce que « page » veut dire pour l'œil, et un nombre
+    /// de lignes fixé d'avance vaudrait le double une fois la police
+    /// grossie.
+    pub(super) fn jump_diff(&mut self, jump: Jump, cx: &mut Context<Self>) {
+        let split = crate::ui::settings::Settings::global(cx).diff_split;
+        let page = self.page_rows(cx);
+        let Some(len) = self
+            .active_review()
+            .and_then(|state| state.diff.as_ref())
+            .map(|diff| diff.len(split))
+        else {
+            return;
+        };
+        if len == 0 {
+            return;
+        }
+        let last = len - 1;
+        let current = self
+            .active_review()
+            .and_then(|state| state.diff_selection)
+            .map(|(_, head)| head)
+            .unwrap_or(0);
+        let target = match jump {
+            Jump::Start => 0,
+            Jump::End => last,
+            Jump::PageUp => current.saturating_sub(page),
+            Jump::PageDown => (current + page).min(last),
+        };
+        self.move_diff_selection(target, target, cx);
+    }
+
+    /// Combien de lignes tiennent dans la vue.
+    ///
+    /// Au moins une : une vue jamais peinte n'a pas de bornes, et une page de
+    /// zéro ligne ferait d'une touche un geste sans effet.
+    fn page_rows(&self, cx: &App) -> usize {
+        let height = self.diff_scroll.0.borrow().base_handle.bounds().size.height;
+        let line = line_height(px(crate::ui::settings::Settings::global(cx).diff_font_size));
+        ((f32::from(height) / f32::from(line)) as usize).max(1)
     }
 
     /// Saute au hunk précédent ou suivant, et au fichier voisin une fois le

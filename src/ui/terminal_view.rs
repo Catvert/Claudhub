@@ -989,6 +989,15 @@ impl TerminalGroup {
         cx.notify();
     }
 
+    pub fn previous(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        self.active = (self.active + self.tabs.len() - 1) % self.tabs.len();
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
     pub fn active_index(&self) -> usize {
         self.active
     }

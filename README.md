@@ -152,27 +152,46 @@ Tous passent par la touche système (Ctrl sous Linux et Windows, Cmd sous
 macOS), parce que le reste du clavier appartient au programme qui tourne dans
 le terminal.
 
+La liste complète est dans l'application : **`F1`**, ou le menu ☰ ›
+« Raccourcis clavier ». Elle est engendrée à partir des liaisons elles-mêmes,
+donc elle ne peut pas mentir. Les principaux :
+
 | Raccourci | Action |
 | --- | --- |
+| `F1` | afficher les raccourcis |
 | `F5` / `Ctrl+R` | actualiser |
-| `Ctrl+Maj+T` | nouveau terminal |
-| `Ctrl+Maj+W` | fermer l'onglet de terminal |
-| ``Ctrl+` `` | afficher/masquer le panneau des terminaux |
-| `Ctrl+Tab` | onglet de terminal suivant |
+| `Ctrl+1` … `Ctrl+9` | aller au n-ième worktree |
+| `Ctrl+B` | afficher/masquer la barre latérale |
+| `Ctrl+Maj+R` / `Ctrl+Maj+U` / `Ctrl+Maj+P` | récupérer / tirer / publier |
 | `Ctrl+Entrée` | valider |
-| `Ctrl+1` / `Ctrl+2` | modifications / revue de branche |
-| `Ctrl+H` | afficher/masquer l'historique |
-| `Ctrl+S` | enregistrer le fichier ouvert |
+| `Ctrl+Maj+I` | indexer ou dés-indexer le fichier ouvert |
+| `↑` `↓` | bloc modifié précédent / suivant |
+| `←` `→` | fichier précédent / suivant |
+| `Début` `Fin` `Page↑` `Page↓` | parcourir le fichier |
+| `Ctrl+C` / `Ctrl+Maj+C` | copier le code / le patch |
+| `Ctrl+S` / `Ctrl+W` | enregistrer / fermer l'éditeur |
 | `Ctrl+F` | chercher dans le panneau où l'on vient de cliquer |
-| `↑` `↓` `←` `→` | parcourir l'arborescence de l'explorateur |
 | `Ctrl+G` / `Ctrl+Maj+G` | occurrence suivante / précédente |
 | `Échap` | fermer la recherche |
 | `Ctrl+Maj+N` | annoter les lignes sélectionnées |
 | `Ctrl+Maj+K` | poser une question à l'agent sur la sélection |
 | `Ctrl+Maj+E` | envoyer les remarques non traitées à l'agent |
-| `Ctrl+Maj+C` | copier la sélection du terminal |
-| `Ctrl+Maj+V` | coller dans le terminal |
-| `Ctrl+Maj+A` | tout sélectionner dans le terminal |
+| `Ctrl+Maj+T` / `Ctrl+Maj+W` | nouveau terminal / fermer l'onglet |
+| ``Ctrl+` `` / `Ctrl+Tab` | afficher les terminaux / onglet suivant |
+| `Ctrl+Maj+C` `Ctrl+Maj+V` `Ctrl+Maj+A` | copier, coller, tout sélectionner (terminal) |
+
+Une liaison qui s'écrit avec la touche système et **une seule lettre** ne vaut
+pas dans le terminal : `Ctrl+R` y reste la recherche arrière du shell, `Ctrl+S`
+son XOFF. Ce qui demande Maj vaut partout, comme dans tout terminal.
+
+### Mode vim
+
+Désactivé par défaut ; Réglages › Clavier. Il ne remplace pas l'éditeur — il
+donne la main gauche à la relecture : `j`/`k` d'une ligne à l'autre, `h`/`l`
+d'un fichier à l'autre, `]c`/`[c` d'un bloc modifié au suivant, `gg`/`G`,
+`Ctrl+D`/`Ctrl+U`, `y` pour copier, `/` puis `n`/`N` pour chercher. Les mêmes
+touches parcourent l'arborescence du projet. Ce sont des lettres nues : elles
+ne valent que là où ni un champ de saisie ni un terminal n'a le focus.
 
 ## Ce qui n'y est pas encore
 

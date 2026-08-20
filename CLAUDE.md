@@ -64,7 +64,9 @@ src/
     find.rs         la recherche d'un panneau, et son routage
     motion.rs       le lissage de la molette, sans rien de gpui dedans
     scroll.rs       la barre de défilement d'un panneau, et son lissage
-    theme.rs / shortcuts.rs / icons.rs
+    shortcuts.rs    les actions, leurs touches, et l'aide qui en sort
+    shortcuts_view.rs  la fenêtre d'aide, en deux colonnes
+    theme.rs / icons.rs
 ```
 
 ### La boucle Cmd/Evt
@@ -1230,6 +1232,59 @@ worktree avec les copies et les hooks du projet, et le prompt est livré à
 l'agent **quand la liste des worktrees revient** — c'est le seul signal qui
 dise que les hooks ont fini.
 
+### Les raccourcis clavier
+
+**Une seule table décrit chaque liaison** (`shortcuts::table!`), et c'est
+d'elle que sortent à la fois `bind_keys` et la fenêtre d'aide. Deux listes
+auraient divergé au premier ajout, et une aide qui ment sur les touches est
+pire qu'une absence d'aide. La table porte les touches, le groupe, le prédicat
+et la **clé i18n** du libellé ; un test vérifie que chaque clé existe dans les
+deux catalogues, un autre que chaque touche se lit — `KeyBinding::new`
+*panique* sur ce qu'elle ne sait pas lire, et `init` tourne au démarrage.
+
+**Deux prédicats, et pas un seul.** Sous Linux, `secondary` **est** Ctrl : une
+liaison sur `secondary-r` prend au shell sa recherche arrière, `secondary-s`
+son XOFF, et rien ne le dit. Ce qui s'écrit avec la touche système et une
+**seule lettre** passe donc par `WINDOW_PREDICATE`, qui exclut le terminal ; ce
+qui demande Maj ou une touche de fonction vaut partout (`PREDICATE`). C'est la
+convention que les terminaux ont eux-mêmes fixée : Ctrl+Maj+C pour copier,
+parce que Ctrl+C est pris.
+
+**Un panneau ne s'active pas au clavier**, et ce n'est pas un oubli :
+`TabPanel::set_active_ix` est privé dans gpui-component 0.5.1 et rien de public
+n'en tient lieu. `Ctrl+1` à `Ctrl+9` désignent donc des **worktrees**, ce qui
+est de toute façon le geste central — et leur ordre est celui de la barre
+latérale, replis compris, sans quoi le même chiffre ne désignerait pas le même
+worktree d'un pliage à l'autre.
+
+L'aide se lit dans `shortcuts::sheet`, qui **réunit sur une ligne** les
+plusieurs façons de faire un même geste : `F5` et `Ctrl+R`, `Ctrl+1` à `Ctrl+9`
+rendus comme une plage, la flèche et son équivalent vim. C'est le geste qu'on
+cherche dans cette liste, pas la touche.
+
+### Le mode vim
+
+Désactivé par défaut, et il faut que ça le reste : ses liaisons sont des
+**lettres nues**. Ce n'est pas un mode d'édition — il n'y a rien à éditer dans
+un diff, et l'éditeur intégré appartient à gpui-component — mais la main gauche
+sur la rangée de repos pour relire : `j`/`k` d'une ligne à l'autre, `h`/`l`
+d'un fichier à l'autre, `]c`/`[c` d'un bloc modifié au suivant comme le fait
+vim-gitgutter, `gg`/`G`, `Ctrl+D`/`Ctrl+U`, `y` pour copier, `/` puis `n`/`N`
+pour chercher.
+
+**Le réglage n'ajoute pas de liaisons, il allume un contexte.** `bind_keys`
+s'appelle une fois au démarrage ; les liaisons vim sont donc posées
+inconditionnellement, sous un prédicat qui exige `ClaudhubVim`, et c'est la vue
+racine qui déclare ce contexte quand le réglage est vrai. Le contexte étant
+recalculé à chaque rendu, la bascule est immédiate.
+
+Corollaire à connaître, et il ne se devine pas : **`ClaudhubVim` doit être
+déclaré sur le même nœud que l'identifiant avec lequel il se combine.**
+`KeyBindingContextPredicate::depth_of` évalue chaque identifiant contre un seul
+niveau de la pile de contextes, si bien que `ClaudhubExplorer && ClaudhubVim`
+ne se rencontre jamais quand l'un est sur l'arbre et l'autre sur la racine.
+D'où `explorer_context(vim)` en plus de `context(vim)`.
+
 ### Ce qui tient lieu de système d'extension
 
 La question revient à chaque intégration, alors elle est tranchée ici. Trois
@@ -1267,9 +1322,10 @@ Elles viennent d'Aviary, et les enfreindre produit des bugs silencieux.
   `"Claudhub && !Dialog"` à `key_context` fait boucler le parseur et déborder la
   pile au premier rendu. L'expression va dans le troisième argument de
   `KeyBinding::new` ; le contexte va dans `shortcuts::context()`.
-- Les raccourcis de l'application passent tous par `secondary-` : le reste du
-  clavier appartient au programme qui tourne dans le terminal, et
-  `key_bytes` refuse justement de transmettre la touche système au pty.
+- Les raccourcis de l'application passent par `secondary-` : le reste du
+  clavier appartient au programme qui tourne dans le terminal — sauf les
+  flèches nues et, mode vim allumé, la rangée de repos. Voir « Les raccourcis
+  clavier » pour ce que `secondary` prend au shell, et à quelles conditions.
 - gpui rend via Vulkan sur Linux : `vulkan-loader` doit être dans
   `LD_LIBRARY_PATH`, ce dont `shell.nix` se charge.
 

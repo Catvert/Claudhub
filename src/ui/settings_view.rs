@@ -66,6 +66,7 @@ impl ClaudhubApp {
                             ))
                             .page(terminal_page(shells, terminal_fonts))
                             .page(review_page())
+                            .page(keyboard_page())
                             .page(files_page())
                             .page(sentry_page()),
                     ),
@@ -596,6 +597,28 @@ fn terminal_page(
                     .description(tr!("settings-scrollback-help")),
                 ),
         )
+}
+
+/// Le clavier.
+///
+/// Une page pour un seul réglage, et c'est assumé : le mode vim change le sens
+/// de la moitié des touches, et c'est le premier endroit où l'on va le
+/// chercher. Le rappel de `F1` y est parce qu'une aide qu'on ne trouve pas
+/// n'en est pas une.
+fn keyboard_page() -> SettingPage {
+    SettingPage::new(tr!("settings-page-keyboard")).group(
+        SettingGroup::new().title(tr!("settings-group-vim")).item(
+            SettingItem::new(
+                tr!("settings-vim-mode"),
+                SettingField::switch(
+                    |cx: &App| Settings::global(cx).vim_mode,
+                    |value: bool, cx: &mut App| Settings::update_global(cx, |s| s.vim_mode = value),
+                )
+                .default_value(false),
+            )
+            .description(tr!("settings-vim-mode-help")),
+        ),
+    )
 }
 
 fn review_page() -> SettingPage {

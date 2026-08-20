@@ -2,12 +2,25 @@
 //!
 //! Un terminal a besoin de presque toutes les combinaisons : Ctrl+C, Ctrl+D,
 //! Ctrl+L appartiennent au programme qui tourne dedans, pas à Claudhub. Les
-//! raccourcis de l'application passent donc tous par la touche système
-//! (`secondary-`, c'est-à-dire Ctrl sous Linux et Windows, Cmd sous macOS),
-//! que `key_bytes` refuse justement de transmettre au pty.
+//! raccourcis de l'application passent donc par la touche système
+//! (`secondary-`, c'est-à-dire Ctrl sous Linux et Windows, Cmd sous macOS).
+//!
+//! Ce qui ne suffit pas : sous Linux, `secondary` **est** Ctrl, et une liaison
+//! sur `secondary-r` prend le Ctrl+R du shell — la recherche dans
+//! l'historique — sans rien dire. D'où deux prédicats et non un : ce qui
+//! s'écrit avec une seule lettre (`WINDOW_PREDICATE`) laisse le terminal
+//! tranquille, ce qui demande Maj ou une touche de fonction
+//! (`PREDICATE`) vaut partout. Les terminaux eux-mêmes ont fixé cette
+//! convention : Ctrl+Maj+C pour copier, parce que Ctrl+C est pris.
+//!
+//! **Une seule table décrit chaque liaison** (`table!`), et c'est d'elle que
+//! sortent à la fois `bind_keys` et la fenêtre d'aide. Deux listes auraient
+//! divergé au premier ajout, et une aide qui ment sur les touches est pire
+//! qu'une absence d'aide.
 
-use gpui::{actions, App, KeyBinding, KeyContext, Window};
+use gpui::{actions, App, KeyBinding, KeyContext, SharedString, Window};
 
+use crate::tr;
 use crate::ui::app::ClaudhubApp;
 
 actions!(
@@ -18,11 +31,17 @@ actions!(
         CloseTerminal,
         ToggleTerminal,
         NextTerminal,
+        PreviousTerminal,
         Commit,
         OpenSettings,
+        ShowShortcuts,
+        ToggleSidebar,
         ZoomIn,
         ZoomOut,
         ZoomReset,
+        Fetch,
+        Pull,
+        Push,
         CopyDiff,
         CopyDiffPatch,
         SelectWholeDiff,
@@ -34,12 +53,19 @@ actions!(
         NextHunk,
         PreviousFile,
         NextFile,
+        DiffStart,
+        DiffEnd,
+        DiffPageUp,
+        DiffPageDown,
         ToggleDiffSplit,
         ToggleWholeFile,
+        ToggleStage,
+        ToggleReviewTree,
         AnnotateSelection,
         AskAgent,
         SendNotes,
         SaveFile,
+        CloseEditor,
         Find,
         CloseFind,
         FindNext,
@@ -48,9 +74,22 @@ actions!(
         ExplorerDown,
         ExplorerLeft,
         ExplorerRight,
+        ExplorerHome,
+        ExplorerEnd,
         ExplorerOpen
     ]
 );
+
+/// Aller au n-ième worktree de la barre latérale.
+///
+/// Une action *avec une donnée* plutôt que neuf actions : `Ctrl+1` à `Ctrl+9`
+/// font la même chose à un indice près, et neuf gestionnaires identiques ne
+/// diraient rien de plus.
+#[derive(Clone, PartialEq, Debug, Default, gpui::Action)]
+#[action(namespace = claudhub, no_json)]
+pub struct SelectWorktree {
+    pub index: usize,
+}
 
 /// Prédicat des liaisons. Les couches de gpui-component (dialogue, menu,
 /// popover) sont exclues : un raccourci qui se déclenche derrière un dialogue
@@ -60,6 +99,14 @@ actions!(
 /// contre la pile de contextes du nœud focalisé, et elle n'a de sens que dans
 /// `KeyBinding::new`. La passer à `key_context` fait boucler le parseur.
 const PREDICATE: &str = "Claudhub && !Dialog && !PopupMenu && !Popover";
+
+/// Prédicat de ce qui s'écrit avec la touche système et **une seule lettre**.
+///
+/// Sous Linux, `secondary-s` *est* Ctrl+S, c'est-à-dire XOFF, et `secondary-r`
+/// est la recherche arrière du shell. Une liaison qui vaudrait aussi dans le
+/// terminal les lui prendrait en silence — et l'agent qui tourne dedans est
+/// justement ce qu'on est venu piloter.
+const WINDOW_PREDICATE: &str = "Claudhub && !Dialog && !PopupMenu && !Popover && !ClaudhubTerminal";
 
 /// Prédicat de la copie depuis le diff.
 ///
@@ -84,11 +131,28 @@ const COPY_PREDICATE: &str =
 const NAVIGATION_PREDICATE: &str = "Claudhub && !Dialog && !PopupMenu && !Popover && !Input \
      && !ClaudhubTerminal && !ClaudhubExplorer";
 
-/// Le contexte que la vue racine déclare. Un simple identifiant : c'est le
-/// nom auquel `PREDICATE` se réfère.
-pub fn context() -> KeyContext {
+/// Prédicat de la navigation en mode vim.
+///
+/// `ClaudhubVim` est **sur le même nœud** que `Claudhub` — la vue racine — et
+/// ce n'est pas un détail de style : `depth_of` évalue chaque identifiant
+/// contre un seul niveau de la pile de contextes, si bien que deux
+/// identifiants déclarés à deux profondeurs différentes ne se rencontrent
+/// jamais dans un `&&`.
+const VIM_PREDICATE: &str = "Claudhub && ClaudhubVim && !Dialog && !PopupMenu && !Popover \
+     && !Input && !ClaudhubTerminal && !ClaudhubExplorer";
+
+/// Le contexte que la vue racine déclare. Des identifiants, pas un prédicat :
+/// c'est le nom auquel `PREDICATE` se réfère.
+///
+/// `ClaudhubVim` s'y ajoute quand le mode vim est actif, et cela suffit à
+/// l'allumer ou à l'éteindre : le contexte est recalculé à chaque rendu, alors
+/// que les liaisons sont posées une fois pour toutes au démarrage.
+pub fn context(vim: bool) -> KeyContext {
     let mut context = KeyContext::default();
     context.add("Claudhub");
+    if vim {
+        context.add("ClaudhubVim");
+    }
     context
 }
 
@@ -131,82 +195,413 @@ pub fn find_context() -> KeyContext {
 /// parent. Ce sont celles de PhpStorm, et de tout explorateur.
 const EXPLORER_PREDICATE: &str = "ClaudhubExplorer";
 
-pub fn explorer_context() -> KeyContext {
+/// Les mêmes en mode vim. `ClaudhubVim` doit être déclaré **par l'arbre
+/// lui-même** et non par la racine : voir `VIM_PREDICATE`.
+const VIM_EXPLORER_PREDICATE: &str = "ClaudhubExplorer && ClaudhubVim";
+
+pub fn explorer_context(vim: bool) -> KeyContext {
     let mut context = KeyContext::default();
     context.add("ClaudhubExplorer");
+    if vim {
+        context.add("ClaudhubVim");
+    }
     context
 }
 
+/// Les familles de l'aide, dans l'ordre où elle les affiche.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Group {
+    Window,
+    Worktrees,
+    Repository,
+    Review,
+    Explorer,
+    Search,
+    Terminal,
+}
+
+impl Group {
+    pub const ORDER: [Group; 7] = [
+        Group::Window,
+        Group::Worktrees,
+        Group::Repository,
+        Group::Review,
+        Group::Explorer,
+        Group::Search,
+        Group::Terminal,
+    ];
+
+    /// La clé i18n du titre. La clé et non le texte : un test vérifie que
+    /// toutes celles de ce module existent dans les deux catalogues, et il ne
+    /// peut le faire que sur des clés.
+    pub fn key(self) -> &'static str {
+        match self {
+            Group::Window => "shortcut-group-window",
+            Group::Worktrees => "shortcut-group-worktrees",
+            Group::Repository => "shortcut-group-repository",
+            Group::Review => "shortcut-group-review",
+            Group::Explorer => "shortcut-group-explorer",
+            Group::Search => "shortcut-group-search",
+            Group::Terminal => "shortcut-group-terminal",
+        }
+    }
+}
+
+/// Une liaison, telle que l'aide la montre.
+///
+/// Le même enregistrement sert à `bind_keys` : c'est la seule façon d'être sûr
+/// que l'aide dise ce que le clavier fait.
+pub struct Entry {
+    pub keys: &'static str,
+    pub group: Group,
+    /// Clé i18n de la description.
+    pub label: &'static str,
+    /// Gardé pour ce qu'il vaut au test : deux liaisons peuvent porter les
+    /// mêmes touches — `Entrée` ouvre un fichier dans l'explorateur et va à
+    /// l'occurrence suivante dans une recherche — à condition que leurs
+    /// prédicats ne se rencontrent pas.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub predicate: &'static str,
+}
+
+/// Déclare une famille de liaisons : les touches d'un côté, l'aide de l'autre,
+/// écrites une seule fois.
+macro_rules! table {
+    ($entries:ident, $bind:ident, [
+        $($group:ident $keys:literal => $action:expr, $predicate:expr, $label:literal;)*
+    ]) => {
+        static $entries: &[Entry] = &[$(
+            Entry {
+                keys: $keys,
+                group: Group::$group,
+                label: $label,
+                predicate: $predicate,
+            },
+        )*];
+
+        fn $bind() -> Vec<KeyBinding> {
+            vec![$(
+                KeyBinding::new($keys, $action, Some($predicate)),
+            )*]
+        }
+    };
+}
+
+table!(STANDARD, standard_bindings, [
+    // ── La fenêtre ──────────────────────────────────────────────────────────
+    Window "f1" => ShowShortcuts, PREDICATE, "shortcut-help";
+    Window "f5" => Refresh, PREDICATE, "shortcut-refresh";
+    Window "secondary-r" => Refresh, WINDOW_PREDICATE, "shortcut-refresh";
+    // La convention de tous les éditeurs, y compris sous Linux.
+    Window "secondary-," => OpenSettings, PREDICATE, "shortcut-settings";
+    Window "secondary-b" => ToggleSidebar, WINDOW_PREDICATE, "shortcut-sidebar";
+    // Le zoom vise la zone qui a le focus : le terminal quand il l'a, les
+    // diffs sinon. `secondary-=` autant que `secondary-+` parce que le signe
+    // plus demande Maj sur un clavier azerty comme sur un qwerty.
+    Window "secondary-=" => ZoomIn, PREDICATE, "shortcut-zoom-in";
+    Window "secondary-+" => ZoomIn, PREDICATE, "shortcut-zoom-in";
+    Window "secondary--" => ZoomOut, PREDICATE, "shortcut-zoom-out";
+    Window "secondary-0" => ZoomReset, PREDICATE, "shortcut-zoom-reset";
+
+    // ── Les worktrees ───────────────────────────────────────────────────────
+    // Neuf liaisons et une seule ligne d'aide : `merge` reconnaît la suite de
+    // chiffres et l'affiche comme une plage.
+    Worktrees "secondary-1" => SelectWorktree { index: 0 }, PREDICATE, "shortcut-worktree";
+    Worktrees "secondary-2" => SelectWorktree { index: 1 }, PREDICATE, "shortcut-worktree";
+    Worktrees "secondary-3" => SelectWorktree { index: 2 }, PREDICATE, "shortcut-worktree";
+    Worktrees "secondary-4" => SelectWorktree { index: 3 }, PREDICATE, "shortcut-worktree";
+    Worktrees "secondary-5" => SelectWorktree { index: 4 }, PREDICATE, "shortcut-worktree";
+    Worktrees "secondary-6" => SelectWorktree { index: 5 }, PREDICATE, "shortcut-worktree";
+    Worktrees "secondary-7" => SelectWorktree { index: 6 }, PREDICATE, "shortcut-worktree";
+    Worktrees "secondary-8" => SelectWorktree { index: 7 }, PREDICATE, "shortcut-worktree";
+    Worktrees "secondary-9" => SelectWorktree { index: 8 }, PREDICATE, "shortcut-worktree";
+
+    // ── Le dépôt ────────────────────────────────────────────────────────────
+    // Avec Maj, donc valables jusque dans le terminal : ces trois-là partent
+    // sur le réseau et ne dépendent pas de ce qu'on regarde.
+    Repository "secondary-shift-r" => Fetch, PREDICATE, "shortcut-fetch";
+    Repository "secondary-shift-u" => Pull, PREDICATE, "shortcut-pull";
+    Repository "secondary-shift-p" => Push, PREDICATE, "shortcut-push";
+    Repository "secondary-enter" => Commit, PREDICATE, "shortcut-commit";
+
+    // ── La relecture ────────────────────────────────────────────────────────
+    // Les flèches nues vont d'une modification à la suivante — c'est le geste
+    // de la relecture, les lignes de contexte entre deux hunks n'ayant rien à
+    // montrer — et débordent sur le fichier voisin une fois le dernier hunk
+    // passé. La touche système descend à la ligne, Maj étend la sélection.
+    Review "up" => PreviousHunk, NAVIGATION_PREDICATE, "shortcut-previous-hunk";
+    Review "down" => NextHunk, NAVIGATION_PREDICATE, "shortcut-next-hunk";
+    Review "secondary-up" => PreviousLine, NAVIGATION_PREDICATE, "shortcut-previous-line";
+    Review "secondary-down" => NextLine, NAVIGATION_PREDICATE, "shortcut-next-line";
+    Review "shift-up" => ExtendUp, NAVIGATION_PREDICATE, "shortcut-extend-up";
+    Review "shift-down" => ExtendDown, NAVIGATION_PREDICATE, "shortcut-extend-down";
+    Review "left" => PreviousFile, NAVIGATION_PREDICATE, "shortcut-previous-file";
+    Review "right" => NextFile, NAVIGATION_PREDICATE, "shortcut-next-file";
+    Review "pageup" => DiffPageUp, NAVIGATION_PREDICATE, "shortcut-page-up";
+    Review "pagedown" => DiffPageDown, NAVIGATION_PREDICATE, "shortcut-page-down";
+    Review "home" => DiffStart, NAVIGATION_PREDICATE, "shortcut-diff-start";
+    Review "end" => DiffEnd, NAVIGATION_PREDICATE, "shortcut-diff-end";
+    // Copier le code relu, et sa variante qui garde les marqueurs de patch.
+    Review "secondary-c" => CopyDiff, COPY_PREDICATE, "shortcut-copy";
+    Review "secondary-shift-c" => CopyDiffPatch, COPY_PREDICATE, "shortcut-copy-patch";
+    Review "secondary-a" => SelectWholeDiff, COPY_PREDICATE, "shortcut-select-all";
+    // Annoter et demander partagent le prédicat de la copie : ils partent d'une
+    // sélection dans le diff, et n'ont rien à faire quand c'est un champ de
+    // saisie ou un terminal qui a le focus.
+    Review "secondary-shift-n" => AnnotateSelection, COPY_PREDICATE, "shortcut-annotate";
+    Review "secondary-shift-k" => AskAgent, COPY_PREDICATE, "shortcut-ask";
+    Review "secondary-shift-e" => SendNotes, PREDICATE, "shortcut-send-notes";
+    Review "secondary-shift-s" => ToggleDiffSplit, PREDICATE, "shortcut-split";
+    Review "secondary-shift-f" => ToggleWholeFile, PREDICATE, "shortcut-whole-file";
+    Review "secondary-shift-i" => ToggleStage, PREDICATE, "shortcut-stage";
+    Review "secondary-shift-l" => ToggleReviewTree, PREDICATE, "shortcut-review-tree";
+    // Enregistrer et fermer visent l'éditeur intégré ; dans le terminal, Ctrl+S
+    // est XOFF et Ctrl+W efface un mot.
+    Review "secondary-s" => SaveFile, WINDOW_PREDICATE, "shortcut-save";
+    Review "secondary-w" => CloseEditor, WINDOW_PREDICATE, "shortcut-close-editor";
+
+    // ── L'explorateur ───────────────────────────────────────────────────────
+    Explorer "up" => ExplorerUp, EXPLORER_PREDICATE, "shortcut-explorer-up";
+    Explorer "down" => ExplorerDown, EXPLORER_PREDICATE, "shortcut-explorer-down";
+    Explorer "left" => ExplorerLeft, EXPLORER_PREDICATE, "shortcut-explorer-collapse";
+    Explorer "right" => ExplorerRight, EXPLORER_PREDICATE, "shortcut-explorer-expand";
+    Explorer "home" => ExplorerHome, EXPLORER_PREDICATE, "shortcut-explorer-first";
+    Explorer "end" => ExplorerEnd, EXPLORER_PREDICATE, "shortcut-explorer-last";
+    Explorer "enter" => ExplorerOpen, EXPLORER_PREDICATE, "shortcut-explorer-open";
+
+    // ── La recherche ────────────────────────────────────────────────────────
+    // `Ctrl+F` cherche dans le panneau où le dernier clic a eu lieu. Il est
+    // exclu du terminal et des champs de saisie, qui ont chacun la leur.
+    Search "secondary-f" => Find, COPY_PREDICATE, "shortcut-find";
+    Search "secondary-g" => FindNext, WINDOW_PREDICATE, "shortcut-find-next";
+    Search "enter" => FindNext, FIND_PREDICATE, "shortcut-find-next";
+    Search "secondary-shift-g" => FindPrevious, PREDICATE, "shortcut-find-previous";
+    Search "shift-enter" => FindPrevious, FIND_PREDICATE, "shortcut-find-previous";
+    Search "escape" => CloseFind, FIND_PREDICATE, "shortcut-close-find";
+
+    // ── Les terminaux ───────────────────────────────────────────────────────
+    Terminal "secondary-shift-t" => NewTerminal, PREDICATE, "shortcut-new-terminal";
+    Terminal "secondary-shift-w" => CloseTerminal, PREDICATE, "shortcut-close-terminal";
+    Terminal "secondary-`" => ToggleTerminal, PREDICATE, "shortcut-toggle-terminal";
+    Terminal "secondary-tab" => NextTerminal, PREDICATE, "shortcut-next-terminal";
+    Terminal "secondary-shift-tab" => PreviousTerminal, PREDICATE, "shortcut-previous-terminal";
+    // Les conventions des terminaux : la touche système *avec* Maj, parce que
+    // `Ctrl+C` et `Ctrl+V` nus appartiennent au programme.
+    Terminal "secondary-shift-c" => CopySelection, TERMINAL_PREDICATE, "shortcut-terminal-copy";
+    Terminal "secondary-shift-v" => PasteClipboard, TERMINAL_PREDICATE, "shortcut-terminal-paste";
+    Terminal "secondary-shift-a" => SelectAllText, TERMINAL_PREDICATE, "shortcut-terminal-select-all";
+]);
+
+table!(VIM, vim_bindings, [
+    // Pas de modes ni d'opérateurs : Claudhub n'est pas un éditeur, et son
+    // éditeur intégré appartient à gpui-component. Ce qui est repris, c'est la
+    // main gauche sur la rangée de repos pour parcourir un diff — ce qu'un
+    // relecteur fait mille fois par revue.
+    Review "j" => NextLine, VIM_PREDICATE, "shortcut-next-line";
+    Review "k" => PreviousLine, VIM_PREDICATE, "shortcut-previous-line";
+    // La convention de vim-gitgutter et de fugitive pour aller d'un bloc
+    // modifié au suivant.
+    Review "] c" => NextHunk, VIM_PREDICATE, "shortcut-next-hunk";
+    Review "[ c" => PreviousHunk, VIM_PREDICATE, "shortcut-previous-hunk";
+    Review "l" => NextFile, VIM_PREDICATE, "shortcut-next-file";
+    Review "h" => PreviousFile, VIM_PREDICATE, "shortcut-previous-file";
+    Review "g g" => DiffStart, VIM_PREDICATE, "shortcut-diff-start";
+    Review "shift-g" => DiffEnd, VIM_PREDICATE, "shortcut-diff-end";
+    Review "secondary-d" => DiffPageDown, VIM_PREDICATE, "shortcut-page-down";
+    Review "secondary-u" => DiffPageUp, VIM_PREDICATE, "shortcut-page-up";
+    Review "y" => CopyDiff, VIM_PREDICATE, "shortcut-copy";
+
+    Explorer "j" => ExplorerDown, VIM_EXPLORER_PREDICATE, "shortcut-explorer-down";
+    Explorer "k" => ExplorerUp, VIM_EXPLORER_PREDICATE, "shortcut-explorer-up";
+    Explorer "l" => ExplorerRight, VIM_EXPLORER_PREDICATE, "shortcut-explorer-expand";
+    Explorer "h" => ExplorerLeft, VIM_EXPLORER_PREDICATE, "shortcut-explorer-collapse";
+    Explorer "g g" => ExplorerHome, VIM_EXPLORER_PREDICATE, "shortcut-explorer-first";
+    Explorer "shift-g" => ExplorerEnd, VIM_EXPLORER_PREDICATE, "shortcut-explorer-last";
+
+    Search "/" => Find, VIM_PREDICATE, "shortcut-find";
+    Search "n" => FindNext, VIM_PREDICATE, "shortcut-find-next";
+    Search "shift-n" => FindPrevious, VIM_PREDICATE, "shortcut-find-previous";
+]);
+
 pub fn init(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("f5", Refresh, Some(PREDICATE)),
-        KeyBinding::new("secondary-r", Refresh, Some(PREDICATE)),
-        KeyBinding::new("secondary-shift-t", NewTerminal, Some(PREDICATE)),
-        KeyBinding::new("secondary-shift-w", CloseTerminal, Some(PREDICATE)),
-        KeyBinding::new("secondary-`", ToggleTerminal, Some(PREDICATE)),
-        KeyBinding::new("secondary-tab", NextTerminal, Some(PREDICATE)),
-        KeyBinding::new("secondary-enter", Commit, Some(PREDICATE)),
-        // La convention de tous les éditeurs, y compris sous Linux.
-        KeyBinding::new("secondary-,", OpenSettings, Some(PREDICATE)),
-        // Le zoom vise la zone qui a le focus : le terminal quand il l'a, les
-        // diffs sinon. `secondary-=` autant que `secondary-+` parce que le
-        // signe plus demande Maj sur un clavier azerty comme sur un qwerty.
-        KeyBinding::new("secondary-=", ZoomIn, Some(PREDICATE)),
-        KeyBinding::new("secondary-+", ZoomIn, Some(PREDICATE)),
-        KeyBinding::new("secondary--", ZoomOut, Some(PREDICATE)),
-        KeyBinding::new("secondary-0", ZoomReset, Some(PREDICATE)),
-        // Copier le code relu, et sa variante qui garde les marqueurs de
-        // patch.
-        KeyBinding::new("secondary-c", CopyDiff, Some(COPY_PREDICATE)),
-        KeyBinding::new("secondary-shift-c", CopyDiffPatch, Some(COPY_PREDICATE)),
-        KeyBinding::new("secondary-a", SelectWholeDiff, Some(COPY_PREDICATE)),
-        // Relire au clavier. Les flèches nues vont d'une modification à la
-        // suivante — c'est le geste de la relecture, les lignes de contexte
-        // entre deux hunks n'ayant rien à montrer — et débordent sur le
-        // fichier voisin une fois le dernier hunk passé. La touche système
-        // descend à la ligne, Maj étend la sélection.
-        KeyBinding::new("up", PreviousHunk, Some(NAVIGATION_PREDICATE)),
-        KeyBinding::new("down", NextHunk, Some(NAVIGATION_PREDICATE)),
-        KeyBinding::new("shift-up", ExtendUp, Some(NAVIGATION_PREDICATE)),
-        KeyBinding::new("shift-down", ExtendDown, Some(NAVIGATION_PREDICATE)),
-        KeyBinding::new("secondary-up", PreviousLine, Some(NAVIGATION_PREDICATE)),
-        KeyBinding::new("secondary-down", NextLine, Some(NAVIGATION_PREDICATE)),
-        KeyBinding::new("left", PreviousFile, Some(NAVIGATION_PREDICATE)),
-        KeyBinding::new("right", NextFile, Some(NAVIGATION_PREDICATE)),
-        // Annoter et demander partagent le prédicat de la copie : ils partent
-        // d'une sélection dans le diff, et n'ont rien à faire quand c'est un
-        // champ de saisie ou un terminal qui a le focus.
-        KeyBinding::new("secondary-shift-n", AnnotateSelection, Some(COPY_PREDICATE)),
-        KeyBinding::new("secondary-shift-k", AskAgent, Some(COPY_PREDICATE)),
-        KeyBinding::new("secondary-shift-e", SendNotes, Some(PREDICATE)),
-        // Enregistrer vise l'éditeur intégré, et n'existe que quand il est
-        // ouvert : ailleurs, il n'y a rien à écrire.
-        KeyBinding::new("secondary-s", SaveFile, Some(PREDICATE)),
-        KeyBinding::new("secondary-shift-s", ToggleDiffSplit, Some(PREDICATE)),
-        KeyBinding::new("secondary-shift-f", ToggleWholeFile, Some(PREDICATE)),
-        // Les conventions des terminaux : la touche système *avec* Maj, parce
-        // que `Ctrl+C` et `Ctrl+V` nus appartiennent au programme.
-        KeyBinding::new("secondary-shift-c", CopySelection, Some(TERMINAL_PREDICATE)),
-        KeyBinding::new(
-            "secondary-shift-v",
-            PasteClipboard,
-            Some(TERMINAL_PREDICATE),
-        ),
-        KeyBinding::new("secondary-shift-a", SelectAllText, Some(TERMINAL_PREDICATE)),
-        // Chercher dans le panneau où le dernier clic a eu lieu. `Ctrl+F` est
-        // la convention partout, et la touche système ne part jamais au pty.
-        KeyBinding::new("secondary-f", Find, Some(PREDICATE)),
-        KeyBinding::new("escape", CloseFind, Some(FIND_PREDICATE)),
-        KeyBinding::new("shift-enter", FindPrevious, Some(FIND_PREDICATE)),
-        KeyBinding::new("secondary-g", FindNext, Some(PREDICATE)),
-        KeyBinding::new("secondary-shift-g", FindPrevious, Some(PREDICATE)),
-        // L'arborescence au clavier.
-        KeyBinding::new("up", ExplorerUp, Some(EXPLORER_PREDICATE)),
-        KeyBinding::new("down", ExplorerDown, Some(EXPLORER_PREDICATE)),
-        KeyBinding::new("left", ExplorerLeft, Some(EXPLORER_PREDICATE)),
-        KeyBinding::new("right", ExplorerRight, Some(EXPLORER_PREDICATE)),
-        KeyBinding::new("enter", ExplorerOpen, Some(EXPLORER_PREDICATE)),
-    ]);
+    // Les liaisons vim sont posées **toujours**, et c'est le contexte
+    // `ClaudhubVim` qui les allume : `bind_keys` s'appelle une fois au
+    // démarrage, alors que le réglage se change en cours de route.
+    cx.bind_keys(standard_bindings());
+    cx.bind_keys(vim_bindings());
+}
+
+/// Une famille de l'aide, prête à afficher.
+pub struct Section {
+    pub title: SharedString,
+    pub rows: Vec<Row>,
+}
+
+pub struct Row {
+    pub keys: String,
+    pub label: SharedString,
+}
+
+/// Les raccourcis, groupés, tels que la fenêtre d'aide les montre.
+///
+/// Les liaisons vim n'y figurent que quand le mode l'est : les afficher
+/// éteintes ferait une liste deux fois plus longue dont la moitié ne marche
+/// pas.
+pub fn sheet(vim: bool) -> Vec<Section> {
+    let labels = Labels::current();
+    let mut sections = Vec::new();
+    for group in Group::ORDER {
+        let mut rows: Vec<Row> = Vec::new();
+        // Deux liaisons pour un même geste — F5 et Ctrl+R, Ctrl+1 à Ctrl+9,
+        // la flèche et son équivalent vim — tiennent sur une ligne : c'est le
+        // geste qu'on cherche dans cette liste, pas la touche.
+        let mut push = |entry: &Entry, keys: String| {
+            let label = tr!(entry.label);
+            match rows.iter_mut().find(|row| row.label == label) {
+                Some(row) => row.keys = merge(&row.keys, &keys),
+                None => rows.push(Row { keys, label }),
+            }
+        };
+        for entry in STANDARD.iter().filter(|e| e.group == group) {
+            push(entry, pretty(entry.keys, &labels));
+        }
+        if vim {
+            for entry in VIM.iter().filter(|e| e.group == group) {
+                push(entry, vim_pretty(entry.keys));
+            }
+        }
+        if !rows.is_empty() {
+            sections.push(Section {
+                title: tr!(group.key()),
+                rows,
+            });
+        }
+    }
+    sections
+}
+
+/// Les mots que la lecture d'une touche emprunte à la langue.
+///
+/// Passés en argument plutôt que lus par `tr!` au fond de la fonction : c'est
+/// ce qui rend `pretty` libre et testable, et le catalogue n'est pas chargé
+/// dans un test unitaire.
+pub struct Labels {
+    pub shift: SharedString,
+    pub escape: SharedString,
+    pub enter: SharedString,
+    pub home: SharedString,
+    pub end: SharedString,
+}
+
+impl Labels {
+    pub fn current() -> Self {
+        Self {
+            shift: tr!("key-shift"),
+            escape: tr!("key-escape"),
+            enter: tr!("key-enter"),
+            home: tr!("key-home"),
+            end: tr!("key-end"),
+        }
+    }
+}
+
+/// Le nom de la touche système, tel que son clavier l'écrit.
+const SECONDARY: &str = if cfg!(target_os = "macos") {
+    "⌘"
+} else {
+    "Ctrl"
+};
+
+/// Une liaison gpui rendue lisible : `secondary-shift-e` → `Ctrl+Maj+E`.
+pub fn pretty(keys: &str, labels: &Labels) -> String {
+    keys.split(' ')
+        .map(|stroke| {
+            let mut parts: Vec<String> = Vec::new();
+            let mut rest = stroke;
+            // Le nom de la touche peut être un tiret (`secondary--`) : c'est
+            // le *dernier* segment, jamais un modificateur.
+            while let Some((head, tail)) = rest.split_once('-') {
+                match head {
+                    "secondary" | "cmd" | "ctrl" => parts.push(SECONDARY.to_string()),
+                    "shift" => parts.push(labels.shift.to_string()),
+                    "alt" => parts.push("Alt".to_string()),
+                    _ => break,
+                }
+                rest = tail;
+            }
+            parts.push(key_name(rest, labels));
+            parts.join("+")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn key_name(key: &str, labels: &Labels) -> String {
+    match key {
+        "escape" => labels.escape.to_string(),
+        "enter" => labels.enter.to_string(),
+        "home" => labels.home.to_string(),
+        "end" => labels.end.to_string(),
+        "tab" => "Tab".to_string(),
+        "space" => "␣".to_string(),
+        "up" => "↑".to_string(),
+        "down" => "↓".to_string(),
+        "left" => "←".to_string(),
+        "right" => "→".to_string(),
+        "pageup" => "Page ↑".to_string(),
+        "pagedown" => "Page ↓".to_string(),
+        // Les touches de fonction s'écrivent en majuscule, les lettres aussi,
+        // et le reste — `,` `-` `` ` `` — tel quel.
+        other => other.to_uppercase(),
+    }
+}
+
+/// Une liaison vim rendue **comme vim l'écrit** : `g g` → `gg`, `shift-g` →
+/// `G`, `] c` → `]c`.
+///
+/// Traduire ces touches comme les autres donnerait « Maj+G » là où tout ce que
+/// l'utilisateur connaît dit « G » : la notation fait partie de ce qu'il sait
+/// déjà, et la remplacer serait lui apprendre autre chose.
+pub fn vim_pretty(keys: &str) -> String {
+    keys.split(' ')
+        .map(|stroke| match stroke.split_once('-') {
+            Some(("shift", key)) => key.to_uppercase(),
+            Some(("secondary", key)) => format!("{SECONDARY}+{}", key.to_uppercase()),
+            _ => stroke.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// Réunit deux façons de faire le même geste sur une seule ligne.
+///
+/// Une suite de touches numérotées — `Ctrl+1` … `Ctrl+9` — s'écrit comme une
+/// plage ; deux touches sans rapport s'écrivent l'une ou l'autre.
+fn merge(current: &str, next: &str) -> String {
+    if let Some(start) = current.split(['…', '/']).next().map(str::trim) {
+        if consecutive(start, next) || current.contains('…') {
+            let first = current.split('…').next().unwrap_or(current).trim();
+            return format!("{first} … {next}");
+        }
+    }
+    format!("{current} / {next}")
+}
+
+/// Deux touches qui ne diffèrent que par un chiffre qui se suit.
+///
+/// Le découpage se fait sur le **caractère** et non sur l'octet : une touche
+/// s'écrit couramment `Ctrl+↓`, et couper un pas avant la fin d'une flèche
+/// est une panique.
+fn consecutive(first: &str, next: &str) -> bool {
+    fn trailing_digit(text: &str) -> Option<(&str, u32)> {
+        let last = text.chars().next_back()?;
+        let digit = last.to_digit(10)?;
+        Some((&text[..text.len() - last.len_utf8()], digit))
+    }
+    match (trailing_digit(first), trailing_digit(next)) {
+        (Some((head, a)), Some((other, b))) => head == other && b == a + 1,
+        _ => false,
+    }
 }
 
 pub fn refresh(
@@ -549,4 +944,278 @@ pub fn find_previous(
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.find_step(-1, cx);
+}
+
+pub fn show_shortcuts(
+    this: &mut ClaudhubApp,
+    _: &ShowShortcuts,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.open_shortcuts(window, cx);
+}
+
+pub fn toggle_sidebar(
+    this: &mut ClaudhubApp,
+    _: &ToggleSidebar,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.toggle_sidebar(window, cx);
+}
+
+pub fn previous_terminal(
+    this: &mut ClaudhubApp,
+    _: &PreviousTerminal,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    let Some(worktree) = this.active_path() else {
+        return;
+    };
+    let group = this.terminal_group(&worktree, window, cx);
+    group.update(cx, |group, cx| group.previous(window, cx));
+}
+
+pub fn select_worktree(
+    this: &mut ClaudhubApp,
+    action: &SelectWorktree,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.select_worktree_at(action.index, window, cx);
+}
+
+pub fn fetch(
+    this: &mut ClaudhubApp,
+    _: &Fetch,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.fetch(cx);
+}
+
+pub fn pull(
+    this: &mut ClaudhubApp,
+    _: &Pull,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.pull(cx);
+}
+
+pub fn push(
+    this: &mut ClaudhubApp,
+    _: &Push,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.push(cx);
+}
+
+pub fn toggle_stage(
+    this: &mut ClaudhubApp,
+    _: &ToggleStage,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.toggle_stage_of_open_file(cx);
+}
+
+pub fn toggle_review_tree(
+    this: &mut ClaudhubApp,
+    _: &ToggleReviewTree,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.toggle_review_tree(cx);
+}
+
+pub fn diff_start(
+    this: &mut ClaudhubApp,
+    _: &DiffStart,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.jump_diff(crate::ui::diff_view::Jump::Start, cx);
+}
+
+pub fn diff_end(
+    this: &mut ClaudhubApp,
+    _: &DiffEnd,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.jump_diff(crate::ui::diff_view::Jump::End, cx);
+}
+
+pub fn diff_page_up(
+    this: &mut ClaudhubApp,
+    _: &DiffPageUp,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.jump_diff(crate::ui::diff_view::Jump::PageUp, cx);
+}
+
+pub fn diff_page_down(
+    this: &mut ClaudhubApp,
+    _: &DiffPageDown,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.jump_diff(crate::ui::diff_view::Jump::PageDown, cx);
+}
+
+pub fn close_editor(
+    this: &mut ClaudhubApp,
+    _: &CloseEditor,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.close_editor(window, cx);
+}
+
+pub fn explorer_home(
+    this: &mut ClaudhubApp,
+    _: &ExplorerHome,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.jump_project_cursor(false, cx);
+}
+
+pub fn explorer_end(
+    this: &mut ClaudhubApp,
+    _: &ExplorerEnd,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.jump_project_cursor(true, cx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn labels() -> Labels {
+        Labels {
+            shift: "Maj".into(),
+            escape: "Échap".into(),
+            enter: "Entrée".into(),
+            home: "Début".into(),
+            end: "Fin".into(),
+        }
+    }
+
+    #[test]
+    fn a_binding_reads_the_way_a_keyboard_is_labelled() {
+        let l = labels();
+        assert_eq!(pretty("f5", &l), "F5");
+        assert_eq!(
+            pretty("secondary-shift-e", &l),
+            format!("{SECONDARY}+Maj+E")
+        );
+        assert_eq!(pretty("shift-up", &l), "Maj+↑");
+        assert_eq!(pretty("escape", &l), "Échap");
+        assert_eq!(pretty("pagedown", &l), "Page ↓");
+        // Le tiret est ici la touche, pas un séparateur de modificateur.
+        assert_eq!(pretty("secondary--", &l), format!("{SECONDARY}+-"));
+        assert_eq!(pretty("secondary-,", &l), format!("{SECONDARY}+,"));
+    }
+
+    /// La notation de vim fait partie de ce que l'utilisateur sait déjà : la
+    /// traduire en « Maj+G » serait lui apprendre autre chose.
+    #[test]
+    fn a_vim_binding_reads_the_way_vim_writes_it() {
+        assert_eq!(vim_pretty("g g"), "gg");
+        assert_eq!(vim_pretty("shift-g"), "G");
+        assert_eq!(vim_pretty("] c"), "]c");
+        assert_eq!(vim_pretty("j"), "j");
+        assert_eq!(vim_pretty("secondary-d"), format!("{SECONDARY}+D"));
+    }
+
+    #[test]
+    fn a_run_of_numbered_keys_is_shown_as_a_range() {
+        let mut keys = "Ctrl+1".to_string();
+        for n in 2..=9 {
+            keys = merge(&keys, &format!("Ctrl+{n}"));
+        }
+        assert_eq!(keys, "Ctrl+1 … Ctrl+9");
+        // Deux touches sans rapport restent deux façons de faire.
+        assert_eq!(merge("F5", "Ctrl+R"), "F5 / Ctrl+R");
+    }
+
+    /// `KeyBinding::new` **panique** sur une touche qu'elle ne sait pas lire,
+    /// et `init` tourne au démarrage : une faute de frappe dans la table ne se
+    /// verrait pas autrement qu'en lançant Claudhub.
+    #[test]
+    fn every_keystroke_parses() {
+        assert_eq!(standard_bindings().len(), STANDARD.len());
+        assert_eq!(vim_bindings().len(), VIM.len());
+    }
+
+    /// La clé du libellé est une **variable**, pas un littéral : si `tr!` ne
+    /// savait pas les traduire ainsi, l'aide afficherait `shortcut-refresh` à
+    /// la place du texte, et tous les autres tests passeraient quand même.
+    #[test]
+    fn the_sheet_is_translated_and_not_a_list_of_keys() {
+        let sections = sheet(true);
+        assert!(!sections.is_empty());
+        for section in &sections {
+            assert!(!section.title.starts_with("shortcut-"), "{}", section.title);
+            for row in &section.rows {
+                assert!(!row.label.starts_with("shortcut-"), "{}", row.label);
+                assert!(!row.keys.is_empty());
+            }
+        }
+        // Le mode éteint, aucune touche de vim n'est proposée.
+        let plain = sheet(false);
+        let keys: Vec<&str> = plain
+            .iter()
+            .flat_map(|s| s.rows.iter().map(|r| r.keys.as_str()))
+            .collect();
+        assert!(!keys.iter().any(|k| k.contains("gg")), "{keys:?}");
+    }
+
+    /// Une liaison dont l'aide n'aurait pas le texte s'afficherait sous la
+    /// forme de sa clé, ce qu'aucune relecture ne rattrape.
+    #[test]
+    fn every_label_exists_in_both_catalogs() {
+        const EN: &str = include_str!("../../assets/i18n/en.json");
+        const FR: &str = include_str!("../../assets/i18n/fr.json");
+        let keys = |json: &str| -> std::collections::BTreeSet<String> {
+            let value: serde_json::Value = serde_json::from_str(json).unwrap();
+            value.as_object().unwrap().keys().cloned().collect()
+        };
+        let (en, fr) = (keys(EN), keys(FR));
+        let needed = STANDARD
+            .iter()
+            .chain(VIM.iter())
+            .map(|entry| entry.label)
+            .chain(Group::ORDER.iter().map(|group| group.key()));
+        for key in needed {
+            assert!(en.contains(key), "« {key} » manque à en.json");
+            assert!(fr.contains(key), "« {key} » manque à fr.json");
+        }
+    }
+
+    /// Deux liaisons différentes sur les mêmes touches et le même prédicat se
+    /// départageraient par l'ordre de déclaration, ce qui n'est jamais ce
+    /// qu'on voulait dire.
+    #[test]
+    fn no_two_bindings_share_keys_within_a_table() {
+        for table in [STANDARD, VIM] {
+            let mut seen = std::collections::HashSet::new();
+            for entry in table {
+                // Les chiffres des worktrees partagent leur libellé, jamais
+                // leurs touches.
+                assert!(
+                    seen.insert((entry.keys, entry.predicate)),
+                    "« {} » est déclaré deux fois sous le même prédicat",
+                    entry.keys
+                );
+            }
+        }
+    }
 }

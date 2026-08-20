@@ -44,6 +44,24 @@ use gpui_component::scroll::{ScrollableElement, ScrollbarAxis, ScrollbarHandle};
 use crate::ui::app::ClaudhubApp;
 use crate::ui::motion::{Axes, ScrollMotion};
 
+/// Une barre verticale, **sans** lissage de la molette.
+///
+/// Pour ce qui n'est pas un panneau : la fenêtre d'aide est bâtie dans une
+/// fermeture de dialogue, qui ne reçoit qu'un `App` et ne peut donc pas
+/// s'abonner à la molette par `cx.listener`.
+pub fn vertical<H: ScrollbarHandle + Clone>(
+    id: impl Into<SharedString>,
+    handle: &H,
+    content: impl IntoElement,
+) -> Stateful<gpui::Div> {
+    wrap(
+        id,
+        handle,
+        ScrollbarAxis::Vertical,
+        content.into_any_element(),
+    )
+}
+
 /// Une barre sur les deux axes, **sans** lissage de la molette.
 ///
 /// Le seul panneau qui en veuille est le diff : ses lignes ne sont jamais

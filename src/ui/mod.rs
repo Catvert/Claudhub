@@ -28,6 +28,7 @@ mod sentry_view;
 mod settings;
 mod settings_view;
 mod shortcuts;
+mod shortcuts_view;
 mod sidebar;
 mod store;
 mod terminal_view;

@@ -427,6 +427,14 @@ pub struct Settings {
     pub sentry_token: String,
     /// Requête envoyée à Sentry. Vide : les issues non résolues.
     pub sentry_query: String,
+    /// Parcourir les diffs et l'arborescence avec les touches de vim.
+    ///
+    /// Désactivé par défaut, et il faut que ça le reste : ces liaisons sont
+    /// des **lettres nues**, et elles prennent la place de tout ce qu'une
+    /// lettre pourrait faire ailleurs. Ce n'est pas un mode d'édition — il n'y
+    /// a rien à éditer dans un diff — mais la main gauche sur la rangée de
+    /// repos pour relire.
+    pub vim_mode: bool,
 }
 
 impl Default for Settings {
@@ -454,6 +462,7 @@ impl Default for Settings {
             sentry_org: String::new(),
             sentry_token: String::new(),
             sentry_query: String::new(),
+            vim_mode: false,
         }
     }
 }

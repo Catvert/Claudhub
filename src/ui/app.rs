@@ -1592,11 +1592,20 @@ impl ClaudhubApp {
             .dropdown_menu(move |menu, _window, _cx| {
                 let entity = entity.clone();
                 let for_reset = entity.clone();
+                let for_shortcuts = entity.clone();
                 menu.item(PopupMenuItem::new(tr!("settings-title")).on_click(
                     move |_, window, cx| {
                         entity.update(cx, |this, cx| this.open_settings(window, cx));
                     },
                 ))
+                // Les raccourcis sont ce qu'on cherche quand on ne sait plus :
+                // ils vivent donc là où l'on va chercher, à côté des réglages,
+                // et non dans une aide qu'il faudrait deviner.
+                .item(
+                    PopupMenuItem::new(tr!("shortcuts-title")).on_click(move |_, window, cx| {
+                        for_shortcuts.update(cx, |this, cx| this.open_shortcuts(window, cx));
+                    }),
+                )
                 .item(PopupMenuItem::new(tr!("menu-reset-layout")).on_click(
                     move |_, window, cx| {
                         for_reset.update(cx, |this, cx| this.reset_layout(window, cx));
@@ -1689,7 +1698,10 @@ impl Focusable for ClaudhubApp {
 impl Render for ClaudhubApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
-            .key_context(super::shortcuts::context())
+            // Le mode vim se lit au rendu et non à la construction : le
+            // contexte est ce qui allume ses liaisons, et le réglage se change
+            // en cours de route.
+            .key_context(super::shortcuts::context(Settings::global(cx).vim_mode))
             .track_focus(&self.focus)
             .on_action(cx.listener(super::shortcuts::refresh))
             .on_action(cx.listener(super::shortcuts::new_terminal))
@@ -1727,6 +1739,22 @@ impl Render for ClaudhubApp {
             .on_action(cx.listener(super::shortcuts::explorer_left))
             .on_action(cx.listener(super::shortcuts::explorer_right))
             .on_action(cx.listener(super::shortcuts::explorer_open))
+            .on_action(cx.listener(super::shortcuts::explorer_home))
+            .on_action(cx.listener(super::shortcuts::explorer_end))
+            .on_action(cx.listener(super::shortcuts::show_shortcuts))
+            .on_action(cx.listener(super::shortcuts::toggle_sidebar))
+            .on_action(cx.listener(super::shortcuts::previous_terminal))
+            .on_action(cx.listener(super::shortcuts::select_worktree))
+            .on_action(cx.listener(super::shortcuts::fetch))
+            .on_action(cx.listener(super::shortcuts::pull))
+            .on_action(cx.listener(super::shortcuts::push))
+            .on_action(cx.listener(super::shortcuts::toggle_stage))
+            .on_action(cx.listener(super::shortcuts::toggle_review_tree))
+            .on_action(cx.listener(super::shortcuts::diff_start))
+            .on_action(cx.listener(super::shortcuts::diff_end))
+            .on_action(cx.listener(super::shortcuts::diff_page_up))
+            .on_action(cx.listener(super::shortcuts::diff_page_down))
+            .on_action(cx.listener(super::shortcuts::close_editor))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -1877,5 +1905,86 @@ impl ClaudhubApp {
     pub(super) fn toggle_terminal_panel(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.show_terminal = !self.show_terminal;
         cx.notify();
+    }
+
+    /// Affiche ou masque la zone de gauche — dépôts, branches, fichiers.
+    ///
+    /// `toggle_dock` ne notifie que le dock intérieur, et c'est l'aire qu'on
+    /// observe pour enregistrer la disposition : sans ce `notify`, la fenêtre
+    /// rouvrirait avec la zone dans l'état d'avant le geste.
+    pub(super) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dock.update(cx, |area, cx| {
+            area.toggle_dock(gpui_component::dock::DockPlacement::Left, window, cx);
+            cx.notify();
+        });
+    }
+
+    /// Les worktrees dans l'ordre où la barre latérale les affiche.
+    ///
+    /// Les replis n'y changent rien : `Ctrl+3` doit désigner le même worktree
+    /// qu'on ait replié son dépôt ou non, sans quoi le raccourci ne serait
+    /// mémorisable que dans un seul état de la liste.
+    fn worktrees_in_order(&self) -> Vec<PathBuf> {
+        self.repos
+            .iter()
+            .flat_map(|repo| repo.worktrees.iter().map(|w| w.path.clone()))
+            .collect()
+    }
+
+    pub(super) fn select_worktree_at(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(path) = self.worktrees_in_order().into_iter().nth(index) {
+            self.select_worktree(path, window, cx);
+        }
+    }
+
+    pub(super) fn fetch(&mut self, cx: &mut Context<Self>) {
+        if let Some(worktree) = self.active.clone() {
+            self.git.send(Cmd::Fetch { worktree });
+            cx.notify();
+        }
+    }
+
+    pub(super) fn pull(&mut self, cx: &mut Context<Self>) {
+        if let Some(worktree) = self.active.clone() {
+            self.git.send(Cmd::Pull { worktree });
+            cx.notify();
+        }
+    }
+
+    pub(super) fn push(&mut self, cx: &mut Context<Self>) {
+        if let Some(worktree) = self.active.clone() {
+            self.git.send(Cmd::Push {
+                worktree,
+                force_with_lease: false,
+            });
+            cx.notify();
+        }
+    }
+
+    /// Coche ou décoche le fichier ouvert, comme un clic sur sa case.
+    ///
+    /// Le statut est la seule source qui distingue l'index du répertoire de
+    /// travail : un fichier absent de sa liste n'est pas indexable — c'est un
+    /// fichier de commit, pas une modification en cours.
+    pub(super) fn toggle_stage_of_open_file(&mut self, cx: &mut Context<Self>) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let Some(state) = self.active_review() else {
+            return;
+        };
+        let Some(path) = state.selected.clone() else {
+            return;
+        };
+        let Some(file) = state.status.files.iter().find(|file| file.path == path) else {
+            return;
+        };
+        let staged = file.is_staged();
+        self.set_staged(worktree, vec![path], !staged, cx);
     }
 }

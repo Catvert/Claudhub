@@ -285,6 +285,20 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    /// Porte le curseur au premier ou au dernier de la liste affichée.
+    pub(super) fn jump_project_cursor(&mut self, last: bool, cx: &mut Context<Self>) {
+        let Some(explorer) = self.explorer() else {
+            return;
+        };
+        let count = explorer.rows.len();
+        if count == 0 {
+            return;
+        }
+        explorer.cursor = explorer.path_at(if last { count - 1 } else { 0 });
+        self.reveal_cursor();
+        cx.notify();
+    }
+
     /// Déplie ou replie au curseur.
     ///
     /// Sur un fichier, la flèche gauche remonte au dossier parent et la droite
@@ -642,6 +656,7 @@ impl ClaudhubApp {
         };
         self.ensure_project_files(cx);
         let ignored = Settings::global(cx).show_ignored_files;
+        let vim = Settings::global(cx).vim_mode;
         let scroll = self.files_scroll.clone();
         let focus = self.explorer_focus.clone();
         let find = self.render_find(crate::ui::find::Pane::Files, cx);
@@ -720,7 +735,7 @@ impl ClaudhubApp {
                     .id("project-tree")
                     // Les flèches appartiennent à l'arbre tant qu'il a le
                     // focus : c'est ce contexte-là que leur prédicat lit.
-                    .key_context(crate::ui::shortcuts::explorer_context())
+                    .key_context(crate::ui::shortcuts::explorer_context(vim))
                     .track_focus(&focus)
                     .flex_1()
                     .min_h_0()
