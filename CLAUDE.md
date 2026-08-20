@@ -53,6 +53,7 @@ src/
     settings_view.rs  le formulaire, bâti sur `gpui_component::setting`
     tree.rs         chemins → arborescence repliable, en indices
     file_icons.rs   l'icône et la teinte d'un fichier, d'après son nom
+                    (marques dans assets/icons/lang/, CC0)
     explorer.rs     l'explorateur de projet et l'éditeur intégré
     sentry_view.rs  les issues, leur trace, et de quoi les confier
     conflicts.rs    les conflits et le garde-fou d'une opération à mi-chemin
@@ -290,30 +291,42 @@ Trois listes en portent — l'explorateur, les modifications, la revue de branch
 — parce que le geste central de Claudhub est de parcourir des listes de
 fichiers.
 
-**La forme dit la famille, la couleur dit le langage.** Les icônes livrées sont
-des traits monochromes à la Lucide : dessiner un logo par langage serait un
-autre métier, et trente glyphes presque identiques ne se distingueraient pas
-mieux qu'un seul. `.php`, `.js` et `.rs` partagent donc `file-code` et se
-séparent par la teinte.
+**Un glyphe par langage, pas un glyphe par famille.** Les icônes de Lucide
+livrées avec Claudhub ne connaissent que des catégories : tout le code y serait
+le même `file-code`, et une revue Laravel — du PHP, des vues Blade, du Vue, du
+CSS, du SQL, trois fichiers de configuration — n'y gagnerait rien. Les marques
+viennent donc de **simple-icons** (CC0), rangées dans `assets/icons/lang/` : un
+dossier à part, parce qu'elles n'ont ni la même licence ni le même dessin — les
+nôtres sont des traits, celles-ci des aplats. Les marques restent la propriété
+de leurs titulaires ; ce sont des repères visuels, pas une revendication.
 
-**Les teintes viennent de la coloration syntaxique du thème**, pas d'une
-palette à nous : elles existent dans tous les thèmes livrés — `keys_of` le
-verrouille —, elles s'accordent au diff affiché à côté, et elles suivent
-l'apparence claire ou sombre sans qu'on s'en occupe. Elles n'ont **pas de sens
-sémantique** : un `.rs` n'est pas « un type ». C'est une convention
-d'affichage, et un thème de l'utilisateur qui ne définirait pas un nom de style
-retombe sur le suivant de la liste, puis sur la couleur du texte.
+**La teinte vient de la coloration syntaxique du thème**, pas d'une palette à
+nous et **pas des couleurs de marque**. Les noms de style existent dans tous
+les thèmes livrés — `keys_of` le verrouille —, ils s'accordent au diff affiché
+à côté, et ils suivent l'apparence claire ou sombre sans qu'on s'en occupe. Une
+couleur de marque figée, elle, disparaît sur la moitié des thèmes : un logo
+noir sur fond sombre est un trou. La teinte n'a donc **aucun sens sémantique** :
+un `.rs` n'est pas « un type ». C'est une convention d'affichage, et un thème
+qui ne définirait pas un nom de style retombe sur le suivant de la liste, puis
+sur la couleur du texte.
 
-Le **nom entier** est regardé avant l'extension : `Dockerfile`, `Makefile` et
-`.gitignore` n'en ont pas, `.env.production` en a une qui ne veut rien dire, et
-un `.blade.php` est du balisage avant d'être du PHP — la coloration fait déjà
-cette distinction, l'icône n'a pas à la contredire.
+Quatre passes, de la plus précise à la plus large : le **nom entier**
+(`Dockerfile`, `.gitignore`, et surtout `package.json` qui est de npm avant
+d'être du JSON, `Cargo.toml` qui est de Rust avant d'être du TOML), les
+**familles d'outils** qui se déclinent (`.eslintrc`, `.eslintrc.json`,
+`eslint.config.js`), les **doubles extensions** (`.blade.php` est du balisage
+avant d'être du PHP, comme le dit déjà la coloration), puis l'**extension**.
 
-Un test vérifie que **chaque nom d'icône de la table existe sur le disque** :
-une icône absente ne provoque aucune erreur, gpui rend un vide, et la ligne
-perd son repère sans que rien ne le dise. C'est la faute qu'attire une table de
-deux cents entrées. Trois glyphes manquaient au jeu livré — `file-code`,
-`file-json`, `database` — et sont redessinés sur la grille de Lucide.
+Les deux grandes tables sont **triées et interrogées par recherche binaire**,
+et un test vérifie qu'elles le sont : un ordre cassé ne provoque aucune erreur,
+il fait rater des entrées, et une entrée ratée n'est qu'une icône générique de
+plus — ce que personne ne remarque. Un autre test vérifie que chaque icône
+nommée est sur le disque **et embarquée** : les marques vivent dans un
+sous-dossier que le motif de `rust-embed` doit couvrir, et un fichier présent
+mais non embarqué donnerait une case vide, seulement en release.
+
+Trois glyphes manquaient au jeu de Lucide — `file-code`, `file-json`,
+`database` — et sont redessinés sur sa grille.
 
 ### Lire et retoucher un fichier
 

@@ -53,7 +53,7 @@ const JETBRAINS_MONO_FONT: &[u8] = include_bytes!("../../assets/fonts/JetBrainsM
 #[derive(RustEmbed)]
 #[folder = "assets"]
 #[include = "icons/**/*.svg"]
-struct Assets;
+pub(crate) struct Assets;
 
 impl gpui::AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<std::borrow::Cow<'static, [u8]>>> {

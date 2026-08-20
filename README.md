@@ -174,6 +174,14 @@ le terminal.
   direct ; les autres viennent de gpui-component.
 - L'historique s'arrête à deux mille commits et ne se recherche pas.
 
+## Crédits
+
+Les icônes d'interface viennent de [Lucide](https://lucide.dev) (ISC) ; les
+logos de langages et d'outils, de [simple-icons](https://simpleicons.org)
+(CC0), dans `assets/icons/lang/`. Les marques restent la propriété de leurs
+titulaires : Claudhub s'en sert comme repères visuels dans ses listes de
+fichiers.
+
 ## Licence
 
 Apache-2.0.
