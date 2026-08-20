@@ -2318,7 +2318,11 @@ impl Render for ClaudhubApp {
             .bg(super::theme::gutter(cx))
             .text_color(cx.theme().foreground)
             .child(self.render_topbar(window, cx))
-            .child(div().flex_1().min_h_0().child(self.dock.clone()))
+            // Le même souffle que le fork met entre les cartes, autour d'elles :
+            // sans ce rembourrage, les zones touchent les bords de la fenêtre,
+            // la barre du haut et la barre d'état, et les cartes ne respirent
+            // que de l'intérieur.
+            .child(div().flex_1().min_h_0().p(px(4.)).child(self.dock.clone()))
             .child(self.render_status_bar(cx))
             // Les couches de gpui-component doivent être ré-émises par la vue
             // racine, sinon dialogues et notifications ne s'affichent nulle

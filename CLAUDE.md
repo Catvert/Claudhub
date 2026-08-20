@@ -1171,6 +1171,23 @@ clarté en moins : c'est la couleur que le `split_frame` du fork peint entre
 les cartes, et que la vue racine peint derrière tout — poignées de
 redimensionnement, zones repliées appartiennent à ce plan-là.
 
+**La vue racine rembourre le dock des mêmes quatre pixels** que le fork met
+entre les cartes : sans ce `p(4.)`, les zones touchent les bords de la
+fenêtre, la barre du haut et la barre d'état, et les cartes ne respirent que
+de l'intérieur.
+
+**La poignée de redimensionnement ne peint rien au repos.** La couche de base
+(`gpui-base`) tient **sa propre copie** du thème — poignées et barres de
+défilement se peignent sans passer par gpui-component — et `theme::apply` doit
+la projeter (`Theme::sync_base`) après ses retouches, faute de quoi rien
+d'écrit sur le thème ne les atteint. La projection reconstruit la copie à
+partir de zéro, donc l'extinction de la poignée (`resizable.handle`
+transparent) vient **après** elle. La poignée reste saisissable — sa zone est
+plus large que son trait — et se montre pendant le glissement, où elle est une
+information ; au repos, une ligne grise recoudrait les cartes que la gouttière
+vient de séparer. C'est pour écrire dans ce global que `gpui-base` est une
+dépendance directe.
+
 **Une ligne de liste est une pastille, pas une bande.** Le fond d'une ligne
 survolée ou sélectionnée s'arrête avant les bords, et il est arrondi. Piège à
 connaître : **`uniform_list` ignore les marges de ses entrées**, dont il calcule
@@ -1186,13 +1203,15 @@ rembourrage que le rayon ne doit pas recouper.
 du dock, `Tab`, a un rayon **codé en dur à zéro** et rien dans le thème ne
 l'atteint ; `Tab::with_variant` et `TabBar::with_variant` existent pourtant,
 c'est seulement le panneau d'onglets du dock qui ne les transmettait pas. D'où
-le **fork** (voir `Cargo.toml`) : trois commits au-dessus de leur `main` — le
+le **fork** (voir `Cargo.toml`) : quatre commits au-dessus de leur `main` — le
 `TabVariant` que `DockSkin` fait passer jusqu'au `TabBar` ; les coins en boîte
 bordée du bandeau réservés au variant classique, dont ils épousent les
-rectangles ; et le groupe lu comme une carte hors variant classique — cadre
+rectangles ; le groupe lu comme une carte hors variant classique — cadre
 arrondi, splits espacés, pastille Segmented sur le jeton `tab_active` au lieu
-d'un `background` codé en dur. Les commits ont vocation à partir en PR, et le
-fork à disparaître avec elle.
+d'un `background` codé en dur — ; et la même gouttière entre les **zones** du
+dock (gauche, bas, centre), qui restaient collées pendant que les splits
+respiraient. Les commits ont vocation à partir en PR, et le fork à disparaître
+avec elle.
 
 **`PanelStyle::TabBar`, et non le défaut `Auto`** : `Auto` rend un titre plat
 dès qu'un groupe n'a qu'un panneau, et « Branches » ou « Terminaux » n'avaient

@@ -37,6 +37,10 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
 gpui-component = { git = "https://github.com/Catvert/gpui-component", branch = "claudhub", features = [
     "tree-sitter-languages",
 ] }
+# La couche de base tient sa propre copie du thème (poignées, barres de
+# défilement) : éteindre la ligne d'une poignée de redimensionnement s'écrit
+# dans son global à elle, que gpui-component ne réexporte pas.
+gpui-base = { git = "https://github.com/Catvert/gpui-component", branch = "claudhub" }
 # Assets embarqués (icônes Lucide, polices) servis à gpui via AssetSource.
 rust-embed = "8"
 

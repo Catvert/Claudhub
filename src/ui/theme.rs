@@ -177,6 +177,20 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
     // se voit nulle part. C'est la panne muette de cette version.
     theme.tokens = gpui_component::ThemeTokens::from(&theme.colors);
 
+    // La couche de base tient **sa propre copie** du thème — les poignées de
+    // redimensionnement et les barres de défilement se peignent sans passer
+    // par gpui-component. Sans cette projection, tout ce qui précède ne
+    // l'atteint pas ; et comme elle reconstruit la copie à partir de zéro, la
+    // retouche des poignées vient après.
+    Theme::sync_base(cx);
+    let base = gpui_base::Theme::global_mut(cx);
+    // La poignée au repos ne peint rien : les cartes sont déjà séparées par la
+    // gouttière, et une ligne grise par-dessus recoudrait ce qu'on vient de
+    // découdre. Elle reste saisissable — la zone de saisie est plus large que
+    // le trait — et se montre pendant le glissement, où elle est une
+    // information.
+    base.resizable.handle = gpui::transparent_black();
+
     cx.refresh_windows();
 }
 
