@@ -45,32 +45,18 @@ fn pane_root(
     cx: &App,
 ) -> impl IntoElement {
     let app = app.clone();
-    // La carte est peinte **ici** et non par le dock : `TabPanel::render` est
-    // un `size_full().bg(background)` sans rayon ni marge, et rien dans le
-    // thème ne l'atteint. On peint donc la gouttière à l'intérieur du panneau,
-    // et le contenu par-dessus, en retrait : le dock ne sait pas qu'il a des
-    // cartes, et il n'y a pas une ligne de gpui-component à reprendre pour
-    // cela.
-    //
-    // `overflow_hidden` n'est pas décoratif : sans lui, une liste virtualisée
-    // déborde par-dessus les coins arrondis, qui ne se voient plus.
+    // Plus de carte ici : c'est le **cadre du groupe** qui l'est désormais —
+    // le fork arrondit `TabGroupSkin::frame` et espace les splits d'une
+    // gouttière, si bien que la barre d'onglets et le contenu partagent la
+    // même surface, sans couture ni bordure entre eux. Redessiner une carte
+    // à l'intérieur remettrait la couture qu'on vient d'enlever.
     div()
         .size_full()
-        .bg(crate::ui::theme::gutter(cx))
+        .bg(cx.theme().background)
         .capture_any_mouse_down(move |_, _window, cx| {
             app.update(cx, |app, cx| app.touch_pane(pane, cx));
         })
-        .child(
-            div()
-                .size_full()
-                .m(gpui::px(4.))
-                .rounded(crate::ui::theme::card_radius(cx))
-                .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().background)
-                .overflow_hidden()
-                .child(content),
-        )
+        .child(content)
 }
 
 /// Déclare les panneaux au registre du dock.

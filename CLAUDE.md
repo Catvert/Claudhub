@@ -1154,21 +1154,22 @@ palette ne s'en occupe pas : `radius`, `radius.lg` et `shadow` sont des clés de
 `ThemeConfig`, et un thème qui les déclare a choisi son grain. Ils portent tout
 ce que la fenêtre affiche — boutons, champs, menus, dialogues.
 
-**Les panneaux sont des cartes, peintes par `panels::pane_root`.**
-`TabPanel::render` de gpui-component 0.5.1 est un `size_full().bg(background)`
-sans rayon ni marge, et aucun jeton de thème ne l'atteint. On peint donc la
-gouttière **à l'intérieur** du panneau et le contenu par-dessus, en retrait de
-quatre pixels, arrondi et bordé : le dock ne sait pas qu'il a des cartes.
-`overflow_hidden` n'y est pas décoratif — sans lui, une liste virtualisée
-déborde par-dessus les coins, qui ne se voient plus.
+**La carte, c'est le groupe d'onglets entier** — barre comprise. C'est le fork
+qui la peint : `TabGroupSkin::frame` s'arrondit hors variant classique, son
+clip emporte le coin sur la barre et le contenu à la fois, et les splits
+s'espacent d'une gouttière de quatre pixels — c'est elle qui fait lire des
+cartes plutôt que des rectangles échancrés. `panels::pane_root` ne dessine
+donc **plus rien** : redessiner une carte à l'intérieur remettrait la couture
+qu'on vient d'enlever. La barre est **sur la carte** (`tab_bar_segmented` =
+fond), et la pastille active porte un ton surélevé (`tab_active` =
+`secondary`) — sur la carte, elle serait invisible, et c'est précisément
+pourquoi le fork fait lire ce jeton à la pastille Segmented au lieu de son
+`background` codé en dur.
 
-**La gouttière est la couleur de la barre d'onglets**, dérivée du fond de
-quelques pour cent de clarté en moins. Les deux sont le même plan — celui sur
-lequel les cartes sont posées — et les peindre de deux couleurs
-proches-mais-pas-égales est exactement ce qui fait qu'une fenêtre a l'air mal
-assemblée. L'onglet actif prend la couleur de la carte qu'il ouvre. La vue
-racine peint la gouttière elle aussi : ce qui se voit entre deux panneaux —
-poignée de redimensionnement, zone repliée — appartient à ce plan-là.
+**La gouttière reste `tab_bar`**, dérivée du fond de quelques pour cent de
+clarté en moins : c'est la couleur que le `split_frame` du fork peint entre
+les cartes, et que la vue racine peint derrière tout — poignées de
+redimensionnement, zones repliées appartiennent à ce plan-là.
 
 **Une ligne de liste est une pastille, pas une bande.** Le fond d'une ligne
 survolée ou sélectionnée s'arrête avant les bords, et il est arrondi. Piège à
@@ -1185,14 +1186,13 @@ rembourrage que le rayon ne doit pas recouper.
 du dock, `Tab`, a un rayon **codé en dur à zéro** et rien dans le thème ne
 l'atteint ; `Tab::with_variant` et `TabBar::with_variant` existent pourtant,
 c'est seulement le panneau d'onglets du dock qui ne les transmettait pas. D'où
-le **fork** (voir `Cargo.toml`) : deux commits au-dessus de leur `main` — l'un
-fait passer un `TabVariant` de `DockSkin` jusqu'au `TabBar`, qui le propage
-lui-même à chaque onglet ; l'autre ne dessine les coins en boîte bordée du
-bandeau (préfixe des boutons de repli, suffixe zoom/menu) que pour le variant
-classique, dont ils épousent les rectangles — sur les autres, ils se lisaient
-comme un reste de chrome autour de boutons nus. Les commits ont vocation à
-partir en PR, et le fork à disparaître avec elle. Le rail de `Segmented` a son
-propre jeton (`tab_bar_segmented`), aligné sur la gouttière comme `tab_bar`.
+le **fork** (voir `Cargo.toml`) : trois commits au-dessus de leur `main` — le
+`TabVariant` que `DockSkin` fait passer jusqu'au `TabBar` ; les coins en boîte
+bordée du bandeau réservés au variant classique, dont ils épousent les
+rectangles ; et le groupe lu comme une carte hors variant classique — cadre
+arrondi, splits espacés, pastille Segmented sur le jeton `tab_active` au lieu
+d'un `background` codé en dur. Les commits ont vocation à partir en PR, et le
+fork à disparaître avec elle.
 
 **`PanelStyle::TabBar`, et non le défaut `Auto`** : `Auto` rend un titre plat
 dès qu'un groupe n'a qu'un panneau, et « Branches » ou « Terminaux » n'avaient

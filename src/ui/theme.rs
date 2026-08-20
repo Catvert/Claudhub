@@ -153,11 +153,15 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
         ..base
     };
     theme.tab_bar = gutter;
-    // Le rail des onglets `Segmented` a son propre jeton ; même plan, même
-    // couleur — deux gris proches-mais-pas-égaux referaient la fenêtre mal
-    // assemblée qu'on vient de quitter.
-    theme.tab_bar_segmented = gutter;
-    theme.tab_active = base;
+    // Le rail des onglets est **sur la carte**, pas sur la gouttière : la
+    // barre et le contenu d'un groupe partagent la même surface, et c'est ce
+    // qui les fond l'un dans l'autre — l'ancienne couture entre les deux était
+    // précisément la barre peinte couleur gouttière au-dessus d'une carte
+    // bordée.
+    theme.tab_bar_segmented = base;
+    // La pastille active porte donc un ton **surélevé** (celui des en-têtes de
+    // section), pas celui de la carte — sur la carte, elle serait invisible.
+    theme.tab_active = theme.secondary;
     // L'onglet actif est un bloc de la couleur de la carte : son libellé doit
     // donc porter la couleur du texte ordinaire, et les autres rester en
     // retrait — sans quoi les cinq onglets se lisent tous pareil et l'actif ne
@@ -218,15 +222,6 @@ pub fn toolbar_height(cx: &App) -> Pixels {
 /// savoir.
 pub fn gutter(cx: &App) -> Hsla {
     gpui_component::ActiveTheme::theme(cx).tab_bar
-}
-
-/// Le rayon d'une carte de panneau.
-///
-/// Un cran au-dessus de `radius_lg` : une carte pleine hauteur porte un
-/// arrondi plus franc qu'un bouton sans paraître mou, et c'est ce qui se voit
-/// d'abord d'une fenêtre.
-pub fn card_radius(cx: &App) -> Pixels {
-    gpui_component::ActiveTheme::theme(cx).radius_lg
 }
 
 fn scaled(cx: &App, factor: f32, floor: Pixels) -> Pixels {
