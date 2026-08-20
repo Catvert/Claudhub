@@ -703,6 +703,11 @@ impl ClaudhubApp {
         // rectangle bordé dont le rayon est un zéro codé en dur. C'est notre
         // commit sur le fork qui expose ce réglage.
         dock_skin.set_tab_variant(gpui_component::tab::TabVariant::Segmented, cx);
+        // Barre d'onglets partout, y compris sur les groupes d'un seul
+        // panneau : le défaut (`Auto`) rend alors un titre plat, et
+        // « Branches » ou « Terminaux » n'avaient pas le même bandeau que
+        // leurs voisins — deux chromes pour une même fenêtre.
+        dock_skin.set_panel_style(gpui_component::dock::PanelStyle::TabBar, cx);
 
         crate::ui::panels::register(&this, cx);
 

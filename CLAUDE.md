@@ -1185,11 +1185,18 @@ rembourrage que le rayon ne doit pas recouper.
 du dock, `Tab`, a un rayon **codé en dur à zéro** et rien dans le thème ne
 l'atteint ; `Tab::with_variant` et `TabBar::with_variant` existent pourtant,
 c'est seulement le panneau d'onglets du dock qui ne les transmettait pas. D'où
-le **fork** (voir `Cargo.toml`) : un commit au-dessus de leur `main`, qui fait
-passer un `TabVariant` de `DockSkin` jusqu'au `TabBar` — lequel le propage
-lui-même à chaque onglet. Le commit a vocation à partir en PR, et le fork à
-disparaître avec elle. Le rail de `Segmented` a son propre jeton
-(`tab_bar_segmented`), aligné sur la gouttière comme `tab_bar`.
+le **fork** (voir `Cargo.toml`) : deux commits au-dessus de leur `main` — l'un
+fait passer un `TabVariant` de `DockSkin` jusqu'au `TabBar`, qui le propage
+lui-même à chaque onglet ; l'autre ne dessine les coins en boîte bordée du
+bandeau (préfixe des boutons de repli, suffixe zoom/menu) que pour le variant
+classique, dont ils épousent les rectangles — sur les autres, ils se lisaient
+comme un reste de chrome autour de boutons nus. Les commits ont vocation à
+partir en PR, et le fork à disparaître avec elle. Le rail de `Segmented` a son
+propre jeton (`tab_bar_segmented`), aligné sur la gouttière comme `tab_bar`.
+
+**`PanelStyle::TabBar`, et non le défaut `Auto`** : `Auto` rend un titre plat
+dès qu'un groupe n'a qu'un panneau, et « Branches » ou « Terminaux » n'avaient
+pas le même bandeau que leurs voisins — deux chromes pour une même fenêtre.
 
 **Les couleurs posées sur le thème ne suffisent pas** : `Theme::tokens` est
 dérivé de `Theme::colors` une seule fois, à l'application de la palette, et les
