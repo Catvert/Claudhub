@@ -196,7 +196,7 @@ impl ClaudhubApp {
             tr!("branch-new-placeholder"),
             window,
             cx,
-            |this, name, cx| {
+            |this, name, _window, cx| {
                 let name = name.trim().to_string();
                 if name.is_empty() {
                     return;

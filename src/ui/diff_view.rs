@@ -385,7 +385,9 @@ use gpui::{
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
-    h_flex, v_flex, ActiveTheme, Sizable,
+    h_flex,
+    menu::ContextMenuExt,
+    v_flex, ActiveTheme, Sizable,
 };
 
 use crate::git::DiffRange;
@@ -746,6 +748,28 @@ impl ClaudhubApp {
                     .icon(icon("copy"))
                     .tooltip(tr!("action-copy-file"))
                     .on_click(cx.listener(|this, _, _window, cx| this.copy_diff(false, cx))),
+            )
+            // Les deux gestes de la relecture annotée, à côté de la copie : ce
+            // sont les trois choses qu'on fait d'une sélection de code.
+            .child(
+                Button::new("annotate")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("reply"))
+                    .tooltip(tr!("note-add"))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.annotate_selection(window, cx)),
+                    ),
+            )
+            .child(
+                Button::new("ask-agent")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("bot"))
+                    .tooltip(tr!("note-ask-title"))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.ask_about_selection(window, cx)),
+                    ),
             );
 
         let Some(diff) = diff else {
@@ -815,6 +839,14 @@ impl ClaudhubApp {
             .and_then(|state| state.diff_selection)
             .map(|(a, b)| (a.min(b), a.max(b)));
         let selection_bg = cx.theme().selection;
+        // Les lignes annotées sont calculées à l'arrivée du diff : la
+        // fermeture ci-dessous tourne pour chaque ligne visible à chaque
+        // frame, et n'y a donc rien à chercher.
+        let marks = self
+            .active_review()
+            .map(|state| state.note_marks.clone())
+            .unwrap_or_default();
+        let note_color = cx.theme().warning;
 
         v_flex()
             .size_full()
@@ -835,31 +867,26 @@ impl ClaudhubApp {
                                 .map(|ix| {
                                     let selected =
                                         selection.is_some_and(|(a, b)| ix >= a && ix <= b);
+                                    let style = RowStyle {
+                                        line_height,
+                                        gutter,
+                                        stageable,
+                                        selected,
+                                        selection_bg,
+                                        annotated: marks.at(ix, split),
+                                        note_color,
+                                    };
                                     if split {
                                         render_split_row(
-                                            &rows,
-                                            ix,
-                                            &colors,
-                                            gutter,
-                                            column,
-                                            line_height,
-                                            stageable,
-                                            selected,
-                                            selection_bg,
-                                            &entity,
-                                            cx,
+                                            &rows, ix, &colors, column, &style, &entity, cx,
                                         )
                                     } else {
                                         render_row(
                                             &rows,
                                             ix,
                                             &colors,
-                                            gutter,
                                             content_width,
-                                            line_height,
-                                            stageable,
-                                            selected,
-                                            selection_bg,
+                                            &style,
                                             &entity,
                                             cx,
                                         )
@@ -882,43 +909,87 @@ impl ClaudhubApp {
                         // n'importe laquelle mesure donc la bonne.
                         .with_width_from_item(Some(if split { 0 } else { diff.longest_row }))
                         .track_scroll(self.diff_scroll.clone()),
-                    ),
+                    )
+                    // Le clic droit porte les gestes qui n'ont pas de bouton
+                    // sous la main : on vient de sélectionner des lignes, et
+                    // remonter à la barre d'en-tête pour agir dessus est un
+                    // aller-retour de trop.
+                    .context_menu({
+                        let entity = cx.entity();
+                        move |menu, _window, _cx| {
+                            let (note, ask) = (entity.clone(), entity.clone());
+                            let (copy, patch) = (entity.clone(), entity.clone());
+                            menu.item(
+                                gpui_component::menu::PopupMenuItem::new(tr!("note-add")).on_click(
+                                    move |_, window, cx| {
+                                        note.update(cx, |this, cx| {
+                                            this.annotate_selection(window, cx)
+                                        });
+                                    },
+                                ),
+                            )
+                            .item(
+                                gpui_component::menu::PopupMenuItem::new(tr!("note-ask-title"))
+                                    .on_click(move |_, window, cx| {
+                                        ask.update(cx, |this, cx| {
+                                            this.ask_about_selection(window, cx)
+                                        });
+                                    }),
+                            )
+                            .separator()
+                            .item(
+                                gpui_component::menu::PopupMenuItem::new(tr!("action-copy-file"))
+                                    .on_click(move |_, _window, cx| {
+                                        copy.update(cx, |this, cx| this.copy_diff(false, cx));
+                                    }),
+                            )
+                            .item(
+                                gpui_component::menu::PopupMenuItem::new(tr!("action-copy-patch"))
+                                    .on_click(move |_, _window, cx| {
+                                        patch.update(cx, |this, cx| this.copy_diff(true, cx));
+                                    }),
+                            )
+                        }
+                    }),
             )
             .into_any_element()
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Ce qui change d'une entrée à l'autre sans venir du diff : l'état de la
+/// sélection, l'annotation, la géométrie.
+///
+/// Un agrégat plutôt que huit paramètres : ils traversaient trois fonctions,
+/// et le compilateur ne dit rien quand deux booléens voisins s'échangent.
+pub struct RowStyle {
+    pub line_height: Pixels,
+    /// Largeur de la colonne des numéros de ligne.
+    pub gutter: Pixels,
+    pub stageable: bool,
+    pub selected: bool,
+    pub selection_bg: gpui::Hsla,
+    /// Une note porte sur cette entrée.
+    pub annotated: bool,
+    pub note_color: gpui::Hsla,
+}
+
 fn render_row(
     diff: &Rc<Rendered>,
     index: usize,
     colors: &DiffColors,
-    gutter: Pixels,
     content_width: Pixels,
-    line_height: Pixels,
-    stageable: bool,
-    selected: bool,
-    selection_bg: gpui::Hsla,
+    style: &RowStyle,
     entity: &Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
     let Some(row) = diff.rows.get(index).copied() else {
         return div().into_any_element();
     };
+    let (selected, selection_bg) = (style.selected, style.selection_bg);
     match row {
-        Row::Header { hunk } => render_header(
-            diff,
-            index,
-            hunk,
-            colors,
-            content_width,
-            line_height,
-            stageable,
-            selected,
-            selection_bg,
-            entity,
-            cx,
-        ),
+        Row::Header { hunk } => {
+            render_header(diff, index, hunk, colors, content_width, style, entity, cx)
+        }
         Row::Line { hunk, line } => {
             let Some(source) = diff.file.hunks.get(hunk).and_then(|h| h.lines.get(line)) else {
                 return div().into_any_element();
@@ -930,7 +1001,7 @@ fn render_row(
             let entity = entity.clone();
             h_flex()
                 .id(("line", index))
-                .h(line_height)
+                .h(style.line_height)
                 .min_w(content_width)
                 .items_center()
                 .whitespace_nowrap()
@@ -944,8 +1015,13 @@ fn render_row(
                     select(&entity, index, event.modifiers.shift, window, cx);
                 })
                 .on_mouse_move(move |event, _window, cx| drag(&for_drag, index, event, cx))
-                .child(number(source.old_no, gutter, colors))
-                .child(number(source.new_no, gutter, colors))
+                // Le marqueur d'annotation est un filet dans la marge, avant
+                // les numéros : il doit se voir sans déplacer une colonne, et
+                // la gouttière est la seule place que le défilement horizontal
+                // ne fait pas sortir de la vue.
+                .child(note_mark(style))
+                .child(number(source.old_no, style.gutter, colors))
+                .child(number(source.new_no, style.gutter, colors))
                 .child(
                     div()
                         .w(px(14.))
@@ -969,13 +1045,16 @@ fn render_header(
     hunk: usize,
     colors: &DiffColors,
     content_width: Pixels,
-    line_height: Pixels,
-    stageable: bool,
-    selected: bool,
-    selection_bg: gpui::Hsla,
+    style: &RowStyle,
     entity: &Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
+    let (selected, selection_bg, line_height, stageable) = (
+        style.selected,
+        style.selection_bg,
+        style.line_height,
+        style.stageable,
+    );
     let patch = diff.patches.get(hunk).cloned().unwrap_or_default();
     let entity = entity.clone();
     let for_copy = entity.clone();
@@ -1073,38 +1152,22 @@ fn line_content(
 }
 
 /// Une entrée de la vue en deux colonnes.
-#[allow(clippy::too_many_arguments)]
 fn render_split_row(
     diff: &Rc<Rendered>,
     index: usize,
     colors: &DiffColors,
-    gutter: Pixels,
     column: Pixels,
-    line_height: Pixels,
-    stageable: bool,
-    selected: bool,
-    selection_bg: gpui::Hsla,
+    style: &RowStyle,
     entity: &Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
     let Some(row) = diff.split.get(index).copied() else {
         return div().into_any_element();
     };
+    let (selected, selection_bg) = (style.selected, style.selection_bg);
     let (old, new) = match row {
         SplitRow::Header { hunk, .. } => {
-            return render_header(
-                diff,
-                index,
-                hunk,
-                colors,
-                column * 2.,
-                line_height,
-                stageable,
-                selected,
-                selection_bg,
-                entity,
-                cx,
-            )
+            return render_header(diff, index, hunk, colors, column * 2., style, entity, cx)
         }
         SplitRow::Pair { old, new } => (old, new),
     };
@@ -1113,19 +1176,20 @@ fn render_split_row(
     let for_click = entity.clone();
     h_flex()
         .id(("pair", index))
-        .h(line_height)
+        .h(style.line_height)
         .items_center()
         .whitespace_nowrap()
         .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
             select(&for_click, index, event.modifiers.shift, window, cx);
         })
         .on_mouse_move(move |event, _window, cx| drag(&for_drag, index, event, cx))
+        .child(note_mark(style))
         .child(half(
             diff,
             old,
             Column::Old,
             colors,
-            gutter,
+            style.gutter,
             column,
             selected,
             selection_bg,
@@ -1135,12 +1199,24 @@ fn render_split_row(
             new,
             Column::New,
             colors,
-            gutter,
+            style.gutter,
             column,
             selected,
             selection_bg,
         ))
         .into_any_element()
+}
+
+/// Le filet de marge d'une ligne annotée.
+///
+/// Toujours présent, coloré seulement quand il y a une note : une largeur qui
+/// apparaît et disparaît décalerait tout le contenu d'une ligne à l'autre.
+fn note_mark(style: &RowStyle) -> impl IntoElement {
+    div()
+        .w(px(3.))
+        .flex_none()
+        .h_full()
+        .when(style.annotated, |el| el.bg(style.note_color))
 }
 
 /// Une moitié de ligne : son numéro, son signe et son texte.

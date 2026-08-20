@@ -565,8 +565,11 @@ pub fn migrate_from_perch() {
 /// Écrit en 0600 sous Unix : le fichier porte les chemins des dépôts et la
 /// ligne de commande de l'agent, qui ne regardent pas les autres comptes de la
 /// machine.
+///
+/// Partagé avec le magasin d'état (`store.rs`), qui porte des notes de
+/// relecture et n'a pas plus à être lisible par tout le monde.
 #[cfg(unix)]
-fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
+pub(super) fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -583,7 +586,7 @@ fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
+pub(super) fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
     std::fs::write(path, contents)
 }
 

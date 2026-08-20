@@ -14,12 +14,15 @@ mod highlight;
 mod history_view;
 mod icons;
 mod layout;
+mod notes;
+pub(crate) mod notes_view;
 mod panels;
 mod review;
 mod settings;
 mod settings_view;
 mod shortcuts;
 mod sidebar;
+mod store;
 mod terminal_view;
 mod theme;
 
@@ -94,6 +97,9 @@ pub fn run() {
         // les écrit depuis des fermetures qui n'ont qu'un `App`, et
         // l'installation des thèmes les relit pour savoir quoi appliquer.
         settings.clone().init_global(cx);
+        // L'état par worktree suit les réglages : les vues le lisent au même
+        // titre, et il doit être là avant la première d'entre elles.
+        store::Store::load().init_global(cx);
         theme::install(cx);
         theme::apply(&settings, None, cx);
 

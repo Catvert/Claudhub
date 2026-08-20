@@ -33,9 +33,11 @@ use crate::ui::base_select::BaseChoice;
 use crate::ui::diff_view::Rendered;
 use crate::ui::icons::icon;
 use crate::ui::panels::{
-    BranchPanel, BranchesPanel, ChangesPanel, DiffPanel, HistoryPanel, SidebarPanel, TerminalPanel,
+    BranchPanel, BranchesPanel, ChangesPanel, DiffPanel, HistoryPanel, NotesPanel, SidebarPanel,
+    TerminalPanel,
 };
 use crate::ui::settings::Settings;
+use crate::ui::store::Store;
 use crate::ui::terminal_view::TerminalGroup;
 
 /// Hauteur d'origine du panneau des terminaux.
@@ -44,7 +46,7 @@ const TERMINAL_HEIGHT: gpui::Pixels = px(280.);
 /// Version de la disposition enregistrée. À incrémenter quand les panneaux
 /// changent de nom ou de nature, pour que gpui-component écarte une
 /// disposition qu'il ne saurait plus reconstruire.
-const LAYOUT_VERSION: usize = 3;
+const LAYOUT_VERSION: usize = 4;
 
 /// Les panneaux de la disposition par défaut.
 struct DefaultPanels {
@@ -53,6 +55,7 @@ struct DefaultPanels {
     changes: Arc<dyn gpui_component::dock::PanelView>,
     branch: Arc<dyn gpui_component::dock::PanelView>,
     history: Arc<dyn gpui_component::dock::PanelView>,
+    notes: Arc<dyn gpui_component::dock::PanelView>,
     diff: Arc<dyn gpui_component::dock::PanelView>,
     terminal: Arc<dyn gpui_component::dock::PanelView>,
 }
@@ -114,7 +117,16 @@ fn install_default_layout(
                         // glissent ailleurs d'un geste si l'on préfère les voir
                         // ensemble.
                         DockItem::tabs(
-                            vec![panels.changes, panels.branch, panels.history],
+                            vec![
+                                panels.changes,
+                                panels.branch,
+                                panels.history,
+                                // La relecture est le quatrième point de vue
+                                // sur le même travail : ce qu'on a eu à en
+                                // dire. Elle se lit au même endroit que ce
+                                // qu'elle commente.
+                                panels.notes,
+                            ],
                             weak_dock,
                             window,
                             cx,
@@ -237,6 +249,28 @@ pub struct ReviewState {
     pub history_pending: bool,
     /// Commit sélectionné dans l'historique, dont le diff est affiché.
     pub commit: Option<String>,
+    /// Les notes de relecture prises sur ce worktree, tous fichiers confondus.
+    ///
+    /// Elles vivent ici et non dans le diff : une note survit au rechargement
+    /// du fichier, au changement de domaine et à la fermeture de Claudhub, alors
+    /// qu'un `Rendered` ne survit pas à la prochaine écriture de fichier.
+    pub notes: Vec<crate::ui::notes::Note>,
+    /// Prochain identifiant. Il ne se déduit pas de `notes` : une note
+    /// supprimée libérerait son numéro, et deux notes le porteraient.
+    pub next_note: u64,
+    /// Les lignes annotées du diff affiché, une case par entrée de liste.
+    ///
+    /// Calculé **en amont**, à l'arrivée du diff et à chaque modification des
+    /// notes, jamais dans la fermeture de `uniform_list` : celle-ci tourne
+    /// pour chaque ligne visible à chaque frame, animation de molette
+    /// comprise.
+    pub note_marks: std::rc::Rc<crate::ui::notes::Marks>,
+    /// Notes que le diff affiché ne sait plus placer.
+    ///
+    /// Elles restent dans la liste, marquées comme telles : une note perdue en
+    /// silence est pire que pas de note du tout. L'ensemble ne vaut que pour
+    /// le fichier ouvert — c'est le seul dont on ait le diff sous la main.
+    pub drifted: std::collections::HashSet<u64>,
     /// Où poser la sélection quand le diff demandé arrivera.
     ///
     /// Une flèche qui déborde sur le fichier voisin ne peut pas le placer
@@ -244,6 +278,11 @@ pub struct ReviewState {
     /// donc noté, et consommé à l'arrivée — seulement pour la navigation au
     /// clavier, un clic devant ouvrir un fichier sans rien y sélectionner.
     pub pending_jump: Option<Jump>,
+    /// Note dont il faudra sélectionner les lignes à l'arrivée du diff.
+    ///
+    /// Même raison que `pending_jump` : cliquer une note du panneau ouvre un
+    /// fichier, et son diff n'arrive qu'après la commande git.
+    pub pending_note: Option<u64>,
 }
 
 /// De quel bout un fichier ouvert au clavier commence.
@@ -279,7 +318,12 @@ impl Default for ReviewState {
             history_range: LogRange::All,
             history_pending: false,
             commit: None,
+            notes: Vec::new(),
+            next_note: 1,
+            note_marks: std::rc::Rc::new(crate::ui::notes::Marks::default()),
+            drifted: std::collections::HashSet::new(),
             pending_jump: None,
+            pending_note: None,
         }
     }
 }
@@ -336,6 +380,18 @@ pub struct ClaudhubApp {
     /// soixante-dix entrées pour en trouver une dont on connaît le nom est
     /// exactement ce qu'un champ de recherche évite.
     pub(super) base_select: Entity<SelectState<SearchableVec<BaseChoice>>>,
+    /// Champ de saisie d'une note. Créé **une fois** : recréé dans un `render`
+    /// ou à l'ouverture du dialogue, il perdrait curseur, sélection et texte
+    /// dès la première frappe.
+    pub(super) note_input: Entity<InputState>,
+    /// La note en cours de rédaction : son ancrage, arrêté au moment du geste.
+    ///
+    /// Il est arrêté là et non à la validation parce que le diff peut changer
+    /// pendant qu'on écrit — un agent travaille pendant qu'on le relit — et
+    /// que la note doit porter sur ce qu'on avait sous les yeux.
+    pub(super) note_draft: Option<crate::ui::notes_view::NoteDraft>,
+    /// Le panneau des notes ne montre-t-il que les non traitées.
+    pub(super) notes_only_open: bool,
     pub(super) toast: Option<Toast>,
     /// Worktrees dont une lecture de statut est déjà partie.
     ///
@@ -408,6 +464,16 @@ impl ClaudhubApp {
         let branch_filter =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("branch-filter-placeholder")));
 
+        // `auto_grow` plutôt qu'une hauteur fixe : une remarque de relecture
+        // fait deux lignes ou dix, et une zone figée oblige à faire défiler ce
+        // qu'on est en train d'écrire.
+        let note_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .auto_grow(2, 8)
+                .placeholder(tr!("note-placeholder"))
+        });
+
         let base_select = cx.new(|cx| {
             SelectState::new(
                 SearchableVec::new(Vec::<BaseChoice>::new()),
@@ -452,6 +518,7 @@ impl ClaudhubApp {
         let changes = cx.new(|cx| ChangesPanel::new(&this, cx));
         let branch = cx.new(|cx| BranchPanel::new(&this, cx));
         let history = cx.new(|cx| HistoryPanel::new(&this, cx));
+        let notes = cx.new(|cx| NotesPanel::new(&this, cx));
         let diff = cx.new(|cx| DiffPanel::new(&this, cx));
         let terminal = cx.new(|cx| TerminalPanel::new(&this, cx));
 
@@ -462,6 +529,7 @@ impl ClaudhubApp {
                 changes: Arc::new(changes),
                 branch: Arc::new(branch),
                 history: Arc::new(history),
+                notes: Arc::new(notes),
                 diff: Arc::new(diff),
                 terminal: Arc::new(terminal),
             };
@@ -491,6 +559,9 @@ impl ClaudhubApp {
             terminals: HashMap::new(),
             commit_input,
             base_select,
+            note_input,
+            note_draft: None,
+            notes_only_open: false,
             toast: None,
             pending_status: std::collections::HashSet::new(),
             dock,
@@ -696,6 +767,7 @@ impl ClaudhubApp {
                     collapsed: false,
                 });
                 Settings::update_global(cx, |s| s.remember_repository(&main));
+                self.forget_missing_worktrees(&main, cx);
                 self.git.send(Cmd::LoadBranches { main });
                 if self.active.is_none() {
                     if let Some(path) = first {
@@ -707,6 +779,9 @@ impl ClaudhubApp {
                 if let Some(repo) = self.repos.iter_mut().find(|r| r.main == main) {
                     repo.worktrees = worktrees;
                 }
+                // git vient d'énumérer : c'est le seul moment où la liste est
+                // sûre, donc le seul où oublier une entrée est sans risque.
+                self.forget_missing_worktrees(&main, cx);
                 // Le worktree actif peut avoir été retiré sous nos pieds.
                 if let Some(active) = self.active.clone() {
                     if !self.worktree_exists(&active) {
@@ -722,6 +797,7 @@ impl ClaudhubApp {
             Evt::Status { worktree, status } => {
                 self.pending_status.remove(&worktree);
                 let base = self.default_base_for(&worktree);
+                self.ensure_review(&worktree, cx);
                 let state = self.review.entry(worktree.clone()).or_default();
                 state.status = status;
                 if state.base.is_none() {
@@ -777,6 +853,7 @@ impl ClaudhubApp {
                 let theme = cx.theme().highlight_theme.clone();
                 let split = Settings::global(cx).diff_split;
                 let mut jumped = None;
+                let mut note = None;
                 if let Some(state) = self.review.get_mut(&worktree) {
                     if state.selected.as_deref() == Some(path.as_path()) {
                         let rendered = std::rc::Rc::new(Rendered::new(&path, diff, &theme));
@@ -790,10 +867,17 @@ impl ClaudhubApp {
                             };
                             state.diff_selection = jumped.map(|row| (row, row));
                         }
+                        note = state.pending_note.take();
                         state.diff = Some(rendered);
                     }
                 }
-                if let Some(row) = jumped {
+                // Les lignes annotées se déduisent du diff qui vient
+                // d'arriver : c'est le seul moment où le calcul a lieu, et
+                // certainement pas dans le rendu de la liste.
+                self.refresh_note_marks(&worktree);
+                if let Some(id) = note {
+                    self.select_note_rows(id, cx);
+                } else if let Some(row) = jumped {
                     self.diff_scroll
                         .scroll_to_item(row, gpui::ScrollStrategy::Top);
                 }
@@ -953,7 +1037,7 @@ impl ClaudhubApp {
             watcher.watch(&path);
         }
         self.active = Some(path.clone());
-        self.review.entry(path.clone()).or_default();
+        self.ensure_review(&path, cx);
         self.request_status(path);
         // Chaque worktree a sa base : le sélecteur doit montrer celle-ci, pas
         // celle du worktree qu'on vient de quitter.
@@ -1122,7 +1206,68 @@ impl ClaudhubApp {
         if let Some(state) = self.review.get_mut(&worktree) {
             state.history = None;
         }
+        self.persist_review(&worktree, cx);
         cx.notify();
+    }
+
+    /// Crée l'état d'un worktree, en y remettant ce que le magasin en avait
+    /// retenu.
+    ///
+    /// La base relue **l'emporte** sur celle que git devine : c'est un choix
+    /// de l'utilisateur, et le redeviner à chaque lancement était exactement
+    /// le manque que le magasin comble. Le repli des dossiers vient du même
+    /// endroit, pour la même raison.
+    fn ensure_review(&mut self, worktree: &Path, cx: &App) {
+        if self.review.contains_key(worktree) {
+            return;
+        }
+        let saved = Store::global(cx).worktree(worktree).cloned();
+        let mut state = ReviewState::default();
+        if let Some(saved) = saved {
+            state.base = saved.base;
+            state.collapsed = saved.collapsed.into_iter().collect();
+            state.notes = saved.notes;
+            // Un fichier écrit avant que ce champ existe porte zéro, et une
+            // note d'identifiant nul se confondrait avec l'absence de note.
+            state.next_note = saved.next_note.max(1);
+        }
+        self.review.insert(worktree.to_path_buf(), state);
+    }
+
+    /// Écrit dans le magasin ce que le worktree courant a de persistant.
+    ///
+    /// Un seul point d'écriture plutôt qu'un par champ : les trois tiennent
+    /// dans quelques kilo-octets, et les tenir à jour séparément multiplierait
+    /// les occasions d'en oublier un.
+    pub(super) fn persist_review(&mut self, worktree: &Path, cx: &mut App) {
+        let Some(main) = self.main_of(worktree) else {
+            return;
+        };
+        let Some(state) = self.review.get(worktree) else {
+            return;
+        };
+        // Trié : un `HashSet` sérialisé dans un ordre différent à chaque
+        // écriture ferait un fichier qui change sans que rien n'ait changé.
+        let mut collapsed: Vec<PathBuf> = state.collapsed.iter().cloned().collect();
+        collapsed.sort();
+        let (base, notes, next_note) = (state.base.clone(), state.notes.clone(), state.next_note);
+        Store::update_global(cx, |store| {
+            let saved = store.worktree_mut(worktree, &main);
+            saved.base = base;
+            saved.collapsed = collapsed;
+            saved.notes = notes;
+            saved.next_note = next_note;
+        });
+    }
+
+    /// Oublie ce qu'on retenait de worktrees que git ne liste plus.
+    fn forget_missing_worktrees(&mut self, main: &Path, cx: &mut App) {
+        let Some(repo) = self.repos.iter().find(|r| r.main == main) else {
+            return;
+        };
+        let alive: Vec<PathBuf> = repo.worktrees.iter().map(|w| w.path.clone()).collect();
+        let main = main.to_path_buf();
+        Store::update_global(cx, |store| store.forget_missing(&main, &alive));
     }
 
     /// Base de comparaison de la revue courante, si elle en a une.
@@ -1412,6 +1557,9 @@ impl Render for ClaudhubApp {
             .on_action(cx.listener(super::shortcuts::next_file))
             .on_action(cx.listener(super::shortcuts::toggle_diff_split))
             .on_action(cx.listener(super::shortcuts::toggle_whole_file))
+            .on_action(cx.listener(super::shortcuts::annotate_selection))
+            .on_action(cx.listener(super::shortcuts::ask_agent))
+            .on_action(cx.listener(super::shortcuts::send_notes))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -1438,7 +1586,7 @@ impl ClaudhubApp {
         placeholder: SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
-        on_ok: impl Fn(&mut Self, String, &mut Context<Self>) + 'static,
+        on_ok: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
     ) {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         let entity = cx.entity();
@@ -1449,9 +1597,13 @@ impl ClaudhubApp {
                 .title(title.clone())
                 .confirm()
                 .child(gpui_component::input::Input::new(&input))
-                .on_ok(move |_, _window, cx| {
+                // La fenêtre est passée à la fermeture : ce qu'on lance
+                // ensuite — ouvrir un terminal, y livrer un texte — en a
+                // besoin, et la reprendre après coup demanderait une frame
+                // d'écart avec le geste.
+                .on_ok(move |_, window, cx| {
                     let value = input.read(cx).value().to_string();
-                    entity.update(cx, |this, cx| on_ok(this, value, cx));
+                    entity.update(cx, |this, cx| on_ok(this, value, window, cx));
                     true
                 })
         });
@@ -1476,6 +1628,7 @@ impl ClaudhubApp {
             changes: Arc::new(cx.new(|cx| ChangesPanel::new(&this, cx))),
             branch: Arc::new(cx.new(|cx| BranchPanel::new(&this, cx))),
             history: Arc::new(cx.new(|cx| HistoryPanel::new(&this, cx))),
+            notes: Arc::new(cx.new(|cx| NotesPanel::new(&this, cx))),
             diff: Arc::new(cx.new(|cx| DiffPanel::new(&this, cx))),
             terminal: Arc::new(cx.new(|cx| TerminalPanel::new(&this, cx))),
         };

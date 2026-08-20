@@ -425,7 +425,7 @@ impl ClaudhubApp {
             tr!("worktree-new-placeholder"),
             window,
             cx,
-            move |this, name, cx| {
+            move |this, name, _window, cx| {
                 let name = name.trim();
                 if name.is_empty() {
                     return;

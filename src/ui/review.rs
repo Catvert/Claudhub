@@ -463,6 +463,9 @@ impl ClaudhubApp {
         if !state.collapsed.remove(&path) {
             state.collapsed.insert(path);
         }
+        if let Some(worktree) = self.active_path() {
+            self.persist_review(&worktree, cx);
+        }
         cx.notify();
     }
 

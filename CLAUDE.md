@@ -48,6 +48,9 @@ src/
     sidebar.rs / review.rs / branches.rs / terminal_view.rs
     settings.rs     les réglages et leur global
     settings_view.rs  le formulaire, bâti sur `gpui_component::setting`
+    store.rs        ce qu'on retient par worktree : base, replis, notes
+    notes.rs        le modèle des notes, leur ancrage et leur prompt
+    notes_view.rs   les gestes de la relecture annotée et son panneau
     theme.rs / shortcuts.rs / icons.rs
 ```
 
@@ -329,6 +332,38 @@ par convention de nommage pour les champs à chasse fixe : gpui n'expose pas
 cette propriété de façon portable. La liste rate donc des familles, et le
 fichier de réglages reste modifiable à la main pour ces cas-là.
 
+### Le magasin d'état
+
+Les réglages disent comment Claudhub s'affiche ; le magasin
+(`store::StateStore`, `<config>/state.json`) dit où l'on en est — la base à
+laquelle on compare *ce* worktree, les dossiers qu'on y a repliés, les notes de
+relecture qu'on y a prises. Deux fichiers et non un seul : le premier se
+modifie à la main, le second compterait quelques centaines de lignes par dépôt
+et n'y survivrait pas.
+
+Il est écrit **depuis le thread d'interface**, ce qui déroge à « `src/ui/` ne
+fait jamais d'entrée-sortie ». C'est le précédent de `settings.rs` et la même
+raison : quelques kilo-octets écrits une fois par demi-seconde ne valent pas un
+aller-retour par le protocole. La règle vise les commandes git, dont la plus
+rapide coûte déjà une frame, pas la préférence qu'on range.
+
+Trois points qui ne se devinent pas :
+
+- **La valeur relue l'emporte sur celle que git devine.** `ensure_review` crée
+  l'état d'un worktree en y remettant ce que le magasin en avait ; `base` y est
+  alors `Some`, et les deux endroits qui proposent un `default_base` —
+  `Evt::Status` et `Evt::Branches` — ne l'écrasent pas, tous deux testant
+  `is_none()`. C'est un choix de l'utilisateur, pas une devinette à refaire.
+- **Une entrée retient son dépôt** (`WorktreeState::repo`). La purge se fait
+  quand git vient d'énumérer les worktrees, seul moment où la liste est sûre ;
+  sans ce champ, une entrée absente de cette liste ne se distinguerait pas
+  d'une entrée appartenant à un dépôt qu'on n'a pas encore ouvert, et l'oublier
+  effacerait les notes d'un worktree bien vivant.
+- **Un seul point d'écriture** (`ClaudhubApp::persist_review`) plutôt qu'un par
+  champ. Les replis sont triés avant d'être écrits : un `HashSet` sérialisé
+  dans un ordre différent à chaque fois ferait un fichier qui change sans que
+  rien n'ait changé.
+
 ### Les hauteurs de ligne
 
 Aucune hauteur de ligne ne s'écrit en dur : elles viennent de
@@ -375,6 +410,57 @@ Un clic sur une ligne **prend le focus**. Sans cela le focus reste au terminal,
 et le `Ctrl+C` qui suit part au programme qui y tourne au lieu de copier. Pour
 la même raison, la liaison de copie exclut `Input` et `ClaudhubTerminal` de son
 prédicat : le champ de message de commit a sa propre copie.
+
+### Annoter une relecture
+
+Une note porte sur une plage de lignes, et on la renvoie à l'agent qui les a
+écrites. Le modèle et tout ce qui se teste sans gpui sont dans `notes.rs` ;
+`notes_view.rs` n'est que de la plomberie.
+
+**Une note ne peut pas s'accrocher à la sélection.** `diff_selection` est un
+couple d'indices dans la liste *affichée* : il est invalidé par la bascule
+unifié/deux colonnes, par un changement de contexte, et par tout rechargement
+du diff — c'est-à-dire par chaque écriture de fichier dans le worktree, ce qui
+arrive plusieurs fois par minute pendant qu'un agent travaille. On retient donc
+des **numéros de ligne**, un **côté** (`Old`/`New` : commenter du code supprimé
+a un sens, et une ligne supprimée n'a pas de numéro dans la nouvelle version),
+et **l'extrait de code** lui-même.
+
+`notes::relocate` replace la note à chaque arrivée de diff, dans cet ordre :
+aux numéros retenus si le texte qui s'y trouve est bien celui qu'on a cité ;
+sinon par recherche de l'extrait, ligne à ligne, dans tout le diff ; sinon la
+note est dite **décalée** et **reste dans la liste**. Une note perdue en
+silence est pire que pas de note du tout.
+
+Trois corollaires :
+
+- **L'ancrage est arrêté au moment du geste**, pas à la validation du
+  dialogue : le diff peut changer pendant qu'on écrit la remarque, et la note
+  doit porter sur ce qu'on avait sous les yeux.
+- **Les marqueurs de gouttière sont calculés en amont** (`notes::marks`, rangé
+  dans un `Rc` sur `ReviewState`), à l'arrivée du diff et à chaque
+  modification des notes. Jamais dans la fermeture de `uniform_list`, qui
+  tourne pour chaque ligne visible à chaque frame. Deux vecteurs, un par
+  disposition : les deux listes ne comptent pas les mêmes entrées.
+- **Le dialogue n'est pas un popover.** La ligne annotée appartient à une
+  liste virtualisée : le moindre défilement emporterait l'ancre, et le popover
+  avec.
+
+**L'envoi passe par le terminal, jamais par une API.** Claudhub compose un
+prompt (`notes::prompt`, libre et testé) et le livre à l'agent qui, lui, a le
+dépôt entre les mains. Deux détails qui se paient cher si on les rate :
+
+- Le texte part en **collage encadré** (`Terminal::paste`), sans quoi un
+  message multiligne arrive dans un shell comme autant de commandes validées.
+- Le **retour chariot part dans un second envoi**, après un court silence : un
+  TUI qui vient de recevoir un collage encadré peut avaler un `\r` arrivé dans
+  la foulée, et le message resterait dans l'invite sans partir.
+- S'il n'y a pas d'onglet d'agent, on en ouvre un et l'envoi est **différé**
+  (`AGENT_WARMUP`) : rien dans un pty ne dit « je suis prêt », et ce qui arrive
+  avant l'invite est lu par le shell qu'on n'a pas encore remplacé.
+
+Les notes envoyées passent à `sent`, pas à `done` : c'est la relecture de la
+réponse qui les clôt.
 
 ### La répartition du chrome
 

@@ -35,6 +35,16 @@ use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
 use crate::ui::settings::{Settings, TerminalSettings};
 
+/// Temps laissé à un agent qu'on vient de lancer pour afficher son invite.
+///
+/// Rien dans un pty ne dit « je suis prêt » : ce qui arrive avant l'invite est
+/// lu par le shell qu'on n'a pas encore remplacé, ou perdu. Deux secondes
+/// couvrent le démarrage d'un agent sur une machine chargée.
+const AGENT_WARMUP: std::time::Duration = std::time::Duration::from_millis(2000);
+
+/// Silence entre le collage et le retour chariot qui le valide.
+const SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(120);
+
 /// Un onglet de terminal.
 pub struct TerminalView {
     terminal: Terminal,
@@ -61,6 +71,13 @@ pub struct TerminalView {
     /// Vrai quand une transmission différée est déjà programmée.
     resize_scheduled: bool,
     label: SharedString,
+    /// Vrai quand cet onglet exécute un agent de codage.
+    ///
+    /// C'est ce qui permet de lui livrer des notes de relecture sans se
+    /// tromper d'onglet. Retenu à l'ouverture et non déduit du titre : un
+    /// agent renomme son onglet au fil de la conversation, et chercher son nom
+    /// dans un titre changeant reviendrait à jouer aux devinettes.
+    agent: bool,
 }
 
 impl TerminalView {
@@ -91,6 +108,7 @@ impl TerminalView {
     pub fn attach(
         terminal: Terminal,
         label: SharedString,
+        agent: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -137,7 +155,38 @@ impl TerminalView {
             pending_size: None,
             resize_scheduled: false,
             label,
+            agent,
         }
+    }
+
+    pub fn is_agent(&self) -> bool {
+        self.agent
+    }
+
+    /// Livre un texte au programme qui tourne, sans le valider.
+    ///
+    /// Passe par le **collage encadré** que gère `Terminal::paste` : sans lui,
+    /// un texte multiligne arrive dans un shell comme autant de commandes
+    /// validées, ce qui est la façon classique d'exécuter par accident ce
+    /// qu'on voulait seulement faire lire.
+    pub fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.terminal.paste(text);
+        self.terminal.scroll_to_bottom();
+        self.snapshot = self.terminal.snapshot();
+        cx.notify();
+    }
+
+    /// Valide ce qui vient d'être collé.
+    ///
+    /// **Toujours dans un envoi séparé du collage**, jamais au bout du même :
+    /// un TUI qui vient de recevoir un collage encadré peut avaler le retour
+    /// chariot qui le suit dans le même paquet, et le message reste alors dans
+    /// l'invite sans partir.
+    pub fn submit(&mut self, cx: &mut Context<Self>) {
+        self.terminal.write_str("\r");
+        self.terminal.scroll_to_bottom();
+        self.snapshot = self.terminal.snapshot();
+        cx.notify();
     }
 
     pub fn label(&self) -> SharedString {
@@ -753,10 +802,14 @@ impl TerminalGroup {
     }
 
     /// Ouvre un onglet. `command` vide lance le shell de l'utilisateur.
+    ///
+    /// `agent` dit si ce qu'on lance est un agent de codage : c'est à cet
+    /// onglet-là que les notes de relecture seront livrées.
     pub fn open(
         &mut self,
         command: Option<(String, Vec<String>)>,
         label: SharedString,
+        agent: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -777,7 +830,7 @@ impl TerminalGroup {
                 return;
             }
         };
-        let view = cx.new(|cx| TerminalView::attach(terminal, label, window, cx));
+        let view = cx.new(|cx| TerminalView::attach(terminal, label, agent, window, cx));
         self.error = None;
         self.tabs.push(view);
         self.active = self.tabs.len() - 1;
@@ -809,9 +862,73 @@ impl TerminalGroup {
         self.open(
             Some((program.clone(), args)),
             SharedString::from(program),
+            true,
             window,
             cx,
         );
+    }
+
+    /// Livre un texte à l'agent de ce worktree, et le valide.
+    ///
+    /// S'il n'y a pas d'onglet d'agent, on en ouvre un — et l'envoi est
+    /// **différé** : un agent met une seconde ou deux à afficher son invite, et
+    /// ce qui arrive avant est lu par le shell qui n'a pas encore été remplacé,
+    /// ou tout simplement perdu.
+    pub fn send_to_agent(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        match self.agent_tab(cx) {
+            Some(index) => {
+                self.active = index;
+                self.focus_active(window, cx);
+                self.deliver(index, text, cx);
+            }
+            None => {
+                self.open_agent(window, cx);
+                let Some(index) = self.agent_tab(cx) else {
+                    return;
+                };
+                self.active = index;
+                cx.spawn(async move |group, cx| {
+                    cx.background_executor().timer(AGENT_WARMUP).await;
+                    let _ = group.update(cx, |group, cx| group.deliver(index, text, cx));
+                })
+                .detach();
+            }
+        }
+    }
+
+    /// L'onglet d'agent le plus récent qui tourne encore.
+    ///
+    /// Le plus récent : c'est celui qu'on regarde, et relancer un agent après
+    /// en avoir quitté un est le geste normal quand la conversation s'est
+    /// enlisée.
+    fn agent_tab(&self, cx: &App) -> Option<usize> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, tab)| {
+                let tab = tab.read(cx);
+                tab.is_agent() && !tab.has_exited()
+            })
+            .map(|(index, _)| index)
+    }
+
+    /// Colle, puis valide dans un **second** envoi.
+    ///
+    /// Les deux sont séparés par un court silence : un TUI qui vient de
+    /// recevoir un collage encadré peut avaler un retour chariot arrivé dans
+    /// la foulée, et le message resterait dans l'invite sans partir.
+    fn deliver(&mut self, index: usize, text: String, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index).cloned() else {
+            return;
+        };
+        tab.update(cx, |view, cx| view.paste_text(&text, cx));
+        cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(SUBMIT_DELAY).await;
+            let _ = tab.update(cx, |view, cx| view.submit(cx));
+        })
+        .detach();
+        cx.notify();
     }
 
     pub fn close(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -919,7 +1036,13 @@ impl Render for TerminalGroup {
                                     menu.item(PopupMenuItem::new(tr!("terminal-new")).on_click(
                                         move |_, window, cx| {
                                             shell.update(cx, |this, cx| {
-                                                this.open(None, tr!("terminal-shell"), window, cx)
+                                                this.open(
+                                                    None,
+                                                    tr!("terminal-shell"),
+                                                    false,
+                                                    window,
+                                                    cx,
+                                                )
                                             });
                                         },
                                     ))
@@ -983,7 +1106,7 @@ impl ClaudhubApp {
         let path = worktree.to_path_buf();
         let group = cx.new(|_| TerminalGroup::new(path));
         group.update(cx, |group, cx| {
-            group.open(None, tr!("terminal-shell"), window, cx);
+            group.open(None, tr!("terminal-shell"), false, window, cx);
         });
         self.terminals.insert(worktree.to_path_buf(), group.clone());
         group

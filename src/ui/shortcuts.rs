@@ -35,7 +35,10 @@ actions!(
         PreviousFile,
         NextFile,
         ToggleDiffSplit,
-        ToggleWholeFile
+        ToggleWholeFile,
+        AnnotateSelection,
+        AskAgent,
+        SendNotes
     ]
 );
 
@@ -130,6 +133,12 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-down", NextLine, Some(NAVIGATION_PREDICATE)),
         KeyBinding::new("left", PreviousFile, Some(NAVIGATION_PREDICATE)),
         KeyBinding::new("right", NextFile, Some(NAVIGATION_PREDICATE)),
+        // Annoter et demander partagent le prédicat de la copie : ils partent
+        // d'une sélection dans le diff, et n'ont rien à faire quand c'est un
+        // champ de saisie ou un terminal qui a le focus.
+        KeyBinding::new("secondary-shift-n", AnnotateSelection, Some(COPY_PREDICATE)),
+        KeyBinding::new("secondary-shift-k", AskAgent, Some(COPY_PREDICATE)),
+        KeyBinding::new("secondary-shift-e", SendNotes, Some(PREDICATE)),
         KeyBinding::new("secondary-shift-s", ToggleDiffSplit, Some(PREDICATE)),
         KeyBinding::new("secondary-shift-f", ToggleWholeFile, Some(PREDICATE)),
         // Les conventions des terminaux : la touche système *avec* Maj, parce
@@ -164,7 +173,7 @@ pub fn new_terminal(
     };
     let group = this.terminal_group(&worktree, window, cx);
     group.update(cx, |group, cx| {
-        group.open(None, crate::tr!("terminal-shell"), window, cx);
+        group.open(None, crate::tr!("terminal-shell"), false, window, cx);
     });
     this.show_terminal_panel(window, cx);
 }
@@ -367,4 +376,31 @@ pub fn commit(
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.commit(false, cx);
+}
+
+pub fn annotate_selection(
+    this: &mut ClaudhubApp,
+    _: &AnnotateSelection,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.annotate_selection(window, cx);
+}
+
+pub fn ask_agent(
+    this: &mut ClaudhubApp,
+    _: &AskAgent,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.ask_about_selection(window, cx);
+}
+
+pub fn send_notes(
+    this: &mut ClaudhubApp,
+    _: &SendNotes,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.send_notes(None, window, cx);
 }

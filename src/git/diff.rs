@@ -19,7 +19,9 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 /// `Hash` parce que les fichiers de chaque domaine sont rangés par domaine :
 /// deux panneaux montrent deux listes en même temps, et elles ne se
 /// chevauchent pas.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Sérialisable : une note de relecture retient le domaine où elle a été
+/// prise, et le magasin d'état la relit au lancement suivant.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Range {
     /// Tout ce qui sépare le répertoire de travail de HEAD, indexé ou non.
     ///
