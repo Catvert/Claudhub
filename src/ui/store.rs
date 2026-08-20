@@ -198,9 +198,7 @@ fn schedule_save(cx: &mut App) {
                 store.store.clone()
             })
         });
-        if let Ok(store) = store {
-            store.save();
-        }
+        store.save();
     })
     .detach();
 }

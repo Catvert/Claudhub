@@ -86,12 +86,8 @@ impl ScrollMotion {
         let now = Instant::now();
         let actual = handle.offset();
         let max = handle.max_offset();
-        let (x, moving_x) = self
-            .x
-            .advance(f32::from(actual.x), f32::from(max.width), now);
-        let (y, moving_y) = self
-            .y
-            .advance(f32::from(actual.y), f32::from(max.height), now);
+        let (x, moving_x) = self.x.advance(f32::from(actual.x), f32::from(max.x), now);
+        let (y, moving_y) = self.y.advance(f32::from(actual.y), f32::from(max.y), now);
         if x != f32::from(actual.x) || y != f32::from(actual.y) {
             handle.set_offset(point(px(x), px(y)));
         }
@@ -132,13 +128,13 @@ impl ScrollMotion {
             f32::from(jumped.x)
         } else {
             self.x
-                .on_wheel(f32::from(jumped.x), dx, f32::from(max.width), now)
+                .on_wheel(f32::from(jumped.x), dx, f32::from(max.x), now)
         };
         let y = if dy == 0. {
             f32::from(jumped.y)
         } else {
             self.y
-                .on_wheel(f32::from(jumped.y), dy, f32::from(max.height), now)
+                .on_wheel(f32::from(jumped.y), dy, f32::from(max.y), now)
         };
         handle.set_offset(point(px(x), px(y)));
         true

@@ -115,7 +115,7 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
     // une liste virtualisée — aurait disparu chaque fois qu'on se demande où
     // l'on en est. Ni `Hover`, qui ne les montre qu'une fois le pointeur sur
     // la barre : elle est invisible, donc introuvable.
-    theme.scrollbar_show = gpui_component::scroll::ScrollbarShow::Always;
+    theme.scrollbar_mode = gpui_component::scroll::ScrollbarMode::Always;
 
     // Les rayons de gpui-component sont ceux d'un formulaire web de 2015 : six
     // et huit pixels. Ils portent tout ce que la fenêtre affiche — boutons,

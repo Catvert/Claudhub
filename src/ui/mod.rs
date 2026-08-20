@@ -17,7 +17,6 @@ mod find;
 mod highlight;
 mod history_view;
 mod icons;
-mod layout;
 mod motion;
 mod notes;
 pub(crate) mod notes_view;
@@ -37,7 +36,7 @@ mod tree;
 mod vault;
 mod worktree_ops;
 
-use gpui::{px, size, App, AppContext, Application, Bounds, WindowBounds, WindowOptions};
+use gpui::{px, size, App, AppContext, Bounds, WindowBounds, WindowOptions};
 use gpui_component::Root;
 use rust_embed::RustEmbed;
 
@@ -99,47 +98,52 @@ pub fn run() {
     let settings = Settings::load();
     set_language(settings.language);
 
-    Application::new().with_assets(Assets).run(move |cx| {
-        gpui_component::init(cx);
-        highlight::register_languages();
-        shortcuts::init(cx);
-        install_fonts(cx);
-        // Les réglages passent en global avant tout le reste : le formulaire
-        // les écrit depuis des fermetures qui n'ont qu'un `App`, et
-        // l'installation des thèmes les relit pour savoir quoi appliquer.
-        settings.clone().init_global(cx);
-        // L'état par worktree suit les réglages : les vues le lisent au même
-        // titre, et il doit être là avant la première d'entre elles.
-        store::Store::load().init_global(cx);
-        theme::install(cx);
-        theme::apply(&settings, None, cx);
+    // `gpui_platform::application()` a remplacé `Application::new()` : gpui a
+    // été coupé en deux, le cœur d'un côté et la plateforme (wayland, x11,
+    // font-kit) de l'autre, et c'est cette dernière qui monte la boucle.
+    gpui_platform::application()
+        .with_assets(Assets)
+        .run(move |cx| {
+            gpui_component::init(cx);
+            highlight::register_languages();
+            shortcuts::init(cx);
+            install_fonts(cx);
+            // Les réglages passent en global avant tout le reste : le formulaire
+            // les écrit depuis des fermetures qui n'ont qu'un `App`, et
+            // l'installation des thèmes les relit pour savoir quoi appliquer.
+            settings.clone().init_global(cx);
+            // L'état par worktree suit les réglages : les vues le lisent au même
+            // titre, et il doit être là avant la première d'entre elles.
+            store::Store::load().init_global(cx);
+            theme::install(cx);
+            theme::apply(&settings, None, cx);
 
-        let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
-        // `Maximized` porte quand même ces dimensions : elles deviennent la
-        // taille de restauration.
-        let window_bounds = if settings.start_maximized {
-            WindowBounds::Maximized(bounds)
-        } else {
-            WindowBounds::Windowed(bounds)
-        };
-        cx.activate(true);
+            let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
+            // `Maximized` porte quand même ces dimensions : elles deviennent la
+            // taille de restauration.
+            let window_bounds = if settings.start_maximized {
+                WindowBounds::Maximized(bounds)
+            } else {
+                WindowBounds::Windowed(bounds)
+            };
+            cx.activate(true);
 
-        let opened = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(window_bounds),
-                titlebar: Some(gpui_component::TitleBar::title_bar_options()),
-                app_id: Some("claudhub".into()),
-                ..Default::default()
-            },
-            |window, cx| {
-                let main = cx.new(|cx| app::ClaudhubApp::new(window, cx));
-                cx.new(|cx| Root::new(main, window, cx))
-            },
-        );
-        if let Err(e) = opened {
-            log::error!("ouverture de la fenêtre : {e:#}");
-        }
-    });
+            let opened = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(window_bounds),
+                    titlebar: Some(gpui_component::TitleBar::title_bar_options()),
+                    app_id: Some("claudhub".into()),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    let main = cx.new(|cx| app::ClaudhubApp::new(window, cx));
+                    cx.new(|cx| Root::new(main, window, cx))
+                },
+            );
+            if let Err(e) = opened {
+                log::error!("ouverture de la fenêtre : {e:#}");
+            }
+        });
 }
 
 #[cfg(test)]

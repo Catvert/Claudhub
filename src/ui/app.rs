@@ -14,12 +14,12 @@ use gpui::{
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
-    divider::Divider,
-    dock::{DockArea, DockItem},
+    dock::{DockArea, DockLayout, DockPlacement},
     h_flex,
-    input::InputState,
+    input::{InputState, TextareaState},
     menu::{DropdownMenu, PopupMenuItem},
     select::{SearchableVec, SelectEvent, SelectState},
+    separator::Separator as Divider,
     v_flex, ActiveTheme, Disableable, Root, Selectable, Sizable, StyledExt, WindowExt,
 };
 
@@ -46,7 +46,10 @@ const TERMINAL_HEIGHT: gpui::Pixels = px(280.);
 /// Version de la disposition enregistrée. À incrémenter quand les panneaux
 /// changent de nom ou de nature, pour que gpui-component écarte une
 /// disposition qu'il ne saurait plus reconstruire.
-const LAYOUT_VERSION: usize = 8;
+// 9 : le schéma de `DockAreaState` a changé avec la refonte du dock. Une
+// disposition écrite par la version précédente se relirait de travers plutôt
+// que de refuser franchement, ce qui donne une fenêtre pleine de cadres vides.
+const LAYOUT_VERSION: usize = 9;
 
 /// Les panneaux de la disposition par défaut.
 struct DefaultPanels {
@@ -72,12 +75,9 @@ struct DefaultPanels {
 fn install_default_layout(
     area: &mut DockArea,
     panels: DefaultPanels,
-    weak_dock: &gpui::WeakEntity<DockArea>,
     window: &mut Window,
     cx: &mut Context<DockArea>,
 ) {
-    use crate::ui::layout::split;
-
     // Les dépôts et les branches l'un au-dessus de l'autre, et non en onglets :
     // on choisit un worktree *puis* on regarde ses branches, et devoir passer
     // de l'un à l'autre pour cela est un aller-retour de trop. Un tiers pour
@@ -90,86 +90,63 @@ fn install_default_layout(
     // worktree, un fichier dedans —, et l'arbre d'un projet est ce qui a le
     // plus besoin des deux tiers du haut. Les branches, elles, sont une liste
     // courte qu'on filtre.
-    // Les deux tailles sont données explicitement : un `None` laisse la pile
-    // partager la hauteur en parts égales, et la proportion demandée passe à
-    // la trappe.
     let height = window.viewport_size().height.max(px(600.));
     let third = height / 3.;
-    area.set_left_dock(
-        split(
-            gpui::Axis::Vertical,
-            vec![
-                DockItem::tabs(vec![panels.sidebar, panels.files], weak_dock, window, cx),
-                DockItem::tabs(vec![panels.branches], weak_dock, window, cx),
-            ],
-            vec![Some(height - third), Some(third)],
-            weak_dock,
-            window,
-            cx,
-        ),
-        Some(px(280.)),
-        true,
-        window,
-        cx,
-    );
-    area.set_center(
-        split(
-            gpui::Axis::Vertical,
-            vec![
-                split(
-                    gpui::Axis::Horizontal,
-                    vec![
-                        // Les trois façons de choisir quoi relire : ce qui
-                        // change maintenant, ce que la branche a écrit, ce qui
-                        // est déjà committé. Des onglets et non des panneaux
-                        // côte à côte — ils répondent à la même question, et se
-                        // glissent ailleurs d'un geste si l'on préfère les voir
-                        // ensemble.
-                        DockItem::tabs(
-                            vec![
-                                // Les notes en premier : elles disent où l'on
-                                // en est — ce qui reste à faire, ce qu'on a eu
-                                // à dire — là où les trois suivantes disent ce
-                                // qu'il y a à lire. C'est par là qu'on reprend
-                                // un worktree qu'on a quitté hier.
-                                panels.notes,
-                                panels.changes,
-                                panels.branch,
-                                panels.history,
-                                // Les issues sont un point de départ comme un
-                                // autre, souvent meilleur qu'une intention :
-                                // elles se lisent où l'on choisit quoi relire.
-                                panels.sentry,
-                                // Masqué tant qu'il n'y a rien à résoudre : un
-                                // onglet permanent décalerait les autres pour
-                                // servir une fois sur cent.
-                                panels.conflicts,
-                            ],
-                            weak_dock,
-                            window,
-                            cx,
-                        ),
-                        DockItem::tabs(vec![panels.diff], weak_dock, window, cx),
-                    ],
-                    vec![Some(px(420.)), None],
-                    weak_dock,
-                    window,
-                    cx,
-                ),
-                // Les terminaux vivent dans le centre et non dans une zone
-                // d'accueil : gpui-component interdit de déplacer le dernier
-                // panneau d'une zone, et une zone qui n'en contient qu'un est
-                // donc figée. Ici la pile en compte deux — il se glisse.
-                DockItem::tabs(vec![panels.terminal], weak_dock, window, cx),
-            ],
-            vec![Some(height - TERMINAL_HEIGHT), Some(TERMINAL_HEIGHT)],
-            weak_dock,
-            window,
-            cx,
-        ),
-        window,
-        cx,
-    );
+    let left = DockLayout::v_split()
+        .child(
+            DockLayout::tabs()
+                .panel_view(panels.sidebar, cx)
+                .panel_view(panels.files, cx),
+            Some(height - third),
+        )
+        .child(
+            DockLayout::tabs().panel_view(panels.branches, cx),
+            Some(third),
+        );
+
+    let center = DockLayout::v_split()
+        .child(
+            DockLayout::h_split()
+                // Les façons de choisir quoi relire : ce qui reste à faire et
+                // ce qu'on a eu à dire, ce qui change maintenant, ce que la
+                // branche a écrit, ce qui est déjà committé. Des onglets et non
+                // des panneaux côte à côte — ils répondent à la même question,
+                // et se glissent ailleurs d'un geste si l'on préfère les voir
+                // ensemble.
+                .child(
+                    DockLayout::tabs()
+                        // Les notes en premier : elles disent où l'on en est,
+                        // là où les suivantes disent ce qu'il y a à lire. C'est
+                        // par là qu'on reprend un worktree quitté hier.
+                        .panel_view(panels.notes, cx)
+                        .panel_view(panels.changes, cx)
+                        .panel_view(panels.branch, cx)
+                        .panel_view(panels.history, cx)
+                        // Les issues sont un point de départ comme un autre,
+                        // souvent meilleur qu'une intention : elles se lisent
+                        // où l'on choisit quoi relire.
+                        .panel_view(panels.sentry, cx)
+                        // Masqué tant qu'il n'y a rien à résoudre : un onglet
+                        // permanent décalerait les autres pour servir une fois
+                        // sur cent.
+                        .panel_view(panels.conflicts, cx),
+                    Some(px(420.)),
+                )
+                .child(DockLayout::tabs().panel_view(panels.diff, cx), None),
+            Some(height - TERMINAL_HEIGHT),
+        )
+        // Les terminaux vivent dans le centre et non dans une zone d'accueil :
+        // le dernier panneau d'une zone ne se déplace pas, et une zone qui n'en
+        // contient qu'un est donc figée. Ici la pile en compte deux — il se
+        // glisse.
+        .child(
+            DockLayout::tabs().panel_view(panels.terminal, cx),
+            Some(TERMINAL_HEIGHT),
+        );
+
+    area.set_center(center, window, cx);
+    area.set_dock(DockPlacement::Left, left, window, cx);
+    area.set_dock_size(DockPlacement::Left, px(280.), window, cx);
 }
 
 fn load_layout() -> Option<gpui_component::dock::DockAreaState> {
@@ -430,7 +407,7 @@ pub struct ClaudhubApp {
     pub(super) active: Option<PathBuf>,
     pub(super) review: HashMap<PathBuf, ReviewState>,
     pub(super) terminals: HashMap<PathBuf, Entity<TerminalGroup>>,
-    pub(super) commit_input: Entity<InputState>,
+    pub(super) commit_input: Entity<TextareaState>,
     /// Sélecteur de la base de comparaison. Il est searchable : un dépôt
     /// vivant a des dizaines de branches, et faire défiler une liste de
     /// soixante-dix entrées pour en trouver une dont on connaît le nom est
@@ -439,9 +416,9 @@ pub struct ClaudhubApp {
     /// Champ de saisie d'une note. Créé **une fois** : recréé dans un `render`
     /// ou à l'ouverture du dialogue, il perdrait curseur, sélection et texte
     /// dès la première frappe.
-    pub(super) note_input: Entity<InputState>,
+    pub(super) note_input: Entity<TextareaState>,
     /// Le prompt qui part à l'agent, avant qu'il parte.
-    pub(super) prompt_input: Entity<InputState>,
+    pub(super) prompt_input: Entity<TextareaState>,
     /// La saisie d'une tâche à ajouter à `TODO.md`, en bas de la liste.
     pub(super) task_input: Entity<InputState>,
     /// La saisie d'une tâche qu'on retouche, à sa place dans la liste.
@@ -457,7 +434,7 @@ pub struct ClaudhubApp {
     /// Une seule pour tous les worktrees, dont le contenu suit celui qui est
     /// affiché : une par worktree ouvert garderait autant d'états d'édition
     /// vivants, et il n'y en a jamais qu'un sous les yeux.
-    pub(super) journal_input: Entity<InputState>,
+    pub(super) journal_input: Entity<TextareaState>,
     /// Une écriture de la note libre est déjà programmée.
     pub(super) journal_save: bool,
     /// La note en cours de rédaction : son ancrage, arrêté au moment du geste.
@@ -650,11 +627,8 @@ impl ClaudhubApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (git, events) = runtime::spawn();
 
-        let commit_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
-                .placeholder(tr!("commit-placeholder"))
-        });
+        let commit_input =
+            cx.new(|cx| TextareaState::new(window, cx).placeholder(tr!("commit-placeholder")));
 
         let branch_filter =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("branch-filter-placeholder")));
@@ -663,8 +637,7 @@ impl ClaudhubApp {
         // fait deux lignes ou dix, et une zone figée oblige à faire défiler ce
         // qu'on est en train d'écrire.
         let note_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
+            TextareaState::new(window, cx)
                 .auto_grow(2, 8)
                 .placeholder(tr!("note-placeholder"))
         });
@@ -672,11 +645,7 @@ impl ClaudhubApp {
         // Plus haut que celui d'une note : ce qu'on relit ici est un message
         // entier, avec le code cité, et huit lignes de contexte sont le
         // minimum pour juger de ce qui part.
-        let prompt_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
-                .auto_grow(8, 20)
-        });
+        let prompt_input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(8, 20));
 
         let task_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("todo-add-placeholder")));
@@ -685,8 +654,7 @@ impl ClaudhubApp {
         // La note libre : elle grandit avec ce qu'on y écrit, dans les limites
         // que la section peut donner sans repousser le reste hors de vue.
         let journal_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
+            TextareaState::new(window, cx)
                 .auto_grow(3, 14)
                 .placeholder(tr!("journal-placeholder"))
         });
@@ -715,7 +683,7 @@ impl ClaudhubApp {
         // faible pour ne pas former de cycle.
         let this = cx.entity();
         let dock = cx.new(|cx| DockArea::new("claudhub", Some(LAYOUT_VERSION), window, cx));
-        let weak_dock = dock.downgrade();
+
         crate::ui::panels::register(&this, cx);
 
         // Une disposition enregistrée reprend la main sur celle par défaut.
@@ -757,7 +725,7 @@ impl ClaudhubApp {
                 terminal: Arc::new(terminal),
             };
             dock.update(cx, |area, cx| {
-                install_default_layout(area, panels, &weak_dock, window, cx);
+                install_default_layout(area, panels, window, cx);
             });
         }
 
@@ -2376,7 +2344,8 @@ impl ClaudhubApp {
             let (input, entity, on_ok) = (input.clone(), entity.clone(), on_ok.clone());
             dialog
                 .title(title.clone())
-                .confirm()
+                .overlay_closable(false)
+                .close_button(false)
                 .child(gpui_component::input::Input::new(&input))
                 // La fenêtre est passée à la fermeture : ce qu'on lance
                 // ensuite — ouvrir un terminal, y livrer un texte — en a
@@ -2402,7 +2371,7 @@ impl ClaudhubApp {
     /// panneau glissé hors de vue n'a sinon aucun moyen de revenir.
     pub(super) fn reset_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let this = cx.entity();
-        let weak_dock = self.dock.downgrade();
+
         let panels = DefaultPanels {
             sidebar: Arc::new(cx.new(|cx| SidebarPanel::new(&this, cx))),
             branches: Arc::new(cx.new(|cx| BranchesPanel::new(&this, cx))),
@@ -2417,7 +2386,7 @@ impl ClaudhubApp {
             terminal: Arc::new(cx.new(|cx| TerminalPanel::new(&this, cx))),
         };
         self.dock.update(cx, |area, cx| {
-            install_default_layout(area, panels, &weak_dock, window, cx);
+            install_default_layout(area, panels, window, cx);
         });
         self.schedule_layout_save(cx);
         cx.notify();

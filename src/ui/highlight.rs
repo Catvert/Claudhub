@@ -129,7 +129,7 @@ impl DiffHighlights {
                     span.range.end += prologue.len();
                 }
             }
-            highlighter.update(None, &Rope::from_str(&text));
+            highlighter.update(None, &Rope::from_str(&text), None);
             let highlighted = highlighter.styles(&(0..text.len()), theme);
             distribute(&highlighted, &spans, &mut styles);
         }

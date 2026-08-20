@@ -299,7 +299,7 @@ impl ClaudhubApp {
                             .collect::<Vec<_>>()
                     })
                     .size_full()
-                    .track_scroll(self.history_scroll.clone()),
+                    .track_scroll(&self.history_scroll.clone()),
                     cx,
                 ),
             ),

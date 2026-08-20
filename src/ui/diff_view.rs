@@ -1279,7 +1279,7 @@ impl ClaudhubApp {
                 // celle des deux colonnes réunies — et n'importe laquelle
                 // mesure donc la bonne.
                 .with_width_from_item(Some(if split { 0 } else { diff.longest_row }))
-                .track_scroll(self.diff_scroll.clone()),
+                .track_scroll(&self.diff_scroll.clone()),
             )
         };
 
@@ -1878,7 +1878,7 @@ fn select(
     cx: &mut gpui::App,
 ) {
     let handle = entity.read(cx).focus_handle(cx);
-    window.focus(&handle);
+    window.focus(&handle, cx);
     entity.update(cx, |this, cx| {
         this.diff_dragging = true;
         this.select_diff_row(index, extend, cx);

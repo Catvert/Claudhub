@@ -17,11 +17,11 @@ use gpui::{
     div, prelude::*, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
     IntoElement, Render, WeakEntity, Window,
 };
-use gpui_component::dock::{Panel, PanelControl, PanelEvent};
+use gpui_component::dock::{BasePanel, Panel, PanelControl, PanelEvent};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::ActiveTheme;
 
-use gpui_component::dock::{register_panel, PanelView};
+use gpui_component::dock::{panel_handle, register_panel};
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
@@ -83,9 +83,9 @@ pub fn register(app: &Entity<ClaudhubApp>, cx: &mut App) {
     macro_rules! declare {
         ($($name:ident => $id:literal),* $(,)?) => { $(
             let handle = app.clone();
-            register_panel(cx, $id, move |_, _, _, _window, cx| {
+            register_panel(cx, $id, move |_state, _window, cx| {
                 let handle = handle.clone();
-                Box::new(cx.new(|cx| $name::new(&handle, cx))) as Box<dyn PanelView>
+                panel_handle(cx.new(|cx| $name::new(&handle, cx)))
             });
         )* };
     }
@@ -220,13 +220,15 @@ macro_rules! panels {
 
         impl EventEmitter<PanelEvent> for $name {}
 
-        impl Panel for $name {
+        // Deux traits depuis la refonte du dock : `BasePanel` porte ce qui
+        // décide de la disposition — le nom persisté, la visibilité, la
+        // fermeture, le zoom — et vit dans `gpui-base`, qui ne sait pas
+        // dessiner. `Panel` porte la présentation, et n'existe que dans la
+        // peau. C'est cette séparation qui permettrait d'écrire notre propre
+        // peau sans reprendre le moteur.
+        impl BasePanel for $name {
             fn panel_name(&self) -> &'static str {
                 $id
-            }
-
-            fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                tr!($title)
             }
 
             /// Aucun panneau ne se ferme : rien ne permettrait de le rouvrir,
@@ -235,12 +237,18 @@ macro_rules! panels {
                 false
             }
 
-            fn zoomable(&self, _: &App) -> Option<PanelControl> {
-                zoom_in_toolbar()
-            }
-
             fn visible(&self, _: &App) -> bool {
                 self.visible
+            }
+        }
+
+        impl Panel for $name {
+            fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                tr!($title)
+            }
+
+            fn zoom_control(&self, _: &App) -> Option<PanelControl> {
+                zoom_in_toolbar()
             }
 
             fn dropdown_menu(
@@ -329,11 +337,19 @@ impl Focusable for DiffPanel {
 
 impl EventEmitter<PanelEvent> for DiffPanel {}
 
-impl Panel for DiffPanel {
+impl BasePanel for DiffPanel {
     fn panel_name(&self) -> &'static str {
         Self::NAME
     }
+    fn closable(&self, _: &App) -> bool {
+        false
+    }
+    fn visible(&self, _: &App) -> bool {
+        self.visible
+    }
+}
 
+impl Panel for DiffPanel {
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         if self.editing {
             tr!("panel-editor")
@@ -342,16 +358,8 @@ impl Panel for DiffPanel {
         }
     }
 
-    fn closable(&self, _: &App) -> bool {
-        false
-    }
-
-    fn zoomable(&self, _: &App) -> Option<PanelControl> {
+    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
         zoom_in_toolbar()
-    }
-
-    fn visible(&self, _: &App) -> bool {
-        self.visible
     }
 
     fn dropdown_menu(
@@ -426,25 +434,25 @@ impl Focusable for ConflictsPanel {
 
 impl EventEmitter<PanelEvent> for ConflictsPanel {}
 
-impl Panel for ConflictsPanel {
+impl BasePanel for ConflictsPanel {
     fn panel_name(&self) -> &'static str {
         "ClaudhubConflicts"
     }
+    fn closable(&self, _: &App) -> bool {
+        false
+    }
+    fn visible(&self, _: &App) -> bool {
+        self.visible
+    }
+}
 
+impl Panel for ConflictsPanel {
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         tr!("panel-conflicts")
     }
 
-    fn closable(&self, _: &App) -> bool {
-        false
-    }
-
-    fn zoomable(&self, _: &App) -> Option<PanelControl> {
+    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
         zoom_in_toolbar()
-    }
-
-    fn visible(&self, _: &App) -> bool {
-        self.visible
     }
 }
 
@@ -503,25 +511,25 @@ impl Focusable for TerminalPanel {
 
 impl EventEmitter<PanelEvent> for TerminalPanel {}
 
-impl Panel for TerminalPanel {
+impl BasePanel for TerminalPanel {
     fn panel_name(&self) -> &'static str {
         Self::NAME
     }
+    fn closable(&self, _: &App) -> bool {
+        false
+    }
+    fn visible(&self, _: &App) -> bool {
+        self.visible
+    }
+}
 
+impl Panel for TerminalPanel {
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         tr!("panel-terminal")
     }
 
-    fn closable(&self, _: &App) -> bool {
-        false
-    }
-
-    fn zoomable(&self, _: &App) -> Option<PanelControl> {
+    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
         zoom_in_toolbar()
-    }
-
-    fn visible(&self, _: &App) -> bool {
-        self.visible
     }
 
     fn dropdown_menu(
@@ -585,25 +593,25 @@ impl Focusable for HistoryPanel {
 
 impl EventEmitter<PanelEvent> for HistoryPanel {}
 
-impl Panel for HistoryPanel {
+impl BasePanel for HistoryPanel {
     fn panel_name(&self) -> &'static str {
         Self::NAME
     }
+    fn closable(&self, _: &App) -> bool {
+        false
+    }
+    fn visible(&self, _: &App) -> bool {
+        self.visible
+    }
+}
 
+impl Panel for HistoryPanel {
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         tr!("panel-history")
     }
 
-    fn closable(&self, _: &App) -> bool {
-        false
-    }
-
-    fn zoomable(&self, _: &App) -> Option<PanelControl> {
+    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
         zoom_in_toolbar()
-    }
-
-    fn visible(&self, _: &App) -> bool {
-        self.visible
     }
 
     fn dropdown_menu(

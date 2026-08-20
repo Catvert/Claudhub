@@ -34,7 +34,7 @@ use gpui::{div, prelude::*, px, uniform_list, Context, Entity, Pixels, SharedStr
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
-    input::{Input, InputState},
+    input::{Editor, EditorState},
     menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
     v_flex, ActiveTheme, Sizable, WindowExt,
 };
@@ -186,7 +186,7 @@ pub struct Editing {
     /// L'entité de saisie, créée **une fois** à l'ouverture du fichier :
     /// recréée dans un rendu, elle perdrait curseur et sélection à la première
     /// frappe.
-    pub input: Entity<InputState>,
+    pub input: Entity<EditorState>,
     /// Empreinte du contenu lu, ce qui permet de refuser d'écraser le travail
     /// d'un agent.
     pub hash: u64,
@@ -401,7 +401,7 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.explorer_focus.focus(window);
+        self.explorer_focus.focus(window, cx);
         if let Some(explorer) = self.explorer() {
             explorer.cursor = Some(path);
         }
@@ -483,8 +483,12 @@ impl ClaudhubApp {
         // diff : c'est la même table, PHP compris.
         let language = crate::ui::highlight::language_for_path(&path).unwrap_or("text");
         let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .code_editor(language)
+            // `EditorState` et non `InputState` : la refonte des saisies a
+            // séparé les trois modes en trois types — une ligne, du texte
+            // multiligne, du code. Les fonctions de code (langage, numéros de
+            // ligne, LSP) n'existent que sur le troisième.
+            EditorState::new(window, cx)
+                .language(language)
                 .line_number(true)
                 .default_value(content.text)
         });
@@ -563,7 +567,8 @@ impl ClaudhubApp {
                         .child(div().text_sm().child(label.clone()))
                         .child(div().text_xs().child(tr!("editor-discard-help"))),
                 )
-                .confirm()
+                .overlay_closable(false)
+                .close_button(false)
                 .on_ok(move |_, _window, cx| {
                     entity.update(cx, |this, cx| {
                         this.editing = None;
@@ -767,7 +772,7 @@ impl ClaudhubApp {
                             // liste, une marge sur une entrée de
                             // `uniform_list` étant ignorée.
                             .px_1()
-                            .track_scroll(scroll.clone()),
+                            .track_scroll(&scroll.clone()),
                             cx,
                         ),
                     ),
@@ -969,7 +974,8 @@ impl ClaudhubApp {
                         .child(div().text_sm().child(label.clone()))
                         .child(div().text_xs().child(tr!("delete-warning"))),
                 )
-                .confirm()
+                .overlay_closable(false)
+                .close_button(false)
                 .on_ok(move |_, _window, cx| {
                     entity.update(cx, |this, cx| {
                         this.file_op(files::Op::Delete { path: path.clone() }, cx)
@@ -1054,7 +1060,7 @@ impl ClaudhubApp {
                                 ),
                         ),
                 )
-                .child(div().flex_1().min_h_0().child(Input::new(&input).h_full())),
+                .child(div().flex_1().min_h_0().child(Editor::new(&input).h_full())),
         )
     }
 }

@@ -10,7 +10,7 @@
 //! de valider pour voir le résultat rend le choix d'une police ou d'une taille
 //! impossible autrement qu'à l'aveugle.
 
-use gpui::{div, prelude::*, px, App, Context, Corner, Entity, SharedString, Subscription, Window};
+use gpui::{div, prelude::*, px, Anchor, App, Context, Entity, SharedString, Subscription, Window};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
@@ -142,7 +142,7 @@ fn shell_item(shells: Vec<(SharedString, SharedString)>) -> SettingItem {
                             .small()
                             .icon(icon("chevron-down"))
                             .tooltip(tr!("settings-shell-detected"))
-                            .dropdown_menu_with_anchor(Corner::TopRight, move |menu, _, _| {
+                            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                                 shells.iter().fold(menu, |menu, (value, label)| {
                                     let (input, value) = (for_menu.clone(), value.clone());
                                     menu.item(PopupMenuItem::new(label.clone()).on_click(
@@ -331,7 +331,7 @@ fn default_agent_item() -> SettingItem {
                 .outline()
                 .small()
                 .label(SharedString::from(current))
-                .dropdown_menu_with_anchor(Corner::TopRight, move |menu, _, _| {
+                .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                     profiles.iter().fold(menu, |menu, profile| {
                         let label = SharedString::from(profile.label().to_string());
                         let chosen = label.clone();

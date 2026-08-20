@@ -23,7 +23,7 @@ use gpui_component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     h_flex,
-    input::Input,
+    input::{Input, Textarea},
     v_flex, ActiveTheme, Disableable, Selectable, Sizable, WindowExt,
 };
 
@@ -159,9 +159,10 @@ impl ClaudhubApp {
                                         .map(|line| div().whitespace_nowrap().child(line)),
                                 ),
                         )
-                        .child(Input::new(&input)),
+                        .child(Textarea::new(&input)),
                 )
-                .confirm()
+                .overlay_closable(false)
+                .close_button(false)
                 .on_ok(move |_, _window, cx| {
                     let body = input.read(cx).value().to_string();
                     on_ok.update(cx, |this, cx| this.save_note(body, cx));
@@ -301,7 +302,7 @@ impl ClaudhubApp {
         self.task_editing = Some(line);
         self.task_edit_input
             .update(cx, |input, cx| input.set_value(label, window, cx));
-        gpui::Focusable::focus_handle(&self.task_edit_input, cx).focus(window);
+        gpui::Focusable::focus_handle(&self.task_edit_input, cx).focus(window, cx);
         cx.notify();
     }
 
@@ -587,9 +588,10 @@ impl ClaudhubApp {
                         .gap_2()
                         .w(px(640.))
                         .child(div().text_xs().child(tr!("note-prompt-hint")))
-                        .child(Input::new(&input)),
+                        .child(Textarea::new(&input)),
                 )
-                .confirm()
+                .overlay_closable(false)
+                .close_button(false)
                 .on_ok(move |_, window, cx| {
                     let text = input.read(cx).value().to_string();
                     entity.update(cx, |this, cx| {
@@ -984,7 +986,7 @@ impl ClaudhubApp {
         v_flex()
             .w_full()
             .child(header)
-            .child(div().p_2().child(Input::new(&self.journal_input)))
+            .child(div().p_2().child(Textarea::new(&self.journal_input)))
     }
 
     /// Les fichiers cochés comme relus, et de quoi les rendre à relire.
@@ -1101,7 +1103,7 @@ impl ClaudhubApp {
                     // trop.
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.notes_collapsed.remove("todo");
-                        gpui::Focusable::focus_handle(&this.task_input, cx).focus(window);
+                        gpui::Focusable::focus_handle(&this.task_input, cx).focus(window, cx);
                         cx.notify();
                     })),
             );

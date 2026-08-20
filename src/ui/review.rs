@@ -13,7 +13,7 @@ use gpui_component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     h_flex,
-    input::Input,
+    input::Textarea,
     select::Select,
     v_flex, ActiveTheme, Disableable, Sizable, WindowExt,
 };
@@ -313,7 +313,7 @@ impl ClaudhubApp {
                                 // laisse les fonds arrondis respirer au lieu
                                 // de traverser le panneau d'un bord à l'autre.
                                 .px_1()
-                                .track_scroll(scroll.clone()),
+                                .track_scroll(&scroll.clone()),
                                 cx,
                             ),
                         )
@@ -469,7 +469,7 @@ impl ClaudhubApp {
             .gap_1()
             .border_t_1()
             .border_color(cx.theme().border)
-            .child(Input::new(&self.commit_input).h(px(64.)))
+            .child(Textarea::new(&self.commit_input).h(px(64.)))
             .child(
                 h_flex()
                     .gap_2()
@@ -587,7 +587,8 @@ impl ClaudhubApp {
                         .child(div().text_sm().child(label.clone()))
                         .child(div().text_xs().child(warning.clone())),
                 )
-                .confirm()
+                .overlay_closable(false)
+                .close_button(false)
                 .on_ok(move |_, _window, cx| {
                     entity.update(cx, |this, cx| {
                         let paths = vec![path.clone()];
@@ -862,7 +863,7 @@ fn render_file(
                 // c'est de là qu'on venait, et la relecture au clavier du
                 // fichier qu'on vient d'ouvrir serait inerte.
                 let handle = entity.read(cx).focus_handle(cx);
-                window.focus(&handle);
+                window.focus(&handle, cx);
                 entity.update(cx, |this, cx| {
                     this.open_file(worktree.clone(), path.clone(), range.clone(), cx)
                 });

@@ -324,7 +324,7 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         if event.button != MouseButton::Left {
             return;
         }
@@ -1008,7 +1008,7 @@ impl TerminalGroup {
         tab.update(cx, |view, cx| view.paste_text(&text, cx));
         cx.spawn(async move |_, cx| {
             cx.background_executor().timer(SUBMIT_DELAY).await;
-            let _ = tab.update(cx, |view, cx| view.submit(cx));
+            tab.update(cx, |view, cx| view.submit(cx));
         })
         .detach();
         cx.notify();
@@ -1049,7 +1049,7 @@ impl TerminalGroup {
     fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(view) = self.tabs.get(self.active) {
             let handle = view.read(cx).focus.clone();
-            window.focus(&handle);
+            window.focus(&handle, cx);
         }
     }
 }

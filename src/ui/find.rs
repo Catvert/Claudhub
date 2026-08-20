@@ -170,7 +170,7 @@ impl ClaudhubApp {
         // Le panneau des branches a déjà son filtre à demeure : lui en poser
         // un second au-dessus donnerait deux champs qui font la même chose.
         if pane == Pane::Branches {
-            self.branch_filter.focus_handle(cx).focus(window);
+            self.branch_filter.focus_handle(cx).focus(window, cx);
             return;
         }
         let input = match self.finders.get_mut(&pane) {
@@ -207,7 +207,7 @@ impl ClaudhubApp {
                 input
             }
         };
-        input.focus_handle(cx).focus(window);
+        input.focus_handle(cx).focus(window, cx);
         cx.notify();
     }
 
@@ -218,7 +218,7 @@ impl ClaudhubApp {
         }
         // Le focus retourne à la vue : le laisser dans un champ qu'on vient de
         // masquer rendrait les flèches de relecture inertes.
-        self.focus_handle(cx).focus(window);
+        self.focus_handle(cx).focus(window, cx);
         cx.notify();
     }
 

@@ -306,7 +306,8 @@ impl ClaudhubApp {
                             this.render_creation_body(cx).into_any_element()
                         })),
                 )
-                .confirm()
+                .overlay_closable(false)
+                .close_button(false)
                 .on_ok(move |_, _window, cx| {
                     entity.update(cx, |this, cx| this.submit_answers(cx));
                     // Le dialogue reste ouvert : la page suivante s'y affiche,
@@ -655,7 +656,8 @@ impl ClaudhubApp {
                         .child(div().text_sm().child(label.clone()))
                         .child(div().text_xs().child(tr!("worktree-cleanup-help"))),
                 )
-                .confirm()
+                .overlay_closable(false)
+                .close_button(false)
                 .on_ok(move |_, _window, cx| {
                     entity.update(cx, |this, cx| {
                         this.wt_remove(main.clone(), &worktree, cx);

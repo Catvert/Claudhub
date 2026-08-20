@@ -526,7 +526,8 @@ impl ClaudhubApp {
             dialog
                 .title(tr!("worktree-remove-title"))
                 .child(div().text_sm().child(label.clone()))
-                .confirm()
+                .overlay_closable(false)
+                .close_button(false)
                 .on_ok(move |_, _window, cx| {
                     entity.update(cx, |this, cx| {
                         this.git.send(Cmd::RemoveWorktree {

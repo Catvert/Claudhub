@@ -720,9 +720,7 @@ fn schedule_save(cx: &mut App) {
                 store.settings.clone()
             })
         });
-        if let Ok(settings) = settings {
-            settings.save();
-        }
+        settings.save();
     })
     .detach();
 }

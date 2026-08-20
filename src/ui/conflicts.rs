@@ -282,7 +282,7 @@ impl ClaudhubApp {
                 .child(div().text_color(warning).child(icon("git-merge").xsmall()))
                 .child(div().text_color(warning).child(tr!(kind.key())))
                 .child(self.render_pending_buttons("bar", cx))
-                .child(gpui_component::divider::Divider::vertical().h(px(12.))),
+                .child(gpui_component::separator::Separator::vertical().h(px(12.))),
         )
     }
 }
