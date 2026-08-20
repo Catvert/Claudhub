@@ -9,6 +9,7 @@ mod app;
 mod base_select;
 mod blade;
 mod branches;
+mod conflicts;
 mod diff_view;
 mod highlight;
 mod history_view;
@@ -25,6 +26,7 @@ mod sidebar;
 mod store;
 mod terminal_view;
 mod theme;
+mod worktree_ops;
 
 use gpui::{px, size, App, AppContext, Application, Bounds, WindowBounds, WindowOptions};
 use gpui_component::Root;

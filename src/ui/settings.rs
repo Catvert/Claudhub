@@ -398,6 +398,16 @@ pub struct Settings {
     /// Afficher le fichier entier autour des modifications, et non seulement
     /// leurs quelques lignes de contexte.
     pub diff_whole_file: bool,
+    /// « Mettre à jour depuis la base » rejoue la branche au lieu de fusionner.
+    ///
+    /// Les deux se défendent et le choix est une habitude d'équipe : un
+    /// historique linéaire d'un côté, la trace de ce qui a été intégré et
+    /// quand de l'autre. Merge par défaut, parce qu'il ne réécrit rien et ne
+    /// casse donc jamais une branche déjà poussée.
+    pub update_with_rebase: bool,
+    /// Intégrer force un commit de fusion, même quand l'avance rapide serait
+    /// possible : c'est ce qui garde une trace de la branche d'agent.
+    pub integrate_no_ff: bool,
 }
 
 impl Default for Settings {
@@ -418,6 +428,8 @@ impl Default for Settings {
             review_tree: true,
             diff_split: false,
             diff_whole_file: false,
+            update_with_rebase: false,
+            integrate_no_ff: true,
         }
     }
 }

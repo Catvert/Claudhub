@@ -47,6 +47,7 @@ pub fn register(app: &Entity<ClaudhubApp>, cx: &mut App) {
         BranchPanel => "ClaudhubBranch",
         HistoryPanel => "ClaudhubHistory",
         NotesPanel => "ClaudhubNotes",
+        ConflictsPanel => "ClaudhubConflicts",
         DiffPanel => "ClaudhubDiff",
         TerminalPanel => "ClaudhubTerminal",
     }
@@ -114,6 +115,67 @@ panels! {
     BranchPanel => ("ClaudhubBranch", "range-branch", render_branch_review),
     NotesPanel => ("ClaudhubNotes", "panel-notes", render_notes),
     DiffPanel => ("ClaudhubDiff", "panel-diff", render_diff),
+}
+
+/// Les conflits n'apparaissent que quand il y en a.
+///
+/// `Panel::visible`, comme les terminaux : un onglet « Conflits » présent en
+/// permanence décalerait les autres et ne servirait qu'une fois sur cent. Il
+/// reste visible tant qu'une opération est en cours, même sans fichier en
+/// conflit — c'est là qu'on trouve de quoi la continuer ou l'abandonner.
+pub struct ConflictsPanel {
+    app: WeakEntity<ClaudhubApp>,
+    focus: FocusHandle,
+}
+
+impl ConflictsPanel {
+    pub fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
+        cx.observe(app, |_, _, cx| cx.notify()).detach();
+        Self {
+            app: app.downgrade(),
+            focus: cx.focus_handle(),
+        }
+    }
+}
+
+impl Focusable for ConflictsPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl EventEmitter<PanelEvent> for ConflictsPanel {}
+
+impl Panel for ConflictsPanel {
+    fn panel_name(&self) -> &'static str {
+        "ClaudhubConflicts"
+    }
+
+    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        tr!("panel-conflicts")
+    }
+
+    fn closable(&self, _: &App) -> bool {
+        false
+    }
+
+    fn visible(&self, cx: &App) -> bool {
+        self.app.upgrade().is_some_and(|app| {
+            let app = app.read(cx);
+            app.pending_operation().is_some() || !app.conflicted_files().is_empty()
+        })
+    }
+}
+
+impl Render for ConflictsPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(app) = self.app.upgrade() else {
+            return div().into_any_element();
+        };
+        app.update(cx, |app, cx| {
+            app.render_conflicts(window, cx).into_any_element()
+        })
+    }
 }
 
 /// Les terminaux se masquent sans se fermer.

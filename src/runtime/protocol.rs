@@ -126,6 +126,101 @@ pub enum Cmd {
         force: bool,
     },
 
+    /// Intègre `from` dans la branche du checkout.
+    ///
+    /// `no_ff` force un commit de fusion : c'est ce qui garde une trace de la
+    /// branche d'agent une fois son travail intégré.
+    Merge {
+        worktree: WorktreeId,
+        from: String,
+        no_ff: bool,
+    },
+    /// Intègre une branche d'agent dans la base, **depuis le dépôt
+    /// principal**.
+    ///
+    /// Le worker vérifie d'abord que le principal est propre et positionné sur
+    /// la base ; sinon il refuse et le dit. C'est le seul endroit où cette
+    /// vérification peut se faire : la vue ne connaît l'état d'un checkout que
+    /// s'il a été ouvert, et le dépôt principal ne l'est pas toujours.
+    Integrate {
+        main: PathBuf,
+        branch: String,
+        base: String,
+        no_ff: bool,
+    },
+    /// Rejoue la branche du checkout sur `onto`.
+    Rebase {
+        worktree: WorktreeId,
+        onto: String,
+    },
+    /// Abandonne l'opération en cours et rend le checkout à son état d'avant.
+    AbortPending {
+        worktree: WorktreeId,
+    },
+    /// Reprend l'opération en cours, une fois les conflits résolus.
+    ResumePending {
+        worktree: WorktreeId,
+    },
+    /// Résout un conflit en gardant une des deux versions, puis l'indexe.
+    ResolveConflict {
+        worktree: WorktreeId,
+        path: PathBuf,
+        /// La nôtre, au sens de l'utilisateur : la version de la branche où
+        /// l'on se trouve. La traduction en `--ours`/`--theirs` dépend de
+        /// l'opération en cours et se fait dans la couche git.
+        ours: bool,
+    },
+
+    // — `wt` : ce que le `wt.toml` du projet ajoute ————————————————
+    /// Lit le `wt.toml` d'un dépôt. Une lecture de fichier, mais elle a sa
+    /// commande : la vue n'a le droit de toucher au disque nulle part.
+    WtLoad {
+        main: PathBuf,
+    },
+    /// Les questions du projet qui s'appliquent, compte tenu des réponses déjà
+    /// données. Un `[[prompt]]` avec `source` lance un shell : jamais depuis le
+    /// thread d'interface.
+    WtQuestions {
+        main: PathBuf,
+        slug: String,
+        answers: std::collections::BTreeMap<String, String>,
+    },
+    /// Crée un worktree avec tout ce que le projet demande : branche selon son
+    /// modèle, dossiers, copies, ports, puis `post_new`.
+    WtCreate {
+        main: PathBuf,
+        slug: String,
+        from: Option<String>,
+        answers: std::collections::BTreeMap<String, String>,
+    },
+    WtRemove {
+        main: PathBuf,
+        slug: String,
+    },
+    WtUp {
+        main: PathBuf,
+        slug: String,
+    },
+    WtDown {
+        main: PathBuf,
+        slug: String,
+    },
+    /// Prépare une tâche du projet : les commandes sont rendues ici et lancées
+    /// par un onglet de terminal, parce qu'elles sont souvent interactives.
+    WtTask {
+        main: PathBuf,
+        worktree: WorktreeId,
+        slug: String,
+        task: String,
+    },
+    /// Relève l'état et les adresses des worktrees d'un projet.
+    ///
+    /// Ce sont des commandes shell, une par worktree et par relevé : file de
+    /// fond uniquement, et période longue.
+    WtScan {
+        targets: Vec<(PathBuf, WorktreeId)>,
+    },
+
     AddWorktree {
         main: PathBuf,
         path: PathBuf,
@@ -180,6 +275,31 @@ pub enum Evt {
     Summaries {
         summaries: Vec<(WorktreeId, Summary)>,
     },
+    /// Ce que le `wt.toml` d'un dépôt déclare. `None` quand il n'y en a pas —
+    /// le cas courant, et pas une erreur : les gestes de `wt` disparaissent
+    /// simplement du menu.
+    WtProject {
+        main: PathBuf,
+        project: Option<crate::wt::Snapshot>,
+    },
+    WtQuestions {
+        main: PathBuf,
+        slug: String,
+        /// Les réponses avec lesquelles la question a été posée : le dialogue
+        /// les repasse d'un tour à l'autre, et une réponse en retard ne doit
+        /// pas écraser un tour plus avancé.
+        answers: std::collections::BTreeMap<String, String>,
+        questions: Vec<crate::wt::Question>,
+    },
+    /// Une tâche prête à partir dans un terminal.
+    WtTask {
+        worktree: WorktreeId,
+        task: String,
+        launch: crate::wt::Launch,
+    },
+    WtStates {
+        states: Vec<(WorktreeId, WtWorktree)>,
+    },
     Agents {
         agents: crate::agent::Agents,
     },
@@ -206,6 +326,15 @@ pub enum Evt {
     },
 }
 
+/// Ce que `wt` sait d'un worktree, et que git ignore.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WtWorktree {
+    /// `None` quand le projet ne déclare pas de `[status] up` : il n'y a alors
+    /// rien à démarrer, et afficher « arrêté » serait une information fausse.
+    pub up: Option<bool>,
+    pub endpoints: Vec<crate::wt::Endpoint>,
+}
+
 /// Ce que l'utilisateur a demandé, pour formuler le message de résultat et
 /// savoir quoi rafraîchir ensuite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,6 +354,14 @@ pub enum Action {
     Worktree,
     Diff,
     History,
+    Merge,
+    Integrate,
+    Rebase,
+    Abort,
+    Resume,
+    WtUp,
+    WtDown,
+    Resolve,
 }
 
 impl Action {
@@ -246,6 +383,14 @@ impl Action {
             Self::Worktree => "action-worktree-ok",
             Self::Diff => "action-diff-ok",
             Self::History => "action-history-ok",
+            Self::Merge => "action-merge-ok",
+            Self::Integrate => "action-integrate-ok",
+            Self::Rebase => "action-rebase-ok",
+            Self::Abort => "action-abort-ok",
+            Self::Resume => "action-resume-ok",
+            Self::WtUp => "action-wt-up-ok",
+            Self::WtDown => "action-wt-down-ok",
+            Self::Resolve => "action-resolve-ok",
         }
     }
 }

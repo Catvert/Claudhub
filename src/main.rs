@@ -15,6 +15,7 @@ pub mod logging;
 pub mod runtime;
 pub mod terminal;
 pub mod ui;
+pub mod wt;
 
 /// Évite une allocation par chaîne traduite : les catalogues compilés rendent
 /// des `Cow::Borrowed(&'static str)`, et une clé sans interpolation devient un

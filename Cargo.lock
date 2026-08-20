@@ -992,6 +992,7 @@ dependencies = [
  "serde_json",
  "toml 0.9.12+spec-1.1.0",
  "tree-sitter-php",
+ "wt",
 ]
 
 [[package]]
@@ -8048,6 +8049,16 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
+
+[[package]]
+name = "wt"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "rust-i18n 4.2.1",
+ "serde",
+ "toml 1.1.4+spec-1.1.0",
+]
 
 [[package]]
 name = "x11"

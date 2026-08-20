@@ -34,6 +34,12 @@ alacritty_terminal = "0.26"
 notify = "8"
 notify-debouncer-full = "0.5"
 
+# `wt`, le gestionnaire de worktrees, en bibliothèque : c'est son `wt.toml`
+# qui sert de système d'extension à Claudhub — tâches, questions, statuts,
+# URLs. `default-features = false` écarte sa CLI et son interface plein écran,
+# donc clap et ratatui : nous n'appelons que le cœur.
+wt = { path = "../wt", default-features = false }
+
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"

@@ -43,7 +43,23 @@ fn is_network(cmd: &Cmd) -> bool {
 /// les worktrees ouverts, il revient toutes les quelques secondes, et il ne
 /// doit jamais passer devant le diff qu'on vient de demander.
 fn is_background(cmd: &Cmd) -> bool {
-    matches!(cmd, Cmd::LoadSummaries { .. } | Cmd::ScanAgents { .. })
+    matches!(
+        cmd,
+        Cmd::LoadSummaries { .. } | Cmd::ScanAgents { .. } | Cmd::WtScan { .. }
+    )
+}
+
+/// Les opérations de `wt` qui lancent les hooks du projet.
+///
+/// Elles ont la file du réseau, et pour la même raison : un `post_new` qui
+/// installe des dépendances, un `up` qui démarre des conteneurs, cela dure des
+/// minutes. Les mettre avec les lectures reviendrait à figer la revue le temps
+/// d'un `composer install`.
+fn is_long(cmd: &Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::WtCreate { .. } | Cmd::WtRemove { .. } | Cmd::WtUp { .. } | Cmd::WtDown { .. }
+    )
 }
 
 pub struct Handle {
@@ -57,7 +73,7 @@ impl Handle {
     /// fermé) n'arrive qu'à l'extinction : il n'y a rien à en dire à
     /// l'utilisateur, dont la fenêtre se ferme.
     pub fn send(&self, cmd: Cmd) {
-        let queue = if is_network(&cmd) {
+        let queue = if is_network(&cmd) || is_long(&cmd) {
             &self.network
         } else if is_background(&cmd) {
             &self.background
@@ -285,6 +301,110 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
             }
             Err(e) => vec![fail(None, Action::Branch, e)],
         },
+        Cmd::Merge {
+            worktree,
+            from,
+            no_ff,
+        } => write_then_refresh(worktree, Action::Merge, |dir| {
+            repo::merge(dir, &from, no_ff)
+        }),
+        Cmd::Integrate {
+            main,
+            branch,
+            base,
+            no_ff,
+        } => write_then_refresh(main, Action::Integrate, |dir| {
+            integrate(dir, &branch, &base, no_ff)
+        }),
+        Cmd::Rebase { worktree, onto } => {
+            write_then_refresh(worktree, Action::Rebase, |dir| repo::rebase(dir, &onto))
+        }
+        Cmd::AbortPending { worktree } => write_then_refresh(worktree, Action::Abort, repo::abort),
+        Cmd::ResumePending { worktree } => {
+            write_then_refresh(worktree, Action::Resume, repo::resume)
+        }
+        Cmd::ResolveConflict {
+            worktree,
+            path,
+            ours,
+        } => write_then_refresh(worktree, Action::Resolve, |dir| {
+            repo::resolve(dir, &path, ours).map(|_| String::new())
+        }),
+
+        Cmd::WtLoad { main } => {
+            let project = crate::wt::snapshot(&main);
+            vec![Evt::WtProject { main, project }]
+        }
+        Cmd::WtQuestions {
+            main,
+            slug,
+            answers,
+        } => match crate::wt::questions(&main, &slug, &answers) {
+            Ok(questions) => vec![Evt::WtQuestions {
+                main,
+                slug,
+                answers,
+                questions,
+            }],
+            Err(e) => vec![fail(None, Action::Worktree, e)],
+        },
+        Cmd::WtCreate {
+            main,
+            slug,
+            from,
+            answers,
+        } => {
+            let r = repo::Repo { main: main.clone() };
+            match crate::wt::create(&main, &slug, from.as_deref(), &answers) {
+                Ok((_, output)) => worktree_changed(&r, output),
+                Err(e) => vec![fail(None, Action::Worktree, e)],
+            }
+        }
+        Cmd::WtRemove { main, slug } => {
+            let r = repo::Repo { main: main.clone() };
+            match crate::wt::remove(&main, &slug) {
+                Ok(output) => worktree_changed(&r, output),
+                Err(e) => vec![fail(None, Action::Worktree, e)],
+            }
+        }
+        Cmd::WtUp { main, slug } => match crate::wt::up(&main, &slug) {
+            Ok(output) => vec![done(None, Action::WtUp, output)],
+            Err(e) => vec![fail(None, Action::WtUp, e)],
+        },
+        Cmd::WtDown { main, slug } => match crate::wt::down(&main, &slug) {
+            Ok(output) => vec![done(None, Action::WtDown, output)],
+            Err(e) => vec![fail(None, Action::WtDown, e)],
+        },
+        Cmd::WtTask {
+            main,
+            worktree,
+            slug,
+            task,
+        } => match crate::wt::task(&main, &slug, &task) {
+            Ok(launch) => vec![Evt::WtTask {
+                worktree,
+                task,
+                launch,
+            }],
+            Err(e) => vec![fail(Some(worktree), Action::Worktree, e)],
+        },
+        Cmd::WtScan { targets } => {
+            let states = targets
+                .into_iter()
+                .filter_map(|(main, worktree)| {
+                    let slug = crate::wt::slug_of(&main, &worktree)?;
+                    Some((
+                        worktree,
+                        protocol::WtWorktree {
+                            up: crate::wt::is_up(&main, &slug),
+                            endpoints: crate::wt::endpoints(&main, &slug),
+                        },
+                    ))
+                })
+                .collect();
+            vec![Evt::WtStates { states }]
+        }
+
         Cmd::AddWorktree {
             main,
             path,
@@ -305,6 +425,26 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
             }
         }
     }
+}
+
+/// Intègre une branche dans la base, depuis le dépôt principal.
+///
+/// Les deux vérifications préalables ne sont pas de la prudence de principe :
+/// fusionner dans un checkout sale mêle les modifications en cours au travail
+/// intégré, et fusionner alors qu'on est sur une autre branche écrit dans
+/// celle-là — deux dégâts qu'on découvre après coup, et qu'un message évite.
+fn integrate(main: &Path, branch: &str, base: &str, no_ff: bool) -> Result<String> {
+    if repo::is_dirty(main) {
+        anyhow::bail!("le dépôt principal a des modifications en cours : validez-les ou rangez-les avant d'intégrer");
+    }
+    let current = branch::current(main);
+    if current.as_deref() != Some(base) {
+        anyhow::bail!(
+            "le dépôt principal est sur « {} » et non sur « {base} »",
+            current.as_deref().unwrap_or("HEAD détachée")
+        );
+    }
+    repo::merge(main, branch, no_ff)
 }
 
 fn open_repo(path: &Path) -> Result<Evt> {

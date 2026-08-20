@@ -286,6 +286,132 @@ pub fn delete_branch(main: &Path, name: &str, force: bool) -> Result<()> {
     git(main, &["branch", flag, name]).map(|_| ())
 }
 
+/// Une opération git en cours, qui laisse le dépôt à mi-chemin.
+///
+/// Tant qu'elle dure, l'index porte des conflits et `HEAD` ne désigne pas ce
+/// qu'on croit. La barre d'état la nomme : sans cela, l'utilisateur se
+/// retrouve dans un état que Claudhub ne dit pas, à se demander pourquoi la
+/// liste des fichiers ressemble à ça.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pending {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+}
+
+impl Pending {
+    /// Clé i18n du nom de l'opération.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Merge => "pending-merge",
+            Self::Rebase => "pending-rebase",
+            Self::CherryPick => "pending-cherry-pick",
+            Self::Revert => "pending-revert",
+        }
+    }
+
+    /// Le sous-commande qui la continue ou l'abandonne.
+    fn command(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Rebase => "rebase",
+            Self::CherryPick => "cherry-pick",
+            Self::Revert => "revert",
+        }
+    }
+}
+
+/// Le répertoire git **de ce checkout**.
+///
+/// Dans un worktree lié, `.git` est un *fichier* qui pointe vers
+/// `<principal>/.git/worktrees/<nom>` : c'est là que vivent son `HEAD`, son
+/// index et les marqueurs d'opération en cours. Les chercher dans `<dir>/.git`
+/// revient à ne jamais rien trouver.
+pub fn git_dir(dir: &Path) -> Option<PathBuf> {
+    let path = git_opt(dir, &["rev-parse", "--git-dir"])?;
+    Some(absolute(dir, Path::new(&path)))
+}
+
+/// L'opération en cours, d'après les marqueurs que git laisse dans son
+/// répertoire.
+///
+/// Fonction libre et sans sous-processus : `status` la rappelle à chaque
+/// rafraîchissement, et il en arrive un par écriture de fichier.
+pub fn pending_in(git_dir: &Path) -> Option<Pending> {
+    // L'ordre compte : un rebase pose aussi `CHERRY_PICK_HEAD` en rejouant ses
+    // commits, et l'annoncer comme un picorage ferait proposer la mauvaise
+    // commande pour en sortir.
+    const MARKERS: [(&str, Pending); 5] = [
+        ("rebase-merge", Pending::Rebase),
+        ("rebase-apply", Pending::Rebase),
+        ("MERGE_HEAD", Pending::Merge),
+        ("CHERRY_PICK_HEAD", Pending::CherryPick),
+        ("REVERT_HEAD", Pending::Revert),
+    ];
+    MARKERS
+        .into_iter()
+        .find(|(marker, _)| git_dir.join(marker).exists())
+        .map(|(_, kind)| kind)
+}
+
+/// L'opération en cours dans ce checkout, s'il y en a une.
+pub fn pending(dir: &Path) -> Option<Pending> {
+    pending_in(&git_dir(dir)?)
+}
+
+/// Intègre `from` dans la branche courante.
+///
+/// `--no-edit` parce qu'un message par défaut convient : le geste part d'un
+/// bouton, pas d'une ligne de commande où l'on aurait de quoi écrire.
+pub fn merge(dir: &Path, from: &str, no_ff: bool) -> Result<String> {
+    let mut args: Vec<&str> = vec!["merge", "--no-edit"];
+    if no_ff {
+        args.push("--no-ff");
+    }
+    args.push(from);
+    git(dir, &args)
+}
+
+/// Rejoue la branche courante sur `onto`.
+pub fn rebase(dir: &Path, onto: &str) -> Result<String> {
+    git(dir, &["rebase", onto])
+}
+
+/// Abandonne l'opération en cours et rend le checkout à son état d'avant.
+pub fn abort(dir: &Path) -> Result<String> {
+    let kind = pending(dir).ok_or_else(|| anyhow!("aucune opération en cours"))?;
+    git(dir, &[kind.command(), "--abort"])
+}
+
+/// Reprend l'opération en cours, une fois les conflits résolus.
+pub fn resume(dir: &Path) -> Result<String> {
+    let kind = pending(dir).ok_or_else(|| anyhow!("aucune opération en cours"))?;
+    git(dir, &[kind.command(), "--continue"])
+}
+
+/// Résout un conflit en gardant une des deux versions.
+///
+/// `--ours` et `--theirs` de `git checkout` désignent, pendant un merge, la
+/// branche courante et celle qu'on intègre — et **s'inversent pendant un
+/// rebase**, où git rejoue nos commits par-dessus les leurs. Le drapeau est
+/// donc traduit ici plutôt qu'à l'appel : la vue parle de « la nôtre » et de
+/// « la leur » au sens de l'utilisateur, pas au sens de git.
+pub fn resolve(dir: &Path, path: &Path, ours: bool) -> Result<()> {
+    let swapped = matches!(pending(dir), Some(Pending::Rebase));
+    let flag = if ours != swapped {
+        "--ours"
+    } else {
+        "--theirs"
+    };
+    let mut args: Vec<OsString> = vec!["checkout".into(), flag.into(), "--".into()];
+    args.push(path.as_os_str().to_os_string());
+    git(dir, &args)?;
+    // Garder une version, c'est décider : le fichier passe à l'index, ce qui
+    // le fait sortir de la liste des conflits.
+    stage(dir, std::slice::from_ref(&path.to_path_buf()))
+}
+
 /// Vrai si le checkout a des modifications non validées, suivies ou non.
 pub fn is_dirty(dir: &Path) -> bool {
     git_opt(dir, &["status", "--porcelain"])

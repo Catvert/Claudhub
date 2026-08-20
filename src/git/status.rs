@@ -123,6 +123,12 @@ pub struct Status {
     pub ahead: usize,
     pub behind: usize,
     pub files: Vec<FileStatus>,
+    /// Merge, rebase ou picorage interrompu.
+    ///
+    /// Il vit dans le statut parce qu'il se lit au même moment et qu'il change
+    /// la lecture de tout le reste : tant qu'il dure, l'index porte des
+    /// conflits et `HEAD` ne désigne pas ce qu'on croit.
+    pub pending: Option<super::repo::Pending>,
 }
 
 impl Status {
@@ -164,7 +170,14 @@ pub fn status(dir: &Path) -> Result<Status> {
             "--untracked-files=all",
         ],
     )?;
-    Ok(parse(&out))
+    let mut status = parse(&out);
+    // Un `rev-parse` de plus par rafraîchissement, et rien qu'un : les
+    // marqueurs se lisent ensuite sur le disque. C'est le prix pour ne pas
+    // laisser l'utilisateur dans un état à mi-chemin que rien ne nomme.
+    status.pending = super::repo::git_dir(dir)
+        .as_deref()
+        .and_then(super::repo::pending_in);
+    Ok(status)
 }
 
 fn parse(out: &str) -> Status {

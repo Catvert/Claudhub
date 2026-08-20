@@ -33,8 +33,8 @@ use crate::ui::base_select::BaseChoice;
 use crate::ui::diff_view::Rendered;
 use crate::ui::icons::icon;
 use crate::ui::panels::{
-    BranchPanel, BranchesPanel, ChangesPanel, DiffPanel, HistoryPanel, NotesPanel, SidebarPanel,
-    TerminalPanel,
+    BranchPanel, BranchesPanel, ChangesPanel, ConflictsPanel, DiffPanel, HistoryPanel, NotesPanel,
+    SidebarPanel, TerminalPanel,
 };
 use crate::ui::settings::Settings;
 use crate::ui::store::Store;
@@ -46,7 +46,7 @@ const TERMINAL_HEIGHT: gpui::Pixels = px(280.);
 /// Version de la disposition enregistrée. À incrémenter quand les panneaux
 /// changent de nom ou de nature, pour que gpui-component écarte une
 /// disposition qu'il ne saurait plus reconstruire.
-const LAYOUT_VERSION: usize = 4;
+const LAYOUT_VERSION: usize = 5;
 
 /// Les panneaux de la disposition par défaut.
 struct DefaultPanels {
@@ -56,6 +56,7 @@ struct DefaultPanels {
     branch: Arc<dyn gpui_component::dock::PanelView>,
     history: Arc<dyn gpui_component::dock::PanelView>,
     notes: Arc<dyn gpui_component::dock::PanelView>,
+    conflicts: Arc<dyn gpui_component::dock::PanelView>,
     diff: Arc<dyn gpui_component::dock::PanelView>,
     terminal: Arc<dyn gpui_component::dock::PanelView>,
 }
@@ -126,6 +127,10 @@ fn install_default_layout(
                                 // dire. Elle se lit au même endroit que ce
                                 // qu'elle commente.
                                 panels.notes,
+                                // Masqué tant qu'il n'y a rien à résoudre : un
+                                // onglet permanent décalerait les autres pour
+                                // servir une fois sur cent.
+                                panels.conflicts,
                             ],
                             weak_dock,
                             window,
@@ -398,6 +403,16 @@ pub struct ClaudhubApp {
     pub(super) note_draft: Option<crate::ui::notes_view::NoteDraft>,
     /// Le panneau des notes ne montre-t-il que les non traitées.
     pub(super) notes_only_open: bool,
+    /// Le `wt.toml` de chaque dépôt ouvert, lu une fois. `None` : il n'en a
+    /// pas, et les gestes du projet disparaissent simplement du menu.
+    pub(super) wt_projects: HashMap<PathBuf, Option<crate::wt::Snapshot>>,
+    /// Ce que `wt` sait de chaque worktree : démarré ou non, ses adresses.
+    pub(super) wt_states: HashMap<PathBuf, crate::runtime::protocol::WtWorktree>,
+    /// La création guidée en cours.
+    pub(super) creation: Option<crate::ui::worktree_ops::Creation>,
+    /// Le worktree dont l'intégration est partie, et sa branche : c'est à
+    /// l'arrivée du succès qu'on propose de faire le ménage.
+    pub(super) integrated: Option<(PathBuf, String)>,
     pub(super) toast: Option<Toast>,
     /// Worktrees dont une lecture de statut est déjà partie.
     ///
@@ -525,6 +540,7 @@ impl ClaudhubApp {
         let branch = cx.new(|cx| BranchPanel::new(&this, cx));
         let history = cx.new(|cx| HistoryPanel::new(&this, cx));
         let notes = cx.new(|cx| NotesPanel::new(&this, cx));
+        let conflicts = cx.new(|cx| ConflictsPanel::new(&this, cx));
         let diff = cx.new(|cx| DiffPanel::new(&this, cx));
         let terminal = cx.new(|cx| TerminalPanel::new(&this, cx));
 
@@ -536,6 +552,7 @@ impl ClaudhubApp {
                 branch: Arc::new(branch),
                 history: Arc::new(history),
                 notes: Arc::new(notes),
+                conflicts: Arc::new(conflicts),
                 diff: Arc::new(diff),
                 terminal: Arc::new(terminal),
             };
@@ -568,6 +585,10 @@ impl ClaudhubApp {
             note_input,
             note_draft: None,
             notes_only_open: false,
+            wt_projects: HashMap::new(),
+            wt_states: HashMap::new(),
+            creation: None,
+            integrated: None,
             toast: None,
             pending_status: std::collections::HashSet::new(),
             dock,
@@ -647,6 +668,10 @@ impl ClaudhubApp {
             self.git.send(Cmd::LoadSummaries {
                 worktrees: worktrees.clone(),
             });
+            // Le relevé de `wt` suit celui des résumés : ce sont des commandes
+            // shell déclarées par le projet, une par worktree, et il n'y a
+            // aucune raison de les lancer plus souvent qu'un `git status`.
+            self.scan_wt();
         }
         let programs = Settings::global(cx).terminal.agent_programs();
         self.git.send(Cmd::ScanAgents {
@@ -777,6 +802,7 @@ impl ClaudhubApp {
                 });
                 Settings::update_global(cx, |s| s.remember_repository(&main));
                 self.forget_missing_worktrees(&main, cx);
+                self.ensure_wt_project(&main);
                 self.git.send(Cmd::LoadBranches { main });
                 if self.active.is_none() {
                     if let Some(path) = first {
@@ -894,6 +920,23 @@ impl ClaudhubApp {
             Evt::Summaries { summaries } => {
                 self.summaries.extend(summaries);
             }
+            Evt::WtProject { main, project } => {
+                self.wt_projects.insert(main, project);
+            }
+            Evt::WtQuestions {
+                main,
+                slug,
+                answers,
+                questions,
+            } => self.wt_questions_arrived(main, slug, answers, questions, window, cx),
+            Evt::WtTask {
+                worktree,
+                task,
+                launch,
+            } => self.wt_task_ready(worktree, task, launch, window, cx),
+            Evt::WtStates { states } => {
+                self.wt_states.extend(states);
+            }
             Evt::Agents { agents } => {
                 let mut next = HashMap::new();
                 let mut cpu = HashMap::new();
@@ -997,6 +1040,11 @@ impl ClaudhubApp {
                     SharedString::from(output.trim().to_string())
                 };
                 self.toast = Some(Toast { text, error: false });
+                // L'intégration a abouti : reste à décider du sort du worktree
+                // et de sa branche, que `wt` conserve délibérément.
+                if action == Action::Integrate {
+                    self.offer_cleanup(window, cx);
+                }
                 // Une opération qui a bougé HEAD change aussi les branches.
                 if matches!(
                     action,
@@ -1017,6 +1065,12 @@ impl ClaudhubApp {
                 // rafraîchissement ultérieur de ce worktree.
                 if let Some(worktree) = worktree.as_ref() {
                     self.pending_status.remove(worktree);
+                }
+                // Un drapeau d'intégration armé survivrait à l'échec et ferait
+                // proposer le ménage à la prochaine réussite, quelle qu'elle
+                // soit.
+                if action == Action::Integrate {
+                    self.integrated = None;
                 }
                 log::warn!("{action:?} a échoué : {message}");
                 self.toast = Some(Toast {
@@ -1475,7 +1529,7 @@ impl ClaudhubApp {
     /// jamais et n'ont pas à occuper la barre d'outils ; le message, lui, est
     /// épisodique, et une barre qui ne porte que lui reste vide la plupart du
     /// temps.
-    fn render_status_bar(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn render_status_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let (text, error) = match &self.toast {
             Some(t) => (t.text.clone(), t.error),
             None => (SharedString::default(), false),
@@ -1519,6 +1573,9 @@ impl ClaudhubApp {
                     .when(ahead > 0, |el| el.child(format!("↑{ahead}")))
                     .child(Divider::vertical().h(px(12.)))
             })
+            // Une opération à mi-chemin passe avant tout le reste : tant
+            // qu'elle dure, ce que la revue affiche n'est pas ce qu'on croit.
+            .children(self.render_pending_bar(cx))
             .when(unwatched, |el| {
                 el.child(
                     h_flex()
@@ -1645,6 +1702,7 @@ impl ClaudhubApp {
             branch: Arc::new(cx.new(|cx| BranchPanel::new(&this, cx))),
             history: Arc::new(cx.new(|cx| HistoryPanel::new(&this, cx))),
             notes: Arc::new(cx.new(|cx| NotesPanel::new(&this, cx))),
+            conflicts: Arc::new(cx.new(|cx| ConflictsPanel::new(&this, cx))),
             diff: Arc::new(cx.new(|cx| DiffPanel::new(&this, cx))),
             terminal: Arc::new(cx.new(|cx| TerminalPanel::new(&this, cx))),
         };

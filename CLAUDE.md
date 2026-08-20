@@ -23,6 +23,7 @@ elle ne fait jamais d'entrée-sortie**.
 
 ```
 src/
+  wt.rs         le `wt.toml` d'un projet : questions, tâches, statut, URLs
   git/          couche git — sous-processus `git`, testable sans gpui
     mod.rs      exécution des commandes (stdin fermé, LC_ALL=C, pas de pager)
     repo.rs     découverte, worktrees, écritures (stage, commit, push…)
@@ -48,6 +49,8 @@ src/
     sidebar.rs / review.rs / branches.rs / terminal_view.rs
     settings.rs     les réglages et leur global
     settings_view.rs  le formulaire, bâti sur `gpui_component::setting`
+    conflicts.rs    les conflits et le garde-fou d'une opération à mi-chemin
+    worktree_ops.rs création guidée, tâches du projet, intégration
     store.rs        ce qu'on retient par worktree : base, replis, notes
     notes.rs        le modèle des notes, leur ancrage et leur prompt
     notes_view.rs   les gestes de la relecture annotée et son panneau
@@ -640,6 +643,75 @@ d'un curseur.
 parenthèses, et il peut contenir des espaces et des parenthèses — découper la
 ligne sur les espaces décale tous les champs suivants. C'est le piège que tout
 parseur naïf de `/proc` rate, et un test le verrouille.
+
+### Intégrer un worktree
+
+`git/repo.rs` sait fusionner, rebaser, abandonner et reprendre. Trois choses
+n'y sont pas évidentes :
+
+- **`GIT_EDITOR=true` est posé globalement**, comme `GIT_TERMINAL_PROMPT=0` et
+  pour la même raison : `merge --continue` et `rebase --continue` ouvrent un
+  éditeur, et un worker bloqué sur un éditeur que personne ne voit ne revient
+  jamais.
+- **`--ours` et `--theirs` s'inversent pendant un rebase**, git rejouant nos
+  commits par-dessus les leurs. `repo::resolve` traduit donc le drapeau
+  lui-même : la vue parle de « la nôtre » au sens de l'utilisateur, pas au sens
+  de git.
+- **L'opération en cours vit dans `Status`** : elle se lit au même moment et
+  elle change la lecture de tout le reste. `pending_in` est libre et sans
+  sous-processus — `status` la rappelle à chaque écriture de fichier ; seul
+  `git rev-parse --git-dir` coûte un fork, et il en faut un parce que dans un
+  worktree lié les marqueurs vivent dans `<principal>/.git/worktrees/<nom>`.
+
+**Intégrer s'exécute depuis le dépôt principal**, et le worker vérifie d'abord
+qu'il est propre et positionné sur la base ; sinon il refuse et le dit. La
+vérification ne peut pas se faire dans la vue : elle ne connaît l'état d'un
+checkout que s'il a été ouvert, et le principal ne l'est pas toujours. Une fois
+la fusion faite, Claudhub propose de retirer le worktree et sa branche — `wt`
+conserve délibérément la branche, c'est donc une question à poser.
+
+Le panneau « Conflits » n'apparaît que quand il y a de quoi le remplir
+(`Panel::visible`, comme les terminaux). **Une vue à trois volets n'est pas
+promise** : garder la nôtre, garder la leur, marquer résolu, et l'éditeur pour
+le reste — c'est ce qu'on fait dans la grande majorité des cas, et une fusion à
+la main se fait dans un éditeur qui sait déjà la faire.
+
+### Le `wt.toml` comme système d'extension
+
+`wt` est une **dépendance**, pas un sous-processus : le dépôt est le nôtre, et
+parser la sortie de sa CLI — alignée, colorée, traduite — reviendrait à lire ce
+qui est fait pour un humain. Sa bibliothèque expose `config`, `git`, `state`,
+`ops`, `tmpl`, `util` ; sa CLI et son interface plein écran restent derrière la
+caractéristique `cli`, que Claudhub n'active pas — sans quoi il paierait
+ratatui et clap pour créer un dossier.
+
+Ce que cela donne : **le `wt.toml` d'un projet ajoute des actions à Claudhub
+sans que Claudhub les connaisse**. Ses `[tasks.*]` apparaissent dans le menu
+d'un worktree, ses `[[prompt]]` deviennent un dialogue, son `[status] up` une
+pastille, son `[open]` un bouton. Rien de tout cela n'est compilé ici.
+
+Trois règles à respecter :
+
+- **Tout appel à `ops::App` part dans un worker**, et sur la file longue (celle
+  du réseau) : un `post_new` installe des dépendances, un `up` démarre des
+  conteneurs. Les mettre avec les lectures figerait la revue le temps d'un
+  `composer install`.
+- **Les questions se demandent en boucle** (`Cmd::WtQuestions` → `Evt` →
+  `Cmd::WtQuestions`). Un `[[prompt]]` a un `when` qui peut dépendre d'une
+  réponse précédente : les poser toutes d'un coup ferait sauter celles qu'une
+  autre débloque. La boucle converge, et l'absence de nouvelle question est ce
+  qui déclenche la création.
+- **Les tâches partent dans un onglet de terminal, pas dans un panneau de
+  sortie.** Elles sont interactives, colorées, parfois longues.
+  `wt::task` rend les commandes — modèles résolus, environnement calculé — et
+  c'est le terminal qui les lance, dans un `sh -lc`. Le partage avec la
+  bibliothèque : ce qui tient une comptabilité (création, suppression, `up`,
+  `down`) passe par elle, qui alloue les ports et écrit l'état ; le reste passe
+  par le shell.
+
+Le relevé de `[status] up` et de `[open]` est une commande shell par worktree :
+**file de fond uniquement**, à la période des résumés, jamais devant un diff
+demandé.
 
 ### Les domaines de revue
 

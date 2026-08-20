@@ -22,7 +22,7 @@ pub mod status;
 pub use branch::{Branch, BranchKind, Upstream};
 pub use diff::{DiffFile, DiffLine, DiffLineKind, FileDiff, Hunk, Range as DiffRange};
 pub use history::{Commit, GraphRow, LogRange};
-pub use repo::{Repo, Worktree};
+pub use repo::{Pending, Repo, Worktree};
 pub use status::{FileStatus, Status, StatusCode, Summary};
 
 use std::ffi::OsStr;
@@ -202,6 +202,13 @@ fn command<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Command {
         // Un pager laisserait la commande attendre un lecteur qui n'existe pas.
         .env("GIT_PAGER", "cat")
         .env("GIT_TERMINAL_PROMPT", "0")
+        // Même raison que l'invite de mot de passe : aucune commande lancée
+        // ici n'a de message à faire écrire, et celles qui en ouvriraient un
+        // — `merge --continue`, `rebase --continue` — bloqueraient le worker
+        // pour toujours sur un éditeur que personne ne voit. `true` sort avec
+        // zéro sans rien modifier, ce que git lit comme « le message convient ».
+        .env("GIT_EDITOR", "true")
+        .env("GIT_SEQUENCE_EDITOR", "true")
         // Les sorties porcelain sont stables, mais les messages d'erreur que
         // nous affichons tels quels ne le sont pas : les lire en anglais évite
         // de dépendre de la locale de la machine pour les reconnaître.

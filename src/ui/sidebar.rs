@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use gpui::{div, prelude::*, px, Context, Window};
 use gpui_component::{
     button::{Button, ButtonVariants},
-    h_flex, v_flex, ActiveTheme, Sizable, StyledExt, WindowExt,
+    h_flex,
+    menu::ContextMenuExt,
+    v_flex, ActiveTheme, Sizable, StyledExt, WindowExt,
 };
 
 use crate::runtime::Cmd;
@@ -114,6 +116,12 @@ impl ClaudhubApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // Le `wt.toml` de chaque dépôt, demandé une fois : c'est lui qui
+        // décide de ce que le menu d'un worktree propose.
+        let mains: Vec<PathBuf> = self.repos.iter().map(|repo| repo.main.clone()).collect();
+        for main in &mains {
+            self.ensure_wt_project(main);
+        }
         let repos: Vec<_> = self
             .repos
             .iter()
@@ -280,7 +288,9 @@ impl ClaudhubApp {
                                                     active.as_deref() == Some(path.as_path());
                                                 let for_click = path.clone();
                                                 let for_remove = path.clone();
+                                                let for_menu = path.clone();
                                                 let repo_main = main.clone();
+                                                let for_menu_main = main.clone();
                                                 h_flex()
                                                     .id(("worktree", ix * 1000 + wix))
                                                     // Pas de hauteur fixe : la
@@ -363,6 +373,11 @@ impl ClaudhubApp {
                                                         summary.filter(|s| !s.is_empty()),
                                                         |el, summary| el.child(volume(summary, cx)),
                                                     )
+                                                    // Ce que `wt` sait de lui :
+                                                    // démarré ou non, et
+                                                    // l'adresse qu'il expose.
+                                                    .children(self.render_wt_state(&path, cx))
+                                                    .children(self.render_wt_links(&path, cx))
                                                     .when(prunable, |el| {
                                                         el.child(
                                                             icon("alert-circle")
@@ -395,6 +410,27 @@ impl ClaudhubApp {
                                                                 },
                                                             )),
                                                         )
+                                                    })
+                                                    // Le clic droit porte tout
+                                                    // ce que le projet ajoute :
+                                                    // Claudhub ne connaît ni
+                                                    // ses tâches ni ses hooks,
+                                                    // il les affiche.
+                                                    .context_menu({
+                                                        let entity = cx.entity();
+                                                        let (main, path) = (
+                                                            for_menu_main.clone(),
+                                                            for_menu.clone(),
+                                                        );
+                                                        move |menu, _window, cx| {
+                                                            let (main, path) =
+                                                                (main.clone(), path.clone());
+                                                            entity.update(cx, |this, cx| {
+                                                                this.worktree_menu(
+                                                                    menu, main, path, cx,
+                                                                )
+                                                            })
+                                                        }
                                                     })
                                             },
                                         ))
@@ -433,29 +469,12 @@ impl ClaudhubApp {
             tr!("worktree-new-placeholder"),
             window,
             cx,
-            move |this, name, _window, cx| {
-                let name = name.trim();
-                if name.is_empty() {
-                    return;
-                }
-                // Le worktree est créé à côté du dépôt, dans `<dépôt>-wt/<nom>`
-                // — la convention de `wt`, pour que les deux outils voient les
-                // mêmes dossiers.
-                let repo_name = main
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "repo".into());
-                let root = main
-                    .parent()
-                    .map(|p| p.join(format!("{repo_name}-wt")))
-                    .unwrap_or_else(|| main.join("worktrees"));
-                this.git.send(Cmd::AddWorktree {
-                    main: main.clone(),
-                    path: root.join(name),
-                    branch: format!("wt/{name}"),
-                    from: None,
-                });
-                cx.notify();
+            // Le nom saisi, puis ce que le projet demande : ses `[[prompt]]`
+            // deviennent un dialogue, ses copies et ses ports sont faits par
+            // `wt`. Sans `wt.toml`, l'ajout git nu suffit — un dépôt sans
+            // configuration doit pouvoir gagner un worktree quand même.
+            move |this, name, window, cx| {
+                this.start_worktree(main.clone(), name, None, window, cx);
             },
         );
     }

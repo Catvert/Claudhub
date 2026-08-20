@@ -597,62 +597,93 @@ fn terminal_page(
 }
 
 fn review_page() -> SettingPage {
-    SettingPage::new(tr!("settings-page-review")).group(
-        SettingGroup::new()
-            .title(tr!("settings-group-diff"))
-            .item(
-                SettingItem::new(
-                    tr!("settings-diff-context"),
-                    SettingField::number_input(
-                        NumberFieldOptions {
-                            min: 0.,
-                            max: 50.,
-                            step: 1.,
-                        },
-                        |cx: &App| Settings::global(cx).diff_context as f64,
-                        |value: f64, cx: &mut App| {
-                            Settings::update_global(cx, |s| {
-                                s.diff_context = value.clamp(0., 50.) as usize
-                            })
-                        },
+    SettingPage::new(tr!("settings-page-review"))
+        .group(
+            SettingGroup::new()
+                .title(tr!("settings-group-integration"))
+                .item(
+                    SettingItem::new(
+                        tr!("settings-update-rebase"),
+                        SettingField::switch(
+                            |cx: &App| Settings::global(cx).update_with_rebase,
+                            |value: bool, cx: &mut App| {
+                                Settings::update_global(cx, |s| s.update_with_rebase = value)
+                            },
+                        )
+                        .default_value(false),
                     )
-                    .default_value(3.0),
+                    .description(tr!("settings-update-rebase-help")),
                 )
-                .description(tr!("settings-diff-context-help")),
-            )
-            .item(SettingItem::render(|_, _, cx| {
-                div()
-                    .text_xs()
-                    .text_color(gpui_component::ActiveTheme::theme(cx).muted_foreground)
-                    .child(tr!("settings-diff-context-note"))
-            }))
-            .item(
-                SettingItem::new(
-                    tr!("settings-diff-whole-file"),
-                    SettingField::switch(
-                        |cx: &App| Settings::global(cx).diff_whole_file,
-                        |value: bool, cx: &mut App| {
-                            Settings::update_global(cx, |s| s.diff_whole_file = value)
-                        },
+                .item(
+                    SettingItem::new(
+                        tr!("settings-integrate-no-ff"),
+                        SettingField::switch(
+                            |cx: &App| Settings::global(cx).integrate_no_ff,
+                            |value: bool, cx: &mut App| {
+                                Settings::update_global(cx, |s| s.integrate_no_ff = value)
+                            },
+                        )
+                        .default_value(true),
                     )
-                    .default_value(false),
-                )
-                .description(tr!("settings-diff-whole-file-help")),
-            )
-            .item(
-                SettingItem::new(
-                    tr!("settings-diff-split"),
-                    SettingField::switch(
-                        |cx: &App| Settings::global(cx).diff_split,
-                        |value: bool, cx: &mut App| {
-                            Settings::update_global(cx, |s| s.diff_split = value)
-                        },
+                    .description(tr!("settings-integrate-no-ff-help")),
+                ),
+        )
+        .group(
+            SettingGroup::new()
+                .title(tr!("settings-group-diff"))
+                .item(
+                    SettingItem::new(
+                        tr!("settings-diff-context"),
+                        SettingField::number_input(
+                            NumberFieldOptions {
+                                min: 0.,
+                                max: 50.,
+                                step: 1.,
+                            },
+                            |cx: &App| Settings::global(cx).diff_context as f64,
+                            |value: f64, cx: &mut App| {
+                                Settings::update_global(cx, |s| {
+                                    s.diff_context = value.clamp(0., 50.) as usize
+                                })
+                            },
+                        )
+                        .default_value(3.0),
                     )
-                    .default_value(false),
+                    .description(tr!("settings-diff-context-help")),
                 )
-                .description(tr!("settings-diff-split-help")),
-            ),
-    )
+                .item(SettingItem::render(|_, _, cx| {
+                    div()
+                        .text_xs()
+                        .text_color(gpui_component::ActiveTheme::theme(cx).muted_foreground)
+                        .child(tr!("settings-diff-context-note"))
+                }))
+                .item(
+                    SettingItem::new(
+                        tr!("settings-diff-whole-file"),
+                        SettingField::switch(
+                            |cx: &App| Settings::global(cx).diff_whole_file,
+                            |value: bool, cx: &mut App| {
+                                Settings::update_global(cx, |s| s.diff_whole_file = value)
+                            },
+                        )
+                        .default_value(false),
+                    )
+                    .description(tr!("settings-diff-whole-file-help")),
+                )
+                .item(
+                    SettingItem::new(
+                        tr!("settings-diff-split"),
+                        SettingField::switch(
+                            |cx: &App| Settings::global(cx).diff_split,
+                            |value: bool, cx: &mut App| {
+                                Settings::update_global(cx, |s| s.diff_split = value)
+                            },
+                        )
+                        .default_value(false),
+                    )
+                    .description(tr!("settings-diff-split-help")),
+                ),
+        )
 }
 
 /// Bornes communes aux tailles de texte, les mêmes que celles de la molette.
