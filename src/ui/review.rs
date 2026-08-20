@@ -239,10 +239,10 @@ impl ClaudhubApp {
             DiffRange::Commit { id, .. } => format!("commit-{id}"),
         };
 
+        // Sans filet droit : c'était la couture avec le diff voisin, du temps
+        // où les panneaux se touchaient — la gouttière les sépare désormais.
         v_flex()
             .size_full()
-            .border_r_1()
-            .border_color(cx.theme().border)
             .when(!matches!(range, DiffRange::Working), |el| {
                 el.child(self.render_base_bar(cx))
             })

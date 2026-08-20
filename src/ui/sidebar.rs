@@ -166,12 +166,14 @@ impl ClaudhubApp {
         let active = self.active.clone();
         let empty = repos.is_empty();
 
+        // Ni fond `sidebar`, ni filet droit : des reliques de l'époque des
+        // panneaux cousus bord à bord. Le fond vient de la carte — un jeton
+        // proche-mais-pas-égal repeindrait par-dessus ses coins arrondis, et
+        // c'est ce qui faisait de « Dépôts » la seule carte d'une autre
+        // couleur, carrée en bas.
         v_flex()
             .size_full()
             .min_w(px(160.))
-            .bg(cx.theme().sidebar)
-            .border_r_1()
-            .border_color(cx.theme().border)
             .child(
                 h_flex()
                     .py_1()
