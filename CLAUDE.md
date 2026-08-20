@@ -1184,7 +1184,12 @@ parser la sortie de sa CLI — alignée, colorée, traduite — reviendrait à l
 qui est fait pour un humain. Sa bibliothèque expose `config`, `git`, `state`,
 `ops`, `tmpl`, `util` ; sa CLI et son interface plein écran restent derrière la
 caractéristique `cli`, que Claudhub n'active pas — sans quoi il paierait
-ratatui et clap pour créer un dossier.
+ratatui, clap et skim pour créer un dossier.
+
+Elle vient du **dépôt distant**, `branch = "main"`, et non d'un chemin voisin :
+Claudhub se compile ainsi sur une machine qui n'a pas `wt` à côté. Suivre une
+branche ne rend pas la version flottante — `Cargo.lock` fige le commit, et il
+faut un `cargo update -p wt` pour en changer.
 
 Ce que cela donne : **le `wt.toml` d'un projet ajoute des actions à Claudhub
 sans que Claudhub les connaisse**. Ses `[tasks.*]` apparaissent dans le menu

@@ -37,8 +37,13 @@ notify-debouncer-full = "0.5"
 # `wt`, le gestionnaire de worktrees, en bibliothèque : c'est son `wt.toml`
 # qui sert de système d'extension à Claudhub — tâches, questions, statuts,
 # URLs. `default-features = false` écarte sa CLI et son interface plein écran,
-# donc clap et ratatui : nous n'appelons que le cœur.
-wt = { path = "../wt", default-features = false }
+# donc clap, ratatui et skim : nous n'appelons que le cœur.
+#
+# Par le dépôt distant et non par un chemin : Claudhub se compile alors sur une
+# machine qui n'a pas `wt` à côté. `Cargo.lock` fige le commit — suivre `main`
+# ne veut donc pas dire qu'un `cargo build` change de version tout seul, il
+# faut un `cargo update -p wt`.
+wt = { git = "https://github.com/Catvert/wt.git", branch = "main", default-features = false }
 
 # HTTP bloquant pour l'API Sentry : `ureq` épouse le modèle à threads du
 # runtime — un appel, une attente, rien à entrelacer — là où un client async
