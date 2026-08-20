@@ -45,9 +45,34 @@ pub enum Entry {
 /// celui d'un `BTreeMap`, et il doit être stable d'un rafraîchissement à
 /// l'autre — une liste qui se réordonne à chaque `git status` est illisible.
 pub fn build(paths: &[PathBuf], collapsed: &HashSet<PathBuf>) -> Vec<Entry> {
+    build_subset(paths, None, collapsed)
+}
+
+/// La même chose, restreinte à une partie des chemins.
+///
+/// C'est ce dont une recherche a besoin : les indices rendus désignent
+/// toujours la liste **entière**, celle que l'appelant tient, et non le
+/// sous-ensemble — sans quoi il faudrait une table de correspondance à chaque
+/// frappe, et la ligne cliquée n'ouvrirait pas le bon fichier.
+pub fn build_subset(
+    paths: &[PathBuf],
+    keep: Option<&[usize]>,
+    collapsed: &HashSet<PathBuf>,
+) -> Vec<Entry> {
     let mut root = Node::default();
-    for (index, path) in paths.iter().enumerate() {
-        root.insert(path, index);
+    match keep {
+        Some(keep) => {
+            for &index in keep {
+                if let Some(path) = paths.get(index) {
+                    root.insert(path, index);
+                }
+            }
+        }
+        None => {
+            for (index, path) in paths.iter().enumerate() {
+                root.insert(path, index);
+            }
+        }
     }
     let mut out = Vec::new();
     emit(&root, paths, Path::new(""), 0, collapsed, &mut out);
@@ -188,6 +213,19 @@ mod tests {
                 assert_eq!(leaves, &vec![0, 1]);
             }
             other => panic!("attendu un dossier : {other:?}"),
+        }
+    }
+
+    /// Les indices rendus désignent la liste entière, pas le sous-ensemble :
+    /// c'est ce qui permet de filtrer sans table de correspondance.
+    #[test]
+    fn a_subset_still_indexes_the_whole_list() {
+        let paths = paths(&["a.rs", "src/b.rs", "src/c.rs"]);
+        let entries = build_subset(&paths, Some(&[2]), &HashSet::new());
+        assert_eq!(labels(&entries, &paths), vec!["src/", "  c.rs"]);
+        match entries[1] {
+            Entry::Leaf { index, .. } => assert_eq!(index, 2),
+            _ => panic!("attendu une feuille"),
         }
     }
 

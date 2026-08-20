@@ -468,15 +468,24 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let notes_scroll = self.scroll_of("notes");
+        let find = self.render_find(crate::ui::find::Pane::Notes, cx);
+        let query = self.query(crate::ui::find::Pane::Notes, cx);
         let Some(state) = self.active_review() else {
             return empty_notes(tr!("no-worktree"), cx).into_any_element();
         };
         let only_open = self.notes_only_open;
         let drifted = state.drifted.clone();
+        // La recherche porte sur la remarque, sur le code cité et sur le
+        // chemin : les trois par lesquels on retrouve une note.
         let notes: Vec<Note> = state
             .notes
             .iter()
             .filter(|note| !only_open || !note.done)
+            .filter(|note| {
+                crate::ui::find::matches(&query, &note.body)
+                    || crate::ui::find::matches(&query, &note.excerpt)
+                    || crate::ui::find::matches(&query, &note.path.to_string_lossy())
+            })
             .cloned()
             .collect();
         let total = state.notes.len();
@@ -522,6 +531,7 @@ impl ClaudhubApp {
             return v_flex()
                 .size_full()
                 .child(bar)
+                .children(find)
                 .child(empty_notes(
                     if total == 0 {
                         tr!("note-empty")
@@ -577,6 +587,7 @@ impl ClaudhubApp {
         v_flex()
             .size_full()
             .child(bar)
+            .children(find)
             .child(
                 div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
                     "notes-bar",

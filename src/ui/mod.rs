@@ -13,6 +13,7 @@ mod conflicts;
 mod diff_view;
 mod explorer;
 mod file_icons;
+mod find;
 mod highlight;
 mod history_view;
 mod icons;

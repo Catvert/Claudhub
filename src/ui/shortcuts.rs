@@ -39,7 +39,11 @@ actions!(
         AnnotateSelection,
         AskAgent,
         SendNotes,
-        SaveFile
+        SaveFile,
+        Find,
+        CloseFind,
+        FindNext,
+        FindPrevious
     ]
 );
 
@@ -95,6 +99,18 @@ const TERMINAL_PREDICATE: &str = "ClaudhubTerminal";
 pub fn terminal_context() -> KeyContext {
     let mut context = KeyContext::default();
     context.add("ClaudhubTerminal");
+    context
+}
+
+/// Contexte déclaré par une barre de recherche.
+///
+/// `Échap` la ferme, et n'a rien à fermer ailleurs : la lier globalement
+/// ferait d'une touche d'annulation universelle le geste d'un panneau.
+const FIND_PREDICATE: &str = "ClaudhubFind";
+
+pub fn find_context() -> KeyContext {
+    let mut context = KeyContext::default();
+    context.add("ClaudhubFind");
     context
 }
 
@@ -154,6 +170,13 @@ pub fn init(cx: &mut App) {
             Some(TERMINAL_PREDICATE),
         ),
         KeyBinding::new("secondary-shift-a", SelectAllText, Some(TERMINAL_PREDICATE)),
+        // Chercher dans le panneau où le dernier clic a eu lieu. `Ctrl+F` est
+        // la convention partout, et la touche système ne part jamais au pty.
+        KeyBinding::new("secondary-f", Find, Some(PREDICATE)),
+        KeyBinding::new("escape", CloseFind, Some(FIND_PREDICATE)),
+        KeyBinding::new("shift-enter", FindPrevious, Some(FIND_PREDICATE)),
+        KeyBinding::new("secondary-g", FindNext, Some(PREDICATE)),
+        KeyBinding::new("secondary-shift-g", FindPrevious, Some(PREDICATE)),
     ]);
 }
 
@@ -416,4 +439,40 @@ pub fn save_file(
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.save_file(cx);
+}
+
+pub fn find(
+    this: &mut ClaudhubApp,
+    _: &Find,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.open_find(window, cx);
+}
+
+pub fn close_find(
+    this: &mut ClaudhubApp,
+    _: &CloseFind,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.close_find(window, cx);
+}
+
+pub fn find_next(
+    this: &mut ClaudhubApp,
+    _: &FindNext,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.find_step(1, cx);
+}
+
+pub fn find_previous(
+    this: &mut ClaudhubApp,
+    _: &FindPrevious,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.find_step(-1, cx);
 }

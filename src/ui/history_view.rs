@@ -136,11 +136,60 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    /// Un commit correspond-il à la requête ? Son sujet, son auteur, son
+    /// abrégé : les trois choses par lesquelles on retrouve un commit.
+    pub(super) fn commit_matches(commit: &crate::git::Commit, query: &str) -> bool {
+        crate::ui::find::matches(query, &commit.summary)
+            || crate::ui::find::matches(query, &commit.author)
+            || crate::ui::find::matches(query, &commit.short)
+    }
+
+    /// Sélectionne le commit trouvé suivant, et l'amène dans la vue.
+    ///
+    /// Le graphe interdit de filtrer : ses traits relient une ligne à ses
+    /// voisines, et retirer une ligne du milieu ferait pointer chacun d'eux
+    /// sur le mauvais commit. La recherche éteint donc ce qui ne correspond
+    /// pas, et cette touche va d'une trouvaille à la suivante.
+    pub(super) fn step_history_match(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let query = self.query(crate::ui::find::Pane::History, cx);
+        if query.trim().is_empty() {
+            return;
+        }
+        let Some(state) = self.active_review() else {
+            return;
+        };
+        let Some(history) = state.history.clone() else {
+            return;
+        };
+        let selected = state.commit.clone();
+        let count = history.commits.len();
+        if count == 0 {
+            return;
+        }
+        let from = selected
+            .and_then(|id| history.commits.iter().position(|c| c.id == id))
+            .map(|index| index as isize)
+            .unwrap_or(if delta > 0 { -1 } else { count as isize });
+        // La recherche boucle : on cherche à faire le tour de ce qu'on a
+        // trouvé, pas à buter au bout de la liste.
+        for step in 1..=count as isize {
+            let index = (from + delta * step).rem_euclid(count as isize) as usize;
+            if Self::commit_matches(&history.commits[index], &query) {
+                self.open_commit(index, cx);
+                self.history_scroll
+                    .scroll_to_item(index, gpui::ScrollStrategy::Center);
+                return;
+            }
+        }
+    }
+
     pub(super) fn render_history(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let find = self.render_find(crate::ui::find::Pane::History, cx);
+        let query = self.query(crate::ui::find::Pane::History, cx);
         let Some(state) = self.active_review() else {
             return div().into_any_element();
         };
@@ -181,6 +230,7 @@ impl ClaudhubApp {
             return v_flex()
                 .size_full()
                 .child(header)
+                .children(find)
                 .child(
                     div()
                         .p_3()
@@ -194,6 +244,7 @@ impl ClaudhubApp {
             return v_flex()
                 .size_full()
                 .child(header)
+                .children(find)
                 .child(
                     div()
                         .p_3()
@@ -213,19 +264,30 @@ impl ClaudhubApp {
             .and_then(|state| state.commit.as_ref().map(|_| state.range.clone()))
             .filter(|range| matches!(range, DiffRange::Commit { .. }));
 
-        let graph = v_flex().size_full().child(header).child(
+        let graph = v_flex().size_full().child(header).children(find).child(
             div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
                 "history-bar",
                 &self.history_scroll,
                 uniform_list("history", count, move |visible, _window, cx| {
                     visible
                         .map(|ix| {
+                            // Filtrer est impossible ici : les traits du graphe
+                            // relient une ligne à ses voisines, et en retirer
+                            // une du milieu ferait pointer chacun d'eux sur le
+                            // mauvais commit. Ce qui ne correspond pas
+                            // s'éteint donc, et reste à sa place.
+                            let dimmed = !query.is_empty()
+                                && !history
+                                    .commits
+                                    .get(ix)
+                                    .is_some_and(|c| ClaudhubApp::commit_matches(c, &query));
                             render_commit(
                                 &history,
                                 ix,
                                 gutter,
                                 selected.as_deref(),
                                 row_height,
+                                dimmed,
                                 &entity,
                                 cx,
                             )
@@ -261,6 +323,8 @@ fn render_commit(
     gutter: Pixels,
     selected: Option<&str>,
     row_height: Pixels,
+    // Le commit ne correspond pas à la recherche en cours.
+    dimmed: bool,
     entity: &Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
@@ -293,6 +357,9 @@ fn render_commit(
         // réservée par la liste virtualisée et recouvre le résumé du commit.
         .overflow_hidden()
         .whitespace_nowrap()
+        // Éteint plutôt que masqué : la ligne garde sa place, donc le graphe
+        // garde ses traits.
+        .when(dimmed, |el| el.opacity(0.35))
         .cursor_pointer()
         .when(is_selected, |el| el.bg(accent))
         .hover(|s| s.bg(accent.opacity(0.5)))

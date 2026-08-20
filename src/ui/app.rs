@@ -485,6 +485,17 @@ pub struct ClaudhubApp {
     /// « Modifications » sont affichés en même temps, et une seule poignée les
     /// ferait défiler ensemble.
     file_scroll: HashMap<DiffRange, gpui::UniformListScrollHandle>,
+    /// La recherche de chaque panneau, créée à sa première ouverture.
+    pub(super) finders: HashMap<crate::ui::find::Pane, crate::ui::find::Finder>,
+    /// Le panneau où le dernier clic a eu lieu : c'est lui que `Ctrl+F` vise.
+    ///
+    /// Le clic et non le focus. Le dock de gpui-component pose le focus sur
+    /// l'onglet actif de chaque zone — il y en a trois affichées en même
+    /// temps — et rien ne dit laquelle l'utilisateur regarde ; le dernier
+    /// bouton enfoncé, si.
+    pub(super) pane: crate::ui::find::Pane,
+    /// Les occurrences trouvées dans le diff affiché.
+    pub(super) diff_search: crate::ui::find::DiffSearch,
     /// Poignées de défilement des panneaux qui ne sont **pas** virtualisés —
     /// les notes, les conflits, Sentry, la barre latérale. Une table plutôt
     /// qu'un champ par panneau : ce sont toutes la même chose, et elles ne
@@ -640,6 +651,11 @@ impl ClaudhubApp {
             branch_scroll: gpui::UniformListScrollHandle::new(),
             file_scroll: HashMap::new(),
             scrolls: HashMap::new(),
+            finders: HashMap::new(),
+            // Le diff par défaut : c'est le panneau qu'on regarde en arrivant,
+            // et le seul qui soit toujours là.
+            pane: crate::ui::find::Pane::Diff,
+            diff_search: crate::ui::find::DiffSearch::default(),
             branch_filter,
             history_split: cx.new(|_| gpui_component::resizable::ResizableState::default()),
             focus: cx.focus_handle(),
@@ -944,6 +960,9 @@ impl ClaudhubApp {
                         }
                         note = state.pending_note.take();
                         state.diff = Some(rendered);
+                        // Les occurrences portent des décalages dans un texte
+                        // qui vient d'être remplacé.
+                        self.diff_search.valid = false;
                     }
                 }
                 // Les lignes annotées se déduisent du diff qui vient
@@ -1687,6 +1706,10 @@ impl Render for ClaudhubApp {
             .on_action(cx.listener(super::shortcuts::ask_agent))
             .on_action(cx.listener(super::shortcuts::send_notes))
             .on_action(cx.listener(super::shortcuts::save_file))
+            .on_action(cx.listener(super::shortcuts::find))
+            .on_action(cx.listener(super::shortcuts::close_find))
+            .on_action(cx.listener(super::shortcuts::find_next))
+            .on_action(cx.listener(super::shortcuts::find_previous))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)

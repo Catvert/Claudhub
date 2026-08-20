@@ -86,8 +86,14 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let list_scroll = self.scroll_of("conflicts");
+        let find = self.render_find(crate::ui::find::Pane::Conflicts, cx);
+        let query = self.query(crate::ui::find::Pane::Conflicts, cx);
         let pending = self.pending_operation();
-        let files = self.conflicted_files();
+        let files: Vec<_> = self
+            .conflicted_files()
+            .into_iter()
+            .filter(|path| crate::ui::find::matches(&query, &path.to_string_lossy()))
+            .collect();
         let range = crate::git::DiffRange::Working;
         let selected = self
             .active_review()
@@ -120,6 +126,7 @@ impl ClaudhubApp {
             return v_flex()
                 .size_full()
                 .child(bar)
+                .children(find)
                 .child(
                     v_flex()
                         .size_full()
@@ -147,6 +154,7 @@ impl ClaudhubApp {
         v_flex()
             .size_full()
             .child(bar)
+            .children(find)
             .child(
                 div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
                     "conflict-bar",

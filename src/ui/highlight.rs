@@ -321,8 +321,142 @@ pub fn language_for_path(path: &Path) -> Option<&'static str> {
     })
 }
 
+/// Pose des fonds par-dessus une coloration existante.
+///
+/// C'est ce qui rend visible une occurrence de recherche **dans** du code
+/// coloré : le fond marque la trouvaille, la grammaire garde ses couleurs de
+/// texte. Repeindre la ligne entière ferait perdre l'un ou l'autre.
+///
+/// Les deux invariants de `with_highlights` valent ici aussi, et gpui n'en
+/// vérifie aucun : les plages rendues sont **triées et disjointes** — la
+/// fonction convertit en longueurs de runs consécutives, et une plage
+/// désordonnée décale tout ce qui suit — et les décalages sont en **octets**.
+/// `base` et `marks` doivent l'être également, chacun de son côté ; ils
+/// peuvent en revanche se chevaucher entre eux, c'est même le cas courant.
+pub fn overlay(
+    base: &[(Range<usize>, HighlightStyle)],
+    marks: &[(Range<usize>, gpui::Hsla)],
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    if marks.is_empty() {
+        return base.to_vec();
+    }
+    // Toutes les frontières des deux découpages : entre deux d'entre elles, ni
+    // le style de fond ni celui du texte ne change, et le segment est donc
+    // uniforme par construction.
+    let mut cuts: Vec<usize> = Vec::with_capacity((base.len() + marks.len()) * 2);
+    for (range, _) in base {
+        cuts.push(range.start);
+        cuts.push(range.end);
+    }
+    for (range, _) in marks {
+        cuts.push(range.start);
+        cuts.push(range.end);
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+
+    let mut out: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
+    for pair in cuts.windows(2) {
+        let (start, end) = (pair[0], pair[1]);
+        let style = base
+            .iter()
+            .find(|(range, _)| range.start <= start && end <= range.end)
+            .map(|(_, style)| *style);
+        let mark = marks
+            .iter()
+            .find(|(range, _)| range.start <= start && end <= range.end)
+            .map(|(_, color)| *color);
+        let (Some(mut style), mark) = (style.or(mark.map(|_| HighlightStyle::default())), mark)
+        else {
+            // Ni coloration ni occurrence : le texte reste au style ambiant,
+            // et une plage sans effet n'a rien à faire dans la liste.
+            continue;
+        };
+        if let Some(color) = mark {
+            style.background_color = Some(color);
+        }
+        // Deux segments voisins de même style se recollent : `with_highlights`
+        // en fait des runs, et deux runs identiques côte à côte sont un coût
+        // de mise en page pour rien.
+        match out.last_mut() {
+            Some((last, previous)) if last.end == start && *previous == style => last.end = end,
+            _ => out.push((start..end, style)),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    /// Un fond posé au milieu d'un mot coloré doit découper ce mot en trois,
+    /// et non remplacer sa couleur.
+    #[test]
+    fn a_mark_splits_the_style_it_falls_inside() {
+        let red = HighlightStyle {
+            color: Some(gpui::red()),
+            ..Default::default()
+        };
+        let base = vec![(0..10, red)];
+        let yellow = gpui::yellow();
+        let out = overlay(&base, &[(3..6, yellow)]);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].0, 0..3);
+        assert_eq!(out[1].0, 3..6);
+        assert_eq!(out[2].0, 6..10);
+        assert_eq!(out[0].1.color, Some(gpui::red()));
+        assert_eq!(
+            out[1].1.color,
+            Some(gpui::red()),
+            "le texte garde sa couleur"
+        );
+        assert_eq!(out[1].1.background_color, Some(yellow));
+        assert!(out[0].1.background_color.is_none());
+    }
+
+    /// Sans coloration dessous, l'occurrence est le seul style de la ligne.
+    #[test]
+    fn a_mark_on_bare_text_stands_alone() {
+        let yellow = gpui::yellow();
+        let out = overlay(&[], &[(2..4, yellow)]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, 2..4);
+        assert_eq!(out[0].1.background_color, Some(yellow));
+    }
+
+    /// L'invariant que gpui ne vérifie pas : trié et disjoint.
+    #[test]
+    fn the_result_stays_sorted_and_disjoint() {
+        let style = |c| HighlightStyle {
+            color: Some(c),
+            ..Default::default()
+        };
+        let base = vec![(0..4, style(gpui::red())), (8..12, style(gpui::blue()))];
+        let out = overlay(&base, &[(2..10, gpui::yellow())]);
+        let mut previous = 0;
+        for (range, _) in &out {
+            assert!(range.start >= previous, "plages désordonnées : {out:?}");
+            assert!(range.start < range.end, "plage vide : {out:?}");
+            previous = range.end;
+        }
+        // Le trou entre les deux plages colorées est couvert par l'occurrence,
+        // et n'est donc pas perdu.
+        assert!(out.iter().any(|(range, _)| range == &(4..8)));
+    }
+
+    /// Sans occurrence, rien ne change : c'est le cas de presque toutes les
+    /// lignes de presque toutes les frames.
+    #[test]
+    fn no_mark_returns_the_colouring_untouched() {
+        let base = vec![(
+            0..3,
+            HighlightStyle {
+                color: Some(gpui::red()),
+                ..Default::default()
+            },
+        )];
+        assert_eq!(overlay(&base, &[]), base);
+    }
+
     use super::*;
     use crate::git::{DiffLine, Hunk};
 

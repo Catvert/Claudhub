@@ -204,6 +204,8 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let issues_scroll = self.scroll_of("sentry-issues");
+        let find = self.render_find(crate::ui::find::Pane::Sentry, cx);
+        let query = self.query(crate::ui::find::Pane::Sentry, cx);
         let org = Settings::global(cx).sentry_org.trim().to_string();
         let project = self.sentry_project(cx);
         let muted = cx.theme().muted_foreground;
@@ -261,12 +263,25 @@ impl ClaudhubApp {
             self.load_issues(cx);
         }
 
-        let issues = self.sentry.issues.clone();
+        // Le filtre porte sur ce qui est déjà chargé, et non sur la requête
+        // envoyée à Sentry (`sentry_query`, un réglage) : on cherche parmi les
+        // issues qu'on a sous les yeux, sans attendre un aller-retour réseau.
+        let issues: Vec<_> = self
+            .sentry
+            .issues
+            .iter()
+            .filter(|issue| {
+                crate::ui::find::matches(&query, &issue.title)
+                    || crate::ui::find::matches(&query, &issue.culprit)
+            })
+            .cloned()
+            .collect();
         let selected = self.sentry.selected.clone();
         if issues.is_empty() {
             return v_flex()
                 .size_full()
                 .child(bar)
+                .children(find)
                 .child(empty(
                     if self.sentry.loading {
                         tr!("sentry-loading")
@@ -286,6 +301,7 @@ impl ClaudhubApp {
         v_flex()
             .size_full()
             .child(bar)
+            .children(find)
             .child(
                 div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
                     "sentry-issues-bar",

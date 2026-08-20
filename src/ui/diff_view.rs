@@ -155,6 +155,25 @@ impl Rendered {
         bounds
     }
 
+    /// L'indice, dans la liste **affichée**, d'une ligne désignée par son
+    /// hunk et son rang.
+    ///
+    /// Une occurrence de recherche porte sur le texte du fichier, pas sur une
+    /// entrée de liste : c'est la traduction qui manque entre les deux, et
+    /// elle dépend de la disposition — appariées, une suppression et l'ajout
+    /// qui lui répond tiennent sur une même entrée en deux colonnes.
+    pub fn display_row(&self, hunk: usize, line: usize, split: bool) -> Option<usize> {
+        let unified = self.rows.iter().position(
+            |row| matches!(row, Row::Line { hunk: h, line: l } if *h == hunk && *l == line),
+        )?;
+        if !split {
+            return Some(unified);
+        }
+        self.split
+            .iter()
+            .position(|row| row.unified().any(|index| index == unified))
+    }
+
     /// Les indices des en-têtes de hunk dans la liste affichée, en ordre
     /// croissant.
     pub fn headers(&self, split: bool) -> Vec<usize> {
@@ -548,6 +567,86 @@ impl ClaudhubApp {
         self.announce(tr!("copy-path-done"), cx);
     }
 
+    /// Recalcule les occurrences du diff affiché, si la requête ou le diff a
+    /// changé.
+    ///
+    /// Appelée au rendu, mais elle ne travaille qu'aux changements : la
+    /// comparaison d'une chaîne par frame est ce que coûte le fait de ne pas
+    /// avoir à prévenir tous les endroits d'où une requête peut changer.
+    pub(super) fn refresh_diff_search(&mut self, query: &str) {
+        if self.diff_search.valid && self.diff_search.query == query {
+            return;
+        }
+        let mut hits = Vec::new();
+        if let Some(diff) = self.active_review().and_then(|state| state.diff.clone()) {
+            for (h, hunk) in diff.file.hunks.iter().enumerate() {
+                for (l, line) in hunk.lines.iter().enumerate() {
+                    hits.extend(
+                        crate::ui::find::find_all(query, &line.text)
+                            .into_iter()
+                            .map(|range| crate::ui::find::Hit {
+                                hunk: h,
+                                line: l,
+                                range,
+                            }),
+                    );
+                }
+            }
+        }
+        // Rangées par ligne parce que c'est ainsi que le rendu les consulte,
+        // et qu'il le fait pour chaque ligne visible de chaque frame.
+        let mut by_line: std::collections::HashMap<(usize, usize), Vec<std::ops::Range<usize>>> =
+            std::collections::HashMap::new();
+        for hit in &hits {
+            by_line
+                .entry((hit.hunk, hit.line))
+                .or_default()
+                .push(hit.range.clone());
+        }
+        self.diff_search = crate::ui::find::DiffSearch {
+            query: query.to_string(),
+            valid: true,
+            hits: std::rc::Rc::new(hits),
+            by_line: std::rc::Rc::new(by_line),
+            current: 0,
+        };
+    }
+
+    /// Passe à l'occurrence suivante ou précédente, en bouclant.
+    ///
+    /// Elle boucle, contrairement à la relecture au clavier qui bute aux deux
+    /// bouts : une recherche qui s'arrête à la dernière occurrence oblige à
+    /// remonter à la main pour revoir la première, alors qu'on cherche
+    /// justement à faire le tour de ce qu'on a trouvé.
+    pub(super) fn step_diff_match(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let query = self.query(crate::ui::find::Pane::Diff, cx);
+        self.refresh_diff_search(&query);
+        let total = self.diff_search.hits.len();
+        if total == 0 {
+            return;
+        }
+        let current =
+            (self.diff_search.current as isize + delta).rem_euclid(total as isize) as usize;
+        self.diff_search.current = current;
+        let Some(hit) = self.diff_search.hits.get(current).cloned() else {
+            return;
+        };
+        let split = crate::ui::settings::Settings::global(cx).diff_split;
+        let row = self
+            .active_review()
+            .and_then(|state| state.diff.as_ref())
+            .and_then(|diff| diff.display_row(hit.hunk, hit.line, split));
+        let Some(row) = row else {
+            return;
+        };
+        if let Some(state) = self.active_review_mut() {
+            state.diff_selection = Some((row, row));
+        }
+        self.diff_scroll
+            .scroll_to_item(row, gpui::ScrollStrategy::Center);
+        cx.notify();
+    }
+
     /// Déplace la sélection d'une ligne, et la ramène dans la vue.
     ///
     /// `extend` garde l'ancre en place : c'est Maj+flèche, qui prend un bloc
@@ -682,6 +781,12 @@ impl ClaudhubApp {
         if let Some(editor) = self.render_editor(window, cx) {
             return editor.into_any_element();
         }
+        // Les occurrences sont recalculées ici plutôt qu'à chaque endroit d'où
+        // la requête peut changer : la comparaison d'une chaîne par frame est
+        // le prix de n'avoir personne à prévenir.
+        let query = self.query(crate::ui::find::Pane::Diff, cx);
+        self.refresh_diff_search(&query);
+        let find = self.render_find(crate::ui::find::Pane::Diff, cx);
         let Some(state) = self.active_review() else {
             return div().into_any_element();
         };
@@ -853,10 +958,20 @@ impl ClaudhubApp {
             .map(|state| state.note_marks.clone())
             .unwrap_or_default();
         let note_color = cx.theme().warning;
+        // Les occurrences sont rangées par ligne à chaque changement de
+        // requête ou de diff, et la fermeture ci-dessous ne fait que les
+        // consulter : elle tourne pour chaque ligne visible de chaque frame.
+        let search = SearchPaint {
+            by_line: self.diff_search.by_line.clone(),
+            current: self.diff_search.hits.get(self.diff_search.current).cloned(),
+            color: crate::ui::find::highlight_color(false, cx),
+            current_color: crate::ui::find::highlight_color(true, cx),
+        };
 
         v_flex()
             .size_full()
             .child(header)
+            .children(find)
             .child(
                 div()
                     .id("diff-zoom")
@@ -886,7 +1001,8 @@ impl ClaudhubApp {
                                     };
                                     if split {
                                         render_split_row(
-                                            &rows, ix, &colors, column, &style, &entity, cx,
+                                            &rows, ix, &colors, column, &style, &search, &entity,
+                                            cx,
                                         )
                                     } else {
                                         render_row(
@@ -895,6 +1011,7 @@ impl ClaudhubApp {
                                             &colors,
                                             content_width,
                                             &style,
+                                            &search,
                                             &entity,
                                             cx,
                                         )
@@ -971,6 +1088,46 @@ impl ClaudhubApp {
     }
 }
 
+/// Ce que la recherche pose sur les lignes du diff.
+///
+/// Vide la plupart du temps, et c'est ce qui compte : sans requête,
+/// `by_line` l'est aussi, `marks` rend une tranche vide sans rien allouer, et
+/// la coloration passe exactement par le chemin qu'elle prenait avant.
+#[derive(Clone)]
+pub struct SearchPaint {
+    pub by_line: crate::ui::find::MatchesByLine,
+    /// L'occurrence courante, peinte plus vivement que les autres : dans un
+    /// fichier qui en compte quarante, « où en suis-je » est la question.
+    pub current: Option<crate::ui::find::Hit>,
+    pub color: gpui::Hsla,
+    pub current_color: gpui::Hsla,
+}
+
+impl SearchPaint {
+    fn marks(&self, hunk: usize, line: usize) -> Vec<(std::ops::Range<usize>, gpui::Hsla)> {
+        let Some(ranges) = self.by_line.get(&(hunk, line)) else {
+            return Vec::new();
+        };
+        ranges
+            .iter()
+            .map(|range| {
+                let current = self
+                    .current
+                    .as_ref()
+                    .is_some_and(|hit| hit.hunk == hunk && hit.line == line && hit.range == *range);
+                (
+                    range.clone(),
+                    if current {
+                        self.current_color
+                    } else {
+                        self.color
+                    },
+                )
+            })
+            .collect()
+    }
+}
+
 /// Ce qui change d'une entrée à l'autre sans venir du diff : l'état de la
 /// sélection, l'annotation, la géométrie.
 ///
@@ -988,12 +1145,14 @@ pub struct RowStyle {
     pub note_color: gpui::Hsla,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_row(
     diff: &Rc<Rendered>,
     index: usize,
     colors: &DiffColors,
     content_width: Pixels,
     style: &RowStyle,
+    search: &SearchPaint,
     entity: &Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
@@ -1010,7 +1169,7 @@ fn render_row(
                 return div().into_any_element();
             };
             let (bg, fg) = line_colors(source.kind, colors);
-            let content = line_content(diff, hunk, line, fg);
+            let content = line_content(diff, hunk, line, fg, &search.marks(hunk, line));
 
             let for_drag = entity.clone();
             let entity = entity.clone();
@@ -1148,31 +1307,43 @@ fn line_content(
     hunk: usize,
     line: usize,
     fg: Option<gpui::Hsla>,
+    marks: &[(std::ops::Range<usize>, gpui::Hsla)],
 ) -> gpui::AnyElement {
     let Some(source) = diff.file.hunks.get(hunk).and_then(|h| h.lines.get(line)) else {
         return div().into_any_element();
     };
     let text = SharedString::from(source.text.clone());
     let styles = diff.highlights.line(hunk, line);
-    if styles.is_empty() {
-        div()
-            .when_some(fg, |el, fg| el.text_color(fg))
-            .child(text)
-            .into_any_element()
-    } else {
-        StyledText::new(text)
-            .with_highlights(styles.iter().cloned())
-            .into_any_element()
+    if marks.is_empty() {
+        return if styles.is_empty() {
+            div()
+                .when_some(fg, |el, fg| el.text_color(fg))
+                .child(text)
+                .into_any_element()
+        } else {
+            StyledText::new(text)
+                .with_highlights(styles.iter().cloned())
+                .into_any_element()
+        };
     }
+    // La couleur d'ajout ou de suppression reste portée par le conteneur
+    // quand la grammaire n'a rien à dire : sans elle, une ligne trouvée dans
+    // un fichier sans grammaire perdrait sa teinte de diff.
+    div()
+        .when_some(fg.filter(|_| styles.is_empty()), |el, fg| el.text_color(fg))
+        .child(StyledText::new(text).with_highlights(crate::ui::highlight::overlay(styles, marks)))
+        .into_any_element()
 }
 
 /// Une entrée de la vue en deux colonnes.
+#[allow(clippy::too_many_arguments)]
 fn render_split_row(
     diff: &Rc<Rendered>,
     index: usize,
     colors: &DiffColors,
     column: Pixels,
     style: &RowStyle,
+    search: &SearchPaint,
     entity: &Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
@@ -1208,6 +1379,7 @@ fn render_split_row(
             column,
             selected,
             selection_bg,
+            search,
         ))
         .child(half(
             diff,
@@ -1218,6 +1390,7 @@ fn render_split_row(
             column,
             selected,
             selection_bg,
+            search,
         ))
         .into_any_element()
 }
@@ -1256,6 +1429,7 @@ fn half(
     column: Pixels,
     selected: bool,
     selection_bg: gpui::Hsla,
+    search: &SearchPaint,
 ) -> gpui::AnyElement {
     let source = row
         .and_then(|index| diff.rows.get(index).copied())
@@ -1311,7 +1485,13 @@ fn half(
                 .when_some(fg, |el, fg| el.text_color(fg))
                 .child(sign(kind)),
         )
-        .child(line_content(diff, hunk, line, fg))
+        .child(line_content(
+            diff,
+            hunk,
+            line,
+            fg,
+            &search.marks(hunk, line),
+        ))
         .into_any_element()
 }
 

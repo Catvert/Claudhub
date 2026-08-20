@@ -48,6 +48,9 @@ pub struct Explorer {
     pub pending: bool,
     /// Les fichiers ignorés étaient-ils demandés, pour savoir quand relire.
     pub ignored: bool,
+    /// La recherche pour laquelle `rows` a été construit. Comparée au rendu :
+    /// c'est le prix de n'avoir personne à prévenir quand elle change.
+    pub query: String,
 }
 
 impl Default for Explorer {
@@ -58,13 +61,32 @@ impl Default for Explorer {
             collapsed: std::collections::HashSet::new(),
             pending: false,
             ignored: false,
+            query: String::new(),
         }
     }
 }
 
 impl Explorer {
     fn rebuild(&mut self) {
-        self.rows = Rc::new(tree::build(&self.files, &self.collapsed));
+        // Pendant une recherche, les replis sont ignorés et l'arbre est réduit
+        // à ce qui correspond : un fichier trouvé dans un dossier fermé ne se
+        // verrait pas, et la recherche paraîtrait n'avoir rien trouvé.
+        let keep: Option<Vec<usize>> = (!self.query.trim().is_empty()).then(|| {
+            self.files
+                .iter()
+                .enumerate()
+                .filter(|(_, path)| crate::ui::find::matches(&self.query, &path.to_string_lossy()))
+                .map(|(index, _)| index)
+                .collect()
+        });
+        let open = std::collections::HashSet::new();
+        let collapsed = if keep.is_some() {
+            &open
+        } else {
+            &self.collapsed
+        };
+        let rows = tree::build_subset(&self.files, keep.as_deref(), collapsed);
+        self.rows = Rc::new(rows);
     }
 }
 
@@ -329,9 +351,16 @@ impl ClaudhubApp {
         self.ensure_project_files(cx);
         let ignored = Settings::global(cx).show_ignored_files;
         let scroll = self.files_scroll.clone();
-        let Some(explorer) = self.explorers.get(&worktree) else {
+        let find = self.render_find(crate::ui::find::Pane::Files, cx);
+        let query = self.query(crate::ui::find::Pane::Files, cx);
+        let Some(explorer) = self.explorers.get_mut(&worktree) else {
             return div().into_any_element();
         };
+        if explorer.query != query {
+            explorer.query = query;
+            explorer.rebuild();
+        }
+        let explorer = &*explorer;
         let rows = explorer.rows.clone();
         let files = Rc::new(explorer.files.clone());
         let count = rows.len();
@@ -403,6 +432,7 @@ impl ClaudhubApp {
         v_flex()
             .size_full()
             .child(bar)
+            .children(find)
             .child(
                 div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
                     "project-files-bar",

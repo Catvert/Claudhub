@@ -172,6 +172,16 @@ impl ClaudhubApp {
                 .into_any_element();
         };
 
+        // Deux panneaux affichent cette liste en même temps : chacun a sa
+        // recherche, sans quoi filtrer les modifications filtrerait aussi la
+        // revue de branche.
+        let pane = if matches!(range, DiffRange::Working) {
+            crate::ui::find::Pane::Changes
+        } else {
+            crate::ui::find::Pane::Branch
+        };
+        let find = self.render_find(pane, cx);
+        let query = self.query(pane, cx);
         // C'est le panneau qui demande sa liste : lui seul sait ce qu'il
         // affiche, et charger les deux domaines d'avance coûterait une
         // commande pour un onglet que personne n'ouvrira.
@@ -187,13 +197,30 @@ impl ClaudhubApp {
         // La liste plate reste la référence : c'est elle qui compte ce qui est
         // indexé et qui donne à la case d'un groupe les fichiers sur lesquels
         // agir, y compris ceux qu'un dossier replié cache.
-        let flat = self.rows(&range, cx);
+        // Le filtre s'applique à la liste plate, avant l'arborescence : c'est
+        // elle la référence, et un dossier dont plus rien ne reste doit
+        // disparaître avec ses fichiers.
+        let flat: Vec<Row> = self
+            .rows(&range, cx)
+            .into_iter()
+            .filter(|row| match row {
+                Row::File(file) => crate::ui::find::matches(&query, &file.path.to_string_lossy()),
+                _ => true,
+            })
+            .collect();
         let staged_count = flat
             .iter()
             .filter(|row| matches!(row, Row::File(file) if file.staged))
             .count();
+        // Pendant une recherche, les replis sont ignorés : un fichier trouvé
+        // dans un dossier fermé ne se verrait pas, et la recherche paraîtrait
+        // n'avoir rien trouvé.
         let rows = if crate::ui::settings::Settings::global(cx).review_tree {
-            tree_rows(&flat, &collapsed)
+            if query.trim().is_empty() {
+                tree_rows(&flat, &collapsed)
+            } else {
+                tree_rows(&flat, &HashSet::new())
+            }
         } else {
             flat.clone()
         };
@@ -217,6 +244,7 @@ impl ClaudhubApp {
             .when(matches!(range, DiffRange::Working), |el| {
                 el.child(self.render_changes_bar(cx))
             })
+            .children(find)
             .child(
                 div()
                     .flex_1()

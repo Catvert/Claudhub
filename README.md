@@ -159,6 +159,9 @@ le terminal.
 | `Ctrl+1` / `Ctrl+2` | modifications / revue de branche |
 | `Ctrl+H` | afficher/masquer l'historique |
 | `Ctrl+S` | enregistrer le fichier ouvert |
+| `Ctrl+F` | chercher dans le panneau où l'on vient de cliquer |
+| `Ctrl+G` / `Ctrl+Maj+G` | occurrence suivante / précédente |
+| `Échap` | fermer la recherche |
 | `Ctrl+Maj+N` | annoter les lignes sélectionnées |
 | `Ctrl+Maj+K` | poser une question à l'agent sur la sélection |
 | `Ctrl+Maj+E` | envoyer les remarques non traitées à l'agent |
@@ -169,10 +172,11 @@ le terminal.
 ## Ce qui n'y est pas encore
 
 - Résolution de conflits — les fichiers en conflit sont signalés, pas outillés.
-- Recherche dans un diff ou dans l'historique d'un terminal.
+- Recherche dans l'historique d'un terminal : `Ctrl+F` y appartient au
+  programme qui tourne.
 - Les langages sans grammaire embarquée s'affichent en texte nu. PHP est lié en
   direct ; les autres viennent de gpui-component.
-- L'historique s'arrête à deux mille commits et ne se recherche pas.
+- L'historique s'arrête à deux mille commits.
 
 ## Crédits
 

@@ -117,37 +117,52 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let sidebar_scroll = self.scroll_of("sidebar");
+        let find = self.render_find(crate::ui::find::Pane::Sidebar, cx);
+        let query = self.query(crate::ui::find::Pane::Sidebar, cx);
         // Le `wt.toml` de chaque dépôt, demandé une fois : c'est lui qui
         // décide de ce que le menu d'un worktree propose.
         let mains: Vec<PathBuf> = self.repos.iter().map(|repo| repo.main.clone()).collect();
         for main in &mains {
             self.ensure_wt_project(main);
         }
-        let repos: Vec<_> = self
-            .repos
-            .iter()
-            .enumerate()
-            .map(|(ix, repo)| {
-                (
-                    ix,
-                    repo.main.clone(),
-                    repo.name.clone(),
-                    repo.collapsed,
-                    repo.worktrees
-                        .iter()
-                        .map(|w| WorktreeRow {
-                            path: w.path.clone(),
-                            label: w.label(),
-                            branch: w.branch.clone(),
-                            is_main: w.is_main,
-                            prunable: w.prunable,
-                            summary: self.summaries.get(&w.path).copied(),
-                            agent: self.agents.get(&w.path).cloned(),
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect();
+        let repos: Vec<_> =
+            self.repos
+                .iter()
+                .enumerate()
+                .map(|(ix, repo)| {
+                    (
+                        ix,
+                        repo.main.clone(),
+                        repo.name.clone(),
+                        repo.collapsed,
+                        repo.worktrees
+                            .iter()
+                            .map(|w| WorktreeRow {
+                                path: w.path.clone(),
+                                label: w.label(),
+                                branch: w.branch.clone(),
+                                is_main: w.is_main,
+                                prunable: w.prunable,
+                                summary: self.summaries.get(&w.path).copied(),
+                                agent: self.agents.get(&w.path).cloned(),
+                            })
+                            .filter(|row| {
+                                crate::ui::find::matches(&query, &row.label)
+                                    || row.branch.as_deref().is_some_and(|branch| {
+                                        crate::ui::find::matches(&query, branch)
+                                    })
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                // Un dépôt dont le nom correspond reste entier — c'est le geste
+                // « montre-moi ce dépôt ». Sinon il ne reste que s'il porte un
+                // worktree trouvé : un dépôt réduit à son titre se lirait comme un
+                // dépôt vide.
+                .filter(|(_, _, name, _, worktrees)| {
+                    crate::ui::find::matches(&query, name) || !worktrees.is_empty()
+                })
+                .collect();
         let active = self.active.clone();
         let empty = repos.is_empty();
 
@@ -182,6 +197,7 @@ impl ClaudhubApp {
                             })),
                     ),
             )
+            .children(find)
             .child(
                 div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
                     "sidebar-bar",

@@ -61,6 +61,7 @@ src/
     store.rs        ce qu'on retient par worktree : base, replis, notes
     notes.rs        le modèle des notes, leur ancrage et leur prompt
     notes_view.rs   les gestes de la relecture annotée et son panneau
+    find.rs         la recherche d'un panneau, et son routage
     scroll.rs       la barre de défilement d'un panneau
     theme.rs / shortcuts.rs / icons.rs
 ```
@@ -469,6 +470,58 @@ Trois points qui ne se devinent pas :
   champ. Les replis sont triés avant d'être écrits : un `HashSet` sérialisé
   dans un ordre différent à chaque fois ferait un fichier qui change sans que
   rien n'ait changé.
+
+### Chercher dans un panneau
+
+`Ctrl+F` cherche dans le panneau où l'on vient de cliquer. Presque tout ce que
+Claudhub affiche est une liste, et une liste qu'on ne peut pas interroger se
+parcourt du regard.
+
+**Le clic, et non le focus.** Le dock pose le focus sur l'onglet actif de
+*chaque* zone — il y en a trois affichées en même temps — et rien là-dedans ne
+dit laquelle l'utilisateur regarde. `panels::pane_root` note donc le panneau
+touché, en phase de **capture** : une ligne de diff comme une case à cocher
+consomment leur clic, et le panneau ne saurait jamais qu'on l'a touché.
+
+**Un seul geste, deux comportements.** Là où la liste est libre de son ordre,
+la recherche **filtre**. Là où l'ordre porte du sens, elle **saute** :
+
+- Le **diff** est le fichier ; on y surligne les occurrences par-dessus la
+  coloration (`highlight::overlay`) et `Ctrl+G` va de l'une à l'autre. C'est le
+  seul panneau qui affiche un compte — c'est la seule liste dont on ne voie pas
+  l'effet de la recherche, une occurrence pouvant être à quatre mille lignes.
+- L'**historique** a un graphe dont les traits relient une ligne à ses
+  voisines : en retirer une du milieu ferait pointer chacun d'eux sur le
+  mauvais commit. Ce qui ne correspond pas est donc éteint, pas retiré.
+- Les **branches** ont déjà leur filtre à demeure ; `Ctrl+F` s'y contente de
+  lui donner le focus, plutôt que d'empiler deux champs qui font la même chose.
+
+Trois détails qui se paient :
+
+- **La casse est déduite de la requête** : une requête tout en minuscules
+  l'ignore, une majuscule la respecte. C'est la convention des éditeurs, et
+  elle évite un bouton pour un réglage qu'on change à chaque recherche.
+- **Les décalages sont en octets**, et `find_all` compare caractère à
+  caractère plutôt que de chercher dans un `to_lowercase()` : la mise en
+  minuscules change la longueur en octets de certains caractères, et les
+  décalages rendus ne désigneraient plus rien.
+- **Une recherche ignore les replis** — explorateur et liste de revue. Un
+  fichier trouvé dans un dossier fermé ne se verrait pas, et la recherche
+  paraîtrait n'avoir rien trouvé.
+
+Les occurrences du diff sont calculées à chaque changement de requête et à
+chaque arrivée de diff, **jamais au rendu** ; le rendu les consulte par
+`(hunk, ligne)`. `DiffSearch::valid` est ce qui les invalide : les décalages
+portaient sur un texte qui vient d'être remplacé.
+
+`highlight::overlay` pose un fond sans toucher aux couleurs de texte, en
+découpant aux frontières des deux découpages. Il rend des plages **triées et
+disjointes**, l'invariant que gpui ne vérifie pas et dont la violation décale
+tout ce qui suit.
+
+Le terminal n'a pas de recherche : `Ctrl+F` y appartient au programme qui
+tourne, et l'historique d'une grille alacritty n'est pas une liste que nous
+tenions.
 
 ### Les barres de défilement
 

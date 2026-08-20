@@ -14,8 +14,8 @@
 //! main : la mise en page est faite hors de cet emprunt.
 
 use gpui::{
-    div, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    Render, WeakEntity, Window,
+    div, prelude::*, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    IntoElement, Render, WeakEntity, Window,
 };
 use gpui_component::dock::{Panel, PanelEvent};
 
@@ -23,6 +23,27 @@ use gpui_component::dock::{register_panel, PanelView};
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
+use crate::ui::find::Pane;
+
+/// Enveloppe le contenu d'un panneau de quoi noter qu'on vient d'y cliquer.
+///
+/// C'est ce qui donne une cible à `Ctrl+F`. Le clic et non le focus : le dock
+/// pose le focus sur l'onglet actif de **chaque** zone, il y en a trois
+/// affichées en même temps, et rien là-dedans ne dit laquelle l'utilisateur
+/// regarde.
+///
+/// En phase de **capture**, donc avant les enfants et sans qu'aucun d'eux
+/// puisse l'arrêter : une ligne de diff comme une case à cocher consomment
+/// leur clic, et le panneau ne saurait jamais qu'on l'a touché.
+fn pane_root(app: &Entity<ClaudhubApp>, pane: Pane, content: impl IntoElement) -> impl IntoElement {
+    let app = app.clone();
+    div()
+        .size_full()
+        .capture_any_mouse_down(move |_, _window, cx| {
+            app.update(cx, |app, cx| app.touch_pane(pane, cx));
+        })
+        .child(content)
+}
 
 /// Déclare les panneaux au registre du dock.
 ///
@@ -56,7 +77,7 @@ pub fn register(app: &Entity<ClaudhubApp>, cx: &mut App) {
 }
 
 macro_rules! panels {
-    ($($name:ident => ($id:literal, $title:literal, $render:ident)),* $(,)?) => { $(
+    ($($name:ident => ($id:literal, $title:literal, $render:ident, $pane:ident)),* $(,)?) => { $(
         pub struct $name {
             app: WeakEntity<ClaudhubApp>,
             focus: FocusHandle,
@@ -104,21 +125,22 @@ macro_rules! panels {
                 let Some(app) = self.app.upgrade() else {
                     return div().into_any_element();
                 };
-                app.update(cx, |app, cx| app.$render(window, cx).into_any_element())
+                let content = app.update(cx, |app, cx| app.$render(window, cx).into_any_element());
+                pane_root(&app, Pane::$pane, content).into_any_element()
             }
         }
     )* };
 }
 
 panels! {
-    SidebarPanel => ("ClaudhubSidebar", "panel-repositories", render_sidebar),
-    BranchesPanel => ("ClaudhubBranches", "panel-branches", render_branches),
-    ChangesPanel => ("ClaudhubChanges", "range-working", render_changes),
-    BranchPanel => ("ClaudhubBranch", "range-branch", render_branch_review),
-    NotesPanel => ("ClaudhubNotes", "panel-notes", render_notes),
-    FilesPanel => ("ClaudhubFiles", "panel-files", render_files),
-    SentryPanel => ("ClaudhubSentry", "panel-sentry", render_sentry),
-    DiffPanel => ("ClaudhubDiff", "panel-diff", render_diff),
+    SidebarPanel => ("ClaudhubSidebar", "panel-repositories", render_sidebar, Sidebar),
+    BranchesPanel => ("ClaudhubBranches", "panel-branches", render_branches, Branches),
+    ChangesPanel => ("ClaudhubChanges", "range-working", render_changes, Changes),
+    BranchPanel => ("ClaudhubBranch", "range-branch", render_branch_review, Branch),
+    NotesPanel => ("ClaudhubNotes", "panel-notes", render_notes, Notes),
+    FilesPanel => ("ClaudhubFiles", "panel-files", render_files, Files),
+    SentryPanel => ("ClaudhubSentry", "panel-sentry", render_sentry, Sentry),
+    DiffPanel => ("ClaudhubDiff", "panel-diff", render_diff, Diff),
 }
 
 /// Les conflits n'apparaissent que quand il y en a.
@@ -196,9 +218,10 @@ impl Render for ConflictsPanel {
         let Some(app) = self.app.upgrade() else {
             return div().into_any_element();
         };
-        app.update(cx, |app, cx| {
+        let content = app.update(cx, |app, cx| {
             app.render_conflicts(window, cx).into_any_element()
-        })
+        });
+        pane_root(&app, Pane::Conflicts, content).into_any_element()
     }
 }
 
@@ -320,9 +343,10 @@ impl Render for HistoryPanel {
         let Some(app) = self.app.upgrade() else {
             return div().into_any_element();
         };
-        app.update(cx, |app, cx| {
+        let content = app.update(cx, |app, cx| {
             app.ensure_history(cx);
             app.render_history(window, cx).into_any_element()
-        })
+        });
+        pane_root(&app, Pane::History, content).into_any_element()
     }
 }
