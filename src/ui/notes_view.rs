@@ -284,35 +284,90 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Demande une tâche et l'ajoute à la liste.
+    /// Ouvre la retouche d'une tâche, à sa place dans la liste.
     ///
-    /// Le dialogue crée le fichier au besoin : « créer une liste vide » n'est
-    /// pas un geste qu'on a envie de faire, et l'agent, lui, crée le sien tout
-    /// seul par `$CLAUDHUB_TODO`.
-    pub(super) fn prompt_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active.is_none() {
+    /// Une zone de saisie sur la ligne et non un dialogue : une liste de tâches
+    /// se corrige à la volée, et un dialogue par correction ferait deux clics
+    /// et une fenêtre pour changer un mot.
+    pub(super) fn edit_task(&mut self, line: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(label) = self
+            .active_review()
+            .and_then(|state| state.todo.as_ref())
+            .and_then(|todo| todo.tasks.iter().find(|task| task.line == line))
+            .map(|task| task.label.clone())
+        else {
+            return;
+        };
+        self.task_editing = Some(line);
+        self.task_edit_input
+            .update(cx, |input, cx| input.set_value(label, window, cx));
+        gpui::Focusable::focus_handle(&self.task_edit_input, cx).focus(window);
+        cx.notify();
+    }
+
+    /// Valide la retouche en cours. Un libellé vide **supprime** la tâche.
+    ///
+    /// C'est la convention des listes qui s'éditent en place : effacer le texte
+    /// et valider est le geste par lequel on retire une ligne, et il évite un
+    /// bouton de plus sur chacune d'elles.
+    pub(super) fn commit_task_edit(&mut self, label: &str, cx: &mut Context<Self>) {
+        let Some(line) = self.task_editing.take() else {
+            return;
+        };
+        cx.notify();
+        if label.trim().is_empty() {
+            self.remove_task(line, cx);
             return;
         }
-        let input = self.task_input.clone();
-        let entity = cx.entity();
-        input.update(cx, |input, cx| input.set_value("", window, cx));
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let (input, entity) = (input.clone(), entity.clone());
-            dialog
-                .title(tr!("todo-add"))
-                .child(v_flex().w(px(420.)).child(Input::new(&input)))
-                .confirm()
-                .on_ok(move |_, _window, cx| {
-                    let label = input.read(cx).value().to_string();
-                    entity.update(cx, |this, cx| this.add_task(&label, cx));
-                    true
-                })
+        self.rewrite_todo(cx, |text| {
+            crate::ui::vault::set_task_label(text, line, label)
         });
+    }
+
+    pub(super) fn remove_task(&mut self, line: usize, cx: &mut Context<Self>) {
+        self.rewrite_todo(cx, |text| crate::ui::vault::remove_task(text, line));
+    }
+
+    /// Applique une transformation au `TODO.md` du worktree affiché.
+    ///
+    /// Le passage obligé des trois gestes d'édition : la transformation est
+    /// pure et rend `None` quand la ligne visée n'est plus ce qu'elle était —
+    /// l'agent a écrit entre-temps —, et l'écriture repart avec l'empreinte de
+    /// ce qu'on avait sous les yeux.
+    fn rewrite_todo(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&str) -> Option<String>) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let Some(dir) = self.notes_dir(&worktree, cx) else {
+            return;
+        };
+        let Some(current) = self
+            .review
+            .get(&worktree)
+            .and_then(|state| state.todo.as_ref())
+            .map(|todo| todo.text.clone())
+        else {
+            return;
+        };
+        let Some(text) = edit(&current) else {
+            return;
+        };
+        let expect = Some(crate::files::digest(&current));
+        if let Some(state) = self.review.get_mut(&worktree) {
+            state.todo = Some(crate::ui::vault::parse_todo(&text));
+        }
+        self.git.send(Cmd::WriteVaultFile {
+            worktree,
+            path: dir.join(crate::ui::vault::TODO),
+            text,
+            expect,
+        });
+        cx.notify();
     }
 
     /// Ajoute une tâche au `TODO.md` du worktree, en le créant s'il n'y en a
     /// pas.
-    fn add_task(&mut self, label: &str, cx: &mut Context<Self>) {
+    pub(super) fn add_task(&mut self, label: &str, cx: &mut Context<Self>) {
         if label.trim().is_empty() {
             return;
         }
@@ -1040,22 +1095,25 @@ impl ClaudhubApp {
                     .xsmall()
                     .icon(icon("plus"))
                     .tooltip(tr!("todo-add"))
-                    .on_click(cx.listener(|this, _, window, cx| this.prompt_new_task(window, cx))),
+                    // Le bouton ne fait que donner le focus à la ligne de
+                    // saisie qui est déjà là : deux façons d'ajouter une tâche
+                    // qui n'aboutissent pas au même endroit seraient une de
+                    // trop.
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.notes_collapsed.remove("todo");
+                        gpui::Focusable::focus_handle(&this.task_input, cx).focus(window);
+                        cx.notify();
+                    })),
             );
-        let Some(todo) = todo.filter(|_| !self.collapsed("todo")) else {
+        if self.collapsed("todo") {
             return v_flex().w_full().child(header);
-        };
-        if todo.tasks.is_empty() {
-            return v_flex()
-                .w_full()
-                .child(header)
-                .child(section_empty(tr!("todo-empty"), cx));
         }
 
         let muted = cx.theme().muted_foreground;
+        let editing = self.task_editing;
         let rows: Vec<_> = todo
-            .tasks
             .iter()
+            .flat_map(|todo| todo.tasks.iter())
             .map(|task| {
                 let (line, done) = (task.line, task.done);
                 h_flex()
@@ -1063,7 +1121,7 @@ impl ClaudhubApp {
                     .px_2()
                     .py_0p5()
                     .gap_2()
-                    .items_start()
+                    .items_center()
                     // Deux espaces d'indentation dans le fichier valent un
                     // décrochement ici : une sous-tâche d'agent en est une.
                     .pl(px(8. + 12. * task.depth.min(4) as f32))
@@ -1074,17 +1132,56 @@ impl ClaudhubApp {
                                 this.toggle_task(line, *checked, cx)
                             })),
                     )
-                    .child(
-                        div()
+                    // Un clic sur le libellé le remplace par sa saisie, à sa
+                    // place dans la liste : c'est le geste des listes de tâches
+                    // partout ailleurs, et il n'y a rien à apprendre.
+                    .child(match editing == Some(line) {
+                        true => div()
+                            .flex_1()
+                            .child(Input::new(&self.task_edit_input).xsmall())
+                            .into_any_element(),
+                        false => div()
+                            .id(("todo-label", line))
                             .flex_1()
                             .text_xs()
+                            .cursor_text()
                             .when(done, |el| el.text_color(muted).line_through())
-                            .child(task.label.clone()),
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.edit_task(line, window, cx)
+                            }))
+                            .child(task.label.clone())
+                            .into_any_element(),
+                    })
+                    .child(
+                        Button::new(("todo-remove", line))
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("trash-2"))
+                            .tooltip(tr!("todo-remove"))
+                            .on_click(
+                                cx.listener(move |this, _, _window, cx| this.remove_task(line, cx)),
+                            ),
                     )
             })
             .collect();
 
-        v_flex().w_full().child(header).children(rows)
+        v_flex()
+            .w_full()
+            .child(header)
+            .children(rows)
+            // La ligne de saisie est **toujours** là, en bas de la liste :
+            // c'est ce qui remplace le dialogue, et une liste de tâches se
+            // remplit d'une traite sans reprendre la souris entre deux.
+            .child(
+                h_flex()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .gap_2()
+                    .items_center()
+                    .child(icon("plus").xsmall().text_color(muted))
+                    .child(div().flex_1().child(Input::new(&self.task_input).xsmall())),
+            )
     }
 
     fn render_note(

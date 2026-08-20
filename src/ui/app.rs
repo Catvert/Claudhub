@@ -441,8 +441,16 @@ pub struct ClaudhubApp {
     pub(super) note_input: Entity<InputState>,
     /// Le prompt qui part à l'agent, avant qu'il parte.
     pub(super) prompt_input: Entity<InputState>,
-    /// La saisie d'une tâche à ajouter à `TODO.md`.
+    /// La saisie d'une tâche à ajouter à `TODO.md`, en bas de la liste.
     pub(super) task_input: Entity<InputState>,
+    /// La saisie d'une tâche qu'on retouche, à sa place dans la liste.
+    ///
+    /// Une seconde zone et non celle du bas : ce qu'on est en train de taper
+    /// pour une nouvelle tâche ne doit pas disparaître parce qu'on corrige une
+    /// faute deux lignes plus haut.
+    pub(super) task_edit_input: Entity<InputState>,
+    /// La ligne de la tâche en cours de retouche, s'il y en a une.
+    pub(super) task_editing: Option<usize>,
     /// La zone de saisie de la note libre du worktree.
     ///
     /// Une seule pour tous les worktrees, dont le contenu suit celui qui est
@@ -671,6 +679,7 @@ impl ClaudhubApp {
 
         let task_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("todo-add-placeholder")));
+        let task_edit_input = cx.new(|cx| InputState::new(window, cx));
 
         // La note libre : elle grandit avec ce qu'on y écrit, dans les limites
         // que la section peut donner sans repousser le reste hors de vue.
@@ -775,6 +784,8 @@ impl ClaudhubApp {
             note_input,
             prompt_input,
             task_input,
+            task_edit_input,
+            task_editing: None,
             journal_input,
             journal_save: false,
             notes_collapsed: std::collections::HashSet::new(),
@@ -825,7 +836,7 @@ impl ClaudhubApp {
         app.pump_events(events, window, cx);
         app.start_scanning(cx);
         app.start_watching(window, cx);
-        app.watch_journal_input(cx);
+        app.watch_vault_inputs(window, cx);
 
         // Les dépôts de la session précédente, puis le répertoire courant s'il
         // en est un — c'est ce qu'attend quelqu'un qui lance `claudhub` depuis son
@@ -985,13 +996,47 @@ impl ClaudhubApp {
     /// écrire à chaque caractère ferait travailler la synchronisation en
     /// permanence. Pas de bouton « enregistrer » : c'est un bloc-notes, et
     /// devoir le valider serait le meilleur moyen d'y perdre trois phrases.
-    fn watch_journal_input(&mut self, cx: &mut Context<Self>) {
+    fn watch_vault_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_component::input::InputEvent;
         cx.subscribe(&self.journal_input.clone(), |this, _, event, cx| {
-            if !matches!(event, gpui_component::input::InputEvent::Change) {
-                return;
+            if matches!(event, InputEvent::Change) {
+                this.schedule_journal_save(cx);
             }
-            this.schedule_journal_save(cx);
         })
+        .detach();
+        // `subscribe_in` et non `subscribe` : vider un champ demande une
+        // fenêtre, que l'événement seul ne porte pas.
+        //
+        // Entrée ajoute et laisse le champ prêt pour la suivante : une liste se
+        // remplit d'une traite, et reprendre la souris entre deux tâches est le
+        // geste qu'on cherchait justement à supprimer.
+        cx.subscribe_in(
+            &self.task_input.clone(),
+            window,
+            |this, input, event, window, cx| {
+                if !matches!(event, InputEvent::PressEnter { .. }) {
+                    return;
+                }
+                let label = input.read(cx).value().to_string();
+                this.add_task(&label, cx);
+                input.update(cx, |input, cx| input.set_value("", window, cx));
+            },
+        )
+        .detach();
+        // Entrée valide, et perdre le focus aussi : `InputState` n'a pas
+        // d'événement d'échappement, et abandonner une correction parce qu'on a
+        // cliqué à côté serait le plus mauvais des deux défauts.
+        cx.subscribe_in(
+            &self.task_edit_input.clone(),
+            window,
+            |this, input, event, _window, cx| {
+                if !matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    return;
+                }
+                let label = input.read(cx).value().to_string();
+                this.commit_task_edit(&label, cx);
+            },
+        )
         .detach();
     }
 

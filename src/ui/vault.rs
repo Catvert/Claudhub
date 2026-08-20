@@ -118,27 +118,14 @@ pub fn parse_todo(text: &str) -> Todo {
 /// écrire au jugé retournerait la mauvaise case.
 pub fn toggle_task(text: &str, line: usize, done: bool) -> Option<String> {
     let raw = text.lines().nth(line)?;
-    let at = ["[ ]", "[x]", "[X]"]
-        .iter()
-        .filter_map(|box_| raw.find(box_))
-        .min()?;
+    let at = box_at(raw)?;
     let replaced = format!(
         "{}{}{}",
         &raw[..at],
         if done { "[x]" } else { "[ ]" },
         &raw[at + 3..]
     );
-    let mut out = String::with_capacity(text.len() + 1);
-    for (i, current) in text.lines().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        out.push_str(if i == line { &replaced } else { current });
-    }
-    if text.ends_with('\n') {
-        out.push('\n');
-    }
-    Some(out)
+    Some(replace_line(text, line, &replaced))
 }
 
 /// Le `TODO.md` qu'on pose quand il n'y en a pas.
@@ -205,6 +192,65 @@ pub fn append_task(text: &str, label: &str) -> String {
     }
     let mut out = lines.join("\n");
     out.push('\n');
+    out
+}
+
+/// Réécrit le libellé d'une tâche, en laissant sa case et son indentation.
+///
+/// `None` si la ligne n'est plus une case à cocher, comme pour `toggle_task` :
+/// le fichier a changé sous nos pieds, et réécrire au jugé emporterait la
+/// mauvaise ligne.
+pub fn set_task_label(text: &str, line: usize, label: &str) -> Option<String> {
+    let raw = text.lines().nth(line)?;
+    let at = box_at(raw)?;
+    Some(replace_line(
+        text,
+        line,
+        &format!("{}{} {}", &raw[..at], &raw[at..at + 3], label.trim()),
+    ))
+}
+
+/// Retire la tâche d'une ligne.
+pub fn remove_task(text: &str, line: usize) -> Option<String> {
+    let raw = text.lines().nth(line)?;
+    box_at(raw)?;
+    let kept: Vec<&str> = text
+        .lines()
+        .enumerate()
+        .filter(|(i, _)| *i != line)
+        .map(|(_, l)| l)
+        .collect();
+    let mut out = kept.join("\n");
+    if !out.is_empty() || text.ends_with('\n') {
+        out.push('\n');
+    }
+    Some(out)
+}
+
+/// La position de la case à cocher d'une ligne, s'il y en a une.
+fn box_at(raw: &str) -> Option<usize> {
+    let trimmed = raw.trim_start();
+    if !(trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ")) {
+        return None;
+    }
+    ["[ ]", "[x]", "[X]"]
+        .iter()
+        .filter_map(|mark| raw.find(mark))
+        .min()
+}
+
+/// Remplace une ligne, en gardant le reste du fichier au caractère près.
+fn replace_line(text: &str, line: usize, replacement: &str) -> String {
+    let mut out = String::with_capacity(text.len() + replacement.len());
+    for (i, current) in text.lines().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(if i == line { replacement } else { current });
+    }
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
     out
 }
 
@@ -737,6 +783,21 @@ mod tests {
         let after = append_task(&seed_todo(Path::new("/tmp/wt")), "lire le diff");
         assert_eq!(parse_todo(&after).tasks.len(), 1);
         assert!(after.ends_with("\n- [ ] lire le diff\n"));
+    }
+
+    /// Retoucher un libellé laisse la case, l'indentation et le reste du
+    /// fichier là où ils sont.
+    #[test]
+    fn a_label_is_rewritten_in_place() {
+        let text = "- [x] lire\n  - [ ] sous-tâche\nDu texte.\n";
+        let after = set_task_label(text, 1, "  relire le diff  ").expect("une case");
+        assert_eq!(after, "- [x] lire\n  - [ ] relire le diff\nDu texte.\n");
+
+        let after = remove_task(text, 0).expect("une case");
+        assert_eq!(after, "  - [ ] sous-tâche\nDu texte.\n");
+
+        assert!(set_task_label(text, 2, "x").is_none());
+        assert!(remove_task(text, 2).is_none());
     }
 
     /// Le fichier qu'on pose doit se relire : c'est le même contrat que les

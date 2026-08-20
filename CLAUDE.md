@@ -992,6 +992,25 @@ entier**.
   (`vault::append_task`) : un agent écrit sous sa liste — ce qu'il a compris,
   ce qui reste à décider —, et une tâche posée après cette prose ne se lirait
   plus comme faisant partie de la liste.
+- **Tout s'y édite en place, jamais dans un dialogue.** Une ligne de saisie en
+  bas de la liste ajoute — elle est toujours là, et Entrée la laisse prête pour
+  la suivante, une liste se remplissant d'une traite ; un clic sur un libellé
+  le remplace par sa saisie, à sa place ; un libellé vidé **supprime** la
+  tâche, ce qui est la convention de ces listes partout ailleurs et évite un
+  bouton de plus par ligne (il y en a un quand même, pour qui ne connaît pas la
+  convention). Le bouton `+` de l'en-tête ne fait que donner le focus à la
+  ligne du bas : deux façons d'ajouter qui n'aboutiraient pas au même endroit
+  seraient une de trop.
+- **Deux zones de saisie et non une** (`task_input`, `task_edit_input`) : ce
+  qu'on est en train de taper pour une nouvelle tâche ne doit pas disparaître
+  parce qu'on corrige une faute deux lignes plus haut.
+- **Perdre le focus valide.** `InputState` n'a pas d'événement d'échappement, et
+  abandonner une correction parce qu'on a cliqué à côté serait le plus mauvais
+  des deux défauts.
+- **Les trois gestes passent par `rewrite_todo`** : une transformation pure qui
+  rend `None` quand la ligne visée n'est plus ce qu'elle était — l'agent a
+  écrit entre-temps —, et une écriture qui repart avec l'empreinte de ce qu'on
+  avait sous les yeux.
 - Il s'affiche **au-dessus** des notes et hors de leur défilement : c'est ce
   qu'on regarde pour savoir où en est l'agent, et le faire descendre avec une
   revue de trois cents notes reviendrait à ne jamais le voir.
