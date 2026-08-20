@@ -15,6 +15,7 @@ use gpui_component::{
     h_flex,
     input::Textarea,
     select::Select,
+    separator::Separator as Divider,
     v_flex, ActiveTheme, Disableable, Sizable, WindowExt,
 };
 
@@ -411,9 +412,83 @@ impl ClaudhubApp {
         self.open_file(worktree, path, range, cx);
     }
 
-    /// La barre du panneau des modifications : juste la bascule d'affichage.
+    /// La barre du panneau des modifications : ce qu'on fait au dépôt, puis la
+    /// bascule d'affichage.
+    ///
+    /// `fetch`, `pull` et `push` vivent ici et non dans la barre d'outils de la
+    /// fenêtre : ce sont les gestes de ce panneau-là — on regarde ce qui a
+    /// changé, on coche, on valide, on pousse —, et les tenir à l'autre bout
+    /// de l'écran faisait traverser la fenêtre pour terminer une phrase
+    /// commencée en bas.
     fn render_changes_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        self.bar(cx).child(self.tree_toggle(cx))
+        let has_active = self.active.is_some();
+        // L'avance et le retard sur l'amont, tels que le statut les rapporte.
+        // Ils sont **sur les boutons** et pas seulement dans la barre d'état :
+        // ce sont eux qui disent lequel des deux gestes il y a à faire, et un
+        // bouton éteint dit qu'il n'y a rien à faire — ce qui est la moitié de
+        // l'information qu'on cherche en arrivant sur un worktree.
+        let (ahead, behind) = self
+            .active_review()
+            .map(|state| (state.status.ahead, state.status.behind))
+            .unwrap_or((0, 0));
+        self.bar(cx)
+            .child(
+                Button::new("fetch")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("refresh-cw"))
+                    .tooltip(tr!("action-fetch"))
+                    .disabled(!has_active)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(worktree) = this.active.clone() {
+                            this.git.send(Cmd::Fetch { worktree });
+                        }
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("pull")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("arrow-down-to-line"))
+                    .tooltip(if behind > 0 {
+                        tr!("action-pull-behind", { count: behind })
+                    } else {
+                        tr!("action-pull")
+                    })
+                    .when(behind > 0, |el| el.primary().label(behind.to_string()))
+                    .disabled(!has_active)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(worktree) = this.active.clone() {
+                            this.git.send(Cmd::Pull { worktree });
+                        }
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("push")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("arrow-up-from-line"))
+                    .tooltip(if ahead > 0 {
+                        tr!("action-push-ahead", { count: ahead })
+                    } else {
+                        tr!("action-push")
+                    })
+                    .when(ahead > 0, |el| el.primary().label(ahead.to_string()))
+                    .disabled(!has_active)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(worktree) = this.active.clone() {
+                            this.git.send(Cmd::Push {
+                                worktree,
+                                force_with_lease: false,
+                            });
+                        }
+                        cx.notify();
+                    })),
+            )
+            .child(Divider::vertical().h(px(12.)))
+            .child(self.tree_toggle(cx))
     }
 
     /// La barre de la revue de branche : la bascule, et le choix de la base.
@@ -481,6 +556,7 @@ impl ClaudhubApp {
                             .text_color(cx.theme().muted_foreground)
                             .child(tr!("commit-staged-count", { count: staged })),
                     )
+                    .children(self.suggest_button(can_commit, cx))
                     .child(
                         Button::new("commit")
                             .primary()
@@ -491,6 +567,49 @@ impl ClaudhubApp {
                             .on_click(cx.listener(|this, _, _, cx| this.commit(false, cx))),
                     ),
             )
+    }
+
+    /// Le bouton qui demande un message à l'agent.
+    ///
+    /// Il n'existe pas quand le réglage est vide : proposer un geste qui
+    /// échouera faute de commande vaut moins que de ne rien proposer. Il
+    /// tourne pendant l'attente — l'agent met dix à trente secondes, et un
+    /// bouton qui ne dit rien pendant ce temps-là se clique trois fois.
+    fn suggest_button(&self, can_commit: bool, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let command = crate::ui::settings::Settings::global(cx)
+            .commit_message_command
+            .clone();
+        if command.trim().is_empty() {
+            return None;
+        }
+        let waiting = self.suggesting_message.is_some();
+        Some(
+            Button::new("commit-suggest")
+                .ghost()
+                .xsmall()
+                .icon(icon(if waiting { "loader-circle" } else { "sparkles" }))
+                .tooltip(tr!("commit-suggest"))
+                .disabled(!can_commit || waiting)
+                .on_click(cx.listener(|this, _, _, cx| this.suggest_commit_message(cx))),
+        )
+    }
+
+    /// Demande à l'agent un message pour ce qui est indexé.
+    ///
+    /// La commande part dans un worker comme tout le reste : `claude -p` met
+    /// dix à trente secondes, et les attendre depuis un gestionnaire de clic
+    /// figerait la fenêtre pour toute la durée.
+    pub(super) fn suggest_commit_message(&mut self, cx: &mut Context<Self>) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        if self.suggesting_message.is_some() {
+            return;
+        }
+        self.suggesting_message = Some(worktree.clone());
+        self.git.send(Cmd::SuggestMessage { worktree });
+        self.announce(tr!("commit-suggest-running"), cx);
+        cx.notify();
     }
 
     /// Bascule entre l'arborescence et la liste plate.

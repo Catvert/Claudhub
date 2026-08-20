@@ -13,6 +13,51 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Les marqueurs qu'une session d'agent laisse dans l'environnement.
+///
+/// Ce sont ceux de Claude Code, seul agent qui en pose aujourd'hui ; la liste
+/// est **explicite** et non un balayage de `CLAUDE_CODE_*`, qui emporterait
+/// aussi la configuration de l'utilisateur (`CLAUDE_CODE_USE_BEDROCK`,
+/// `ANTHROPIC_MODEL`, les limites de jetons) — précisément ce qu'il faut
+/// transmettre.
+const SESSION_MARKERS: &[&str] = &[
+    "AI_AGENT",
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SSE_PORT",
+    "CLAUDE_EFFORT",
+    "CLAUDE_PID",
+];
+
+/// Efface de notre propre environnement les marqueurs de la session qui nous a
+/// lancés.
+///
+/// Lancer Claudhub depuis un agent est le cas **courant** : c'est un agent qui
+/// écrit Claudhub, et c'est depuis son terminal qu'on l'essaie. Tout ce que
+/// nous démarrons héritait alors de ses marqueurs, et un `claude` ouvert dans
+/// un onglet se croyait la sous-session de celui d'à côté — il n'enregistrait
+/// donc plus sa transcription, et le disait sans qu'on puisse rien y faire
+/// depuis l'onglet.
+///
+/// Ici et non dans l'environnement du pty : la question ne concerne pas que
+/// les terminaux. `wt` lance les hooks du projet, `commit_msg` lance un agent
+/// en une passe — tout cela est démarré par Claudhub, qui n'est la session de
+/// personne.
+///
+/// **À appeler au tout début de `main`**, avant qu'un thread existe :
+/// `remove_var` touche un environnement que le processus partage, et un autre
+/// thread en train de le lire pendant ce temps est un comportement indéfini.
+pub fn disinherit_session() {
+    for marker in SESSION_MARKERS {
+        std::env::remove_var(marker);
+    }
+}
+
 /// Un processus d'agent trouvé dans un worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Process {

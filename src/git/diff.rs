@@ -139,6 +139,30 @@ pub fn file(dir: &Path, range: &Range, path: &Path, context: usize) -> Result<Fi
     Ok(parse_unified(&out))
 }
 
+/// Le texte brut de ce qui est indexé, tel que git l'écrit.
+///
+/// Ni `DiffFile` ni `FileDiff` : ce diff-là n'est pas affiché, il est **lu par
+/// un agent** à qui l'on demande un message de commit. Le format unifié est
+/// justement ce qu'un modèle sait lire, et le redécouper pour le recomposer
+/// ensuite ne ferait que perdre les en-têtes qui disent quel fichier change.
+///
+/// Le contexte est réduit à trois lignes : ce qu'on paie ici, c'est le nombre
+/// de jetons envoyés. Un binaire modifié n'y met qu'une ligne — git ne
+/// l'écrit pas sans `--text`, et c'est ce qu'on veut.
+pub fn staged_text(dir: &Path) -> Result<String> {
+    git(
+        dir,
+        &[
+            "diff",
+            "--cached",
+            "-U3",
+            "-M",
+            "--no-ext-diff",
+            "--no-color",
+        ],
+    )
+}
+
 /// Diff d'un fichier non suivi : git ne le connaît pas, donc `diff` seul rend
 /// une sortie vide. `--no-index` contre `/dev/null` produit le même format que
 /// pour les autres fichiers, ce qui évite un second chemin d'affichage.

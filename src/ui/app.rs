@@ -20,7 +20,7 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
     select::{SearchableVec, SelectEvent, SelectState},
     separator::Separator as Divider,
-    v_flex, ActiveTheme, Disableable, Root, Selectable, Sizable, StyledExt, WindowExt,
+    v_flex, ActiveTheme, Root, Selectable, Sizable, StyledExt, WindowExt,
 };
 
 use crate::git::{Branch, Commit, DiffFile, DiffRange, GraphRow, LogRange, Status, Worktree};
@@ -204,6 +204,21 @@ pub struct RepoState {
     /// ainsi.
     pub default_base: Option<String>,
     pub collapsed: bool,
+}
+
+/// Un dépôt mémorisé qu'on n'a pas pu ouvrir.
+///
+/// Il vit à part des `RepoState` et non parmi eux, avec un drapeau : tout ce
+/// qui parcourt `repos` — le balayage des agents, les résumés, le relevé de
+/// `wt`, le fetch automatique — suppose un dépôt qui existe, et le contraire
+/// se paierait en gardes semés partout, dont un oubli ferait lancer des
+/// commandes git dans un dossier absent, toutes les deux secondes.
+pub struct UnavailableRepo {
+    pub path: PathBuf,
+    /// Ce que git a répondu, pour l'infobulle. La ligne, elle, dit seulement
+    /// « introuvable » : c'est ce qu'on a besoin de savoir pour décider de le
+    /// retirer.
+    pub message: String,
 }
 
 /// Ce que la revue montre pour un worktree donné.
@@ -414,6 +429,12 @@ pub struct Toast {
 pub struct ClaudhubApp {
     pub(super) git: runtime::Handle,
     pub(super) repos: Vec<RepoState>,
+    /// Les dépôts mémorisés qui ne s'ouvrent pas.
+    ///
+    /// Ils restent affichés — c'est la seule façon de les retirer, et un dépôt
+    /// qui disparaît de la liste sans rien dire se lit comme un bug de
+    /// Claudhub plutôt que comme un dossier déplacé.
+    pub(super) unavailable: Vec<UnavailableRepo>,
     /// Worktree sélectionné : la clé de presque tout le reste.
     pub(super) active: Option<PathBuf>,
     pub(super) review: HashMap<PathBuf, ReviewState>,
@@ -499,6 +520,15 @@ pub struct ClaudhubApp {
     /// fichiers empile mille `git status` identiques, et tout ce qui suit —
     /// diffs compris — attend derrière eux.
     pending_status: std::collections::HashSet<PathBuf>,
+    /// Quand le dernier fetch automatique a été lancé.
+    last_auto_fetch: Option<std::time::Instant>,
+    /// Le worktree dont on attend un message de commit, s'il y en a un.
+    ///
+    /// Un seul, et son chemin plutôt qu'un booléen : l'agent met plusieurs
+    /// secondes, on change de worktree entre-temps, et c'est ce qui permet à
+    /// la réponse de retrouver le champ auquel elle appartient — comme au
+    /// bouton de savoir lequel des deux panneaux tourne.
+    pub(super) suggesting_message: Option<PathBuf>,
     /// La disposition. Elle appartient à gpui-component : c'est lui qui gère
     /// le glissement d'un panneau d'une zone à l'autre, les onglets et les
     /// zones d'accueil.
@@ -775,6 +805,7 @@ impl ClaudhubApp {
         let mut app = Self {
             git,
             repos: Vec::new(),
+            unavailable: Vec::new(),
             active: None,
             review: HashMap::new(),
             terminals: HashMap::new(),
@@ -801,6 +832,8 @@ impl ClaudhubApp {
             awaiting_agent: None,
             toast: None,
             pending_status: std::collections::HashSet::new(),
+            last_auto_fetch: None,
+            suggesting_message: None,
             dock,
             dock_skin,
             layout_save_scheduled: false,
@@ -866,6 +899,7 @@ impl ClaudhubApp {
                 let alive = this
                     .update(cx, |this, cx| {
                         this.scan_now(tick.is_multiple_of(SUMMARY_EVERY), cx);
+                        this.auto_fetch_now(cx);
                     })
                     .is_ok();
                 if !alive {
@@ -901,6 +935,41 @@ impl ClaudhubApp {
             worktrees,
             programs,
         });
+    }
+
+    /// Va chercher les nouveautés des dépôts ouverts, à la période réglée.
+    ///
+    /// Un horodatage plutôt qu'un compte de tics : la période se règle en
+    /// minutes et le balayage bat toutes les deux secondes, si bien qu'un
+    /// compteur de tics n'aurait pas de rapport lisible avec le réglage. C'est
+    /// aussi ce qui fait que changer le réglage vaut tout de suite.
+    ///
+    /// Le premier passage a lieu dès que le premier dépôt est ouvert : ce
+    /// qu'on veut savoir en arrivant, c'est justement ce qui a changé pendant
+    /// qu'on n'était pas là. Tant qu'aucun dépôt n'est ouvert, rien n'est
+    /// noté — sinon l'ouverture attendrait la période entière.
+    fn auto_fetch_now(&mut self, cx: &mut Context<Self>) {
+        let Some(period) = Settings::global(cx).auto_fetch_period() else {
+            return;
+        };
+        if self.repos.is_empty() {
+            return;
+        }
+        if self
+            .last_auto_fetch
+            .is_some_and(|last| last.elapsed() < period)
+        {
+            return;
+        }
+        self.last_auto_fetch = Some(std::time::Instant::now());
+        for main in self
+            .repos
+            .iter()
+            .map(|repo| repo.main.clone())
+            .collect::<Vec<_>>()
+        {
+            self.git.send(Cmd::AutoFetch { main });
+        }
     }
 
     /// Enregistre la disposition, une fois le calme revenu.
@@ -1150,6 +1219,8 @@ impl ClaudhubApp {
                 if self.repos.iter().any(|r| r.main == main) {
                     return; // déjà ouvert : rouvrir ne doit pas dupliquer
                 }
+                // Le dossier est revenu — remonté, recloné, rouvert à la main.
+                self.unavailable.retain(|repo| repo.path != main);
                 // À défaut du checkout d'où l'ouverture vient, le premier de la
                 // liste, qui est le dépôt principal.
                 let first = opened_at.or_else(|| worktrees.first().map(|w| w.path.clone()));
@@ -1169,6 +1240,26 @@ impl ClaudhubApp {
                     if let Some(path) = first {
                         self.select_worktree(path, window, cx);
                     }
+                }
+            }
+            Evt::RepoUnavailable { path, message } => {
+                log::warn!("{} ne s'ouvre pas : {message}", path.display());
+                // Mémorisé : il reste affiché, en erreur, avec de quoi le
+                // retirer. Désigné à l'instant dans un sélecteur de dossier :
+                // il n'y a rien à garder, seulement à dire pourquoi.
+                if Settings::global(cx)
+                    .repositories
+                    .iter()
+                    .any(|remembered| remembered == &path)
+                {
+                    if !self.unavailable.iter().any(|repo| repo.path == path) {
+                        self.unavailable.push(UnavailableRepo { path, message });
+                    }
+                } else {
+                    self.toast = Some(Toast {
+                        text: SharedString::from(message),
+                        error: true,
+                    });
                 }
             }
             Evt::Worktrees { main, worktrees } => {
@@ -1302,6 +1393,35 @@ impl ClaudhubApp {
             }
             Evt::Summaries { summaries } => {
                 self.summaries.extend(summaries);
+            }
+            Evt::Fetched { main } => {
+                // Le fetch a bougé les références distantes : l'avance et le
+                // retard du worktree affiché ne valent plus, et ce sont eux que
+                // les boutons portent. Le statut du seul worktree affiché — le
+                // balayage de fond se charge des autres, et relire dix statuts
+                // toutes les dix minutes coûterait plus que ce que cela montre.
+                if let Some(worktree) = self.active.clone() {
+                    if self.main_of(&worktree).as_deref() == Some(main.as_path()) {
+                        self.request_status(worktree);
+                    }
+                }
+                self.git.send(Cmd::LoadBranches { main });
+            }
+            Evt::CommitMessage { worktree, message } => {
+                // Le message arrive plusieurs secondes après la demande : il ne
+                // se pose que dans le champ du worktree qui l'a demandé. Le
+                // drapeau, lui, tombe quoi qu'il arrive — sans quoi le bouton
+                // resterait à tourner sur un worktree qu'on a quitté.
+                if self.suggesting_message.as_deref() == Some(worktree.as_path()) {
+                    self.suggesting_message = None;
+                }
+                if self.active.as_deref() == Some(worktree.as_path()) {
+                    self.commit_input.update(cx, |input, cx| {
+                        input.set_value(message, window, cx);
+                    });
+                } else {
+                    self.announce(tr!("commit-suggest-elsewhere"), cx);
+                }
             }
             Evt::WtProject { main, project } => {
                 self.wt_projects.insert(main, project);
@@ -1535,6 +1655,9 @@ impl ClaudhubApp {
                 // soit.
                 if action == Action::Integrate {
                     self.integrated = None;
+                }
+                if action == Action::SuggestMessage {
+                    self.suggesting_message = None;
                 }
                 log::warn!("{action:?} a échoué : {message}");
                 self.toast = Some(Toast {
@@ -2018,7 +2141,7 @@ impl ClaudhubApp {
             .any(|r| r.worktrees.iter().any(|w| w.path == path))
     }
 
-    fn first_worktree(&self) -> Option<PathBuf> {
+    pub(super) fn first_worktree(&self) -> Option<PathBuf> {
         self.repos
             .iter()
             .flat_map(|r| r.worktrees.iter())
@@ -2047,7 +2170,6 @@ impl ClaudhubApp {
         let label = worktree
             .map(|w| w.label())
             .unwrap_or_else(|| tr!("no-worktree").to_string());
-        let has_active = self.active.is_some();
 
         h_flex()
             .h(super::theme::toolbar_height(cx))
@@ -2064,55 +2186,11 @@ impl ClaudhubApp {
             // épisodique pendant que celle-ci débordait.
             .child(div().font_semibold().text_sm().child(label))
             .child(div().flex_1())
-            .child(
-                Button::new("fetch")
-                    .ghost()
-                    .small()
-                    .icon(icon("refresh-cw"))
-                    .tooltip(tr!("action-fetch"))
-                    .disabled(!has_active)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(worktree) = this.active.clone() {
-                            this.git.send(Cmd::Fetch { worktree });
-                        }
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("pull")
-                    .ghost()
-                    .small()
-                    .icon(icon("arrow-down-to-line"))
-                    .tooltip(tr!("action-pull"))
-                    .disabled(!has_active)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(worktree) = this.active.clone() {
-                            this.git.send(Cmd::Pull { worktree });
-                        }
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("push")
-                    .ghost()
-                    .small()
-                    .icon(icon("arrow-up-from-line"))
-                    .tooltip(tr!("action-push"))
-                    .disabled(!has_active)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(worktree) = this.active.clone() {
-                            this.git.send(Cmd::Push {
-                                worktree,
-                                force_with_lease: false,
-                            });
-                        }
-                        cx.notify();
-                    })),
-            )
-            .child(Divider::vertical().h(px(16.)))
-            // L'historique et les branches sont des onglets du dock, atteints
-            // d'un clic sur leur onglet : un bouton de plus ici ferait deux
-            // chemins pour le même geste.
+            // Ni `fetch`, ni `pull`, ni `push` : ils sont descendus dans la
+            // barre du panneau « Modifications », où se fait le reste du
+            // geste — cocher, valider, pousser. L'historique et les branches
+            // sont, eux, des onglets du dock : un bouton de plus ici ferait
+            // deux chemins pour le même geste.
             .child(
                 Button::new("terminal")
                     .ghost()

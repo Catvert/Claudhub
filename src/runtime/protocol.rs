@@ -101,8 +101,26 @@ pub enum Cmd {
         amend: bool,
         all: bool,
     },
+    /// Demande un message de commit à l'agent configuré, à partir de ce qui
+    /// est indexé.
+    ///
+    /// La commande n'y figure pas : le worker lit les réglages lui-même, comme
+    /// il le fait pour l'éditeur externe et le jeton Sentry. C'est un réglage
+    /// global, et le recopier dans chaque commande ne dirait rien de plus.
+    SuggestMessage {
+        worktree: WorktreeId,
+    },
     Fetch {
         worktree: WorktreeId,
+    },
+    /// Le fetch périodique d'un dépôt.
+    ///
+    /// Une commande à part de `Fetch`, et pas seulement pour la file : celui-ci
+    /// **ne dit rien** quand il aboutit. Un message toutes les dix minutes dans
+    /// la barre d'état pour annoncer qu'il ne s'est rien passé userait
+    /// justement l'endroit où l'on regarde ce qui vient de se passer.
+    AutoFetch {
+        main: PathBuf,
     },
     Pull {
         worktree: WorktreeId,
@@ -334,6 +352,18 @@ pub enum Evt {
         /// dépôt principal qui se trouve en tête de la liste.
         opened_at: Option<WorktreeId>,
     },
+    /// Un dépôt qu'on n'a pas pu ouvrir : le dossier a disparu, ou ce n'en
+    /// est pas un.
+    ///
+    /// Un événement à lui plutôt qu'un `Failed` : ce n'est pas une opération
+    /// qui a échoué mais un dépôt qui manque, et ce qu'il faut en faire dépend
+    /// de la façon dont il est arrivé là. Mémorisé, il doit rester **visible**
+    /// pour qu'on puisse le retirer ; désigné à l'instant dans un sélecteur de
+    /// dossier, il n'a qu'à se dire.
+    RepoUnavailable {
+        path: PathBuf,
+        message: String,
+    },
     Worktrees {
         main: PathBuf,
         worktrees: Vec<Worktree>,
@@ -363,6 +393,21 @@ pub enum Evt {
     },
     Summaries {
         summaries: Vec<(WorktreeId, Summary)>,
+    },
+    /// Le dépôt vient d'être relevé sans qu'on l'ait demandé. Ce qu'il porte
+    /// n'est pas un résultat mais une occasion : l'avance et le retard sur
+    /// l'amont ont pu changer, et ils se lisent dans le statut.
+    Fetched {
+        main: PathBuf,
+    },
+    /// Le message que l'agent propose pour ce qui est indexé.
+    ///
+    /// Il porte son worktree parce qu'il arrive plusieurs secondes après la
+    /// demande : on a pu changer de worktree entre-temps, et poser ce
+    /// message-là dans le champ d'un autre serait le pire des services.
+    CommitMessage {
+        worktree: WorktreeId,
+        message: String,
     },
     /// Ce que le `wt.toml` d'un dépôt déclare. `None` quand il n'y en a pas —
     /// le cas courant, et pas une erreur : les gestes de `wt` disparaissent
@@ -458,13 +503,13 @@ pub struct WtWorktree {
 /// savoir quoi rafraîchir ensuite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
-    Open,
     Refresh,
     Stage,
     Unstage,
     Discard,
     Delete,
     Commit,
+    SuggestMessage,
     Fetch,
     Pull,
     Push,
@@ -493,13 +538,13 @@ impl Action {
     /// Clé i18n du message affiché en cas de succès.
     pub fn success_key(self) -> &'static str {
         match self {
-            Self::Open => "action-open-ok",
             Self::Refresh => "action-refresh-ok",
             Self::Stage => "action-stage-ok",
             Self::Unstage => "action-unstage-ok",
             Self::Discard => "action-discard-ok",
             Self::Delete => "action-delete-ok",
             Self::Commit => "action-commit-ok",
+            Self::SuggestMessage => "action-suggest-message-ok",
             Self::Fetch => "action-fetch-ok",
             Self::Pull => "action-pull-ok",
             Self::Push => "action-push-ok",

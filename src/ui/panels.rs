@@ -28,16 +28,41 @@ use crate::ui::app::ClaudhubApp;
 use crate::ui::find::Pane;
 use crate::ui::settings::Settings;
 
-/// Enveloppe le contenu d'un panneau de quoi noter qu'on vient d'y cliquer.
+/// Le fond d'un panneau, et les coins bas de la carte qui le porte.
 ///
-/// C'est ce qui donne une cible à `Ctrl+F`. Le clic et non le focus : le dock
-/// pose le focus sur l'onglet actif de **chaque** zone, il y en a trois
-/// affichées en même temps, et rien là-dedans ne dit laquelle l'utilisateur
-/// regarde.
+/// Plus de carte ici : c'est le **cadre du groupe** qui l'est désormais — le
+/// fork arrondit `TabGroupSkin::frame` et espace les splits d'une gouttière,
+/// si bien que la barre d'onglets et le contenu partagent la même surface,
+/// sans couture ni bordure entre eux. Redessiner une carte à l'intérieur
+/// remettrait la couture qu'on vient d'enlever.
 ///
-/// En phase de **capture**, donc avant les enfants et sans qu'aucun d'eux
-/// puisse l'arrêter : une ligne de diff comme une case à cocher consomment
-/// leur clic, et le panneau ne saurait jamais qu'on l'a touché.
+/// `rounded_b` : le masque de contenu de gpui est **rectangulaire** —
+/// l'arrondi du cadre du groupe ne rogne pas ses enfants, et un fond carré
+/// peint ici couvrirait les coins bas de la carte. En haut, le rail des
+/// onglets est en retrait et laisse le cadre paraître ; en bas, c'est ce
+/// fond-ci qui a le dernier mot. Tout panneau doit donc passer par là : celui
+/// qui s'en dispense a des coins carrés, et rien ne le signale.
+fn pane_frame(content: impl IntoElement, cx: &App) -> gpui::Div {
+    div()
+        .size_full()
+        .rounded_b(cx.theme().radius_lg)
+        .bg(cx.theme().background)
+        .child(content)
+}
+
+/// Idem, en notant le panneau qu'on vient de **toucher** : c'est ce qui donne
+/// une cible à `Ctrl+F`.
+///
+/// Le clic et non le focus : le dock pose le focus sur l'onglet actif de
+/// **chaque** zone, il y en a trois affichées en même temps, et rien là-dedans
+/// ne dit laquelle l'utilisateur regarde. En phase de **capture**, donc avant
+/// les enfants et sans qu'aucun d'eux puisse l'arrêter : une ligne de diff
+/// comme une case à cocher consomment leur clic, et le panneau ne saurait
+/// jamais qu'on l'a touché.
+///
+/// Les terminaux n'ont pas de panneau de recherche — `Ctrl+F` y appartient au
+/// programme qui tourne —, et c'est pour eux que les deux fonctions sont
+/// séparées : le cadre leur revient, la note non.
 fn pane_root(
     app: &Entity<ClaudhubApp>,
     pane: Pane,
@@ -45,24 +70,9 @@ fn pane_root(
     cx: &App,
 ) -> impl IntoElement {
     let app = app.clone();
-    // Plus de carte ici : c'est le **cadre du groupe** qui l'est désormais —
-    // le fork arrondit `TabGroupSkin::frame` et espace les splits d'une
-    // gouttière, si bien que la barre d'onglets et le contenu partagent la
-    // même surface, sans couture ni bordure entre eux. Redessiner une carte
-    // à l'intérieur remettrait la couture qu'on vient d'enlever.
-    // `rounded_b` : le masque de contenu de gpui est **rectangulaire** —
-    // l'arrondi du cadre du groupe ne rogne pas ses enfants, et un fond carré
-    // peint ici couvrirait les coins bas de la carte. En haut, le rail des
-    // onglets est en retrait et laisse le cadre paraître ; en bas, c'est ce
-    // fond-ci qui a le dernier mot.
-    div()
-        .size_full()
-        .rounded_b(cx.theme().radius_lg)
-        .bg(cx.theme().background)
-        .capture_any_mouse_down(move |_, _window, cx| {
-            app.update(cx, |app, cx| app.touch_pane(pane, cx));
-        })
-        .child(content)
+    pane_frame(content, cx).capture_any_mouse_down(move |_, _window, cx| {
+        app.update(cx, |app, cx| app.touch_pane(pane, cx));
+    })
 }
 
 /// Déclare les panneaux au registre du dock.
@@ -539,9 +549,10 @@ impl Render for TerminalPanel {
         let Some(app) = self.app.upgrade() else {
             return div().into_any_element();
         };
-        app.update(cx, |app, cx| {
+        let content = app.update(cx, |app, cx| {
             app.render_terminals(window, cx).into_any_element()
-        })
+        });
+        pane_frame(content, cx).into_any_element()
     }
 }
 

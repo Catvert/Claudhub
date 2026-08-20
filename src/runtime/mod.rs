@@ -38,6 +38,11 @@ fn is_network(cmd: &Cmd) -> bool {
         cmd,
         Cmd::Fetch { .. }
             | Cmd::Pull { .. }
+            | Cmd::AutoFetch { .. }
+            // Un agent qui rédige un message met dix à trente secondes : c'est
+            // exactement le profil des commandes qui ont fait sortir le réseau
+            // de la file des lectures.
+            | Cmd::SuggestMessage { .. }
             | Cmd::Push { .. }
             | Cmd::LoadIssues { .. }
             | Cmd::LoadIssueEvent { .. }
@@ -145,7 +150,10 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
     match cmd {
         Cmd::OpenRepo(path) => match open_repo(&path) {
             Ok(evt) => vec![evt],
-            Err(e) => vec![fail(None, Action::Open, e)],
+            Err(e) => vec![Evt::RepoUnavailable {
+                path,
+                message: describe_error(e),
+            }],
         },
         Cmd::RefreshRepo { main } => match (repo::Repo { main: main.clone() }).worktrees() {
             Ok(worktrees) => vec![Evt::Worktrees { main, worktrees }],
@@ -273,6 +281,24 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
                 },
             )
         }),
+        Cmd::SuggestMessage { worktree } => {
+            match crate::commit_msg::suggest(&worktree, &suggest_command()) {
+                Ok(message) => vec![Evt::CommitMessage { worktree, message }],
+                Err(e) => vec![fail(Some(worktree), Action::SuggestMessage, e)],
+            }
+        }
+        Cmd::AutoFetch { main } => match repo::fetch(&main, true) {
+            Ok(_) => vec![Evt::Fetched { main }],
+            // Silence, et une trace. Un dépôt sans distant, une machine hors
+            // ligne, une authentification qui manque : rien de tout cela n'est
+            // arrivé au moment où l'utilisateur regardait, et le lui dire
+            // reviendrait à l'interrompre pour une commande qu'il n'a pas
+            // lancée.
+            Err(e) => {
+                log::debug!("fetch automatique de {} : {e}", main.display());
+                Vec::new()
+            }
+        },
         Cmd::Fetch { worktree } => {
             write_then_refresh(worktree, Action::Fetch, |dir| repo::fetch(dir, true))
         }
@@ -557,6 +583,12 @@ fn editor_template() -> String {
     crate::ui::Settings::load().external_editor
 }
 
+/// La commande qui rédige un message de commit, telle que les réglages la
+/// portent. Lue ici pour la même raison que `editor_template`.
+fn suggest_command() -> String {
+    crate::ui::Settings::load().commit_message_command
+}
+
 fn open_repo(path: &Path) -> Result<Evt> {
     let r = repo::Repo::discover(path)?;
     let worktrees = r.worktrees()?;
@@ -618,12 +650,17 @@ fn done(worktree: Option<PathBuf>, action: Action, output: String) -> Evt {
 
 /// Aplatit la chaîne de causes d'`anyhow` en une phrase : la vue affiche un
 /// message, pas une trace.
-fn fail(worktree: Option<PathBuf>, action: Action, err: anyhow::Error) -> Evt {
-    let message = err
-        .chain()
+/// La chaîne des causes, mise bout à bout : celle de git dit *ce qui* a
+/// échoué, la nôtre *ce qu'on essayait de faire*.
+fn describe_error(err: anyhow::Error) -> String {
+    err.chain()
         .map(|c| c.to_string())
         .collect::<Vec<_>>()
-        .join(" : ");
+        .join(" : ")
+}
+
+fn fail(worktree: Option<PathBuf>, action: Action, err: anyhow::Error) -> Evt {
+    let message = describe_error(err);
     log::warn!("{action:?} : {message}");
     Evt::Failed {
         worktree,

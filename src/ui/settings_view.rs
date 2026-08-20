@@ -651,6 +651,43 @@ fn review_page() -> SettingPage {
                         .default_value(true),
                     )
                     .description(tr!("settings-integrate-no-ff-help")),
+                )
+                .item(
+                    SettingItem::new(
+                        tr!("settings-commit-message"),
+                        SettingField::input(
+                            |cx: &App| Settings::global(cx).commit_message_command.clone().into(),
+                            |value: SharedString, cx: &mut App| {
+                                Settings::update_global(cx, |s| {
+                                    s.commit_message_command = value.to_string()
+                                })
+                            },
+                        )
+                        .default_value(SharedString::from(
+                            crate::ui::settings::DEFAULT_COMMIT_MESSAGE_COMMAND,
+                        )),
+                    )
+                    .description(tr!("settings-commit-message-help")),
+                )
+                .item(
+                    SettingItem::new(
+                        tr!("settings-auto-fetch"),
+                        SettingField::number_input(
+                            NumberFieldOptions {
+                                min: 0.,
+                                max: 240.,
+                                step: 5.,
+                            },
+                            |cx: &App| Settings::global(cx).auto_fetch_minutes as f64,
+                            |value: f64, cx: &mut App| {
+                                Settings::update_global(cx, |s| {
+                                    s.auto_fetch_minutes = value.clamp(0., 240.) as u32
+                                })
+                            },
+                        )
+                        .default_value(10.0),
+                    )
+                    .description(tr!("settings-auto-fetch-help")),
                 ),
         )
         .group(

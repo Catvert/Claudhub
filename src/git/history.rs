@@ -78,6 +78,31 @@ pub fn commits(dir: &Path, range: &LogRange, limit: usize) -> Result<Vec<Commit>
     Ok(parse(&out))
 }
 
+/// Les sujets des derniers commits, du plus récent au plus ancien.
+///
+/// Ils servent d'exemple à l'agent qui propose un message : la langue, la
+/// personne du verbe et les préfixes éventuels d'un dépôt ne se devinent pas,
+/// et une consigne écrite ici les imposerait à tous les dépôts. Un dépôt neuf
+/// n'en a aucun, ce qui n'est pas une erreur — d'où la liste vide.
+pub fn recent_subjects(dir: &Path, limit: usize) -> Vec<String> {
+    super::git_opt(
+        dir,
+        &[
+            "log".to_string(),
+            "-z".to_string(),
+            "--format=%s".to_string(),
+            format!("--max-count={limit}"),
+        ],
+    )
+    .map(|out| {
+        super::split_nul(&out)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
 fn parse(out: &str) -> Vec<Commit> {
     super::split_nul(out).filter_map(parse_commit).collect()
 }

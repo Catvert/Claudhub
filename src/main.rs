@@ -10,6 +10,7 @@ const _: &str = include_str!("../assets/i18n/fr.json");
 rust_i18n::i18n!("assets/i18n", fallback = "en");
 
 pub mod agent;
+pub mod commit_msg;
 pub mod files;
 pub mod git;
 pub mod logging;
@@ -41,6 +42,10 @@ macro_rules! tr {
 }
 
 fn main() {
+    // Avant tout le reste, et avant qu'un thread existe : ce qui nous a lancés
+    // est souvent un agent, et ses marqueurs de session feraient de chaque
+    // agent que nous démarrons une sous-session du sien.
+    agent::disinherit_session();
     logging::init();
     ui::run();
 }

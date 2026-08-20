@@ -5,11 +5,11 @@
 
 use std::path::PathBuf;
 
-use gpui::{div, prelude::*, px, Context, Window};
+use gpui::{div, prelude::*, px, Context, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
-    menu::ContextMenuExt,
+    menu::{ContextMenuExt, PopupMenuItem},
     v_flex, ActiveTheme, Sizable, StyledExt, WindowExt,
 };
 
@@ -110,6 +110,17 @@ fn agent_badge(agent: &crate::ui::app::AgentState, cx: &gpui::App) -> impl IntoE
         )
 }
 
+/// Le nom d'un dépôt qu'on n'a pas pu ouvrir.
+///
+/// Déduit du chemin et non demandé à git, qui ne peut justement pas répondre :
+/// c'est le dernier segment, celui qu'on reconnaît, et le chemin entier reste
+/// sur la ligne d'en dessous.
+fn repo_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 impl ClaudhubApp {
     pub(super) fn render_sidebar(
         &mut self,
@@ -163,8 +174,22 @@ impl ClaudhubApp {
                     crate::ui::find::matches(&query, name) || !worktrees.is_empty()
                 })
                 .collect();
+        // Les dépôts qui ne s'ouvrent pas, filtrés comme les autres : la
+        // recherche porte sur ce qu'on voit.
+        let unavailable: Vec<(PathBuf, SharedString, SharedString)> = self
+            .unavailable
+            .iter()
+            .map(|repo| {
+                (
+                    repo.path.clone(),
+                    SharedString::from(repo_name(&repo.path)),
+                    SharedString::from(repo.message.clone()),
+                )
+            })
+            .filter(|(_, name, _)| crate::ui::find::matches(&query, name))
+            .collect();
         let active = self.active.clone();
-        let empty = repos.is_empty();
+        let empty = repos.is_empty() && unavailable.is_empty();
 
         // Ni fond `sidebar`, ni filet droit : des reliques de l'époque des
         // panneaux cousus bord à bord. Le fond vient de la carte — un jeton
@@ -246,6 +271,7 @@ impl ClaudhubApp {
                             .children(repos.into_iter().map(
                                 |(ix, main, name, collapsed, worktrees)| {
                                     let main_for_add = main.clone();
+                                    let main_for_menu = main.clone();
                                     v_flex()
                                         .child(
                                             h_flex()
@@ -295,7 +321,37 @@ impl ClaudhubApp {
                                                                 );
                                                             },
                                                         )),
-                                                ),
+                                                )
+                                                // Retirer un dépôt de la liste
+                                                // ne touche à rien sur le
+                                                // disque, mais cela ferme tout
+                                                // ce qu'on y avait ouvert : au
+                                                // clic droit, comme les gestes
+                                                // qu'on ne fait pas deux fois
+                                                // par jour.
+                                                .context_menu({
+                                                    let entity = cx.entity();
+                                                    let main = main_for_menu.clone();
+                                                    move |menu, _window, _cx| {
+                                                        let (entity, main) =
+                                                            (entity.clone(), main.clone());
+                                                        menu.item(
+                                                            PopupMenuItem::new(tr!(
+                                                                "sidebar-forget-repository"
+                                                            ))
+                                                            .icon(icon("x"))
+                                                            .on_click(move |_, window, cx| {
+                                                                entity.update(cx, |this, cx| {
+                                                                    this.forget_repository(
+                                                                        main.clone(),
+                                                                        window,
+                                                                        cx,
+                                                                    );
+                                                                });
+                                                            }),
+                                                        )
+                                                    }
+                                                }),
                                         )
                                         .when(!collapsed, |el| {
                                             el.children(worktrees.into_iter().enumerate().map(
@@ -468,11 +524,118 @@ impl ClaudhubApp {
                                             ))
                                         })
                                 },
+                            ))
+                            // Les dépôts introuvables en dernier : ce sont des
+                            // reliques, pas des dépôts de travail, et les
+                            // laisser à leur rang d'origine ferait un trou au
+                            // milieu de la liste.
+                            .children(unavailable.into_iter().enumerate().map(
+                                |(ix, (path, name, message))| {
+                                    let for_forget = path.clone();
+                                    h_flex()
+                                        .id(("unavailable", ix))
+                                        .py_1()
+                                        .px_2()
+                                        .gap_1()
+                                        .items_center()
+                                        .tooltip(move |window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(message.clone())
+                                                .build(window, cx)
+                                        })
+                                        .child(
+                                            icon("triangle-alert")
+                                                .xsmall()
+                                                .text_color(cx.theme().warning),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .child(
+                                                    div()
+                                                        .truncate()
+                                                        .text_sm()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(name),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .truncate()
+                                                        .text_xs()
+                                                        .text_color(cx.theme().warning)
+                                                        .child(tr!("sidebar-repo-unavailable")),
+                                                ),
+                                        )
+                                        // Un bouton et non une entrée de menu :
+                                        // c'est la seule chose qu'on puisse
+                                        // faire d'une ligne pareille, et la
+                                        // cacher derrière un clic droit
+                                        // reviendrait à ne pas la proposer.
+                                        .child(
+                                            Button::new(("forget-repo", ix))
+                                                .ghost()
+                                                .xsmall()
+                                                .icon(icon("x"))
+                                                .tooltip(tr!("sidebar-forget-repository"))
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        this.forget_repository(
+                                                            for_forget.clone(),
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
+                                        )
+                                },
                             )),
                         cx,
                     ),
                 ),
             )
+    }
+
+    /// Retire un dépôt de la liste. Rien n'est touché sur le disque.
+    ///
+    /// Le même geste pour un dépôt ouvert et pour un dépôt introuvable : dans
+    /// les deux cas, ce qu'on retire est une entrée de la liste des dépôts
+    /// rouverts au démarrage, et le second cas est le seul où l'on ne pouvait
+    /// pas le faire — d'où le signalement.
+    pub(super) fn forget_repository(
+        &mut self,
+        main: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::ui::settings::Settings::update_global(cx, |s| s.forget_repository(&main));
+        self.unavailable.retain(|repo| repo.path != main);
+        let closed: Vec<PathBuf> = self
+            .repos
+            .iter()
+            .filter(|repo| repo.main == main)
+            .flat_map(|repo| repo.worktrees.iter().map(|w| w.path.clone()))
+            .collect();
+        self.repos.retain(|repo| repo.main != main);
+        // Ce qu'on gardait de ses worktrees n'a plus d'objet. Le magasin
+        // d'état, lui, n'est pas purgé : notes et replis attendent le jour où
+        // le dépôt est rouvert, et les effacer ici ferait d'un rangement une
+        // perte.
+        for worktree in &closed {
+            self.review.remove(worktree);
+            self.terminals.remove(worktree);
+            self.summaries.remove(worktree);
+        }
+        if self
+            .active
+            .as_deref()
+            .is_some_and(|active| closed.iter().any(|path| path == active))
+        {
+            self.active = None;
+            if let Some(first) = self.first_worktree() {
+                self.select_worktree(first, window, cx);
+            }
+        }
+        cx.notify();
     }
 
     /// Ouvre un dépôt. Le sélecteur de dossier natif est asynchrone : la

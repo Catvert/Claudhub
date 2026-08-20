@@ -27,8 +27,8 @@ use gpui_component::{
 };
 
 use crate::terminal::{
-    key_bytes, Paint, SelectionKind, Side, Snapshot, Spawn, TermSize, Terminal, TerminalEvent,
-    ViewportPosition,
+    key_bytes, mouse, Paint, SelectionKind, Side, Snapshot, Spawn, TermSize, Terminal,
+    TerminalEvent, ViewportPosition,
 };
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
@@ -64,6 +64,12 @@ pub struct TerminalView {
     /// Vrai entre l'enfoncement et le relâchement du bouton : c'est ce qui
     /// distingue un glissement de sélection d'un simple survol.
     selecting: bool,
+    /// La cellule où la souris a été rapportée pour la dernière fois.
+    ///
+    /// Un déplacement se compte en pixels et un rapport en cellules : sans
+    /// cette note, traverser une seule cellule enverrait dix événements
+    /// identiques au programme, qui en redessinerait dix fois.
+    mouse_cell: Option<(usize, usize)>,
     /// Fraction de ligne non consommée par le dernier événement de molette.
     scroll_remainder: f32,
     /// Géométrie demandée par la mise en page, pas encore transmise.
@@ -151,6 +157,7 @@ impl TerminalView {
             bounds: Bounds::default(),
             cell: gpui::size(px(8.), px(16.)),
             selecting: false,
+            mouse_cell: None,
             scroll_remainder: 0.,
             pending_size: None,
             resize_scheduled: false,
@@ -318,6 +325,42 @@ impl TerminalView {
         viewport_position(point - self.bounds.origin, self.cell)
     }
 
+    /// Rapporte un événement de souris au programme, s'il écoute.
+    ///
+    /// Rend vrai quand il l'a reçu : le geste lui appartient alors
+    /// entièrement, et la vue n'a plus ni sélection à étendre ni historique à
+    /// remonter. **Maj est la sortie de secours** — c'est la convention de
+    /// tous les terminaux, et sans elle on ne pourrait plus rien copier d'un
+    /// programme qui prend la souris.
+    fn report_mouse(
+        &mut self,
+        button: Option<mouse::Button>,
+        action: mouse::Action,
+        position: Point<Pixels>,
+        modifiers: gpui::Modifiers,
+    ) -> bool {
+        if modifiers.shift || !self.terminal.reports_mouse() {
+            return false;
+        }
+        let cell = self.position_at(position);
+        let (column, line) = (cell.column, cell.line);
+        // Un déplacement ne vaut d'être rapporté qu'au changement de cellule :
+        // le programme redessine à chaque événement, et un geste de la main en
+        // traverse une dizaine. Rien n'est parti, d'où le `false` — il n'y a de
+        // toute façon aucun geste local à faire d'un survol.
+        if action == mouse::Action::Move && self.mouse_cell == Some((column, line)) {
+            return false;
+        }
+        self.mouse_cell = Some((column, line));
+        self.terminal.report_mouse(mouse::Report {
+            button,
+            action,
+            column,
+            line,
+            modifiers,
+        })
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -326,6 +369,23 @@ impl TerminalView {
     ) {
         window.focus(&self.focus, cx);
         if event.button != MouseButton::Left {
+            return;
+        }
+        // Seul le bouton gauche part au programme. Le milieu colle la
+        // sélection primaire et le droit ouvre le menu de Claudhub — d'où l'on
+        // copie, justement, ce qu'un programme qui prend la souris rendrait
+        // sinon impossible.
+        if self.report_mouse(
+            Some(mouse::Button::Left),
+            mouse::Action::Press,
+            event.position,
+            event.modifiers,
+        ) {
+            // Une sélection laissée derrière soi se peindrait par-dessus ce
+            // que le programme dessine, sans qu'on puisse plus l'ôter.
+            self.terminal.clear_selection();
+            self.snapshot = self.terminal.snapshot();
+            cx.notify();
             return;
         }
         let kind = match event.click_count {
@@ -348,6 +408,15 @@ impl TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Un glissement n'est pas un survol : le programme les demande
+        // séparément, et `mouse::report` fait le tri.
+        let held =
+            matches!(event.pressed_button, Some(MouseButton::Left)).then_some(mouse::Button::Left);
+        if !self.selecting
+            && self.report_mouse(held, mouse::Action::Move, event.position, event.modifiers)
+        {
+            return;
+        }
         if !self.selecting {
             return;
         }
@@ -358,7 +427,20 @@ impl TerminalView {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // Le relâchement suit l'enfoncement : si celui-ci est parti au
+        // programme, il n'y a pas de sélection en cours, et c'est ce que dit
+        // `selecting`.
         if event.button != MouseButton::Left {
+            return;
+        }
+        if !self.selecting
+            && self.report_mouse(
+                Some(mouse::Button::Left),
+                mouse::Action::Release,
+                event.position,
+                event.modifiers,
+            )
+        {
             return;
         }
         self.selecting = false;
@@ -491,11 +573,34 @@ impl TerminalView {
             return;
         }
 
+        // Le programme a demandé la souris : la molette lui appartient, et
+        // c'est le seul cas où elle arrive telle quelle. Un cran par ligne,
+        // comme le fait tout terminal — le programme décide de ce que vaut un
+        // cran chez lui.
+        let button = if lines > 0 {
+            mouse::Button::WheelUp
+        } else {
+            mouse::Button::WheelDown
+        };
+        if !event.modifiers.shift && self.terminal.reports_mouse() {
+            let cell = self.position_at(event.position);
+            for _ in 0..lines.unsigned_abs() {
+                self.terminal.report_mouse(mouse::Report {
+                    button: Some(button),
+                    action: mouse::Action::Press,
+                    column: cell.column,
+                    line: cell.line,
+                    modifiers: event.modifiers,
+                });
+            }
+            return;
+        }
+
         // Dans l'écran secondaire — un agent, `less`, `vim` — il n'y a pas
         // d'historique à remonter : la grille est ce que le programme dessine,
         // et lui seul sait ce qu'il y a au-dessus. La molette s'y traduit donc
-        // en flèches, comme dans tous les terminaux ; sans quoi elle ne fait
-        // rien du tout, ce qui est exactement ce qu'on nous a signalé.
+        // en flèches, comme dans tous les terminaux quand personne n'écoute la
+        // souris ; sans quoi elle ne fait rien du tout.
         if self.terminal.in_alternate_screen() {
             let key = if lines > 0 { "up" } else { "down" };
             let repeats = lines.unsigned_abs() as usize * ALT_SCREEN_LINES;
@@ -588,6 +693,12 @@ impl Render for TerminalView {
             .size_full()
             .relative()
             .bg(cx.theme().background)
+            // Le dernier fond peint est celui qui décide des coins bas de la
+            // carte : le masque de contenu de gpui est rectangulaire, et
+            // l'arrondi de `panels::pane_frame` ne rogne pas ses enfants. Ce
+            // fond-ci couvre toute la surface du panneau — sans cet arrondi,
+            // le terminal reste carré en bas quoi qu'on peigne dessous.
+            .rounded_b(cx.theme().radius_lg)
             .font_family(font_family.clone())
             .text_size(font_size)
             .on_key_down(cx.listener(Self::on_key))

@@ -23,6 +23,14 @@ pub const DEFAULT_UI_FONT: &str = "Inter";
 /// Police à chasse fixe embarquée, celle du terminal et des diffs.
 pub const DEFAULT_MONO_FONT: &str = "JetBrains Mono";
 
+/// Ce qui rédige un message de commit quand rien n'est configuré.
+///
+/// `-p` fait de `claude` un filtre : il lit son prompt sur l'entrée standard
+/// et écrit sa réponse sur la sortie, sans session ni interface. Le modèle est
+/// nommé parce qu'un résumé de diff n'a pas de quoi occuper le plus gros, et
+/// que celui-ci répond en quelques secondes.
+pub const DEFAULT_COMMIT_MESSAGE_COMMAND: &str = "claude -p --model sonnet";
+
 /// Palettes de repli : celles que gpui-component fournit, et qui existent donc
 /// même si le répertoire de thèmes est vide ou illisible.
 pub const DEFAULT_LIGHT_THEME: &str = "Default Light";
@@ -425,6 +433,22 @@ pub struct Settings {
     pub external_editor: String,
     /// Montrer aussi les fichiers que `.gitignore` écarte, dans l'explorateur.
     pub show_ignored_files: bool,
+    /// Minutes entre deux `git fetch` automatiques. `0` : aucun.
+    ///
+    /// Sans lui, « en retard de trois commits » n'apparaît qu'après un fetch
+    /// demandé à la main — c'est-à-dire quand on se doutait déjà de quelque
+    /// chose. Un relevé régulier est ce qui rend le compte du bouton digne de
+    /// confiance ; c'est ce que font les clients git de bureau, et ils le
+    /// règlent tous.
+    pub auto_fetch_minutes: u32,
+    /// Ce qui rédige un message de commit à partir du diff indexé.
+    ///
+    /// Un programme et non une API : c'est la décision de cadrage de Claudhub,
+    /// et elle vaut ici comme pour les agents du terminal. Le diff lui arrive
+    /// par l'entrée standard, sa sortie standard est le message. Un modèle
+    /// rapide suffit — d'où `sonnet` par défaut, la rédaction d'un résumé
+    /// n'ayant pas de quoi occuper le plus gros. Vide, le bouton disparaît.
+    pub commit_message_command: String,
     /// Organisation Sentry. Le *projet*, lui, dépend du dépôt et vit dans le
     /// magasin d'état, pas ici.
     pub sentry_org: String,
@@ -487,6 +511,8 @@ impl Default for Settings {
             integrate_no_ff: true,
             external_editor: String::new(),
             show_ignored_files: false,
+            auto_fetch_minutes: 10,
+            commit_message_command: DEFAULT_COMMIT_MESSAGE_COMMAND.into(),
             sentry_org: String::new(),
             sentry_token: String::new(),
             sentry_query: String::new(),
@@ -498,6 +524,12 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Le délai entre deux fetch automatiques, ou `None` quand il n'y en a pas.
+    pub fn auto_fetch_period(&self) -> Option<std::time::Duration> {
+        (self.auto_fetch_minutes > 0)
+            .then(|| std::time::Duration::from_secs(u64::from(self.auto_fetch_minutes) * 60))
+    }
+
     /// La racine des notes, `~` développé.
     ///
     /// Un chemin qu'on saisit dans un formulaire s'écrit `~/Coffre/…` — c'est

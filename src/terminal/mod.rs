@@ -12,10 +12,12 @@
 //! affamer l'interface qui essaie de le peindre.
 
 mod keys;
+pub mod mouse;
 mod snapshot;
 
 pub use alacritty_terminal::index::Side;
 pub use keys::key_bytes;
+pub use mouse::{Action as MouseAction, Button as MouseButton, Report as MouseReport};
 pub use snapshot::{Cursor, Line, Paint, Segment, Snapshot};
 
 use std::borrow::Cow;
@@ -447,6 +449,27 @@ impl Terminal {
     /// bloquerait la boucle d'E/S pendant tout le rendu.
     pub fn snapshot(&self) -> Snapshot {
         snapshot::capture(&self.term.lock())
+    }
+
+    /// Rapporte un événement de souris au programme, s'il en a demandé.
+    ///
+    /// Rend vrai quand l'événement lui a été livré : la vue n'a alors plus
+    /// rien à en faire — ni défiler, ni sélectionner. C'est le programme qui a
+    /// la souris, comme dans n'importe quel terminal.
+    pub fn report_mouse(&self, event: mouse::Report) -> bool {
+        let Some(bytes) = mouse::report(self.mode(), event) else {
+            return false;
+        };
+        self.write(bytes);
+        true
+    }
+
+    /// Vrai si le programme écoute la souris. La vue s'en sert pour ce qui se
+    /// décide **avant** l'événement — laisser la sélection au Maj, par
+    /// exemple.
+    pub fn reports_mouse(&self) -> bool {
+        self.mode()
+            .intersects(alacritty_terminal::term::TermMode::MOUSE_MODE)
     }
 
     /// Vrai si le programme est en mode « application » pour la souris ou les

@@ -23,6 +23,7 @@ elle ne fait jamais d'entrée-sortie**.
 
 ```
 src/
+  commit_msg.rs le message de commit proposé : prompt, nettoyage, agent
   files.rs      lire, écrire (sous condition), ranger, éditeur externe
   sentry.rs     issues et traces Sentry, testées sur fixture
   wt.rs         le `wt.toml` d'un projet : questions, tâches, statut, URLs
@@ -42,6 +43,7 @@ src/
     mod.rs      pty + `Term` alacritty derrière un `FairMutex`
     snapshot.rs grille → lignes et runs de style, sans tenir le verrou
     keys.rs     frappe gpui → octets (séquences xterm)
+    mouse.rs    clic et molette → octets, quand le programme les demande
   ui/           tout gpui
     mod.rs      `run()`, `AssetSource`, polices, i18n
     app.rs      `ClaudhubApp` : l'état, la pompe d'événements, le chrome
@@ -329,6 +331,48 @@ Corollaire à connaître : le diff affiché va de HEAD au répertoire de travail
 index compris. Indexer un hunk isolé sur un fichier *déjà partiellement
 indexé* peut donc échouer — `git apply --cached` refuse un patch qui ne
 s'applique pas —, et le message le dit.
+
+### Proposer un message de commit
+
+Le bouton à côté de « Valider » donne le diff indexé à un agent et met sa
+réponse dans le champ. `src/commit_msg.rs` en tient tout ce qui se teste — le
+prompt et le nettoyage de la réponse —, le reste est un sous-processus.
+
+**Un programme, pas une API.** C'est la décision de cadrage de Claudhub, la
+même que pour l'agent du terminal : `Settings::commit_message_command`, par
+défaut `claude -p --model sonnet`, est une ligne de commande que l'utilisateur
+a déjà installée et authentifiée. Une clé d'API et un client HTTP à nous
+auraient leur propre authentification, leurs propres quotas et leur propre
+format d'erreur, pour rédiger une ligne de résumé. Le réglage vide fait
+disparaître le bouton plutôt que d'offrir un geste qui échouera.
+
+Six points qui ne se devinent pas :
+
+- **Le diff part par l'entrée standard**, jamais en argument : une ligne de
+  commande a une longueur maximale, environnement compris, et un diff de
+  relecture d'agent la frôle. Les trois flux passent par des threads, comme
+  dans `git::wait_with_timeout` et pour la même raison — un tube plein bloque
+  celui qui écrit, et attendre la fin avant de lire est l'interblocage
+  classique.
+- **Les sujets des derniers commits partent avec** (`history::recent_subjects`).
+  La convention d'un dépôt ne se devine pas : la langue d'abord, mais aussi la
+  personne du verbe et les préfixes que l'équipe s'est donnés. Une consigne
+  écrite dans le prompt les imposerait à tous les dépôts.
+- **Le diff est tronqué à `MAX_DIFF`**, sur une frontière de caractère : en
+  octets nus, un diff accentué se couperait au milieu d'un caractère et la
+  tranche ne serait plus de l'UTF-8. La coupe est dite dans le prompt.
+- **La réponse est nettoyée avant d'entrer dans le champ** (`clean`). Un modèle
+  encadre volontiers sa réponse d'un bloc de code ou de guillemets malgré la
+  consigne, et ce sont des caractères qui finiraient tels quels dans
+  l'historique du dépôt.
+- **File réseau, et un délai à lui.** Un agent qui rédige met dix à trente
+  secondes : c'est le profil qui a fait sortir le réseau de la file des
+  lectures. Le délai de `git` — trente secondes — serait ici un échec quasi
+  certain, d'où les deux minutes de `commit_msg::TIMEOUT`.
+- **Le message retrouve le champ qui l'a demandé.** `Evt::CommitMessage` porte
+  son worktree, et `ClaudhubApp::suggesting_message` retient lequel attend : on
+  change de worktree pendant les vingt secondes d'attente, et poser ce
+  message-là dans le champ d'un autre serait le pire des services.
 
 ### L'explorateur de projet
 
@@ -698,8 +742,21 @@ et `ClaudhubApp::scrolled` pose les deux d'un même geste — **une seule clé**
 pour la barre et pour le mouvement, si bien qu'aucun panneau ne peut animer le
 décalage d'un autre, ce qui le ferait sauter d'un bout à l'autre.
 
-Quatre choses qu'on ne devine pas :
+Cinq choses qu'on ne devine pas :
 
+- **Le saut se lit, il ne se recalcule pas.** gpui ne rogne rien au moment de
+  la molette — il ajoute son delta au décalage, et c'est la mise en page
+  suivante qui le ramène dans les bornes. Refaire le calcul de notre côté
+  demanderait la même hauteur de ligne que lui, or il capture la sienne **sous
+  le style de texte de l'élément qui défile** quand notre écouteur, posé sur un
+  ancêtre, lit la hauteur ambiante : sur le diff, qui n'a ni la police ni la
+  taille de l'interface, trois lignes d'écart font deux ou trois pixels. Au
+  milieu d'un saut de soixante, ils ne décalent que la provenance de la
+  transition ; **au bord, ils sont tout le mouvement** — la destination y est
+  rognée à la position qu'on occupe déjà, la provenance non, et la vue reculait
+  de trois pixels pour y revenir en cent soixante millisecondes, à chaque cran.
+  D'où `Axis::jump`, qui prend la différence avec le décalage écrit à la frame
+  précédente, et ne s'y fie qu'à condition qu'elle ressemble au saut attendu.
 - **Un pavé tactile n'est pas une molette.** Il envoie des
   `ScrollDelta::Pixels`, déjà continus et attachés au doigt : les lisser
   ajouterait un retard à un geste direct. Ils passent tels quels, et annulent
@@ -1125,8 +1182,23 @@ La barre d'outils ne porte que des **actions** ; ce qui décrit l'endroit où
 l'on est — branche, avance et retard sur l'amont — vit dans la barre d'état.
 Ces informations ne changent presque jamais, et la barre d'état ne portait
 qu'un message épisodique, donc restait vide la plupart du temps pendant que la
-barre du haut débordait. Les boutons y sont séparés en trois groupes — le
-réseau, l'agent, les panneaux — par des filets verticaux.
+barre du haut débordait.
+
+**Une action va où se fait le geste dont elle est la fin.** `fetch`, `pull` et
+`push` vivent donc dans la barre du panneau « Modifications » et non en haut de
+la fenêtre : on y regarde ce qui a changé, on coche, on valide, et pousser est
+le mot suivant de la même phrase — la tenir à l'autre bout de l'écran faisait
+traverser la fenêtre pour la terminer. Ce qui reste en haut ne parle pas du
+dépôt regardé : le menu de l'application, le nom du worktree, la bascule des
+terminaux.
+
+**`pull` et `push` portent leur compte et s'allument** quand il y a quelque
+chose à faire — l'avance et le retard sur l'amont, tels que le statut les
+rapporte. La barre d'état les affiche déjà, mais elle dit *où l'on est* ; sur
+le bouton, le même nombre dit *ce qu'il y a à faire*, et un bouton éteint dit
+qu'il n'y a rien à faire, ce qui est la moitié de ce qu'on cherche en arrivant
+sur un worktree. Le compte ne vaut évidemment que si les références distantes
+sont fraîches — voir le fetch automatique.
 
 Les états vides portent une icône et, quand une action s'impose, un bouton :
 au premier lancement la barre latérale vide est la première chose qu'on voit,
@@ -1180,6 +1252,13 @@ Corollaire pour la disposition par défaut : la moitié **fixe** d'une division
 est celle du bas, jamais celle du haut — l'aire du dock est plus petite que la
 fenêtre, et deux tailles fixes qui somment à sa hauteur font déborder la
 colonne, coins coupés et gouttière avalée.
+
+**Tout panneau passe par `panels::pane_frame`**, et pas seulement ceux que la
+macro `panels!` fabrique : c'est lui qui peint le fond arrondi du bas, et le
+panneau qui s'en dispensait — les terminaux, écrits à la main — avait deux
+coins carrés au bas de sa carte sans que rien ne le signale. `pane_root` n'y
+ajoute que la note du panneau touché, dont les terminaux n'ont que faire : la
+recherche y appartient au programme qui tourne.
 
 **La vue racine rembourre le dock des mêmes quatre pixels** que le fork met
 entre les cartes : sans ce `p(4.)`, les zones touchent les bords de la
@@ -1390,6 +1469,32 @@ lignes mais ignore ce qu'il ne suit pas, `status` voit les fichiers nouveaux
 sans savoir ce qu'ils contiennent, et un worktree d'agent est plein de fichiers
 nouveaux — donc un relevé sur cinq.
 
+**Le fetch automatique bat sur la même horloge**, mais se compte en minutes :
+`Settings::auto_fetch_minutes`, dix par défaut, zéro pour ne rien faire. Sans
+lui, « en retard de trois commits » n'apparaît qu'après un fetch demandé à la
+main, c'est-à-dire quand on se doutait déjà de quelque chose — et le compte que
+portent les boutons ne vaudrait rien.
+
+Quatre points :
+
+- **Un horodatage, pas un compte de tics** (`ClaudhubApp::last_auto_fetch`). Le
+  balayage bat toutes les deux secondes et le réglage se donne en minutes : un
+  compteur de tics n'aurait aucun rapport lisible avec le champ, et changer le
+  réglage ne vaudrait qu'au tour suivant.
+- **Un dépôt et non un worktree.** Les références distantes sont partagées par
+  tous les worktrees d'un dépôt ; en relever une par worktree reviendrait à
+  faire dix fois le même travail et à se disputer le verrou des références.
+- **`Cmd::AutoFetch` ne dit rien quand il aboutit.** Un message toutes les dix
+  minutes pour annoncer qu'il ne s'est rien passé userait justement l'endroit
+  où l'on regarde ce qui vient de se passer ; un échec — pas de distant, pas de
+  réseau, pas d'authentification — n'est pas arrivé au moment où l'utilisateur
+  regardait, et part dans la trace. `Evt::Fetched` ne porte donc pas un
+  résultat mais une **occasion** : relire le statut du worktree affiché, d'où
+  viennent l'avance et le retard.
+- **File réseau**, comme le fetch demandé à la main, et non celle du fond : un
+  fetch se compte en secondes, et le mettre avec les résumés ferait attendre la
+  barre latérale le temps d'une connexion qui expire.
+
 `agent::scan` est **Linux seulement**, par un `cfg` explicite et non par
 accident : le parcours compile partout et échouerait en silence à l'ouverture
 de `/proc`, ce qui se lit comme une détection cassée au lieu d'une absence
@@ -1532,6 +1637,35 @@ La suppression passe par `git clean` et non par `remove_file` : il refuse ce
 qui est suivi, ce qui est la garantie qu'on veut — une erreur d'aiguillage dans
 la vue ne peut pas détruire un fichier versionné.
 
+### Un dépôt qui n'est plus là
+
+Un dossier déplacé, un clone effacé, une partition non montée : le dépôt
+mémorisé ne s'ouvre plus, et il n'apparaissait alors **nulle part** — deux
+avertissements dans la trace à chaque démarrage, et aucun moyen de le retirer
+sans éditer le fichier de réglages à la main.
+
+Il reste donc affiché, en bas de la barre latérale, en erreur et avec de quoi
+le retirer. Quatre points :
+
+- **`Evt::RepoUnavailable` et non un `Failed`.** Ce n'est pas une opération qui
+  a échoué mais un dépôt qui manque, et ce qu'il faut en faire dépend d'où il
+  vient : **mémorisé**, il doit rester visible pour qu'on puisse le retirer ;
+  **désigné à l'instant** dans un sélecteur de dossier, il n'a qu'à se dire
+  dans la barre d'état — en garder une trace serait faire une relique d'une
+  faute de frappe.
+- **Une liste à part** (`ClaudhubApp::unavailable`) et non un drapeau sur
+  `RepoState`. Tout ce qui parcourt `repos` — les résumés, le relevé des
+  agents, celui de `wt`, le fetch automatique — suppose un dépôt qui existe ;
+  un drapeau se paierait en gardes semés partout, dont un oubli ferait lancer
+  des commandes git dans un dossier absent toutes les deux secondes.
+- **Un bouton, pas une entrée de menu.** C'est la seule chose qu'on puisse
+  faire d'une ligne pareille. Sur un dépôt ouvert, en revanche, le même geste
+  vit au clic droit : il ferme tout ce qu'on y avait ouvert, et ce n'est pas
+  une chose qu'on fait deux fois par jour.
+- **Le magasin d'état n'est pas purgé.** Retirer un dépôt de la liste ne touche
+  à rien sur le disque ; ses notes et ses replis attendent le jour où on le
+  rouvre, et les effacer ici ferait d'un rangement une perte.
+
 ### Quel worktree s'ouvre
 
 `runtime::open_repo` retient le checkout d'où l'ouverture vient, et non le
@@ -1646,9 +1780,39 @@ envoie par dixièmes, et les arrondir chacune à zéro rend le défilement inert
 La conversion se fait sur la hauteur d'une cellule, pas sur celle du texte
 ambiant — elles diffèrent dès que le terminal n'a pas la taille de l'interface.
 
-Limite connue : le rapport de souris (`MOUSE_MODE`) n'est pas implémenté. Un
-programme qui demande à recevoir les événements de molette reçoit des flèches
-à la place.
+**Un programme peut demander la souris**, et il faut la lui donner
+(`terminal::mouse`). Tant qu'on ne le faisait pas, la molette retombait sur les
+flèches — la convention quand personne n'écoute — et un agent qui, lui, écoute,
+recevait des déplacements de curseur au lieu d'un défilement. Il le disait :
+« scroll wheel is sending arrow keys ».
+
+Quatre décisions, et aucune n'est cosmétique :
+
+- **Maj est la sortie de secours.** Un programme qui prend la souris prend
+  aussi la sélection, et sans cette convention — celle de tous les terminaux —
+  on ne pourrait plus rien copier de ce qu'il affiche.
+- **Seul le bouton gauche part au programme.** Le milieu colle la sélection
+  primaire et le droit ouvre le menu de Claudhub, d'où l'on copie justement.
+  Les livrer aussi ne gagnerait que les rares interfaces qui les écoutent, et
+  coûterait les deux seuls gestes qui n'ont pas d'équivalent ailleurs.
+- **Un déplacement n'est rapporté qu'au changement de cellule.** Le programme
+  redessine à chaque événement, et un geste de la main traverse dix cellules en
+  cent événements.
+- **Le format d'origine abandonne au-delà de la 223e colonne** plutôt que d'y
+  rogner : un clic rapporté sur la mauvaise cellule est pire que pas de clic.
+  C'est la raison d'être de SGR (`1006`), que demande tout ce qui a été écrit
+  depuis quinze ans.
+
+**Les marqueurs de session de l'agent qui nous a lancés sont effacés au
+démarrage** (`agent::disinherit_session`, premier geste de `main`). Lancer
+Claudhub depuis un agent est le cas courant — c'en est un qui l'écrit —, et ses
+variables passaient à tout ce que nous démarrons : un `claude` ouvert dans un
+onglet se croyait la sous-session de celui d'à côté et cessait d'enregistrer sa
+transcription. La liste est explicite et non un balayage de `CLAUDE_CODE_*`,
+qui emporterait la configuration de l'utilisateur avec les marqueurs. Effacer
+dans notre propre environnement et non dans celui du pty : `wt` lance les hooks
+du projet et `commit_msg` un agent en une passe, et Claudhub n'est la session de
+personne pour eux non plus.
 
 **Le redimensionnement est différé et planchérisé.** Un glissement à la souris
 passe par toutes les largeurs intermédiaires ; transmettre chacune revient à
@@ -1771,8 +1935,10 @@ niveaux, du moins cher au plus cher :
    affiche sans les connaître, et cela n'a coûté que la dépendance à `wt`.
    C'est le vrai système d'extension.
 2. **Des commandes déclarées dans les réglages** — les profils d'agent en sont
-   le premier exemple : un nom, une commande, un environnement. Pour ce qui
-   n'est pas propre à un projet.
+   le premier exemple : un nom, une commande, un environnement. Le message de
+   commit proposé en est le second, et il montre la forme la plus économe :
+   une ligne de commande, le texte par l'entrée standard, la réponse par la
+   sortie. Pour ce qui n'est pas propre à un projet.
 3. **Des extensions wasm, à la Zed — écarté.** Rien dans les besoins listés ne
    le demande, et le coût est sans commune mesure.
 

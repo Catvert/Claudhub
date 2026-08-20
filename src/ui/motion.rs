@@ -14,8 +14,14 @@
 //! l'écouteur : sur un ancêtre **non défilant** de l'élément qui défile, donc
 //! après son gestionnaire interne dans la phase de remontée.
 //!
-//! Trois choses qu'il ne faut pas rater :
+//! Quatre choses qu'il ne faut pas rater :
 //!
+//! - **Le saut se lit, il ne se recalcule pas.** gpui capture
+//!   `window.line_height()` sous le style de texte de l'élément qui défile ;
+//!   notre écouteur, posé sur un ancêtre, lit la hauteur ambiante. Sur le
+//!   diff, qui n'a ni la police ni la taille de l'interface, les deux ne sont
+//!   pas la même — d'où `Axis::jump`, qui prend la différence avec le décalage
+//!   écrit à la frame précédente.
 //! - **Un pavé tactile n'est pas une molette.** Il envoie des
 //!   `ScrollDelta::Pixels`, déjà continus et attachés au doigt : les lisser
 //!   ajouterait un retard à un geste direct. Ils passent tels quels, et
@@ -212,17 +218,13 @@ impl Axis {
     /// Rend le décalage d'avant le saut, et vise celui d'après.
     fn on_wheel(&mut self, jumped: f32, delta: f32, max: f32, now: Instant) -> f32 {
         let clamp = |value: f32| value.clamp(-max, 0.);
+        let jump = self.jump(jumped, delta);
         let (current, target) = match self.motion.take() {
             // Un cran pendant une transition allonge la destination.
-            Some(motion) => (motion.sample_at(now).value, motion.target + delta),
-            None => {
-                // gpui a rogné le saut sur un bord : la position d'avant ne se
-                // déduit pas de l'arrivée, mais nous l'avions notée.
-                let observed = self.last.filter(|previous| {
-                    (jumped - clamp(*previous + delta)).abs() <= SYNC_EPSILON_PX
-                });
-                (observed.unwrap_or(jumped - delta), jumped)
-            }
+            Some(motion) => (motion.sample_at(now).value, motion.target + jump),
+            // La position d'avant est celle que nous avions écrite, et le saut
+            // celui que gpui vient d'y ajouter.
+            None => (jumped - jump, jumped),
         };
         let current = clamp(current);
         let target = clamp(target);
@@ -233,6 +235,36 @@ impl Axis {
         self.last = Some(current);
         self.motion = Some(Motion::between(current, target, now));
         current
+    }
+
+    /// Le saut que gpui vient d'appliquer, **lu** plutôt que recalculé.
+    ///
+    /// `delta` est ce que vaudrait ce cran pour nous, et il ne vaut pas ce
+    /// qu'il a valu pour gpui : celui-ci capture `window.line_height()` sous
+    /// le **style de texte de l'élément qui défile**, alors que notre écouteur
+    /// est sur un ancêtre et lit la hauteur de ligne ambiante. Le diff n'ayant
+    /// ni la police ni la taille de l'interface, trois lignes d'écart font
+    /// deux ou trois pixels.
+    ///
+    /// Cet écart est invisible au milieu d'un saut de soixante pixels — il
+    /// décale seulement la provenance de la transition. **Sur un bord, il est
+    /// tout le mouvement** : la destination y est rognée à la position qu'on
+    /// occupe déjà, la provenance ne l'est pas, et la vue reculait de trois
+    /// pixels pour y revenir en cent soixante millisecondes, à chaque cran.
+    ///
+    /// La différence avec le décalage écrit à la frame précédente, elle, est
+    /// exacte. On ne s'y fie qu'à condition qu'elle ressemble au saut attendu :
+    /// un décalage écrit par quelqu'un d'autre depuis notre dernier rendu
+    /// rendrait cette note fausse, et la vue s'y téléporterait.
+    fn jump(&self, jumped: f32, delta: f32) -> f32 {
+        let Some(last) = self.last else { return delta };
+        let observed = jumped - last;
+        let plausible = observed * delta > 0. && observed.abs() <= delta.abs() * 2.;
+        if plausible {
+            observed
+        } else {
+            delta
+        }
     }
 
     fn cancel(&mut self) {
@@ -335,20 +367,41 @@ mod tests {
         assert!(axis.motion.is_none());
     }
 
-    /// Sur un bord, gpui rogne le saut : la position d'avant ne se déduit pas
-    /// de l'arrivée, et sans la note on repartirait de l'autre côté du bord.
+    /// Près d'un bord, gpui ne rogne rien : il ajoute son saut au décalage et
+    /// c'est la mise en page qui le ramènera dans les bornes. La destination
+    /// est donc rognée, la provenance non.
     #[test]
-    fn a_clamped_jump_starts_from_where_the_view_really_was() {
+    fn a_jump_past_the_edge_stops_at_it_without_starting_from_it() {
         let now = Instant::now();
         // On est à dix pixels du bas, un cran en demande soixante.
         let mut axis = Axis {
             last: Some(-990.),
             ..Default::default()
         };
-        let written = axis.on_wheel(-MAX, -60., MAX, now);
+        let written = axis.on_wheel(-1050., -60., MAX, now);
         assert_eq!(written, -990.);
         let (end, _) = axis.advance(written, MAX, now + DURATION);
         assert_eq!(end, -MAX, "la destination est rognée, pas la provenance");
+    }
+
+    /// Le bord, et le cran de trop.
+    ///
+    /// La hauteur de ligne que nous lisons n'est pas celle que gpui a
+    /// utilisée : trois lignes d'écart font deux ou trois pixels. Ils sont
+    /// invisibles au milieu d'un saut de soixante, mais ici ils *sont* le
+    /// mouvement — la vue reculait d'autant avant d'y revenir, à chaque cran.
+    #[test]
+    fn a_notch_against_the_edge_leaves_the_view_where_it_is() {
+        let now = Instant::now();
+        let mut axis = Axis {
+            last: Some(-MAX),
+            ..Default::default()
+        };
+        // gpui a sauté de soixante pixels ; notre hauteur de ligne en compte
+        // soixante-trois.
+        let written = axis.on_wheel(-MAX - 60., -63., MAX, now);
+        assert_eq!(written, -MAX, "la vue ne bouge pas d'un pixel");
+        assert!(axis.motion.is_none(), "il n'y a rien à animer");
     }
 
     /// Le pavé tactile est déjà continu, et un panneau à un seul axe reçoit
