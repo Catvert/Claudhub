@@ -464,7 +464,7 @@ impl ClaudhubApp {
 
     pub(super) fn render_notes(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let notes_scroll = self.scroll_of("notes");
@@ -589,16 +589,21 @@ impl ClaudhubApp {
             .child(bar)
             .children(find)
             .child(
-                div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
-                    "notes-bar",
-                    &notes_scroll,
-                    v_flex()
-                        .id("notes-list")
-                        .size_full()
-                        .overflow_y_scroll()
-                        .track_scroll(&notes_scroll)
-                        .children(sections),
-                )),
+                div().flex_1().min_h_0().child(
+                    self.scrolled(
+                        "notes-bar",
+                        &notes_scroll,
+                        crate::ui::motion::Axes::Vertical,
+                        window,
+                        v_flex()
+                            .id("notes-list")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&notes_scroll)
+                            .children(sections),
+                        cx,
+                    ),
+                ),
             )
             .into_any_element()
     }

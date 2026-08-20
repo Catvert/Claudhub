@@ -51,6 +51,10 @@ sans quitter l'application.
 - **Branches** — liste locale et distante avec leur dernier commit et leur
   écart à l'amont, bascule, création, et création d'un worktree depuis une
   branche existante.
+- **Défilement** — chaque panneau porte sa barre, et la molette y est lissée :
+  un cran glisse en une fraction de seconde au lieu de sauter de trois lignes,
+  ce qui garde sa place à l'œil quand on relit. Un pavé tactile reste
+  directement attaché au doigt.
 - **Rafraîchissement automatique** — le worktree affiché est surveillé. Un
   agent qui écrit des fichiers, un `git commit` tapé dans le terminal intégré :
   la revue suit sans qu'on lui demande.
@@ -175,6 +179,9 @@ le terminal.
 - Résolution de conflits — les fichiers en conflit sont signalés, pas outillés.
 - Recherche dans l'historique d'un terminal : `Ctrl+F` y appartient au
   programme qui tourne.
+- Le défilement de l'éditeur intégré n'est pas lissé : sa poignée est privée
+  dans gpui-component. Celui du terminal non plus — la grille d'alacritty se
+  compte en lignes entières.
 - Les langages sans grammaire embarquée s'affichent en texte nu. PHP est lié en
   direct ; les autres viennent de gpui-component.
 - L'historique s'arrête à deux mille commits.

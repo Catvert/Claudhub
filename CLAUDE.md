@@ -62,7 +62,8 @@ src/
     notes.rs        le modèle des notes, leur ancrage et leur prompt
     notes_view.rs   les gestes de la relecture annotée et son panneau
     find.rs         la recherche d'un panneau, et son routage
-    scroll.rs       la barre de défilement d'un panneau
+    motion.rs       le lissage de la molette, sans rien de gpui dedans
+    scroll.rs       la barre de défilement d'un panneau, et son lissage
     theme.rs / shortcuts.rs / icons.rs
 ```
 
@@ -601,6 +602,66 @@ en haut à chaque frame.
 
 Le terminal fait exception : son défilement n'est pas celui de gpui mais le
 `display_offset` de la grille alacritty, qu'aucune `ScrollHandle` ne décrit.
+
+### Le lissage de la molette
+
+Un cran de molette est un **saut** : gpui traduit un `ScrollDelta::Lines` en
+trois hauteurs de ligne et les ajoute d'un coup au décalage. Sur les listes que
+Claudhub affiche — un diff de plusieurs milliers de lignes, l'arbre d'un projet
+Laravel — l'œil perd sa place à chaque cran, et il en faut une vingtaine pour
+traverser un hunk. `ui::motion` rejoue donc le saut en cent soixante
+millisecondes, amorties en fin de course. Le procédé vient d'Aviary, dont le
+module du même nom est la référence.
+
+Le principe tient en une inversion : **on n'empêche pas gpui de sauter**. Il
+n'y a pas de phase de capture pour la molette — le même piège que le zoom du
+diff. On le laisse faire, on lit où il a atterri, on **remet** le décalage
+d'avant, et on y va progressivement. D'où la place de l'écouteur : sur un
+ancêtre **non défilant** de la liste, donc après son gestionnaire interne dans
+la phase de remontée. C'est exactement le conteneur de la barre de défilement,
+et `ClaudhubApp::scrolled` pose les deux d'un même geste — **une seule clé**
+pour la barre et pour le mouvement, si bien qu'aucun panneau ne peut animer le
+décalage d'un autre, ce qui le ferait sauter d'un bout à l'autre.
+
+Quatre choses qu'on ne devine pas :
+
+- **Un pavé tactile n'est pas une molette.** Il envoie des
+  `ScrollDelta::Pixels`, déjà continus et attachés au doigt : les lisser
+  ajouterait un retard à un geste direct. Ils passent tels quels, et annulent
+  la transition en cours.
+- **Un saut demandé par le code gagne.** `scroll_to_item` — une flèche qui
+  change de hunk, `reveal_file` — écrit le décalage sans rien dire à personne.
+  `advance` compare donc ce qu'il trouve à ce qu'il avait écrit lui-même : un
+  écart veut dire que quelqu'un d'autre est passé, et la transition est
+  abandonnée plutôt que de ramener la vue en arrière.
+- **La liste change de taille pendant le mouvement.** Un diff qui arrive
+  pendant qu'un agent écrit, un dossier qu'on déplie : la destination est
+  reprise à chaque frame sur les bornes du moment, depuis la position visible.
+- **Les deux axes sont répartis comme gpui les répartit** — molette
+  horizontale rabattue sur le vertical quand un seul axe déborde, composante
+  dominante seule quand les deux débordent (`allow_concurrent_scroll` est faux
+  par défaut). Un partage différent ferait aller le lissage ailleurs que le
+  saut qu'il remplace.
+
+`Axis` ne contient aucun type de gpui, et c'est ce qui rend la mécanique
+testable : rendre le saut, additionner deux crans, céder à un saut
+programmatique, repartir de la bonne position quand git a rogné le décalage sur
+un bord.
+
+Trois surfaces n'y passent pas, et chacune pour une raison différente :
+
+- **Le diff** garde son écouteur à lui (`on_diff_scroll`). Le zoom et le
+  lissage veulent tous deux rendre le saut que gpui vient d'appliquer, et deux
+  écouteurs le rendraient deux fois ; un zoom en cours de transition l'annule,
+  la destination ayant été calculée sur des lignes qui n'ont plus la même
+  hauteur.
+- **L'éditeur intégré** n'est pas lissé : la poignée de défilement d'un
+  `InputState` est `pub(crate)` dans gpui-component, hors d'atteinte. Le lisser
+  demanderait de vendorer la bibliothèque, ce qui n'est pas un prix à payer
+  pour un confort.
+- **Le terminal** non plus : son défilement est le `display_offset` de la
+  grille alacritty, compté en lignes entières, et il n'y a pas de demi-ligne à
+  dessiner.
 
 ### Les hauteurs de ligne
 

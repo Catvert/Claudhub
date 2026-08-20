@@ -82,7 +82,7 @@ impl ClaudhubApp {
     /// Le panneau des conflits.
     pub(super) fn render_conflicts(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let list_scroll = self.scroll_of("conflicts");
@@ -156,16 +156,21 @@ impl ClaudhubApp {
             .child(bar)
             .children(find)
             .child(
-                div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
-                    "conflict-bar",
-                    &list_scroll,
-                    v_flex()
-                        .id("conflict-list")
-                        .size_full()
-                        .overflow_y_scroll()
-                        .track_scroll(&list_scroll)
-                        .children(rows),
-                )),
+                div().flex_1().min_h_0().child(
+                    self.scrolled(
+                        "conflict-bar",
+                        &list_scroll,
+                        crate::ui::motion::Axes::Vertical,
+                        window,
+                        v_flex()
+                            .id("conflict-list")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&list_scroll)
+                            .children(rows),
+                        cx,
+                    ),
+                ),
             )
             .into_any_element()
     }

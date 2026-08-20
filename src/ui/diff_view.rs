@@ -423,6 +423,10 @@ use crate::ui::theme::DiffColors;
 /// le texte le ferait déborder d'une hauteur restée constante.
 const LINE_SPACING: f32 = 1.5;
 
+/// La barre de défilement du diff, et donc la clé de son lissage : une seule
+/// valeur pour les deux, voir `ui::scroll`.
+const DIFF_SCROLL: &str = "diff-lines-bar";
+
 pub fn line_height(font_size: Pixels) -> Pixels {
     (font_size * LINE_SPACING).round()
 }
@@ -732,24 +736,39 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Molette avec la touche système : grossir ou réduire le code relu.
+    /// La molette du diff : le zoom quand la touche système est enfoncée, le
+    /// défilement lissé sinon.
     ///
-    /// La liste a **déjà** défilé quand cet écouteur s'exécute — les deux sont
-    /// en phase de remontée, et l'enfant est traité avant son parent. gpui
-    /// n'expose pas de phase de capture pour la molette : on rend donc le
-    /// décalage plutôt que d'essayer de l'empêcher, sans quoi chaque cran de
-    /// zoom ferait aussi sauter la lecture de trois lignes.
+    /// Un seul écouteur pour les deux, et il ne peut pas en être autrement :
+    /// le zoom et le lissage veulent tous deux **rendre** le saut que gpui
+    /// vient d'appliquer, et deux écouteurs le rendraient deux fois.
+    ///
+    /// La liste a en effet **déjà** défilé quand cet écouteur s'exécute — les
+    /// deux sont en phase de remontée, et l'enfant est traité avant son
+    /// parent. gpui n'expose pas de phase de capture pour la molette : on rend
+    /// donc le décalage plutôt que d'essayer de l'empêcher, sans quoi chaque
+    /// cran de zoom ferait aussi sauter la lecture de trois lignes.
     pub(super) fn on_diff_scroll(
         &mut self,
         event: &gpui::ScrollWheelEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let handle = self.diff_scroll.0.borrow().base_handle.clone();
         if !event.modifiers.secondary() {
+            if self
+                .motion(DIFF_SCROLL.into(), crate::ui::motion::Axes::Both)
+                .on_wheel(&handle, event, window)
+            {
+                cx.notify();
+            }
             return;
         }
+        // Un zoom au milieu d'un défilement lissé : la transition viserait une
+        // position calculée sur des lignes qui n'ont plus la même hauteur.
+        self.motion(DIFF_SCROLL.into(), crate::ui::motion::Axes::Both)
+            .cancel();
         let delta = event.delta.pixel_delta(window.line_height().max(px(1.)));
-        let handle = self.diff_scroll.0.borrow().base_handle.clone();
         // Un seul axe bouge à la fois : c'est le comportement par défaut de
         // gpui, qui ne laisse passer que la composante dominante.
         let undo = if delta.x.abs() > delta.y.abs() {
@@ -924,6 +943,11 @@ impl ClaudhubApp {
             .unwrap_or(px(7.));
 
         let gutter = cell * diff.gutter_digits as f32 + px(6.);
+        // Le lissage avance d'une frame. L'ordre avec la construction de la
+        // liste est libre : le décalage n'est lu qu'à la mise en page.
+        let base = self.diff_scroll.0.borrow().base_handle.clone();
+        self.motion(DIFF_SCROLL.into(), crate::ui::motion::Axes::Both)
+            .advance(&base, window);
         // La largeur du contenu tient compte du viewport mesuré à la frame
         // précédente : sans ce plancher, le fond coloré d'une ligne modifiée
         // s'arrêterait au bout de son texte au lieu de traverser la vue.
@@ -983,7 +1007,7 @@ impl ClaudhubApp {
                         cx.listener(|this, _, _window, _cx| this.end_diff_drag()),
                     )
                     .child(crate::ui::scroll::both(
-                        "diff-lines-bar",
+                        DIFF_SCROLL,
                         &self.diff_scroll,
                         uniform_list("diff-lines", count, move |range, _window, cx| {
                             range

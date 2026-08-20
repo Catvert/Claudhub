@@ -628,7 +628,7 @@ impl ClaudhubApp {
 
     pub(super) fn render_files(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let Some(worktree) = self.active.clone() else {
@@ -724,29 +724,34 @@ impl ClaudhubApp {
                     .track_focus(&focus)
                     .flex_1()
                     .min_h_0()
-                    .child(crate::ui::scroll::vertical(
-                        "project-files-bar",
-                        &scroll,
-                        uniform_list("project-files", count, move |visible, _window, cx| {
-                            visible
-                                .map(|ix| {
-                                    render_row(
-                                        &rows,
-                                        &files,
-                                        ix,
-                                        &status,
-                                        open.as_deref(),
-                                        cursor.as_deref(),
-                                        &look,
-                                        &entity,
-                                        cx,
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .size_full()
-                        .track_scroll(scroll.clone()),
-                    )),
+                    .child(
+                        self.scrolled(
+                            "project-files-bar",
+                            &scroll,
+                            crate::ui::motion::Axes::Vertical,
+                            window,
+                            uniform_list("project-files", count, move |visible, _window, cx| {
+                                visible
+                                    .map(|ix| {
+                                        render_row(
+                                            &rows,
+                                            &files,
+                                            ix,
+                                            &status,
+                                            open.as_deref(),
+                                            cursor.as_deref(),
+                                            &look,
+                                            &entity,
+                                            cx,
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .size_full()
+                            .track_scroll(scroll.clone()),
+                            cx,
+                        ),
+                    ),
             )
             .into_any_element()
     }

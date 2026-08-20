@@ -509,6 +509,9 @@ pub struct ClaudhubApp {
     /// servent qu'à donner une position à la barre de défilement. Créées ici
     /// et non au rendu, sans quoi la liste remonterait en haut à chaque frame.
     scrolls: HashMap<&'static str, gpui::ScrollHandle>,
+    /// Le lissage de la molette, par panneau, créé à sa première utilisation.
+    /// La clé est celle de la barre de défilement — voir `ui::scroll`.
+    pub(super) motions: HashMap<gpui::SharedString, crate::ui::motion::ScrollMotion>,
     /// Filtre du panneau des branches. Une entité créée une fois : recréée par
     /// frame, elle perdrait le curseur et le texte dès la première frappe.
     pub(super) branch_filter: Entity<InputState>,
@@ -658,6 +661,7 @@ impl ClaudhubApp {
             branch_scroll: gpui::UniformListScrollHandle::new(),
             file_scroll: HashMap::new(),
             scrolls: HashMap::new(),
+            motions: HashMap::new(),
             explorer_focus: cx.focus_handle(),
             finders: HashMap::new(),
             // Le diff par défaut : c'est le panneau qu'on regarde en arrivant,

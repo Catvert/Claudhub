@@ -18,6 +18,7 @@ mod highlight;
 mod history_view;
 mod icons;
 mod layout;
+mod motion;
 mod notes;
 pub(crate) mod notes_view;
 mod panels;

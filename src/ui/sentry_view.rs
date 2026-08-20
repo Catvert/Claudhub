@@ -200,7 +200,7 @@ impl ClaudhubApp {
 
     pub(super) fn render_sentry(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let issues_scroll = self.scroll_of("sentry-issues");
@@ -303,18 +303,23 @@ impl ClaudhubApp {
             .child(bar)
             .children(find)
             .child(
-                div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
-                    "sentry-issues-bar",
-                    &issues_scroll,
-                    v_flex()
-                        .id("sentry-issues")
-                        .size_full()
-                        .overflow_y_scroll()
-                        .track_scroll(&issues_scroll)
-                        .children(rows),
-                )),
+                div().flex_1().min_h_0().child(
+                    self.scrolled(
+                        "sentry-issues-bar",
+                        &issues_scroll,
+                        crate::ui::motion::Axes::Vertical,
+                        window,
+                        v_flex()
+                            .id("sentry-issues")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&issues_scroll)
+                            .children(rows),
+                        cx,
+                    ),
+                ),
             )
-            .children(self.render_trace(cx))
+            .children(self.render_trace(window, cx))
             .into_any_element()
     }
 
@@ -371,7 +376,11 @@ impl ClaudhubApp {
     }
 
     /// La trace de l'issue choisie, avec ses frames cliquables.
-    fn render_trace(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    fn render_trace(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
         let trace_scroll = self.scroll_of("sentry-trace");
         let worktree = self.active.clone()?;
         let event = self.sentry.event.clone()?;
@@ -453,16 +462,21 @@ impl ClaudhubApp {
                         ),
                 )
                 .child(
-                    div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
-                        "sentry-trace-bar",
-                        &trace_scroll,
-                        v_flex()
-                            .id("sentry-trace")
-                            .size_full()
-                            .overflow_y_scroll()
-                            .track_scroll(&trace_scroll)
-                            .children(frames),
-                    )),
+                    div().flex_1().min_h_0().child(
+                        self.scrolled(
+                            "sentry-trace-bar",
+                            &trace_scroll,
+                            crate::ui::motion::Axes::Vertical,
+                            window,
+                            v_flex()
+                                .id("sentry-trace")
+                                .size_full()
+                                .overflow_y_scroll()
+                                .track_scroll(&trace_scroll)
+                                .children(frames),
+                            cx,
+                        ),
+                    ),
                 ),
         )
     }

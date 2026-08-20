@@ -155,7 +155,7 @@ impl ClaudhubApp {
     pub(super) fn render_file_list(
         &mut self,
         range: DiffRange,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let Some(worktree) = self.active.clone() else {
@@ -272,34 +272,39 @@ impl ClaudhubApp {
                         // commit déjà écrit, il n'y a rien à indexer.
                         let checkable = matches!(range, DiffRange::Working);
                         let row_range = range.clone();
-                        el.child(crate::ui::scroll::vertical(
-                            gpui::SharedString::from(format!("file-bar-{}", list_id)),
-                            &scroll,
-                            uniform_list(
-                                gpui::SharedString::from(format!("file-list-{}", list_id)),
-                                count,
-                                move |visible, _window, cx| {
-                                    visible
-                                        .map(|ix| {
-                                            render_row(
-                                                &rows,
-                                                &flat,
-                                                ix,
-                                                &worktree,
-                                                &row_range,
-                                                selected.as_deref(),
-                                                &colors,
-                                                checkable,
-                                                &entity,
-                                                cx,
-                                            )
-                                        })
-                                        .collect::<Vec<_>>()
-                                },
-                            )
-                            .size_full()
-                            .track_scroll(scroll.clone()),
-                        ))
+                        el.child(
+                            self.scrolled(
+                                gpui::SharedString::from(format!("file-bar-{}", list_id)),
+                                &scroll,
+                                crate::ui::motion::Axes::Vertical,
+                                window,
+                                uniform_list(
+                                    gpui::SharedString::from(format!("file-list-{}", list_id)),
+                                    count,
+                                    move |visible, _window, cx| {
+                                        visible
+                                            .map(|ix| {
+                                                render_row(
+                                                    &rows,
+                                                    &flat,
+                                                    ix,
+                                                    &worktree,
+                                                    &row_range,
+                                                    selected.as_deref(),
+                                                    &colors,
+                                                    checkable,
+                                                    &entity,
+                                                    cx,
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                    },
+                                )
+                                .size_full()
+                                .track_scroll(scroll.clone()),
+                                cx,
+                            ),
+                        )
                     }),
             )
             .when(commits, |el| {

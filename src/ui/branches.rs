@@ -107,7 +107,7 @@ fn detail(branch: &Branch) -> String {
 impl ClaudhubApp {
     pub(super) fn render_branches(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let Some(worktree) = self.active.clone() else {
@@ -117,6 +117,7 @@ impl ClaudhubApp {
             return div().into_any_element();
         };
         let main = repo.main.clone();
+        let branch_scroll = self.branch_scroll.clone();
         let filter = self.branch_filter.read(cx).value().to_string();
         let rows = std::rc::Rc::new(rows_for(&repo.branches, &filter));
 
@@ -171,23 +172,28 @@ impl ClaudhubApp {
             .size_full()
             .child(header)
             .child(
-                div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
-                    "branch-list-bar",
-                    &self.branch_scroll,
-                    uniform_list("branch-list", count, move |visible, _window, cx| {
-                        visible
-                            .map(|ix| match rows.get(ix) {
-                                Some(Row::Group(kind)) => render_group(*kind, height, cx),
-                                Some(Row::Branch(row)) => {
-                                    render_branch(row, ix, &worktree, &main, height, &entity, cx)
-                                }
-                                None => div().into_any_element(),
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .size_full()
-                    .track_scroll(self.branch_scroll.clone()),
-                )),
+                div().flex_1().min_h_0().child(
+                    self.scrolled(
+                        "branch-list-bar",
+                        &branch_scroll,
+                        crate::ui::motion::Axes::Vertical,
+                        window,
+                        uniform_list("branch-list", count, move |visible, _window, cx| {
+                            visible
+                                .map(|ix| match rows.get(ix) {
+                                    Some(Row::Group(kind)) => render_group(*kind, height, cx),
+                                    Some(Row::Branch(row)) => render_branch(
+                                        row, ix, &worktree, &main, height, &entity, cx,
+                                    ),
+                                    None => div().into_any_element(),
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .size_full()
+                        .track_scroll(self.branch_scroll.clone()),
+                        cx,
+                    ),
+                ),
             )
             .into_any_element()
     }

@@ -113,7 +113,7 @@ fn agent_badge(agent: &crate::ui::app::AgentState, cx: &gpui::App) -> impl IntoE
 impl ClaudhubApp {
     pub(super) fn render_sidebar(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let sidebar_scroll = self.scroll_of("sidebar");
@@ -199,175 +199,183 @@ impl ClaudhubApp {
             )
             .children(find)
             .child(
-                div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
-                    "sidebar-bar",
-                    &sidebar_scroll,
-                    div()
-                        .id("sidebar-scroll")
-                        .size_full()
-                        .overflow_y_scroll()
-                        .track_scroll(&sidebar_scroll)
-                        // Au premier lancement, c'est tout ce qu'on voit : un
-                        // texte gris ne dit pas quoi faire, un bouton si.
-                        .when(empty, |el| {
-                            el.child(
-                                v_flex()
-                                    .p_4()
-                                    .gap_2()
-                                    .items_center()
-                                    .child(
-                                        icon("folder")
-                                            .large()
-                                            .text_color(cx.theme().muted_foreground.opacity(0.4)),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_center()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(tr!("sidebar-empty")),
-                                    )
-                                    .child(
-                                        Button::new("open-first-repo")
-                                            .outline()
-                                            .small()
-                                            .label(tr!("sidebar-open-repository"))
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.prompt_open_repository(window, cx);
-                                            })),
-                                    ),
-                            )
-                        })
-                        .children(repos.into_iter().map(
-                            |(ix, main, name, collapsed, worktrees)| {
-                                let main_for_add = main.clone();
-                                v_flex()
-                                    .child(
-                                        h_flex()
-                                            .id(("repo", ix))
-                                            .py_1()
-                                            .px_2()
-                                            .gap_1()
-                                            .items_center()
-                                            .cursor_pointer()
-                                            .hover(|s| s.bg(cx.theme().sidebar_accent.opacity(0.6)))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                if let Some(repo) = this.repos.get_mut(ix) {
-                                                    repo.collapsed = !repo.collapsed;
-                                                }
-                                                cx.notify();
-                                            }))
-                                            .child(
-                                                icon(if collapsed {
-                                                    "chevron-right"
-                                                } else {
-                                                    "chevron-down"
-                                                })
-                                                .xsmall(),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .truncate()
-                                                    .text_sm()
-                                                    .font_semibold()
-                                                    .child(name),
-                                            )
-                                            .child(
-                                                Button::new(("add-worktree", ix))
-                                                    .ghost()
-                                                    .xsmall()
-                                                    .icon(icon("plus"))
-                                                    .tooltip(tr!("sidebar-new-worktree"))
-                                                    .on_click(cx.listener(
-                                                        move |this, _, window, cx| {
-                                                            this.prompt_new_worktree(
-                                                                main_for_add.clone(),
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
+                div().flex_1().min_h_0().child(
+                    self.scrolled(
+                        "sidebar-bar",
+                        &sidebar_scroll,
+                        crate::ui::motion::Axes::Vertical,
+                        window,
+                        div()
+                            .id("sidebar-scroll")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&sidebar_scroll)
+                            // Au premier lancement, c'est tout ce qu'on voit : un
+                            // texte gris ne dit pas quoi faire, un bouton si.
+                            .when(empty, |el| {
+                                el.child(
+                                    v_flex()
+                                        .p_4()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(
+                                            icon("folder").large().text_color(
+                                                cx.theme().muted_foreground.opacity(0.4),
                                             ),
-                                    )
-                                    .when(!collapsed, |el| {
-                                        el.children(worktrees.into_iter().enumerate().map(
-                                            |(wix, worktree)| {
-                                                let WorktreeRow {
-                                                    path,
-                                                    label,
-                                                    branch,
-                                                    is_main,
-                                                    prunable,
-                                                    summary,
-                                                    agent,
-                                                } = worktree;
-                                                let selected =
-                                                    active.as_deref() == Some(path.as_path());
-                                                let for_click = path.clone();
-                                                let for_remove = path.clone();
-                                                let for_menu = path.clone();
-                                                let repo_main = main.clone();
-                                                let for_menu_main = main.clone();
-                                                h_flex()
-                                                    .id(("worktree", ix * 1000 + wix))
-                                                    // Pas de hauteur fixe : la
-                                                    // ligne porte deux lignes de
-                                                    // texte, et une hauteur figée
-                                                    // les faisait déborder sur la
-                                                    // ligne suivante dès qu'on
-                                                    // grossissait la police.
-                                                    .py_1()
-                                                    .pl_5()
-                                                    .pr_1()
-                                                    .gap_1()
-                                                    .items_center()
-                                                    .cursor_pointer()
-                                                    .border_l_2()
-                                                    .border_color(gpui::transparent_black())
-                                                    .when(selected, |el| {
-                                                        el.bg(cx.theme().sidebar_accent)
-                                                            .border_color(cx.theme().primary)
-                                                            .text_color(
-                                                                cx.theme()
-                                                                    .sidebar_accent_foreground,
-                                                            )
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_center()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(tr!("sidebar-empty")),
+                                        )
+                                        .child(
+                                            Button::new("open-first-repo")
+                                                .outline()
+                                                .small()
+                                                .label(tr!("sidebar-open-repository"))
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.prompt_open_repository(window, cx);
+                                                })),
+                                        ),
+                                )
+                            })
+                            .children(repos.into_iter().map(
+                                |(ix, main, name, collapsed, worktrees)| {
+                                    let main_for_add = main.clone();
+                                    v_flex()
+                                        .child(
+                                            h_flex()
+                                                .id(("repo", ix))
+                                                .py_1()
+                                                .px_2()
+                                                .gap_1()
+                                                .items_center()
+                                                .cursor_pointer()
+                                                .hover(|s| {
+                                                    s.bg(cx.theme().sidebar_accent.opacity(0.6))
+                                                })
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    if let Some(repo) = this.repos.get_mut(ix) {
+                                                        repo.collapsed = !repo.collapsed;
+                                                    }
+                                                    cx.notify();
+                                                }))
+                                                .child(
+                                                    icon(if collapsed {
+                                                        "chevron-right"
+                                                    } else {
+                                                        "chevron-down"
                                                     })
-                                                    .hover(|s| {
-                                                        s.bg(cx.theme().sidebar_accent.opacity(0.5))
-                                                    })
-                                                    .on_click(cx.listener(
-                                                        move |this, _, window, cx| {
-                                                            this.select_worktree(
-                                                                for_click.clone(),
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    ))
-                                                    .child(
-                                                        icon(if is_main {
-                                                            "folder"
-                                                        } else {
-                                                            "git-branch"
+                                                    .xsmall(),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .truncate()
+                                                        .text_sm()
+                                                        .font_semibold()
+                                                        .child(name),
+                                                )
+                                                .child(
+                                                    Button::new(("add-worktree", ix))
+                                                        .ghost()
+                                                        .xsmall()
+                                                        .icon(icon("plus"))
+                                                        .tooltip(tr!("sidebar-new-worktree"))
+                                                        .on_click(cx.listener(
+                                                            move |this, _, window, cx| {
+                                                                this.prompt_new_worktree(
+                                                                    main_for_add.clone(),
+                                                                    window,
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        )),
+                                                ),
+                                        )
+                                        .when(!collapsed, |el| {
+                                            el.children(worktrees.into_iter().enumerate().map(
+                                                |(wix, worktree)| {
+                                                    let WorktreeRow {
+                                                        path,
+                                                        label,
+                                                        branch,
+                                                        is_main,
+                                                        prunable,
+                                                        summary,
+                                                        agent,
+                                                    } = worktree;
+                                                    let selected =
+                                                        active.as_deref() == Some(path.as_path());
+                                                    let for_click = path.clone();
+                                                    let for_remove = path.clone();
+                                                    let for_menu = path.clone();
+                                                    let repo_main = main.clone();
+                                                    let for_menu_main = main.clone();
+                                                    h_flex()
+                                                        .id(("worktree", ix * 1000 + wix))
+                                                        // Pas de hauteur fixe : la
+                                                        // ligne porte deux lignes de
+                                                        // texte, et une hauteur figée
+                                                        // les faisait déborder sur la
+                                                        // ligne suivante dès qu'on
+                                                        // grossissait la police.
+                                                        .py_1()
+                                                        .pl_5()
+                                                        .pr_1()
+                                                        .gap_1()
+                                                        .items_center()
+                                                        .cursor_pointer()
+                                                        .border_l_2()
+                                                        .border_color(gpui::transparent_black())
+                                                        .when(selected, |el| {
+                                                            el.bg(cx.theme().sidebar_accent)
+                                                                .border_color(cx.theme().primary)
+                                                                .text_color(
+                                                                    cx.theme()
+                                                                        .sidebar_accent_foreground,
+                                                                )
                                                         })
-                                                        .xsmall(),
-                                                    )
-                                                    .child(
-                                                        v_flex()
-                                                            .flex_1()
-                                                            .min_w_0()
-                                                            .child(
-                                                                div()
-                                                                    .truncate()
-                                                                    .text_sm()
-                                                                    .when(selected, |el| {
-                                                                        el.font_semibold()
-                                                                    })
-                                                                    .child(label),
-                                                            )
-                                                            .when_some(branch, |el, branch| {
-                                                                el.child(
+                                                        .hover(|s| {
+                                                            s.bg(cx
+                                                                .theme()
+                                                                .sidebar_accent
+                                                                .opacity(0.5))
+                                                        })
+                                                        .on_click(cx.listener(
+                                                            move |this, _, window, cx| {
+                                                                this.select_worktree(
+                                                                    for_click.clone(),
+                                                                    window,
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        ))
+                                                        .child(
+                                                            icon(if is_main {
+                                                                "folder"
+                                                            } else {
+                                                                "git-branch"
+                                                            })
+                                                            .xsmall(),
+                                                        )
+                                                        .child(
+                                                            v_flex()
+                                                                .flex_1()
+                                                                .min_w_0()
+                                                                .child(
+                                                                    div()
+                                                                        .truncate()
+                                                                        .text_sm()
+                                                                        .when(selected, |el| {
+                                                                            el.font_semibold()
+                                                                        })
+                                                                        .child(label),
+                                                                )
+                                                                .when_some(branch, |el, branch| {
+                                                                    el.child(
                                                                     div()
                                                                         .truncate()
                                                                         .text_xs()
@@ -377,38 +385,40 @@ impl ClaudhubApp {
                                                                         )
                                                                         .child(branch),
                                                                 )
-                                                            }),
-                                                    )
-                                                    // Ce que ce worktree a en
-                                                    // chantier, et qui y
-                                                    // travaille : les deux
-                                                    // questions qu'on se pose
-                                                    // en parcourant la liste.
-                                                    .when_some(agent, |el, agent| {
-                                                        el.child(agent_badge(&agent, cx))
-                                                    })
-                                                    .when_some(
-                                                        summary.filter(|s| !s.is_empty()),
-                                                        |el, summary| el.child(volume(summary, cx)),
-                                                    )
-                                                    // Ce que `wt` sait de lui :
-                                                    // démarré ou non, et
-                                                    // l'adresse qu'il expose.
-                                                    .children(self.render_wt_state(&path, cx))
-                                                    .children(self.render_wt_links(&path, cx))
-                                                    .when(prunable, |el| {
-                                                        el.child(
-                                                            icon("alert-circle")
-                                                                .xsmall()
-                                                                .text_color(cx.theme().warning),
+                                                                }),
                                                         )
-                                                    })
-                                                    // Le worktree principal ne se
-                                                    // retire pas : git refuse, et
-                                                    // proposer le bouton reviendrait
-                                                    // à promettre une erreur.
-                                                    .when(!is_main, |el| {
-                                                        el.child(
+                                                        // Ce que ce worktree a en
+                                                        // chantier, et qui y
+                                                        // travaille : les deux
+                                                        // questions qu'on se pose
+                                                        // en parcourant la liste.
+                                                        .when_some(agent, |el, agent| {
+                                                            el.child(agent_badge(&agent, cx))
+                                                        })
+                                                        .when_some(
+                                                            summary.filter(|s| !s.is_empty()),
+                                                            |el, summary| {
+                                                                el.child(volume(summary, cx))
+                                                            },
+                                                        )
+                                                        // Ce que `wt` sait de lui :
+                                                        // démarré ou non, et
+                                                        // l'adresse qu'il expose.
+                                                        .children(self.render_wt_state(&path, cx))
+                                                        .children(self.render_wt_links(&path, cx))
+                                                        .when(prunable, |el| {
+                                                            el.child(
+                                                                icon("alert-circle")
+                                                                    .xsmall()
+                                                                    .text_color(cx.theme().warning),
+                                                            )
+                                                        })
+                                                        // Le worktree principal ne se
+                                                        // retire pas : git refuse, et
+                                                        // proposer le bouton reviendrait
+                                                        // à promettre une erreur.
+                                                        .when(!is_main, |el| {
+                                                            el.child(
                                                             Button::new((
                                                                 "rm-worktree",
                                                                 ix * 1000 + wix,
@@ -428,34 +438,36 @@ impl ClaudhubApp {
                                                                 },
                                                             )),
                                                         )
-                                                    })
-                                                    // Le clic droit porte tout
-                                                    // ce que le projet ajoute :
-                                                    // Claudhub ne connaît ni
-                                                    // ses tâches ni ses hooks,
-                                                    // il les affiche.
-                                                    .context_menu({
-                                                        let entity = cx.entity();
-                                                        let (main, path) = (
-                                                            for_menu_main.clone(),
-                                                            for_menu.clone(),
-                                                        );
-                                                        move |menu, _window, cx| {
-                                                            let (main, path) =
-                                                                (main.clone(), path.clone());
-                                                            entity.update(cx, |this, cx| {
-                                                                this.worktree_menu(
-                                                                    menu, main, path, cx,
-                                                                )
-                                                            })
-                                                        }
-                                                    })
-                                            },
-                                        ))
-                                    })
-                            },
-                        )),
-                )),
+                                                        })
+                                                        // Le clic droit porte tout
+                                                        // ce que le projet ajoute :
+                                                        // Claudhub ne connaît ni
+                                                        // ses tâches ni ses hooks,
+                                                        // il les affiche.
+                                                        .context_menu({
+                                                            let entity = cx.entity();
+                                                            let (main, path) = (
+                                                                for_menu_main.clone(),
+                                                                for_menu.clone(),
+                                                            );
+                                                            move |menu, _window, cx| {
+                                                                let (main, path) =
+                                                                    (main.clone(), path.clone());
+                                                                entity.update(cx, |this, cx| {
+                                                                    this.worktree_menu(
+                                                                        menu, main, path, cx,
+                                                                    )
+                                                                })
+                                                            }
+                                                        })
+                                                },
+                                            ))
+                                        })
+                                },
+                            )),
+                        cx,
+                    ),
+                ),
             )
     }
 

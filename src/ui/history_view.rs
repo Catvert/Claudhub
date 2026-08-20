@@ -188,6 +188,7 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let history_scroll = self.history_scroll.clone();
         let find = self.render_find(crate::ui::find::Pane::History, cx);
         let query = self.query(crate::ui::find::Pane::History, cx);
         let Some(state) = self.active_review() else {
@@ -265,38 +266,43 @@ impl ClaudhubApp {
             .filter(|range| matches!(range, DiffRange::Commit { .. }));
 
         let graph = v_flex().size_full().child(header).children(find).child(
-            div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
-                "history-bar",
-                &self.history_scroll,
-                uniform_list("history", count, move |visible, _window, cx| {
-                    visible
-                        .map(|ix| {
-                            // Filtrer est impossible ici : les traits du graphe
-                            // relient une ligne à ses voisines, et en retirer
-                            // une du milieu ferait pointer chacun d'eux sur le
-                            // mauvais commit. Ce qui ne correspond pas
-                            // s'éteint donc, et reste à sa place.
-                            let dimmed = !query.is_empty()
-                                && !history
-                                    .commits
-                                    .get(ix)
-                                    .is_some_and(|c| ClaudhubApp::commit_matches(c, &query));
-                            render_commit(
-                                &history,
-                                ix,
-                                gutter,
-                                selected.as_deref(),
-                                row_height,
-                                dimmed,
-                                &entity,
-                                cx,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .size_full()
-                .track_scroll(self.history_scroll.clone()),
-            )),
+            div().flex_1().min_h_0().child(
+                self.scrolled(
+                    "history-bar",
+                    &history_scroll,
+                    crate::ui::motion::Axes::Vertical,
+                    window,
+                    uniform_list("history", count, move |visible, _window, cx| {
+                        visible
+                            .map(|ix| {
+                                // Filtrer est impossible ici : les traits du graphe
+                                // relient une ligne à ses voisines, et en retirer
+                                // une du milieu ferait pointer chacun d'eux sur le
+                                // mauvais commit. Ce qui ne correspond pas
+                                // s'éteint donc, et reste à sa place.
+                                let dimmed = !query.is_empty()
+                                    && !history
+                                        .commits
+                                        .get(ix)
+                                        .is_some_and(|c| ClaudhubApp::commit_matches(c, &query));
+                                render_commit(
+                                    &history,
+                                    ix,
+                                    gutter,
+                                    selected.as_deref(),
+                                    row_height,
+                                    dimmed,
+                                    &entity,
+                                    cx,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .size_full()
+                    .track_scroll(self.history_scroll.clone()),
+                    cx,
+                ),
+            ),
         );
 
         // Le graphe seul ne dit pas ce qu'un commit a touché : la liste de ses
