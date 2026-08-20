@@ -127,17 +127,40 @@ panels! {
 /// permanence décalerait les autres et ne servirait qu'une fois sur cent. Il
 /// reste visible tant qu'une opération est en cours, même sans fichier en
 /// conflit — c'est là qu'on trouve de quoi la continuer ou l'abandonner.
+///
+/// **La visibilité est mise en cache et non lue à la demande.** `visible` est
+/// appelé par `TabPanel::active_panel`, y compris depuis `add_panel` pendant
+/// la construction de la disposition — c'est-à-dire **à l'intérieur** de
+/// `ClaudhubApp::new`. Y lire l'entité racine la lirait pendant qu'elle est
+/// en cours de mise à jour, ce que gpui refuse par une panique. L'observation
+/// posée dans le constructeur, elle, se déclenche hors de tout emprunt.
 pub struct ConflictsPanel {
     app: WeakEntity<ClaudhubApp>,
     focus: FocusHandle,
+    visible: bool,
 }
 
 impl ConflictsPanel {
     pub fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
-        cx.observe(app, |_, _, cx| cx.notify()).detach();
+        cx.observe(app, |this: &mut Self, app, cx| {
+            let app = app.read(cx);
+            let visible = app.pending_operation().is_some() || !app.conflicted_files().is_empty();
+            if this.visible != visible {
+                this.visible = visible;
+                // Le dock relit la visibilité de ses onglets quand la zone se
+                // redessine : c'est la notification de l'aire, et non celle du
+                // panneau, qui fait apparaître ou disparaître l'onglet.
+                cx.emit(PanelEvent::LayoutChanged);
+            }
+            cx.notify();
+        })
+        .detach();
         Self {
             app: app.downgrade(),
             focus: cx.focus_handle(),
+            // Faux au départ, et ce n'est pas un pis-aller : aucun dépôt n'est
+            // encore ouvert quand la disposition se construit.
+            visible: false,
         }
     }
 }
@@ -163,11 +186,8 @@ impl Panel for ConflictsPanel {
         false
     }
 
-    fn visible(&self, cx: &App) -> bool {
-        self.app.upgrade().is_some_and(|app| {
-            let app = app.read(cx);
-            app.pending_operation().is_some() || !app.conflicted_files().is_empty()
-        })
+    fn visible(&self, _: &App) -> bool {
+        self.visible
     }
 }
 
@@ -190,14 +210,28 @@ impl Render for ConflictsPanel {
 pub struct TerminalPanel {
     app: WeakEntity<ClaudhubApp>,
     focus: FocusHandle,
+    /// Mise en cache pour la même raison que celle des conflits : `visible`
+    /// est appelé pendant la construction de la disposition, donc au milieu de
+    /// `ClaudhubApp::new`.
+    visible: bool,
 }
 
 impl TerminalPanel {
     pub fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
-        cx.observe(app, |_, _, cx| cx.notify()).detach();
+        cx.observe(app, |this: &mut Self, app, cx| {
+            let visible = app.read(cx).terminal_visible(cx);
+            if this.visible != visible {
+                this.visible = visible;
+                cx.emit(PanelEvent::LayoutChanged);
+            }
+            cx.notify();
+        })
+        .detach();
         Self {
             app: app.downgrade(),
             focus: cx.focus_handle(),
+            // Le panneau est affiché au démarrage, comme `show_terminal`.
+            visible: true,
         }
     }
 }
@@ -223,10 +257,8 @@ impl Panel for TerminalPanel {
         false
     }
 
-    fn visible(&self, cx: &App) -> bool {
-        self.app
-            .upgrade()
-            .is_some_and(|app| app.read(cx).terminal_visible(cx))
+    fn visible(&self, _: &App) -> bool {
+        self.visible
     }
 }
 
