@@ -46,7 +46,7 @@ const TERMINAL_HEIGHT: gpui::Pixels = px(280.);
 /// Version de la disposition enregistrée. À incrémenter quand les panneaux
 /// changent de nom ou de nature, pour que gpui-component écarte une
 /// disposition qu'il ne saurait plus reconstruire.
-const LAYOUT_VERSION: usize = 7;
+const LAYOUT_VERSION: usize = 8;
 
 /// Les panneaux de la disposition par défaut.
 struct DefaultPanels {
@@ -127,14 +127,15 @@ fn install_default_layout(
                         // ensemble.
                         DockItem::tabs(
                             vec![
+                                // Les notes en premier : elles disent où l'on
+                                // en est — ce qui reste à faire, ce qu'on a eu
+                                // à dire — là où les trois suivantes disent ce
+                                // qu'il y a à lire. C'est par là qu'on reprend
+                                // un worktree qu'on a quitté hier.
+                                panels.notes,
                                 panels.changes,
                                 panels.branch,
                                 panels.history,
-                                // La relecture est le quatrième point de vue
-                                // sur le même travail : ce qu'on a eu à en
-                                // dire. Elle se lit au même endroit que ce
-                                // qu'elle commente.
-                                panels.notes,
                                 // Les issues sont un point de départ comme un
                                 // autre, souvent meilleur qu'une intention :
                                 // elles se lisent où l'on choisit quoi relire.

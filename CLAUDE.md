@@ -930,6 +930,11 @@ gèrent au même endroit désormais, parce qu'elles vivent déjà dans le même
 dossier : les **tâches**, la **note libre**, les **remarques**, les **fichiers
 relus**.
 
+C'est le **premier onglet** du centre, devant « Modifications » : il dit où
+l'on en est — ce qui reste à faire, ce qu'on a eu à dire — là où les trois
+suivants disent ce qu'il y a à lire, et c'est par là qu'on reprend un worktree
+qu'on a quitté hier.
+
 **Des sections repliables, ni trois panneaux ni des sous-onglets.** Trois
 panneaux feraient trois onglets pour un seul sujet — et « Modifications » et
 « Revue de branche » en sont deux parce qu'on les regarde *ensemble*, ce qui
