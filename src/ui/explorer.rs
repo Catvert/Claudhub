@@ -647,6 +647,7 @@ impl ClaudhubApp {
             explorer.rebuild();
         }
         let explorer = &*explorer;
+        let pending = explorer.pending;
         let rows = explorer.rows.clone();
         let files = Rc::new(explorer.files.clone());
         let cursor = explorer.cursor.clone();
@@ -680,7 +681,11 @@ impl ClaudhubApp {
         let entity = cx.entity();
         let look = Look::of(cx);
 
-        if count == 0 {
+        // Rien à montrer, et rien en route : c'est un projet vide ou une
+        // recherche sans résultat. Pendant le premier `ls-files`, la liste
+        // reste blanche — annoncer « aucun fichier » puis les afficher se lit
+        // comme un défaut d'affichage.
+        if count == 0 && !pending {
             return v_flex()
                 .size_full()
                 .child(bar)
