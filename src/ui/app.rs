@@ -14,7 +14,7 @@ use gpui::{
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
-    dock::{DockArea, DockLayout, DockPlacement},
+    dock::{panel_handle, DockArea, DockLayout, DockPlacement, DockSkin},
     h_flex,
     input::{InputState, TextareaState},
     menu::{DropdownMenu, PopupMenuItem},
@@ -52,18 +52,24 @@ const TERMINAL_HEIGHT: gpui::Pixels = px(280.);
 const LAYOUT_VERSION: usize = 9;
 
 /// Les panneaux de la disposition par défaut.
+///
+/// `BasePanelView` et non `PanelView` : c'est le type que rend `panel_handle`,
+/// et c'est **lui** qu'il faut. `Entity<P>` sait se convertir tout seul en
+/// `Arc<dyn BasePanelView>` — et le dock le prend sans broncher, mais sans la
+/// présentation qui va avec : ni onglet, ni titre, ni contenu. C'est la panne
+/// silencieuse de cette refonte, et la seule chose que `panel_handle` empêche.
 struct DefaultPanels {
-    sidebar: Arc<dyn gpui_component::dock::PanelView>,
-    branches: Arc<dyn gpui_component::dock::PanelView>,
-    files: Arc<dyn gpui_component::dock::PanelView>,
-    changes: Arc<dyn gpui_component::dock::PanelView>,
-    branch: Arc<dyn gpui_component::dock::PanelView>,
-    history: Arc<dyn gpui_component::dock::PanelView>,
-    notes: Arc<dyn gpui_component::dock::PanelView>,
-    sentry: Arc<dyn gpui_component::dock::PanelView>,
-    conflicts: Arc<dyn gpui_component::dock::PanelView>,
-    diff: Arc<dyn gpui_component::dock::PanelView>,
-    terminal: Arc<dyn gpui_component::dock::PanelView>,
+    sidebar: Arc<dyn gpui_component::dock::BasePanelView>,
+    branches: Arc<dyn gpui_component::dock::BasePanelView>,
+    files: Arc<dyn gpui_component::dock::BasePanelView>,
+    changes: Arc<dyn gpui_component::dock::BasePanelView>,
+    branch: Arc<dyn gpui_component::dock::BasePanelView>,
+    history: Arc<dyn gpui_component::dock::BasePanelView>,
+    notes: Arc<dyn gpui_component::dock::BasePanelView>,
+    sentry: Arc<dyn gpui_component::dock::BasePanelView>,
+    conflicts: Arc<dyn gpui_component::dock::BasePanelView>,
+    diff: Arc<dyn gpui_component::dock::BasePanelView>,
+    terminal: Arc<dyn gpui_component::dock::BasePanelView>,
 }
 
 /// La disposition d'origine : les dépôts à gauche, la revue et le diff au
@@ -492,6 +498,10 @@ pub struct ClaudhubApp {
     /// le glissement d'un panneau d'une zone à l'autre, les onglets et les
     /// zones d'accueil.
     pub(super) dock: Entity<DockArea>,
+    /// La peau du dock, gardée en vie : c'est elle qui dessine les onglets, et
+    /// c'est par elle que passent les réglages de présentation.
+    #[allow(dead_code)]
+    dock_skin: std::rc::Rc<DockSkin>,
     /// Vrai quand une écriture différée de la disposition est déjà programmée.
     layout_save_scheduled: bool,
     /// Les vues que l'utilisateur a masquées, par nom de panneau.
@@ -682,7 +692,13 @@ impl ClaudhubApp {
         // délèguent à cette entité, dont ils ne gardent qu'une référence
         // faible pour ne pas former de cycle.
         let this = cx.entity();
-        let dock = cx.new(|cx| DockArea::new("claudhub", Some(LAYOUT_VERSION), window, cx));
+        // **Par `DockSkin` et non par `DockArea::new`.** Depuis que le moteur
+        // de disposition vit dans `gpui-base`, une aire construite sans peau
+        // dock, glisse et persiste très bien — mais ne dessine **aucun
+        // chrome** : ni barre d'onglets, ni titre, ni cadre. Les panneaux
+        // s'empilent alors nus, ce qui se lit comme une fenêtre cassée sans
+        // qu'une seule erreur soit signalée.
+        let (dock, dock_skin) = DockSkin::dock_area("claudhub", Some(LAYOUT_VERSION), window, cx);
 
         crate::ui::panels::register(&this, cx);
 
@@ -712,17 +728,17 @@ impl ClaudhubApp {
 
         if !restored {
             let panels = DefaultPanels {
-                sidebar: Arc::new(sidebar),
-                branches: Arc::new(branches),
-                files: Arc::new(files),
-                changes: Arc::new(changes),
-                branch: Arc::new(branch),
-                history: Arc::new(history),
-                notes: Arc::new(notes),
-                sentry: Arc::new(sentry),
-                conflicts: Arc::new(conflicts),
-                diff: Arc::new(diff),
-                terminal: Arc::new(terminal),
+                sidebar: panel_handle(sidebar),
+                branches: panel_handle(branches),
+                files: panel_handle(files),
+                changes: panel_handle(changes),
+                branch: panel_handle(branch),
+                history: panel_handle(history),
+                notes: panel_handle(notes),
+                sentry: panel_handle(sentry),
+                conflicts: panel_handle(conflicts),
+                diff: panel_handle(diff),
+                terminal: panel_handle(terminal),
             };
             dock.update(cx, |area, cx| {
                 install_default_layout(area, panels, window, cx);
@@ -772,6 +788,7 @@ impl ClaudhubApp {
             toast: None,
             pending_status: std::collections::HashSet::new(),
             dock,
+            dock_skin,
             layout_save_scheduled: false,
             hidden_panels: Settings::global(cx).hidden_panels.iter().cloned().collect(),
             summaries: HashMap::new(),
@@ -2373,17 +2390,17 @@ impl ClaudhubApp {
         let this = cx.entity();
 
         let panels = DefaultPanels {
-            sidebar: Arc::new(cx.new(|cx| SidebarPanel::new(&this, cx))),
-            branches: Arc::new(cx.new(|cx| BranchesPanel::new(&this, cx))),
-            files: Arc::new(cx.new(|cx| FilesPanel::new(&this, cx))),
-            changes: Arc::new(cx.new(|cx| ChangesPanel::new(&this, cx))),
-            branch: Arc::new(cx.new(|cx| BranchPanel::new(&this, cx))),
-            history: Arc::new(cx.new(|cx| HistoryPanel::new(&this, cx))),
-            notes: Arc::new(cx.new(|cx| NotesPanel::new(&this, cx))),
-            sentry: Arc::new(cx.new(|cx| SentryPanel::new(&this, cx))),
-            conflicts: Arc::new(cx.new(|cx| ConflictsPanel::new(&this, cx))),
-            diff: Arc::new(cx.new(|cx| DiffPanel::new(&this, cx))),
-            terminal: Arc::new(cx.new(|cx| TerminalPanel::new(&this, cx))),
+            sidebar: panel_handle(cx.new(|cx| SidebarPanel::new(&this, cx))),
+            branches: panel_handle(cx.new(|cx| BranchesPanel::new(&this, cx))),
+            files: panel_handle(cx.new(|cx| FilesPanel::new(&this, cx))),
+            changes: panel_handle(cx.new(|cx| ChangesPanel::new(&this, cx))),
+            branch: panel_handle(cx.new(|cx| BranchPanel::new(&this, cx))),
+            history: panel_handle(cx.new(|cx| HistoryPanel::new(&this, cx))),
+            notes: panel_handle(cx.new(|cx| NotesPanel::new(&this, cx))),
+            sentry: panel_handle(cx.new(|cx| SentryPanel::new(&this, cx))),
+            conflicts: panel_handle(cx.new(|cx| ConflictsPanel::new(&this, cx))),
+            diff: panel_handle(cx.new(|cx| DiffPanel::new(&this, cx))),
+            terminal: panel_handle(cx.new(|cx| TerminalPanel::new(&this, cx))),
         };
         self.dock.update(cx, |area, cx| {
             install_default_layout(area, panels, window, cx);
