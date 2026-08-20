@@ -12,6 +12,7 @@ mod branches;
 mod conflicts;
 mod diff_view;
 mod explorer;
+mod file_icons;
 mod highlight;
 mod history_view;
 mod icons;

@@ -662,6 +662,7 @@ fn render_row(
                 .on_click(move |_, _window, cx| {
                     open_entity.update(cx, |this, cx| this.open_in_editor(for_open.clone(), cx));
                 })
+                .child(crate::ui::file_icons::file_icon(&path, cx))
                 .child(
                     div()
                         .flex_1()

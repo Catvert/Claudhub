@@ -821,6 +821,10 @@ fn render_file(
                 ))
                 .child(row.codes()),
         )
+        // L'icône dit la famille par sa forme et le langage par sa teinte :
+        // c'est ce qui rend une liste de deux cents fichiers parcourable du
+        // regard, là où les codes de git ne disent que ce qui a changé.
+        .child(crate::ui::file_icons::file_icon(&row.path, cx))
         .child(
             h_flex()
                 .flex_1()

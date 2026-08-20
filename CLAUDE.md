@@ -52,6 +52,7 @@ src/
     settings.rs     les réglages et leur global
     settings_view.rs  le formulaire, bâti sur `gpui_component::setting`
     tree.rs         chemins → arborescence repliable, en indices
+    file_icons.rs   l'icône et la teinte d'un fichier, d'après son nom
     explorer.rs     l'explorateur de projet et l'éditeur intégré
     sentry_view.rs  les issues, leur trace, et de quoi les confier
     conflicts.rs    les conflits et le garde-fou d'une opération à mi-chemin
@@ -282,6 +283,37 @@ quarante mille fichiers ferait sinon des centaines de milliers de clones de
 à chaque repli, et rangé derrière un `Rc`. La liste de revue, elle, se
 reconstruit au rendu : quelques centaines d'entrées le permettent, des dizaines
 de milliers non.
+
+### L'icône d'un fichier
+
+Trois listes en portent — l'explorateur, les modifications, la revue de branche
+— parce que le geste central de Claudhub est de parcourir des listes de
+fichiers.
+
+**La forme dit la famille, la couleur dit le langage.** Les icônes livrées sont
+des traits monochromes à la Lucide : dessiner un logo par langage serait un
+autre métier, et trente glyphes presque identiques ne se distingueraient pas
+mieux qu'un seul. `.php`, `.js` et `.rs` partagent donc `file-code` et se
+séparent par la teinte.
+
+**Les teintes viennent de la coloration syntaxique du thème**, pas d'une
+palette à nous : elles existent dans tous les thèmes livrés — `keys_of` le
+verrouille —, elles s'accordent au diff affiché à côté, et elles suivent
+l'apparence claire ou sombre sans qu'on s'en occupe. Elles n'ont **pas de sens
+sémantique** : un `.rs` n'est pas « un type ». C'est une convention
+d'affichage, et un thème de l'utilisateur qui ne définirait pas un nom de style
+retombe sur le suivant de la liste, puis sur la couleur du texte.
+
+Le **nom entier** est regardé avant l'extension : `Dockerfile`, `Makefile` et
+`.gitignore` n'en ont pas, `.env.production` en a une qui ne veut rien dire, et
+un `.blade.php` est du balisage avant d'être du PHP — la coloration fait déjà
+cette distinction, l'icône n'a pas à la contredire.
+
+Un test vérifie que **chaque nom d'icône de la table existe sur le disque** :
+une icône absente ne provoque aucune erreur, gpui rend un vide, et la ligne
+perd son repère sans que rien ne le dise. C'est la faute qu'attire une table de
+deux cents entrées. Trois glyphes manquaient au jeu livré — `file-code`,
+`file-json`, `database` — et sont redessinés sur la grille de Lucide.
 
 ### Lire et retoucher un fichier
 
