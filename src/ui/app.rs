@@ -432,12 +432,20 @@ pub struct ClaudhubApp {
     /// ou à l'ouverture du dialogue, il perdrait curseur, sélection et texte
     /// dès la première frappe.
     pub(super) note_input: Entity<InputState>,
+    /// Le prompt qui part à l'agent, avant qu'il parte.
+    pub(super) prompt_input: Entity<InputState>,
     /// La note en cours de rédaction : son ancrage, arrêté au moment du geste.
     ///
     /// Il est arrêté là et non à la validation parce que le diff peut changer
     /// pendant qu'on écrit — un agent travaille pendant qu'on le relit — et
     /// que la note doit porter sur ce qu'on avait sous les yeux.
     pub(super) note_draft: Option<crate::ui::notes_view::NoteDraft>,
+    /// Les sections repliées du panneau « Notes », par clé.
+    ///
+    /// En mémoire et non dans le magasin : c'est une posture de lecture, qui
+    /// change plusieurs fois pendant une relecture, pas une préférence qu'on
+    /// s'attend à retrouver le lendemain.
+    pub(super) notes_collapsed: std::collections::HashSet<&'static str>,
     /// Le panneau des notes ne montre-t-il que les non traitées.
     pub(super) notes_only_open: bool,
     /// Le `wt.toml` de chaque dépôt ouvert, lu une fois. `None` : il n'en a
@@ -635,6 +643,15 @@ impl ClaudhubApp {
                 .placeholder(tr!("note-placeholder"))
         });
 
+        // Plus haut que celui d'une note : ce qu'on relit ici est un message
+        // entier, avec le code cité, et huit lignes de contexte sont le
+        // minimum pour juger de ce qui part.
+        let prompt_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .auto_grow(8, 20)
+        });
+
         let base_select = cx.new(|cx| {
             SelectState::new(
                 SearchableVec::new(Vec::<BaseChoice>::new()),
@@ -727,6 +744,8 @@ impl ClaudhubApp {
             commit_input,
             base_select,
             note_input,
+            prompt_input,
+            notes_collapsed: std::collections::HashSet::new(),
             note_draft: None,
             notes_only_open: false,
             wt_projects: HashMap::new(),

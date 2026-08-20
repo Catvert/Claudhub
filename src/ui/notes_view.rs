@@ -313,6 +313,22 @@ impl ClaudhubApp {
         });
     }
 
+    /// Rend tous les fichiers d'un worktree à relire.
+    ///
+    /// Le geste manquait : on coche fichier par fichier, et reprendre une revue
+    /// depuis le début demandait autant de clics que la branche a de fichiers,
+    /// ou une visite dans le Markdown du coffre.
+    pub(super) fn clear_reviewed(&mut self, cx: &mut Context<Self>) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        if let Some(state) = self.review.get_mut(&worktree) {
+            state.reviewed.clear();
+        }
+        self.persist_review(&worktree, cx);
+        cx.notify();
+    }
+
     pub(super) fn toggle_notes_filter(&mut self, cx: &mut Context<Self>) {
         self.notes_only_open = !self.notes_only_open;
         cx.notify();
@@ -454,11 +470,69 @@ impl ClaudhubApp {
             self.announce(tr!("note-nothing-to-send"), cx);
             return;
         }
-        let count = chosen.len();
         let ids: Vec<u64> = chosen.iter().map(|note| note.id).collect();
         let text = notes::prompt(&branch, &chosen);
-        self.deliver(worktree.clone(), text, window, cx);
+        self.confirm_prompt(worktree, ids, text, window, cx);
+    }
 
+    /// Montre le prompt avant qu'il parte, et le laisse retoucher.
+    ///
+    /// Ce qui part dans un terminal ne se rattrape pas : un agent a lu le
+    /// collage avant qu'on ait vu ce qu'on venait d'envoyer. Le dialogue est
+    /// aussi ce qui rappelle à quoi ressemble une demande — on y ajoute d'une
+    /// phrase ce que les notes ne disent pas.
+    fn confirm_prompt(
+        &mut self,
+        worktree: PathBuf,
+        ids: Vec<u64>,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = self.prompt_input.clone();
+        let entity = cx.entity();
+        input.update(cx, |input, cx| input.set_value(text, window, cx));
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let input = input.clone();
+            let entity = entity.clone();
+            let (worktree, ids) = (worktree.clone(), ids.clone());
+            dialog
+                .title(tr!("note-prompt-title"))
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .w(px(640.))
+                        .child(div().text_xs().child(tr!("note-prompt-hint")))
+                        .child(Input::new(&input)),
+                )
+                .confirm()
+                .on_ok(move |_, window, cx| {
+                    let text = input.read(cx).value().to_string();
+                    entity.update(cx, |this, cx| {
+                        this.send_prompt(worktree.clone(), ids.clone(), text, window, cx);
+                    });
+                    true
+                })
+        });
+    }
+
+    /// Livre le prompt et marque les notes comme envoyées.
+    ///
+    /// `sent` et non `done` : c'est la relecture de la réponse qui clôt une
+    /// note, pas son envoi.
+    fn send_prompt(
+        &mut self,
+        worktree: PathBuf,
+        ids: Vec<u64>,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if text.trim().is_empty() {
+            return;
+        }
+        let count = ids.len();
+        self.deliver(worktree.clone(), text, window, cx);
         if let Some(state) = self.review.get_mut(&worktree) {
             for note in state.notes.iter_mut().filter(|note| ids.contains(&note.id)) {
                 note.sent = true;
@@ -529,6 +603,14 @@ impl ClaudhubApp {
 
     // — Le panneau ——————————————————————————————————————————————
 
+    /// Le panneau « Notes » : le coffre du worktree, en trois sections.
+    ///
+    /// Trois choses s'y gèrent, et elles vivent déjà dans le même dossier —
+    /// les tâches, les remarques, les fichiers relus. Les répartir en trois
+    /// panneaux ferait trois onglets pour un seul sujet ; les mettre en
+    /// sous-onglets demanderait un clic pour savoir où en est l'agent. Des
+    /// sections repliables dans un seul défilement gardent les trois comptes
+    /// sous les yeux, et rendent la hauteur à celle qu'on regarde.
     pub(super) fn render_notes(
         &mut self,
         window: &mut Window,
@@ -536,11 +618,157 @@ impl ClaudhubApp {
     ) -> impl IntoElement {
         let notes_scroll = self.scroll_of("notes");
         let find = self.render_find(crate::ui::find::Pane::Notes, cx);
-        let query = self.query(crate::ui::find::Pane::Notes, cx);
-        let Some(state) = self.active_review() else {
+        if self.active_review().is_none() {
             return empty_notes(tr!("no-worktree"), cx).into_any_element();
-        };
+        }
+        let bar = self.render_vault_bar(cx);
+        let todo = self.render_todo_section(cx);
+        let notes = self.render_notes_section(cx);
+        let reviewed = self.render_reviewed_section(cx);
+
+        v_flex()
+            .size_full()
+            .child(bar)
+            .children(find)
+            .child(
+                div().flex_1().min_h_0().child(
+                    self.scrolled(
+                        "notes-bar",
+                        &notes_scroll,
+                        crate::ui::motion::Axes::Vertical,
+                        window,
+                        v_flex()
+                            .id("notes-list")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&notes_scroll)
+                            .child(todo)
+                            .child(notes)
+                            .children(reviewed),
+                        cx,
+                    ),
+                ),
+            )
+            .into_any_element()
+    }
+
+    /// La barre du panneau : ce dont les trois sections parlent, c'est-à-dire
+    /// le dossier du coffre, et de quoi l'ouvrir là où il est.
+    ///
+    /// Le chemin n'apparaissait nulle part ailleurs, et un coffre qu'on ne sait
+    /// pas retrouver est un coffre qu'on n'ouvre pas dans Obsidian.
+    fn render_vault_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let dir = self
+            .active
+            .clone()
+            .and_then(|worktree| self.notes_dir(&worktree, cx));
+        let label = dir
+            .as_ref()
+            .map(|dir| SharedString::from(dir.display().to_string()))
+            .unwrap_or_else(|| tr!("note-no-vault"));
+        h_flex()
+            .h(crate::ui::theme::bar_height(cx))
+            .w_full()
+            .px_2()
+            .gap_2()
+            .items_center()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(icon("book-open").xsmall())
+            .child(
+                div()
+                    .flex_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .truncate()
+                    .child(label.clone()),
+            )
+            .when_some(dir, |el, dir| {
+                el.child(
+                    Button::new("vault-open")
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("external-link"))
+                        .tooltip(tr!("note-open-vault"))
+                        .on_click(move |_, _window, cx| {
+                            // `file://` plutôt qu'un éditeur : le geste est
+                            // « montre-moi ce dossier », et c'est au bureau de
+                            // décider avec quoi — le même chemin que le bouton
+                            // d'adresse d'un worktree.
+                            cx.open_url(&format!("file://{}", dir.display()));
+                        }),
+                )
+            })
+    }
+
+    /// L'en-tête d'une section : le chevron, le titre, le compte, les actions.
+    ///
+    /// Le repli est **en mémoire** et ne se persiste pas : c'est une posture de
+    /// lecture, qui change plusieurs fois pendant une relecture, pas une
+    /// préférence qu'on retrouve le lendemain.
+    fn section_header(
+        &mut self,
+        key: &'static str,
+        glyph: &'static str,
+        title: SharedString,
+        count: SharedString,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let collapsed = self.notes_collapsed.contains(key);
+        h_flex()
+            .w_full()
+            .px_2()
+            .py_1()
+            .gap_2()
+            .items_center()
+            .bg(cx.theme().secondary)
+            // Le repli est porté par le titre, pas par la ligne entière : les
+            // boutons de la section vivent dessus, et un clic sur « envoyer »
+            // remonterait replier ce qu'on vient d'agir.
+            .child(
+                h_flex()
+                    .id(SharedString::from(format!("notes-section-{key}")))
+                    .flex_1()
+                    .gap_2()
+                    .items_center()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        if !this.notes_collapsed.remove(key) {
+                            this.notes_collapsed.insert(key);
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        icon(if collapsed {
+                            "chevron-right"
+                        } else {
+                            "chevron-down"
+                        })
+                        .xsmall(),
+                    )
+                    .child(icon(glyph).xsmall())
+                    .child(div().text_xs().child(title))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(count),
+                    ),
+            )
+    }
+
+    fn collapsed(&self, key: &'static str) -> bool {
+        self.notes_collapsed.contains(key)
+    }
+
+    /// Les remarques, groupées par fichier.
+    fn render_notes_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let query = self.query(crate::ui::find::Pane::Notes, cx);
         let only_open = self.notes_only_open;
+        let Some(state) = self.active_review() else {
+            return div().into_any_element();
+        };
         let drifted = state.drifted.clone();
         // La recherche porte sur la remarque, sur le code cité et sur le
         // chemin : les trois par lesquels on retrouve une note.
@@ -557,25 +785,15 @@ impl ClaudhubApp {
             .collect();
         let total = state.notes.len();
         let pending = state.notes.iter().filter(|note| !note.done).count();
-        let no_todo = state.todo.is_none();
         let mono = cx.theme().mono_font_family.clone();
-        let todo = self.render_todo(window, cx);
 
-        let bar = h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_2()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(icon("reply").xsmall())
-            .child(
-                div()
-                    .flex_1()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(tr!("note-count", { count: pending })),
+        let header = self
+            .section_header(
+                "notes",
+                "reply",
+                tr!("panel-notes"),
+                tr!("note-count", { count: pending }),
+                cx,
             )
             .child(
                 Button::new("notes-filter")
@@ -586,16 +804,6 @@ impl ClaudhubApp {
                     .tooltip(tr!("note-only-open"))
                     .on_click(cx.listener(|this, _, _window, cx| this.toggle_notes_filter(cx))),
             )
-            .when(no_todo, |el| {
-                el.child(
-                    Button::new("todo-create")
-                        .ghost()
-                        .xsmall()
-                        .icon(icon("list"))
-                        .tooltip(tr!("todo-create"))
-                        .on_click(cx.listener(|this, _, _window, cx| this.create_todo(cx))),
-                )
-            })
             .child(
                 Button::new("notes-send-all")
                     .ghost()
@@ -606,20 +814,20 @@ impl ClaudhubApp {
                     .on_click(cx.listener(|this, _, window, cx| this.send_notes(None, window, cx))),
             );
 
+        if self.collapsed("notes") {
+            return v_flex().w_full().child(header).into_any_element();
+        }
+
         if notes.is_empty() {
+            let message = if total == 0 {
+                tr!("note-empty")
+            } else {
+                tr!("note-all-done")
+            };
             return v_flex()
-                .size_full()
-                .child(bar)
-                .children(find)
-                .children(todo)
-                .child(empty_notes(
-                    if total == 0 {
-                        tr!("note-empty")
-                    } else {
-                        tr!("note-all-done")
-                    },
-                    cx,
-                ))
+                .w_full()
+                .child(header)
+                .child(section_empty(message, cx))
                 .into_any_element();
         }
 
@@ -637,7 +845,7 @@ impl ClaudhubApp {
         // paresseuse : `render_note` emprunte la vue *et* le contexte, ce
         // qu'un itérateur consommé plus loin dans la même expression
         // n'autorise pas.
-        let (secondary, muted) = (cx.theme().secondary, cx.theme().muted_foreground);
+        let muted = cx.theme().muted_foreground;
         let mut sections = Vec::new();
         for (path, bucket) in groups {
             let mut rows = Vec::new();
@@ -655,7 +863,6 @@ impl ClaudhubApp {
                             .py_1()
                             .text_xs()
                             .font_family(mono.clone())
-                            .bg(secondary)
                             .text_color(muted)
                             .truncate()
                             .child(path.display().to_string()),
@@ -665,47 +872,135 @@ impl ClaudhubApp {
         }
 
         v_flex()
-            .size_full()
-            .child(bar)
-            .children(find)
-            .children(todo)
-            .child(
-                div().flex_1().min_h_0().child(
-                    self.scrolled(
-                        "notes-bar",
-                        &notes_scroll,
-                        crate::ui::motion::Axes::Vertical,
-                        window,
-                        v_flex()
-                            .id("notes-list")
-                            .size_full()
-                            .overflow_y_scroll()
-                            .track_scroll(&notes_scroll)
-                            .children(sections),
-                        cx,
-                    ),
-                ),
-            )
+            .w_full()
+            .child(header)
+            .children(sections)
             .into_any_element()
     }
 
-    /// La liste de tâches du worktree, quand le coffre en porte une.
+    /// Les fichiers cochés comme relus, et de quoi les rendre à relire.
     ///
-    /// Elle est **au-dessus** des notes et hors de leur défilement : c'est ce
-    /// qu'on regarde pour savoir où en est l'agent, et le faire descendre avec
-    /// une revue de trois cents notes reviendrait à ne jamais le voir. Sa
-    /// hauteur est bornée, avec son propre défilement : une liste de tâches
-    /// n'a pas de bord non plus.
-    fn render_todo(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
-        let scroll = self.scroll_of("todo");
-        let todo = self.active_review()?.todo.clone()?;
-        let (done, total) = (todo.done(), todo.tasks.len());
-        let (muted, secondary) = (cx.theme().muted_foreground, cx.theme().secondary);
+    /// Ils se cochent dans les listes de fichiers ; ils ne se **décochaient**
+    /// que là, fichier par fichier, ou dans le Markdown du coffre. Une revue
+    /// qu'on veut reprendre de zéro demandait donc autant de clics qu'elle a de
+    /// fichiers.
+    fn render_reviewed_section(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let state = self.active_review()?;
+        if state.reviewed.is_empty() {
+            return None;
+        }
+        let mut reviewed = state.reviewed.clone();
+        reviewed.sort_by(|a, b| a.path.cmp(&b.path));
+        let worktree = self.active.clone()?;
+        let mono = cx.theme().mono_font_family.clone();
+        let muted = cx.theme().muted_foreground;
 
+        let header = self
+            .section_header(
+                "reviewed",
+                "check-check",
+                tr!("note-reviewed"),
+                SharedString::from(reviewed.len().to_string()),
+                cx,
+            )
+            .child(
+                Button::new("reviewed-clear")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("delete"))
+                    .tooltip(tr!("note-reviewed-clear"))
+                    .on_click(cx.listener(|this, _, _window, cx| this.clear_reviewed(cx))),
+            );
+
+        if self.collapsed("reviewed") {
+            return Some(v_flex().w_full().child(header));
+        }
+
+        let rows: Vec<_> = reviewed
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let (worktree, range, path) =
+                    (worktree.clone(), item.range.clone(), item.path.clone());
+                h_flex()
+                    .w_full()
+                    .px_2()
+                    .py_0p5()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .font_family(mono.clone())
+                            .text_color(muted)
+                            .truncate()
+                            .child(item.path.display().to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("+{} −{}", item.added, item.removed)),
+                    )
+                    .child(
+                        Button::new(("reviewed-undo", index))
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("check-check"))
+                            .tooltip(tr!("action-unreview"))
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.set_reviewed(
+                                    worktree.clone(),
+                                    range.clone(),
+                                    vec![path.clone()],
+                                    false,
+                                    cx,
+                                );
+                            })),
+                    )
+            })
+            .collect();
+
+        Some(v_flex().w_full().child(header).children(rows))
+    }
+
+    /// La liste de tâches du worktree.
+    ///
+    /// Elle est **en tête** du panneau : c'est ce qu'on regarde pour savoir où
+    /// en est l'agent, et la mettre sous une revue de trois cents notes
+    /// reviendrait à ne jamais la voir. Sans `TODO.md`, la section reste et
+    /// porte le bouton qui le crée — un état vide qui dit quoi faire vaut mieux
+    /// qu'une section absente dont on ignore qu'elle pourrait exister.
+    fn render_todo_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let todo = self.active_review().and_then(|state| state.todo.clone());
+        let count = match &todo {
+            Some(todo) => tr!("todo-progress", { done: todo.done(), total: todo.tasks.len() }),
+            None => tr!("todo-none"),
+        };
+        let header = self
+            .section_header("todo", "check-check", tr!("todo-title"), count, cx)
+            .when(todo.is_none(), |el| {
+                el.child(
+                    Button::new("todo-create")
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("file-plus"))
+                        .tooltip(tr!("todo-create"))
+                        .on_click(cx.listener(|this, _, _window, cx| this.create_todo(cx))),
+                )
+            });
+        let Some(todo) = todo.filter(|_| !self.collapsed("todo")) else {
+            return v_flex().w_full().child(header);
+        };
+        if todo.tasks.is_empty() {
+            return v_flex()
+                .w_full()
+                .child(header)
+                .child(section_empty(tr!("todo-empty"), cx));
+        }
+
+        let muted = cx.theme().muted_foreground;
         let rows: Vec<_> = todo
             .tasks
             .iter()
@@ -737,47 +1032,7 @@ impl ClaudhubApp {
             })
             .collect();
 
-        let header = h_flex()
-            .w_full()
-            .px_2()
-            .py_1()
-            .gap_2()
-            .items_center()
-            .bg(secondary)
-            .child(icon("check-check").xsmall())
-            .child(
-                div()
-                    .flex_1()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(tr!("todo-progress", { done: done, total: total })),
-            );
-
-        Some(
-            v_flex()
-                .w_full()
-                .flex_shrink_0()
-                .border_b_1()
-                .border_color(cx.theme().border)
-                .child(header)
-                .child(
-                    self.scrolled(
-                        "todo-bar",
-                        &scroll,
-                        crate::ui::motion::Axes::Vertical,
-                        window,
-                        v_flex()
-                            .id("todo-list")
-                            .w_full()
-                            .max_h(px(160.))
-                            .py_1()
-                            .overflow_y_scroll()
-                            .track_scroll(&scroll)
-                            .children(rows),
-                        cx,
-                    ),
-                ),
-        )
+        v_flex().w_full().child(header).children(rows)
     }
 
     fn render_note(
@@ -944,6 +1199,20 @@ fn split_span(
 }
 
 /// L'état vide du panneau : une icône et une phrase, comme partout ailleurs.
+/// L'état vide d'une section, à l'intérieur du panneau.
+///
+/// Une ligne grise et non un état vide pleine hauteur : trois sections
+/// partagent ce défilement, et celle qui n'a rien ne doit pas pousser les deux
+/// autres hors de vue.
+fn section_empty(message: SharedString, cx: &Context<ClaudhubApp>) -> impl IntoElement {
+    div()
+        .px_2()
+        .py_2()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child(message)
+}
+
 fn empty_notes(message: SharedString, cx: &Context<ClaudhubApp>) -> impl IntoElement {
     v_flex()
         .size_full()

@@ -923,6 +923,46 @@ Deux détails s'y paient :
   que le dossier existe désormais ; il repose la surveillance et relit, ce qui
   rend aussi la vue à la vérité du disque quand une écriture a été refusée.
 
+### Le panneau « Notes »
+
+Il s'appelait « Relecture » et ne portait que les remarques. Trois choses se
+gèrent au même endroit désormais, parce qu'elles vivent déjà dans le même
+dossier : les **tâches**, les **remarques**, les **fichiers relus**.
+
+**Des sections repliables, ni trois panneaux ni des sous-onglets.** Trois
+panneaux feraient trois onglets pour un seul sujet — et « Modifications » et
+« Revue de branche » en sont deux parce qu'on les regarde *ensemble*, ce qui
+n'est pas le cas ici. Des sous-onglets demanderaient un clic pour savoir où en
+est l'agent. Un seul défilement, trois en-têtes qui portent chacune son compte,
+et replier rend la hauteur à celle qu'on lit.
+
+Trois détails qui se paient :
+
+- **Le repli est porté par le titre, pas par la ligne entière.** Les boutons
+  d'une section vivent sur son en-tête, et un clic sur « envoyer tout »
+  remonterait replier ce qu'on vient d'agir.
+- **Il ne se persiste pas.** C'est une posture de lecture, qui change plusieurs
+  fois pendant une relecture, pas une préférence qu'on s'attend à retrouver le
+  lendemain — d'où `ClaudhubApp::notes_collapsed`, en mémoire.
+- **Une section vide se réduit à une ligne grise** (`section_empty`) et non à
+  l'état vide pleine hauteur des panneaux : trois sections partagent ce
+  défilement, et celle qui n'a rien ne doit pas pousser les deux autres hors de
+  vue.
+
+La barre du panneau porte le **chemin du coffre** et de quoi l'ouvrir
+(`file://`, donc le bureau décide avec quoi). Il n'apparaissait nulle part, et
+un coffre qu'on ne sait pas retrouver est un coffre qu'on n'ouvre pas dans
+Obsidian.
+
+**Le prompt se voit avant de partir.** Ce qui entre dans un terminal ne se
+rattrape pas : l'agent a lu le collage avant qu'on ait vu ce qu'on envoyait. Le
+dialogue est aussi l'endroit où l'on ajoute d'une phrase ce que les notes ne
+disent pas. Les notes ne passent à `sent` qu'à la validation.
+
+**« Tout rendre à relire »** vit dans la section des fichiers relus : on coche
+fichier par fichier, et reprendre une revue depuis le début demandait sinon
+autant de clics que la branche a de fichiers.
+
 ### La liste de tâches d'un worktree
 
 `TODO.md`, dans le même dossier que les notes. C'est là que l'agent tient sa
