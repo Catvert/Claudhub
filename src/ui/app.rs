@@ -699,6 +699,10 @@ impl ClaudhubApp {
         // s'empilent alors nus, ce qui se lit comme une fenêtre cassée sans
         // qu'une seule erreur soit signalée.
         let (dock, dock_skin) = DockSkin::dock_area("claudhub", Some(LAYOUT_VERSION), window, cx);
+        // `Segmented` : la pastille arrondie dans un rail, à la place du
+        // rectangle bordé dont le rayon est un zéro codé en dur. C'est notre
+        // commit sur le fork qui expose ce réglage.
+        dock_skin.set_tab_variant(gpui_component::tab::TabVariant::Segmented, cx);
 
         crate::ui::panels::register(&this, cx);
 

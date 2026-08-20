@@ -153,6 +153,10 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
         ..base
     };
     theme.tab_bar = gutter;
+    // Le rail des onglets `Segmented` a son propre jeton ; même plan, même
+    // couleur — deux gris proches-mais-pas-égaux referaient la fenêtre mal
+    // assemblée qu'on vient de quitter.
+    theme.tab_bar_segmented = gutter;
     theme.tab_active = base;
     // L'onglet actif est un bloc de la couleur de la carte : son libellé doit
     // donc porter la couleur du texte ordinaire, et les autres rester en

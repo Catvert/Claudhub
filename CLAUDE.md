@@ -1180,11 +1180,23 @@ Le cas des branches est le troisième : l'entrée y est un conteneur à la haute
 imposée et c'est son enfant qui porte le fond, la ligne ayant besoin d'un
 rembourrage que le rayon ne doit pas recouper.
 
-Ce que cela ne fait pas, et qu'il ne faut pas chercher à obtenir sans décision
-explicite : la barre d'onglets elle-même reste carrée, ses filets sont écrits en
-dur dans gpui-component. Les arrondir demanderait de vendorer le module `dock/`
-— quatre mille lignes — ou une contribution en amont, où `tile_radius` et
-`tile_shadow` existent déjà pour les tuiles.
+**Les onglets sont des pastilles** (`TabVariant::Segmented`), posé par
+`dock_skin.set_tab_variant` à la construction de l'aire. Le variant par défaut
+du dock, `Tab`, a un rayon **codé en dur à zéro** et rien dans le thème ne
+l'atteint ; `Tab::with_variant` et `TabBar::with_variant` existent pourtant,
+c'est seulement le panneau d'onglets du dock qui ne les transmettait pas. D'où
+le **fork** (voir `Cargo.toml`) : un commit au-dessus de leur `main`, qui fait
+passer un `TabVariant` de `DockSkin` jusqu'au `TabBar` — lequel le propage
+lui-même à chaque onglet. Le commit a vocation à partir en PR, et le fork à
+disparaître avec elle. Le rail de `Segmented` a son propre jeton
+(`tab_bar_segmented`), aligné sur la gouttière comme `tab_bar`.
+
+**Les couleurs posées sur le thème ne suffisent pas** : `Theme::tokens` est
+dérivé de `Theme::colors` une seule fois, à l'application de la palette, et les
+composants récents — la barre d'onglets du dock en tête — lisent `tokens`.
+Toute couleur écrite dans `theme::apply` doit être suivie du recalcul
+(`ThemeTokens::from(&theme.colors)`), sans quoi elle ne se voit nulle part et
+rien ne le signale.
 
 ### Les thèmes
 

@@ -30,7 +30,11 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
 ] }
 # `tree-sitter-languages` fournit entre autres la grammaire `diff`, qui colore
 # les hunks de la vue de revue sans que nous écrivions un lexer.
-gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "c6ffd3e166ab", features = [
+# Notre fork, branche `claudhub` : un seul commit au-dessus de leur `main`, qui
+# laisse la peau du dock choisir le variant des onglets (`set_tab_variant`) —
+# le rayon du variant par défaut est un zéro codé en dur. Le commit a vocation
+# à partir en PR ; le fork disparaîtra avec elle.
+gpui-component = { git = "https://github.com/Catvert/gpui-component", branch = "claudhub", features = [
     "tree-sitter-languages",
 ] }
 # Assets embarqués (icônes Lucide, polices) servis à gpui via AssetSource.
