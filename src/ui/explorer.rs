@@ -10,6 +10,19 @@
 //! compte des centaines d'entrées — celle-ci en compte des dizaines de
 //! milliers : la reconstruire à chaque frame ferait tomber l'interface.
 //!
+//! **Il se parcourt au clavier**, comme celui de PhpStorm : haut et bas d'une
+//! ligne à l'autre de la liste *affichée*, droite pour déplier, gauche pour
+//! replier ou remonter au dossier parent, Entrée pour ouvrir. D'où un contexte
+//! clavier à lui (`ClaudhubExplorer`), les flèches nues appartenant sinon à la
+//! relecture du diff.
+//!
+//! **Le curseur est un chemin, pas un indice.** L'arbre se reconstruit à
+//! chaque repli, à chaque frappe de recherche et à chaque relecture de la
+//! liste : un indice y désignerait une autre ligne d'une fois sur l'autre.
+//!
+//! **Ouvert et sous le curseur sont deux choses**, et se voient différemment :
+//! on parcourt l'arbre au clavier sans quitter le fichier qu'on relit.
+//!
 //! **L'édition reste légère.** Retouche courte ici, vrai travail dans
 //! l'éditeur externe de son choix : Claudhub ne devient pas un IDE, et
 //! `external_editor` est ce qui rend ce partage praticable.
@@ -17,13 +30,13 @@
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gpui::{div, prelude::*, px, uniform_list, Context, Entity, SharedString, Window};
+use gpui::{div, prelude::*, px, uniform_list, Context, Entity, Pixels, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputState},
-    menu::{ContextMenuExt, PopupMenuItem},
-    v_flex, ActiveTheme, Selectable, Sizable, WindowExt,
+    menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
+    v_flex, ActiveTheme, Sizable, WindowExt,
 };
 
 use crate::files;
@@ -51,6 +64,12 @@ pub struct Explorer {
     /// La recherche pour laquelle `rows` a été construit. Comparée au rendu :
     /// c'est le prix de n'avoir personne à prévenir quand elle change.
     pub query: String,
+    /// La ligne sur laquelle le clavier travaille — un fichier ou un dossier.
+    ///
+    /// Un **chemin** et non un indice : l'arbre se reconstruit à chaque repli,
+    /// à chaque frappe de recherche et à chaque relecture de la liste, et un
+    /// indice y désignerait une autre ligne d'une fois sur l'autre.
+    pub cursor: Option<PathBuf>,
 }
 
 impl Default for Explorer {
@@ -62,6 +81,7 @@ impl Default for Explorer {
             pending: false,
             ignored: false,
             query: String::new(),
+            cursor: None,
         }
     }
 }
@@ -87,6 +107,75 @@ impl Explorer {
         };
         let rows = tree::build_subset(&self.files, keep.as_deref(), collapsed);
         self.rows = Rc::new(rows);
+    }
+
+    /// Le chemin d'une entrée affichée, dossier ou fichier.
+    fn path_at(&self, index: usize) -> Option<PathBuf> {
+        match self.rows.get(index)? {
+            tree::Entry::Dir { path, .. } => Some(path.clone()),
+            tree::Entry::Leaf { index, .. } => self.files.get(*index).cloned(),
+        }
+    }
+
+    /// Où se trouve un chemin dans la liste affichée, s'il y est encore.
+    fn row_of(&self, wanted: &Path) -> Option<usize> {
+        (0..self.rows.len()).find(|index| self.path_at(*index).as_deref() == Some(wanted))
+    }
+
+    fn is_dir(&self, index: usize) -> bool {
+        matches!(self.rows.get(index), Some(tree::Entry::Dir { .. }))
+    }
+
+    /// Ouvre tous les dossiers qui mènent à un chemin.
+    ///
+    /// Retirer chaque ancêtre suffit, y compris avec les chaînes fusionnées :
+    /// `app/Http/Livewire/Forms` tient sur une ligne mais reste un ancêtre du
+    /// fichier qu'elle contient.
+    fn reveal(&mut self, path: &Path) {
+        let mut changed = false;
+        for ancestor in path.ancestors().skip(1) {
+            changed |= self.collapsed.remove(ancestor);
+        }
+        if changed {
+            self.rebuild();
+        }
+    }
+
+    /// Replie tout ce qui est ouvert au premier niveau et en dessous.
+    fn collapse_all(&mut self) {
+        // Tous les dossiers, et non seulement ceux qu'on voit : ce qu'un
+        // dossier fermé cache doit l'être aussi quand on le rouvrira.
+        for path in &self.files {
+            for ancestor in path.ancestors().skip(1) {
+                if !ancestor.as_os_str().is_empty() {
+                    self.collapsed.insert(ancestor.to_path_buf());
+                }
+            }
+        }
+        self.rebuild();
+    }
+
+    /// Déplie tout un sous-arbre.
+    fn expand_under(&mut self, root: &Path) {
+        self.collapsed
+            .retain(|path| !path.starts_with(root) && path != root);
+        self.rebuild();
+    }
+
+    /// Replie tout un sous-arbre, sa racine comprise.
+    fn collapse_under(&mut self, root: &Path) {
+        for path in &self.files {
+            if !path.starts_with(root) {
+                continue;
+            }
+            for ancestor in path.ancestors().skip(1) {
+                if ancestor.starts_with(root) {
+                    self.collapsed.insert(ancestor.to_path_buf());
+                }
+            }
+        }
+        self.collapsed.insert(root.to_path_buf());
+        self.rebuild();
     }
 }
 
@@ -147,6 +236,201 @@ impl ClaudhubApp {
             explorer.collapsed.insert(path);
         }
         explorer.rebuild();
+        cx.notify();
+    }
+
+    /// Amène la ligne du curseur sous les yeux, sans faire sauter la liste
+    /// quand elle y est déjà.
+    fn reveal_cursor(&mut self) {
+        let Some(explorer) = self.explorer() else {
+            return;
+        };
+        let Some(index) = explorer
+            .cursor
+            .clone()
+            .and_then(|path| explorer.row_of(&path))
+        else {
+            return;
+        };
+        self.files_scroll
+            .scroll_to_item(index, gpui::ScrollStrategy::Top);
+    }
+
+    /// Monte ou descend d'une ligne dans l'arborescence affichée.
+    ///
+    /// La liste affichée, replis compris : c'est celle que l'œil suit, et
+    /// descendre dans un dossier fermé mènerait à des lignes invisibles.
+    pub(super) fn step_project_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(explorer) = self.explorer() else {
+            return;
+        };
+        let count = explorer.rows.len();
+        if count == 0 {
+            return;
+        }
+        let current = explorer
+            .cursor
+            .clone()
+            .and_then(|path| explorer.row_of(&path))
+            .map(|index| index as isize);
+        // Sans curseur, la première flèche entre par le bout vers lequel elle
+        // pointe, comme la relecture d'un diff.
+        let next = match current {
+            Some(index) => (index + delta).clamp(0, count as isize - 1),
+            None if delta > 0 => 0,
+            None => count as isize - 1,
+        } as usize;
+        explorer.cursor = explorer.path_at(next);
+        self.reveal_cursor();
+        cx.notify();
+    }
+
+    /// Déplie ou replie au curseur.
+    ///
+    /// Sur un fichier, la flèche gauche remonte au dossier parent et la droite
+    /// descend d'une ligne : c'est ce que fait tout explorateur, et une touche
+    /// inerte se lit comme une touche cassée.
+    pub(super) fn fold_project_cursor(&mut self, open: bool, cx: &mut Context<Self>) {
+        let Some(explorer) = self.explorer() else {
+            return;
+        };
+        let Some(path) = explorer.cursor.clone() else {
+            return self.step_project_cursor(if open { 1 } else { -1 }, cx);
+        };
+        let Some(index) = explorer.row_of(&path) else {
+            return;
+        };
+        if explorer.is_dir(index) {
+            let is_collapsed = explorer.collapsed.contains(&path);
+            if open == is_collapsed {
+                if open {
+                    explorer.collapsed.remove(&path);
+                } else {
+                    explorer.collapsed.insert(path);
+                }
+                explorer.rebuild();
+                cx.notify();
+                return;
+            }
+        }
+        if open {
+            self.step_project_cursor(1, cx);
+            return;
+        }
+        // Remonter au dossier qui contient la ligne : le premier ancêtre qui
+        // soit lui-même affiché, les chaînes fusionnées sautant des niveaux.
+        let parent = path
+            .ancestors()
+            .skip(1)
+            .find(|ancestor| explorer.row_of(ancestor).is_some())
+            .map(Path::to_path_buf);
+        if parent.is_some() {
+            explorer.cursor = parent;
+            self.reveal_cursor();
+            cx.notify();
+        }
+    }
+
+    /// Entrée : ouvre le fichier, ou replie le dossier.
+    pub(super) fn activate_project_cursor(&mut self, cx: &mut Context<Self>) {
+        let Some(explorer) = self.explorer() else {
+            return;
+        };
+        let Some(path) = explorer.cursor.clone() else {
+            return;
+        };
+        let Some(index) = explorer.row_of(&path) else {
+            return;
+        };
+        if explorer.is_dir(index) {
+            self.toggle_project_dir(path, cx);
+        } else {
+            self.open_in_editor(path, cx);
+        }
+    }
+
+    /// Montre dans l'arbre le fichier qu'on est en train de regarder.
+    ///
+    /// Le geste « scroll from source » de PhpStorm : on relit un diff, on veut
+    /// voir où le fichier vit. Il déplie ce qu'il faut pour l'atteindre, et
+    /// n'est **pas** automatique — une liste qui saute toute seule à chaque
+    /// clic dans la revue est un mouvement de trop.
+    pub(super) fn reveal_open_file(&mut self, cx: &mut Context<Self>) {
+        let path = self
+            .editing
+            .as_ref()
+            .map(|editing| editing.path.clone())
+            .or_else(|| {
+                self.active_review()
+                    .and_then(|state| state.selected.clone())
+            });
+        let Some(path) = path else {
+            return;
+        };
+        let Some(explorer) = self.explorer() else {
+            return;
+        };
+        explorer.reveal(&path);
+        explorer.cursor = Some(path);
+        self.reveal_cursor();
+        cx.notify();
+    }
+
+    /// Donne le focus à l'arbre et y pose le curseur.
+    ///
+    /// Sans le focus, la flèche qui suit le clic partirait au diff : les
+    /// liaisons se départagent sur le contexte du nœud focalisé, et l'arbre
+    /// n'est pas focalisé du seul fait qu'on a cliqué dedans.
+    pub(super) fn focus_project_tree(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.explorer_focus.focus(window);
+        if let Some(explorer) = self.explorer() {
+            explorer.cursor = Some(path);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn expand_project_dir(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if let Some(explorer) = self.explorer() {
+            explorer.expand_under(&path);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn collapse_project_dir(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if let Some(explorer) = self.explorer() {
+            explorer.collapse_under(&path);
+        }
+        cx.notify();
+    }
+
+    /// Copie le chemin d'une entrée, relatif au worktree ou absolu.
+    ///
+    /// Les deux servent, et pas aux mêmes choses : le relatif se colle dans
+    /// l'invite d'un agent, qui travaille depuis le worktree ; l'absolu dans
+    /// un terminal ouvert ailleurs.
+    pub(super) fn copy_project_path(
+        &mut self,
+        path: &Path,
+        absolute: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let text = match (absolute, self.active.as_ref()) {
+            (true, Some(worktree)) => worktree.join(path).display().to_string(),
+            _ => path.display().to_string(),
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        self.announce(tr!("copy-path-done"), cx);
+    }
+
+    pub(super) fn collapse_project_tree(&mut self, cx: &mut Context<Self>) {
+        if let Some(explorer) = self.explorer() {
+            explorer.collapse_all();
+        }
         cx.notify();
     }
 
@@ -351,8 +635,10 @@ impl ClaudhubApp {
         self.ensure_project_files(cx);
         let ignored = Settings::global(cx).show_ignored_files;
         let scroll = self.files_scroll.clone();
+        let focus = self.explorer_focus.clone();
         let find = self.render_find(crate::ui::find::Pane::Files, cx);
         let query = self.query(crate::ui::find::Pane::Files, cx);
+        let bar = self.render_files_bar(&worktree, ignored, cx);
         let Some(explorer) = self.explorers.get_mut(&worktree) else {
             return div().into_any_element();
         };
@@ -363,6 +649,7 @@ impl ClaudhubApp {
         let explorer = &*explorer;
         let rows = explorer.rows.clone();
         let files = Rc::new(explorer.files.clone());
+        let cursor = explorer.cursor.clone();
         let count = rows.len();
         // Le statut git est déjà là : l'afficher ne coûte qu'une consultation
         // par ligne visible, et c'est ce qui fait la différence entre une
@@ -391,84 +678,199 @@ impl ClaudhubApp {
         );
         let open = self.editing.as_ref().map(|editing| editing.path.clone());
         let entity = cx.entity();
-        let colors = (cx.theme().muted_foreground, cx.theme().accent);
+        let look = Look::of(cx);
 
-        let bar = h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_2()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(icon("folder").xsmall())
-            .child(
-                div()
-                    .flex_1()
-                    .text_xs()
-                    .text_color(colors.0)
-                    .child(tr!("files-count", { count: count })),
-            )
-            .child(
-                Button::new("files-ignored")
-                    .ghost()
-                    .xsmall()
-                    .icon(icon(if ignored { "eye" } else { "eye-off" }))
-                    .selected(ignored)
-                    .tooltip(tr!("files-show-ignored"))
-                    .on_click(cx.listener(|this, _, _window, cx| this.toggle_ignored_files(cx))),
-            )
-            .child(
-                Button::new("files-new")
-                    .ghost()
-                    .xsmall()
-                    .icon(icon("plus"))
-                    .tooltip(tr!("files-new-file"))
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.prompt_new_path(false, window, cx)),
-                    ),
-            );
+        if count == 0 {
+            return v_flex()
+                .size_full()
+                .child(bar)
+                .children(find)
+                .child(
+                    v_flex()
+                        .size_full()
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .text_color(look.muted)
+                        .child(icon("folder"))
+                        .child(div().text_sm().child(tr!("files-empty"))),
+                )
+                .into_any_element();
+        }
 
         v_flex()
             .size_full()
             .child(bar)
             .children(find)
             .child(
-                div().flex_1().min_h_0().child(crate::ui::scroll::vertical(
-                    "project-files-bar",
-                    &scroll,
-                    uniform_list("project-files", count, move |visible, _window, cx| {
-                        visible
-                            .map(|ix| {
-                                render_row(
-                                    &rows,
-                                    &files,
-                                    ix,
-                                    &status,
-                                    open.as_deref(),
-                                    colors,
-                                    &entity,
-                                    cx,
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .size_full()
-                    .track_scroll(scroll.clone()),
-                )),
+                div()
+                    .id("project-tree")
+                    // Les flèches appartiennent à l'arbre tant qu'il a le
+                    // focus : c'est ce contexte-là que leur prédicat lit.
+                    .key_context(crate::ui::shortcuts::explorer_context())
+                    .track_focus(&focus)
+                    .flex_1()
+                    .min_h_0()
+                    .child(crate::ui::scroll::vertical(
+                        "project-files-bar",
+                        &scroll,
+                        uniform_list("project-files", count, move |visible, _window, cx| {
+                            visible
+                                .map(|ix| {
+                                    render_row(
+                                        &rows,
+                                        &files,
+                                        ix,
+                                        &status,
+                                        open.as_deref(),
+                                        cursor.as_deref(),
+                                        &look,
+                                        &entity,
+                                        cx,
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .size_full()
+                        .track_scroll(scroll.clone()),
+                    )),
             )
             .into_any_element()
     }
 
+    /// L'en-tête : le projet, ce qu'il pèse, et les gestes de l'arbre.
+    ///
+    /// Trois boutons et un menu plutôt que six boutons : le panneau est
+    /// étroit par nature — c'est une colonne de noms de fichiers — et ce qui
+    /// ne sert qu'une fois de temps en temps n'a pas à y prendre la place de
+    /// ce qui sert à chaque relecture.
+    fn render_files_bar(
+        &mut self,
+        worktree: &Path,
+        ignored: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let name = worktree
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| worktree.display().to_string());
+        let count = self
+            .explorers
+            .get(worktree)
+            .map(|explorer| explorer.files.len())
+            .unwrap_or(0);
+        let muted = cx.theme().muted_foreground;
+        let entity = cx.entity();
+
+        h_flex()
+            .h(crate::ui::theme::bar_height(cx))
+            .w_full()
+            .px_2()
+            .gap_1()
+            .items_center()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(icon("folder-open").xsmall().text_color(muted))
+            .child(
+                div()
+                    .flex_1()
+                    .truncate()
+                    .text_xs()
+                    .child(SharedString::from(name)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(SharedString::from(count.to_string())),
+            )
+            .child(
+                Button::new("files-search")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("search"))
+                    .tooltip(tr!("files-search"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        // Le panneau devient la cible de la recherche : le
+                        // bouton est dans son en-tête, et cliquer dedans ne
+                        // passe pas forcément par le contenu.
+                        this.touch_pane(crate::ui::find::Pane::Files, cx);
+                        this.open_find(window, cx);
+                    })),
+            )
+            .child(
+                Button::new("files-reveal")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("crosshair"))
+                    .tooltip(tr!("files-reveal"))
+                    .on_click(cx.listener(|this, _, _window, cx| this.reveal_open_file(cx))),
+            )
+            .child(
+                Button::new("files-collapse")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("chevrons-down-up"))
+                    .tooltip(tr!("files-collapse-all"))
+                    .on_click(cx.listener(|this, _, _window, cx| this.collapse_project_tree(cx))),
+            )
+            .child(
+                Button::new("files-more")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("ellipsis"))
+                    .tooltip(tr!("files-more"))
+                    .dropdown_menu(move |menu, _window, _cx| {
+                        let (file, dir, hidden) = (entity.clone(), entity.clone(), entity.clone());
+                        menu.item(PopupMenuItem::new(tr!("files-new-file")).on_click(
+                            move |_, window, cx| {
+                                file.update(cx, |this, cx| {
+                                    this.prompt_new_path(None, false, window, cx)
+                                });
+                            },
+                        ))
+                        .item(PopupMenuItem::new(tr!("files-new-dir")).on_click(
+                            move |_, window, cx| {
+                                dir.update(cx, |this, cx| {
+                                    this.prompt_new_path(None, true, window, cx)
+                                });
+                            },
+                        ))
+                        .separator()
+                        .item(
+                            PopupMenuItem::new(tr!("files-show-ignored"))
+                                .icon(icon(if ignored { "eye" } else { "eye-off" }))
+                                .on_click(move |_, _window, cx| {
+                                    hidden.update(cx, |this, cx| this.toggle_ignored_files(cx));
+                                }),
+                        )
+                    }),
+            )
+    }
+
     /// Demande un chemin et crée le fichier ou le dossier.
-    fn prompt_new_path(&mut self, directory: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_text_dialog(
+    ///
+    /// `parent` préremplit le champ : c'est ce qui fait la différence entre
+    /// « nouveau fichier » et « nouveau fichier *ici* », le second étant le
+    /// geste qu'on a réellement depuis un clic droit sur un dossier.
+    fn prompt_new_path(
+        &mut self,
+        parent: Option<PathBuf>,
+        directory: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let start = parent
+            .map(|parent| format!("{}/", parent.display()))
+            .unwrap_or_default();
+        self.open_text_dialog_with(
             if directory {
                 tr!("files-new-dir")
             } else {
                 tr!("files-new-file")
             },
             tr!("files-path-placeholder"),
+            start,
             window,
             cx,
             move |this, value, _window, cx| {
@@ -615,6 +1017,54 @@ impl ClaudhubApp {
     }
 }
 
+/// Ce qui ne dépend pas de la ligne : couleurs et géométrie.
+///
+/// Lu une fois par frame et non par entrée visible — la fermeture de la liste
+/// virtualisée tourne pour chaque ligne à l'écran, animation de molette
+/// comprise, et `cx.theme()` emprunte le contexte.
+struct Look {
+    height: Pixels,
+    muted: gpui::Hsla,
+    accent: gpui::Hsla,
+    /// Le filet vertical d'un niveau d'indentation.
+    guide: gpui::Hsla,
+    folder: gpui::Hsla,
+}
+
+impl Look {
+    fn of(cx: &gpui::App) -> Self {
+        Self {
+            height: crate::ui::theme::row_height(cx),
+            muted: cx.theme().muted_foreground,
+            accent: cx.theme().accent,
+            // Assez pâle pour se lire comme une trame et non comme un
+            // séparateur : ces filets sont là par dizaines à l'écran.
+            guide: cx.theme().border.opacity(0.7),
+            folder: cx.theme().muted_foreground,
+        }
+    }
+}
+
+/// Largeur d'un niveau d'indentation, et du filet qui le marque.
+const INDENT: f32 = 12.;
+
+/// Les filets verticaux des niveaux parents.
+///
+/// C'est ce qui rend une arborescence profonde lisible : sans eux, à six
+/// niveaux d'indentation — le cas courant sur un projet Laravel — plus rien ne
+/// dit à quel dossier une ligne appartient.
+fn indent_guides(depth: usize, look: &Look) -> impl IntoIterator<Item = gpui::Div> + use<> {
+    let guide = look.guide;
+    (0..depth).map(move |_| {
+        div()
+            .w(px(INDENT))
+            .h_full()
+            .flex_none()
+            .border_l_1()
+            .border_color(guide)
+    })
+}
+
 /// Une ligne de l'explorateur : un dossier repliable ou un fichier.
 #[allow(clippy::too_many_arguments)]
 fn render_row(
@@ -623,14 +1073,14 @@ fn render_row(
     index: usize,
     status: &Rc<std::collections::HashMap<PathBuf, crate::git::StatusCode>>,
     open: Option<&Path>,
-    colors: (gpui::Hsla, gpui::Hsla),
+    cursor: Option<&Path>,
+    look: &Look,
     entity: &Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
     let Some(entry) = rows.get(index) else {
         return div().into_any_element();
     };
-    let (muted, accent) = colors;
     match entry {
         tree::Entry::Dir {
             path,
@@ -639,34 +1089,53 @@ fn render_row(
             collapsed,
             ..
         } => {
+            let at_cursor = cursor == Some(path.as_path());
             let (path, entity) = (path.clone(), entity.clone());
+            let (for_click, for_menu) = (path.clone(), path.clone());
+            let click = entity.clone();
             h_flex()
                 .id(("dir", index))
-                .py_1()
+                .h(look.height)
+                .pl_1()
                 .pr_2()
-                .pl(px(8. + *depth as f32 * 12.))
-                .gap_1()
                 .items_center()
                 .cursor_pointer()
-                .hover(|s| s.bg(accent.opacity(0.4)))
-                .on_click(move |_, _window, cx| {
-                    entity.update(cx, |this, cx| this.toggle_project_dir(path.clone(), cx));
+                .when(at_cursor, |el| el.bg(look.accent.opacity(0.5)))
+                .hover(|s| s.bg(look.accent.opacity(0.4)))
+                .on_click(move |_, window, cx| {
+                    click.update(cx, |this, cx| {
+                        this.focus_project_tree(for_click.clone(), window, cx);
+                        this.toggle_project_dir(for_click.clone(), cx);
+                    });
                 })
+                .children(indent_guides(*depth, look))
                 .child(
                     icon(if *collapsed {
                         "chevron-right"
                     } else {
                         "chevron-down"
                     })
-                    .xsmall(),
+                    .xsmall()
+                    .text_color(look.muted),
+                )
+                // Le dossier porte son propre glyphe, ouvert ou fermé : le
+                // chevron dit l'état du repli, l'icône dit qu'on regarde un
+                // dossier — c'est ce qui distingue une arborescence d'une
+                // liste indentée.
+                .child(
+                    icon(if *collapsed { "folder" } else { "folder-open" })
+                        .xsmall()
+                        .text_color(look.folder),
                 )
                 .child(
                     div()
+                        .pl_1()
                         .flex_1()
                         .truncate()
                         .text_sm()
                         .child(SharedString::from(label.clone())),
                 )
+                .context_menu(move |menu, _window, _cx| dir_menu(menu, &entity, &for_menu))
                 .into_any_element()
         }
         tree::Entry::Leaf { index: leaf, depth } => {
@@ -678,25 +1147,37 @@ fn render_row(
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let code = status.get(&path).copied();
-            let selected = open == Some(path.as_path());
+            let is_open = open == Some(path.as_path());
+            let at_cursor = cursor == Some(path.as_path());
             let (for_open, for_menu) = (path.clone(), path.clone());
             let (open_entity, menu_entity) = (entity.clone(), entity.clone());
             h_flex()
                 .id(("file", index))
-                .py_1()
+                .h(look.height)
+                .pl_1()
                 .pr_2()
-                .pl(px(20. + *depth as f32 * 12.))
-                .gap_1()
                 .items_center()
                 .cursor_pointer()
-                .when(selected, |el| el.bg(accent))
-                .hover(|s| s.bg(accent.opacity(0.4)))
-                .on_click(move |_, _window, cx| {
-                    open_entity.update(cx, |this, cx| this.open_in_editor(for_open.clone(), cx));
+                // Ouvert et sous le curseur sont deux choses : on parcourt
+                // l'arbre au clavier sans quitter le fichier qu'on relit, et
+                // ne montrer que l'un des deux perdrait l'autre.
+                .when(is_open, |el| el.bg(look.accent))
+                .when(at_cursor && !is_open, |el| el.bg(look.accent.opacity(0.5)))
+                .hover(|s| s.bg(look.accent.opacity(0.4)))
+                .on_click(move |_, window, cx| {
+                    open_entity.update(cx, |this, cx| {
+                        this.focus_project_tree(for_open.clone(), window, cx);
+                        this.open_in_editor(for_open.clone(), cx);
+                    });
                 })
+                .children(indent_guides(*depth, look))
+                // La place du chevron qu'un fichier n'a pas : sans elle, les
+                // noms de fichiers et ceux des dossiers ne s'alignent pas.
+                .child(div().w(px(14.)).flex_none())
                 .child(crate::ui::file_icons::file_icon(&path, cx))
                 .child(
                     div()
+                        .pl_1()
                         .flex_1()
                         .truncate()
                         .text_sm()
@@ -707,49 +1188,115 @@ fn render_row(
                     el.child(
                         div()
                             .text_xs()
-                            .text_color(muted)
+                            .text_color(look.muted)
                             .child(SharedString::new_static(code.letter())),
                     )
                 })
-                .context_menu(move |menu, _window, _cx| {
-                    let path = for_menu.clone();
-                    let (rename, delete, external, copy) = (
-                        menu_entity.clone(),
-                        menu_entity.clone(),
-                        menu_entity.clone(),
-                        menu_entity.clone(),
-                    );
-                    let (p1, p2, p3, p4) = (path.clone(), path.clone(), path.clone(), path.clone());
-                    menu.item(PopupMenuItem::new(tr!("editor-external")).on_click(
-                        move |_, _window, cx| {
-                            external.update(cx, |this, cx| this.open_externally(p1.clone(), 1, cx));
-                        },
-                    ))
-                    .item(PopupMenuItem::new(tr!("action-copy-path")).on_click(
-                        move |_, _window, cx| {
-                            copy.update(cx, |this, cx| {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    p2.display().to_string(),
-                                ));
-                                this.announce(tr!("copy-path-done"), cx);
-                            });
-                        },
-                    ))
-                    .separator()
-                    .item(
-                        PopupMenuItem::new(tr!("files-rename")).on_click(move |_, window, cx| {
-                            rename
-                                .update(cx, |this, cx| this.prompt_rename(p3.clone(), window, cx));
-                        }),
-                    )
-                    .item(
-                        PopupMenuItem::new(tr!("files-delete")).on_click(move |_, window, cx| {
-                            delete
-                                .update(cx, |this, cx| this.confirm_delete(p4.clone(), window, cx));
-                        }),
-                    )
-                })
+                .context_menu(move |menu, _window, _cx| file_menu(menu, &menu_entity, &for_menu))
                 .into_any_element()
         }
     }
+}
+
+/// Le menu d'un dossier : créer dedans, et le déplier ou le replier en bloc.
+fn dir_menu(
+    menu: gpui_component::menu::PopupMenu,
+    entity: &Entity<ClaudhubApp>,
+    path: &Path,
+) -> gpui_component::menu::PopupMenu {
+    let (new_file, new_dir) = (entity.clone(), entity.clone());
+    let (expand, collapse, copy) = (entity.clone(), entity.clone(), entity.clone());
+    let (p1, p2, p3, p4, p5) = (
+        path.to_path_buf(),
+        path.to_path_buf(),
+        path.to_path_buf(),
+        path.to_path_buf(),
+        path.to_path_buf(),
+    );
+    menu.item(
+        PopupMenuItem::new(tr!("files-new-here")).on_click(move |_, window, cx| {
+            new_file.update(cx, |this, cx| {
+                this.prompt_new_path(Some(p1.clone()), false, window, cx)
+            });
+        }),
+    )
+    .item(
+        PopupMenuItem::new(tr!("files-new-dir-here")).on_click(move |_, window, cx| {
+            new_dir.update(cx, |this, cx| {
+                this.prompt_new_path(Some(p2.clone()), true, window, cx)
+            });
+        }),
+    )
+    .separator()
+    .item(
+        PopupMenuItem::new(tr!("files-expand-under")).on_click(move |_, _window, cx| {
+            expand.update(cx, |this, cx| this.expand_project_dir(p3.clone(), cx));
+        }),
+    )
+    .item(
+        PopupMenuItem::new(tr!("files-collapse-under")).on_click(move |_, _window, cx| {
+            collapse.update(cx, |this, cx| this.collapse_project_dir(p4.clone(), cx));
+        }),
+    )
+    .separator()
+    .item(
+        PopupMenuItem::new(tr!("action-copy-path")).on_click(move |_, _window, cx| {
+            copy.update(cx, |this, cx| this.copy_project_path(&p5, false, cx));
+        }),
+    )
+}
+
+/// Le menu d'un fichier.
+fn file_menu(
+    menu: gpui_component::menu::PopupMenu,
+    entity: &Entity<ClaudhubApp>,
+    path: &Path,
+) -> gpui_component::menu::PopupMenu {
+    let (external, copy, absolute) = (entity.clone(), entity.clone(), entity.clone());
+    let (new_file, rename, delete) = (entity.clone(), entity.clone(), entity.clone());
+    let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let (p1, p2, p3, p4, p5) = (
+        path.to_path_buf(),
+        path.to_path_buf(),
+        path.to_path_buf(),
+        path.to_path_buf(),
+        path.to_path_buf(),
+    );
+    menu.item(
+        PopupMenuItem::new(tr!("editor-external")).on_click(move |_, _window, cx| {
+            external.update(cx, |this, cx| this.open_externally(p1.clone(), 1, cx));
+        }),
+    )
+    .separator()
+    .item(
+        PopupMenuItem::new(tr!("action-copy-path")).on_click(move |_, _window, cx| {
+            copy.update(cx, |this, cx| this.copy_project_path(&p2, false, cx));
+        }),
+    )
+    .item(
+        PopupMenuItem::new(tr!("files-copy-absolute")).on_click(move |_, _window, cx| {
+            absolute.update(cx, |this, cx| this.copy_project_path(&p3, true, cx));
+        }),
+    )
+    .separator()
+    // « Ici » veut dire dans le dossier du fichier : on clique droit sur un
+    // voisin de ce qu'on veut créer, jamais sur le dossier lui-même quand la
+    // liste en montre déjà le contenu.
+    .item(
+        PopupMenuItem::new(tr!("files-new-here")).on_click(move |_, window, cx| {
+            new_file.update(cx, |this, cx| {
+                this.prompt_new_path(Some(parent.clone()), false, window, cx)
+            });
+        }),
+    )
+    .item(
+        PopupMenuItem::new(tr!("files-rename")).on_click(move |_, window, cx| {
+            rename.update(cx, |this, cx| this.prompt_rename(p4.clone(), window, cx));
+        }),
+    )
+    .item(
+        PopupMenuItem::new(tr!("files-delete")).on_click(move |_, window, cx| {
+            delete.update(cx, |this, cx| this.confirm_delete(p5.clone(), window, cx));
+        }),
+    )
 }

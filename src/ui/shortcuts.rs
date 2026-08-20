@@ -43,7 +43,12 @@ actions!(
         Find,
         CloseFind,
         FindNext,
-        FindPrevious
+        FindPrevious,
+        ExplorerUp,
+        ExplorerDown,
+        ExplorerLeft,
+        ExplorerRight,
+        ExplorerOpen
     ]
 );
 
@@ -72,7 +77,12 @@ const COPY_PREDICATE: &str =
 /// qui a le focus. Un champ de saisie déplace son curseur, un terminal les
 /// transmet au programme, un menu change d'entrée — ces trois-là sont donc
 /// exclus, comme pour la copie.
-const NAVIGATION_PREDICATE: &str = COPY_PREDICATE;
+///
+/// L'explorateur en est exclu à son tour : ses flèches lui appartiennent — on
+/// y parcourt une arborescence, pas un diff — et deux jeux de liaisons sur la
+/// même touche ne se départageraient pas.
+const NAVIGATION_PREDICATE: &str = "Claudhub && !Dialog && !PopupMenu && !Popover && !Input \
+     && !ClaudhubTerminal && !ClaudhubExplorer";
 
 /// Le contexte que la vue racine déclare. Un simple identifiant : c'est le
 /// nom auquel `PREDICATE` se réfère.
@@ -111,6 +121,19 @@ const FIND_PREDICATE: &str = "ClaudhubFind";
 pub fn find_context() -> KeyContext {
     let mut context = KeyContext::default();
     context.add("ClaudhubFind");
+    context
+}
+
+/// Contexte déclaré par l'arbre de l'explorateur.
+///
+/// Les flèches y parcourent une arborescence : haut et bas d'une ligne à
+/// l'autre, droite pour déplier, gauche pour replier ou remonter au dossier
+/// parent. Ce sont celles de PhpStorm, et de tout explorateur.
+const EXPLORER_PREDICATE: &str = "ClaudhubExplorer";
+
+pub fn explorer_context() -> KeyContext {
+    let mut context = KeyContext::default();
+    context.add("ClaudhubExplorer");
     context
 }
 
@@ -177,6 +200,12 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("shift-enter", FindPrevious, Some(FIND_PREDICATE)),
         KeyBinding::new("secondary-g", FindNext, Some(PREDICATE)),
         KeyBinding::new("secondary-shift-g", FindPrevious, Some(PREDICATE)),
+        // L'arborescence au clavier.
+        KeyBinding::new("up", ExplorerUp, Some(EXPLORER_PREDICATE)),
+        KeyBinding::new("down", ExplorerDown, Some(EXPLORER_PREDICATE)),
+        KeyBinding::new("left", ExplorerLeft, Some(EXPLORER_PREDICATE)),
+        KeyBinding::new("right", ExplorerRight, Some(EXPLORER_PREDICATE)),
+        KeyBinding::new("enter", ExplorerOpen, Some(EXPLORER_PREDICATE)),
     ]);
 }
 
@@ -439,6 +468,51 @@ pub fn save_file(
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.save_file(cx);
+}
+
+pub fn explorer_up(
+    this: &mut ClaudhubApp,
+    _: &ExplorerUp,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.step_project_cursor(-1, cx);
+}
+
+pub fn explorer_down(
+    this: &mut ClaudhubApp,
+    _: &ExplorerDown,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.step_project_cursor(1, cx);
+}
+
+pub fn explorer_left(
+    this: &mut ClaudhubApp,
+    _: &ExplorerLeft,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.fold_project_cursor(false, cx);
+}
+
+pub fn explorer_right(
+    this: &mut ClaudhubApp,
+    _: &ExplorerRight,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.fold_project_cursor(true, cx);
+}
+
+pub fn explorer_open(
+    this: &mut ClaudhubApp,
+    _: &ExplorerOpen,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.activate_project_cursor(cx);
 }
 
 pub fn find(

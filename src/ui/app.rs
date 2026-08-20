@@ -427,6 +427,13 @@ pub struct ClaudhubApp {
     /// Le fichier ouvert dans l'éditeur intégré, s'il y en a un.
     pub(super) editing: Option<crate::ui::explorer::Editing>,
     pub(super) files_scroll: gpui::UniformListScrollHandle,
+    /// Le focus de l'arbre de l'explorateur, qui lui donne ses flèches.
+    ///
+    /// Un handle à lui et non celui de la vue racine : c'est ce qui distingue
+    /// « les flèches parcourent l'arborescence » de « les flèches parcourent
+    /// le diff », et le prédicat des liaisons se lit sur le contexte du nœud
+    /// focalisé.
+    pub(super) explorer_focus: FocusHandle,
     /// Les issues Sentry du dépôt courant, et celle qu'on regarde.
     pub(super) sentry: crate::ui::sentry_view::SentryState,
     /// Un worktree qu'on attend, et le prompt à y livrer une fois créé.
@@ -651,6 +658,7 @@ impl ClaudhubApp {
             branch_scroll: gpui::UniformListScrollHandle::new(),
             file_scroll: HashMap::new(),
             scrolls: HashMap::new(),
+            explorer_focus: cx.focus_handle(),
             finders: HashMap::new(),
             // Le diff par défaut : c'est le panneau qu'on regarde en arrivant,
             // et le seul qui soit toujours là.
@@ -1710,6 +1718,11 @@ impl Render for ClaudhubApp {
             .on_action(cx.listener(super::shortcuts::close_find))
             .on_action(cx.listener(super::shortcuts::find_next))
             .on_action(cx.listener(super::shortcuts::find_previous))
+            .on_action(cx.listener(super::shortcuts::explorer_up))
+            .on_action(cx.listener(super::shortcuts::explorer_down))
+            .on_action(cx.listener(super::shortcuts::explorer_left))
+            .on_action(cx.listener(super::shortcuts::explorer_right))
+            .on_action(cx.listener(super::shortcuts::explorer_open))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -1738,7 +1751,28 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
         on_ok: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
     ) {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        self.open_text_dialog_with(title, placeholder, "", window, cx, on_ok)
+    }
+
+    /// La même chose, le champ déjà rempli.
+    ///
+    /// « Nouveau fichier ici » a besoin du dossier sous le curseur : le
+    /// retaper à chaque fois est ce qui fait qu'on ne se sert pas du geste.
+    pub(super) fn open_text_dialog_with(
+        &mut self,
+        title: SharedString,
+        placeholder: SharedString,
+        value: impl Into<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        on_ok: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let value = value.into();
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(placeholder)
+                .default_value(value)
+        });
         let entity = cx.entity();
         let on_ok = std::rc::Rc::new(on_ok);
         window.open_dialog(cx, move |dialog, _window, _cx| {

@@ -160,6 +160,7 @@ le terminal.
 | `Ctrl+H` | afficher/masquer l'historique |
 | `Ctrl+S` | enregistrer le fichier ouvert |
 | `Ctrl+F` | chercher dans le panneau où l'on vient de cliquer |
+| `↑` `↓` `←` `→` | parcourir l'arborescence de l'explorateur |
 | `Ctrl+G` / `Ctrl+Maj+G` | occurrence suivante / précédente |
 | `Échap` | fermer la recherche |
 | `Ctrl+Maj+N` | annoter les lignes sélectionnées |

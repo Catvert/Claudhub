@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use gpui::{div, prelude::*, px, uniform_list, Context, Window};
+use gpui::{div, prelude::*, px, uniform_list, Context, Focusable, Window};
 use gpui_component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
@@ -814,7 +814,13 @@ fn render_file(
                 row.path.clone(),
                 range.clone(),
             );
-            move |_, _window, cx| {
+            move |_, window, cx| {
+                // Le focus revient à la vue : sans cela, les flèches
+                // continueraient de parcourir l'arbre de l'explorateur si
+                // c'est de là qu'on venait, et la relecture au clavier du
+                // fichier qu'on vient d'ouvrir serait inerte.
+                let handle = entity.read(cx).focus_handle(cx);
+                window.focus(&handle);
                 entity.update(cx, |this, cx| {
                     this.open_file(worktree.clone(), path.clone(), range.clone(), cx)
                 });

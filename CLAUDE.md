@@ -287,6 +287,35 @@ quarante mille fichiers ferait sinon des centaines de milliers de clones de
 reconstruit au rendu : quelques centaines d'entrées le permettent, des dizaines
 de milliers non.
 
+**Il se parcourt au clavier**, comme celui de PhpStorm : haut et bas d'une
+ligne à l'autre de la liste *affichée*, droite pour déplier, gauche pour
+replier ou remonter au dossier parent, Entrée pour ouvrir. D'où un contexte à
+lui, `ClaudhubExplorer`, que `NAVIGATION_PREDICATE` exclut : les flèches nues
+appartiennent sinon à la relecture du diff, et deux jeux de liaisons sur la
+même touche ne se départageraient pas. Corollaire : un clic dans la liste de
+revue **reprend le focus**, sans quoi les flèches continueraient de parcourir
+l'arbre après qu'on a ouvert un fichier ailleurs.
+
+**Le curseur est un chemin, pas un indice.** L'arbre se reconstruit à chaque
+repli, à chaque frappe de recherche et à chaque relecture de la liste : un
+indice y désignerait une autre ligne d'une fois sur l'autre. Le chercher coûte
+un parcours par geste, ce qu'un geste peut payer et pas une frame.
+
+**Ouvert et sous le curseur sont deux choses**, et se voient différemment : on
+parcourt l'arbre au clavier sans quitter le fichier qu'on relit, et ne montrer
+que l'un des deux perdrait l'autre.
+
+**Les filets d'indentation ne sont pas une décoration** : à six niveaux — le
+cas courant sur un projet Laravel — plus rien ne dit à quel dossier une ligne
+appartient. Ils imposent une hauteur de ligne explicite (`theme::row_height`),
+les filets étant en `h_full`.
+
+`reveal_open_file` est le « scroll from source » de PhpStorm, et il n'est
+**pas** automatique : une liste de quarante mille entrées qui saute toute seule
+à chaque clic dans la revue est un mouvement de trop. Il déplie les ancêtres —
+il suffit de les retirer des replis, une chaîne fusionnée restant un ancêtre de
+ce qu'elle contient.
+
 ### L'icône d'un fichier
 
 Trois listes en portent — l'explorateur, les modifications, la revue de branche
