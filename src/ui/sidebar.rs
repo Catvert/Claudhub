@@ -325,6 +325,8 @@ impl ClaudhubApp {
                                                         .py_1()
                                                         .pl_5()
                                                         .pr_1()
+                                                        .mx_1()
+                                                        .rounded(cx.theme().radius)
                                                         .gap_1()
                                                         .items_center()
                                                         .cursor_pointer()

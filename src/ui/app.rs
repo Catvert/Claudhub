@@ -2317,7 +2317,11 @@ impl Render for ClaudhubApp {
             .on_action(cx.listener(super::shortcuts::diff_page_down))
             .on_action(cx.listener(super::shortcuts::close_editor))
             .size_full()
-            .bg(cx.theme().background)
+            // La gouttière et non le fond : ce qui se voit entre deux panneaux
+            // — les poignées de redimensionnement, une zone repliée — est le
+            // plan sur lequel les cartes sont posées, pas la surface d'une
+            // carte.
+            .bg(super::theme::gutter(cx))
             .text_color(cx.theme().foreground)
             .child(self.render_topbar(window, cx))
             .child(div().flex_1().min_h_0().child(self.dock.clone()))

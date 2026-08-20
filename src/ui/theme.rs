@@ -117,6 +117,43 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
     // la barre : elle est invisible, donc introuvable.
     theme.scrollbar_show = gpui_component::scroll::ScrollbarShow::Always;
 
+    // Les rayons de gpui-component sont ceux d'un formulaire web de 2015 : six
+    // et huit pixels. Ils portent tout ce que la fenêtre affiche — boutons,
+    // champs, menus, dialogues —, et les monter d'un cran suffit à changer le
+    // grain de l'application entière.
+    //
+    // Seulement si la palette ne s'en occupe pas : `radius`, `radius.lg` et
+    // `shadow` sont des clés de `ThemeConfig`, et un thème qui les déclare a
+    // choisi son grain — l'écraser reviendrait à ne les avoir jamais lues.
+    let config = if theme.mode.is_dark() {
+        theme.dark_theme.clone()
+    } else {
+        theme.light_theme.clone()
+    };
+    if config.radius.is_none() {
+        theme.radius = px(8.);
+    }
+    if config.radius_lg.is_none() {
+        theme.radius_lg = px(12.);
+    }
+
+    // La barre d'onglets prend la couleur de la gouttière, et l'onglet actif
+    // celle de la carte qu'il ouvre.
+    //
+    // C'est la répartition des rôles, qui est de nous — les couleurs restent
+    // celles de la palette : `TabPanel` peint sa barre en `tab_bar` et son
+    // corps en `background`, et tant que les deux étaient proches, la fenêtre
+    // n'était qu'une grille de rectangles cousus. Fondue dans la gouttière, la
+    // barre laisse lire des onglets posés sur une carte — ce que la
+    // bibliothèque ne saurait pas faire d'elle-même, son `TabPanel::render`
+    // étant un `size_full()` sans rayon ni marge.
+    let base = theme.background;
+    theme.tab_bar = Hsla {
+        l: (base.l - 0.05).max(0.),
+        ..base
+    };
+    theme.tab_active = base;
+
     cx.refresh_windows();
 }
 
@@ -147,6 +184,30 @@ pub fn bar_height(cx: &App) -> Pixels {
 /// Hauteur de la barre d'outils principale, qui porte des boutons.
 pub fn toolbar_height(cx: &App) -> Pixels {
     scaled(cx, 2.7, px(32.))
+}
+
+/// La couleur de la gouttière entre les panneaux.
+///
+/// C'est celle de la barre d'onglets, que `theme::apply` dérive du fond de
+/// quelques pour cent de clarté en moins : la gouttière et la barre sont le **même** plan, celui
+/// sur lequel les cartes sont posées, et les peindre de deux couleurs
+/// proches-mais-pas-égales est exactement ce qui fait qu'une fenêtre a l'air
+/// mal assemblée.
+///
+/// La dériver plutôt que de l'ajouter aux douze palettes livrées, c'est aussi
+/// ce qui fait qu'un thème écrit par quelqu'un d'autre y a droit sans le
+/// savoir.
+pub fn gutter(cx: &App) -> Hsla {
+    gpui_component::ActiveTheme::theme(cx).tab_bar
+}
+
+/// Le rayon d'une carte de panneau.
+///
+/// Un cran au-dessus de `radius_lg` : une carte pleine hauteur porte un
+/// arrondi plus franc qu'un bouton sans paraître mou, et c'est ce qui se voit
+/// d'abord d'une fenêtre.
+pub fn card_radius(cx: &App) -> Pixels {
+    gpui_component::ActiveTheme::theme(cx).radius_lg
 }
 
 fn scaled(cx: &App, factor: f32, floor: Pixels) -> Pixels {

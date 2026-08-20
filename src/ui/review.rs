@@ -306,6 +306,13 @@ impl ClaudhubApp {
                                     },
                                 )
                                 .size_full()
+                                // Le retrait des lignes est ici et non sur
+                                // elles : `uniform_list` pose ses entrées à la
+                                // taille qu'il calcule, et une marge sur une
+                                // entrée est ignorée. C'est ce retrait qui
+                                // laisse les fonds arrondis respirer au lieu
+                                // de traverser le panneau d'un bord à l'autre.
+                                .px_1()
                                 .track_scroll(scroll.clone()),
                                 cx,
                             ),
@@ -667,6 +674,7 @@ fn render_dir(
     h_flex()
         .id(("dir", index))
         .h(crate::ui::theme::row_height(cx))
+        .rounded(cx.theme().radius)
         .pl(indent(row.depth, cx))
         .pr_2()
         .gap_1()
@@ -824,6 +832,7 @@ fn render_file(
     h_flex()
         .id(("file", index))
         .h(crate::ui::theme::row_height(cx))
+        .rounded(cx.theme().radius)
         .pl(indent(row.depth, cx))
         .pr_2()
         .gap_2()

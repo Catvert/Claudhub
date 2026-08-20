@@ -295,101 +295,117 @@ fn render_branch(
         row.detail.clone()
     };
 
-    h_flex()
-        .id(("branch", index))
+    // Deux éléments et non un : `uniform_list` pose ses entrées à une taille
+    // qu'il calcule lui-même, et une **marge** sur l'entrée est ignorée. Le
+    // retrait est donc un rembourrage du conteneur, et c'est l'enfant qui porte
+    // le fond arrondi — sans quoi une ligne sélectionnée traverserait le
+    // panneau d'un bord à l'autre, ce qui est le geste graphique d'un
+    // gestionnaire de fichiers de 2005.
+    div()
         .h(height)
         .w_full()
-        .px_2()
-        .gap_2()
-        .items_center()
-        .whitespace_nowrap()
-        .overflow_hidden()
-        .when(row.is_head, |el| el.bg(cx.theme().accent))
-        .hover(|s| s.bg(cx.theme().accent.opacity(0.4)))
+        .px_1()
         .child(
-            icon(match row.kind {
-                BranchKind::Local => "git-branch",
-                BranchKind::Remote => "download",
-            })
-            .xsmall()
-            .text_color(muted),
-        )
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
+            h_flex()
+                .id(("branch", index))
+                .size_full()
+                .px_2()
+                .rounded(cx.theme().radius)
+                .gap_2()
+                .items_center()
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .when(row.is_head, |el| el.bg(cx.theme().accent))
+                .hover(|s| s.bg(cx.theme().accent.opacity(0.4)))
                 .child(
-                    div()
-                        .truncate()
-                        .text_sm()
-                        .when(row.is_head, |el| el.font_semibold())
-                        .child(SharedString::from(row.name.clone())),
+                    icon(match row.kind {
+                        BranchKind::Local => "git-branch",
+                        BranchKind::Remote => "download",
+                    })
+                    .xsmall()
+                    .text_color(muted),
                 )
-                .when(!detail.is_empty(), |el| {
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_sm()
+                                .when(row.is_head, |el| el.font_semibold())
+                                .child(SharedString::from(row.name.clone())),
+                        )
+                        .when(!detail.is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(SharedString::from(detail)),
+                            )
+                        }),
+                )
+                // Le retard avant l'avance : c'est ce qu'il faut intégrer avant de
+                // pouvoir pousser.
+                .when(row.behind > 0, |el| {
                     el.child(
                         div()
-                            .truncate()
+                            .flex_none()
                             .text_xs()
                             .text_color(muted)
-                            .child(SharedString::from(detail)),
+                            .child(format!("↓{}", row.behind)),
+                    )
+                })
+                .when(row.ahead > 0, |el| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("↑{}", row.ahead)),
+                    )
+                })
+                .when(!row.is_head, |el| {
+                    let (for_checkout, for_worktree) = (row.name.clone(), row.name.clone());
+                    let (checkout_target, main) = (worktree.to_path_buf(), main.to_path_buf());
+                    let (checkout_entity, worktree_entity) = (entity.clone(), entity.clone());
+                    el.child(
+                        Button::new(("checkout", index))
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("check"))
+                            .tooltip(tr!("branch-checkout"))
+                            .disabled(taken)
+                            .on_click(move |_, _window, cx| {
+                                checkout_entity.update(cx, |this, cx| {
+                                    this.git.send(Cmd::Checkout {
+                                        worktree: checkout_target.clone(),
+                                        branch: for_checkout.clone(),
+                                    });
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new(("worktree-from", index))
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("folder-open"))
+                            .tooltip(tr!("branch-new-worktree"))
+                            .disabled(taken)
+                            .on_click(move |_, _window, cx| {
+                                worktree_entity.update(cx, |this, cx| {
+                                    this.worktree_from_branch(
+                                        main.clone(),
+                                        for_worktree.clone(),
+                                        cx,
+                                    )
+                                });
+                            }),
                     )
                 }),
         )
-        // Le retard avant l'avance : c'est ce qu'il faut intégrer avant de
-        // pouvoir pousser.
-        .when(row.behind > 0, |el| {
-            el.child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(format!("↓{}", row.behind)),
-            )
-        })
-        .when(row.ahead > 0, |el| {
-            el.child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(format!("↑{}", row.ahead)),
-            )
-        })
-        .when(!row.is_head, |el| {
-            let (for_checkout, for_worktree) = (row.name.clone(), row.name.clone());
-            let (checkout_target, main) = (worktree.to_path_buf(), main.to_path_buf());
-            let (checkout_entity, worktree_entity) = (entity.clone(), entity.clone());
-            el.child(
-                Button::new(("checkout", index))
-                    .ghost()
-                    .xsmall()
-                    .icon(icon("check"))
-                    .tooltip(tr!("branch-checkout"))
-                    .disabled(taken)
-                    .on_click(move |_, _window, cx| {
-                        checkout_entity.update(cx, |this, cx| {
-                            this.git.send(Cmd::Checkout {
-                                worktree: checkout_target.clone(),
-                                branch: for_checkout.clone(),
-                            });
-                            cx.notify();
-                        });
-                    }),
-            )
-            .child(
-                Button::new(("worktree-from", index))
-                    .ghost()
-                    .xsmall()
-                    .icon(icon("folder-open"))
-                    .tooltip(tr!("branch-new-worktree"))
-                    .disabled(taken)
-                    .on_click(move |_, _window, cx| {
-                        worktree_entity.update(cx, |this, cx| {
-                            this.worktree_from_branch(main.clone(), for_worktree.clone(), cx)
-                        });
-                    }),
-            )
-        })
         .into_any_element()
 }
 

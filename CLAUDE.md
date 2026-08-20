@@ -1142,6 +1142,50 @@ quelle famille de gestes il s'agit. Les glyphes manquants sont pris chez
 Lucide, à la version que porte déjà `assets/icons/` ; un nom d'icône qui ne
 désigne aucun fichier ne provoque **aucune erreur**, il peint un vide.
 
+### Le grain de l'interface
+
+Ce qui datait n'était pas une couleur mais une **géométrie** : des rectangles
+cousus bord à bord, des filets partout, et les rayons par défaut de
+gpui-component — six et huit pixels, ceux d'un formulaire web. Quatre décisions,
+et aucune ne demande de reprendre le dock.
+
+**Les rayons montent à huit et douze**, dans `theme::apply`, et seulement si la
+palette ne s'en occupe pas : `radius`, `radius.lg` et `shadow` sont des clés de
+`ThemeConfig`, et un thème qui les déclare a choisi son grain. Ils portent tout
+ce que la fenêtre affiche — boutons, champs, menus, dialogues.
+
+**Les panneaux sont des cartes, peintes par `panels::pane_root`.**
+`TabPanel::render` de gpui-component 0.5.1 est un `size_full().bg(background)`
+sans rayon ni marge, et aucun jeton de thème ne l'atteint. On peint donc la
+gouttière **à l'intérieur** du panneau et le contenu par-dessus, en retrait de
+quatre pixels, arrondi et bordé : le dock ne sait pas qu'il a des cartes.
+`overflow_hidden` n'y est pas décoratif — sans lui, une liste virtualisée
+déborde par-dessus les coins, qui ne se voient plus.
+
+**La gouttière est la couleur de la barre d'onglets**, dérivée du fond de
+quelques pour cent de clarté en moins. Les deux sont le même plan — celui sur
+lequel les cartes sont posées — et les peindre de deux couleurs
+proches-mais-pas-égales est exactement ce qui fait qu'une fenêtre a l'air mal
+assemblée. L'onglet actif prend la couleur de la carte qu'il ouvre. La vue
+racine peint la gouttière elle aussi : ce qui se voit entre deux panneaux —
+poignée de redimensionnement, zone repliée — appartient à ce plan-là.
+
+**Une ligne de liste est une pastille, pas une bande.** Le fond d'une ligne
+survolée ou sélectionnée s'arrête avant les bords, et il est arrondi. Piège à
+connaître : **`uniform_list` ignore les marges de ses entrées**, dont il calcule
+lui-même la taille. Le retrait appartient donc à la **liste**
+(`.px_1()` sur l'`uniform_list`), et l'entrée ne porte que son rayon ; là où la
+liste n'est pas virtualisée — la barre latérale — un `mx_1` sur la ligne suffit.
+Le cas des branches est le troisième : l'entrée y est un conteneur à la hauteur
+imposée et c'est son enfant qui porte le fond, la ligne ayant besoin d'un
+rembourrage que le rayon ne doit pas recouper.
+
+Ce que cela ne fait pas, et qu'il ne faut pas chercher à obtenir sans décision
+explicite : la barre d'onglets elle-même reste carrée, ses filets sont écrits en
+dur dans gpui-component. Les arrondir demanderait de vendorer le module `dock/`
+— quatre mille lignes — ou une contribution en amont, où `tile_radius` et
+`tile_shadow` existent déjà pour les tuiles.
+
 ### Les thèmes
 
 Une douzaine de palettes sont livrées — One Dark, Nord, Dracula, Tokyo Night,

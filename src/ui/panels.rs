@@ -19,6 +19,7 @@ use gpui::{
 };
 use gpui_component::dock::{Panel, PanelControl, PanelEvent};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
+use gpui_component::ActiveTheme;
 
 use gpui_component::dock::{register_panel, PanelView};
 
@@ -37,14 +38,39 @@ use crate::ui::settings::Settings;
 /// En phase de **capture**, donc avant les enfants et sans qu'aucun d'eux
 /// puisse l'arrêter : une ligne de diff comme une case à cocher consomment
 /// leur clic, et le panneau ne saurait jamais qu'on l'a touché.
-fn pane_root(app: &Entity<ClaudhubApp>, pane: Pane, content: impl IntoElement) -> impl IntoElement {
+fn pane_root(
+    app: &Entity<ClaudhubApp>,
+    pane: Pane,
+    content: impl IntoElement,
+    cx: &App,
+) -> impl IntoElement {
     let app = app.clone();
+    // La carte est peinte **ici** et non par le dock : `TabPanel::render` est
+    // un `size_full().bg(background)` sans rayon ni marge, et rien dans le
+    // thème ne l'atteint. On peint donc la gouttière à l'intérieur du panneau,
+    // et le contenu par-dessus, en retrait : le dock ne sait pas qu'il a des
+    // cartes, et il n'y a pas une ligne de gpui-component à reprendre pour
+    // cela.
+    //
+    // `overflow_hidden` n'est pas décoratif : sans lui, une liste virtualisée
+    // déborde par-dessus les coins arrondis, qui ne se voient plus.
     div()
         .size_full()
+        .bg(crate::ui::theme::gutter(cx))
         .capture_any_mouse_down(move |_, _window, cx| {
             app.update(cx, |app, cx| app.touch_pane(pane, cx));
         })
-        .child(content)
+        .child(
+            div()
+                .size_full()
+                .m(gpui::px(4.))
+                .rounded(crate::ui::theme::card_radius(cx))
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().background)
+                .overflow_hidden()
+                .child(content),
+        )
 }
 
 /// Déclare les panneaux au registre du dock.
@@ -233,7 +259,7 @@ macro_rules! panels {
                     return div().into_any_element();
                 };
                 let content = app.update(cx, |app, cx| app.$render(window, cx).into_any_element());
-                pane_root(&app, Pane::$pane, content).into_any_element()
+                pane_root(&app, Pane::$pane, content, cx).into_any_element()
             }
         }
     )* };
@@ -344,7 +370,7 @@ impl Render for DiffPanel {
             return div().into_any_element();
         };
         let content = app.update(cx, |app, cx| app.render_diff(window, cx).into_any_element());
-        pane_root(&app, Pane::Diff, content).into_any_element()
+        pane_root(&app, Pane::Diff, content, cx).into_any_element()
     }
 }
 
@@ -430,7 +456,7 @@ impl Render for ConflictsPanel {
         let content = app.update(cx, |app, cx| {
             app.render_conflicts(window, cx).into_any_element()
         });
-        pane_root(&app, Pane::Conflicts, content).into_any_element()
+        pane_root(&app, Pane::Conflicts, content, cx).into_any_element()
     }
 }
 
@@ -599,6 +625,6 @@ impl Render for HistoryPanel {
             app.ensure_history(cx);
             app.render_history(window, cx).into_any_element()
         });
-        pane_root(&app, Pane::History, content).into_any_element()
+        pane_root(&app, Pane::History, content, cx).into_any_element()
     }
 }

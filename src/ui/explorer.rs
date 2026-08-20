@@ -763,6 +763,10 @@ impl ClaudhubApp {
                                     .collect::<Vec<_>>()
                             })
                             .size_full()
+                            // Voir `review.rs` : le retrait appartient à la
+                            // liste, une marge sur une entrée de
+                            // `uniform_list` étant ignorée.
+                            .px_1()
                             .track_scroll(scroll.clone()),
                             cx,
                         ),
@@ -1062,6 +1066,9 @@ impl ClaudhubApp {
 /// comprise, et `cx.theme()` emprunte le contexte.
 struct Look {
     height: Pixels,
+    /// Le rayon du fond d'une ligne. Une ligne survolée ou ouverte est une
+    /// pastille posée dans la liste, pas une bande qui la traverse.
+    radius: Pixels,
     muted: gpui::Hsla,
     accent: gpui::Hsla,
     /// Le filet vertical d'un niveau d'indentation.
@@ -1073,6 +1080,7 @@ impl Look {
     fn of(cx: &gpui::App) -> Self {
         Self {
             height: crate::ui::theme::row_height(cx),
+            radius: cx.theme().radius,
             muted: cx.theme().muted_foreground,
             accent: cx.theme().accent,
             // Assez pâle pour se lire comme une trame et non comme un
@@ -1134,6 +1142,7 @@ fn render_row(
             h_flex()
                 .id(("dir", index))
                 .h(look.height)
+                .rounded(look.radius)
                 .pl_1()
                 .pr_2()
                 .items_center()
@@ -1192,6 +1201,7 @@ fn render_row(
             h_flex()
                 .id(("file", index))
                 .h(look.height)
+                .rounded(look.radius)
                 .pl_1()
                 .pr_2()
                 .items_center()
