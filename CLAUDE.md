@@ -991,6 +991,23 @@ worktree avec les copies et les hooks du projet, et le prompt est livré à
 l'agent **quand la liste des worktrees revient** — c'est le seul signal qui
 dise que les hooks ont fini.
 
+### Ce qui tient lieu de système d'extension
+
+La question revient à chaque intégration, alors elle est tranchée ici. Trois
+niveaux, du moins cher au plus cher :
+
+1. **Le `wt.toml` du projet** — tâches, questions, statuts, URLs. Claudhub les
+   affiche sans les connaître, et cela n'a coûté que la dépendance à `wt`.
+   C'est le vrai système d'extension.
+2. **Des commandes déclarées dans les réglages** — les profils d'agent en sont
+   le premier exemple : un nom, une commande, un environnement. Pour ce qui
+   n'est pas propre à un projet.
+3. **Des extensions wasm, à la Zed — écarté.** Rien dans les besoins listés ne
+   le demande, et le coût est sans commune mesure.
+
+`wt` et Sentry sont donc des **modules compilés**, pas des greffons : les
+traiter autrement ferait payer un mécanisme générique pour deux cas.
+
 ## Conventions gpui
 
 Elles viennent d'Aviary, et les enfreindre produit des bugs silencieux.
