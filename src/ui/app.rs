@@ -20,7 +20,7 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
     select::{SearchableVec, SelectEvent, SelectState},
     separator::Separator as Divider,
-    v_flex, ActiveTheme, Root, Selectable, Sizable, StyledExt, WindowExt,
+    v_flex, ActiveTheme, Root, Selectable, Sizable, StyledExt, TitleBar, WindowExt,
 };
 
 use crate::git::{Branch, Commit, DiffFile, DiffRange, GraphRow, LogRange, Status, Worktree};
@@ -2230,36 +2230,57 @@ impl ClaudhubApp {
             .map(|w| w.label())
             .unwrap_or_else(|| tr!("no-worktree").to_string());
 
-        h_flex()
+        // La barre du haut **est** la barre de titre de la fenêtre.
+        //
+        // `TitleBar::title_bar_options()` demande à la plateforme de ne pas en
+        // dessiner une : sous Windows, la fenêtre n'avait donc plus de quoi
+        // être déplacée, réduite ni fermée. Il en faut une, et l'empiler
+        // au-dessus de celle-ci coûterait trente pixels pour redire ce qu'elle
+        // dit déjà — c'est le raisonnement qui a fait descendre le choix de
+        // l'écran dans la barre d'état. `TitleBar` apporte le déplacement, le
+        // double-clic qui agrandit et les boutons de la fenêtre ; nos actions
+        // vivent dedans. Elle garde notre hauteur et nos couleurs, pas les
+        // siennes.
+        //
+        // Les boutons posés dans la zone de déplacement restent cliquables :
+        // la région est rendue en `HTCAPTION`, mais gpui traite les messages
+        // souris de zone non cliente et les redistribue. C'est ce que fait la
+        // barre de titre de Zed, aux mêmes conditions.
+        TitleBar::new()
             .h(super::theme::toolbar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_2()
-            .items_center()
-            .border_b_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().title_bar)
-            .child(self.render_main_menu(cx))
-            // Le worktree, et rien d'autre : la branche et sa divergence sont
-            // descendues dans la barre d'état, qui ne portait qu'un message
-            // épisodique pendant que celle-ci débordait.
-            .child(div().font_semibold().text_sm().child(label))
-            .child(div().flex_1())
-            // Ni `fetch`, ni `pull`, ni `push` : ils sont descendus dans la
-            // barre du panneau « Modifications », où se fait le reste du
-            // geste — cocher, valider, pousser. L'historique et les branches
-            // sont, eux, des onglets du dock : un bouton de plus ici ferait
-            // deux chemins pour le même geste.
             .child(
-                Button::new("terminal")
-                    .ghost()
-                    .small()
-                    .icon(icon("square-terminal"))
-                    .tooltip(tr!("panel-terminal"))
-                    .selected(self.terminal_visible(cx))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_terminal_panel(window, cx);
-                    })),
+                h_flex()
+                    .w_full()
+                    .h_full()
+                    .pr_2()
+                    .gap_2()
+                    .items_center()
+                    .child(self.render_main_menu(cx))
+                    // Le worktree, et rien d'autre : la branche et sa
+                    // divergence sont descendues dans la barre d'état, qui ne
+                    // portait qu'un message épisodique pendant que celle-ci
+                    // débordait.
+                    .child(div().font_semibold().text_sm().child(label))
+                    .child(div().flex_1())
+                    // Ni `fetch`, ni `pull`, ni `push` : ils sont descendus
+                    // dans la barre du panneau « Modifications », où se fait
+                    // le reste du geste — cocher, valider, pousser.
+                    // L'historique et les branches sont, eux, des onglets du
+                    // dock : un bouton de plus ici ferait deux chemins pour le
+                    // même geste.
+                    .child(
+                        Button::new("terminal")
+                            .ghost()
+                            .small()
+                            .icon(icon("square-terminal"))
+                            .tooltip(tr!("panel-terminal"))
+                            .selected(self.terminal_visible(cx))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_terminal_panel(window, cx);
+                            })),
+                    ),
             )
     }
 

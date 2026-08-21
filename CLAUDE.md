@@ -1389,6 +1389,27 @@ pendant que la barre du haut débordait. C'est aussi ce qui lui a valu le choix
 de l'écran, plutôt qu'une seconde barre juste au-dessus d'elle — voir « Les
 sous-applications ».
 
+**La barre du haut *est* la barre de titre de la fenêtre**
+(`gpui_component::TitleBar`, posée par `app::render_topbar`). Ce n'est pas un
+raffinement : `TitleBar::title_bar_options()`, qu'ouvre `ui::run`, demande à la
+plateforme de ne pas en dessiner une. Tant que rien ne la remplaçait, la
+fenêtre Windows n'avait plus de quoi être déplacée, réduite ni fermée — sous un
+gestionnaire de fenêtres pavant, où il n'y a de toute façon pas de décoration,
+cela ne se voyait pas. En empiler une au-dessus de la nôtre coûterait trente
+pixels pour redire ce qu'elle dit déjà ; c'est le raisonnement qui a fait
+descendre le choix de l'écran dans la barre d'état. Elle garde donc notre
+hauteur (`theme::toolbar_height`) et nos couleurs, et gagne le glissement, le
+double-clic qui agrandit et les boutons de la fenêtre.
+
+Deux choses à savoir : `ui::run` part de `TitleBar::window_options()` et non de
+`Default`, qui pose aussi `app_owns_titlebar_drag` — sans lui, la plateforme et
+notre barre se disputent le double-clic. Et **les boutons posés dans la zone de
+déplacement restent cliquables** : la région est rendue en `HTCAPTION`, mais
+gpui traite les messages souris de zone non cliente et les redistribue. C'est
+ce que fait la barre de titre de Zed, aux mêmes conditions. Les boutons de la
+fenêtre, eux, sont **hors** de cette zone — un `WindowControlArea` ancêtre
+l'emporterait sur le leur.
+
 **Une action va où se fait le geste dont elle est la fin.** `fetch`, `pull` et
 `push` vivent donc dans la barre du panneau « Modifications » et non en haut de
 la fenêtre : on y regarde ce qui a changé, on coche, on valide, et pousser est

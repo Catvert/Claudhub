@@ -133,11 +133,15 @@ pub fn run() {
             cx.activate(true);
 
             let opened = cx.open_window(
+                // `TitleBar::window_options` et non `Default` : elle pose
+                // aussi `app_owns_titlebar_drag`, sans quoi la plateforme et
+                // notre barre se disputent le double-clic et le glissement.
+                // C'est `app::render_topbar` qui dessine la barre — sans elle,
+                // la fenêtre n'a plus rien pour être déplacée ni fermée.
                 WindowOptions {
                     window_bounds: Some(window_bounds),
-                    titlebar: Some(gpui_component::TitleBar::title_bar_options()),
                     app_id: Some("claudhub".into()),
-                    ..Default::default()
+                    ..gpui_component::TitleBar::window_options()
                 },
                 |window, cx| {
                     let main = cx.new(|cx| app::ClaudhubApp::new(window, cx));
