@@ -38,10 +38,26 @@ l'hôte. La machine cible fournit `git`, un pilote Vulkan, et l'agent.
 
 **La CI ne construit que des versions** (`.github/workflows/release.yml`,
 déclenché par un tag `v*` ou à la main). Pas à chaque commit : chacune de ces
-jambes recompile l'arbre gpui entier, et ce que la CI vérifierait, `just
-check`, `just clippy`, `just test` et `just check-server` le disent déjà sur
-la machine de développement — le workflow lance d'ailleurs les mêmes portes
-avant d'empaqueter. Elle produit deux livraisons, et **chacune est un fichier
+jambes recompile l'arbre gpui entier, et ce que la CI vérifierait, `just ci` le
+dit déjà sur la machine de développement.
+
+**Mais elle relance les mêmes portes avant d'empaqueter**, et ce n'est pas une
+redite : la machine qui vérifie et la machine qui livre ne sont pas la même, et
+la jambe Windows compile du code que la machine de développement ne compile
+jamais. Deux jambes, parce qu'elles n'ont pas le même prix. **« Core tests »**
+est gratuite — `fmt --check`, les tests et le clippy du cœur sans la feature
+`ui`, plus `check-server` — et c'est elle qui prouve qu'aucun module du cœur
+ne tire gpui. **« Interface tests »** compile l'arbre entier pour lancer
+`clippy --all-targets` et la campagne complète : les deux tiers des tests
+vivent derrière la feature `ui` — les catalogues i18n, la table des raccourcis
+dont `KeyBinding::new` **panique** au démarrage sur une touche illisible, les
+clés de thème, les plages triées et disjointes du diff — et ne tournaient
+nulle part ailleurs que sur la machine de développement. Une version pouvait
+donc partir avec un binaire qui panique au lancement.
+
+Elle tourne **à côté** des jambes d'empaquetage et non devant : un build gpui
+complet est de toute façon le chemin le plus long, et c'est `publish` qui
+l'attend — rien n'atteint une page de release sans elle. Elle produit deux livraisons, et **chacune est un fichier
 unique** : l'AppImage et le `.run` ci-dessus pour Linux, et pour Windows un
 `.exe` qui **porte le serveur en lui** (voir « La cible Windows »). D'où
 l'ordre des jambes : celle du serveur musl doit finir avant que celle de

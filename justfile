@@ -22,6 +22,14 @@ check-server:
 test:
     {{_cargo}} "cargo test"
 
+# Les portes, dans l'ordre où la CI les lance. À passer avant de poser un tag :
+# ce sont exactement les mêmes, et les découvrir dans la CI coûte un build gpui
+# complet par essai.
+ci: fmt-check clippy test check-server
+
+fmt-check:
+    {{_cargo}} "cargo fmt --check"
+
 build:
     {{_cargo}} "cargo build --release"
 
