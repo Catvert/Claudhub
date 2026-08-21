@@ -11,7 +11,7 @@
 //! d'entrée-sortie » existe pour éviter. La vue ne garde qu'un état
 //! d'avancement et le peint.
 
-use gpui::{div, prelude::*, px, Context, SharedString, Window};
+use gpui::{div, prelude::*, px, Context, Render, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex, v_flex, ActiveTheme, Selectable, Sizable, WindowExt,
@@ -42,9 +42,46 @@ pub enum ServerState {
 
 /// La question posée au premier démarrage, tant qu'aucune distribution n'est
 /// choisie.
+///
+/// **C'est une entité à elle, et non un champ de `ClaudhubApp`.** La fermeture
+/// que `open_dialog` retient est un `Fn` rappelé à **chaque frame**, depuis le
+/// rendu de la vue racine — c'est-à-dire au milieu d'un emprunt de
+/// `ClaudhubApp`. Y toucher à l'application, fût-ce pour la lire, panique
+/// (« cannot update … while it is already being updated ») : le choix vit donc
+/// dans son propre état, que le dialogue affiche comme n'importe quelle vue
+/// enfant.
 pub struct WslPrompt {
     pub distros: Vec<String>,
     pub chosen: usize,
+}
+
+impl Render for WslPrompt {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let chosen = self.chosen;
+        v_flex().gap_1().children(
+            self.distros
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, name)| {
+                    Button::new(("wsl-distro", index))
+                        .ghost()
+                        .w_full()
+                        .justify_start()
+                        .selected(index == chosen)
+                        .icon(icon(if index == chosen {
+                            "circle-check"
+                        } else {
+                            "circle"
+                        }))
+                        .label(name)
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            this.chosen = index;
+                            cx.notify();
+                        }))
+                }),
+        )
+    }
 }
 
 impl ClaudhubApp {
@@ -91,7 +128,7 @@ impl ClaudhubApp {
                     // L'état reste « en route » tant que la question est
                     // posée : annoncer un serveur indisponible pendant qu'on
                     // demande où le mettre serait se plaindre de soi-même.
-                    app.wsl_prompt = Some(WslPrompt { distros, chosen: 0 });
+                    app.wsl_prompt = Some(cx.new(|_| WslPrompt { distros, chosen: 0 }));
                     app.open_wsl_dialog(window, cx);
                 }
                 Err(e) => app.server_failed(e, cx),
@@ -102,10 +139,18 @@ impl ClaudhubApp {
     }
 
     /// Le dialogue de choix, et ce qu'il déclenche.
+    ///
+    /// Rien dans la fermeture ne touche à `ClaudhubApp` : elle est rappelée au
+    /// rendu, donc pendant qu'il est emprunté. La liste des distributions
+    /// s'affiche par son entité (voir `WslPrompt`), et les deux boutons ne
+    /// s'exécutent qu'au clic, où l'emprunt est rendu.
     fn open_wsl_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, cx| {
-            let (entity, cancel) = (entity.clone(), entity.clone());
+        let Some(prompt) = self.wsl_prompt.clone() else {
+            return;
+        };
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let (entity, cancel, prompt) = (entity.clone(), entity.clone(), prompt.clone());
             dialog
                 .title(tr!("server-wsl-title"))
                 .child(
@@ -113,9 +158,7 @@ impl ClaudhubApp {
                         .w(px(420.))
                         .gap_2()
                         .child(div().text_sm().child(tr!("server-wsl-help")))
-                        .child(entity.clone().update(cx, |this, cx| {
-                            this.render_wsl_choices(cx).into_any_element()
-                        })),
+                        .child(prompt),
                 )
                 .overlay_closable(false)
                 .close_button(false)
@@ -136,47 +179,12 @@ impl ClaudhubApp {
         });
     }
 
-    /// Les distributions, une par ligne, celle qui est retenue cochée.
-    fn render_wsl_choices(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(prompt) = self.wsl_prompt.as_ref() else {
-            return v_flex();
-        };
-        let chosen = prompt.chosen;
-        v_flex()
-            .gap_1()
-            .children(
-                prompt
-                    .distros
-                    .iter()
-                    .cloned()
-                    .enumerate()
-                    .map(|(index, name)| {
-                        Button::new(("wsl-distro", index))
-                            .ghost()
-                            .w_full()
-                            .justify_start()
-                            .selected(index == chosen)
-                            .icon(icon(if index == chosen {
-                                "circle-check"
-                            } else {
-                                "circle"
-                            }))
-                            .label(name)
-                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                if let Some(prompt) = this.wsl_prompt.as_mut() {
-                                    prompt.chosen = index;
-                                    cx.notify();
-                                }
-                            }))
-                    }),
-            )
-    }
-
     /// Retient le choix et lance la mise en route.
     fn accept_wsl_distro(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(prompt) = self.wsl_prompt.take() else {
             return;
         };
+        let prompt = prompt.read(cx);
         let Some(distro) = prompt.distros.get(prompt.chosen).cloned() else {
             return;
         };

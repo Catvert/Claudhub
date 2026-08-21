@@ -346,7 +346,7 @@ pub struct ClaudhubApp {
     pub(super) server_state: super::server::ServerState,
     /// La question du premier démarrage sous Windows, tant qu'aucune
     /// distribution n'est choisie.
-    pub(super) wsl_prompt: Option<super::server::WslPrompt>,
+    pub(super) wsl_prompt: Option<Entity<super::server::WslPrompt>>,
     /// Le serveur tourne sous WSL (dit par sa poignée de main) : c'est là
     /// que « ce chemin est un montage Windows » a un sens, et la machine de
     /// la vue ne peut pas le savoir à sa place.

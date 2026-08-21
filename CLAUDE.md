@@ -2515,6 +2515,17 @@ Elles viennent d'Aviary, et les enfreindre produit des bugs silencieux.
 - La vue racine doit ré-émettre les couches de `Root` (dialogues,
   notifications) à la fin de son `render`, sinon elles ne s'affichent nulle
   part.
+- **La fermeture d'`open_dialog` ne doit rien toucher à `ClaudhubApp`.** C'est
+  un `Fn` que `Root` retient et rappelle **à chaque frame**, depuis le rendu de
+  la vue racine — donc au milieu de l'emprunt de l'application. Un
+  `entity.update(cx, …)` là-dedans panique (« cannot update … while it is
+  already being updated »), et un `read` aussi, pour la même raison : l'entité
+  est sortie de la table le temps de son rendu. Un état que le dialogue affiche
+  *et* modifie vit donc dans une **entité à lui**, posée en enfant (le motif de
+  `server::WslPrompt`) ; ce qui ne s'exécute qu'au clic — `on_ok`, `on_cancel`,
+  `on_click` — est libre, l'emprunt étant rendu à ce moment-là. Les autres
+  fermetures de ce dépôt reçoivent `_cx` pour cette raison ; celle des
+  raccourcis ne s'en sert que pour lire le thème, qui est un global.
 - **`key_context` prend un identifiant, pas un prédicat.** Passer
   `"Claudhub && !Dialog"` à `key_context` fait boucler le parseur et déborder la
   pile au premier rendu. L'expression va dans le troisième argument de
