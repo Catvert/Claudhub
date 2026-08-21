@@ -1,36 +1,35 @@
-//! Mettre une liste de chemins en arborescence repliable.
+//! Turning a list of paths into a collapsible tree.
 //!
-//! Deux listes s'en servent — les fichiers d'une revue et ceux du projet — et
-//! elles n'affichent pas les mêmes choses : l'une porte des cases à cocher et
-//! des volumes de modification, l'autre un statut git et rien d'autre. Ce
-//! module ne connaît donc **que des chemins**, et rend des **indices** dans la
-//! liste qu'on lui a donnée : c'est à l'appelant de décider ce qu'une ligne
-//! affiche.
+//! Two lists use it — a review's files and the project's — and they do not
+//! display the same things: one carries checkboxes and change volumes, the
+//! other a git status and nothing else. This module therefore knows **only
+//! paths**, and returns **indices** into the list it was given: it is up to
+//! the caller to decide what a row shows.
 //!
-//! Des indices et non des valeurs, parce que la même feuille apparaît dans le
-//! sous-arbre de chacun de ses dossiers parents : un projet Laravel de
-//! quarante mille fichiers ferait sinon des centaines de milliers de clones de
-//! `PathBuf` à chaque reconstruction.
+//! Indices and not values, because the same leaf appears in the subtree of
+//! each of its parent directories: a Laravel project of forty thousand files
+//! would otherwise make hundreds of thousands of `PathBuf` clones on every
+//! rebuild.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// Une ligne de l'arborescence.
+/// A row of the tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
     Dir {
-        /// Chemin complet, et clé du repli. C'est celui du dossier le plus
-        /// profond de la chaîne fusionnée : replier `app/Http` et replier
-        /// `app/Http/Livewire` sont deux gestes différents, mais une chaîne
-        /// fusionnée n'en offre qu'un.
+        /// Full path, and collapse key. It is the deepest directory of the
+        /// merged chain: collapsing `app/Http` and collapsing
+        /// `app/Http/Livewire` are two different gestures, but a merged chain
+        /// only offers one.
         path: PathBuf,
-        /// Ce qui s'affiche : un segment, ou la chaîne fusionnée.
+        /// What is displayed: one segment, or the merged chain.
         label: String,
         depth: usize,
         collapsed: bool,
-        /// Tous les indices du sous-arbre, y compris ce qu'un repli cache :
-        /// cocher un dossier fermé doit agir sur ce qu'il contient, et non sur
-        /// ce qu'on en voit.
+        /// Every index in the subtree, including what a collapse hides:
+        /// ticking a closed directory must act on what it contains, not on
+        /// what is visible of it.
         leaves: Vec<usize>,
     },
     Leaf {
@@ -39,21 +38,21 @@ pub enum Entry {
     },
 }
 
-/// Met une liste de chemins en arborescence.
+/// Turns a list of paths into a tree.
 ///
-/// Les dossiers viennent avant les fichiers, dans l'ordre alphabétique ; c'est
-/// celui d'un `BTreeMap`, et il doit être stable d'un rafraîchissement à
-/// l'autre — une liste qui se réordonne à chaque `git status` est illisible.
+/// Directories come before files, in alphabetical order; that is a
+/// `BTreeMap`'s, and it has to be stable from one refresh to the next — a list
+/// that reorders itself on every `git status` is unreadable.
 pub fn build(paths: &[PathBuf], collapsed: &HashSet<PathBuf>) -> Vec<Entry> {
     build_subset(paths, None, collapsed)
 }
 
-/// La même chose, restreinte à une partie des chemins.
+/// The same thing, restricted to some of the paths.
 ///
-/// C'est ce dont une recherche a besoin : les indices rendus désignent
-/// toujours la liste **entière**, celle que l'appelant tient, et non le
-/// sous-ensemble — sans quoi il faudrait une table de correspondance à chaque
-/// frappe, et la ligne cliquée n'ouvrirait pas le bon fichier.
+/// This is what a search needs: the indices returned always refer to the
+/// **whole** list, the one the caller holds, and never to the subset —
+/// otherwise a lookup table would be needed on every keystroke, and the row
+/// clicked would not open the right file.
 pub fn build_subset(
     paths: &[PathBuf],
     keep: Option<&[usize]>,
@@ -97,7 +96,7 @@ impl Node {
         node.leaves.push(index);
     }
 
-    /// Tous les indices du sous-arbre, dans l'ordre où ils s'afficheraient.
+    /// Every index in the subtree, in the order they would be displayed.
     fn all(&self, out: &mut Vec<usize>) {
         for child in self.dirs.values() {
             child.all(out);

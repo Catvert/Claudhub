@@ -1,20 +1,20 @@
-//! Les gestes de la relecture annotée : prendre une note, la replacer dans le
-//! diff, la lister, la renvoyer à l'agent.
+//! The gestures of annotated review: taking a note, putting it back into the
+//! diff, listing it, sending it back to the agent.
 //!
-//! Le modèle et tout ce qui se teste sans gpui vivent dans `notes.rs` ; ici il
-//! n'y a que de la plomberie d'interface.
+//! The model and everything testable without gpui live in `notes.rs`; here there
+//! is only interface plumbing.
 //!
-//! Deux choses n'y sont pas évidentes :
+//! Two things are not obvious in it:
 //!
-//! - **L'ancrage est arrêté au moment du geste**, pas à la validation du
-//!   dialogue. Un agent écrit dans le worktree pendant qu'on le relit, chaque
-//!   écriture recharge le diff, et la sélection ne survit pas au rechargement :
-//!   décider de l'ancrage à la validation ferait porter la note sur ce qui est
-//!   arrivé pendant qu'on l'écrivait.
-//! - **Les marqueurs de gouttière sont calculés en amont**, à l'arrivée du
-//!   diff et à chaque modification des notes, jamais dans la fermeture de la
-//!   liste virtualisée : celle-ci tourne pour chaque ligne visible à chaque
-//!   frame, animation de molette comprise.
+//! - **The anchoring is settled at the moment of the gesture**, not when the
+//!   dialog is confirmed. An agent writes in the worktree while it is being
+//!   reviewed, every write reloads the diff, and the selection does not survive
+//!   the reload: deciding the anchoring at confirmation time would make the note
+//!   apply to whatever arrived while it was being written.
+//! - **The gutter markers are computed upstream**, when the diff arrives and on
+//!   every change to the notes, never inside the virtualised list's closure:
+//!   that one runs for every visible line on every frame, wheel animation
+//!   included.
 
 use std::path::{Path, PathBuf};
 
@@ -34,10 +34,10 @@ use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
 use crate::ui::notes::{self, Note, Side};
 
-/// Une note en cours de rédaction, avec son ancrage déjà arrêté.
+/// A note being written, with its anchoring already settled.
 pub struct NoteDraft {
-    /// Renseigné quand on retouche une note existante plutôt que d'en créer
-    /// une : le corps change, l'ancrage ne bouge pas.
+    /// Filled in when an existing note is being edited rather than created: the
+    /// body changes, the anchoring does not move.
     pub editing: Option<u64>,
     pub range: DiffRange,
     pub path: PathBuf,
@@ -48,13 +48,13 @@ pub struct NoteDraft {
 }
 
 impl ClaudhubApp {
-    // — Prendre une note ————————————————————————————————————————
+    // — Taking a note ——————————————————————————————————————————
 
-    /// Ouvre le dialogue d'annotation sur la sélection courante.
+    /// Opens the annotation dialog on the current selection.
     ///
-    /// Sans sélection, rien : une note porte sur une **plage**, et prendre le
-    /// fichier entier — ce que fait la copie faute de mieux — donnerait une
-    /// remarque qui ne désigne rien.
+    /// With no selection, nothing: a note applies to a **range**, and taking the
+    /// whole file — which is what copying does for want of better — would give a
+    /// remark that names nothing.
     pub(super) fn annotate_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let split = crate::ui::settings::Settings::global(cx).diff_split;
         let Some(state) = self.active_review() else {
@@ -64,8 +64,8 @@ impl ClaudhubApp {
             return;
         };
         let range = state.range.clone();
-        // La copie et la note partent du même endroit : la liste unifiée, qui
-        // seule porte l'ordre du fichier.
+        // Copying and note-taking start from the same place: the unified list,
+        // which alone carries the file's order.
         let Some((from, to)) = (match (split, state.diff_selection) {
             (true, Some((a, b))) => diff.unified_span(a, b),
             (false, Some((a, b))) => Some((a.min(b), a.max(b))),
@@ -90,7 +90,7 @@ impl ClaudhubApp {
         self.open_note_dialog(String::new(), window, cx);
     }
 
-    /// Rouvre une note pour en corriger le texte.
+    /// Reopens a note to correct its text.
     pub(super) fn edit_note(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(note) = self.note(id).cloned() else {
             return;
@@ -107,11 +107,11 @@ impl ClaudhubApp {
         self.open_note_dialog(note.body, window, cx);
     }
 
-    /// Le dialogue de saisie.
+    /// The input dialog.
     ///
-    /// Un dialogue et non un popover ancré à la ligne : la ligne appartient à
-    /// une liste virtualisée, et le moindre défilement — celui que provoque
-    /// déjà l'ouverture du clavier — emporterait l'ancre et le popover avec.
+    /// A dialog and not a popover anchored to the row: the row belongs to a
+    /// virtualised list, and the slightest scroll — the one opening the keyboard
+    /// already causes — would carry the anchor away, and the popover with it.
     fn open_note_dialog(&mut self, body: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(draft) = self.note_draft.as_ref() else {
             return;
@@ -141,9 +141,9 @@ impl ClaudhubApp {
                                 .font_family(mono.clone())
                                 .child(title.clone()),
                         )
-                        // L'extrait est rappelé sous les yeux : on écrit une
-                        // remarque *sur* du code, et le dialogue recouvre
-                        // justement celui qu'on regardait.
+                        // The excerpt is recalled in front of you: one writes a
+                        // remark *about* code, and the dialog covers precisely
+                        // the code being looked at.
                         .child(
                             v_flex()
                                 .id("note-excerpt")
@@ -189,8 +189,8 @@ impl ClaudhubApp {
             return;
         };
         match draft.editing {
-            // Retoucher une note rouvre la question : elle repart comme non
-            // envoyée, sans quoi la version corrigée ne partirait jamais.
+            // Editing a note reopens the question: it goes back to unsent,
+            // otherwise the corrected version would never go out.
             Some(id) => {
                 if let Some(note) = state.notes.iter_mut().find(|note| note.id == id) {
                     note.body = body;
@@ -247,17 +247,17 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    // — La liste de tâches du worktree ————————————————————————————
+    // — The worktree's task list —————————————————————————————————
 
-    /// Coche ou décoche une tâche de `TODO.md`.
+    /// Ticks or unticks a `TODO.md` task.
     ///
-    /// L'écriture est **conditionnelle**, et c'est tout l'intérêt : ce fichier
-    /// est celui de l'agent, qui y coche ce qu'il vient de finir pendant qu'on
-    /// le lit. L'empreinte de ce qu'on avait sous les yeux repart avec
-    /// l'écriture, et un fichier qui a bougé depuis la fait refuser plutôt que
-    /// d'écraser son travail. La liste affichée, elle, se met à jour tout de
-    /// suite : la surveillance du coffre ramènera de toute façon la vérité du
-    /// disque un quart de seconde plus tard.
+    /// The write is **conditional**, and that is the whole point: this file is
+    /// the agent's, which ticks off what it has just finished while we read it.
+    /// The digest of what we had in front of us goes out with the write, and a
+    /// file that has moved since makes it be refused rather than overwriting its
+    /// work. The displayed list, for its part, updates at once: the vault's
+    /// watch will bring back the disk's truth a quarter of a second later
+    /// anyway.
     pub(super) fn toggle_task(&mut self, line: usize, done: bool, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
@@ -285,11 +285,11 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Ouvre la retouche d'une tâche, à sa place dans la liste.
+    /// Opens a task for editing, in its place in the list.
     ///
-    /// Une zone de saisie sur la ligne et non un dialogue : une liste de tâches
-    /// se corrige à la volée, et un dialogue par correction ferait deux clics
-    /// et une fenêtre pour changer un mot.
+    /// An input on the row and not a dialog: a task list is corrected on the
+    /// fly, and one dialog per correction would mean two clicks and a window to
+    /// change one word.
     pub(super) fn edit_task(&mut self, line: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(label) = self
             .active_review()
@@ -306,11 +306,11 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Valide la retouche en cours. Un libellé vide **supprime** la tâche.
+    /// Confirms the running edit. An empty label **deletes** the task.
     ///
-    /// C'est la convention des listes qui s'éditent en place : effacer le texte
-    /// et valider est le geste par lequel on retire une ligne, et il évite un
-    /// bouton de plus sur chacune d'elles.
+    /// It is the convention of lists edited in place: clearing the text and
+    /// confirming is the gesture by which a row is removed, and it saves one
+    /// more button on every one of them.
     pub(super) fn commit_task_edit(&mut self, label: &str, cx: &mut Context<Self>) {
         let Some(line) = self.task_editing.take() else {
             return;
@@ -329,12 +329,12 @@ impl ClaudhubApp {
         self.rewrite_todo(cx, |text| crate::ui::vault::remove_task(text, line));
     }
 
-    /// Applique une transformation au `TODO.md` du worktree affiché.
+    /// Applies a transformation to the displayed worktree's `TODO.md`.
     ///
-    /// Le passage obligé des trois gestes d'édition : la transformation est
-    /// pure et rend `None` quand la ligne visée n'est plus ce qu'elle était —
-    /// l'agent a écrit entre-temps —, et l'écriture repart avec l'empreinte de
-    /// ce qu'on avait sous les yeux.
+    /// The compulsory path of all three editing gestures: the transformation is
+    /// pure and returns `None` when the targeted line is no longer what it was —
+    /// the agent wrote in the meantime — and the write goes out with the digest
+    /// of what we had in front of us.
     fn rewrite_todo(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&str) -> Option<String>) {
         let Some(worktree) = self.active.clone() else {
             return;
@@ -366,8 +366,7 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Ajoute une tâche au `TODO.md` du worktree, en le créant s'il n'y en a
-    /// pas.
+    /// Adds a task to the worktree's `TODO.md`, creating it if there is none.
     pub(super) fn add_task(&mut self, label: &str, cx: &mut Context<Self>) {
         if label.trim().is_empty() {
             return;
@@ -398,11 +397,11 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Rend tous les fichiers d'un worktree à relire.
+    /// Hands every file of a worktree back to be reviewed.
     ///
-    /// Le geste manquait : on coche fichier par fichier, et reprendre une revue
-    /// depuis le début demandait autant de clics que la branche a de fichiers,
-    /// ou une visite dans le Markdown du coffre.
+    /// The gesture was missing: one ticks file by file, and starting a review
+    /// again from scratch took as many clicks as the branch has files, or a trip
+    /// into the vault's Markdown.
     pub(super) fn clear_reviewed(&mut self, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
@@ -426,12 +425,12 @@ impl ClaudhubApp {
             .find(|note| note.id == id)
     }
 
-    // — Replacer les notes dans le diff ————————————————————————
+    // — Putting the notes back into the diff ——————————————————
 
-    /// Recalcule les lignes annotées du diff affiché.
+    /// Recomputes the annotated lines of the displayed diff.
     ///
-    /// Appelée à l'arrivée d'un diff et à chaque modification des notes, jamais
-    /// pendant un rendu : `relocate` parcourt le diff entier par note.
+    /// Called when a diff arrives and on every change to the notes, never during
+    /// a render: `relocate` walks the whole diff per note.
     pub(super) fn refresh_note_marks(&mut self, worktree: &Path) {
         let Some(state) = self.review.get_mut(worktree) else {
             return;
@@ -460,7 +459,7 @@ impl ClaudhubApp {
         state.drifted = drifted;
     }
 
-    /// Ouvre le fichier d'une note et l'amène sous les yeux.
+    /// Opens a note's file and brings it into view.
     pub(super) fn reveal_note(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some((path, range)) = self
             .note(id)
@@ -475,10 +474,10 @@ impl ClaudhubApp {
             .active_review()
             .is_some_and(|state| state.selected.as_deref() == Some(path.as_path()));
         if !already {
-            // Le diff n'est pas encore là : la sélection sera posée à son
-            // arrivée, par `Evt::FileDiff`, comme pour un débordement de
-            // flèche. Le drapeau est posé **après** l'ouverture, qui efface
-            // justement les sauts armés par un geste précédent.
+            // The diff is not here yet: the selection will be set when it
+            // arrives, by `Evt::FileDiff`, as for an arrow overflow. The flag is
+            // set **after** the opening, which is precisely what clears jumps
+            // armed by an earlier gesture.
             self.open_file(worktree.clone(), path, range, cx);
             if let Some(state) = self.review.get_mut(&worktree) {
                 state.pending_note = Some(id);
@@ -488,7 +487,7 @@ impl ClaudhubApp {
         self.select_note_rows(id, cx);
     }
 
-    /// Sélectionne les lignes d'une note dans le diff déjà affiché.
+    /// Selects a note's lines in the diff already displayed.
     pub(super) fn select_note_rows(&mut self, id: u64, cx: &mut Context<Self>) {
         let split = crate::ui::settings::Settings::global(cx).diff_split;
         let Some(state) = self.active_review() else {
@@ -504,8 +503,8 @@ impl ClaudhubApp {
             self.announce(tr!("note-drifted"), cx);
             return;
         };
-        // En deux colonnes, les indices unifiés ne désignent pas les mêmes
-        // entrées : on retrouve celles qui les recouvrent.
+        // In two columns, the unified indices do not name the same entries: we
+        // find the ones covering them.
         let shown = if split {
             split_span(&diff, from, to)
         } else {
@@ -519,13 +518,13 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    // — Envoyer ————————————————————————————————————————————————
+    // — Sending ————————————————————————————————————————————————
 
-    /// Livre des notes à l'agent du worktree.
+    /// Delivers notes to the worktree's agent.
     ///
-    /// `only` désigne une note ; sans lui, toutes celles qui ne sont pas
-    /// traitées. Elles passent à `sent` et non à `done` : c'est la relecture de
-    /// la réponse qui les clôt.
+    /// `only` names one note; without it, all those not yet handled. They move
+    /// to `sent` and not to `done`: it is the review of the answer that closes
+    /// them.
     pub(super) fn send_notes(
         &mut self,
         only: Option<u64>,
@@ -560,12 +559,12 @@ impl ClaudhubApp {
         self.confirm_prompt(worktree, ids, text, window, cx);
     }
 
-    /// Montre le prompt avant qu'il parte, et le laisse retoucher.
+    /// Shows the prompt before it goes out, and lets it be edited.
     ///
-    /// Ce qui part dans un terminal ne se rattrape pas : un agent a lu le
-    /// collage avant qu'on ait vu ce qu'on venait d'envoyer. Le dialogue est
-    /// aussi ce qui rappelle à quoi ressemble une demande — on y ajoute d'une
-    /// phrase ce que les notes ne disent pas.
+    /// What goes into a terminal cannot be taken back: an agent has read the
+    /// paste before you have seen what you just sent. The dialog is also what
+    /// recalls what a request looks like — you add in one sentence what the
+    /// notes do not say.
     fn confirm_prompt(
         &mut self,
         worktree: PathBuf,
@@ -602,10 +601,10 @@ impl ClaudhubApp {
         });
     }
 
-    /// Livre le prompt et marque les notes comme envoyées.
+    /// Delivers the prompt and marks the notes as sent.
     ///
-    /// `sent` et non `done` : c'est la relecture de la réponse qui clôt une
-    /// note, pas son envoi.
+    /// `sent` and not `done`: it is the review of the answer that closes a note,
+    /// not its sending.
     fn send_prompt(
         &mut self,
         worktree: PathBuf,
@@ -628,11 +627,11 @@ impl ClaudhubApp {
         self.announce(tr!("note-sent", { count: count }), cx);
     }
 
-    /// Pose une question libre sur la sélection courante.
+    /// Asks a free question about the current selection.
     ///
-    /// Sans passer par une note : c'est le geste le plus fréquent en pratique
-    /// — on relit, quelque chose intrigue, on demande, et il n'y a rien à
-    /// consigner.
+    /// Without going through a note: it is the most frequent gesture in practice
+    /// — you read, something puzzles you, you ask, and there is nothing to
+    /// record.
     pub(super) fn ask_about_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let split = crate::ui::settings::Settings::global(cx).diff_split;
         let Some(state) = self.active_review() else {
@@ -641,8 +640,8 @@ impl ClaudhubApp {
         let (Some(diff), Some(path)) = (state.diff.clone(), state.selected.clone()) else {
             return;
         };
-        // Sans sélection, la question porte sur tout le fichier : contrairement
-        // à une note, elle n'a pas à désigner une plage précise.
+        // With no selection, the question is about the whole file: unlike a
+        // note, it does not have to name a precise range.
         let (from, to) = match (split, state.diff_selection) {
             (true, Some((a, b))) => match diff.unified_span(a, b) {
                 Some(span) => span,
@@ -674,7 +673,7 @@ impl ClaudhubApp {
         );
     }
 
-    /// Livre un texte à l'agent, en ouvrant le panneau des terminaux.
+    /// Delivers a text to the agent, opening the terminals panel.
     fn deliver(
         &mut self,
         worktree: PathBuf,
@@ -687,16 +686,16 @@ impl ClaudhubApp {
         self.show_terminal_panel(window, cx);
     }
 
-    // — Le panneau ——————————————————————————————————————————————
+    // — The panel  ——————————————————————————————————————————————
 
-    /// Le panneau « Notes » : le coffre du worktree, en trois sections.
+    /// The "Notes" panel: the worktree's vault, in three sections.
     ///
-    /// Trois choses s'y gèrent, et elles vivent déjà dans le même dossier —
-    /// les tâches, les remarques, les fichiers relus. Les répartir en trois
-    /// panneaux ferait trois onglets pour un seul sujet ; les mettre en
-    /// sous-onglets demanderait un clic pour savoir où en est l'agent. Des
-    /// sections repliables dans un seul défilement gardent les trois comptes
-    /// sous les yeux, et rendent la hauteur à celle qu'on regarde.
+    /// Three things are handled there, and they already live in the same folder
+    /// — the tasks, the remarks, the reviewed files. Splitting them into three
+    /// panels would make three tabs for a single subject; putting them in
+    /// sub-tabs would need a click to know where the agent stands. Collapsible
+    /// sections in a single scroll keep all three counts in view, and give the
+    /// height back to whichever is being read.
     pub(super) fn render_notes(
         &mut self,
         window: &mut Window,
@@ -740,11 +739,11 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// La barre du panneau : ce dont les trois sections parlent, c'est-à-dire
-    /// le dossier du coffre, et de quoi l'ouvrir là où il est.
+    /// The panel's bar: what the three sections are about, that is, the vault's
+    /// folder, and what is needed to open it where it is.
     ///
-    /// Le chemin n'apparaissait nulle part ailleurs, et un coffre qu'on ne sait
-    /// pas retrouver est un coffre qu'on n'ouvre pas dans Obsidian.
+    /// The path appeared nowhere else, and a vault you cannot find again is a
+    /// vault you do not open in Obsidian.
     fn render_vault_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let dir = self
             .active
@@ -779,16 +778,15 @@ impl ClaudhubApp {
                         .icon(icon("external-link"))
                         .tooltip(tr!("note-open-vault"))
                         .on_click(move |_, _window, cx| {
-                            // `file://` plutôt qu'un éditeur : le geste est
-                            // « montre-moi ce dossier », et c'est au bureau de
-                            // décider avec quoi — le même chemin que le bouton
-                            // d'adresse d'un worktree.
+                            // `file://` rather than an editor: the gesture is
+                            // "show me this folder", and it is the desktop's
+                            // business to decide with what — the same path as a
+                            // worktree's address button.
                             //
-                            // Le chemin est celui du serveur ; c'est ici, et
-                            // ici seulement, qu'il repasse dans le monde de
-                            // l'utilisateur — l'explorateur de Windows ne sait
-                            // rien de `/home/…`, mais il ouvre très bien
-                            // `\\wsl.localhost\…`.
+                            // The path is the server's; here, and here only,
+                            // does it go back into the user's world — Windows
+                            // Explorer knows nothing of `/home/…`, but it opens
+                            // `\\wsl.localhost\…` perfectly well.
                             let dir = if cfg!(windows) {
                                 let distro =
                                     crate::ui::settings::Settings::global(cx).wsl_distro.clone();
@@ -802,11 +800,11 @@ impl ClaudhubApp {
             })
     }
 
-    /// L'en-tête d'une section : le chevron, le titre, le compte, les actions.
+    /// A section's header: the chevron, the title, the count, the actions.
     ///
-    /// Le repli est **en mémoire** et ne se persiste pas : c'est une posture de
-    /// lecture, qui change plusieurs fois pendant une relecture, pas une
-    /// préférence qu'on retrouve le lendemain.
+    /// The collapse is **in memory** and is not persisted: it is a reading
+    /// posture, which changes several times during a review, not a preference
+    /// one expects back the next day.
     fn section_header(
         &mut self,
         key: &'static str,
@@ -823,9 +821,9 @@ impl ClaudhubApp {
             .gap_2()
             .items_center()
             .bg(cx.theme().secondary)
-            // Le repli est porté par le titre, pas par la ligne entière : les
-            // boutons de la section vivent dessus, et un clic sur « envoyer »
-            // remonterait replier ce qu'on vient d'agir.
+            // The collapse is carried by the title, not by the whole row: the
+            // section's buttons live on it, and a click on "send" would also
+            // collapse what has just been acted on.
             .child(
                 h_flex()
                     .id(SharedString::from(format!("notes-section-{key}")))
@@ -863,7 +861,7 @@ impl ClaudhubApp {
         self.notes_collapsed.contains(key)
     }
 
-    /// Les remarques, groupées par fichier.
+    /// The remarks, grouped by file.
     fn render_notes_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let query = self.query(crate::ui::find::Pane::Notes, cx);
         let only_open = self.notes_only_open;
@@ -871,8 +869,8 @@ impl ClaudhubApp {
             return div().into_any_element();
         };
         let drifted = state.drifted.clone();
-        // La recherche porte sur la remarque, sur le code cité et sur le
-        // chemin : les trois par lesquels on retrouve une note.
+        // The search covers the remark, the quoted code and the path: the three
+        // things a note is found by.
         let notes: Vec<Note> = state
             .notes
             .iter()
@@ -932,8 +930,8 @@ impl ClaudhubApp {
                 .into_any_element();
         }
 
-        // Groupées par fichier, dans l'ordre où les notes ont été prises : une
-        // relecture se relit dans l'ordre où elle s'est faite.
+        // Grouped by file, in the order the notes were taken: a review is read
+        // back in the order it was made.
         let mut groups: Vec<(PathBuf, Vec<Note>)> = Vec::new();
         for note in notes {
             match groups.last_mut() {
@@ -942,10 +940,9 @@ impl ClaudhubApp {
             }
         }
 
-        // Les lignes sont construites d'avance et non dans une fermeture
-        // paresseuse : `render_note` emprunte la vue *et* le contexte, ce
-        // qu'un itérateur consommé plus loin dans la même expression
-        // n'autorise pas.
+        // The rows are built ahead of time and not in a lazy closure:
+        // `render_note` borrows the view *and* the context, which an iterator
+        // consumed later in the same expression does not allow.
         let muted = cx.theme().muted_foreground;
         let mut sections = Vec::new();
         for (path, bucket) in groups {
@@ -979,12 +976,12 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// La note libre du worktree : `NOTES.md`, éditable sur place.
+    /// The worktree's free note: `NOTES.md`, editable in place.
     ///
-    /// Toujours là, sans geste pour l'ouvrir : c'est un bloc-notes, et un
-    /// bloc-notes qu'il faut créer ne sert à personne. Vide, il n'existe pas
-    /// sur le disque — la zone de saisie ne raconte donc pas qu'un fichier
-    /// attend quelque part, elle attend simplement qu'on y écrive.
+    /// Always there, with no gesture to open it: it is a scratchpad, and a
+    /// scratchpad you have to create serves nobody. Empty, it does not exist on
+    /// disk — the input therefore does not claim a file is waiting somewhere, it
+    /// simply waits for something to be written in it.
     fn render_journal_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let header = self.section_header(
             "journal",
@@ -1002,12 +999,11 @@ impl ClaudhubApp {
             .child(div().p_2().child(Textarea::new(&self.journal_input)))
     }
 
-    /// Les fichiers cochés comme relus, et de quoi les rendre à relire.
+    /// The files ticked as reviewed, and what is needed to hand them back.
     ///
-    /// Ils se cochent dans les listes de fichiers ; ils ne se **décochaient**
-    /// que là, fichier par fichier, ou dans le Markdown du coffre. Une revue
-    /// qu'on veut reprendre de zéro demandait donc autant de clics qu'elle a de
-    /// fichiers.
+    /// They are ticked in the file lists; they could only be **unticked** there,
+    /// file by file, or in the vault's Markdown. A review one wants to restart
+    /// from scratch therefore took as many clicks as it has files.
     fn render_reviewed_section(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let state = self.active_review()?;
         if state.reviewed.is_empty() {
@@ -1089,13 +1085,13 @@ impl ClaudhubApp {
         Some(v_flex().w_full().child(header).children(rows))
     }
 
-    /// La liste de tâches du worktree.
+    /// The worktree's task list.
     ///
-    /// Elle est **en tête** du panneau : c'est ce qu'on regarde pour savoir où
-    /// en est l'agent, et la mettre sous une revue de trois cents notes
-    /// reviendrait à ne jamais la voir. Sans `TODO.md`, la section reste et
-    /// porte le bouton qui le crée — un état vide qui dit quoi faire vaut mieux
-    /// qu'une section absente dont on ignore qu'elle pourrait exister.
+    /// It is **at the top** of the panel: it is what one looks at to know where
+    /// the agent stands, and putting it under a three-hundred-note review would
+    /// amount to never seeing it. Without a `TODO.md`, the section stays and
+    /// carries the button that creates one — an empty state that says what to do
+    /// beats an absent section nobody knows could exist.
     fn render_todo_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let todo = self.active_review().and_then(|state| state.todo.clone());
         let count = match &todo {
@@ -1110,10 +1106,9 @@ impl ClaudhubApp {
                     .xsmall()
                     .icon(icon("plus"))
                     .tooltip(tr!("todo-add"))
-                    // Le bouton ne fait que donner le focus à la ligne de
-                    // saisie qui est déjà là : deux façons d'ajouter une tâche
-                    // qui n'aboutissent pas au même endroit seraient une de
-                    // trop.
+                    // The button only gives focus to the input row that is
+                    // already there: two ways of adding a task that do not end
+                    // up in the same place would be one too many.
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.notes_collapsed.remove("todo");
                         gpui::Focusable::focus_handle(&this.task_input, cx).focus(window, cx);
@@ -1137,8 +1132,8 @@ impl ClaudhubApp {
                     .py_0p5()
                     .gap_2()
                     .items_center()
-                    // Deux espaces d'indentation dans le fichier valent un
-                    // décrochement ici : une sous-tâche d'agent en est une.
+                    // Two spaces of indentation in the file are worth one step
+                    // here: an agent's subtask is one.
                     .pl(px(8. + 12. * task.depth.min(4) as f32))
                     .child(
                         Checkbox::new(("todo", line))
@@ -1147,9 +1142,9 @@ impl ClaudhubApp {
                                 this.toggle_task(line, *checked, cx)
                             })),
                     )
-                    // Un clic sur le libellé le remplace par sa saisie, à sa
-                    // place dans la liste : c'est le geste des listes de tâches
-                    // partout ailleurs, et il n'y a rien à apprendre.
+                    // A click on the label replaces it with its input, in its
+                    // place in the list: it is the gesture of task lists
+                    // everywhere else, and there is nothing to learn.
                     .child(match editing == Some(line) {
                         true => div()
                             .flex_1()
@@ -1184,9 +1179,9 @@ impl ClaudhubApp {
             .w_full()
             .child(header)
             .children(rows)
-            // La ligne de saisie est **toujours** là, en bas de la liste :
-            // c'est ce qui remplace le dialogue, et une liste de tâches se
-            // remplit d'une traite sans reprendre la souris entre deux.
+            // The input row is **always** there, at the bottom of the list: it
+            // is what replaces the dialog, and a task list is filled in one go
+            // without picking the mouse back up in between.
             .child(
                 h_flex()
                     .w_full()
@@ -1245,9 +1240,9 @@ impl ClaudhubApp {
                             }))
                             .child(span_label(note.start, note.end)),
                     )
-                    // Une note dont on ne retrouve plus le code reste dans la
-                    // liste : la perdre en silence serait pire que ne pas
-                    // l'avoir prise.
+                    // A note whose code can no longer be found stays in the
+                    // list: losing it in silence would be worse than not having
+                    // taken it.
                     .when(is_drifted, |el| {
                         el.child(
                             div()
@@ -1290,8 +1285,8 @@ impl ClaudhubApp {
                             })),
                     ),
             )
-            // L'extrait, tronqué à quelques lignes : le panneau sert à
-            // retrouver une note, pas à relire le fichier.
+            // The excerpt, truncated to a few lines: the panel is for finding a
+            // note again, not for reading the file.
             .child(
                 v_flex()
                     .text_xs()
@@ -1312,14 +1307,14 @@ impl ClaudhubApp {
     }
 }
 
-/// Lignes d'extrait montrées dans le panneau : de quoi reconnaître la note,
-/// pas de quoi relire le fichier — c'est le diff qui est là pour ça.
+/// Excerpt lines shown in the panel: enough to recognise the note, not enough
+/// to read the file — the diff is there for that.
 const EXCERPT_LINES: usize = 4;
 
-/// Découpe un extrait en lignes, tronqué à `limit`.
+/// Splits an excerpt into lines, truncated to `limit`.
 ///
-/// Une ligne par élément et non un seul texte : gpui ne coupe pas un texte sur
-/// ses `\n`, et un extrait de six lignes s'afficherait sur une seule.
+/// One line per element and not a single text: gpui does not break a text on its
+/// `\n`, and a six-line excerpt would show on one.
 fn excerpt_lines(excerpt: &str, limit: usize) -> Vec<SharedString> {
     let mut lines: Vec<SharedString> = excerpt
         .lines()
@@ -1332,7 +1327,7 @@ fn excerpt_lines(excerpt: &str, limit: usize) -> Vec<SharedString> {
     lines
 }
 
-/// `120` ou `120-134` : la forme que tout le monde sait lire.
+/// `120` or `120-134`: the form everybody can read.
 fn span_label(start: usize, end: usize) -> String {
     if start == end {
         start.to_string()
@@ -1341,7 +1336,7 @@ fn span_label(start: usize, end: usize) -> String {
     }
 }
 
-/// Les entrées de la vue en colonnes qui recouvrent une plage unifiée.
+/// The column-view entries covering a unified range.
 fn split_span(
     diff: &crate::ui::diff_view::Rendered,
     from: usize,
@@ -1362,12 +1357,11 @@ fn split_span(
     bounds
 }
 
-/// L'état vide du panneau : une icône et une phrase, comme partout ailleurs.
-/// L'état vide d'une section, à l'intérieur du panneau.
+/// The panel's empty state: an icon and a sentence, as everywhere else.
+/// A section's empty state, inside the panel.
 ///
-/// Une ligne grise et non un état vide pleine hauteur : trois sections
-/// partagent ce défilement, et celle qui n'a rien ne doit pas pousser les deux
-/// autres hors de vue.
+/// A grey line and not a full-height empty state: three sections share this
+/// scroll, and the one with nothing must not push the other two out of sight.
 fn section_empty(message: SharedString, cx: &Context<ClaudhubApp>) -> impl IntoElement {
     div()
         .px_2()

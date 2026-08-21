@@ -1,15 +1,14 @@
-//! Les terminaux : un groupe d'onglets par worktree.
+//! The terminals: one tab group per worktree.
 //!
-//! Chaque onglet est un `Terminal` (pty + émulation alacritty) et une vue qui
-//! le dessine. Le multiplexage est ici et non dans tmux : les onglets sont
-//! attachés à un worktree, changer de worktree change de groupe, et fermer un
-//! worktree ferme ce qui tournait dedans.
+//! Each tab is a `Terminal` (pty + alacritty emulation) and a view that draws
+//! it. The multiplexing is here and not in tmux: the tabs are attached to a
+//! worktree, changing worktree changes group, and closing a worktree closes what
+//! was running in it.
 //!
-//! Le rendu est du texte, pas un canevas : chaque ligne de la grille devient
-//! un `StyledText` dont les runs de style viennent de l'instantané. Une police
-//! à chasse fixe suffit alors à aligner les colonnes, et gpui s'occupe du
-//! façonnage, des ligatures et des scripts complexes — ce qu'un rendu cellule
-//! par cellule aurait fallu réécrire.
+//! The rendering is text, not a canvas: each grid line becomes a `StyledText`
+//! whose style runs come from the snapshot. A fixed-pitch font is then enough to
+//! line the columns up, and gpui takes care of shaping, ligatures and complex
+//! scripts — which a cell-by-cell renderer would have had to reimplement.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -35,71 +34,69 @@ use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
 use crate::ui::settings::{Settings, TerminalSettings};
 
-/// Temps laissé à un agent qu'on vient de lancer pour afficher son invite.
+/// Time allowed to a just-launched agent to show its prompt.
 ///
-/// Rien dans un pty ne dit « je suis prêt » : ce qui arrive avant l'invite est
-/// lu par le shell qu'on n'a pas encore remplacé, ou perdu. Deux secondes
-/// couvrent le démarrage d'un agent sur une machine chargée.
+/// Nothing in a pty says "I am ready": what arrives before the prompt is read by
+/// the shell we have not replaced yet, or lost. Two seconds cover an agent
+/// starting on a loaded machine.
 const AGENT_WARMUP: std::time::Duration = std::time::Duration::from_millis(2000);
 
-/// Silence entre le collage et le retour chariot qui le valide.
+/// The silence between the paste and the carriage return that confirms it.
 const SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(120);
 
-/// Un onglet de terminal.
+/// One terminal tab.
 pub struct TerminalView {
     terminal: Terminal,
     snapshot: Snapshot,
     focus: FocusHandle,
     font_size: Pixels,
-    /// Police effective, relue à chaque rendu depuis les réglages : c'est ce
-    /// qui fait qu'un changement dans le formulaire se voit sans rouvrir
-    /// l'onglet.
+    /// The effective font, re-read on every render from the settings: that is
+    /// what makes a change in the form visible without reopening the tab.
     font_family: SharedString,
-    /// Dernière taille connue de la zone de rendu, pour ne redimensionner le
-    /// pty que quand la géométrie change vraiment.
+    /// The last known size of the render area, so the pty is only resized when
+    /// the geometry really changes.
     bounds: Bounds<Pixels>,
-    /// Géométrie d'une cellule, mesurée sur la police effective. Elle sert à
-    /// retraduire une position de souris en ligne et colonne.
+    /// A cell's geometry, measured on the effective font. It serves to translate
+    /// a mouse position back into a line and a column.
     cell: gpui::Size<Pixels>,
-    /// Vrai entre l'enfoncement et le relâchement du bouton : c'est ce qui
-    /// distingue un glissement de sélection d'un simple survol.
+    /// True between button press and release: that is what tells a selection
+    /// drag from a plain hover.
     selecting: bool,
-    /// La cellule où la souris a été rapportée pour la dernière fois.
+    /// The cell the mouse was last reported at.
     ///
-    /// Un déplacement se compte en pixels et un rapport en cellules : sans
-    /// cette note, traverser une seule cellule enverrait dix événements
-    /// identiques au programme, qui en redessinerait dix fois.
+    /// A movement is measured in pixels and a report in cells: without this
+    /// note, crossing a single cell would send ten identical events to the
+    /// program, which would redraw ten times.
     mouse_cell: Option<(usize, usize)>,
-    /// Fraction de ligne non consommée par le dernier événement de molette.
+    /// The fraction of a line left over by the last wheel event.
     scroll_remainder: f32,
-    /// Géométrie demandée par la mise en page, pas encore transmise.
+    /// The geometry layout asked for, not yet passed on.
     pending_size: Option<TermSize>,
-    /// Vrai quand une transmission différée est déjà programmée.
+    /// True when a deferred transmission is already scheduled.
     resize_scheduled: bool,
     label: SharedString,
-    /// Vrai quand cet onglet exécute un agent de codage.
+    /// True when this tab runs a coding agent.
     ///
-    /// C'est ce qui permet de lui livrer des notes de relecture sans se
-    /// tromper d'onglet. Retenu à l'ouverture et non déduit du titre : un
-    /// agent renomme son onglet au fil de la conversation, et chercher son nom
-    /// dans un titre changeant reviendrait à jouer aux devinettes.
+    /// It is what makes it possible to deliver review notes to it without
+    /// picking the wrong tab. Recorded at opening and not derived from the
+    /// title: an agent renames its tab as the conversation goes, and looking for
+    /// its name in a changing title would be guesswork.
     agent: bool,
 }
 
 impl TerminalView {
-    /// Ouvre un pty. Séparé de la vue parce que c'est la seule étape qui peut
-    /// échouer, et qu'un échec dans un constructeur d'entité ne laisse d'autre
-    /// issue que la panique — pendant un rendu, donc avec la fenêtre figée
-    /// pour seul message.
+    /// Opens a pty. Separate from the view because it is the only step that can
+    /// fail, and a failure in an entity constructor leaves no way out but a
+    /// panic — during a render, so with a frozen window as its only message.
     pub fn open(
         working_directory: &Path,
         launch: &Launch,
         settings: &TerminalSettings,
         wsl: Option<&WslShell>,
     ) -> anyhow::Result<Terminal> {
-        // Un onglet ordinaire prend le programme des réglages ; une commande
-        // explicite — l'agent, une tâche `wt` — passe avant, elle est
-        // justement ce qu'on a demandé à lancer.
+        // An ordinary tab takes the settings' program; an explicit command — the
+        // agent, a `wt` task — comes first, it is precisely what was asked to be
+        // launched.
         let command = launch.command.clone().or_else(|| settings.program());
         let spawned = match wsl {
             Some(wsl) => wsl.wrap(working_directory, command, &launch.env),
@@ -113,9 +110,8 @@ impl TerminalView {
             working_directory: &spawned.cwd,
             command: spawned.command,
             env: spawned.env,
-            // La vraie taille arrive au premier rendu ; celle-ci ne sert qu'à
-            // ce que le shell ait une géométrie plausible avant sa première
-            // invite.
+            // The real size arrives on the first render; this one only serves to
+            // give the shell a plausible geometry before its first prompt.
             size: TermSize::new(80, 24, 8, 16),
             scrollback: settings.scrollback,
         })
@@ -132,9 +128,9 @@ impl TerminalView {
         let font_size = px(settings.terminal.font_size);
         let font_family = SharedString::from(settings.terminal_font().to_string());
         let events = terminal.events();
-        // Une tâche de premier plan par terminal : elle réveille la vue quand
-        // la boucle d'E/S a du nouveau. Sans elle, la sortie n'apparaîtrait
-        // qu'au prochain rendu déclenché par autre chose.
+        // One foreground task per terminal: it wakes the view when the I/O loop
+        // has something new. Without it, the output would only appear at the
+        // next render triggered by something else.
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(event) = events.recv().await {
                 let alive = this
@@ -180,12 +176,12 @@ impl TerminalView {
         self.agent
     }
 
-    /// Livre un texte au programme qui tourne, sans le valider.
+    /// Delivers a text to the running program, without confirming it.
     ///
-    /// Passe par le **collage encadré** que gère `Terminal::paste` : sans lui,
-    /// un texte multiligne arrive dans un shell comme autant de commandes
-    /// validées, ce qui est la façon classique d'exécuter par accident ce
-    /// qu'on voulait seulement faire lire.
+    /// Goes through the **bracketed paste** `Terminal::paste` handles: without
+    /// it, a multi-line text arrives in a shell as that many commands entered,
+    /// which is the classic way of accidentally running what you only meant to
+    /// have read.
     pub fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.terminal.paste(text);
         self.terminal.scroll_to_bottom();
@@ -193,12 +189,12 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// Valide ce qui vient d'être collé.
+    /// Confirms what has just been pasted.
     ///
-    /// **Toujours dans un envoi séparé du collage**, jamais au bout du même :
-    /// un TUI qui vient de recevoir un collage encadré peut avaler le retour
-    /// chariot qui le suit dans le même paquet, et le message reste alors dans
-    /// l'invite sans partir.
+    /// **Always in a send separate from the paste**, never at the end of the
+    /// same one: a TUI that has just received a bracketed paste may swallow the
+    /// carriage return following it in the same packet, and the message then
+    /// stays in the prompt without going out.
     pub fn submit(&mut self, cx: &mut Context<Self>) {
         self.terminal.write_str("\r");
         self.terminal.scroll_to_bottom();
@@ -215,13 +211,12 @@ impl TerminalView {
         }
     }
 
-    /// Aligne la police sur les réglages courants.
+    /// Brings the font into line with the current settings.
     ///
-    /// Un changement de taille ou de famille invalide la géométrie mesurée :
-    /// on efface les bornes retenues pour que le prochain passage du canvas de
-    /// mesure recalcule la grille et redimensionne le pty. Sans cela, le texte
-    /// changerait de taille mais le shell continuerait de croire à
-    /// l'ancienne largeur en colonnes.
+    /// A change of size or family invalidates the measured geometry: we clear
+    /// the recorded bounds so the measuring canvas's next pass recomputes the
+    /// grid and resizes the pty. Without that, the text would change size but
+    /// the shell would keep believing in the old column width.
     fn sync_font(&mut self, cx: &App) {
         let settings = Settings::global(cx);
         let font_size = px(settings.terminal.font_size);
@@ -238,12 +233,11 @@ impl TerminalView {
         self.terminal.has_exited()
     }
 
-    /// Recalcule la grille pour la place disponible.
+    /// Recomputes the grid for the available room.
     ///
-    /// La largeur d'un caractère est mesurée sur la police effectivement
-    /// choisie, pas devinée : une chasse fixe ne veut pas dire une largeur
-    /// connue, et un écart d'un pixel décale la dernière colonne d'une ligne
-    /// de quatre-vingts.
+    /// A character's width is measured on the font actually chosen, not guessed:
+    /// a fixed pitch does not mean a known width, and a one-pixel discrepancy
+    /// shifts the last column of an eighty-wide line.
     fn sync_size(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         if bounds == self.bounds {
             return;
@@ -278,15 +272,14 @@ impl TerminalView {
         );
     }
 
-    /// Transmet la nouvelle géométrie, une fois le glissement calmé.
+    /// Passes the new geometry on, once the drag has settled.
     ///
-    /// Un redimensionnement à la souris passe par toutes les largeurs
-    /// intermédiaires. Les transmettre toutes revient à envoyer un `SIGWINCH`
-    /// par image : le programme redessine à chaque fois, et comme il redessine
-    /// *en place*, ses invites successives s'empilent au lieu de se remplacer.
-    /// On attend donc que la taille se stabilise ; pendant ce temps, le
-    /// panneau rogne l'ancienne grille, exactement comme le fait une fenêtre
-    /// qu'on redimensionne.
+    /// A mouse resize goes through every intermediate width. Passing them all on
+    /// amounts to sending one `SIGWINCH` per frame: the program redraws every
+    /// time, and since it redraws *in place*, its successive prompts pile up
+    /// instead of replacing each other. So we wait for the size to settle;
+    /// meanwhile, the panel clips the old grid, exactly as a window being
+    /// resized does.
     fn request_size(&mut self, size: TermSize, cx: &mut Context<Self>) {
         if self.terminal.size() == size {
             self.pending_size = None;
@@ -313,12 +306,12 @@ impl TerminalView {
 
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(bytes) = key_bytes(&event.keystroke, self.terminal.mode()) {
-            // Taper invalide la sélection : ce qu'elle désignait aura bougé
-            // dès que le programme aura répondu.
+            // Typing invalidates the selection: what it named will have moved as
+            // soon as the program answers.
             self.terminal.clear_selection();
-            // Toute frappe ramène en bas : c'est ce que fait un terminal, et
-            // taper en ayant remonté l'historique sans que la vue suive serait
-            // déroutant.
+            // Every keystroke brings the view back to the bottom: that is what a
+            // terminal does, and typing after scrolling back without the view
+            // following would be disconcerting.
             self.terminal.scroll_to_bottom();
             self.terminal.write(bytes);
             self.snapshot = self.terminal.snapshot();
@@ -326,22 +319,22 @@ impl TerminalView {
         }
     }
 
-    /// Traduit une position de la fenêtre en cellule du viewport.
+    /// Translates a window position into a viewport cell.
     ///
-    /// Le côté (`Side`) vient de la moitié de cellule où tombe le pointeur :
-    /// sélectionner en partant de la moitié droite d'un caractère ne doit pas
-    /// l'inclure, comme dans un éditeur.
+    /// The side (`Side`) comes from the half of the cell the pointer falls in:
+    /// selecting from a character's right half must not include it, as in an
+    /// editor.
     fn position_at(&self, point: Point<Pixels>) -> ViewportPosition {
         viewport_position(point - self.bounds.origin, self.cell)
     }
 
-    /// Rapporte un événement de souris au programme, s'il écoute.
+    /// Reports a mouse event to the program, if it is listening.
     ///
-    /// Rend vrai quand il l'a reçu : le geste lui appartient alors
-    /// entièrement, et la vue n'a plus ni sélection à étendre ni historique à
-    /// remonter. **Maj est la sortie de secours** — c'est la convention de
-    /// tous les terminaux, et sans elle on ne pourrait plus rien copier d'un
-    /// programme qui prend la souris.
+    /// Returns true when it has received it: the gesture then belongs entirely
+    /// to it, and the view has neither a selection to extend nor scrollback to
+    /// go up. **Shift is the escape hatch** — it is every terminal's convention,
+    /// and without it nothing could be copied from a program that takes the
+    /// mouse.
     fn report_mouse(
         &mut self,
         button: Option<mouse::Button>,
@@ -354,10 +347,10 @@ impl TerminalView {
         }
         let cell = self.position_at(position);
         let (column, line) = (cell.column, cell.line);
-        // Un déplacement ne vaut d'être rapporté qu'au changement de cellule :
-        // le programme redessine à chaque événement, et un geste de la main en
-        // traverse une dizaine. Rien n'est parti, d'où le `false` — il n'y a de
-        // toute façon aucun geste local à faire d'un survol.
+        // A movement is only worth reporting when the cell changes: the program
+        // redraws on every event, and a movement of the hand crosses a dozen.
+        // Nothing was sent, hence the `false` — there is no local gesture to
+        // make out of a hover anyway.
         if action == mouse::Action::Move && self.mouse_cell == Some((column, line)) {
             return false;
         }
@@ -381,18 +374,18 @@ impl TerminalView {
         if event.button != MouseButton::Left {
             return;
         }
-        // Seul le bouton gauche part au programme. Le milieu colle la
-        // sélection primaire et le droit ouvre le menu de Claudhub — d'où l'on
-        // copie, justement, ce qu'un programme qui prend la souris rendrait
-        // sinon impossible.
+        // Only the left button goes to the program. The middle one pastes the
+        // primary selection and the right one opens Claudhub's menu — which is
+        // precisely where copying happens, something a program taking the mouse
+        // would otherwise make impossible.
         if self.report_mouse(
             Some(mouse::Button::Left),
             mouse::Action::Press,
             event.position,
             event.modifiers,
         ) {
-            // Une sélection laissée derrière soi se peindrait par-dessus ce
-            // que le programme dessine, sans qu'on puisse plus l'ôter.
+            // A selection left behind would paint over what the program draws,
+            // with no way left to remove it.
             self.terminal.clear_selection();
             self.snapshot = self.terminal.snapshot();
             cx.notify();
@@ -401,8 +394,8 @@ impl TerminalView {
         let kind = match event.click_count {
             1 => SelectionKind::Simple,
             2 => SelectionKind::Word,
-            // Au-delà de trois, c'est encore la ligne : personne ne compte les
-            // clics au-delà, et réinitialiser serait déroutant.
+            // Past three, it is still the line: nobody counts clicks beyond
+            // that, and resetting would be disconcerting.
             _ => SelectionKind::Line,
         };
         self.terminal
@@ -418,8 +411,8 @@ impl TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Un glissement n'est pas un survol : le programme les demande
-        // séparément, et `mouse::report` fait le tri.
+        // A drag is not a hover: the program asks for them separately, and
+        // `mouse::report` sorts them out.
         let held =
             matches!(event.pressed_button, Some(MouseButton::Left)).then_some(mouse::Button::Left);
         if !self.selecting
@@ -437,9 +430,8 @@ impl TerminalView {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        // Le relâchement suit l'enfoncement : si celui-ci est parti au
-        // programme, il n'y a pas de sélection en cours, et c'est ce que dit
-        // `selecting`.
+        // The release follows the press: if that one went to the program, there
+        // is no selection under way, and that is what `selecting` says.
         if event.button != MouseButton::Left {
             return;
         }
@@ -454,8 +446,8 @@ impl TerminalView {
             return;
         }
         self.selecting = false;
-        // Une sélection vide est un simple clic : la garder laisserait un
-        // reliquat invisible qui ferait échouer la copie suivante.
+        // An empty selection is a plain click: keeping it would leave an
+        // invisible remnant that would make the next copy fail.
         if !self.terminal.has_selection() {
             self.terminal.clear_selection();
             self.snapshot = self.terminal.snapshot();
@@ -463,14 +455,14 @@ impl TerminalView {
         }
     }
 
-    /// Bouton du milieu : colle la sélection primaire d'X11/Wayland, comme
-    /// tout terminal Unix.
+    /// Middle button: pastes X11/Wayland's primary selection, like every Unix
+    /// terminal.
     ///
-    /// Elle n'existe **que** là : Windows n'a qu'un presse-papiers, et gpui
-    /// n'y expose donc rien à lire — le bouton du milieu n'a alors rien à
-    /// coller. Coller le presse-papiers à la place serait pire que de ne rien
-    /// faire : le geste ne veut pas dire ça, et un clic malheureux déverserait
-    /// dans le terminal ce qu'on avait copié pour ailleurs.
+    /// It exists **only** there: Windows has a single clipboard, and gpui
+    /// therefore exposes nothing to read — the middle button then has nothing to
+    /// paste. Pasting the clipboard instead would be worse than doing nothing:
+    /// the gesture does not mean that, and an unlucky click would dump into the
+    /// terminal what had been copied for elsewhere.
     fn on_middle_click(
         &mut self,
         _event: &MouseDownEvent,
@@ -492,11 +484,10 @@ impl TerminalView {
         let _ = cx;
     }
 
-    /// Vide l'historique et l'écran.
+    /// Clears the scrollback and the screen.
     ///
-    /// La sortie de secours quand un programme a laissé le terminal dans un
-    /// état illisible : le shell a bien un `clear`, mais il faut encore que
-    /// son invite réponde.
+    /// The escape hatch when a program has left the terminal in an unreadable
+    /// state: the shell does have a `clear`, but its prompt still has to answer.
     pub fn clear_scrollback(&mut self, cx: &mut Context<Self>) {
         self.terminal.clear();
         self.snapshot = self.terminal.snapshot();
@@ -522,29 +513,28 @@ impl TerminalView {
         }
     }
 
-    /// Sélectionne tout le contenu visible et l'historique.
+    /// Selects all the visible content and the scrollback.
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
         self.terminal.select_all();
         self.snapshot = self.terminal.snapshot();
         cx.notify();
     }
 
-    /// Dessine le curseur.
+    /// Draws the cursor.
     ///
-    /// Un rectangle semi-transparent posé par-dessus la grille plutôt qu'une
-    /// cellule inversée : l'inversion demanderait de redessiner le glyphe
-    /// dans l'autre sens, alors qu'un fond translucide laisse lire le
-    /// caractère qui est dessous, ce qui est tout ce qu'on demande à un
-    /// curseur de bloc.
+    /// A semi-transparent rectangle laid over the grid rather than an inverted
+    /// cell: inversion would mean redrawing the glyph the other way round,
+    /// whereas a translucent background lets the character underneath be read,
+    /// which is all one asks of a block cursor.
     ///
-    /// Il ne clignote pas. Un clignotement réveille l'interface deux fois par
-    /// seconde et par onglet, en permanence, pour une information que la
-    /// position et le contraste donnent déjà ; hors du focus, le contour seul
-    /// dit assez que la frappe irait ailleurs.
+    /// It does not blink. Blinking wakes the interface twice a second per tab,
+    /// permanently, for information the position and the contrast already give;
+    /// out of focus, the outline alone says well enough that typing would go
+    /// elsewhere.
     fn render_cursor(&self, focused: bool, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let cursor = self.snapshot.cursor?;
-        // Hors de la zone visible : on a remonté l'historique, et le curseur
-        // est resté en bas avec le programme.
+        // Outside the visible area: the scrollback has been scrolled, and the
+        // cursor stayed at the bottom with the program.
         let line = cursor.line?;
         if !cursor.visible || self.terminal.has_exited() {
             return None;
@@ -566,9 +556,9 @@ impl TerminalView {
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         let line_height = window.line_height().max(px(1.));
-        // La touche système change le sens de la molette : on grossit le texte
-        // au lieu de remonter l'historique. Le terminal traite lui-même son
-        // défilement, il suffit donc de ne pas le faire.
+        // The platform key changes the wheel's meaning: we enlarge the text
+        // instead of scrolling back. The terminal handles its own scrolling, so
+        // it is enough not to do it.
         if event.modifiers.secondary() {
             let steps = zoom_steps(event.delta.pixel_delta(line_height).y);
             if steps != 0. {
@@ -578,10 +568,9 @@ impl TerminalView {
             }
             return;
         }
-        // La hauteur d'une cellule, et non celle du texte ambiant : c'est
-        // elle qui donne le nombre de lignes d'un déplacement en pixels, et
-        // elles diffèrent dès que le terminal n'a pas la taille de
-        // l'interface.
+        // A cell's height, and not the ambient text's: it is what gives the
+        // number of lines of a pixel movement, and they differ as soon as the
+        // terminal is not the interface's size.
         let cell = self.cell.height.max(px(1.));
         let lines = take_lines(
             &mut self.scroll_remainder,
@@ -592,10 +581,9 @@ impl TerminalView {
             return;
         }
 
-        // Le programme a demandé la souris : la molette lui appartient, et
-        // c'est le seul cas où elle arrive telle quelle. Un cran par ligne,
-        // comme le fait tout terminal — le programme décide de ce que vaut un
-        // cran chez lui.
+        // The program asked for the mouse: the wheel belongs to it, and this is
+        // the only case where it arrives as it is. One notch per line, as every
+        // terminal does — the program decides what a notch is worth on its side.
         let button = if lines > 0 {
             mouse::Button::WheelUp
         } else {
@@ -615,11 +603,11 @@ impl TerminalView {
             return;
         }
 
-        // Dans l'écran secondaire — un agent, `less`, `vim` — il n'y a pas
-        // d'historique à remonter : la grille est ce que le programme dessine,
-        // et lui seul sait ce qu'il y a au-dessus. La molette s'y traduit donc
-        // en flèches, comme dans tous les terminaux quand personne n'écoute la
-        // souris ; sans quoi elle ne fait rien du tout.
+        // In the alternate screen — an agent, `less`, `vim` — there is no
+        // scrollback to go up: the grid is what the program draws, and it alone
+        // knows what is above. The wheel is therefore translated into arrows
+        // there, as in every terminal when nobody listens to the mouse; without
+        // that it does nothing at all.
         if self.terminal.in_alternate_screen() {
             let key = if lines > 0 { "up" } else { "down" };
             let repeats = lines.unsigned_abs() as usize * ALT_SCREEN_LINES;
@@ -652,9 +640,9 @@ impl Render for TerminalView {
         let font_family = self.font_family.clone();
         let entity = cx.entity();
 
-        // La mesure se fait dans un `canvas` de fond, qui reçoit la géométrie
-        // définitive après la mise en page. La calculer pendant le rendu de la
-        // liste demanderait une taille que personne ne connaît encore.
+        // The measuring happens in a background `canvas`, which receives the
+        // final geometry after layout. Computing it during the list's render
+        // would need a size nobody knows yet.
         let measure = gpui::canvas(
             move |bounds, window, cx| {
                 entity.update(cx, |view, cx| view.sync_size(bounds, window, cx));
@@ -665,16 +653,15 @@ impl Render for TerminalView {
         .size_full();
 
         let selection_bg = cx.theme().selection;
-        // Chaque ligne dans une boîte de la hauteur d'une cellule, qui ne
-        // revient pas à la ligne et qui rogne ce qui dépasse.
+        // Each line inside a box one cell high, which does not wrap and clips
+        // what overflows.
         //
-        // Sans cela, une ligne plus large que le panneau est *repliée* par
-        // gpui : elle occupe deux hauteurs, pousse tout ce qui suit vers le bas
-        // et la grille ne correspond plus à ce que le programme croit
-        // afficher. C'est ce qui se voyait après avoir rétréci puis rouvert le
-        // panneau — la géométrie est mesurée après la mise en page, donc la
-        // grille reste trop large pendant une frame, et le repli qui s'ensuit
-        // désaligne tout.
+        // Without that, a line wider than the panel is *wrapped* by gpui: it
+        // takes two heights, pushes everything after it down and the grid no
+        // longer matches what the program thinks it is showing. That is what
+        // showed after shrinking then reopening the panel — the geometry is
+        // measured after layout, so the grid stays too wide for one frame, and
+        // the wrapping that follows throws everything out of line.
         let cell_height = self.cell.height;
         let lines: Vec<_> = self
             .snapshot
@@ -712,11 +699,12 @@ impl Render for TerminalView {
             .size_full()
             .relative()
             .bg(cx.theme().background)
-            // Le dernier fond peint est celui qui décide des coins bas de la
-            // carte : le masque de contenu de gpui est rectangulaire, et
-            // l'arrondi de `panels::pane_frame` ne rogne pas ses enfants. Ce
-            // fond-ci couvre toute la surface du panneau — sans cet arrondi,
-            // le terminal reste carré en bas quoi qu'on peigne dessous.
+            // The last background painted is what decides the card's bottom
+            // corners: gpui's content mask is rectangular, and
+            // `panels::pane_frame`'s rounding does not clip its children. This
+            // background covers the panel's whole surface — without this
+            // rounding, the terminal stays square at the bottom whatever is
+            // painted underneath.
             .rounded_b(cx.theme().radius_lg)
             .font_family(font_family.clone())
             .text_size(font_size)
@@ -726,9 +714,9 @@ impl Render for TerminalView {
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_middle_click))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            // Le clic droit : les gestes qu'on cherche d'abord dans un
-            // terminal, et que `Ctrl+C` ne peut pas porter — il appartient au
-            // programme qui tourne.
+            // The right click: the gestures one looks for first in a terminal,
+            // and which `Ctrl+C` cannot carry — it belongs to the running
+            // program.
             .context_menu({
                 let entity = cx.entity();
                 move |menu, _window, _cx| {
@@ -771,11 +759,11 @@ impl Render for TerminalView {
     }
 }
 
-/// Convertit un déplacement en pixels en lignes entières.
+/// Converts a pixel movement into whole lines.
 ///
-/// Le reliquat est conservé d'un événement à l'autre : un pavé tactile envoie
-/// des fractions de ligne, et les arrondir chacune à zéro rend le défilement
-/// inerte alors qu'elles finissent par faire des lignes.
+/// The remainder is kept from one event to the next: a trackpad sends fractions
+/// of a line, and rounding each to zero makes scrolling inert although they add
+/// up to lines.
 pub fn take_lines(remainder: &mut f32, pixels: f32, cell: f32) -> i32 {
     *remainder += pixels / cell.max(1.);
     let lines = remainder.trunc();
@@ -783,43 +771,43 @@ pub fn take_lines(remainder: &mut f32, pixels: f32, cell: f32) -> i32 {
     lines as i32
 }
 
-/// Lignes envoyées par cran de molette dans l'écran secondaire.
+/// Lines sent per wheel notch in the alternate screen.
 ///
-/// Trois : la convention des terminaux, et ce que `less` comme `vim` traitent
-/// comme un déplacement naturel.
+/// Three: the terminals' convention, and what both `less` and `vim` treat as a
+/// natural movement.
 const ALT_SCREEN_LINES: usize = 3;
 
-/// Les octets d'une flèche, tels que le programme les attend.
+/// An arrow's bytes, as the program expects them.
 fn arrow_bytes(key: &str, mode: alacritty_terminal::term::TermMode) -> Option<Vec<u8>> {
     crate::terminal::key_bytes(&gpui::Keystroke::parse(key).ok()?, mode)
 }
 
-/// Plancher de la grille : en deçà, le panneau rogne au lieu de demander au
-/// programme de se replier dans un espace où il ne peut rien afficher.
+/// The grid's floor: below it, the panel clips rather than ask the program to
+/// fold into a space where it can show nothing.
 const MIN_COLUMNS: usize = 20;
 const MIN_LINES: usize = 3;
 
-/// Combien de cellules tiennent dans cette place.
+/// How many cells fit in this room.
 ///
-/// Le plancher n'est pas cosmétique : un panneau réduit à rien demanderait un
-/// terminal de deux colonnes, où la moindre invite occupe cinquante lignes. Le
-/// programme redessine, l'historique déborde, et il ne reste que des
-/// fragments. En dessous, le panneau rogne — ce que fait aussi une fenêtre de
-/// terminal qu'on rétrécit trop.
+/// The floor is not cosmetic: a panel shrunk to nothing would ask for a
+/// two-column terminal, where the slightest prompt takes fifty lines. The
+/// program redraws, the scrollback overflows, and only fragments are left. Below
+/// it, the panel clips — which is also what a terminal window shrunk too far
+/// does.
 pub fn grid_size(space: gpui::Size<Pixels>, cell: gpui::Size<Pixels>) -> (usize, usize) {
     let columns = (space.width / cell.width.max(px(1.))) as usize;
     let lines = (space.height / cell.height.max(px(1.))) as usize;
     (columns.max(MIN_COLUMNS), lines.max(MIN_LINES))
 }
 
-/// Délai d'immobilité avant de transmettre une nouvelle géométrie au pty.
+/// The quiet time before a new geometry is passed to the pty.
 const RESIZE_QUIET: std::time::Duration = std::time::Duration::from_millis(150);
 
-/// Un cran de molette vaut un point de taille.
+/// One wheel notch is worth one point of size.
 ///
-/// Le nombre de lignes que la molette annonce n'entre pas en compte : trois
-/// points par cran rendrait le réglage inutilisable, et un pavé tactile en
-/// enverrait des dizaines par geste.
+/// The number of lines the wheel announces does not come into it: three points
+/// per notch would make the setting unusable, and a trackpad would send dozens
+/// per gesture.
 pub fn zoom_steps(delta_y: Pixels) -> f32 {
     if delta_y > px(0.) {
         1.
@@ -830,7 +818,7 @@ pub fn zoom_steps(delta_y: Pixels) -> f32 {
     }
 }
 
-/// Convertit une ligne de l'instantané en texte stylé.
+/// Converts a snapshot line into styled text.
 fn styled_line(
     line: &crate::terminal::Line,
     family: &SharedString,
@@ -866,13 +854,13 @@ fn styled_line(
                 Paint::Rgb(r, g, b) => rgb(r, g, b),
             },
             background_color: if seg.selected {
-                // La sélection l'emporte sur la couleur de fond de la cellule,
-                // sinon elle disparaîtrait sur une ligne colorée.
+                // The selection wins over the cell's background colour,
+                // otherwise it would vanish on a coloured line.
                 Some(selection_bg)
             } else {
                 match seg.bg {
-                    // Le fond par défaut est celui de la fenêtre : ne rien
-                    // peindre évite un rectangle par cellule.
+                    // The default background is the window's: painting nothing
+                    // avoids one rectangle per cell.
                     Paint::Default => None,
                     Paint::Rgb(r, g, b) => Some(rgb(r, g, b)),
                 }
@@ -884,12 +872,12 @@ fn styled_line(
     StyledText::new(text).with_runs(runs)
 }
 
-/// Traduit un décalage en pixels depuis le coin de la zone de rendu en
-/// coordonnées de cellule.
+/// Translates a pixel offset from the render area's corner into cell
+/// coordinates.
 ///
-/// Fonction libre plutôt que méthode : c'est de l'arithmétique dont l'erreur
-/// d'une demi-cellule ne se voit pas à l'œil mais rend la sélection
-/// désagréable, et qui se teste sans fenêtre.
+/// A free function rather than a method: it is arithmetic whose half-cell error
+/// is invisible to the eye but makes selection unpleasant, and which can be
+/// tested without a window.
 fn viewport_position(offset: Point<Pixels>, cell: gpui::Size<Pixels>) -> ViewportPosition {
     let width = f32::from(cell.width).max(1.0);
     let height = f32::from(cell.height).max(1.0);
@@ -899,9 +887,9 @@ fn viewport_position(offset: Point<Pixels>, cell: gpui::Size<Pixels>) -> Viewpor
     ViewportPosition {
         line: line_f as usize,
         column,
-        // La moitié droite d'une cellule désigne la frontière suivante : c'est
-        // ce qui permet de sélectionner « abc » en partant du milieu du `a`
-        // sans l'inclure, comme dans un éditeur de texte.
+        // A cell's right half names the next boundary: that is what makes it
+        // possible to select "abc" starting from the middle of the `a` without
+        // including it, as in a text editor.
         side: if column_f - column as f32 > 0.5 {
             Side::Right
         } else {
@@ -920,13 +908,13 @@ fn rgb(r: u8, g: u8, b: u8) -> Hsla {
     .into()
 }
 
-/// La distribution où ouvrir les terminaux, sous Windows.
+/// The distribution to open the terminals in, on Windows.
 ///
-/// `None` partout ailleurs : le pty s'ouvre là où il a toujours été ouvert.
-/// Sous Windows en revanche, les dépôts vivent dans WSL — un terminal ouvert
-/// localement regarderait un chemin qui n'existe pas, et l'agent qu'on y
-/// lance ne verrait pas le code. Le pty reste local (ConPTY) : seul ce qui
-/// tourne dedans traverse.
+/// `None` everywhere else: the pty opens where it has always opened. On Windows,
+/// on the other hand, the repositories live in WSL — a terminal opened locally
+/// would look at a path that does not exist, and the agent launched in it would
+/// not see the code. The pty stays local (ConPTY): only what runs inside it
+/// crosses.
 #[derive(Clone)]
 pub struct WslShell {
     distro: String,
@@ -934,11 +922,11 @@ pub struct WslShell {
 }
 
 impl WslShell {
-    /// La distribution en service, s'il y en a une.
+    /// The distribution in service, if there is one.
     ///
-    /// Le shell de connexion vient de la distribution elle-même, retenu au
-    /// moment de l'installation du serveur ; à défaut `/bin/sh`, qui existe
-    /// partout.
+    /// The login shell comes from the distribution itself, recorded at the
+    /// moment the server was installed; failing that `/bin/sh`, which exists
+    /// everywhere.
     pub fn current(cx: &gpui::App) -> Option<Self> {
         if !cfg!(windows) {
             return None;
@@ -951,16 +939,16 @@ impl WslShell {
         })
     }
 
-    /// Ce que le pty local doit lancer pour que le travail se fasse là-bas.
+    /// What the local pty has to launch for the work to happen over there.
     ///
-    /// Le répertoire de travail du pty **Windows** devient un dossier
-    /// quelconque mais valide : le vrai répertoire, celui du dépôt, part dans
-    /// le `--cd` de `wsl.exe`. Lui passer le chemin Linux ferait échouer
-    /// l'ouverture avant même d'avoir commencé.
+    /// The **Windows** pty's working directory becomes some valid but arbitrary
+    /// folder: the real directory, the repository's, goes into `wsl.exe`'s
+    /// `--cd`. Passing it the Linux path would make the opening fail before it
+    /// even started.
     fn wrap(&self, worktree: &Path, command: Program, env: &HashMap<String, String>) -> Spawned {
-        // Trié : l'ordre d'une table de hachage change d'une exécution à
-        // l'autre, et une ligne de commande qui bouge sans raison est
-        // impossible à comparer quand il faut la lire dans une trace.
+        // Sorted: a hash map's order changes from one run to the next, and a
+        // command line that moves for no reason is impossible to compare when it
+        // has to be read in a trace.
         let mut vars: Vec<(String, String)> =
             env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         vars.sort();
@@ -979,32 +967,32 @@ impl WslShell {
     }
 }
 
-/// Un programme et ses arguments, tels que le pty les recevra. `None` : le
-/// shell de connexion.
+/// A program and its arguments, as the pty will receive them. `None`: the login
+/// shell.
 type Program = Option<(String, Vec<String>)>;
 
-/// Ce qu'un onglet lance vraiment, une fois la plateforme prise en compte.
+/// What a tab really launches, once the platform is taken into account.
 struct Spawned {
     cwd: PathBuf,
     command: Program,
     env: HashMap<String, String>,
 }
 
-/// Ce qu'il faut pour ouvrir un onglet.
+/// What is needed to open a tab.
 ///
-/// Un agrégat plutôt que quatre paramètres : un profil d'agent porte une
-/// commande, des arguments, un environnement et un nom, et les faire voyager
-/// séparément jusqu'au pty multipliait les occasions d'en oublier un.
+/// An aggregate rather than four parameters: an agent profile carries a command,
+/// arguments, an environment and a name, and making them travel separately down
+/// to the pty multiplied the chances of forgetting one.
 pub struct Launch {
-    /// `None` = le shell de connexion, ce qu'attend quelqu'un qui ouvre « un
-    /// terminal ».
+    /// `None` = the login shell, which is what somebody opening "a terminal"
+    /// expects.
     pub command: Option<(String, Vec<String>)>,
-    /// Variables ajoutées à l'environnement du pty. C'est par là que passe le
-    /// modèle d'un profil d'agent.
+    /// Variables added to the pty's environment. This is where an agent
+    /// profile's model goes through.
     pub env: HashMap<String, String>,
     pub label: SharedString,
-    /// Vrai quand cet onglet exécute un agent : c'est à lui que les notes de
-    /// relecture seront livrées.
+    /// True when this tab runs an agent: it is the one review notes will be
+    /// delivered to.
     pub agent: bool,
 }
 
@@ -1032,19 +1020,19 @@ impl Launch {
     }
 }
 
-/// Les onglets d'un worktree.
+/// A worktree's tabs.
 pub struct TerminalGroup {
     worktree: PathBuf,
-    /// Le dossier de notes de ce worktree, s'il y en a un.
+    /// This worktree's notes folder, if it has one.
     ///
-    /// Il est ici pour finir dans l'environnement du pty : un agent lancé
-    /// depuis Claudhub doit savoir où sont les remarques qu'on lui envoie et
-    /// la liste de tâches qu'il tient. Il est relu par l'application à chaque
-    /// rendu, la racine des notes étant un réglage qui peut changer sous nous.
+    /// It is here so it ends up in the pty's environment: an agent launched from
+    /// Claudhub has to know where the remarks sent to it are and the task list
+    /// it keeps. It is re-read by the application on every render, the notes
+    /// root being a setting that can change under us.
     vault: Option<PathBuf>,
     tabs: Vec<Entity<TerminalView>>,
     active: usize,
-    /// Pourquoi le dernier onglet n'a pas pu s'ouvrir, s'il y a lieu.
+    /// Why the last tab could not open, if that applies.
     error: Option<SharedString>,
 }
 
@@ -1059,26 +1047,25 @@ impl TerminalGroup {
         }
     }
 
-    /// Le dossier de notes à annoncer aux prochains onglets.
+    /// The notes folder to announce to the next tabs.
     ///
-    /// Sans `cx.notify` : ce n'est pas ce qui est affiché qui change, mais ce
-    /// que le prochain pty recevra, et redessiner le groupe à chaque rendu
-    /// serait une boucle.
+    /// Without `cx.notify`: what changes is not what is displayed but what the
+    /// next pty will receive, and redrawing the group on every render would be a
+    /// loop.
     pub fn set_vault(&mut self, vault: Option<PathBuf>) {
         self.vault = vault;
     }
 
-    /// Ouvre un onglet. `command` vide lance le shell de l'utilisateur.
+    /// Opens a tab. An empty `command` launches the user's shell.
     ///
-    /// `agent` dit si ce qu'on lance est un agent de codage : c'est à cet
-    /// onglet-là que les notes de relecture seront livrées.
+    /// `agent` says whether what is launched is a coding agent: it is to that
+    /// tab that review notes will be delivered.
     pub fn open(&mut self, mut launch: Launch, window: &mut Window, cx: &mut Context<Self>) {
-        // Ce que l'agent a besoin de savoir de Claudhub, et qu'aucune API ne
-        // lui dira : où il travaille, où sont les notes de relecture qu'on lui
-        // envoie, et quel fichier porte sa liste de tâches. Des variables
-        // d'environnement plutôt qu'un protocole — un shell les voit aussi,
-        // et un agent qu'on lance dans un terminal à côté n'a qu'à les
-        // recopier.
+        // What the agent needs to know about Claudhub, and no API will tell it:
+        // where it works, where the review notes sent to it are, and which file
+        // carries its task list. Environment variables rather than a protocol —
+        // a shell sees them too, and an agent launched in a terminal alongside
+        // only has to copy them.
         launch.env.insert(
             "CLAUDHUB_WORKTREE".into(),
             self.worktree.display().to_string(),
@@ -1092,13 +1079,13 @@ impl TerminalGroup {
                 vault.join(crate::ui::vault::TODO).display().to_string(),
             );
         }
-        // Un pty qu'on n'arrive pas à ouvrir est un problème système : limite
-        // de descripteurs atteinte, `/dev/pts` absent. On renonce à l'onglet et
-        // on le dit, plutôt que de paniquer au milieu d'un rendu — ce que
-        // faisait ce code, avec pour seul symptôme une fenêtre figée.
-        // Les réglages sont relus à l'ouverture plutôt que retenus à la
-        // construction : changer le shell ou le défilement arrière doit valoir
-        // pour le prochain onglet, sans avoir à fermer les autres.
+        // A pty we cannot open is a system problem: descriptor limit reached,
+        // `/dev/pts` missing. We give the tab up and say so, rather than panic
+        // in the middle of a render — which is what this code used to do, with a
+        // frozen window as its only symptom.
+        // The settings are re-read at opening rather than recorded at
+        // construction: changing the shell or the scrollback has to hold for the
+        // next tab, without having to close the others.
         let settings = Settings::global(cx).terminal.clone();
         let wsl = WslShell::current(cx);
         let terminal = match TerminalView::open(&self.worktree, &launch, &settings, wsl.as_ref()) {
@@ -1119,19 +1106,19 @@ impl TerminalGroup {
         cx.notify();
     }
 
-    /// Vrai quand l'onglet courant a le focus. C'est ce qui désigne la zone
-    /// que les raccourcis de zoom visent.
+    /// True when the current tab has focus. That is what names the area the zoom
+    /// shortcuts aim at.
     pub fn is_focused(&self, window: &Window, cx: &App) -> bool {
         self.tabs
             .get(self.active)
             .is_some_and(|tab| tab.read(cx).focus_handle(cx).is_focused(window))
     }
 
-    /// Ouvre un onglet exécutant l'agent de codage configuré.
+    /// Opens a tab running the configured coding agent.
     ///
-    /// Le geste vit avec les autres ouvertures de terminal — dans le menu du
-    /// bouton « + » — et non dans la barre d'outils de la fenêtre : c'est un
-    /// terminal de plus dans *ce* worktree, pas une action sur le dépôt.
+    /// The gesture lives with the other terminal openings — in the "+" button's
+    /// menu — and not in the window's toolbar: it is one more terminal in *this*
+    /// worktree, not an action on the repository.
     pub fn open_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(profile) = Settings::global(cx).terminal.default_profile().cloned() else {
             return;
@@ -1139,7 +1126,7 @@ impl TerminalGroup {
         self.open_profile(&profile, window, cx);
     }
 
-    /// Ouvre un profil nommé.
+    /// Opens a named profile.
     pub fn open_profile(
         &mut self,
         profile: &crate::ui::settings::AgentProfile,
@@ -1152,12 +1139,12 @@ impl TerminalGroup {
         self.open(Launch::agent(profile), window, cx);
     }
 
-    /// Livre un texte à l'agent de ce worktree, et le valide.
+    /// Delivers a text to this worktree's agent, and confirms it.
     ///
-    /// S'il n'y a pas d'onglet d'agent, on en ouvre un — et l'envoi est
-    /// **différé** : un agent met une seconde ou deux à afficher son invite, et
-    /// ce qui arrive avant est lu par le shell qui n'a pas encore été remplacé,
-    /// ou tout simplement perdu.
+    /// If there is no agent tab, one is opened — and the send is **deferred**:
+    /// an agent takes a second or two to show its prompt, and what arrives
+    /// before is read by the shell that has not been replaced yet, or simply
+    /// lost.
     pub fn send_to_agent(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
         match self.agent_tab(cx) {
             Some(index) => {
@@ -1180,11 +1167,11 @@ impl TerminalGroup {
         }
     }
 
-    /// L'onglet d'agent le plus récent qui tourne encore.
+    /// The most recent agent tab still running.
     ///
-    /// Le plus récent : c'est celui qu'on regarde, et relancer un agent après
-    /// en avoir quitté un est le geste normal quand la conversation s'est
-    /// enlisée.
+    /// The most recent: it is the one being looked at, and relaunching an agent
+    /// after quitting one is the normal gesture when the conversation has got
+    /// bogged down.
     fn agent_tab(&self, cx: &App) -> Option<usize> {
         self.tabs
             .iter()
@@ -1197,11 +1184,11 @@ impl TerminalGroup {
             .map(|(index, _)| index)
     }
 
-    /// Colle, puis valide dans un **second** envoi.
+    /// Pastes, then confirms in a **second** send.
     ///
-    /// Les deux sont séparés par un court silence : un TUI qui vient de
-    /// recevoir un collage encadré peut avaler un retour chariot arrivé dans
-    /// la foulée, et le message resterait dans l'invite sans partir.
+    /// The two are separated by a short silence: a TUI that has just received a
+    /// bracketed paste may swallow a carriage return arriving right behind it,
+    /// and the message would stay in the prompt without going out.
     fn deliver(&mut self, index: usize, text: String, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(index).cloned() else {
             return;
@@ -1312,20 +1299,20 @@ impl Render for TerminalGroup {
                                     })),
                             )
                     }))
-                    // Le bouton suit le dernier onglet plutôt que de se coller
-                    // au bord droit : c'est là que le regard finit sa lecture
-                    // des onglets, et un bouton à l'autre bout du panneau
-                    // demande de traverser la barre pour ouvrir la suite.
+                    // The button follows the last tab rather than sticking to
+                    // the right edge: that is where the eye finishes reading the
+                    // tabs, and a button at the other end of the panel means
+                    // crossing the bar to open the next one.
                     .child(
                         Button::new("new-tab")
                             .ghost()
                             .xsmall()
                             .icon(icon("plus"))
                             .tooltip(tr!("terminal-new"))
-                            // Un profil d'agent par entrée : le menu est le
-                            // seul endroit où le choix se pose, et une liste
-                            // qui vient des réglages évite d'avoir à les
-                            // rouvrir pour lancer autre chose.
+                            // One agent profile per entry: the menu is the only
+                            // place the choice arises, and a list coming from
+                            // the settings saves reopening them to launch
+                            // something else.
                             .dropdown_menu({
                                 let entity = cx.entity();
                                 move |menu, _window, cx| {
@@ -1391,22 +1378,22 @@ impl ClaudhubApp {
         let Some(worktree) = self.active.clone() else {
             return div().into_any_element();
         };
-        // Le groupe est créé à la première demande : ouvrir un worktree ne doit
-        // pas lancer un shell dont personne n'a besoin.
+        // The group is created on first request: opening a worktree must not
+        // launch a shell nobody needs.
         let group = self.terminal_group(&worktree, window, cx);
         group.into_any_element()
     }
 
-    /// Le groupe d'un worktree, créé au besoin avec un premier onglet.
+    /// A worktree's group, created if needed with a first tab.
     pub(super) fn terminal_group(
         &mut self,
         worktree: &Path,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalGroup> {
-        // Relu à chaque appel, donc à chaque rendu du panneau : la racine des
-        // notes est un réglage, et un onglet ouvert après l'avoir changée doit
-        // recevoir le bon dossier.
+        // Re-read on every call, so on every render of the panel: the notes root
+        // is a setting, and a tab opened after changing it has to receive the
+        // right folder.
         let vault = self.notes_dir(worktree, cx);
         if let Some(group) = self.terminals.get(worktree).cloned() {
             group.update(cx, |group, _| group.set_vault(vault));
@@ -1426,37 +1413,37 @@ impl ClaudhubApp {
 #[cfg(test)]
 mod tests {
 
-    /// Un pavé tactile envoie des fractions de ligne : les perdre une à une
-    /// rend le défilement inerte.
+    /// A trackpad sends fractions of a line: losing them one by one makes
+    /// scrolling inert.
     #[test]
     fn fractions_of_a_line_add_up_instead_of_vanishing() {
         let mut remainder = 0.;
         assert_eq!(take_lines(&mut remainder, 6., 16.), 0);
         assert_eq!(take_lines(&mut remainder, 6., 16.), 0);
         assert_eq!(take_lines(&mut remainder, 6., 16.), 1);
-        // Le trop-plein reste pour la suite plutôt que d'être jeté.
+        // The overflow is kept for later rather than thrown away.
         assert!(remainder > 0.1 && remainder < 0.2);
 
-        // Vers le bas, la même chose en négatif.
+        // Downwards, the same thing in negative.
         let mut remainder = 0.;
         assert_eq!(take_lines(&mut remainder, -32., 16.), -2);
         assert_eq!(remainder, 0.);
 
-        // Une hauteur de cellule absurde ne divise pas par zéro.
+        // An absurd cell height does not divide by zero.
         let mut remainder = 0.;
         assert_eq!(take_lines(&mut remainder, 5., 0.), 5);
     }
 
-    /// Le plancher n'est pas cosmétique : sous vingt colonnes, une invite de
-    /// shell occupe des dizaines de lignes, le programme redessine, et le
-    /// glissement de redimensionnement ne laisse que des fragments empilés.
+    /// The floor is not cosmetic: below twenty columns, a shell prompt takes
+    /// dozens of lines, the program redraws, and the resize drag leaves nothing
+    /// but stacked fragments.
     #[test]
     fn a_squeezed_panel_still_gets_a_usable_grid() {
         let cell = gpui::size(px(8.), px(16.));
         assert_eq!(grid_size(gpui::size(px(800.), px(320.)), cell), (100, 20));
-        // Réduit à rien : on rogne plutôt que de demander deux colonnes.
+        // Shrunk to nothing: we clip rather than ask for two columns.
         assert_eq!(grid_size(gpui::size(px(10.), px(4.)), cell), (20, 3));
-        // Une cellule de largeur nulle ne divise pas par zéro.
+        // A zero-width cell does not divide by zero.
         assert_eq!(
             grid_size(gpui::size(px(800.), px(320.)), gpui::size(px(0.), px(0.))),
             (800, 320)
@@ -1473,19 +1460,19 @@ mod tests {
         let p = viewport_position(gpui::point(px(0.), px(0.)), cell());
         assert_eq!((p.line, p.column), (0, 0));
 
-        // Colonne 3, ligne 2 : 3×8 et 2×16, plus un poil.
+        // Column 3, line 2: 3×8 and 2×16, plus a shade.
         let p = viewport_position(gpui::point(px(25.), px(33.)), cell());
         assert_eq!((p.line, p.column), (2, 3));
     }
 
     #[test]
     fn the_half_of_the_cell_decides_the_side() {
-        // Premier tiers de la cellule 2 : on vise sa frontière gauche.
+        // First third of cell 2: we aim at its left boundary.
         let p = viewport_position(gpui::point(px(18.), px(0.)), cell());
         assert_eq!(p.column, 2);
         assert_eq!(p.side, Side::Left);
 
-        // Dernier tiers de la même cellule : frontière droite.
+        // Last third of the same cell: right boundary.
         let p = viewport_position(gpui::point(px(22.), px(0.)), cell());
         assert_eq!(p.column, 2);
         assert_eq!(p.side, Side::Right);
@@ -1493,8 +1480,8 @@ mod tests {
 
     #[test]
     fn a_pointer_above_or_left_of_the_view_clamps_to_the_origin() {
-        // Un glissement qui sort de la zone ne doit pas produire d'indice
-        // négatif : la conversion en `usize` déborderait.
+        // A drag leaving the area must not produce a negative index: the
+        // conversion to `usize` would overflow.
         let p = viewport_position(gpui::point(px(-40.), px(-90.)), cell());
         assert_eq!((p.line, p.column), (0, 0));
     }

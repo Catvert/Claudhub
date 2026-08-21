@@ -1,25 +1,27 @@
-//! Les sous-applications.
+//! The sub-applications.
 //!
-//! Claudhub fait quatre métiers qui n'ont presque rien en commun : relire un
-//! diff, retoucher un fichier, interroger une base, dépouiller une erreur.
-//! Tant qu'ils partageaient une seule fenêtre, chacun payait la place des
-//! trois autres — huit onglets au centre dont on n'en regarde jamais que deux,
-//! et un panneau central qui changeait de nature selon le dernier geste.
+//! Claudhub does four jobs with almost nothing in common: reviewing a diff,
+//! touching up a file, querying a database, working through an error. As long
+//! as they shared one window, each paid for the other three's room — eight tabs
+//! in the centre of which only two are ever looked at, and a central panel that
+//! changed nature according to the last gesture. The settings make a fifth
+//! screen, the only one that is not work: they were a modal window, which is
+//! what one reaches for when there is nowhere to put a form.
 //!
-//! Chaque écran a donc **son dock**, avec ses panneaux, ses onglets et ses
-//! tailles, mémorisés séparément. On passe de l'un à l'autre par la barre du
-//! bas ; régler la revue ne déplace plus rien sur l'écran des bases.
+//! Each screen therefore has **its own dock**, with its panels, its tabs and
+//! its sizes, remembered separately. You move between them through the bottom
+//! bar; tuning the review no longer moves anything on the databases screen.
 //!
-//! **Deux vues sont partout** : les dépôts et les terminaux. Le premier dit
-//! *où* l'on travaille — le choix vaut pour les quatre écrans —, le second est
-//! ce à quoi on parle pendant qu'on regarde n'importe lequel d'entre eux. Ce
-//! sont donc les deux seuls panneaux instanciés une fois par dock.
+//! **Two views are everywhere**: the repositories and the terminals. The first
+//! says *where* you work — the choice holds across every screen — the
+//! second is what you talk to while looking at any of them. They are therefore
+//! the only two panels instantiated once per dock.
 //!
-//! Le panneau central, lui, **cesse d'être partagé** : le diff appartient à la
-//! revue, l'éditeur à l'édition, la console SQL aux bases. C'est ce que la
-//! découpe achète de plus visible — un onglet dont le titre changeait de
-//! « Diff » à « Éditeur » à « SQL » selon ce qu'on venait de faire disait bien
-//! qu'il portait trois choses.
+//! The central panel, for its part, **stops being shared**: the diff belongs to
+//! the review, the editor to editing, the SQL console to the databases. That is
+//! the most visible thing the split buys — a tab whose title changed from
+//! "Diff" to "Editor" to "SQL" depending on what you had just done was saying
+//! plainly that it carried three things.
 
 use gpui::{prelude::*, px, Context, Entity, Window};
 use gpui_component::{
@@ -32,21 +34,22 @@ use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
 use crate::ui::panels;
 
-/// La hauteur d'origine des terminaux, la même sur les quatre écrans : ce
-/// qu'on y lit est de la même nature partout.
+/// The terminals' initial height, the same on every screen: what is read
+/// there is of the same nature everywhere.
 const TERMINAL_HEIGHT: gpui::Pixels = px(220.);
 
-/// La largeur d'origine de la colonne de gauche.
+/// The initial width of the left column.
 const SIDEBAR_WIDTH: gpui::Pixels = px(280.);
 
-/// La largeur d'origine de la colonne qui dit quoi relire, à gauche du diff.
+/// The initial width of the column saying what to review, left of the diff.
 const REVIEW_LIST_WIDTH: gpui::Pixels = px(420.);
 
-/// Un écran, et l'ordre dans lequel la barre les propose.
+/// A screen, and the order in which the bar offers them.
 ///
-/// L'ordre n'est pas indifférent : c'est celui du travail. On relit, on
-/// corrige ce qu'on a lu, on vérifie en base ce que le code raconte, et Sentry
-/// est le point de départ des jours où l'on n'a pas choisi son sujet.
+/// The order is not arbitrary: it is the order of the work. You review, you fix
+/// what you read, you check in the database what the code claims, and Sentry is
+/// the starting point on days when you did not choose your subject. The
+/// settings come last, being the only one that is not work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Workspace {
     #[default]
@@ -197,11 +200,10 @@ fn with_terminal(
         )
 }
 
-/// Fabrique les panneaux dont un écran a besoin, et pose sa disposition
-/// d'origine.
+/// Builds the panels a screen needs, and installs its initial layout.
 ///
-/// Chaque écran a **ses** instances, y compris des deux vues partagées : un
-/// panneau n'appartient qu'à un dock à la fois, et un seul dock est affiché.
+/// Each screen has **its** instances, including of the two shared views: a
+/// panel belongs to only one dock at a time, and only one dock is displayed.
 pub fn install_default_layout(
     workspace: Workspace,
     app: &Entity<ClaudhubApp>,
@@ -247,24 +249,22 @@ pub fn install_default_layout(
                 );
             let center = with_terminal(
                 DockLayout::h_split()
-                    // Les façons de choisir quoi relire : ce qui reste à
-                    // faire et ce qu'on a eu à dire, ce qui change
-                    // maintenant, ce que la branche a écrit, ce qui est déjà
-                    // committé. Des onglets et non des panneaux côte à côte —
-                    // ils répondent à la même question.
+                    // The ways of choosing what to review: what is left to do
+                    // and what we had to say, what changes now, what the branch
+                    // wrote, what is already committed. Tabs and not panels
+                    // side by side — they answer the same question.
                     .child(
                         DockLayout::tabs()
-                            // Les notes en premier : elles disent où l'on en
-                            // est, là où les suivantes disent ce qu'il y a à
-                            // lire. C'est par là qu'on reprend un worktree
-                            // quitté hier.
+                            // Notes first: they say where you stand, where the
+                            // ones after say what there is to read. That is
+                            // where you pick up a worktree left yesterday.
                             .panel_view(panel!(NotesPanel), cx)
                             .panel_view(panel!(ChangesPanel), cx)
                             .panel_view(panel!(BranchPanel), cx)
                             .panel_view(panel!(HistoryPanel), cx)
-                            // Masqué tant qu'il n'y a rien à résoudre : un
-                            // onglet permanent décalerait les autres pour
-                            // servir une fois sur cent.
+                            // Hidden while there is nothing to resolve: a
+                            // permanent tab would shift the others aside to
+                            // serve one time in a hundred.
                             .panel_view(panel!(ConflictsPanel), cx),
                         Some(REVIEW_LIST_WIDTH),
                     )
@@ -377,13 +377,12 @@ impl ClaudhubApp {
                 Button::new(("workspace", workspace as usize))
                     .icon(icon(workspace.icon()))
                     .tooltip(tr!(workspace.label()))
-                    // **Plein contre contour**, et non l'état « sélectionné »
-                    // d'un groupe entier en contour : celui-ci n'est qu'un fond
-                    // légèrement plus clair, invisible sur la moitié des
-                    // thèmes. C'est le même constat que pour le choix du moteur
-                    // d'une connexion, et « où suis-je » est exactement la
-                    // question que cette barre doit répondre sans qu'on la
-                    // cherche.
+                    // **Solid against outline**, and not the "selected" state of
+                    // a whole outlined group: that is only a slightly lighter
+                    // background, invisible on half the themes. It is the same
+                    // observation as for a connection's engine picker, and
+                    // "where am I" is exactly the question this bar has to
+                    // answer without being looked for.
                     .map(|button| {
                         if here {
                             button.primary()

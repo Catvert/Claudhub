@@ -1,20 +1,20 @@
-//! Couche git de Claudhub.
+//! Claudhub's git layer.
 //!
-//! Tout passe par le binaire `git` en sous-processus, jamais par libgit2. Un
-//! utilisateur qui lance Claudhub attend que ses `credential.helper`,
-//! `includeIf`, hooks, `commit.gpgsign` et alias s'appliquent — c'est-à-dire
-//! sa configuration, pas une réimplémentation qui en couvrirait la moitié.
-//! Le coût est un `fork` par commande ; à l'échelle d'un panneau de revue qui
-//! rafraîchit sur événement de fichier, il est invisible.
+//! Everything goes through the `git` binary as a subprocess, never through
+//! libgit2. A user launching Claudhub expects their `credential.helper`,
+//! `includeIf`, hooks, `commit.gpgsign` and aliases to apply — that is, their
+//! configuration, not a reimplementation covering half of it. The cost is one
+//! `fork` per command; at the scale of a review panel refreshing on file
+//! events, it is invisible.
 //!
-//! Aucune fonction de ce module ne doit être appelée depuis le thread UI :
-//! elles bloquent. Elles sont conçues pour tourner dans le worker
-//! (`crate::app::worker`), qui renvoie ses résultats par événements.
+//! No function in this module may be called from the UI thread: they block.
+//! They are meant to run in the worker (`crate::app::worker`), which sends its
+//! results back as events.
 
 pub mod branch;
 pub mod diff;
-// Nommé `history` et non `log` : un module `log` dans ce crate masquerait la
-// bibliothèque de journalisation du même nom pour tout le fichier.
+// Named `history` and not `log`: a module `log` in this crate would shadow the
+// logging library of the same name for the whole file.
 pub mod history;
 pub mod repo;
 pub mod status;
@@ -33,20 +33,19 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
-/// Au-delà, la commande est tuée et l'échec remonte comme un message.
+/// Beyond this, the command is killed and the failure comes back as a message.
 ///
-/// Aucune lecture git ne prend trente secondes : un `status` coûte dix
-/// millisecondes sur un dépôt de quarante mille fichiers. Ce délai n'existe
-/// donc pas pour les commandes lentes mais pour celles qui **n'aboutissent
-/// jamais** — une invite d'authentification qu'on ne voit pas, un dépôt sur un
-/// montage réseau qui a disparu, un verrou tenu par un autre outil. Sans lui,
-/// une seule commande de ce genre emporte un worker définitivement, et trois
-/// figent toute l'application sans le moindre message.
+/// No git read takes thirty seconds: a `status` costs ten milliseconds on a
+/// repository of forty thousand files. This timeout therefore does not exist
+/// for slow commands but for those that **never finish** — an authentication
+/// prompt nobody sees, a repository on a network mount that has vanished, a
+/// lock held by another tool. Without it, one such command takes a worker away
+/// for good, and three freeze the whole application without a single message.
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-// Le délai est réglable pour les tests : trente secondes d'attente y seraient
-// insupportables, et vérifier qu'une commande bloquée est bien interrompue vaut
-// mieux que de faire confiance au code.
+// The timeout is adjustable for tests: waiting thirty seconds there would be
+// unbearable, and checking that a stuck command really is interrupted is
+// better than trusting the code.
 #[cfg(test)]
 thread_local! {
     static TEST_TIMEOUT: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
@@ -223,8 +222,8 @@ pub(crate) fn git_tolerant<S: AsRef<OsStr>>(
     ))
 }
 
-/// Vrai si la commande sort avec le code 0. Pour les questions fermées
-/// (`show-ref --verify --quiet`) dont la sortie n'intéresse personne.
+/// True if the command exits with code 0. For closed questions
+/// (`show-ref --verify --quiet`) whose output interests nobody.
 pub(crate) fn git_ok<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> bool {
     command(dir, args)
         .stdout(Stdio::null())
@@ -240,30 +239,29 @@ fn command<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Command {
         .arg(dir)
         .args(args)
         .stdin(Stdio::null())
-        // Un pager laisserait la commande attendre un lecteur qui n'existe pas.
+        // A pager would leave the command waiting for a reader that does not exist.
         .env("GIT_PAGER", "cat")
         .env("GIT_TERMINAL_PROMPT", "0")
-        // Même raison que l'invite de mot de passe : aucune commande lancée
-        // ici n'a de message à faire écrire, et celles qui en ouvriraient un
-        // — `merge --continue`, `rebase --continue` — bloqueraient le worker
-        // pour toujours sur un éditeur que personne ne voit. `true` sort avec
-        // zéro sans rien modifier, ce que git lit comme « le message convient ».
+        // Same reason as the password prompt: no command launched here has a
+        // message to be written, and those that would open an editor —
+        // `merge --continue`, `rebase --continue` — would block the worker
+        // forever on an editor nobody sees. `true` exits with zero without
+        // changing anything, which git reads as "the message is fine".
         .env("GIT_EDITOR", "true")
         .env("GIT_SEQUENCE_EDITOR", "true")
-        // Les sorties porcelain sont stables, mais les messages d'erreur que
-        // nous affichons tels quels ne le sont pas : les lire en anglais évite
-        // de dépendre de la locale de la machine pour les reconnaître.
+        // Porcelain outputs are stable, but the error messages we display as
+        // they are are not: reading them in English avoids depending on the
+        // machine's locale to recognise them.
         .env("LC_ALL", "C")
-        // **Ne pas réécrire l'index en passant.** `git status` rafraîchit les
-        // informations de `stat` qu'il y garde en cache, ce qui touche
-        // `.git/index` — que nous surveillons. Chaque lecture provoquait donc
-        // la suivante : un `git status` toutes les soixante millisecondes, en
-        // boucle, et la liste des fichiers qui clignotait au même rythme.
+        // **Do not rewrite the index in passing.** `git status` refreshes the
+        // `stat` information it caches there, which touches `.git/index` —
+        // which we watch. Every read therefore triggered the next: a `git
+        // status` every sixty milliseconds, in a loop, and a file list
+        // flickering at the same rate.
         //
-        // C'est le verrou que git qualifie lui-même d'optionnel, et cette
-        // variable est prévue pour les outils qui interrogent un dépôt en
-        // continu. Les écritures, elles, prennent le vrai verrou et ne sont
-        // pas concernées.
+        // This is the lock git itself calls optional, and this variable exists
+        // for tools that poll a repository continuously. Writes take the real
+        // lock and are not affected.
         .env("GIT_OPTIONAL_LOCKS", "0");
     cmd
 }
@@ -282,12 +280,11 @@ fn strip_trailing_newline(mut s: String) -> String {
     s
 }
 
-/// Découpe une sortie `-z` (enregistrements séparés par des octets nuls).
+/// Splits a `-z` output (records separated by null bytes).
 ///
-/// Les formats `--porcelain=v1 -z`, `diff --name-status -z` et consorts
-/// existent précisément parce qu'un chemin peut contenir un saut de ligne ou
-/// une apostrophe ; découper sur `\n` marche jusqu'au jour où un fichier
-/// s'appelle mal.
+/// The `--porcelain=v1 -z`, `diff --name-status -z` and similar formats exist
+/// precisely because a path may contain a newline or a quote; splitting on
+/// `\n` works right up until a file is badly named.
 pub(crate) fn split_nul(s: &str) -> impl Iterator<Item = &str> {
     s.split('\0').filter(|r| !r.is_empty())
 }
@@ -296,9 +293,9 @@ pub(crate) fn split_nul(s: &str) -> impl Iterator<Item = &str> {
 mod tests {
     use super::*;
 
-    /// Une commande qui n'aboutit jamais ne doit pas emporter son worker : sans
-    /// cette interruption, trois d'entre elles figent l'application entière —
-    /// plus de statut, plus de diff — sans le moindre message.
+    /// A command that never returns must not take its worker with it: without
+    /// this interruption, three of them freeze the whole application — no more
+    /// status, no more diff — without a single message.
     #[test]
     fn a_command_that_never_returns_is_interrupted() {
         TEST_TIMEOUT.with(|t| t.set(Some(Duration::from_millis(300))));

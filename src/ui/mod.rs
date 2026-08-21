@@ -1,9 +1,9 @@
-//! Interface gpui.
+//! The gpui interface.
 //!
-//! Seule cette couche connaît gpui. Elle ne fait jamais d'entrée-sortie
-//! elle-même : elle envoie des `Cmd` aux workers git (`crate::runtime`) et
-//! réagit aux `Evt` qu'ils renvoient, drainés par une tâche gpui de premier
-//! plan. Les terminaux ont leur propre boucle, dans `crate::terminal`.
+//! Only this layer knows gpui. It never does I/O itself: it sends `Cmd`s to
+//! the git workers (`crate::runtime`) and reacts to the `Evt`s they send back,
+//! drained by a foreground gpui task. Terminals have their own loop, in
+//! `crate::terminal`.
 
 mod app;
 mod base_select;
@@ -46,18 +46,17 @@ use rust_embed::RustEmbed;
 
 pub use settings::{split_command, LanguageChoice, Settings, ThemeMode};
 
-/// Interface et texte courant.
+/// Interface and body text.
 const INTER_FONT: &[u8] = include_bytes!("../../assets/fonts/Inter.ttf");
 const INTER_BOLD_FONT: &[u8] = include_bytes!("../../assets/fonts/Inter-Bold.ttf");
-/// Terminaux, diffs, chemins de fichiers : tout ce qui doit s'aligner en
-/// colonnes. Le rendu du terminal suppose une chasse fixe.
+/// Terminals, diffs, file paths: everything that has to line up in columns.
+/// The terminal's rendering assumes a fixed pitch.
 const JETBRAINS_MONO_FONT: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono.ttf");
 
-/// Assets embarqués dans le binaire et servis à gpui.
+/// Assets embedded in the binary and served to gpui.
 ///
-/// Les polices en sont exclues : elles arrivent par `include_bytes!`
-/// ci-dessus, et les lister ici les mettrait une seconde fois dans le
-/// binaire.
+/// Fonts are excluded: they arrive through `include_bytes!` above, and listing
+/// them here would put them in the binary a second time.
 #[derive(RustEmbed)]
 #[folder = "assets"]
 #[include = "icons/**/*.svg"]
@@ -76,9 +75,9 @@ impl gpui::AssetSource for Assets {
     }
 }
 
-/// Chaque catalogue `rust-i18n` a son propre état de langue : gpui-component a
-/// le sien pour ses menus intégrés, et il faut le régler aussi, sinon la
-/// moitié de l'interface change de langue et l'autre non.
+/// Each `rust-i18n` catalogue has its own locale state: gpui-component has one
+/// for its built-in menus, and it has to be set too, otherwise half the
+/// interface changes language and the other half does not.
 pub(crate) fn set_language(language: LanguageChoice) {
     let locale = language.to_lang_id();
     rust_i18n::set_locale(locale);
@@ -112,19 +111,19 @@ pub fn run() {
             highlight::register_languages();
             shortcuts::init(cx);
             install_fonts(cx);
-            // Les réglages passent en global avant tout le reste : le formulaire
-            // les écrit depuis des fermetures qui n'ont qu'un `App`, et
-            // l'installation des thèmes les relit pour savoir quoi appliquer.
+            // The settings become global before anything else: the form writes
+            // them from closures that only have an `App`, and installing the
+            // themes reads them back to know what to apply.
             settings.clone().init_global(cx);
-            // L'état par worktree suit les réglages : les vues le lisent au même
-            // titre, et il doit être là avant la première d'entre elles.
+            // Per-worktree state follows the settings: the views read it just
+            // the same, and it has to be there before the first of them.
             store::Store::load().init_global(cx);
             theme::install(cx);
             theme::apply(&settings, None, cx);
 
             let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
-            // `Maximized` porte quand même ces dimensions : elles deviennent la
-            // taille de restauration.
+            // `Maximized` carries these dimensions anyway: they become the
+            // restore size.
             let window_bounds = if settings.start_maximized {
                 WindowBounds::Maximized(bounds)
             } else {
@@ -133,11 +132,11 @@ pub fn run() {
             cx.activate(true);
 
             let opened = cx.open_window(
-                // `TitleBar::window_options` et non `Default` : elle pose
-                // aussi `app_owns_titlebar_drag`, sans quoi la plateforme et
-                // notre barre se disputent le double-clic et le glissement.
-                // C'est `app::render_topbar` qui dessine la barre — sans elle,
-                // la fenêtre n'a plus rien pour être déplacée ni fermée.
+                // `TitleBar::window_options` rather than `Default`: it also
+                // sets `app_owns_titlebar_drag`, without which the platform
+                // and our bar fight over the double-click and the drag. It is
+                // `app::render_topbar` that draws the bar — without it, the
+                // window has nothing left to be moved or closed by.
                 WindowOptions {
                     window_bounds: Some(window_bounds),
                     app_id: Some("claudhub".into()),

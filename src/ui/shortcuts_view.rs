@@ -1,14 +1,14 @@
-//! La fenêtre d'aide des raccourcis.
+//! The shortcuts help window.
 //!
-//! Elle ne connaît aucun raccourci : tout vient de `shortcuts::sheet`, qui les
-//! lit dans la table même dont sortent les liaisons. Une aide écrite à part
-//! aurait divergé au premier ajout, et une aide qui ment sur les touches est
-//! pire qu'une absence d'aide.
+//! It knows no shortcut: everything comes from `shortcuts::sheet`, which reads
+//! them from the very table the bindings come out of. Help written separately
+//! would have diverged on the first addition, and help that lies about the keys
+//! is worse than no help.
 //!
-//! Deux colonnes, et le partage se fait sur le **nombre de lignes** plutôt
-//! qu'au milieu de la liste : les familles n'ont pas la même taille — la
-//! relecture en compte quatre fois plus que les worktrees — et couper au
-//! milieu du tableau laisserait une colonne à moitié vide.
+//! Two columns, and the split is made on the **number of rows** rather than in
+//! the middle of the list: the families are not the same size — review has four
+//! times as many as the worktrees — and cutting in the middle of the table would
+//! leave one column half empty.
 
 use gpui::{div, prelude::*, px, Context, SharedString, Window};
 use gpui_component::{h_flex, v_flex, ActiveTheme, StyledExt, WindowExt};
@@ -20,15 +20,15 @@ use crate::ui::shortcuts::{self, Section};
 
 const WIDTH: gpui::Pixels = px(860.);
 const HEIGHT: gpui::Pixels = px(560.);
-/// Largeur réservée aux touches. Fixe, pour que les libellés s'alignent d'une
-/// ligne à l'autre : c'est la colonne qu'on parcourt du regard.
+/// Width reserved for the keys. Fixed, so the labels line up from one row to the
+/// next: it is the column one scans by eye.
 const KEYS: gpui::Pixels = px(148.);
 
 impl ClaudhubApp {
     pub(super) fn open_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let vim = Settings::global(cx).vim_mode;
-        // La poignée est prise ici et non dans la fermeture : créée au rendu,
-        // elle remettrait la liste en haut à chaque frame.
+        // The handle is taken here and not inside the closure: created at render
+        // time, it would put the list back at the top on every frame.
         let scroll = self.scroll_of("shortcuts");
         window.open_dialog(cx, move |dialog, _window, cx| {
             let sections = shortcuts::sheet(vim);
@@ -57,9 +57,8 @@ impl ClaudhubApp {
                                     .child(column(right, cx)),
                             )),
                         )
-                        // Le mode vim ne se devine pas : sans cette ligne, la
-                        // moitié des touches de cette fenêtre n'existent pour
-                        // personne.
+                        // Vim mode cannot be guessed: without this line, half
+                        // the keys in this window exist for nobody.
                         .when(!vim, |el| {
                             el.child(
                                 div()
@@ -73,20 +72,20 @@ impl ClaudhubApp {
     }
 }
 
-/// Répartit les familles en deux colonnes de hauteur comparable.
+/// Splits the families into two columns of comparable height.
 ///
-/// Chaque famille va dans la colonne la **plus courte** du moment, et non dans
-/// la gauche jusqu'à la moitié : « Relecture » pèse à elle seule un tiers du
-/// tableau, et couper la liste en deux à l'endroit où la somme dépasse la
-/// moitié laisserait la colonne de droite aux deux tiers vide.
+/// Each family goes into the **shorter** column of the moment, and not into the
+/// left one up to the halfway mark: "Review" alone weighs a third of the table,
+/// and cutting the list in two where the sum passes half would leave the right
+/// column two thirds empty.
 ///
-/// Le compte inclut le titre de chaque famille : une famille d'une seule ligne
-/// en occupe deux à l'écran, et l'ignorer déséquilibrerait d'autant.
+/// The count includes each family's title: a one-row family takes two on screen,
+/// and ignoring that would unbalance things by as much.
 fn split(sections: Vec<Section>) -> (Vec<Section>, Vec<Section>) {
     let mut columns: [(usize, Vec<Section>); 2] = [(0, Vec::new()), (0, Vec::new())];
     for section in sections {
         let size = section.rows.len() + 2;
-        // À égalité, la gauche : c'est là que la lecture commence.
+        // On a tie, the left: that is where reading begins.
         let side = usize::from(columns[1].0 < columns[0].0);
         columns[side].0 += size;
         columns[side].1.push(section);
@@ -154,8 +153,8 @@ mod tests {
         }
     }
 
-    /// Une famille qui pèse un tiers du tableau ne doit pas faire une colonne
-    /// pleine et une colonne vide.
+    /// A family weighing a third of the table must not make one full column and
+    /// one empty one.
     #[test]
     fn the_two_columns_end_up_about_the_same_height() {
         let sizes = [7, 1, 4, 24, 7, 4, 8];

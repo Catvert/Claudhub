@@ -1,21 +1,20 @@
-//! Chercher dans un panneau.
+//! Searching inside a panel.
 //!
-//! Presque tout ce que Claudhub affiche est une liste : des fichiers, des
-//! branches, des commits, des issues, des notes, des lignes de diff. Une liste
-//! qu'on ne peut pas interroger se parcourt du regard, et un projet Laravel en
-//! a quarante mille entrées.
+//! Almost everything Claudhub shows is a list: files, branches, commits,
+//! issues, notes, diff lines. A list that cannot be queried has to be scanned
+//! by eye, and a Laravel project has forty thousand entries.
 //!
-//! **Un seul geste, deux comportements.** Là où la liste est libre de son
-//! ordre, la recherche **filtre** : ce qui ne correspond pas disparaît, et il
-//! reste ce qu'on cherchait. Là où l'ordre porte du sens — le diff, qui est le
-//! fichier ; l'historique, dont le graphe relie une ligne à ses voisines —
-//! elle **saute** d'une occurrence à l'autre sans rien retirer. Filtrer un
-//! graphe de commits ferait pointer chaque trait sur la mauvaise ligne.
+//! **One gesture, two behaviours.** Where the list is free to order itself, the
+//! search **filters**: what does not match disappears, and what is left is what
+//! was being looked for. Where the order carries meaning — the diff, which is
+//! the file; the history, whose graph links a row to its neighbours — it
+//! **jumps** from one occurrence to the next without removing anything.
+//! Filtering a commit graph would make every line point at the wrong row.
 //!
-//! **La casse est déduite de la requête** (`smart case`) : une requête tout en
-//! minuscules ignore la casse, une requête qui porte une majuscule la respecte.
-//! C'est la convention de tous les éditeurs, et elle évite un bouton de plus
-//! pour un réglage qu'on change à chaque recherche.
+//! **Case is derived from the query** (smart case): an all-lowercase query
+//! ignores case, a query carrying a capital respects it. It is every editor's
+//! convention, and it saves one more button for a setting that changes with
+//! every search.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -32,11 +31,10 @@ use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
 
-/// Les panneaux qui savent chercher.
+/// The panels that know how to search.
 ///
-/// Le terminal n'y est pas : son contenu est l'écran d'un programme, qui a
-/// son propre `Ctrl+F` — et l'historique d'une grille alacritty n'est pas une
-/// liste que nous tenions.
+/// The terminal is not among them: its content is a program's screen, which has
+/// its own `Ctrl+F` — and an alacritty grid's scrollback is not a list we hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Pane {
     Sidebar,
@@ -77,15 +75,15 @@ impl Pane {
     }
 }
 
-/// La recherche d'un panneau : son champ, et s'il est déployé.
+/// A panel's search: its field, and whether it is open.
 pub struct Finder {
-    /// Créé **une fois**, à la première ouverture. Recréé au rendu, il
-    /// perdrait curseur et texte dès la première frappe.
+    /// Created **once**, on first opening. Recreated at render time, it would
+    /// lose the cursor and the text on the first keystroke.
     pub input: Entity<InputState>,
     pub open: bool,
 }
 
-/// La requête correspond-elle au texte ?
+/// Does the query match the text?
 pub fn matches(query: &str, haystack: &str) -> bool {
     let query = query.trim();
     if query.is_empty() {
@@ -94,9 +92,8 @@ pub fn matches(query: &str, haystack: &str) -> bool {
     first_match(query, haystack, 0).is_some()
 }
 
-/// Toutes les occurrences, en décalages d'**octets** — c'est ce que gpui
-/// attend pour styler un fragment de texte, et indexer en caractères casse dès
-/// le premier accent.
+/// Every occurrence, as **byte** offsets — that is what gpui expects to style a
+/// fragment of text, and indexing by characters breaks at the first accent.
 pub fn find_all(query: &str, haystack: &str) -> Vec<Range<usize>> {
     let query = query.trim();
     let mut out = Vec::new();
@@ -105,20 +102,20 @@ pub fn find_all(query: &str, haystack: &str) -> Vec<Range<usize>> {
     }
     let mut from = 0;
     while let Some(range) = first_match(query, haystack, from) {
-        // Une occurrence vide ferait boucler : `first_match` n'en rend pas,
-        // la requête n'étant jamais vide ici.
+        // An empty occurrence would loop forever: `first_match` returns none,
+        // the query never being empty here.
         from = range.end;
         out.push(range);
     }
     out
 }
 
-/// La première occurrence à partir d'un décalage.
+/// The first occurrence from a given offset.
 ///
-/// Une comparaison caractère à caractère plutôt qu'une recherche dans
-/// `to_lowercase()` : la mise en minuscules change la longueur en octets de
-/// certains caractères, et les décalages rendus ne désigneraient plus rien
-/// dans le texte d'origine.
+/// A character-by-character comparison rather than a search inside
+/// `to_lowercase()`: lowercasing changes the byte length of some characters,
+/// and the offsets returned would no longer point at anything in the original
+/// text.
 fn first_match(query: &str, haystack: &str, from: usize) -> Option<Range<usize>> {
     let sensitive = query.chars().any(char::is_uppercase);
     let first = query.chars().next()?;
@@ -154,10 +151,10 @@ fn same(a: char, b: char, sensitive: bool) -> bool {
 }
 
 impl ClaudhubApp {
-    /// La requête d'un panneau, vide tant que sa barre est fermée.
+    /// A panel's query, empty while its bar is closed.
     ///
-    /// Vide et non `None` : les appelants filtrent tous de la même façon, et
-    /// une requête vide ne retire rien.
+    /// Empty and not `None`: the callers all filter the same way, and an empty
+    /// query removes nothing.
     pub(super) fn query(&self, pane: Pane, cx: &gpui::App) -> String {
         self.finders
             .get(&pane)
@@ -166,7 +163,7 @@ impl ClaudhubApp {
             .unwrap_or_default()
     }
 
-    /// Note le panneau où le geste a eu lieu. C'est lui que `Ctrl+F` visera.
+    /// Records the panel where the gesture happened. That is what `Ctrl+F` aims at.
     pub(super) fn touch_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
         if self.pane != pane {
             self.pane = pane;
@@ -174,11 +171,11 @@ impl ClaudhubApp {
         }
     }
 
-    /// Ouvre la barre du panneau visé et lui donne le focus.
+    /// Opens the target panel's bar and gives it the focus.
     pub(super) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let pane = self.pane;
-        // Le panneau des branches a déjà son filtre à demeure : lui en poser
-        // un second au-dessus donnerait deux champs qui font la même chose.
+        // The branches panel already has its permanent filter: putting a second
+        // one above it would give two fields doing the same thing.
         if pane == Pane::Branches {
             self.branch_filter.focus_handle(cx).focus(window, cx);
             return;
@@ -191,8 +188,8 @@ impl ClaudhubApp {
             None => {
                 let placeholder = pane.placeholder();
                 let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
-                // Une frappe change la liste affichée : sans cette
-                // souscription, le panneau garderait l'image d'avant.
+                // A keystroke changes the displayed list: without this
+                // subscription, the panel would keep the earlier picture.
                 cx.subscribe(&input, move |this, _, event, cx| match event {
                     InputEvent::Change => {
                         if pane.jumps() {
@@ -200,9 +197,8 @@ impl ClaudhubApp {
                         }
                         cx.notify();
                     }
-                    // Entrée passe à l'occurrence suivante. Une liaison
-                    // clavier ne conviendrait pas : le champ traite la touche
-                    // avant elle.
+                    // Enter moves to the next occurrence. A key binding would
+                    // not do: the field handles the key before it.
                     InputEvent::PressEnter { .. } => this.find_step(1, cx),
                     _ => {}
                 })
@@ -221,18 +217,18 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Referme la barre du panneau visé.
+    /// Closes the target panel's bar.
     pub(super) fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(finder) = self.finders.get_mut(&self.pane) {
             finder.open = false;
         }
-        // Le focus retourne à la vue : le laisser dans un champ qu'on vient de
-        // masquer rendrait les flèches de relecture inertes.
+        // The focus goes back to the view: leaving it in a field just hidden
+        // would make the review arrows inert.
         self.focus_handle(cx).focus(window, cx);
         cx.notify();
     }
 
-    /// L'occurrence courante change dans les panneaux qui sautent.
+    /// The current occurrence changes in the panels that jump.
     pub(super) fn find_step(&mut self, delta: isize, cx: &mut Context<Self>) {
         match self.pane {
             Pane::Diff => self.step_diff_match(delta, cx),
@@ -247,11 +243,11 @@ impl ClaudhubApp {
         }
     }
 
-    /// La barre de recherche d'un panneau, quand elle est déployée.
+    /// A panel's search bar, when it is open.
     ///
-    /// Elle se pose sous l'en-tête du panneau et non par-dessus la liste : un
-    /// bandeau flottant recouvrirait les premières entrées, qui sont
-    /// justement celles qu'une recherche fait remonter.
+    /// It sits under the panel header and not over the list: a floating band
+    /// would cover the first entries, which are precisely the ones a search
+    /// brings to the top.
     pub(super) fn render_find(
         &mut self,
         pane: Pane,
@@ -264,8 +260,8 @@ impl ClaudhubApp {
 
         Some(
             h_flex()
-                // Le contexte n'existe que sous cette barre : `Échap` ferme la
-                // recherche ici et n'a rien à fermer ailleurs.
+                // The context only exists under this bar: `Esc` closes the
+                // search here and has nothing to close elsewhere.
                 .key_context(crate::ui::shortcuts::find_context())
                 .h(crate::ui::theme::bar_height(cx))
                 .w_full()
@@ -319,13 +315,12 @@ impl ClaudhubApp {
         )
     }
 
-    /// Le compte affiché par la barre.
+    /// The count the bar shows.
     ///
-    /// Seul le diff le porte : c'est la seule liste dont on ne voie pas
-    /// l'effet de la recherche — un filtre laisse ce qu'il a trouvé sous les
-    /// yeux, alors qu'une occurrence peut être à quatre mille lignes de là.
-    /// L'historique, lui, éteint ce qui ne correspond pas : le compte se lit
-    /// à l'écran.
+    /// Only the diff carries it: it is the only list whose search effect is not
+    /// visible — a filter leaves what it found in plain sight, whereas an
+    /// occurrence may be four thousand lines away. The history, for its part,
+    /// dims what does not match: the count reads off the screen.
     fn find_count(&mut self, pane: Pane, query: &str) -> Option<(usize, usize)> {
         if pane != Pane::Diff || query.trim().is_empty() {
             return None;
@@ -335,30 +330,30 @@ impl ClaudhubApp {
     }
 }
 
-/// Les occurrences trouvées dans le diff affiché.
+/// The occurrences found in the displayed diff.
 ///
-/// Elles sont calculées à chaque changement de requête et à chaque arrivée de
-/// diff, **jamais au rendu** : la fermeture d'une liste virtualisée tourne
-/// pour chaque ligne visible à chaque frame.
+/// They are computed on every query change and on every diff arrival, **never
+/// at render time**: a virtualised list's closure runs for each visible line on
+/// each frame.
 #[derive(Default)]
 pub struct DiffSearch {
-    /// La requête pour laquelle `hits` a été calculé.
+    /// The query `hits` was computed for.
     pub query: String,
-    /// Faux quand un nouveau diff est arrivé : les décalages portent sur un
-    /// texte qui n'est plus à l'écran.
+    /// False when a new diff has arrived: the offsets refer to text that is no
+    /// longer on screen.
     pub valid: bool,
-    /// Les occurrences dans l'ordre du fichier.
+    /// The occurrences in file order.
     pub hits: std::rc::Rc<Vec<Hit>>,
-    /// Les mêmes, rangées par ligne : c'est ainsi que le rendu les consulte,
-    /// et il le fait pour chaque ligne visible.
+    /// The same, filed by line: that is how rendering looks them up, and it
+    /// does so for every visible line.
     pub by_line: MatchesByLine,
     pub current: usize,
 }
 
-/// Les occurrences d'une ligne, rangées par `(hunk, ligne)`.
+/// A line's occurrences, filed by `(hunk, line)`.
 pub type MatchesByLine = std::rc::Rc<HashMap<(usize, usize), Vec<Range<usize>>>>;
 
-/// Une occurrence : la ligne du diff où elle est, et sa place dans son texte.
+/// An occurrence: the diff line it is on, and its place in that line's text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hit {
     pub hunk: usize,
@@ -366,7 +361,7 @@ pub struct Hit {
     pub range: Range<usize>,
 }
 
-/// Le fond d'une occurrence, posé par-dessus la coloration syntaxique.
+/// The background of an occurrence, laid over the syntax highlighting.
 pub fn highlight_color(current: bool, cx: &gpui::App) -> gpui::Hsla {
     if current {
         cx.theme().warning
@@ -413,8 +408,8 @@ mod tests {
         assert_eq!(find_all("ab", "abcab"), vec![0..2, 3..5]);
     }
 
-    /// Deux occurrences qui se chevauchent ne sont pas rendues deux fois : les
-    /// plages doivent rester disjointes pour que gpui les accepte.
+    /// Two overlapping occurrences are not returned twice: the ranges have to
+    /// stay disjoint for gpui to accept them.
     #[test]
     fn overlapping_occurrences_do_not_overlap_in_the_result() {
         assert_eq!(find_all("aa", "aaaa"), vec![0..2, 2..4]);

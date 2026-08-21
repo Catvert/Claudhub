@@ -1,35 +1,35 @@
-//! Traduction des chemins entre Windows et la distro WSL.
+//! Path translation between Windows and the WSL distribution.
 //!
-//! Le fil ne transporte que des chemins Linux : le serveur vit dans la
-//! distro, et c'est son disque qui fait foi. La traduction n'existe donc
-//! qu'aux rares endroits où un chemin **entre** côté Windows — le sélecteur
-//! de dossier, la cible d'un export CSV — et à celui où un chemin Linux doit
-//! **sortir** vers le bureau Windows (ouvrir le coffre dans l'explorateur).
+//! The wire carries only Linux paths: the server lives in the distribution,
+//! and its disk is the authority. Translation therefore exists only at the few
+//! places where a path **enters** from the Windows side — the folder picker,
+//! the target of a CSV export — and at the one where a Linux path has to
+//! **leave** for the Windows desktop (opening the vault in Explorer).
 //!
-//! Tout est textuel et pur : sous Linux un `\\wsl.localhost\…` n'est qu'un
-//! composant unique, et c'est précisément pourquoi ces fonctions travaillent
-//! sur la chaîne — elles se testent ainsi sur n'importe quelle machine.
+//! Everything is textual and pure: on Linux a `\\wsl.localhost\…` is just a
+//! single component, and that is exactly why these functions work on the
+//! string — it makes them testable on any machine.
 
 use std::path::{Path, PathBuf};
 
-/// Un chemin Windows ramené au monde Linux.
+/// A Windows path brought back to the Linux world.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Translated {
-    /// La distro que le chemin nomme, quand il en nomme une
-    /// (`\\wsl.localhost\<distro>\…`). C'est à l'appelant de vérifier que
-    /// c'est bien celle où le serveur tourne — ouvrir le dépôt d'une autre
-    /// distro dans ce serveur-ci trouverait un dossier vide.
+    /// The distribution the path names, when it names one
+    /// (`\\wsl.localhost\<distro>\…`). It is up to the caller to check it is
+    /// the one the server runs in — opening another distribution's repository
+    /// in this server would find an empty folder.
     pub distro: Option<String>,
     pub path: PathBuf,
 }
 
-/// Traduit un chemin Windows en chemin de la distro. `None` pour ce qui n'a
-/// pas d'équivalent — un partage réseau, un chemin déjà Linux.
+/// Translates a Windows path into a distribution path. `None` for what has no
+/// equivalent — a network share, an already-Linux path.
 ///
-/// Deux formes se traduisent : `\\wsl.localhost\<d>\…` (et son ancêtre
-/// `\\wsl$\<d>\…`) vers `/…`, et `C:\…` vers `/mnt/c/…` — les montages drvfs
-/// que WSL pose par défaut, lents mais réels, ce qui suffit pour la cible
-/// d'un export.
+/// Two forms translate: `\\wsl.localhost\<d>\…` (and its ancestor
+/// `\\wsl$\<d>\…`) to `/…`, and `C:\…` to `/mnt/c/…` — the drvfs mounts WSL
+/// sets up by default, slow but real, which is enough for the target of an
+/// export.
 pub fn to_linux(path: &Path) -> Option<Translated> {
     let text = path.to_str()?;
     if let Some(rest) = strip_wsl_prefix(text) {
@@ -68,13 +68,13 @@ pub fn to_linux(path: &Path) -> Option<Translated> {
     None
 }
 
-/// Le chemin tel que le serveur le comprendra.
+/// The path as the server will understand it.
 ///
-/// Un chemin déjà écrit à la façon de Linux passe tel quel — c'est le cas du
-/// coffre qu'on pointe soi-même sur `/home/…` —, un chemin Windows est
-/// traduit, et ce qui n'a pas d'équivalent rend `None` : un partage réseau
-/// n'est atteignable d'aucun des deux côtés, et le taire donnerait un dossier
-/// vide sans dire pourquoi.
+/// A path already written the Linux way passes through unchanged — that is the
+/// case for a vault pointed at `/home/…` by hand — a Windows path is
+/// translated, and what has no equivalent yields `None`: a network share is
+/// reachable from neither side, and staying silent would give an empty folder
+/// without saying why.
 pub fn for_server(path: &Path) -> Option<PathBuf> {
     if path.to_string_lossy().starts_with('/') {
         return Some(path.to_path_buf());
@@ -82,8 +82,9 @@ pub fn for_server(path: &Path) -> Option<PathBuf> {
     to_linux(path).map(|translated| translated.path)
 }
 
-/// Traduit un chemin de la distro en chemin Windows : `/mnt/c/…` redevient
-/// `C:\…`, tout le reste passe par le partage `\\wsl.localhost\<distro>\…`.
+/// Translates a distribution path into a Windows path: `/mnt/c/…` becomes
+/// `C:\…` again, everything else goes through the `\\wsl.localhost\<distro>\…`
+/// share.
 pub fn to_windows(path: &Path, distro: &str) -> PathBuf {
     let text = path.to_string_lossy();
     if let Some(rest) = text.strip_prefix("/mnt/") {
@@ -113,8 +114,8 @@ pub fn to_windows(path: &Path, distro: &str) -> PathBuf {
     PathBuf::from(out)
 }
 
-/// La part après `\\wsl.localhost\` ou `\\wsl$\`, quelle que soit la casse —
-/// les chemins Windows n'en ont pas.
+/// The part after `\\wsl.localhost\` or `\\wsl$\`, whatever the case —
+/// Windows paths have none.
 fn strip_wsl_prefix(text: &str) -> Option<&str> {
     for prefix in [
         "\\\\wsl.localhost\\",

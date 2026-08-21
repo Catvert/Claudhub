@@ -1,29 +1,27 @@
-//! La couche base de données.
+//! The database layer.
 //!
-//! Elle est à `src/ui/db*.rs` ce que `src/git/` est à la revue : des types et
-//! des fonctions qui parlent au monde extérieur, sans une ligne de gpui, et
-//! qui se testent sans fenêtre.
+//! It is to `src/ui/db*.rs` what `src/git/` is to the review: types and
+//! functions that talk to the outside world, without a line of gpui, and that
+//! can be tested without a window.
 //!
-//! **Un seul pilote, `sqlx`**, pour les deux moteurs — et pour le troisième
-//! qu'on ajouterait. Il est asynchrone de bout en bout, d'où l'exécuteur
-//! partagé de `runtime::executor` : le worker qui traite une commande fait un
-//! `block_on` et attend exactement comme il attendait `git`. Ce que cela
-//! achète et qu'un pilote bloquant ne pouvait pas donner : un délai qui
-//! **annule vraiment** — on laisse tomber le futur, et le pilote ferme la
-//! connexion en cours de route.
+//! **One driver, `sqlx`**, for both engines — and for the third one we would
+//! add. It is async end to end, hence `runtime::executor`'s shared executor:
+//! the worker handling a command does a `block_on` and waits exactly as it
+//! waited for `git`. What that buys and a blocking driver could not give: a
+//! timeout that **really cancels** — the future is dropped, and the driver
+//! closes the connection mid-flight.
 //!
-//! **Une connexion par requête, jamais gardée.** Un panneau qui garde une
-//! connexion ouverte sur un serveur qu'on n'interroge plus tient un descripteur
-//! et un processus côté serveur pour rien, et il découvre la coupure du réseau
-//! au pire moment. Le coût d'un `connect` est de quelques millisecondes en
-//! local, et ces commandes vivent de toute façon dans la file du réseau.
+//! **One connection per query, never kept.** A panel holding a connection open
+//! on a server nobody queries any more ties up a descriptor and a server-side
+//! process for nothing, and discovers the network is down at the worst moment.
+//! A `connect` costs a few milliseconds locally, and these commands live in the
+//! network queue anyway.
 //!
-//! **La lecture seule est celle de SQLite.** Le fichier est ouvert avec
-//! `SQLITE_OPEN_READONLY` : un `UPDATE` lancé par erreur dans la console SQL y
-//! échoue, et c'est ce qu'on veut d'un explorateur. Pour MySQL, c'est le
-//! serveur qui décide — les droits du compte de connexion sont la seule
-//! barrière qui vaille, et en poser une seconde ici empêcherait un `UPDATE`
-//! que l'utilisateur a le droit de faire.
+//! **Read-only is SQLite's.** The file is opened with `SQLITE_OPEN_READONLY`:
+//! an `UPDATE` run by mistake in the SQL console fails there, and that is what
+//! one wants from an explorer. For MySQL, the server decides — the connection
+//! account's rights are the only barrier that counts, and adding a second one
+//! here would forbid an `UPDATE` the user is entitled to make.
 
 pub mod mysql;
 pub mod sqlite;
@@ -94,7 +92,7 @@ impl Engine {
         }
     }
 
-    /// Ce que le formulaire propose, dans l'ordre.
+    /// What the form offers, in order.
     pub const ALL: [Engine; 2] = [Engine::Sqlite, Engine::Mysql];
 
     pub fn label(self) -> &'static str {
@@ -105,42 +103,42 @@ impl Engine {
     }
 }
 
-/// Une connexion telle que les réglages la portent.
+/// A connection as the settings carry it.
 ///
-/// **Une structure plate et non une énumération à charge utile**, alors que
-/// les deux moteurs n'ont presque aucun champ en commun : c'est ce qui rend le
-/// formulaire des réglages possible — une ligne, des champs qu'on montre ou
-/// qu'on cache selon le moteur — et ce qui fait qu'un fichier écrit par une
-/// version antérieure se relit toujours, `#[serde(default)]` remplissant ce
-/// qui manque. C'est le choix de `DatabaseConnectionContent` côté Zed, et pour
-/// les mêmes raisons.
+/// **A flat structure and not an enum with a payload**, even though the two
+/// engines have almost no field in common: that is what makes the settings form
+/// possible — one row, fields shown or hidden according to the engine — and
+/// what makes a file written by an earlier version still readable,
+/// `#[serde(default)]` filling in what is missing. It is
+/// `DatabaseConnectionContent`'s choice on the Zed side, and for the same
+/// reasons.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Connection {
-    /// Ce que le panneau affiche. Vide, il est déduit du fichier ou du
+    /// What the panel shows. Empty, it is derived from the file or from
     /// `user@host`.
     pub name: String,
     pub engine: Engine,
-    /// SQLite : le chemin du fichier, `~/` développé à l'ouverture.
+    /// SQLite: the file's path, `~/` expanded at opening.
     pub path: String,
     pub host: String,
-    /// `0` vaut « celui du moteur » : un port par défaut écrit en dur dans le
-    /// fichier de réglages vieillirait mal, et zéro n'est pas un port.
+    /// `0` means "the engine's": a default port hard-coded in the settings file
+    /// would age badly, and zero is not a port.
     pub port: u16,
     pub user: String,
-    /// En clair dans le fichier de réglages, qui est en 0600 sans être un
-    /// coffre pour autant : préférez un compte en lecture seule.
+    /// In the clear in the settings file, which is 0600 without being a vault
+    /// for all that: prefer a read-only account.
     pub password: String,
-    /// Les bases à montrer. Vide : toutes sauf celles du système.
+    /// The databases to show. Empty: all but the system ones.
     pub databases: Vec<String>,
 }
 
-/// Le mot de passe ne s'écrit jamais.
+/// The password is never written.
 ///
-/// C'est ce qui permet à une `Cmd` de porter la connexion entière plutôt que
-/// de la faire relire au worker : le protocole est journalisé — `log::warn!`
-/// sur un échec, `{cmd:?}` sous un débogueur — et un secret qui traverse un
-/// `Debug` dérivé finit dans un fichier de trace.
+/// That is what lets a `Cmd` carry the whole connection rather than have the
+/// worker read it back: the protocol is logged — `log::warn!` on a failure,
+/// `{cmd:?}` under a debugger — and a secret crossing a derived `Debug` ends up
+/// in a trace file.
 impl std::fmt::Debug for Connection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Connection")
@@ -157,7 +155,7 @@ impl std::fmt::Debug for Connection {
 }
 
 impl Connection {
-    /// Le nom affiché : le sien, sinon celui qui se déduit de l'adresse.
+    /// The displayed name: its own, or the one derived from the address.
     pub fn label(&self) -> String {
         if !self.name.trim().is_empty() {
             return self.name.trim().to_string();
@@ -171,7 +169,7 @@ impl Connection {
         }
     }
 
-    /// L'adresse, telle que la ligne du panneau la montre en second.
+    /// The address, as the panel's row shows it second.
     pub fn detail(&self) -> String {
         match self.engine {
             Engine::Sqlite => self.path.clone(),
@@ -205,8 +203,8 @@ impl Connection {
         }
     }
 
-    /// Une connexion sans adresse n'est pas une connexion : elle n'apparaît
-    /// pas dans le panneau plutôt que d'y échouer à chaque ouverture.
+    /// A connection with no address is not a connection: it does not appear in
+    /// the panel rather than failing there on every opening.
     pub fn is_usable(&self) -> bool {
         match self.engine {
             Engine::Sqlite => !self.path.trim().is_empty(),
@@ -214,11 +212,11 @@ impl Connection {
         }
     }
 
-    /// De quoi reconnaître une connexion d'un rendu à l'autre.
+    /// What is needed to recognise a connection from one render to the next.
     ///
-    /// **Le mot de passe n'y est pas** : c'est un secret, il ne change pas le
-    /// schéma, et cette clé sert à retrouver l'état d'une connexion quand les
-    /// réglages viennent d'être réécrits.
+    /// **The password is not in it**: it is a secret, it does not change the
+    /// schema, and this key serves to find a connection's state again when the
+    /// settings have just been rewritten.
     pub fn key(&self) -> String {
         match self.engine {
             Engine::Sqlite => format!("sqlite:{}", self.path),
@@ -233,11 +231,11 @@ impl Connection {
     }
 }
 
-/// Une base de données d'une connexion.
+/// One database of a connection.
 ///
-/// Pour SQLite, c'est `main` et ce que `ATTACH` aurait ajouté : le niveau
-/// existe quand même, sans quoi l'arbre aurait deux formes selon le moteur et
-/// tout ce qui le parcourt devrait s'en occuper.
+/// For SQLite it is `main` and whatever `ATTACH` would have added: the level
+/// exists all the same, otherwise the tree would have two shapes depending on
+/// the engine and everything walking it would have to deal with that.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Database {
     pub name: String,
@@ -248,12 +246,12 @@ pub struct Database {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Table {
     pub name: String,
-    /// Une vue et non une table. Un booléen plutôt qu'une énumération de deux
-    /// variantes : il n'y a rien d'autre à distinguer ici.
+    /// A view and not a table. A boolean rather than a two-variant enum: there
+    /// is nothing else to distinguish here.
     pub view: bool,
     pub engine: Option<String>,
-    /// Approximatif chez MySQL, qui rend l'estimation de l'optimiseur, et
-    /// inconnu chez SQLite, qui ne le tient nulle part.
+    /// Approximate on MySQL, which returns the optimiser's estimate, and unknown
+    /// on SQLite, which keeps it nowhere.
     pub rows: Option<u64>,
     pub bytes: Option<u64>,
     pub collation: Option<String>,
@@ -263,52 +261,51 @@ pub struct Table {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Column {
     pub name: String,
-    /// Le type tel que le moteur le déclare : `varchar(255)`, et non une
-    /// abstraction à nous qui perdrait la longueur.
+    /// The type as the engine declares it: `varchar(255)`, and not an
+    /// abstraction of ours that would lose the length.
     pub data_type: String,
     pub nullable: bool,
     pub default: Option<String>,
     pub primary_key: bool,
     pub unique: bool,
     pub auto_increment: bool,
-    /// La `table.colonne` visée, quand la colonne est une clé étrangère.
+    /// The `table.column` targeted, when the column is a foreign key.
     pub foreign_key: Option<String>,
     pub charset: Option<String>,
     pub collation: Option<String>,
     pub comment: Option<String>,
 }
 
-/// Une valeur de résultat, déjà mise en texte.
+/// A result value, already turned into text.
 ///
-/// **`None` est `NULL`, et ce n'est pas la même chose que la chaîne « NULL ».**
-/// Une colonne `TEXT` contient couramment le mot, et les confondre se paie
-/// trois fois : la table les affiche pareil, l'export CSV écrit `NULL` là où
-/// un champ vide est attendu, et le tri en mémoire les range ensemble. Le
-/// texte plutôt qu'une valeur typée reste le bon niveau — la vue ne connaît
-/// pas les types du moteur, et les lui faire traverser voudrait dire une
-/// énumération de valeurs par pilote.
+/// **`None` is `NULL`, and that is not the same as the string "NULL".** A
+/// `TEXT` column routinely contains the word, and confusing them is paid for
+/// three times: the table shows them alike, the CSV export writes `NULL` where
+/// an empty field is expected, and in-memory sorting files them together. Text
+/// rather than a typed value is still the right level — the view does not know
+/// the engine's types, and making them cross would mean one value enum per
+/// driver.
 pub type Cell = Option<String>;
 
-/// Le résultat d'une requête, une page à la fois.
+/// A query's result, one page at a time.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Rows {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Cell>>,
-    /// Ce qu'une écriture a touché, quand la requête ne rend pas de lignes.
+    /// What a write touched, when the query returns no rows.
     pub affected: Option<u64>,
-    /// Indice de la première ligne rendue dans le résultat entier.
+    /// Index of the first row returned within the whole result.
     pub offset: usize,
-    /// Le résultat continue au-delà de cette page.
+    /// The result continues beyond this page.
     pub more: bool,
 }
 
 impl Rows {
-    /// Ajoute une page à la suite de celle qu'on regarde.
+    /// Appends a page after the one being looked at.
     ///
-    /// C'est ce que fait le défilement quand il atteint le bas : la fenêtre
-    /// affichée **grandit** au lieu de se déplacer, si bien qu'on ne perd pas
-    /// de vue les lignes qu'on venait de lire. Les colonnes sont celles de la
-    /// première page — c'est la même requête.
+    /// It is what scrolling does when it reaches the bottom: the displayed
+    /// window **grows** instead of moving, so the rows just read do not go out
+    /// of sight. The columns are the first page's — it is the same query.
     pub fn extend(&mut self, next: Rows) {
         if self.columns.is_empty() {
             self.columns = next.columns;
@@ -318,7 +315,7 @@ impl Rows {
     }
 }
 
-/// Les bases d'une connexion.
+/// A connection's databases.
 pub async fn databases(connection: &Connection) -> Result<Vec<Database>> {
     with_timeout(async {
         match connection.engine {
@@ -329,7 +326,7 @@ pub async fn databases(connection: &Connection) -> Result<Vec<Database>> {
     .await
 }
 
-/// Les tables et les vues d'une base.
+/// A database's tables and views.
 pub async fn tables(connection: &Connection, database: &str) -> Result<Vec<Table>> {
     with_timeout(async {
         match connection.engine {
@@ -340,7 +337,7 @@ pub async fn tables(connection: &Connection, database: &str) -> Result<Vec<Table
     .await
 }
 
-/// Les colonnes d'une table.
+/// A table's columns.
 pub async fn columns(connection: &Connection, database: &str, table: &str) -> Result<Vec<Column>> {
     with_timeout(async {
         match connection.engine {
@@ -351,10 +348,10 @@ pub async fn columns(connection: &Connection, database: &str, table: &str) -> Re
     .await
 }
 
-/// Les colonnes de **toutes** les tables d'une base, par table.
+/// The columns of **every** table of a database, by table.
 ///
-/// Une requête et non une par table : indexer un schéma de trois cents tables
-/// pour le filtre et les complétions coûterait sinon trois cents connexions.
+/// One query and not one per table: indexing a three-hundred-table schema for
+/// the filter and the completions would otherwise cost three hundred connections.
 pub async fn all_columns(
     connection: &Connection,
     database: &str,
@@ -368,14 +365,14 @@ pub async fn all_columns(
     .await
 }
 
-/// Exécute `sql` et rend la page de `limit` lignes qui commence à `offset`.
+/// Runs `sql` and returns the page of `limit` rows starting at `offset`.
 ///
-/// **La pagination se fait en lisant, pas en réécrivant la requête.** Ajouter
-/// un `LIMIT` à ce que l'utilisateur a écrit demanderait de comprendre sa
-/// requête — un `LIMIT` déjà présent, une union, une procédure — et de la
-/// réécrire, ce qui est le plus sûr moyen de lui faire exécuter autre chose
-/// que ce qu'il lit. Les lignes qui précèdent la page sont donc bien produites
-/// par le moteur, puis jetées ; celles qui suivent ne sont jamais lues.
+/// **Paging is done by reading, not by rewriting the query.** Adding a `LIMIT`
+/// to what the user wrote would mean understanding their query — a `LIMIT`
+/// already present, a union, a procedure — and rewriting it, which is the
+/// surest way to make them run something other than what they read. The rows
+/// preceding the page are therefore really produced by the engine, then thrown
+/// away; those that follow are never read.
 pub async fn query(
     connection: &Connection,
     database: Option<&str>,
@@ -392,14 +389,14 @@ pub async fn query(
     .await
 }
 
-/// Vrai si le résultat de `sql` peut être trié par le moteur.
+/// True if `sql`'s result can be sorted by the engine.
 ///
-/// Le tri passe par `order_by`, qui **enveloppe** la requête : deux choses
-/// l'en empêchent, et il vaut mieux ne pas proposer le geste que le proposer
-/// et échouer. Une requête qu'on ne sait pas envelopper, d'abord — voir
-/// `order_by`. Deux colonnes de même nom, ensuite : MySQL refuse une table
-/// dérivée dont deux colonnes s'appellent pareil, ce qui est le cas courant
-/// d'une jointure écrite `SELECT * FROM a JOIN b`.
+/// Sorting goes through `order_by`, which **wraps** the query: two things
+/// prevent that, and it is better not to offer the gesture than to offer it and
+/// fail. A query we do not know how to wrap, first — see `order_by`. Two
+/// columns with the same name, second: MySQL refuses a derived table whose two
+/// columns are named alike, which is the common case of a join written
+/// `SELECT * FROM a JOIN b`.
 pub fn can_order(sql: &str, columns: &[String]) -> bool {
     if columns.is_empty() {
         return false;
@@ -411,33 +408,32 @@ pub fn can_order(sql: &str, columns: &[String]) -> bool {
     order_by(sql, 0, true).is_some()
 }
 
-/// La requête, entourée de quoi la trier sur sa `column`-ième colonne.
+/// The query, wrapped in what is needed to sort it on its `column`-th column.
 ///
-/// **Cliquer un en-tête demande au moteur, il ne trie pas la page.** Trier en
-/// mémoire ce qu'on a sous les yeux mentirait dès la deuxième page : les mille
-/// lignes chargées seraient rangées entre elles, et la ligne la plus grande du
-/// résultat resterait à la page suivante. C'est la seule chose que Claudhub
-/// ajoute à la requête de l'utilisateur, et elle est bornée par tout ce qui
-/// suit.
+/// **Clicking a header asks the engine, it does not sort the page.** Sorting
+/// what is in front of you in memory would lie from the second page on: the
+/// thousand rows loaded would be ordered among themselves, and the result's
+/// greatest row would stay on the next page. It is the only thing Claudhub adds
+/// to the user's query, and it is bounded by everything that follows.
 ///
-/// **La requête n'est pas réécrite, elle est enveloppée** : `SELECT * FROM (…)
-/// ORDER BY`. Comprendre la requête pour y insérer un `ORDER BY` — un tri déjà
-/// présent, une union, un `LIMIT` — est le plus sûr moyen de lui faire
-/// exécuter autre chose que ce qu'elle lit ; une table dérivée, elle, ne
-/// change pas le sens de ce qu'elle contient.
+/// **The query is not rewritten, it is wrapped**: `SELECT * FROM (…) ORDER BY`.
+/// Understanding the query in order to insert an `ORDER BY` — a sort already
+/// present, a union, a `LIMIT` — is the surest way to make it run something
+/// other than what it reads; a derived table, on the other hand, does not change
+/// the meaning of what it contains.
 ///
-/// **On ordonne par le rang de la colonne et non par son nom** : un rang ne se
-/// cite pas, alors qu'un nom devrait l'être selon des règles propres à chaque
-/// moteur, et une colonne calculée s'appelle `count(*)`.
+/// **We order by the column's rank and not by its name**: a rank does not need
+/// quoting, whereas a name would, under rules specific to each engine, and a
+/// computed column is called `count(*)`.
 ///
-/// **Les parenthèses sont sur leur propre ligne**, ce qui met le `)` hors de
-/// portée d'un commentaire `--` terminant la requête.
+/// **The parentheses are on their own line**, which puts the `)` out of reach of
+/// a `--` comment ending the query.
 ///
-/// `None` quand la requête ne se laisse pas envelopper : plusieurs
-/// instructions — la parenthèse tomberait entre deux —, ou autre chose qu'une
-/// lecture. Le point-virgule est cherché dans le texte brut, si bien qu'une
-/// requête portant un `;` dans une chaîne littérale perd le tri : c'est le
-/// sens du refus, et il ne coûte qu'un geste indisponible.
+/// `None` when the query does not let itself be wrapped: several statements —
+/// the parenthesis would fall between two — or something other than a read. The
+/// semicolon is looked for in the raw text, so a query carrying a `;` inside a
+/// string literal loses sorting: that is the sense of the refusal, and it costs
+/// only one unavailable gesture.
 pub fn order_by(sql: &str, column: usize, ascending: bool) -> Option<String> {
     let body = sql.trim().trim_end_matches(';').trim_end();
     if body.is_empty() || body.contains(';') {
@@ -448,7 +444,7 @@ pub fn order_by(sql: &str, column: usize, ascending: bool) -> Option<String> {
         .next()
         .unwrap_or_default()
         .to_ascii_uppercase();
-    // La chaîne vide est le cas d'une requête ouvrant sur une parenthèse,
+    // The empty string is the case of a query opening on a parenthesis,
     // `(SELECT …) UNION (SELECT …)`.
     if !matches!(head.as_str(), "" | "SELECT" | "WITH" | "VALUES" | "TABLE") {
         return None;
@@ -460,17 +456,17 @@ pub fn order_by(sql: &str, column: usize, ascending: bool) -> Option<String> {
     ))
 }
 
-/// Une ligne de tableau, valeurs échappées et terminée par un saut de ligne.
+/// One table row, values escaped and terminated by a newline.
 ///
-/// L'échappement est celui de la RFC 4180 : on n'encadre que ce qui en a
-/// besoin — le séparateur, un guillemet, un saut de ligne —, et un guillemet
-/// se double. Le terminateur est un `\n` et non le `\r\n` de la RFC : tout ce
-/// qui lit du CSV accepte les deux, et un fichier qu'on ouvre dans son éditeur
-/// à côté du code n'a pas à être semé de retours chariot.
+/// The escaping is RFC 4180's: only what needs it is quoted — the separator, a
+/// quote, a newline — and a quote is doubled. The terminator is a `\n` and not
+/// the RFC's `\r\n`: everything that reads CSV accepts both, and a file opened
+/// in your editor beside the code has no business being littered with carriage
+/// returns.
 ///
-/// **Une valeur nulle est un champ vide**, ce qui est la convention de tous
-/// les exports SQL — et la raison pour laquelle `Cell` distingue `NULL` de la
-/// chaîne « NULL », qui sort ici entre guillemets.
+/// **A null value is an empty field**, which is every SQL export's convention —
+/// and the reason `Cell` distinguishes `NULL` from the string "NULL", which
+/// comes out here in quotes.
 pub fn sep_line<'a>(fields: impl IntoIterator<Item = Option<&'a str>>, separator: char) -> String {
     let mut line = String::new();
     for (index, field) in fields.into_iter().enumerate() {
@@ -551,12 +547,11 @@ pub async fn export_csv(
     Ok(written)
 }
 
-/// Les octets d'une valeur binaire, en texte.
+/// The bytes of a binary value, as text.
 ///
-/// MySQL range son type JSON dans un `LONGTEXT` à collation binaire, et les
-/// colonnes binaires portent souvent du texte lisible : montrer le texte quand
-/// les octets sont de l'UTF-8 valable vaut mieux que de le cacher derrière un
-/// compte.
+/// MySQL files its JSON type in a `LONGTEXT` with a binary collation, and binary
+/// columns often carry readable text: showing the text when the bytes are valid
+/// UTF-8 beats hiding it behind a count.
 pub(crate) fn bytes_to_string(bytes: Vec<u8>) -> String {
     match String::from_utf8(bytes) {
         Ok(text) => text,
@@ -564,8 +559,8 @@ pub(crate) fn bytes_to_string(bytes: Vec<u8>) -> String {
     }
 }
 
-/// Un volume en octets, dans l'unité qui lui va. Neutre en langue : ces
-/// chaînes apparaissent au milieu de valeurs, pas dans un libellé traduit.
+/// A size in bytes, in the unit that suits it. Language-neutral: these strings
+/// appear in the middle of values, not in a translated label.
 pub fn size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;
@@ -581,8 +576,8 @@ pub fn size(bytes: u64) -> String {
     }
 }
 
-/// Un nombre de lignes, abrégé : une table de six millions de lignes ne doit
-/// pas prendre toute la largeur d'un panneau étroit.
+/// A row count, abbreviated: a table of six million rows must not take up the
+/// whole width of a narrow panel.
 pub fn count(rows: u64) -> String {
     if rows >= 1_000_000 {
         format!("{:.1}M", rows as f64 / 1_000_000.)
@@ -593,11 +588,11 @@ pub fn count(rows: u64) -> String {
     }
 }
 
-/// Le chemin d'un fichier SQLite, `~/` développé.
+/// A SQLite file's path, `~/` expanded.
 ///
-/// Un chemin saisi dans un formulaire s'écrit `~/dev/base.sqlite` — c'est
-/// ainsi qu'on le donne à un shell — et le passer tel quel à `std::fs`
-/// chercherait un dossier nommé `~` dans le répertoire courant.
+/// A path typed into a form is written `~/dev/base.sqlite` — that is how it is
+/// given to a shell — and passing it as it is to `std::fs` would look for a
+/// folder named `~` in the current directory.
 pub(crate) fn expand(path: &str) -> std::path::PathBuf {
     match path.trim().strip_prefix("~/") {
         Some(rest) => match directories::UserDirs::new() {
@@ -614,7 +609,7 @@ mod tests {
     use crate::runtime::executor::block_on;
     use sqlx::ConnectOptions as _;
 
-    /// Les valeurs d'un résultat, le nul rendu visible.
+    /// A result's values, with null made visible.
     fn shown(rows: &Rows) -> Vec<Vec<&str>> {
         rows.rows
             .iter()
@@ -635,11 +630,11 @@ mod tests {
         }
     }
 
-    /// Le tour complet sur une vraie base : les trois niveaux de l'arbre, ce
-    /// qu'une colonne déclare, et la pagination d'une requête.
+    /// The full round on a real database: the tree's three levels, what a column
+    /// declares, and a query's paging.
     ///
-    /// Le test passe par `block_on`, donc par l'exécuteur partagé : c'est le
-    /// même pont que celui des workers, et c'est lui qu'on veut éprouver.
+    /// The test goes through `block_on`, so through the shared executor: it is
+    /// the same bridge as the workers', and it is the one we want to exercise.
     #[test]
     fn sqlite_introspection_and_paging() {
         let path = std::env::temp_dir().join(format!("claudhub-db-{}.sqlite", std::process::id()));
@@ -647,9 +642,9 @@ mod tests {
         let connection = sqlite_at(&path);
 
         block_on(async {
-            // La base est créée par une connexion **en écriture** : celle que
-            // le module ouvre est en lecture seule, et c'est justement ce que
-            // le dernier cas vérifie.
+            // The database is created by a **writable** connection: the one this
+            // module opens is read-only, and that is precisely what the last
+            // case checks.
             let mut writable = sqlx::sqlite::SqliteConnectOptions::new()
                 .filename(&path)
                 .create_if_missing(true)
@@ -711,8 +706,8 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(page.columns, ["id", "email", "name"]);
-            // La seconde ligne a un `name` nul, et c'est **`None`** et non la
-            // chaîne « NULL » : tout l'export et tout le tri en dépendent.
+            // The second row has a null `name`, and it is **`None`** and not the
+            // string "NULL": the whole export and the whole sort depend on it.
             assert_eq!(
                 shown(&page),
                 [
@@ -735,8 +730,8 @@ mod tests {
             assert_eq!(second.offset, 1);
             assert!(!second.more);
 
-            // Le fichier est ouvert en lecture seule : une écriture doit
-            // échouer, et c'est le moteur qui le dit.
+            // The file is opened read-only: a write must fail, and it is the
+            // engine that says so.
             assert!(query(
                 &connection,
                 None,
@@ -751,9 +746,9 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Trier et exporter, sur la même base : les deux rejouent la requête, et
-    /// c'est le seul endroit où l'on puisse vérifier que ce qu'on lui ajoute
-    /// est du SQL que le moteur accepte.
+    /// Sorting and exporting, on the same database: both replay the query, and
+    /// it is the only place where one can check that what is added to it is SQL
+    /// the engine accepts.
     #[test]
     fn sorting_and_exporting_replay_the_query() {
         let path = std::env::temp_dir().join(format!("claudhub-csv-{}.sqlite", std::process::id()));
@@ -904,9 +899,8 @@ mod tests {
         assert_eq!(server.detail(), "db.example.com:3306");
     }
 
-    /// Le mot de passe ne fait pas partie de l'identité d'une connexion : le
-    /// corriger dans les réglages ne doit pas refermer l'arbre qu'on avait
-    /// déplié.
+    /// The password is not part of a connection's identity: correcting it in the
+    /// settings must not close the tree that had been unfolded.
     #[test]
     fn the_key_ignores_the_password() {
         let mut connection = Connection {
@@ -921,8 +915,8 @@ mod tests {
         assert_eq!(before, connection.key());
     }
 
-    /// Le mot de passe ne doit apparaître nulle part dans une trace : c'est ce
-    /// qui autorise la connexion entière à voyager dans une `Cmd`.
+    /// The password must appear nowhere in a trace: that is what allows the whole
+    /// connection to travel inside a `Cmd`.
     #[test]
     fn the_debug_output_hides_the_password() {
         let connection = Connection {

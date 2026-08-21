@@ -1,13 +1,13 @@
-//! MySQL et MariaDB, par `sqlx`.
+//! MySQL and MariaDB, through `sqlx`.
 //!
-//! Le schéma se lit dans `information_schema`, qui est une base comme une
-//! autre : une requête suffit pour toutes les colonnes d'un schéma, là où
-//! SQLite demande un pragma par table.
+//! The schema is read from `information_schema`, which is a database like any
+//! other: one query is enough for every column of a schema, where SQLite needs
+//! one pragma per table.
 //!
-//! Rien n'est filtré à l'écriture : ce que le compte de connexion a le droit
-//! de faire, la console SQL le fait. Un compte en lecture seule est la seule
-//! barrière qui tienne — un filtre sur le texte de la requête se contourne en
-//! une ligne et interdit ce qui est légitime.
+//! Nothing is filtered on write: what the connection account is allowed to do,
+//! the SQL console does. A read-only account is the only barrier that holds —
+//! a filter on the query text is worked around in one line and forbids what is
+//! legitimate.
 
 use std::collections::BTreeMap;
 
@@ -20,14 +20,14 @@ use sqlx::{
 
 use super::{bytes_to_string, Cell, Column, Connection, Database, Rows, Table};
 
-/// Les bases du serveur, que personne ne vient explorer.
+/// The server's own databases, which nobody comes to explore.
 const SYSTEM_SCHEMAS: [&str; 4] = ["information_schema", "mysql", "performance_schema", "sys"];
 
-/// Ouvre une connexion, éventuellement positionnée sur une base.
+/// Opens a connection, optionally positioned on a database.
 ///
-/// Le délai est posé ici et non seulement autour de la requête : un serveur
-/// injoignable tiendrait sinon le worker jusqu'à ce que le noyau abandonne,
-/// soit deux minutes.
+/// The timeout is set here and not only around the query: an unreachable
+/// server would otherwise hold the worker until the kernel gives up, which is
+/// two minutes.
 async fn open(connection: &Connection, database: Option<&str>) -> Result<MySqlConnection> {
     let mut options = MySqlConnectOptions::new()
         .host(&connection.host())
@@ -124,8 +124,8 @@ pub async fn tables(connection: &Connection, database: &str) -> Result<Vec<Table
             rows: row.try_get("table_rows")?,
             bytes: row.try_get("total_size")?,
             collation: row.try_get("collation")?,
-            // MySQL écrit le commentaire « VIEW » sur chacune de ses vues :
-            // l'afficher n'apprendrait rien que l'icône ne dise déjà.
+            // MySQL writes the comment "VIEW" on every one of its views:
+            // showing it would teach nothing the icon does not already say.
             comment: comment.filter(|comment| !comment.is_empty() && comment != "VIEW"),
         })
     })
@@ -217,8 +217,8 @@ pub async fn all_columns(
     Ok(out)
 }
 
-/// Une colonne, telle que les deux requêtes ci-dessus la rendent : elles ne
-/// commencent pas par les mêmes champs, mais les nomment de la même façon.
+/// A column, as both queries above return it: they do not start with the same
+/// fields, but they name them the same way.
 fn column(row: &MySqlRow, name: String, foreign_key: Option<String>) -> Result<Column> {
     let key: String = row.try_get("column_key")?;
     let extra: String = row.try_get("extra")?;
@@ -279,7 +279,7 @@ pub async fn query(
     Ok(out)
 }
 
-/// Écrit le résultat entier au fil de l'eau. Voir `super::export_csv`.
+/// Writes the whole result as it streams. See `super::export_csv`.
 pub async fn export(
     connection: &Connection,
     database: Option<&str>,
@@ -312,11 +312,11 @@ fn cells(row: &MySqlRow) -> Vec<Cell> {
         .collect()
 }
 
-/// Une valeur de colonne, en texte.
+/// A column value, as text.
 ///
-/// L'ordre des tentatives est celui du plus précis au plus général, et le
-/// texte passe en premier : un `DECIMAL(20,4)` arrive comme une chaîne et le
-/// faire passer par un `f64` l'arrondirait.
+/// The order of attempts goes from the most precise to the most general, and
+/// text comes first: a `DECIMAL(20,4)` arrives as a string, and putting it
+/// through an `f64` would round it.
 fn value_to_cell(row: &MySqlRow, index: usize) -> Cell {
     match row.try_get_raw(index) {
         Ok(value) if value.is_null() => return None,
@@ -350,7 +350,7 @@ fn value_to_cell(row: &MySqlRow, index: usize) -> Cell {
     if let Ok(value) = row.try_get::<chrono::NaiveTime, _>(index) {
         return Some(value.to_string());
     }
-    // Le type JSON natif de MySQL ne se décode pas en `String`.
+    // MySQL's native JSON type does not decode into a `String`.
     if let Ok(value) = row.try_get::<serde_json::Value, _>(index) {
         return Some(value.to_string());
     }

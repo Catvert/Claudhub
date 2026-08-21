@@ -1,11 +1,11 @@
-//! L'historique, et le graphe qui le rend lisible.
+//! The history, and the graph that makes it readable.
 //!
-//! Un historique git est un graphe orienté acyclique, pas une liste : deux
-//! branches parallèles, un merge, et l'ordre chronologique seul ne dit plus
-//! rien de ce qui descend de quoi. Le graphe est donc calculé ici, sous la
-//! forme dont la vue a besoin — une colonne par ligne et les traits qui les
-//! relient — et non délégué à `git log --graph`, dont la sortie est un dessin
-//! en caractères qu'il faudrait re-parser pour en refaire des coordonnées.
+//! A git history is a directed acyclic graph, not a list: two parallel
+//! branches, a merge, and chronological order alone no longer says anything
+//! about what descends from what. The graph is therefore computed here, in the
+//! shape the view needs — one column per row and the lines that join them — and
+//! not delegated to `git log --graph`, whose output is a drawing in characters
+//! that would have to be re-parsed back into coordinates.
 
 use std::path::Path;
 
@@ -13,18 +13,18 @@ use anyhow::Result;
 
 use super::git;
 
-/// Un commit tel que la liste l'affiche.
+/// A commit as the list shows it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Commit {
     pub id: String,
     pub short: String,
-    /// Parents dans l'ordre de git : le premier est la ligne principale.
+    /// Parents in git's order: the first is the main line.
     pub parents: Vec<String>,
     pub summary: String,
     pub author: String,
-    /// Date relative, telle que git la formule.
+    /// Relative date, as git phrases it.
     pub date: String,
-    /// Branches et étiquettes pointant sur ce commit.
+    /// Branches and tags pointing at this commit.
     pub refs: Vec<String>,
 }
 
@@ -34,16 +34,16 @@ impl Commit {
     }
 }
 
-/// Ce que l'historique montre.
+/// What the history shows.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LogRange {
-    /// L'historique du checkout courant.
+    /// The current checkout's history.
     Head,
-    /// Ce que la branche a ajouté depuis sa divergence d'avec `base` — le même
-    /// domaine que la revue de branche, vu comme une suite de commits.
+    /// What the branch has added since it diverged from `base` — the same range
+    /// as the branch review, seen as a sequence of commits.
     Branch { base: String },
-    /// Toutes les références : c'est là que le graphe prend son sens, les
-    /// branches parallèles étant visibles côte à côte.
+    /// Every reference: this is where the graph earns its keep, parallel
+    /// branches being visible side by side.
     All,
 }
 
@@ -52,17 +52,16 @@ impl LogRange {
         match self {
             Self::Head => vec!["HEAD".into()],
             Self::Branch { base } => vec![format!("{base}..HEAD")],
-            // `--all` sans `--topo-order` entrelacerait les branches par date,
-            // ce qui donne un graphe illisible : les traits sauteraient d'une
-            // branche à l'autre à chaque ligne.
+            // `--all` without `--topo-order` would interleave the branches by
+            // date, which gives an unreadable graph: the lines would jump from
+            // one branch to another on every row.
             Self::All => vec!["--all".into(), "--topo-order".into()],
         }
     }
 }
 
-/// Séparateur de champs. Un caractère de contrôle qu'aucun message de commit
-/// ne contient, là où `|` ou `\t` finissent toujours par apparaître dans un
-/// sujet un jour ou l'autre.
+/// Field separator. A control character no commit message contains, where `|`
+/// or `\t` always end up appearing in a subject sooner or later.
 const FIELD: char = '\u{1f}';
 
 pub fn commits(dir: &Path, range: &LogRange, limit: usize) -> Result<Vec<Commit>> {
@@ -78,12 +77,12 @@ pub fn commits(dir: &Path, range: &LogRange, limit: usize) -> Result<Vec<Commit>
     Ok(parse(&out))
 }
 
-/// Les sujets des derniers commits, du plus récent au plus ancien.
+/// The subjects of the latest commits, most recent first.
 ///
-/// Ils servent d'exemple à l'agent qui propose un message : la langue, la
-/// personne du verbe et les préfixes éventuels d'un dépôt ne se devinent pas,
-/// et une consigne écrite ici les imposerait à tous les dépôts. Un dépôt neuf
-/// n'en a aucun, ce qui n'est pas une erreur — d'où la liste vide.
+/// They serve as examples for the agent proposing a message: a repository's
+/// language, the person of the verb and any prefixes cannot be guessed, and an
+/// instruction written here would impose them on every repository. A brand-new
+/// repository has none, which is not an error — hence the empty list.
 pub fn recent_subjects(dir: &Path, limit: usize) -> Vec<String> {
     super::git_opt(
         dir,
@@ -108,8 +107,8 @@ fn parse(out: &str) -> Vec<Commit> {
 }
 
 fn parse_commit(record: &str) -> Option<Commit> {
-    // `git log -z` sépare les commits par un octet nul mais laisse le saut de
-    // ligne que `--format` termine ; il déborderait sur le champ suivant.
+    // `git log -z` separates commits with a null byte but keeps the newline
+    // `--format` ends with; it would spill onto the next field.
     let record = record.trim_start_matches('\n');
     let mut f = record.split(FIELD);
     let id = f.next()?.to_string();
@@ -139,55 +138,55 @@ fn parse_commit(record: &str) -> Option<Commit> {
     })
 }
 
-/// `%D` rend « HEAD -> main, origin/main, tag: v1.2 ».
+/// `%D` yields "HEAD -> main, origin/main, tag: v1.2".
 fn parse_refs(text: &str) -> Vec<String> {
     text.split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| {
-            // `HEAD -> main` désigne la branche déployée : on garde le nom de
-            // la branche, la flèche n'apprend rien de plus que la puce déjà
-            // portée par la ligne courante.
+            // `HEAD -> main` names the checked-out branch: we keep the branch
+            // name, the arrow teaching nothing the bullet already on the current
+            // row does not.
             s.strip_prefix("HEAD -> ").unwrap_or(s).to_string()
         })
         .collect()
 }
 
-/// La place d'un commit dans le graphe.
+/// A commit's place in the graph.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct GraphRow {
-    /// Colonne où se trouve la puce du commit.
+    /// Column where the commit's bullet sits.
     pub column: usize,
-    /// Colonnes traversées de part en part par un trait vertical, sans rapport
-    /// avec ce commit-ci : d'autres branches qui continuent.
+    /// Columns crossed end to end by a vertical line, unrelated to this commit:
+    /// other branches carrying on.
     pub through: Vec<usize>,
-    /// Colonnes d'où descend un trait vers la puce : les rails que ce commit
-    /// referme, c'est-à-dire ses enfants placés ailleurs.
+    /// Columns from which a line comes down to the bullet: the lanes this commit
+    /// closes, that is, its children placed elsewhere.
     pub incoming: Vec<usize>,
-    /// Colonnes vers lesquelles part un trait sous la puce : ses parents
-    /// placés ailleurs, donc les branches qu'un merge rassemble.
+    /// Columns a line leaves for under the bullet: its parents placed
+    /// elsewhere, so the branches a merge brings together.
     pub outgoing: Vec<usize>,
 }
 
-/// Calcule la disposition du graphe.
+/// Computes the graph's layout.
 ///
-/// L'algorithme est celui de tous les visualiseurs d'historique : on tient une
-/// liste de rails, chacun attendant un commit précis. Un commit prend le rail
-/// qui l'attendait — ou en ouvre un —, y installe son premier parent, et place
-/// ses autres parents sur des rails voisins. Les rails libérés sont réutilisés
-/// avant d'en ouvrir de nouveaux, ce qui garde le graphe étroit.
+/// The algorithm is every history viewer's: we keep a list of lanes, each
+/// waiting for one specific commit. A commit takes the lane that was waiting for
+/// it — or opens one — installs its first parent there, and places its other
+/// parents on neighbouring lanes. Freed lanes are reused before new ones are
+/// opened, which keeps the graph narrow.
 ///
-/// La sortie a exactement autant d'entrées que l'entrée : la vue les affiche
-/// côte à côte, un décalage d'une ligne ferait pointer chaque trait sur le
-/// mauvais commit.
+/// The output has exactly as many entries as the input: the view shows them
+/// side by side, and being off by one row would make every line point at the
+/// wrong commit.
 pub fn layout(commits: &[Commit]) -> Vec<GraphRow> {
-    // Chaque case est le commit attendu par ce rail, ou `None` si libre.
+    // Each slot is the commit that lane is waiting for, or `None` if free.
     let mut lanes: Vec<Option<String>> = Vec::new();
     let mut rows = Vec::with_capacity(commits.len());
 
     for commit in commits {
-        // Tous les rails qui attendaient ce commit : plusieurs enfants peuvent
-        // l'attendre, et ils convergent tous vers la même puce.
+        // Every lane that was waiting for this commit: several children may be
+        // waiting, and they all converge on the same bullet.
         let waiting: Vec<usize> = lanes
             .iter()
             .enumerate()
@@ -197,13 +196,13 @@ pub fn layout(commits: &[Commit]) -> Vec<GraphRow> {
 
         let column = match waiting.first() {
             Some(&first) => first,
-            // Personne ne l'attendait : c'est une pointe de branche.
+            // Nobody was waiting for it: this is a branch tip.
             None => free_lane(&mut lanes),
         };
 
-        // Les rails traversants sont ceux qui restent occupés et ne touchent
-        // pas cette ligne. Relevés avant la mise à jour, sinon le premier
-        // parent qu'on va installer y figurerait à tort.
+        // The crossing lanes are those that stay occupied and do not touch this
+        // row. Collected before the update, otherwise the first parent about to
+        // be installed would wrongly appear among them.
         let through: Vec<usize> = lanes
             .iter()
             .enumerate()
@@ -211,20 +210,20 @@ pub fn layout(commits: &[Commit]) -> Vec<GraphRow> {
             .map(|(ix, _)| ix)
             .collect();
 
-        // Les rails surnuméraires qui attendaient ce commit se referment.
+        // The surplus lanes that were waiting for this commit close here.
         let incoming: Vec<usize> = waiting.iter().skip(1).copied().collect();
         for &ix in &incoming {
             lanes[ix] = None;
         }
 
-        // Le premier parent continue sur le rail du commit ; sans parent, le
-        // rail se libère (commit racine).
+        // The first parent carries on in the commit's lane; with no parent, the
+        // lane is freed (root commit).
         lanes[column] = commit.parents.first().cloned();
 
         let mut outgoing = Vec::new();
         for parent in commit.parents.iter().skip(1) {
-            // Un parent déjà attendu ailleurs ne mérite pas un rail de plus :
-            // le trait rejoint celui qui existe.
+            // A parent already awaited elsewhere does not deserve another lane:
+            // the line joins the one that exists.
             let target = lanes
                 .iter()
                 .position(|lane| lane.as_deref() == Some(parent.as_str()))
@@ -247,9 +246,8 @@ pub fn layout(commits: &[Commit]) -> Vec<GraphRow> {
     rows
 }
 
-/// Le premier rail libre, ou un nouveau. Réutiliser les trous plutôt que
-/// d'empiler évite qu'un graphe s'élargisse indéfiniment le long d'un
-/// historique un peu vivant.
+/// The first free lane, or a new one. Reusing the gaps rather than stacking
+/// keeps a graph from widening indefinitely along a slightly lively history.
 fn free_lane(lanes: &mut Vec<Option<String>>) -> usize {
     match lanes.iter().position(Option::is_none) {
         Some(ix) => ix,
@@ -260,7 +258,7 @@ fn free_lane(lanes: &mut Vec<Option<String>>) -> usize {
     }
 }
 
-/// Nombre de colonnes occupées par un graphe, pour dimensionner la gouttière.
+/// Number of columns a graph occupies, to size the gutter.
 pub fn width(rows: &[GraphRow]) -> usize {
     rows.iter()
         .map(|row| {
@@ -350,11 +348,11 @@ mod tests {
 
     #[test]
     fn a_merge_opens_a_second_column_and_closes_it() {
-        //   m      merge de f dans main
+        //   m      merge of f into main
         //   |\
-        //   | f    la branche
+        //   | f    the branch
         //   |/
-        //   b      la base commune
+        //   b      the common base
         let commits = vec![
             commit("m", &["b2", "f"]),
             commit("b2", &["b"]),
@@ -455,7 +453,7 @@ mod tests {
             .args(),
             vec!["main..HEAD"]
         );
-        // L'ordre topologique est ce qui garde les branches groupées.
+        // Topological order is what keeps the branches grouped.
         assert!(LogRange::All.args().contains(&"--topo-order".to_string()));
     }
 }

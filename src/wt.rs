@@ -99,7 +99,7 @@ pub struct Question {
     pub kind: Kind,
     pub choices: Vec<Choice>,
     pub default: Option<String>,
-    /// Séparateur des valeurs d'un choix multiple.
+    /// Separator for the values of a multiple choice.
     pub separator: String,
 }
 
@@ -118,37 +118,37 @@ pub struct Choice {
     pub detail: String,
 }
 
-/// De quoi lancer une tâche dans un onglet de terminal.
+/// What is needed to launch a task in a terminal tab.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Launch {
-    /// Les commandes du projet, modèles déjà résolus.
+    /// The project's commands, templates already resolved.
     pub commands: Vec<String>,
     pub cwd: PathBuf,
-    /// `WT_SLUG`, `WT_PORT_*`, `WT_OPT_*` : un hook un peu long se lit mieux
-    /// avec des variables d'environnement qu'avec des substitutions.
+    /// `WT_SLUG`, `WT_PORT_*`, `WT_OPT_*`: a slightly long hook reads better
+    /// with environment variables than with substitutions.
     pub env: BTreeMap<String, String>,
 }
 
 impl Launch {
-    /// La ligne à donner à un shell. Les commandes sont enchaînées par `&&` :
-    /// une tâche en plusieurs étapes s'arrête à la première qui échoue, comme
-    /// elle le ferait sur la ligne de commande.
+    /// The line to hand a shell. The commands are chained with `&&`: a
+    /// multi-step task stops at the first that fails, as it would on the
+    /// command line.
     pub fn shell_line(&self) -> String {
         self.commands.join(" && ")
     }
 }
 
-/// Une adresse que le projet sait ouvrir.
+/// An address the project knows how to open.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Endpoint {
     pub url: String,
     pub label: String,
 }
 
-/// Le projet d'un dépôt, ou `None` s'il n'a pas de `wt.toml`.
+/// A repository's project, or `None` if it has no `wt.toml`.
 ///
-/// L'absence est le cas courant — la plupart des dépôts n'en ont pas — et ne
-/// vaut pas une erreur : les gestes de `wt` disparaissent simplement du menu.
+/// Absence is the common case — most repositories have none — and is not worth
+/// an error: `wt`'s gestures simply disappear from the menu.
 fn app(main: &Path) -> Option<App> {
     let project = Project::load(main).ok()?;
     App::new(project).ok()
@@ -365,10 +365,10 @@ pub fn task(
     })
 }
 
-/// Le worktree tourne-t-il, d'après `[status] up` ?
+/// Is the worktree running, according to `[status] up`?
 ///
-/// `None` quand le projet ne le déclare pas : il n'y a alors rien à démarrer,
-/// et afficher « arrêté » serait une information fausse.
+/// `None` when the project does not declare it: there is then nothing to
+/// start, and showing "stopped" would be false information.
 pub fn is_up(main: &Path, slug: &str) -> Option<bool> {
     let app = app(main)?;
     let status = app.project.config.status.up.as_ref()?;
@@ -381,7 +381,7 @@ pub fn is_up(main: &Path, slug: &str) -> Option<bool> {
     ))
 }
 
-/// Les adresses que le projet expose pour ce worktree.
+/// The addresses the project exposes for this worktree.
 pub fn endpoints(main: &Path, slug: &str) -> Vec<Endpoint> {
     let Some(app) = app(main) else {
         return Vec::new();
@@ -511,9 +511,9 @@ mod tests {
             parts.next().is_none().then_some(slug)
         };
         assert_eq!(check("/p/repo-wt/demo"), Some("demo".into()));
-        // Un sous-dossier n'est pas un worktree.
+        // A subdirectory is not a worktree.
         assert_eq!(check("/p/repo-wt/demo/src"), None);
-        // Le dépôt principal n'est pas sous la racine : `wt` ne le connaît pas.
+        // The main repository is not under the root: `wt` does not know it.
         assert_eq!(check("/p/repo"), None);
     }
 

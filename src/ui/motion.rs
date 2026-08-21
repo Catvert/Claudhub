@@ -1,74 +1,73 @@
-//! Le lissage de la molette.
+//! Wheel smoothing.
 //!
-//! Un cran de molette est un **saut** : gpui traduit un `ScrollDelta::Lines`
-//! en trois hauteurs de ligne et les ajoute d'un coup au décalage. Sur une
-//! liste de texte — un diff, un arbre de quarante mille fichiers — l'œil perd
-//! sa place à chaque cran, et il en faut une vingtaine pour traverser un hunk.
-//! Ce module rejoue ce saut en une transition de cent soixante millisecondes,
-//! amortie en fin de course.
+//! A wheel notch is a **jump**: gpui turns a `ScrollDelta::Lines` into three
+//! line heights and adds them to the offset in one go. On a list of text — a
+//! diff, a tree of forty thousand files — the eye loses its place at every
+//! notch, and it takes twenty of them to cross a hunk. This module replays
+//! that jump as a hundred-and-sixty-millisecond transition, eased at the end.
 //!
-//! Le principe vient d'Aviary (`src/ui/motion.rs`), et il tient en une
-//! inversion : **on n'empêche pas gpui de sauter**, il n'y a pas de phase de
-//! capture pour la molette. On le laisse faire, on lit où il a atterri, on
-//! **remet** le décalage d'avant, et on y va progressivement. D'où la place de
-//! l'écouteur : sur un ancêtre **non défilant** de l'élément qui défile, donc
-//! après son gestionnaire interne dans la phase de remontée.
+//! The idea comes from Aviary (`src/ui/motion.rs`), and it rests on one
+//! inversion: **we do not stop gpui from jumping**, there is no capture phase
+//! for the wheel. We let it happen, read where it landed, **put back** the
+//! previous offset, and go there gradually. Hence the listener's position: on
+//! a **non-scrolling** ancestor of the scrolling element, so after its internal
+//! handler in the bubble phase.
 //!
-//! Quatre choses qu'il ne faut pas rater :
+//! Four things not to miss:
 //!
-//! - **Le saut se lit, il ne se recalcule pas.** gpui capture
-//!   `window.line_height()` sous le style de texte de l'élément qui défile ;
-//!   notre écouteur, posé sur un ancêtre, lit la hauteur ambiante. Sur le
-//!   diff, qui n'a ni la police ni la taille de l'interface, les deux ne sont
-//!   pas la même — d'où `Axis::jump`, qui prend la différence avec le décalage
-//!   écrit à la frame précédente.
-//! - **Un pavé tactile n'est pas une molette.** Il envoie des
-//!   `ScrollDelta::Pixels`, déjà continus et attachés au doigt : les lisser
-//!   ajouterait un retard à un geste direct. Ils passent tels quels, et
-//!   annulent la transition en cours.
-//! - **Un saut demandé par le code gagne.** `scroll_to_item` — une flèche qui
-//!   change de hunk, `reveal_file` — écrit le décalage sans rien nous dire.
-//!   `advance` compare donc ce qu'il trouve à ce qu'il avait écrit : un écart
-//!   veut dire que quelqu'un d'autre est passé, et la transition est
-//!   abandonnée plutôt que de ramener la vue en arrière.
-//! - **La liste change de taille pendant le mouvement.** Un diff qui arrive,
-//!   un dossier qu'on déplie : la destination est reprise à chaque frame sur
-//!   les bornes du moment, depuis la position visible, pour que le
-//!   recadrage reste continu.
+//! - **The jump is read, not recomputed.** gpui captures
+//!   `window.line_height()` under the text style of the scrolling element; our
+//!   listener, sitting on an ancestor, reads the ambient height. On the diff,
+//!   which has neither the interface's font nor its size, the two are not the
+//!   same — hence `Axis::jump`, which takes the difference with the offset
+//!   written on the previous frame.
+//! - **A trackpad is not a wheel.** It sends `ScrollDelta::Pixels`, already
+//!   continuous and attached to the finger: smoothing them would add lag to a
+//!   direct gesture. They pass through unchanged, and cancel the running
+//!   transition.
+//! - **A jump asked for by code wins.** `scroll_to_item` — an arrow changing
+//!   hunk, `reveal_file` — writes the offset without telling us. `advance`
+//!   therefore compares what it finds with what it had written: a discrepancy
+//!   means somebody else has been through, and the transition is abandoned
+//!   rather than pulling the view backwards.
+//! - **The list changes size during the motion.** A diff arriving, a folder
+//!   unfolded: the destination is re-clamped on every frame against the
+//!   current bounds, starting from the visible position, so the re-framing
+//!   stays continuous.
 //!
-//! Les deux axes sont indépendants : le diff défile aussi en largeur, et une
-//! transition verticale ne doit pas figer un décalage horizontal.
+//! The two axes are independent: the diff also scrolls in width, and a vertical
+//! transition must not freeze a horizontal offset.
 
 use gpui::{point, px, Pixels, Point, ScrollDelta, ScrollHandle, ScrollWheelEvent, Window};
 use std::time::{Duration, Instant};
 
-/// En deçà, deux positions sont la même. Sert à ne pas relancer une
-/// transition vers la destination qu'on vise déjà.
+/// Below this, two positions are the same. Used to avoid restarting a
+/// transition towards the destination already aimed at.
 const EPSILON: f32 = 0.0001;
-/// Écart au-delà duquel on considère que quelqu'un d'autre a écrit le
-/// décalage. Un demi-pixel de plus que l'arrondi de gpui.
+/// The gap past which we consider somebody else has written the offset. Half a
+/// pixel more than gpui's rounding.
 const SYNC_EPSILON_PX: f32 = 0.75;
-/// En deçà, on se pose plutôt que d'animer un dernier demi-pixel.
+/// Below this, we settle rather than animate a final half pixel.
 const SNAP_PX: f32 = 0.5;
-/// Assez court pour que la liste réponde au cran, assez long pour que l'œil
-/// suive le texte au lieu de le retrouver.
+/// Short enough for the list to answer the notch, long enough for the eye to
+/// follow the text instead of hunting for it.
 const DURATION: Duration = Duration::from_millis(160);
 
-/// Ce qui défile dans un panneau : un axe, ou les deux.
+/// What scrolls in a panel: one axis, or both.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Axes {
-    /// Le cas courant. Une molette horizontale y est traitée comme
-    /// verticale, exactement comme le fait gpui quand un seul axe déborde.
+    /// The common case. A horizontal wheel is treated as vertical here,
+    /// exactly as gpui does when only one axis overflows.
     Vertical,
-    /// Le diff, dont les lignes ne sont jamais renvoyées à la ligne.
+    /// The diff, whose lines never wrap.
     Both,
 }
 
-/// Le lissage d'une poignée de défilement.
+/// The smoothing of one scroll handle.
 ///
-/// Une par panneau, et rangée à côté de la poignée qu'elle anime : avancer le
-/// mouvement d'un panneau sur le décalage d'un autre le ferait sauter d'un
-/// bout à l'autre.
+/// One per panel, and filed beside the handle it animates: advancing one
+/// panel's motion on another's offset would make it jump from one end to the
+/// other.
 pub struct ScrollMotion {
     x: Axis,
     y: Axis,
@@ -84,10 +83,10 @@ impl ScrollMotion {
         }
     }
 
-    /// Avance la transition d'une frame et écrit le décalage obtenu.
+    /// Advances the transition by one frame and writes the resulting offset.
     ///
-    /// À appeler une fois par rendu du panneau, avant ou après avoir bâti son
-    /// contenu — l'élément ne lit le décalage qu'à la mise en page.
+    /// To be called once per panel render, before or after building its content
+    /// — the element only reads the offset at layout time.
     pub fn advance(&mut self, handle: &ScrollHandle, window: &Window) {
         let now = Instant::now();
         let actual = handle.offset();
@@ -102,10 +101,10 @@ impl ScrollMotion {
         }
     }
 
-    /// Reprend le saut que gpui vient d'appliquer et le rejoue en transition.
+    /// Takes over the jump gpui has just applied and replays it as a transition.
     ///
-    /// Rend vrai quand la vue doit être notifiée pour peindre la première
-    /// frame ; `advance` demande les suivantes.
+    /// Returns true when the view has to be notified to paint the first frame;
+    /// `advance` asks for the following ones.
     pub fn on_wheel(
         &mut self,
         handle: &ScrollHandle,
@@ -113,7 +112,7 @@ impl ScrollMotion {
         window: &Window,
     ) -> bool {
         let delta = match event.delta {
-            // Le doigt est déjà progressif : le lisser ajouterait un retard.
+            // The finger is already gradual: smoothing it would add lag.
             ScrollDelta::Pixels(_) => {
                 self.cancel();
                 return false;
@@ -128,8 +127,8 @@ impl ScrollMotion {
         let now = Instant::now();
         let jumped = handle.offset();
         let max = handle.max_offset();
-        // L'axe que ce cran ne touche pas garde la position que `advance` lui
-        // a écrite : la relire ici, c'est la lui rendre inchangée.
+        // The axis this notch does not touch keeps the position `advance` wrote
+        // for it: reading it back here is handing it back unchanged.
         let x = if dx == 0. {
             f32::from(jumped.x)
         } else {
@@ -146,18 +145,18 @@ impl ScrollMotion {
         true
     }
 
-    /// Abandonne la transition en cours, avant un geste direct.
+    /// Drops the running transition, ahead of a direct gesture.
     pub fn cancel(&mut self) {
         self.x.cancel();
         self.y.cancel();
     }
 
-    /// Répartit un delta sur les axes **comme le fait gpui**, sans quoi le
-    /// lissage déplacerait la vue autrement que le saut qu'il remplace.
+    /// Splits a delta across the axes **the way gpui does**, otherwise the
+    /// smoothing would move the view differently from the jump it replaces.
     ///
-    /// Sur un panneau à un seul axe, une molette horizontale bascule sur le
-    /// vertical ; sur un panneau à deux axes, seule la composante dominante
-    /// passe (`allow_concurrent_scroll` est faux par défaut).
+    /// On a single-axis panel, a horizontal wheel falls back to vertical; on a
+    /// two-axis panel, only the dominant component gets through
+    /// (`allow_concurrent_scroll` is false by default).
     fn split(&self, delta: Point<Pixels>) -> (f32, f32) {
         match self.axes {
             Axes::Vertical => {
@@ -170,24 +169,24 @@ impl ScrollMotion {
     }
 }
 
-/// Un axe, et rien de gpui dedans : c'est ce qui le rend testable.
+/// One axis, with nothing of gpui inside: that is what makes it testable.
 #[derive(Default)]
 struct Axis {
     motion: Option<Motion>,
-    /// Le dernier décalage écrit. Il sert à reconnaître un saut venu
-    /// d'ailleurs, et à retrouver la position d'avant celui de gpui même
-    /// quand il a été rogné sur un bord.
+    /// The last offset written. It serves to recognise a jump from elsewhere,
+    /// and to recover the position from before gpui's even when that one was
+    /// clamped against an edge.
     last: Option<f32>,
 }
 
 impl Axis {
-    /// Rend le décalage à écrire, et s'il faut une frame de plus.
+    /// Returns the offset to write, and whether one more frame is needed.
     fn advance(&mut self, actual: f32, max: f32, now: Instant) -> (f32, bool) {
         let Some(mut motion) = self.motion.take() else {
             self.last = Some(actual);
             return (actual, false);
         };
-        // Quelqu'un d'autre a écrit le décalage : il gagne.
+        // Somebody else has written the offset: they win.
         if self
             .last
             .is_some_and(|expected| (actual - expected).abs() > SYNC_EPSILON_PX)
@@ -198,8 +197,8 @@ impl Axis {
 
         let mut sample = motion.sample_at(now);
         let target = motion.target.clamp(-max, 0.);
-        // La liste a changé de taille : on repart de la position visible vers
-        // la destination recadrée, pour que le mouvement reste continu.
+        // The list has changed size: we start again from the visible position
+        // towards the re-clamped destination, so the motion stays continuous.
         if (target - motion.target).abs() > EPSILON {
             motion = Motion::between(sample.value.clamp(-max, 0.), target, now);
             sample = motion.sample_at(now);
@@ -215,15 +214,15 @@ impl Axis {
         (current, true)
     }
 
-    /// Rend le décalage d'avant le saut, et vise celui d'après.
+    /// Returns the offset from before the jump, and aims at the one after.
     fn on_wheel(&mut self, jumped: f32, delta: f32, max: f32, now: Instant) -> f32 {
         let clamp = |value: f32| value.clamp(-max, 0.);
         let jump = self.jump(jumped, delta);
         let (current, target) = match self.motion.take() {
-            // Un cran pendant une transition allonge la destination.
+            // A notch during a transition extends the destination.
             Some(motion) => (motion.sample_at(now).value, motion.target + jump),
-            // La position d'avant est celle que nous avions écrite, et le saut
-            // celui que gpui vient d'y ajouter.
+            // The position before is the one we had written, and the jump the
+            // one gpui has just added to it.
             None => (jumped - jump, jumped),
         };
         let current = clamp(current);
@@ -237,25 +236,25 @@ impl Axis {
         current
     }
 
-    /// Le saut que gpui vient d'appliquer, **lu** plutôt que recalculé.
+    /// The jump gpui has just applied, **read** rather than recomputed.
     ///
-    /// `delta` est ce que vaudrait ce cran pour nous, et il ne vaut pas ce
-    /// qu'il a valu pour gpui : celui-ci capture `window.line_height()` sous
-    /// le **style de texte de l'élément qui défile**, alors que notre écouteur
-    /// est sur un ancêtre et lit la hauteur de ligne ambiante. Le diff n'ayant
-    /// ni la police ni la taille de l'interface, trois lignes d'écart font
-    /// deux ou trois pixels.
+    /// `delta` is what this notch would be worth to us, and it is not what it
+    /// was worth to gpui: gpui captures `window.line_height()` under the **text
+    /// style of the scrolling element**, whereas our listener is on an ancestor
+    /// and reads the ambient line height. The diff having neither the
+    /// interface's font nor its size, three lines apart make two or three
+    /// pixels.
     ///
-    /// Cet écart est invisible au milieu d'un saut de soixante pixels — il
-    /// décale seulement la provenance de la transition. **Sur un bord, il est
-    /// tout le mouvement** : la destination y est rognée à la position qu'on
-    /// occupe déjà, la provenance ne l'est pas, et la vue reculait de trois
-    /// pixels pour y revenir en cent soixante millisecondes, à chaque cran.
+    /// That gap is invisible in the middle of a sixty-pixel jump — it only
+    /// shifts where the transition starts. **At an edge it is the whole
+    /// movement**: the destination there is clamped to the position already
+    /// held, the origin is not, and the view stepped back three pixels only to
+    /// return over a hundred and sixty milliseconds, on every notch.
     ///
-    /// La différence avec le décalage écrit à la frame précédente, elle, est
-    /// exacte. On ne s'y fie qu'à condition qu'elle ressemble au saut attendu :
-    /// un décalage écrit par quelqu'un d'autre depuis notre dernier rendu
-    /// rendrait cette note fausse, et la vue s'y téléporterait.
+    /// The difference with the offset written on the previous frame, on the
+    /// other hand, is exact. We only trust it if it looks like the expected
+    /// jump: an offset written by somebody else since our last render would
+    /// make that note false, and the view would teleport to it.
     fn jump(&self, jumped: f32, delta: f32) -> f32 {
         let Some(last) = self.last else { return delta };
         let observed = jumped - last;
@@ -309,8 +308,8 @@ impl Motion {
     }
 }
 
-/// Départ immédiat, arrivée en douceur. C'est la courbe qui donne
-/// l'impression que la liste répond au cran plutôt qu'à un minuteur.
+/// Immediate start, gentle arrival. It is the curve that makes the list feel
+/// like it answers the notch rather than a timer.
 fn ease_out_cubic(progress: f32) -> f32 {
     1. - (1. - progress.clamp(0., 1.)).powi(3)
 }

@@ -61,14 +61,14 @@ fn write_bundled(dir: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Applique le thème choisi. À appeler au démarrage et à chaque changement de
-/// mode ou de taille de police.
+/// Applies the chosen theme. To be called at startup and on every change of
+/// mode or text size.
 pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
     let mode = match settings.theme {
         ThemeMode::Dark => gpui_component::ThemeMode::Dark,
         ThemeMode::Light => gpui_component::ThemeMode::Light,
-        // gpui n'expose pas la préférence système de façon portable ; le mode
-        // sombre est le défaut d'un outil de développement.
+        // gpui does not expose the system preference portably; dark mode is a
+        // development tool's default.
         ThemeMode::System => match cx.window_appearance() {
             gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight => {
                 gpui_component::ThemeMode::Light
@@ -77,9 +77,9 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
         },
     };
 
-    // Les palettes nommées, prises dans le registre. Un nom inconnu — un
-    // fichier supprimé, un réglage écrit à la main — laisse le thème en place
-    // plutôt que de repeindre la fenêtre en blanc sans explication.
+    // The named palettes, taken from the registry. An unknown name — a deleted
+    // file, a hand-written setting — leaves the theme in place rather than
+    // repainting the window white without explanation.
     let registry = ThemeRegistry::global(cx);
     let light = registry
         .themes()
@@ -87,8 +87,8 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
         .cloned();
     let dark = registry.themes().get(settings.dark_theme.as_str()).cloned();
 
-    // `Theme::change` crée le global s'il manque : il faut passer par lui
-    // avant de pouvoir écrire dans les deux emplacements.
+    // `Theme::change` creates the global if it is missing: it has to be called
+    // before either slot can be written.
     Theme::change(mode, None, cx);
     let theme = Theme::global_mut(cx);
     if let Some(light) = light {
@@ -98,32 +98,32 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
         theme.dark_theme = dark;
     }
 
-    // `Theme::change` réinitialise les couleurs : tout réglage de palette doit
-    // venir après, sinon il est effacé sans bruit.
+    // `Theme::change` resets the colours: any palette tweak has to come after,
+    // or it is wiped silently.
     Theme::change(mode, window, cx);
 
     let theme = Theme::global_mut(cx);
     theme.font_family = settings.ui_font().to_string().into();
     theme.mono_font_family = settings.mono_font().to_string().into();
     theme.font_size = px(settings.font_size);
-    // Les barres de défilement sont **toujours affichées**.
+    // Scrollbars are **always shown**.
     //
-    // Ni `Scrolling`, le défaut, qui les efface deux secondes après le dernier
-    // cran de molette : on relit un diff de plusieurs milliers de lignes en
-    // s'arrêtant à chaque hunk, et la barre — seul repère de position qu'ait
-    // une liste virtualisée — aurait disparu chaque fois qu'on se demande où
-    // l'on en est. Ni `Hover`, qui ne les montre qu'une fois le pointeur sur
-    // la barre : elle est invisible, donc introuvable.
+    // Neither `Scrolling`, the default, which hides them two seconds after the
+    // last wheel notch: a several-thousand-line diff is read stopping at every
+    // hunk, and the bar — the only positional cue a virtualised list has —
+    // would have vanished each time you wonder where you are. Nor `Hover`,
+    // which only shows them once the pointer is on the bar: it is invisible,
+    // therefore unfindable.
     theme.scrollbar_mode = gpui_component::scroll::ScrollbarMode::Always;
 
-    // Les rayons de gpui-component sont ceux d'un formulaire web de 2015 : six
-    // et huit pixels. Ils portent tout ce que la fenêtre affiche — boutons,
-    // champs, menus, dialogues —, et les monter d'un cran suffit à changer le
-    // grain de l'application entière.
+    // gpui-component's radii are a 2015 web form's: six and eight pixels. They
+    // carry everything the window shows — buttons, fields, menus, dialogs — and
+    // moving them up a notch is enough to change the grain of the whole
+    // application.
     //
-    // Seulement si la palette ne s'en occupe pas : `radius`, `radius.lg` et
-    // `shadow` sont des clés de `ThemeConfig`, et un thème qui les déclare a
-    // choisi son grain — l'écraser reviendrait à ne les avoir jamais lues.
+    // Only if the palette does not take care of it: `radius`, `radius.lg` and
+    // `shadow` are `ThemeConfig` keys, and a theme that declares them has chosen
+    // its grain — overwriting it would amount to never having read them.
     let config = if theme.mode.is_dark() {
         theme.dark_theme.clone()
     } else {
@@ -136,103 +136,96 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
         theme.radius_lg = px(12.);
     }
 
-    // La barre d'onglets prend la couleur de la gouttière, et l'onglet actif
-    // celle de la carte qu'il ouvre.
+    // The tab bar takes the gutter's colour, and the active tab the colour of
+    // the card it opens.
     //
-    // C'est la répartition des rôles, qui est de nous — les couleurs restent
-    // celles de la palette : `TabPanel` peint sa barre en `tab_bar` et son
-    // corps en `background`, et tant que les deux étaient proches, la fenêtre
-    // n'était qu'une grille de rectangles cousus. Fondue dans la gouttière, la
-    // barre laisse lire des onglets posés sur une carte — ce que la
-    // bibliothèque ne saurait pas faire d'elle-même, son `TabPanel::render`
-    // étant un `size_full()` sans rayon ni marge.
+    // This is the division of roles, which is ours — the colours stay the
+    // palette's: `TabPanel` paints its bar in `tab_bar` and its body in
+    // `background`, and while the two were close, the window was nothing but a
+    // grid of stitched rectangles. Blended into the gutter, the bar lets tabs
+    // read as sitting on a card — which the library could not do by itself, its
+    // `TabPanel::render` being a `size_full()` with neither radius nor margin.
     let base = theme.background;
     let gutter = Hsla {
         l: (base.l - 0.05).max(0.),
         ..base
     };
     theme.tab_bar = gutter;
-    // Le rail des onglets est **sur la carte**, pas sur la gouttière : la
-    // barre et le contenu d'un groupe partagent la même surface, et c'est ce
-    // qui les fond l'un dans l'autre — l'ancienne couture entre les deux était
-    // précisément la barre peinte couleur gouttière au-dessus d'une carte
-    // bordée.
+    // The tab rail is **on the card**, not on the gutter: a group's bar and
+    // content share the same surface, and that is what blends them into each
+    // other — the old seam between the two was precisely the bar painted in the
+    // gutter colour above a bordered card.
     theme.tab_bar_segmented = base;
-    // La pastille active porte donc un ton **surélevé** (celui des en-têtes de
-    // section), pas celui de la carte — sur la carte, elle serait invisible.
+    // The active pill therefore carries a **raised** tone (that of section
+    // headers), not the card's — on the card it would be invisible.
     theme.tab_active = theme.secondary;
-    // L'onglet actif est un bloc de la couleur de la carte : son libellé doit
-    // donc porter la couleur du texte ordinaire, et les autres rester en
-    // retrait — sans quoi les cinq onglets se lisent tous pareil et l'actif ne
-    // se distingue que par un fond.
+    // The active tab is a block of the card's colour: its label must therefore
+    // carry the ordinary text colour, and the others stay set back — otherwise
+    // all five tabs read the same and the active one is told apart only by a
+    // background.
     theme.tab_active_foreground = theme.foreground;
     theme.tab_foreground = theme.muted_foreground;
     theme.tab = gutter;
 
-    // **Les jetons se recalculent après.** `Theme::tokens` est dérivé des
-    // couleurs, mais une seule fois, à l'application de la palette : les
-    // composants récents — la barre d'onglets du dock en fait partie — lisent
-    // `tokens` et non `colors`, et une couleur changée ici sans ce rappel ne
-    // se voit nulle part. C'est la panne muette de cette version.
+    // **The tokens are recomputed afterwards.** `Theme::tokens` is derived from
+    // the colours, but only once, when the palette is applied: recent
+    // components — the dock's tab bar among them — read `tokens` and not
+    // `colors`, and a colour changed here without this call shows up nowhere.
+    // That is this version's silent failure.
     theme.tokens = gpui_component::ThemeTokens::from(&theme.colors);
 
-    // La couche de base tient **sa propre copie** du thème — les poignées de
-    // redimensionnement et les barres de défilement se peignent sans passer
-    // par gpui-component. Sans cette projection, tout ce qui précède ne
-    // l'atteint pas ; et comme elle reconstruit la copie à partir de zéro, la
-    // retouche des poignées vient après.
+    // The base layer keeps **its own copy** of the theme — resize handles and
+    // scrollbars paint without going through gpui-component. Without this
+    // projection, none of the above reaches it; and since it rebuilds the copy
+    // from scratch, the handle tweak comes after.
     Theme::sync_base(cx);
     let base = gpui_base::Theme::global_mut(cx);
-    // La poignée au repos ne peint rien : les cartes sont déjà séparées par la
-    // gouttière, et une ligne grise par-dessus recoudrait ce qu'on vient de
-    // découdre. Elle reste saisissable — la zone de saisie est plus large que
-    // le trait — et se montre pendant le glissement, où elle est une
-    // information.
+    // The handle at rest paints nothing: the cards are already separated by the
+    // gutter, and a grey line on top would stitch back what we have just
+    // unstitched. It stays grabbable — the grab zone is wider than the line —
+    // and shows during the drag, where it is information.
     base.resizable.handle = gpui::transparent_black();
 
     cx.refresh_windows();
 }
 
-/// Hauteur d'une ligne de liste.
+/// The height of a list row.
 ///
-/// Elle se déduit de la taille du texte au lieu d'être écrite en dur : une
-/// hauteur figée déborde dès qu'on grossit la police, et les listes
-/// virtualisées ne mesurent rien — elles réservent exactement ce qu'on leur
-/// annonce, si bien qu'une ligne trop haute recouvre la suivante.
+/// It is derived from the text size instead of being hard-coded: a fixed
+/// height overflows as soon as the font grows, and virtualised lists measure
+/// nothing — they reserve exactly what they are told, so a too-tall row covers
+/// the next one.
 pub fn row_height(cx: &App) -> Pixels {
     scaled(cx, 1.9, px(22.))
 }
 
-/// Hauteur d'une ligne de liste qui porte deux étages de texte.
+/// The height of a list row carrying two lines of text.
 ///
-/// Une hauteur d'une seule ligne y ferait déborder le second étage sur la
-/// ligne suivante — les listes virtualisées ne mesurent rien et réservent
-/// exactement ce qu'on leur annonce.
+/// A single-line height would make the second line spill onto the next row —
+/// virtualised lists measure nothing and reserve exactly what they are told.
 pub fn tall_row_height(cx: &App) -> Pixels {
     scaled(cx, 3.0, px(34.))
 }
 
-/// Hauteur d'une barre d'en-tête : onglets, titres de panneaux.
+/// The height of a header bar: tabs, panel titles.
 pub fn bar_height(cx: &App) -> Pixels {
     scaled(cx, 2.2, px(26.))
 }
 
-/// Hauteur de la barre d'outils principale, qui porte des boutons.
+/// The height of the main toolbar, which carries buttons.
 pub fn toolbar_height(cx: &App) -> Pixels {
     scaled(cx, 2.7, px(32.))
 }
 
-/// La couleur de la gouttière entre les panneaux.
+/// The colour of the gutter between panels.
 ///
-/// C'est celle de la barre d'onglets, que `theme::apply` dérive du fond de
-/// quelques pour cent de clarté en moins : la gouttière et la barre sont le **même** plan, celui
-/// sur lequel les cartes sont posées, et les peindre de deux couleurs
-/// proches-mais-pas-égales est exactement ce qui fait qu'une fenêtre a l'air
-/// mal assemblée.
+/// It is the tab bar's, which `theme::apply` derives from the background by a
+/// few percent less lightness: the gutter and the bar are the **same** plane,
+/// the one the cards sit on, and painting them two close-but-not-equal colours
+/// is exactly what makes a window look badly assembled.
 ///
-/// La dériver plutôt que de l'ajouter aux douze palettes livrées, c'est aussi
-/// ce qui fait qu'un thème écrit par quelqu'un d'autre y a droit sans le
-/// savoir.
+/// Deriving it rather than adding it to the twelve bundled palettes is also
+/// what gives a theme written by someone else the benefit without knowing it.
 pub fn gutter(cx: &App) -> Hsla {
     gpui_component::ActiveTheme::theme(cx).tab_bar
 }
@@ -293,9 +286,9 @@ pub struct DiffColors {
     pub removed_fg: Hsla,
     pub hunk_bg: Hsla,
     pub line_number: Hsla,
-    /// La moitié vide d'une ligne en deux colonnes : là où une version n'a
-    /// rien en face de l'autre. Une teinte neutre et non un fond transparent,
-    /// sans quoi rien ne distingue « pas de ligne ici » d'une ligne vide.
+    /// The empty half of a two-column row: where one version has nothing
+    /// opposite the other. A neutral tint and not a transparent background,
+    /// otherwise nothing tells "no line here" from an empty line.
     pub absent_bg: Hsla,
 }
 
@@ -355,7 +348,7 @@ impl DiffColors {
     }
 }
 
-/// Couleur de la lettre d'état d'un fichier, dans la liste de revue.
+/// The colour of a file's status letter, in the review list.
 pub fn status_color(code: crate::git::StatusCode, cx: &App) -> Hsla {
     use crate::git::StatusCode as S;
     let theme = gpui_component::ActiveTheme::theme(cx);

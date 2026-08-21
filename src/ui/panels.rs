@@ -1,17 +1,17 @@
-//! Les panneaux du dock.
+//! The dock's panels.
 //!
-//! Chaque zone de l'interface est une entité à part, ce que le dock de
-//! gpui-component exige pour la déplacer : c'est lui qui gère le glissement,
-//! les onglets et les zones d'accueil. Les panneaux ne portent aucun état —
-//! ils délèguent à `ClaudhubApp`, qui reste la seule source.
+//! Every area of the interface is a separate entity, which gpui-component's
+//! dock requires in order to move it: the dock handles dragging, tabs and dock
+//! zones. The panels carry no state — they delegate to `ClaudhubApp`, which
+//! remains the single source.
 //!
-//! La référence à `ClaudhubApp` est **faible**. Forte, elle formerait un cycle —
-//! l'application tient le dock, qui tient les panneaux — et rien ne serait
-//! libéré à la fermeture de la fenêtre.
+//! The reference to `ClaudhubApp` is **weak**. Strong, it would form a cycle —
+//! the application holds the dock, which holds the panels — and nothing would
+//! be freed when the window closes.
 //!
-//! Rendre depuis un `update` sur `ClaudhubApp` est licite parce que le rendu d'une
-//! vue enfant a lieu *après* que la fermeture de rendu du parent a rendu la
-//! main : la mise en page est faite hors de cet emprunt.
+//! Rendering from an `update` on `ClaudhubApp` is legitimate because a child
+//! view's render happens *after* the parent's render closure has returned:
+//! layout is done outside that borrow.
 
 use gpui::{
     div, prelude::*, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
@@ -28,20 +28,19 @@ use crate::ui::app::ClaudhubApp;
 use crate::ui::find::Pane;
 use crate::ui::settings::Settings;
 
-/// Le fond d'un panneau, et les coins bas de la carte qui le porte.
+/// A panel's background, and the bottom corners of the card carrying it.
 ///
-/// Plus de carte ici : c'est le **cadre du groupe** qui l'est désormais — le
-/// fork arrondit `TabGroupSkin::frame` et espace les splits d'une gouttière,
-/// si bien que la barre d'onglets et le contenu partagent la même surface,
-/// sans couture ni bordure entre eux. Redessiner une carte à l'intérieur
-/// remettrait la couture qu'on vient d'enlever.
+/// No card here any more: it is the **group's frame** that is one now — the
+/// fork rounds `TabGroupSkin::frame` and spaces the splits with a gutter, so
+/// the tab bar and the content share one surface, with no seam or border
+/// between them. Redrawing a card inside would put back the seam just removed.
 ///
-/// `rounded_b` : le masque de contenu de gpui est **rectangulaire** —
-/// l'arrondi du cadre du groupe ne rogne pas ses enfants, et un fond carré
-/// peint ici couvrirait les coins bas de la carte. En haut, le rail des
-/// onglets est en retrait et laisse le cadre paraître ; en bas, c'est ce
-/// fond-ci qui a le dernier mot. Tout panneau doit donc passer par là : celui
-/// qui s'en dispense a des coins carrés, et rien ne le signale.
+/// `rounded_b`: gpui's content mask is **rectangular** — the group frame's
+/// rounding does not clip its children, and a square background painted here
+/// would cover the card's bottom corners. At the top, the tab rail is inset and
+/// lets the frame show; at the bottom, this background has the last word. Every
+/// panel must therefore go through it: one that skips it has square corners,
+/// and nothing points that out.
 fn pane_frame(content: impl IntoElement, cx: &App) -> gpui::Div {
     div()
         .size_full()
@@ -50,19 +49,18 @@ fn pane_frame(content: impl IntoElement, cx: &App) -> gpui::Div {
         .child(content)
 }
 
-/// Idem, en notant le panneau qu'on vient de **toucher** : c'est ce qui donne
-/// une cible à `Ctrl+F`.
+/// The same, while recording the panel just **touched**: that is what gives
+/// `Ctrl+F` a target.
 ///
-/// Le clic et non le focus : le dock pose le focus sur l'onglet actif de
-/// **chaque** zone, il y en a trois affichées en même temps, et rien là-dedans
-/// ne dit laquelle l'utilisateur regarde. En phase de **capture**, donc avant
-/// les enfants et sans qu'aucun d'eux puisse l'arrêter : une ligne de diff
-/// comme une case à cocher consomment leur clic, et le panneau ne saurait
-/// jamais qu'on l'a touché.
+/// The click and not the focus: the dock puts focus on the active tab of
+/// **each** zone, there are three shown at once, and nothing in that says which
+/// one the user is looking at. In the **capture** phase, so before the children
+/// and without any of them being able to stop it: a diff line, like a checkbox,
+/// consumes its click, and the panel would never know it had been touched.
 ///
-/// Les terminaux n'ont pas de panneau de recherche — `Ctrl+F` y appartient au
-/// programme qui tourne —, et c'est pour eux que les deux fonctions sont
-/// séparées : le cadre leur revient, la note non.
+/// The terminals have no search panel — `Ctrl+F` there belongs to the running
+/// program — and it is for them that the two functions are separate: the frame
+/// is theirs, the note is not.
 fn pane_root(
     app: &Entity<ClaudhubApp>,
     pane: Pane,
@@ -75,12 +73,11 @@ fn pane_root(
     })
 }
 
-/// Déclare les panneaux au registre du dock.
+/// Declares the panels to the dock's registry.
 ///
-/// C'est ce qui permet de reconstruire une disposition enregistrée : elle ne
-/// contient que des noms, et le registre dit comment fabriquer l'entité qui va
-/// avec. Sans cette déclaration, une disposition relue affiche des panneaux
-/// « inconnus » à la place des nôtres.
+/// That is what makes it possible to rebuild a saved layout: it holds only
+/// names, and the registry says how to build the matching entity. Without this
+/// declaration, a layout read back shows "unknown" panels in place of ours.
 pub fn register(app: &Entity<ClaudhubApp>, cx: &mut App) {
     macro_rules! declare {
         ($($name:ident => $id:literal),* $(,)?) => { $(
@@ -132,27 +129,27 @@ fn hide_view(app: &WeakEntity<ClaudhubApp>, name: &'static str, menu: PopupMenu)
     )
 }
 
-/// La visibilité d'une vue au moment où son panneau est construit.
+/// A view's visibility at the moment its panel is built.
 ///
-/// Lue dans les réglages et non dans `ClaudhubApp` : les panneaux sont bâtis
-/// **pendant** `ClaudhubApp::new`, et y lire l'entité racine pendant qu'elle
-/// se met à jour est ce que gpui refuse par une panique. Les deux disent la
-/// même chose — l'application tient sa liste des réglages.
+/// Read from the settings and not from `ClaudhubApp`: the panels are built
+/// **during** `ClaudhubApp::new`, and reading the root entity there while it is
+/// updating is what gpui refuses with a panic. Both say the same thing — the
+/// application holds its list from the settings.
 fn visible_at_startup(name: &str, cx: &App) -> bool {
     !Settings::global(cx).hidden_panels.iter().any(|n| n == name)
 }
 
-/// Le zoom est un **bouton**, pas une entrée de menu.
+/// Zoom is a **button**, not a menu entry.
 ///
-/// C'est la seule action que le dock met dans son menu `…` — aucun de nos
-/// panneaux ne se ferme —, et un menu déroulant qui ne contient qu'une ligne
-/// coûte deux clics pour ce qui en vaut un. `PanelControl::Toolbar` le sort
-/// dans la barre d'onglets, à côté du titre.
+/// It is the only action the dock puts in its `…` menu — none of our panels
+/// closes — and a dropdown holding a single line costs two clicks for what is
+/// worth one. `PanelControl::Toolbar` brings it out into the tab bar, next to
+/// the title.
 ///
-/// Ce qu'on ne peut pas faire, et qu'il ne faut pas chercher :
-/// `TabPanel::render_toolbar` de gpui-component 0.5.1 pose le bouton `…`
-/// **sans condition**. Il reste donc affiché, son entrée de zoom grisée. Le
-/// retirer demanderait de vendorer la bibliothèque pour un bouton.
+/// What cannot be done, and should not be looked for:
+/// gpui-component 0.5.1's `TabPanel::render_toolbar` places the `…` button
+/// **unconditionally**. It therefore stays visible, its zoom entry greyed out.
+/// Removing it would mean vendoring the library for one button.
 fn zoom_in_toolbar() -> Option<PanelControl> {
     Some(PanelControl::Toolbar)
 }
@@ -162,9 +159,9 @@ macro_rules! panels {
         pub struct $name {
             app: WeakEntity<ClaudhubApp>,
             focus: FocusHandle,
-            /// Mise en cache pour la même raison que celle des conflits :
-            /// `visible` est appelé pendant la construction de la disposition,
-            /// donc au milieu de `ClaudhubApp::new`.
+            /// Cached for the same reason as the conflicts panel's: `visible`
+            /// is called while the layout is being built, so in the middle of
+            /// `ClaudhubApp::new`.
             visible: bool,
         }
 
@@ -172,16 +169,16 @@ macro_rules! panels {
             pub const NAME: &'static str = $id;
 
             pub fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
-                // Sans cette observation, le panneau garderait l'image de
-                // l'état au moment où il a été construit : c'est `ClaudhubApp`
-                // qui change, pas lui.
+                // Without this observation, the panel would keep the picture of
+                // the state at the moment it was built: it is `ClaudhubApp`
+                // that changes, not the panel.
                 cx.observe(app, |this: &mut Self, app, cx| {
                     let visible = app.read(cx).panel_visible(Self::NAME);
                     if this.visible != visible {
                         this.visible = visible;
-                        // C'est l'aire qui relit la visibilité de ses onglets :
-                        // la notification du panneau seul ne la ferait pas
-                        // disparaître.
+                        // It is the area that re-reads its tabs' visibility:
+                        // notifying the panel alone would not make it
+                        // disappear.
                         cx.emit(PanelEvent::LayoutChanged);
                     }
                     cx.notify();
@@ -203,19 +200,18 @@ macro_rules! panels {
 
         impl EventEmitter<PanelEvent> for $name {}
 
-        // Deux traits depuis la refonte du dock : `BasePanel` porte ce qui
-        // décide de la disposition — le nom persisté, la visibilité, la
-        // fermeture, le zoom — et vit dans `gpui-base`, qui ne sait pas
-        // dessiner. `Panel` porte la présentation, et n'existe que dans la
-        // peau. C'est cette séparation qui permettrait d'écrire notre propre
-        // peau sans reprendre le moteur.
+        // Two traits since the dock rework: `BasePanel` carries what decides the
+        // layout — the persisted name, visibility, closing, zoom — and lives in
+        // `gpui-base`, which cannot draw. `Panel` carries the presentation, and
+        // exists only in the skin. It is that separation that would let us write
+        // a skin of our own without taking over the engine.
         impl BasePanel for $name {
             fn panel_name(&self) -> &'static str {
                 $id
             }
 
-            /// Aucun panneau ne se ferme : rien ne permettrait de le rouvrir,
-            /// et une revue sans sa liste de fichiers n'est plus une revue.
+            /// No panel closes: nothing would make it possible to reopen one,
+            /// and a review without its file list is no longer a review.
             fn closable(&self, _: &App) -> bool {
                 false
             }
@@ -302,9 +298,9 @@ impl ConflictsPanel {
             let visible = app.pending_operation().is_some() || !app.conflicted_files().is_empty();
             if this.visible != visible {
                 this.visible = visible;
-                // Le dock relit la visibilité de ses onglets quand la zone se
-                // redessine : c'est la notification de l'aire, et non celle du
-                // panneau, qui fait apparaître ou disparaître l'onglet.
+                // The dock re-reads its tabs' visibility when the zone
+                // redraws: it is the area's notification, and not the panel's,
+                // that makes a tab appear or disappear.
                 cx.emit(PanelEvent::LayoutChanged);
             }
             cx.notify();
@@ -313,8 +309,8 @@ impl ConflictsPanel {
         Self {
             app: app.downgrade(),
             focus: cx.focus_handle(),
-            // Faux au départ, et ce n'est pas un pis-aller : aucun dépôt n'est
-            // encore ouvert quand la disposition se construit.
+            // False to begin with, and that is not a makeshift: no repository is
+            // open yet when the layout is built.
             visible: false,
         }
     }
@@ -362,16 +358,16 @@ impl Render for ConflictsPanel {
     }
 }
 
-/// Les terminaux se masquent sans se fermer.
+/// The terminals hide without closing.
 ///
-/// `Panel::visible` plutôt qu'une zone d'accueil repliable : gpui-component
-/// interdit de déplacer le dernier panneau d'une zone, et les terminaux
-/// seraient alors figés là où ils sont.
+/// `Panel::visible` rather than a collapsible dock zone: gpui-component forbids
+/// moving the last panel of a zone, and the terminals would then be frozen
+/// where they are.
 pub struct TerminalPanel {
     app: WeakEntity<ClaudhubApp>,
     focus: FocusHandle,
-    /// Mise en cache pour la même raison que celle des conflits : `visible`
-    /// est appelé pendant la construction de la disposition, donc au milieu de
+    /// Cached for the same reason as the conflicts panel's: `visible` is called
+    /// while the layout is being built, so in the middle of
     /// `ClaudhubApp::new`.
     visible: bool,
 }
@@ -448,11 +444,11 @@ impl Render for TerminalPanel {
     }
 }
 
-/// L'historique a besoin d'être chargé la première fois qu'on le regarde.
+/// The history needs loading the first time it is looked at.
 ///
-/// Le faire au rendu plutôt qu'à la construction est ce qui évite un `git log`
-/// sur un onglet que personne n'ouvrira ; `ensure_history` ne demande qu'une
-/// fois, sans quoi chaque frame relancerait la commande.
+/// Doing it at render time rather than at construction is what avoids a `git
+/// log` on a tab nobody will open; `ensure_history` only asks once, otherwise
+/// every frame would restart the command.
 pub struct HistoryPanel {
     app: WeakEntity<ClaudhubApp>,
     focus: FocusHandle,

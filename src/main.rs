@@ -1,9 +1,9 @@
-//! Le binaire de l'interface : tout vit dans la bibliothèque `claudhub`.
+//! The interface binary: everything lives in the `claudhub` library.
 
 fn main() {
-    // Avant tout le reste, et avant qu'un thread existe : ce qui nous a lancés
-    // est souvent un agent, et ses marqueurs de session feraient de chaque
-    // agent que nous démarrons une sous-session du sien.
+    // Before anything else, and before any thread exists: what launched us is
+    // often an agent, and its session markers would make every agent we start
+    // a sub-session of its own.
     claudhub::agent::disinherit_session();
     claudhub::logging::init();
     claudhub::ui::run();

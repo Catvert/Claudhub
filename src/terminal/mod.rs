@@ -1,15 +1,14 @@
-//! Terminaux intégrés.
+//! Built-in terminals.
 //!
-//! L'émulation est celle d'alacritty (`alacritty_terminal`) : parseur VTE,
-//! grille de cellules, historique, ouverture du pty et boucle d'E/S. Claudhub
-//! n'écrit que deux choses par-dessus — la traduction des touches gpui en
-//! octets (`keys`) et un instantané de la grille que la vue sait dessiner
-//! (`Snapshot`).
+//! The emulation is alacritty's (`alacritty_terminal`): VTE parser, cell grid,
+//! scrollback, pty opening and I/O loop. Claudhub writes only two things on top
+//! — the translation of gpui keystrokes into bytes (`keys`) and a snapshot of
+//! the grid the view can draw (`Snapshot`).
 //!
-//! Le partage se fait par `FairMutex` : la boucle d'E/S écrit dans le `Term`
-//! depuis son propre thread, le thread d'interface le lit à chaque frame. Ce
-//! verrou-là est équitable, donc un terminal qui déverse `yes` ne peut pas
-//! affamer l'interface qui essaie de le peindre.
+//! Sharing goes through a `FairMutex`: the I/O loop writes into the `Term` from
+//! its own thread, the interface thread reads it on every frame. That lock is
+//! fair, so a terminal spewing `yes` cannot starve the interface trying to
+//! paint it.
 
 mod keys;
 pub mod mouse;
@@ -35,25 +34,25 @@ use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::tty;
 use anyhow::{Context, Result};
 
-/// Ce que la vue a besoin de savoir d'un terminal, entre deux frames.
+/// What the view needs to know about a terminal, between two frames.
 #[derive(Debug, Clone)]
 pub enum TerminalEvent {
-    /// Nouveau contenu : il faut redessiner.
+    /// New content: a redraw is needed.
     Wakeup,
-    /// Le programme a changé le titre (les shells y mettent la commande en
-    /// cours, ce qui donne son nom à l'onglet).
+    /// The program changed the title (shells put the running command there,
+    /// which gives the tab its name).
     Title(String),
     Bell,
-    /// Le processus est sorti ; la session est morte mais son contenu reste
-    /// lisible, ce qui est exactement ce qu'on veut après un test échoué.
+    /// The process has exited; the session is dead but its content stays
+    /// readable, which is exactly what one wants after a failed test.
     Exited,
 }
 
-/// Une position dans la zone visible, en cellules.
+/// A position in the visible area, in cells.
 ///
-/// `side` dit de quel côté de la cellule le pointeur se trouve ; c'est ce qui
-/// permet de sélectionner un caractère en partant de sa moitié droite sans
-/// l'inclure, comme le fait un éditeur de texte.
+/// `side` says which side of the cell the pointer is on; that is what makes it
+/// possible to select a character starting from its right half without
+/// including it, as a text editor does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewportPosition {
     pub line: usize,
@@ -64,14 +63,14 @@ pub struct ViewportPosition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectionKind {
     Simple,
-    /// Double-clic : étend jusqu'aux frontières du mot.
+    /// Double click: extends to word boundaries.
     Word,
-    /// Triple-clic : la ligne entière.
+    /// Triple click: the whole line.
     Line,
 }
 
-/// Taille de la grille. Les dimensions en pixels comptent : les programmes
-/// plein écran interrogent le pty pour placer leurs images et leurs cadres.
+/// Grid size. The pixel dimensions matter: full-screen programs query the pty to
+/// place their images and their frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TermSize {
     pub columns: usize,
@@ -81,9 +80,9 @@ pub struct TermSize {
 }
 
 impl TermSize {
-    /// Une grille de moins d'une colonne ou d'une ligne fait paniquer la
-    /// grille d'alacritty ; c'est ce qui arrive pendant qu'un panneau se
-    /// replie, donc le plancher est ici et pas dans la vue.
+    /// A grid of less than one column or one line makes alacritty's grid panic;
+    /// that is what happens while a panel is collapsing, so the floor is here and
+    /// not in the view.
     pub fn new(columns: usize, lines: usize, cell_width: u16, cell_height: u16) -> Self {
         Self {
             columns: columns.max(2),
@@ -117,18 +116,18 @@ impl From<TermSize> for WindowSize {
     }
 }
 
-/// Le pont entre la boucle d'E/S d'alacritty et le thread d'interface.
+/// The bridge between alacritty's I/O loop and the interface thread.
 ///
-/// `try_send` et non `send` : si la vue n'a pas encore drainé, mieux vaut
-/// perdre un réveil — le prochain redessinera de toute façon l'état courant —
-/// que bloquer le thread qui lit le pty.
+/// `try_send` and not `send`: if the view has not drained yet, losing a wake-up
+/// is better — the next one will redraw the current state anyway — than
+/// blocking the thread that reads the pty.
 #[derive(Clone)]
 struct Proxy {
     events: async_channel::Sender<TerminalEvent>,
-    /// Voie d'écriture vers le pty.
+    /// The write channel towards the pty.
     ///
-    /// Elle n'existe qu'une fois la boucle d'E/S créée, alors que le proxy lui
-    /// est passé à la construction : d'où le `OnceLock`, rempli juste après.
+    /// It only exists once the I/O loop has been created, whereas the proxy is
+    /// handed to it at construction: hence the `OnceLock`, filled just after.
     pty: Arc<std::sync::OnceLock<EventLoopSender>>,
 }
 
@@ -140,46 +139,45 @@ impl EventListener for Proxy {
             AlacEvent::ResetTitle => TerminalEvent::Title(String::new()),
             AlacEvent::Bell => TerminalEvent::Bell,
             AlacEvent::Exit | AlacEvent::ChildExit(_) => TerminalEvent::Exited,
-            // Une réponse que l'émulateur doit au programme : identité du
-            // terminal, position du curseur, état d'un mode. Ce n'est pas
-            // facultatif — fish interroge le terminal au démarrage et attend
-            // **dix secondes** avant de renoncer, puis se prive des
-            // fonctionnalités qui en dépendaient.
+            // An answer the emulator owes the program: terminal identity, cursor
+            // position, state of a mode. It is not optional — fish queries the
+            // terminal at startup and waits **ten seconds** before giving up,
+            // then does without the features that depended on it.
             AlacEvent::PtyWrite(text) => {
                 if let Some(pty) = self.pty.get() {
                     let _ = pty.send(Msg::Input(text.into_bytes().into()));
                 }
                 return;
             }
-            // Presse-papiers, couleurs, forme du curseur : rien que la vue
-            // sache traiter aujourd'hui, et les ignorer est sans conséquence.
+            // Clipboard, colours, cursor shape: nothing the view can handle
+            // today, and ignoring them has no consequence.
             _ => return,
         };
         let _ = self.events.try_send(mapped);
     }
 }
 
-/// Une session : un pty, son émulateur, et le thread qui les relie.
+/// A session: a pty, its emulator, and the thread joining them.
 pub struct Terminal {
     term: Arc<FairMutex<Term<Proxy>>>,
     sender: EventLoopSender,
     events: async_channel::Receiver<TerminalEvent>,
     size: TermSize,
-    /// Répertoire de lancement — celui du worktree auquel l'onglet appartient.
+    /// Launch directory — that of the worktree the tab belongs to.
     working_directory: PathBuf,
     title: String,
     exited: bool,
 }
 
-/// De quoi démarrer une session.
+/// What is needed to start a session.
 pub struct Spawn<'a> {
     pub working_directory: &'a Path,
-    /// Programme et arguments. `None` = le shell de connexion de
-    /// l'utilisateur, ce qu'attend quelqu'un qui ouvre « un terminal ».
+    /// Program and arguments. `None` = the user's login shell, which is what
+    /// somebody opening "a terminal" expects.
     pub command: Option<(String, Vec<String>)>,
     pub env: HashMap<String, String>,
     pub size: TermSize,
-    /// Lignes d'historique conservées.
+    /// Scrollback lines kept.
     pub scrollback: usize,
 }
 
@@ -192,27 +190,27 @@ impl Terminal {
         };
 
         let mut env = options.env;
-        // Sans TERM, les programmes plein écran retombent sur un terminal
-        // muet ; `xterm-256color` est ce que décrit l'émulation d'alacritty et
-        // ce que toutes les terminfo connaissent.
+        // Without TERM, full-screen programs fall back to a dumb terminal;
+        // `xterm-256color` is what alacritty's emulation describes and what
+        // every terminfo knows.
         env.entry("TERM".into())
             .or_insert_with(|| "xterm-256color".into());
         env.entry("COLORTERM".into())
             .or_insert_with(|| "truecolor".into());
-        // Repère pour les scripts et les invites : on est dans Claudhub.
+        // A marker for scripts and prompts: we are inside Claudhub.
         env.insert("CLAUDHUB".into(), "1".into());
 
-        // Sous Linux le repli `..Default::default()` ne couvre aucun champ,
-        // d'où l'allow ; sous Windows il fournit `escape_args`, sans lequel le
-        // littéral ne compile pas.
+        // On Linux the `..Default::default()` fallback covers no field, hence
+        // the allow; on Windows it provides `escape_args`, without which the
+        // literal does not compile.
         #[allow(clippy::needless_update)]
         let pty_options = tty::Options {
             shell: options
                 .command
                 .map(|(program, args)| tty::Shell::new(program, args)),
             working_directory: Some(options.working_directory.to_path_buf()),
-            // Sans drain, la sortie écrite juste avant la fin du processus est
-            // perdue — c'est-à-dire l'erreur qu'on cherchait à lire.
+            // Without draining, the output written just before the process ends
+            // is lost — that is, the error we were trying to read.
             drain_on_exit: true,
             env,
             ..Default::default()
@@ -263,7 +261,7 @@ impl Terminal {
         })
     }
 
-    /// Canal des événements, à drainer depuis une tâche gpui.
+    /// The event channel, to be drained from a gpui task.
     pub fn events(&self) -> async_channel::Receiver<TerminalEvent> {
         self.events.clone()
     }
@@ -292,7 +290,7 @@ impl Terminal {
         self.size
     }
 
-    /// Envoie des octets au programme. Toute saisie passe par là.
+    /// Sends bytes to the program. All input goes through here.
     pub fn write(&self, bytes: impl Into<Cow<'static, [u8]>>) {
         if self.exited {
             return;
@@ -304,9 +302,8 @@ impl Terminal {
         self.write(text.as_bytes().to_vec());
     }
 
-    /// Redimensionne la grille *et* le pty. Les deux, sinon le programme
-    /// continue de dessiner à l'ancienne taille : c'est le pty qui porte
-    /// SIGWINCH.
+    /// Resizes the grid *and* the pty. Both, otherwise the program keeps drawing
+    /// at the old size: it is the pty that carries SIGWINCH.
     pub fn resize(&mut self, size: TermSize) {
         if size == self.size {
             return;
@@ -316,22 +313,22 @@ impl Terminal {
         let _ = self.sender.send(Msg::Resize(size.into()));
     }
 
-    /// Fait défiler l'historique de `lines` lignes (positif = vers le passé).
+    /// Scrolls the scrollback by `lines` lines (positive = towards the past).
     pub fn scroll(&self, lines: i32) {
         use alacritty_terminal::grid::Scroll;
         self.term.lock().scroll_display(Scroll::Delta(lines));
     }
 
-    /// Vrai quand un programme plein écran occupe la grille.
+    /// True when a full-screen program occupies the grid.
     ///
-    /// Il n'y a alors pas d'historique : ce qui est affiché est ce que le
-    /// programme dessine, et ce qui précède n'appartient qu'à lui.
+    /// There is then no scrollback: what is shown is what the program draws, and
+    /// what came before belongs to it alone.
     pub fn in_alternate_screen(&self) -> bool {
         self.mode()
             .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
     }
 
-    /// Vide l'écran et tout l'historique.
+    /// Clears the screen and the whole scrollback.
     pub fn clear(&self) {
         use alacritty_terminal::vte::ansi::{ClearMode, Handler};
         let mut term = self.term.lock();
@@ -339,20 +336,19 @@ impl Terminal {
         term.clear_screen(ClearMode::Saved);
     }
 
-    /// Ramène la vue en bas — ce que fait toute frappe dans un terminal.
+    /// Brings the view back to the bottom — what every keystroke does in a terminal.
     pub fn scroll_to_bottom(&self) {
         use alacritty_terminal::grid::Scroll;
         self.term.lock().scroll_display(Scroll::Bottom);
     }
 
-    // — Sélection ————————————————————————————————————————————————
+    // — Selection ————————————————————————————————————————————————
 
-    /// Ouvre une sélection à une position du viewport.
+    /// Opens a selection at a viewport position.
     ///
-    /// `kind` distingue le glissement simple, le double-clic (mot) et le
-    /// triple-clic (ligne) : alacritty se charge lui-même d'étendre aux
-    /// frontières sémantiques, avec les mêmes règles que dans un terminal
-    /// ordinaire.
+    /// `kind` tells a simple drag from a double click (word) and a triple click
+    /// (line): alacritty takes care of extending to semantic boundaries itself,
+    /// with the same rules as in an ordinary terminal.
     pub fn start_selection(&self, position: ViewportPosition, kind: SelectionKind) {
         let mut term = self.term.lock();
         let point = self.grid_point(&term, position);
@@ -364,9 +360,9 @@ impl Terminal {
         term.selection = Some(Selection::new(ty, point, position.side));
     }
 
-    /// Étend la sélection en cours. Sans appel préalable à `start_selection`,
-    /// ne fait rien — un glissement qui n'a pas commencé dans le terminal ne
-    /// doit pas y sélectionner quoi que ce soit.
+    /// Extends the running selection. Without a prior call to
+    /// `start_selection`, does nothing — a drag that did not start in the
+    /// terminal must not select anything there.
     pub fn update_selection(&self, position: ViewportPosition) {
         let mut term = self.term.lock();
         let point = self.grid_point(&term, position);
@@ -375,13 +371,13 @@ impl Terminal {
         }
     }
 
-    /// Sélectionne tout, historique compris.
+    /// Selects everything, scrollback included.
     pub fn select_all(&self) {
         let mut term = self.term.lock();
         let total = term.grid().total_lines();
         let columns = self.size.columns.saturating_sub(1);
-        // La première ligne de l'historique porte l'indice le plus négatif ;
-        // la dernière ligne visible est à `lines - 1`.
+        // The first scrollback line carries the most negative index; the last
+        // visible line is at `lines - 1`.
         let top = Point::new(
             alacritty_terminal::index::Line(-((total - self.size.lines) as i32)),
             Column(0),
@@ -407,19 +403,18 @@ impl Terminal {
             .is_some_and(|s| !s.is_empty())
     }
 
-    /// Le texte sélectionné, tel qu'il sera collé ailleurs.
+    /// The selected text, as it will be pasted elsewhere.
     ///
-    /// C'est alacritty qui le reconstitue : il sait quelles lignes sont la
-    /// continuation d'une ligne trop longue et ne doivent donc pas être
-    /// coupées par un saut de ligne, ce qu'un assemblage naïf des lignes
-    /// visibles ne saurait pas.
+    /// It is alacritty that rebuilds it: it knows which lines are the
+    /// continuation of a line that was too long and must therefore not be cut
+    /// by a newline, which a naive assembly of the visible lines would not.
     pub fn selection_text(&self) -> Option<String> {
         self.term.lock().selection_to_string()
     }
 
-    /// Convertit une position du viewport en point de la grille, historique
-    /// compris : sans cette translation, une sélection faite après avoir
-    /// remonté l'historique désignerait les lignes du bas.
+    /// Converts a viewport position into a grid point, scrollback included:
+    /// without that translation, a selection made after scrolling back would
+    /// name the lines at the bottom.
     fn grid_point(&self, term: &Term<Proxy>, position: ViewportPosition) -> Point {
         let offset = term.grid().display_offset();
         let line = position.line.min(self.size.lines.saturating_sub(1));
@@ -427,13 +422,12 @@ impl Terminal {
         alacritty_terminal::term::viewport_to_point(offset, Point::new(line, Column(column)))
     }
 
-    /// Colle du texte.
+    /// Pastes text.
     ///
-    /// En mode « collage entre crochets », le contenu est encadré par les
-    /// séquences que le programme attend : sans elles, un shell interprète un
-    /// texte multiligne collé comme autant de commandes validées, ce qui est
-    /// la façon classique d'exécuter par accident ce qu'on voulait seulement
-    /// relire.
+    /// In "bracketed paste" mode, the content is wrapped in the sequences the
+    /// program expects: without them, a shell reads a pasted multi-line text as
+    /// that many commands entered, which is the classic way of accidentally
+    /// running what you only meant to read.
     pub fn paste(&self, text: &str) {
         use alacritty_terminal::term::TermMode;
         if self.mode().contains(TermMode::BRACKETED_PASTE) {
@@ -441,26 +435,26 @@ impl Terminal {
             self.write_str(&text.replace('\x1b', ""));
             self.write_str("\x1b[201~");
         } else {
-            // Hors de ce mode, un retour chariot vaut validation : c'est le
-            // comportement de tous les terminaux, et le changer casserait un
-            // collage volontaire de commandes.
+            // Outside that mode, a carriage return means confirm: it is every
+            // terminal's behaviour, and changing it would break a deliberate
+            // paste of commands.
             self.write_str(&text.replace("\r\n", "\r").replace('\n', "\r"));
         }
     }
 
-    /// Instantané de la grille pour une frame.
+    /// Snapshot of the grid for one frame.
     ///
-    /// Le verrou n'est tenu que le temps de la copie : dessiner sous le verrou
-    /// bloquerait la boucle d'E/S pendant tout le rendu.
+    /// The lock is only held for the length of the copy: drawing under the lock
+    /// would block the I/O loop for the whole render.
     pub fn snapshot(&self) -> Snapshot {
         snapshot::capture(&self.term.lock())
     }
 
-    /// Rapporte un événement de souris au programme, s'il en a demandé.
+    /// Reports a mouse event to the program, if it asked for one.
     ///
-    /// Rend vrai quand l'événement lui a été livré : la vue n'a alors plus
-    /// rien à en faire — ni défiler, ni sélectionner. C'est le programme qui a
-    /// la souris, comme dans n'importe quel terminal.
+    /// Returns true when the event was delivered to it: the view then has
+    /// nothing left to do with it — no scrolling, no selecting. The program has
+    /// the mouse, as in any terminal.
     pub fn report_mouse(&self, event: mouse::Report) -> bool {
         let Some(bytes) = mouse::report(self.mode(), event) else {
             return false;
@@ -469,17 +463,17 @@ impl Terminal {
         true
     }
 
-    /// Vrai si le programme écoute la souris. La vue s'en sert pour ce qui se
-    /// décide **avant** l'événement — laisser la sélection au Maj, par
-    /// exemple.
+    /// True if the program listens to the mouse. The view uses it for what is
+    /// decided **before** the event — leaving the selection to Shift, for
+    /// instance.
     pub fn reports_mouse(&self) -> bool {
         self.mode()
             .intersects(alacritty_terminal::term::TermMode::MOUSE_MODE)
     }
 
-    /// Vrai si le programme est en mode « application » pour la souris ou les
-    /// touches — la vue en a besoin pour savoir si la molette doit défiler
-    /// dans l'historique ou être transmise au programme.
+    /// True if the program is in "application" mode for the mouse or the keys —
+    /// the view needs it to know whether the wheel should scroll the scrollback
+    /// or be passed to the program.
     pub fn mode(&self) -> alacritty_terminal::term::TermMode {
         *self.term.lock().mode()
     }
@@ -487,9 +481,9 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        // Ferme la boucle d'E/S, qui ferme le pty, ce qui envoie SIGHUP au
-        // groupe de processus : sans cela, fermer un onglet laisserait tourner
-        // ce qu'il exécutait.
+        // Closes the I/O loop, which closes the pty, which sends SIGHUP to the
+        // process group: without that, closing a tab would leave what it was
+        // running alive.
         let _ = self.sender.send(Msg::Shutdown);
     }
 }

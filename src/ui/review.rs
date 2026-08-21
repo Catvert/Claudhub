@@ -1,9 +1,9 @@
-//! La revue : liste des fichiers touchés, et le diff du fichier choisi.
+//! The review: the list of touched files, and the chosen file's diff.
 //!
-//! Quatre domaines de comparaison, choisis par les onglets en tête de liste :
-//! les modifications non indexées, l'index, tout le checkout contre HEAD, et
-//! la branche entière depuis sa divergence d'avec sa base. Le dernier est
-//! celui qui sert à relire le travail d'un agent avant de le pousser.
+//! Four comparison ranges, chosen by the tabs at the head of the list: the
+//! unstaged changes, the index, the whole checkout against HEAD, and the whole
+//! branch since it diverged from its base. The last is the one used to review an
+//! agent's work before pushing it.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -78,27 +78,26 @@ struct DirRow {
 #[derive(Clone)]
 struct FileRow {
     path: PathBuf,
-    /// Profondeur dans l'arborescence. Nulle en liste plate.
+    /// Depth in the tree. Zero in the flat list.
     depth: usize,
     name: String,
     directory: String,
-    /// Les deux codes de git, celui de l'index puis celui du répertoire de
-    /// travail : c'est l'information exacte, et elle tient en deux caractères
-    /// là où une seule case à cocher devrait mentir sur les fichiers
-    /// partiellement indexés.
+    /// git's two codes, the index's then the working tree's: it is the exact
+    /// information, and it fits in two characters where a single checkbox would
+    /// have to lie about partially staged files.
     index: StatusCode,
     worktree: StatusCode,
     added: usize,
     removed: usize,
-    /// Ce fichier ira dans le prochain commit, au moins en partie.
+    /// This file will go into the next commit, at least in part.
     staged: bool,
     untracked: bool,
-    /// On l'a marqué relu, et il n'a pas changé depuis.
+    /// It has been marked reviewed, and has not changed since.
     reviewed: bool,
 }
 
 impl FileRow {
-    /// Une partie seulement du fichier est indexée : ce que git écrit `MM`.
+    /// Only part of the file is staged: what git writes `MM`.
     fn partial(&self) -> bool {
         self.staged && !matches!(self.worktree, StatusCode::Unmodified)
     }
@@ -119,7 +118,7 @@ impl FileRow {
 }
 
 impl ClaudhubApp {
-    /// La liste des modifications en cours, et de quoi les valider.
+    /// The list of changes in progress, and what is needed to commit them.
     pub(super) fn render_changes(
         &mut self,
         window: &mut Window,
@@ -128,11 +127,12 @@ impl ClaudhubApp {
         self.render_file_list(DiffRange::Working, window, cx)
     }
 
-    /// La revue de branche : ce que la branche a écrit depuis sa base.
+    /// The branch review: what the branch has written since its base.
     ///
-    /// Tant que la base est inconnue — dépôt sans branche d'intégration, ou
-    /// branche déployée ici qui n'aurait rien à se comparer — le panneau le
-    /// dit plutôt que d'afficher une liste vide qu'on croirait fausse.
+    /// While the base is unknown — a repository with no integration branch, or
+    /// the branch checked out here which would have nothing to compare itself
+    /// against — the panel says so rather than show an empty list one would take
+    /// for wrong.
     pub(super) fn render_branch_review(
         &mut self,
         window: &mut Window,
@@ -176,9 +176,8 @@ impl ClaudhubApp {
                 .into_any_element();
         };
 
-        // Deux panneaux affichent cette liste en même temps : chacun a sa
-        // recherche, sans quoi filtrer les modifications filtrerait aussi la
-        // revue de branche.
+        // Two panels show this list at the same time: each has its own search,
+        // otherwise filtering the changes would also filter the branch review.
         let pane = if matches!(range, DiffRange::Working) {
             crate::ui::find::Pane::Changes
         } else {
@@ -186,24 +185,24 @@ impl ClaudhubApp {
         };
         let find = self.render_find(pane, cx);
         let query = self.query(pane, cx);
-        // C'est le panneau qui demande sa liste : lui seul sait ce qu'il
-        // affiche, et charger les deux domaines d'avance coûterait une
-        // commande pour un onglet que personne n'ouvrira.
+        // It is the panel that asks for its list: it alone knows what it shows,
+        // and loading both ranges in advance would cost a command for a tab
+        // nobody will open.
         self.ensure_files(range.clone(), cx);
-        // Prise avant tout emprunt de l'état : c'est la vue qui la détient, et
-        // la liste ne fait que s'y accrocher.
+        // Taken before any borrow of the state: it is the view that holds it,
+        // and the list only hangs off it.
         let scroll = self.file_scroll(&range);
         let Some(state) = self.review.get(&worktree) else {
             return div().into_any_element();
         };
         let selected = state.selected.clone();
         let collapsed = state.collapsed.clone();
-        // La liste plate reste la référence : c'est elle qui compte ce qui est
-        // indexé et qui donne à la case d'un groupe les fichiers sur lesquels
-        // agir, y compris ceux qu'un dossier replié cache.
-        // Le filtre s'applique à la liste plate, avant l'arborescence : c'est
-        // elle la référence, et un dossier dont plus rien ne reste doit
-        // disparaître avec ses fichiers.
+        // The flat list stays the reference: it is what counts what is staged
+        // and what gives a group's box the files to act on, including those a
+        // collapsed folder hides.
+        // The filter applies to the flat list, before the tree: it is the
+        // reference, and a folder with nothing left in it has to disappear with
+        // its files.
         let flat: Vec<Row> = self
             .rows(&range, cx)
             .into_iter()
@@ -308,12 +307,12 @@ impl ClaudhubApp {
                                     },
                                 )
                                 .size_full()
-                                // Le retrait des lignes est ici et non sur
-                                // elles : `uniform_list` pose ses entrées à la
-                                // taille qu'il calcule, et une marge sur une
-                                // entrée est ignorée. C'est ce retrait qui
-                                // laisse les fonds arrondis respirer au lieu
-                                // de traverser le panneau d'un bord à l'autre.
+                                // The rows' inset is here and not on them:
+                                // `uniform_list` lays its entries out at the
+                                // size it computes, and a margin on an entry is
+                                // ignored. It is that inset that lets the
+                                // rounded backgrounds breathe instead of
+                                // crossing the panel from edge to edge.
                                 .px_1()
                                 .track_scroll(&scroll.clone()),
                                 cx,
@@ -327,11 +326,11 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// Les entrées de la liste d'un domaine.
+    /// The rows of a range's list.
     ///
-    /// Le statut est la source pour les modifications en cours — lui seul
-    /// distingue index et répertoire de travail — et `--numstat` pour les
-    /// domaines qui portent sur des commits et n'ont pas de notion d'index.
+    /// The status is the source for the changes in progress — it alone tells the
+    /// index from the working tree — and `--numstat` for the ranges that are
+    /// about commits and have no notion of an index.
     fn rows(&self, range: &DiffRange, _cx: &Context<Self>) -> Vec<Row> {
         let Some(state) = self.active_review() else {
             return Vec::new();
@@ -340,11 +339,11 @@ impl ClaudhubApp {
         rows_for(range, &state.status, files, &state.reviewed)
     }
 
-    /// Les fichiers de la liste, dans l'ordre où ils s'affichent.
+    /// The list's files, in the order they are displayed.
     ///
-    /// L'ordre affiché et non l'ordre brut : un dossier replié cache ses
-    /// fichiers, et les flèches ne doivent pas ouvrir un fichier que la liste
-    /// ne montre pas — le suivant serait alors introuvable à l'œil.
+    /// The displayed order and not the raw one: a collapsed folder hides its
+    /// files, and the arrows must not open a file the list does not show — the
+    /// next one would then be impossible to find by eye.
     fn visible_files(&self, range: &DiffRange, cx: &Context<Self>) -> Vec<PathBuf> {
         self.visible_rows(range, cx)
             .into_iter()
@@ -355,7 +354,7 @@ impl ClaudhubApp {
             .collect()
     }
 
-    /// Les entrées telles que la liste les affiche, dossiers compris.
+    /// The entries as the list shows them, folders included.
     fn visible_rows(&self, range: &DiffRange, cx: &Context<Self>) -> Vec<Row> {
         let Some(state) = self.active_review() else {
             return Vec::new();
@@ -368,11 +367,11 @@ impl ClaudhubApp {
         }
     }
 
-    /// Amène la liste sur un fichier.
+    /// Brings the list onto a file.
     ///
-    /// L'indice est celui de la liste **affichée** — dossiers compris, et sans
-    /// ce que les replis cachent : c'est cette liste-là que la vue virtualise,
-    /// et un indice pris ailleurs désignerait une autre ligne.
+    /// The index is that of the **displayed** list — folders included, and
+    /// without what the collapses hide: it is that list the view virtualises,
+    /// and an index taken elsewhere would name another row.
     pub(super) fn reveal_file(&mut self, range: &DiffRange, path: &Path, cx: &mut Context<Self>) {
         let Some(index) = self
             .visible_rows(range, cx)
@@ -385,10 +384,10 @@ impl ClaudhubApp {
             .scroll_to_item(index, gpui::ScrollStrategy::Center);
     }
 
-    /// Ouvre le fichier précédent ou suivant de la liste.
+    /// Opens the previous or next file in the list.
     ///
-    /// Aux extrémités, rien ne se passe : boucler ferait recommencer une revue
-    /// qu'on vient de finir sans que rien ne le signale.
+    /// At the ends, nothing happens: wrapping would restart a review just
+    /// finished with nothing to say so.
     pub(super) fn step_file(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
@@ -612,11 +611,11 @@ impl ClaudhubApp {
         )
     }
 
-    /// Demande à l'agent un message pour ce qui est indexé.
+    /// Asks the agent for a message for what is staged.
     ///
-    /// La commande part dans un worker comme tout le reste : `claude -p` met
-    /// dix à trente secondes, et les attendre depuis un gestionnaire de clic
-    /// figerait la fenêtre pour toute la durée.
+    /// The command goes into a worker like everything else: `claude -p` takes
+    /// ten to thirty seconds, and waiting for it from a click handler would
+    /// freeze the window for the whole time.
     pub(super) fn suggest_commit_message(&mut self, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
@@ -633,16 +632,16 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Bascule entre l'arborescence et la liste plate.
+    /// Switches between the tree and the flat list.
     ///
-    /// Le choix est global et persistant : c'est une habitude de lecture, pas
-    /// une décision qu'on reprend par worktree.
+    /// The choice is global and persistent: it is a reading habit, not a
+    /// decision taken again per worktree.
     pub(super) fn toggle_review_tree(&mut self, cx: &mut Context<Self>) {
         crate::ui::settings::Settings::update_global(cx, |s| s.review_tree = !s.review_tree);
         cx.notify();
     }
 
-    /// Replie ou déplie un dossier de la liste.
+    /// Collapses or unfolds a folder of the list.
     pub(super) fn toggle_directory(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let Some(state) = self.active_review_mut() else {
             return;
@@ -656,9 +655,9 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Coche ou décoche des fichiers, c'est-à-dire les indexe ou les retire de
-    /// l'index. C'est le seul geste d'indexation que l'interface propose : la
-    /// case remplace les deux listes que git distingue.
+    /// Ticks or unticks files, that is, stages them or takes them out of the
+    /// index. It is the only staging gesture the interface offers: the box
+    /// replaces the two lists git distinguishes.
     pub(super) fn set_staged(
         &mut self,
         worktree: PathBuf,
@@ -677,7 +676,7 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Valide ce qui est dans l'index. `amend` reprend le commit précédent.
+    /// Commits what is in the index. `amend` reuses the previous commit.
     pub(super) fn commit(&mut self, amend: bool, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
@@ -758,11 +757,11 @@ impl ClaudhubApp {
     }
 }
 
-/// Rend une ligne de la liste : un en-tête de groupe ou un fichier.
+/// Renders one row of the list: a group heading or a file.
 ///
-/// Fonction libre parce que la fermeture d'une liste virtualisée ne reçoit pas
-/// la vue : elle capture l'entité et repasse par `update` pour agir, comme le
-/// font les gestionnaires de dialogue.
+/// A free function because a virtualised list's closure does not receive the
+/// view: it captures the entity and goes back through `update` to act, as the
+/// dialog handlers do.
 #[allow(clippy::too_many_arguments)]
 fn render_row(
     rows: &std::rc::Rc<Vec<Row>>,
@@ -788,16 +787,16 @@ fn render_row(
     }
 }
 
-/// Décalage d'un niveau d'arborescence.
+/// One tree level's offset.
 ///
-/// Proportionnel au texte, comme les hauteurs : une indentation figée disparaît
-/// quand la police grossit, et l'arbre redevient une liste plate.
+/// Proportional to the text, like the heights: a fixed indentation disappears
+/// when the font grows, and the tree becomes a flat list again.
 fn indent(depth: usize, cx: &gpui::App) -> gpui::Pixels {
     px(8.) + crate::ui::theme::row_height(cx) * 0.5 * depth as f32
 }
 
-/// Un dossier : le chevron, la case qui indexe tout ce qu'il contient, et le
-/// total de ses lignes.
+/// A folder: the chevron, the box that stages everything it contains, and the
+/// total of its lines.
 #[allow(clippy::too_many_arguments)]
 fn render_dir(
     row: &DirRow,
@@ -823,8 +822,8 @@ fn render_dir(
         .cursor_pointer()
         .whitespace_nowrap()
         .overflow_hidden()
-        // Un dossier vert est un dossier entièrement relu : c'est ce que sa
-        // coche promet en un clic.
+        // A green folder is a fully reviewed folder: that is what its tick
+        // promises in one click.
         .when(row.reviewed, |el| el.bg(cx.theme().success.opacity(0.12)))
         .hover(|s| s.bg(cx.theme().accent.opacity(0.4)))
         .on_click({
@@ -841,9 +840,9 @@ fn render_dir(
             })
             .xsmall(),
         )
-        // La case d'un dossier agit sur tout son sous-arbre, replié compris :
-        // cocher un dossier fermé doit indexer ce qu'il contient, et non ce
-        // qu'on en voit.
+        // A folder's box acts on its whole subtree, collapsed part included:
+        // ticking a closed folder must stage what it contains, and not what is
+        // visible of it.
         .when(checkable, |el| {
             let (entity, worktree, paths) =
                 (entity.clone(), worktree.to_path_buf(), row.paths.clone());
@@ -964,10 +963,10 @@ fn render_file(
         .cursor_pointer()
         .whitespace_nowrap()
         .overflow_hidden()
-        // Relu : un fond vert, qui se voit d'un coup d'œil là où la seule
-        // coche à droite demande de parcourir une colonne. La sélection passe
-        // devant — c'est l'endroit où l'on est, et le perdre de vue est pire
-        // que d'oublier une ligne déjà lue.
+        // Reviewed: a green background, which shows at a glance where the tick
+        // alone on the right would mean scanning a column. The selection comes
+        // in front — it is where you are, and losing sight of that is worse than
+        // forgetting an already-read row.
         .when(row.reviewed && !is_selected, |el| {
             el.bg(cx.theme().success.opacity(0.12))
         })
@@ -981,10 +980,10 @@ fn render_file(
                 range.clone(),
             );
             move |_, window, cx| {
-                // Le focus revient à la vue : sans cela, les flèches
-                // continueraient de parcourir l'arbre de l'explorateur si
-                // c'est de là qu'on venait, et la relecture au clavier du
-                // fichier qu'on vient d'ouvrir serait inerte.
+                // The focus goes back to the view: without that, the arrows
+                // would go on browsing the explorer's tree if that is where one
+                // came from, and reviewing the file just opened with the
+                // keyboard would be inert.
                 let handle = entity.read(cx).focus_handle(cx);
                 window.focus(&handle, cx);
                 entity.update(cx, |this, cx| {
@@ -992,8 +991,8 @@ fn render_file(
                 });
             }
         })
-        // Cocher, c'est indexer. Les domaines qui portent sur des commits déjà
-        // écrits n'ont rien à cocher : la case y serait un bouton qui ment.
+        // Ticking is staging. The ranges that are about commits already written
+        // have nothing to tick: a box there would be a button that lies.
         .when(checkable, |el| {
             let (entity, worktree, path) =
                 (entity.clone(), worktree.to_path_buf(), row.path.clone());
@@ -1023,9 +1022,9 @@ fn render_file(
                 ))
                 .child(row.codes()),
         )
-        // L'icône dit la famille par sa forme et le langage par sa teinte :
-        // c'est ce qui rend une liste de deux cents fichiers parcourable du
-        // regard, là où les codes de git ne disent que ce qui a changé.
+        // The icon says the family by its shape and the language by its tint:
+        // that is what makes a list of two hundred files scannable, where git's
+        // codes only say what changed.
         .child(crate::ui::file_icons::file_icon(&row.path, cx))
         .child(
             h_flex()
@@ -1033,9 +1032,9 @@ fn render_file(
                 .min_w_0()
                 .gap_1()
                 .items_baseline()
-                // Un fichier relu s'éteint : c'est ce qui fait que la liste
-                // dit d'un coup d'œil ce qu'il reste à lire, là où la seule
-                // coche à droite demande de parcourir une colonne.
+                // A reviewed file dims: that is what makes the list say at a
+                // glance what is left to read, where the tick alone on the right
+                // would mean scanning a column.
                 .child(
                     div()
                         .truncate()
@@ -1053,9 +1052,9 @@ fn render_file(
                         .child(row.directory.clone()),
                 ),
         )
-        // Un fichier dont une partie seulement est indexée : la case cochée ne
-        // suffit pas à le dire, et c'est précisément le cas où l'on croit
-        // valider tout un fichier alors qu'on n'en valide que la moitié.
+        // A file only part of which is staged: the ticked box is not enough to
+        // say so, and it is precisely the case where one thinks a whole file is
+        // being committed when only half of it is.
         .when(row.partial(), |el| {
             el.child(
                 div()
@@ -1099,9 +1098,8 @@ fn render_file(
                     }),
             )
         })
-        // Un fichier se marque relu tout seul, comme un dossier se marque
-        // entier : c'est le geste de base, le dossier n'en étant que le
-        // raccourci.
+        // A file is marked reviewed on its own, as a folder is marked whole: it
+        // is the basic gesture, the folder being only its shortcut.
         .child(render_reviewed(
             ("reviewed", index),
             row.reviewed,
@@ -1114,17 +1112,17 @@ fn render_file(
         .into_any_element()
 }
 
-/// Le bouton qui marque un fichier — ou tout un dossier — relu.
+/// The button that marks a file — or a whole folder — reviewed.
 ///
-/// Une coche et non une case : la case à cocher de cette liste veut déjà dire
-/// « indexer », et deux cases côte à côte pour deux gestes sans rapport se
-/// confondraient au premier coup d'œil. Elle vit à droite, après le volume, où
-/// rien ne la dispute à la lecture du nom.
+/// A tick and not a box: this list's checkbox already means "stage", and two
+/// boxes side by side for two unrelated gestures would be confused at first
+/// glance. It lives on the right, after the volume, where nothing competes with
+/// reading the name.
 ///
-/// Sur un dossier, elle porte tout le sous-arbre, replié compris — comme la
-/// case d'indexation, et pour la même raison : c'est le geste qui vaut le
-/// détour, une revue de branche ayant plus de dossiers relus d'un bloc que de
-/// fichiers relus un par un.
+/// On a folder it carries the whole subtree, collapsed part included — like the
+/// staging box, and for the same reason: it is the gesture worth the detour, a
+/// branch review having more folders reviewed in one go than files reviewed one
+/// by one.
 fn render_reviewed(
     id: (&'static str, usize),
     reviewed: bool,
@@ -1163,12 +1161,11 @@ fn render_reviewed(
         })
 }
 
-/// Les entrées de la liste pour un domaine de revue donné.
+/// The list's rows for a given review range.
 ///
-/// Le fichier voisin, ou rien aux extrémités.
+/// The neighbouring file, or nothing at the ends.
 ///
-/// Sans fichier ouvert, la première flèche prend l'extrémité vers laquelle
-/// elle pointe.
+/// With no file open, the first arrow takes the end it points at.
 fn step_index(current: Option<usize>, delta: isize, len: usize) -> Option<usize> {
     if len == 0 {
         return None;
@@ -1181,14 +1178,14 @@ fn step_index(current: Option<usize>, delta: isize, len: usize) -> Option<usize>
     (next >= 0 && next < len as isize).then_some(next as usize)
 }
 
-/// Fonction libre parce que c'est la seule vraie décision de cette vue — quel
-/// fichier apparaît, dans quel groupe, coché ou non — et qu'elle se teste sans
-/// fenêtre.
+/// A free function because it is this view's only real decision — which file
+/// appears, in which group, ticked or not — and because it can be tested without
+/// a window.
 ///
-/// Le statut est la source pour les modifications en cours : lui seul
-/// distingue ce qui est indexé de ce qui ne l'est pas, distinction que la case
-/// à cocher restitue. Les autres domaines portent sur des commits, qui n'ont
-/// pas de notion d'index, et viennent de `--numstat`.
+/// The status is the source for the changes in progress: it alone tells what is
+/// staged from what is not, a distinction the checkbox renders. The other ranges
+/// are about commits, which have no notion of an index, and come from
+/// `--numstat`.
 fn rows_for(
     range: &DiffRange,
     status: &Status,
@@ -1200,9 +1197,9 @@ fn rows_for(
         .map(|f| (&f.path, (f.added, f.removed)))
         .collect();
     let volume = |path: &PathBuf| volumes.get(path).copied().unwrap_or((0, 0));
-    // Relu **et** inchangé depuis : le volume retenu est ce qui périme la
-    // coche, faute de quoi elle dirait « relu » d'un fichier qu'un agent vient
-    // de réécrire.
+    // Reviewed **and** unchanged since: the recorded volume is what expires the
+    // tick, otherwise it would say "reviewed" of a file an agent has just
+    // rewritten.
     let is_reviewed = |path: &PathBuf, added: usize, removed: usize| {
         reviewed.iter().any(|item| {
             item.range == *range
@@ -1279,7 +1276,7 @@ fn rows_for(
                     worktree: StatusCode::Unmodified,
                     added: f.added,
                     removed: f.removed,
-                    // Un commit est déjà écrit : rien à cocher.
+                    // A commit is already written: nothing to tick.
                     staged: true,
                     untracked: false,
                     reviewed: is_reviewed(&f.path, f.added, f.removed),
@@ -1289,7 +1286,7 @@ fn rows_for(
     }
 }
 
-/// Les fichiers d'un groupe, pour les cases qui agissent sur tout le lot.
+/// A group's files, for the boxes that act on the whole batch.
 fn group_paths(rows: &[Row], group: Group) -> Vec<PathBuf> {
     let mut inside = false;
     let mut paths = Vec::new();
@@ -1303,7 +1300,7 @@ fn group_paths(rows: &[Row], group: Group) -> Vec<PathBuf> {
     paths
 }
 
-/// Vrai si tout le groupe est déjà indexé.
+/// True if the whole group is already staged.
 fn group_checked(rows: &[Row], group: Group) -> bool {
     let mut inside = false;
     let mut any = false;
@@ -1322,13 +1319,12 @@ fn group_checked(rows: &[Row], group: Group) -> bool {
     any
 }
 
-/// Met la liste plate en arborescence.
+/// Turns the flat list into a tree.
 ///
-/// Les groupes sont conservés tels quels ; chaque bloc de fichiers entre deux
-/// groupes devient un arbre. La construction est déléguée à `ui::tree`, qui ne
-/// connaît que des chemins — ce qu'une ligne affiche est décidé ici, et c'est
-/// ce qui permet à l'explorateur de projet d'utiliser le même arbre avec
-/// d'autres feuilles.
+/// The groups are kept as they are; each block of files between two groups
+/// becomes a tree. The construction is delegated to `ui::tree`, which knows only
+/// paths — what a row shows is decided here, and that is what lets the project
+/// explorer use the same tree with other leaves.
 fn tree_rows(flat: &[Row], collapsed: &HashSet<PathBuf>) -> Vec<Row> {
     let mut out = Vec::new();
     let mut block: Vec<FileRow> = Vec::new();
@@ -1339,7 +1335,7 @@ fn tree_rows(flat: &[Row], collapsed: &HashSet<PathBuf>) -> Vec<Row> {
                 out.push(Row::Group(*group));
             }
             Row::File(file) => block.push(file.clone()),
-            // Une liste déjà en arbre ne se remet pas en arbre.
+            // A list already in tree form is not turned into a tree again.
             Row::Dir(_) => {}
         }
     }
@@ -1362,9 +1358,9 @@ fn flush(block: &mut Vec<FileRow>, collapsed: &HashSet<PathBuf>, out: &mut Vec<R
                 collapsed,
                 leaves,
             } => {
-                // Les agrégats d'un dossier portent sur **tout** son
-                // sous-arbre, replié compris : c'est ce que la case à cocher
-                // indexe, et ce que le volume annonce.
+                // A folder's aggregates cover its **whole** subtree, collapsed
+                // part included: it is what the checkbox stages, and what the
+                // volume announces.
                 let inside: Vec<&FileRow> = leaves.iter().map(|index| &files[*index]).collect();
                 out.push(Row::Dir(DirRow {
                     path,
@@ -1381,9 +1377,8 @@ fn flush(block: &mut Vec<FileRow>, collapsed: &HashSet<PathBuf>, out: &mut Vec<R
             crate::ui::tree::Entry::Leaf { index, depth } => {
                 let mut file = files[index].clone();
                 file.depth = depth;
-                // Le dossier est porté par la ligne au-dessus : le répéter sur
-                // chaque fichier est exactement le bruit que l'arborescence
-                // supprime.
+                // The folder is carried by the row above: repeating it on every
+                // file is exactly the noise the tree removes.
                 file.directory.clear();
                 out.push(Row::File(file));
             }
@@ -1474,9 +1469,9 @@ mod tests {
 
     #[test]
     fn lonely_directories_are_merged_into_one_line() {
-        // Le point de l'arborescence sur un projet Laravel : sans fusion,
-        // `app/Http/Livewire/Forms` coûte quatre lignes et quatre niveaux
-        // d'indentation pour un seul fichier.
+        // The point of the tree on a Laravel project: without merging,
+        // `app/Http/Livewire/Forms` costs four rows and four levels of
+        // indentation for one file.
         let rows = tree(&["app/Http/Livewire/Forms/BillForm.php"], &[]);
         assert_eq!(
             shape(&rows),
@@ -1505,9 +1500,9 @@ mod tests {
 
     #[test]
     fn a_collapsed_directory_hides_its_files_but_still_counts_them() {
-        // Ce compte n'est pas cosmétique : c'est la liste sur laquelle agit la
-        // case du dossier, et cocher un dossier fermé doit indexer ce qu'il
-        // contient, pas ce qu'on en voit.
+        // This count is not cosmetic: it is the list the folder's box acts on,
+        // and ticking a closed folder must stage what it contains, not what is
+        // visible of it.
         let rows = tree(&["src/ui/app.rs", "src/ui/review.rs"], &["src/ui"]);
         assert_eq!(shape(&rows), vec!["[2] src/ui"]);
         let Row::Dir(dir) = &rows[0] else {
@@ -1536,8 +1531,8 @@ mod tests {
             &[],
         );
         let rows = tree_rows(&flat, &HashSet::new());
-        // Un arbre par groupe, et non un arbre unique qui mélangerait le suivi
-        // et le non-suivi sous le même dossier.
+        // One tree per group, and not a single tree mixing tracked and untracked
+        // under the same folder.
         assert_eq!(
             shape(&rows),
             vec!["groupe", "[1] src", " a.rs", "groupe", "[1] src", " b.rs"]
@@ -1546,8 +1541,8 @@ mod tests {
 
     #[test]
     fn staged_and_unstaged_files_share_one_list() {
-        // Le point de la fusion : plus deux domaines à recoudre mentalement,
-        // une seule liste où la case dit ce qui partira au prochain commit.
+        // The point of the merge: no more two ranges to stitch together
+        // mentally, one list where the box says what will go into the next commit.
         let status = status(vec![
             file("indexe.rs", StatusCode::Modified, StatusCode::Unmodified),
             file("modifie.rs", StatusCode::Unmodified, StatusCode::Modified),
@@ -1573,14 +1568,14 @@ mod tests {
                 .staged
         );
 
-        // Les fichiers jamais ajoutés forment leur propre groupe : les cocher
-        // ne veut pas dire la même chose que pour un fichier déjà suivi.
+        // Files never added form their own group: ticking them does not mean the
+        // same thing as for a file already tracked.
         assert_eq!(groups_of(&rows), vec![Group::Tracked, Group::Untracked]);
     }
 
     #[test]
     fn a_partially_staged_file_says_so() {
-        // `MM` : une case cochée laisserait croire que tout le fichier part.
+        // `MM`: a ticked box would suggest the whole file is going out.
         let status = status(vec![file(
             "moitie.rs",
             StatusCode::Modified,
@@ -1626,9 +1621,9 @@ mod tests {
         }
     }
 
-    /// Le volume retenu est ce qui périme la coche : un agent qui réécrit un
-    /// fichier annule sa relecture, sans quoi la liste dirait « relu » d'un
-    /// contenu que personne n'a lu.
+    /// The recorded volume is what expires the tick: an agent that rewrites a
+    /// file cancels its review, otherwise the list would say "reviewed" of
+    /// content nobody has read.
     #[test]
     fn a_file_that_changed_since_is_no_longer_reviewed() {
         let status = status(vec![file(
@@ -1676,8 +1671,8 @@ mod tests {
         assert!(!files_of(&rows)[0].reviewed);
     }
 
-    /// La coche d'un dossier ne s'allume que quand tout son sous-arbre est lu,
-    /// replié compris — c'est ce qu'elle promet en un clic.
+    /// A folder's tick only lights up when its whole subtree has been read,
+    /// collapsed part included — that is what it promises in one click.
     #[test]
     fn a_directory_is_reviewed_only_when_all_of_it_is() {
         let status = status(vec![
@@ -1796,7 +1791,7 @@ mod tests {
         let row = files_of(&rows)[0];
         assert_eq!((row.added, row.removed), (12, 3));
 
-        // Sans `--numstat` encore arrivé, la ligne s'affiche quand même.
+        // With `--numstat` not yet arrived, the row still shows.
         let rows = rows_for(&DiffRange::Working, &status, &[], &[]);
         assert_eq!(
             (files_of(&rows)[0].added, files_of(&rows)[0].removed),
@@ -1806,8 +1801,8 @@ mod tests {
 
     #[test]
     fn commit_ranges_come_from_the_file_list_alone() {
-        // Aucun statut : une revue de commits ne parle que de ce que git a
-        // déjà écrit, et rien n'y est à cocher.
+        // No status at all: a commit review only talks about what git has
+        // already written, and nothing in it is to be ticked.
         let files = vec![DiffFile {
             path: PathBuf::from("dossier/ajoute.rs"),
             original: None,

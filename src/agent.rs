@@ -1,29 +1,27 @@
-//! Détection des agents de codage qui tournent dans les worktrees.
+//! Detecting the coding agents running in the worktrees.
 //!
-//! Claudhub ne lance pas tous les agents : on en démarre depuis un onglet de
-//! Claudhub, mais aussi depuis un terminal à côté, et c'est le même travail qu'on
-//! veut voir. La détection passe donc par `/proc` — le répertoire courant d'un
-//! processus dit dans quel worktree il travaille — plutôt que par les seuls
-//! onglets que nous avons ouverts.
+//! Claudhub does not launch every agent: one is started from a Claudhub tab,
+//! but also from a terminal alongside, and it is the same work we want to see.
+//! Detection therefore goes through `/proc` — a process's working directory
+//! says which worktree it works in — rather than through the tabs we opened
+//! ourselves.
 //!
-//! Linux seulement. Ailleurs, la liste est vide et la barre latérale n'affiche
-//! rien de plus : ce n'est pas une fonctionnalité dont l'absence casse quoi que
-//! ce soit.
+//! Linux only. Elsewhere the list is empty and the sidebar shows nothing more:
+//! this is not a feature whose absence breaks anything.
 
 use std::collections::HashMap;
-// `Path` ne sert qu'à ce qui lit `/proc`, donc qu'à Linux : ailleurs, l'import
-// serait un avertissement, et le projet compile en `-D warnings`.
+// `Path` is only used by what reads `/proc`, so only on Linux: elsewhere the
+// import would be a warning, and the project builds with `-D warnings`.
 #[cfg(target_os = "linux")]
 use std::path::Path;
 use std::path::PathBuf;
 
-/// Les marqueurs qu'une session d'agent laisse dans l'environnement.
+/// The markers an agent session leaves in the environment.
 ///
-/// Ce sont ceux de Claude Code, seul agent qui en pose aujourd'hui ; la liste
-/// est **explicite** et non un balayage de `CLAUDE_CODE_*`, qui emporterait
-/// aussi la configuration de l'utilisateur (`CLAUDE_CODE_USE_BEDROCK`,
-/// `ANTHROPIC_MODEL`, les limites de jetons) — précisément ce qu'il faut
-/// transmettre.
+/// These are Claude Code's, the only agent that sets any today; the list is
+/// **explicit** and not a sweep of `CLAUDE_CODE_*`, which would also take the
+/// user's configuration (`CLAUDE_CODE_USE_BEDROCK`, `ANTHROPIC_MODEL`, the
+/// token limits) — precisely what has to be passed on.
 const SESSION_MARKERS: &[&str] = &[
     "AI_AGENT",
     "CLAUDECODE",
@@ -38,68 +36,64 @@ const SESSION_MARKERS: &[&str] = &[
     "CLAUDE_PID",
 ];
 
-/// Efface de notre propre environnement les marqueurs de la session qui nous a
-/// lancés.
+/// Clears from our own environment the markers of the session that launched us.
 ///
-/// Lancer Claudhub depuis un agent est le cas **courant** : c'est un agent qui
-/// écrit Claudhub, et c'est depuis son terminal qu'on l'essaie. Tout ce que
-/// nous démarrons héritait alors de ses marqueurs, et un `claude` ouvert dans
-/// un onglet se croyait la sous-session de celui d'à côté — il n'enregistrait
-/// donc plus sa transcription, et le disait sans qu'on puisse rien y faire
-/// depuis l'onglet.
+/// Launching Claudhub from an agent is the **common** case: an agent writes
+/// Claudhub, and it is from its terminal that we try it. Everything we started
+/// then inherited its markers, and a `claude` opened in a tab believed itself
+/// a sub-session of the one next door — so it no longer recorded its
+/// transcript, and said so with nothing to be done about it from the tab.
 ///
-/// Ici et non dans l'environnement du pty : la question ne concerne pas que
-/// les terminaux. `wt` lance les hooks du projet, `commit_msg` lance un agent
-/// en une passe — tout cela est démarré par Claudhub, qui n'est la session de
-/// personne.
+/// Here and not in the pty's environment: the question is not limited to
+/// terminals. `wt` runs the project's hooks, `commit_msg` runs an agent in one
+/// pass — all of that is started by Claudhub, which is nobody's session.
 ///
-/// **À appeler au tout début de `main`**, avant qu'un thread existe :
-/// `remove_var` touche un environnement que le processus partage, et un autre
-/// thread en train de le lire pendant ce temps est un comportement indéfini.
+/// **To be called at the very start of `main`**, before any thread exists:
+/// `remove_var` touches an environment the process shares, and another thread
+/// reading it meanwhile is undefined behaviour.
 pub fn disinherit_session() {
     for marker in SESSION_MARKERS {
         std::env::remove_var(marker);
     }
 }
 
-/// Un processus d'agent trouvé dans un worktree.
+/// An agent process found in a worktree.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Process {
     pub pid: u32,
-    /// Le programme reconnu, tel que les profils le nomment.
+    /// The recognised program, as the profiles name it.
     ///
-    /// La barre latérale dit *quel* agent tourne et pas seulement combien : à
-    /// deux profils près, « un agent travaille ici » ne dit pas lequel, et
-    /// c'est justement ce qu'on regarde en parcourant la liste.
+    /// The sidebar says *which* agent runs and not only how many: with two
+    /// profiles, "an agent works here" does not say which, and that is exactly
+    /// what one looks for when scanning the list.
     pub program: String,
-    /// Temps processeur consommé depuis le démarrage, en tics d'horloge.
+    /// CPU time consumed since startup, in clock ticks.
     ///
-    /// C'est une mesure cumulée, sans intérêt en soi : c'est sa *variation*
-    /// entre deux relevés qui distingue un agent au travail d'un agent qui
-    /// attend une réponse de l'utilisateur.
+    /// It is a cumulative measure, of no interest by itself: it is its
+    /// *variation* between two readings that tells a working agent from one
+    /// waiting for the user to answer.
     pub cpu: u64,
 }
 
-/// Les agents trouvés, par worktree.
+/// The agents found, by worktree.
 pub type Agents = HashMap<PathBuf, Vec<Process>>;
 
-/// Ailleurs que sous Linux, il n'y a pas de `/proc` : la liste est vide, et la
-/// barre latérale n'affiche simplement aucun agent.
+/// Outside Linux there is no `/proc`: the list is empty, and the sidebar
+/// simply shows no agent.
 ///
-/// Le stub est explicite plutôt qu'accidentel : le parcours ci-dessous
-/// compilerait partout et échouerait en silence à l'ouverture de `/proc`, ce
-/// qui se lit comme une détection cassée plutôt que comme une absence assumée.
+/// The stub is explicit rather than accidental: the walk below would compile
+/// everywhere and fail silently on opening `/proc`, which reads like broken
+/// detection rather than a deliberate absence.
 #[cfg(not(target_os = "linux"))]
 pub fn scan(_worktrees: &[PathBuf], _programs: &[String]) -> Agents {
     Agents::new()
 }
 
-/// Parcourt `/proc` à la recherche des agents lancés dans ces worktrees.
+/// Walks `/proc` looking for the agents launched in these worktrees.
 ///
-/// `programs` sont les noms de commande de **tous** les profils configurés, et
-/// non celui d'un seul : un agent lancé depuis un terminal à côté compte
-/// autant que celui qu'on a démarré ici, et n'en chercher qu'un n'en verrait
-/// qu'un sur deux.
+/// `programs` are the command names of **all** configured profiles, not of a
+/// single one: an agent launched from a terminal alongside counts as much as
+/// the one started here, and looking for only one would see only half of them.
 #[cfg(target_os = "linux")]
 pub fn scan(worktrees: &[PathBuf], programs: &[String]) -> Agents {
     let mut found: Agents = HashMap::new();
@@ -130,9 +124,9 @@ pub fn scan(worktrees: &[PathBuf], programs: &[String]) -> Agents {
         else {
             continue;
         };
-        // Le répertoire courant d'un processus est le worktree où il
-        // travaille ; un lien symbolique non résolu — processus disparu,
-        // permissions — le fait simplement ignorer.
+        // A process's working directory is the worktree it works in; an
+        // unresolved symlink — vanished process, permissions — simply makes it
+        // skipped.
         let Ok(cwd) = std::fs::read_link(dir.join("cwd")) else {
             continue;
         };
@@ -151,17 +145,17 @@ pub fn scan(worktrees: &[PathBuf], programs: &[String]) -> Agents {
     found
 }
 
-/// Le nom de la commande, dépouillé de son chemin et de ses arguments.
+/// The command name, stripped of its path and its arguments.
 pub fn command_name(command: &str) -> &str {
     let program = command.split_whitespace().next().unwrap_or("");
     program.rsplit('/').next().unwrap_or(program)
 }
 
-/// Vrai si ce processus est l'agent cherché.
+/// True if this process is the agent we are looking for.
 ///
-/// Le nom seul (`comm`) ne suffit pas : un agent lancé par un script ou par un
-/// gestionnaire de versions de node s'appelle `node`, et c'est sa ligne de
-/// commande qui porte `claude`.
+/// The name alone (`comm`) is not enough: an agent launched by a script or by
+/// a node version manager is called `node`, and it is its command line that
+/// carries `claude`.
 #[cfg(target_os = "linux")]
 fn matches_program(proc_dir: &Path, program: &str) -> bool {
     if let Ok(comm) = std::fs::read_to_string(proc_dir.join("comm")) {
@@ -175,7 +169,7 @@ fn matches_program(proc_dir: &Path, program: &str) -> bool {
     cmdline_matches(&cmdline, program)
 }
 
-/// `/proc/<pid>/cmdline` sépare les arguments par des octets nuls.
+/// `/proc/<pid>/cmdline` separates the arguments with null bytes.
 #[cfg(target_os = "linux")]
 fn cmdline_matches(cmdline: &[u8], program: &str) -> bool {
     cmdline
@@ -184,10 +178,10 @@ fn cmdline_matches(cmdline: &[u8], program: &str) -> bool {
         .any(|arg| arg.rsplit('/').next().unwrap_or(arg) == program)
 }
 
-/// Le worktree le plus profond qui contient ce répertoire.
+/// The deepest worktree containing this directory.
 ///
-/// Le plus profond, et non le premier trouvé : un worktree imbriqué dans un
-/// autre attribuerait sinon ses agents au mauvais.
+/// The deepest, and not the first found: a worktree nested in another would
+/// otherwise hand its agents to the wrong one.
 #[cfg(target_os = "linux")]
 fn owning_worktree(worktrees: &[PathBuf], cwd: &Path) -> Option<PathBuf> {
     worktrees
@@ -197,19 +191,19 @@ fn owning_worktree(worktrees: &[PathBuf], cwd: &Path) -> Option<PathBuf> {
         .cloned()
 }
 
-/// Temps processeur cumulé d'un processus, d'après `/proc/<pid>/stat`.
+/// A process's cumulative CPU time, from `/proc/<pid>/stat`.
 ///
-/// Le nom du programme est le deuxième champ, entre parenthèses, et **peut
-/// contenir des espaces et des parenthèses** : découper la ligne sur les
-/// espaces donne des champs décalés dès qu'un programme s'appelle « (mon
-/// agent) ». On repart donc de la dernière parenthèse fermante.
+/// The program name is the second field, in parentheses, and it **may contain
+/// spaces and parentheses**: splitting the line on whitespace shifts every
+/// field as soon as a program is called "(my agent)". So we start again from
+/// the last closing parenthesis.
 #[cfg(target_os = "linux")]
 pub fn parse_cpu_ticks(stat: &str) -> Option<u64> {
     let rest = &stat[stat.rfind(')')? + 1..];
     let fields: Vec<&str> = rest.split_whitespace().collect();
-    // Après le nom viennent l'état, ppid, pgrp, session, tty, tpgid, flags,
-    // puis les quatre compteurs de fautes de page : `utime` est le 12ᵉ champ
-    // de ce reste, `stime` le 13ᵉ.
+    // After the name come state, ppid, pgrp, session, tty, tpgid, flags, then
+    // the four page-fault counters: `utime` is the 12th field of that
+    // remainder, `stime` the 13th.
     let utime: u64 = fields.get(11)?.parse().ok()?;
     let stime: u64 = fields.get(12)?.parse().ok()?;
     Some(utime + stime)

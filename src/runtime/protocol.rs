@@ -1,10 +1,10 @@
-//! Le protocole entre le thread d'interface et les workers.
+//! The protocol between the interface thread and the workers.
 //!
-//! Rien ici ne fait de travail : ce sont des données. Le thread UI envoie des
-//! `Cmd`, les workers répondent par des `Evt`. Aucune commande git n'est
-//! lancée depuis un `render` ou un gestionnaire de clic — la plus rapide
-//! (`git status` sur un petit dépôt) coûte déjà plusieurs millisecondes, soit
-//! une frame perdue à chaque frappe.
+//! Nothing here does any work: these are data. The UI thread sends `Cmd`s, the
+//! workers answer with `Evt`s. No git command is launched from a `render` or a
+//! click handler — the fastest of them (`git status` on a small repository)
+//! already costs several milliseconds, that is, a frame lost on every
+//! keystroke.
 
 use std::path::PathBuf;
 
@@ -12,16 +12,16 @@ use crate::git::{
     Branch, Commit, DiffFile, DiffRange, FileDiff, GraphRow, LogRange, Status, Summary, Worktree,
 };
 
-/// Identifie le checkout concerné. C'est le chemin qui sert de clé partout :
-/// il est stable, unique, et c'est aussi le répertoire de travail passé à git.
+/// Identifies the checkout concerned. It is the path that serves as the key
+/// everywhere: stable, unique, and also the working directory passed to git.
 pub type WorktreeId = PathBuf;
 
-/// Un secret qui voyage dans une commande sans finir dans une trace.
+/// A secret that travels inside a command without ending up in a trace.
 ///
-/// Le `Debug` est écrit à la main et masque la valeur, comme celui de
-/// `db::Connection` : `Cmd` se journalise, un jeton non. C'est ce qui permet
-/// au jeton Sentry de voyager dans la commande plutôt que d'être relu par le
-/// worker — le worker d'un serveur distant n'a pas nos réglages sous la main.
+/// The `Debug` is written by hand and masks the value, like `db::Connection`'s:
+/// a `Cmd` is logged, a token is not. That is what lets the Sentry token travel
+/// in the command rather than being read back by the worker — a remote server's
+/// worker does not have our settings to hand.
 #[derive(Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Secret(pub String);
 
@@ -37,31 +37,31 @@ impl std::fmt::Debug for Secret {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Cmd {
-    /// Ouvre un dépôt (ou le worktree d'un dépôt) et énumère ses worktrees.
+    /// Opens a repository (or a repository's worktree) and enumerates its worktrees.
     OpenRepo(PathBuf),
-    /// Ouvre le chemin **si** c'est un dépôt, et ne dit rien sinon.
+    /// Opens the path **if** it is a repository, and says nothing otherwise.
     ///
-    /// C'est le répertoire de lancement de `claudhub` : lancé depuis son
-    /// projet, on s'attend à l'y trouver ouvert ; lancé d'ailleurs, un message
-    /// d'erreur serait du bruit. La vérification vit ici et non dans la vue —
-    /// `is_repo` coûte un sous-processus git, ce qu'un constructeur d'entité
-    /// gpui n'a pas le droit de payer.
+    /// It is `claudhub`'s launch directory: launched from its project, one
+    /// expects to find it open there; launched from elsewhere, an error message
+    /// would be noise. The check lives here and not in the view — `is_repo`
+    /// costs a git subprocess, which a gpui entity constructor is not allowed to
+    /// pay.
     OpenIfRepo(PathBuf),
-    /// Relit worktrees, état et branches d'un dépôt déjà ouvert.
+    /// Re-reads the worktrees, state and branches of an already open repository.
     RefreshRepo {
         main: PathBuf,
     },
-    /// `git status` d'un checkout.
+    /// A checkout's `git status`.
     RefreshStatus {
         worktree: WorktreeId,
     },
-    /// Liste les fichiers d'un domaine de revue.
+    /// Lists a review range's files.
     LoadDiffFiles {
         worktree: WorktreeId,
         range: DiffRange,
     },
-    /// Diff d'un fichier ; `untracked` bascule sur `--no-index`, git ne
-    /// connaissant pas encore le fichier.
+    /// A file's diff; `untracked` switches to `--no-index`, git not knowing the
+    /// file yet.
     LoadFileDiff {
         worktree: WorktreeId,
         range: DiffRange,
@@ -72,22 +72,22 @@ pub enum Cmd {
     LoadBranches {
         main: PathBuf,
     },
-    /// Résume l'état de plusieurs checkouts d'un coup, pour la barre
-    /// latérale. Une file à part : ce balayage ne doit jamais passer devant le
-    /// diff qu'on vient de demander.
+    /// Summarises the state of several checkouts at once, for the sidebar. A
+    /// queue of its own: this sweep must never get in front of the diff just
+    /// asked for.
     LoadSummaries {
         worktrees: Vec<WorktreeId>,
     },
-    /// Cherche les agents de codage qui tournent dans ces checkouts.
+    /// Looks for the coding agents running in these checkouts.
     ScanAgents {
         worktrees: Vec<WorktreeId>,
-        /// Les programmes de **tous** les profils d'agent, dont seul le nom
-        /// sert. La liste entière et non le seul profil courant : un agent
-        /// lancé depuis un terminal à côté compte autant, et n'en chercher
-        /// qu'un n'en verrait qu'un sur deux.
+        /// The programs of **all** the agent profiles, of which only the name is
+        /// used. The whole list and not just the current profile: an agent
+        /// launched from a terminal alongside counts as much, and looking for
+        /// only one would see only half of them.
         programs: Vec<String>,
     },
-    /// Charge l'historique d'un checkout, avec la disposition de son graphe.
+    /// Loads a checkout's history, with its graph layout.
     LoadHistory {
         worktree: WorktreeId,
         range: LogRange,
@@ -102,20 +102,19 @@ pub enum Cmd {
         worktree: WorktreeId,
         paths: Vec<PathBuf>,
     },
-    /// Destructif : les modifications sont perdues. La confirmation est de la
-    /// responsabilité de l'appelant, pas du worker.
+    /// Destructive: the changes are lost. Confirmation is the caller's
+    /// responsibility, not the worker's.
     Discard {
         worktree: WorktreeId,
         paths: Vec<PathBuf>,
     },
-    /// Supprime des fichiers que git ne suit pas. Séparé de `Discard` : ce
-    /// n'est pas un retour en arrière mais une suppression, et git n'en garde
-    /// aucune trace.
+    /// Deletes files git does not track. Separate from `Discard`: it is not a
+    /// step back but a deletion, and git keeps no trace of it.
     Delete {
         worktree: WorktreeId,
         paths: Vec<PathBuf>,
     },
-    /// Indexe (ou dés-indexe, avec `reverse`) un seul hunk.
+    /// Stages (or unstages, with `reverse`) a single hunk.
     ApplyHunk {
         worktree: WorktreeId,
         patch: String,
@@ -128,12 +127,11 @@ pub enum Cmd {
         amend: bool,
         all: bool,
     },
-    /// Demande un message de commit à l'agent configuré, à partir de ce qui
-    /// est indexé.
+    /// Asks the configured agent for a commit message, from what is staged.
     ///
-    /// La commande voyage dans le message : le worker tourne parfois dans un
-    /// autre processus — le serveur WSL —, dont le fichier de réglages n'est
-    /// pas le nôtre. La vue, elle, a toujours le réglage sous la main.
+    /// The command travels inside the message: the worker sometimes runs in
+    /// another process — the WSL server — whose settings file is not ours. The
+    /// view, for its part, always has the setting to hand.
     SuggestMessage {
         worktree: WorktreeId,
         command: String,
@@ -141,12 +139,12 @@ pub enum Cmd {
     Fetch {
         worktree: WorktreeId,
     },
-    /// Le fetch périodique d'un dépôt.
+    /// A repository's periodic fetch.
     ///
-    /// Une commande à part de `Fetch`, et pas seulement pour la file : celui-ci
-    /// **ne dit rien** quand il aboutit. Un message toutes les dix minutes dans
-    /// la barre d'état pour annoncer qu'il ne s'est rien passé userait
-    /// justement l'endroit où l'on regarde ce qui vient de se passer.
+    /// A command separate from `Fetch`, and not only for the queue: this one
+    /// **says nothing** when it succeeds. A message every ten minutes in the
+    /// status bar announcing that nothing happened would wear out precisely the
+    /// place where one looks at what has just happened.
     AutoFetch {
         main: PathBuf,
     },
@@ -172,82 +170,80 @@ pub enum Cmd {
         force: bool,
     },
 
-    /// Intègre `from` dans la branche du checkout.
+    /// Integrates `from` into the checkout's branch.
     ///
-    /// `no_ff` force un commit de fusion : c'est ce qui garde une trace de la
-    /// branche d'agent une fois son travail intégré.
+    /// `no_ff` forces a merge commit: that is what keeps a trace of the agent's
+    /// branch once its work is integrated.
     Merge {
         worktree: WorktreeId,
         from: String,
         no_ff: bool,
     },
-    /// Intègre une branche d'agent dans la base, **depuis le dépôt
-    /// principal**.
+    /// Integrates an agent branch into the base, **from the main repository**.
     ///
-    /// Le worker vérifie d'abord que le principal est propre et positionné sur
-    /// la base ; sinon il refuse et le dit. C'est le seul endroit où cette
-    /// vérification peut se faire : la vue ne connaît l'état d'un checkout que
-    /// s'il a été ouvert, et le dépôt principal ne l'est pas toujours.
+    /// The worker first checks that the main one is clean and sitting on the
+    /// base; otherwise it refuses and says so. It is the only place this check
+    /// can be made: the view only knows a checkout's state if it has been
+    /// opened, and the main repository is not always open.
     Integrate {
         main: PathBuf,
         branch: String,
         base: String,
         no_ff: bool,
     },
-    /// Rejoue la branche du checkout sur `onto`.
+    /// Replays the checkout's branch onto `onto`.
     Rebase {
         worktree: WorktreeId,
         onto: String,
     },
-    /// Abandonne l'opération en cours et rend le checkout à son état d'avant.
+    /// Aborts the operation in progress and returns the checkout to its earlier state.
     AbortPending {
         worktree: WorktreeId,
     },
-    /// Reprend l'opération en cours, une fois les conflits résolus.
+    /// Resumes the operation in progress, once the conflicts are resolved.
     ResumePending {
         worktree: WorktreeId,
     },
-    /// Résout un conflit en gardant une des deux versions, puis l'indexe.
+    /// Resolves a conflict by keeping one of the two versions, then stages it.
     ResolveConflict {
         worktree: WorktreeId,
         path: PathBuf,
-        /// La nôtre, au sens de l'utilisateur : la version de la branche où
-        /// l'on se trouve. La traduction en `--ours`/`--theirs` dépend de
-        /// l'opération en cours et se fait dans la couche git.
+        /// Ours, in the user's sense: the version of the branch one is on. The
+        /// translation into `--ours`/`--theirs` depends on the operation in
+        /// progress and happens in the git layer.
         ours: bool,
     },
 
     // — Sentry ————————————————————————————————————————————————————
-    /// Les issues d'un projet. **File réseau** : une API distante met parfois
-    /// plusieurs secondes et ne doit pas occuper un worker de lecture.
+    /// A project's issues. **Network queue**: a remote API sometimes takes
+    /// several seconds and must not occupy a read worker.
     ///
-    /// Le jeton voyage en [`Secret`], dont le `Debug` masque la valeur : une
-    /// commande se journalise, un secret non. Côté worker, `SENTRY_TOKEN`
-    /// garde la priorité — c'est l'environnement du serveur qui fait foi.
+    /// The token travels as a [`Secret`], whose `Debug` masks the value: a
+    /// command is logged, a secret is not. On the worker side, `SENTRY_TOKEN`
+    /// keeps priority — the server's environment is authoritative.
     LoadIssues {
         org: String,
         project: String,
         query: String,
         token: Secret,
     },
-    /// L'événement le plus récent d'une issue : sa pile et son message.
+    /// An issue's most recent event: its stack and its message.
     LoadIssueEvent {
         issue: String,
         token: Secret,
     },
 
-    // — Bases de données —————————————————————————————————————————
-    /// Les bases d'une connexion.
+    // — Databases —————————————————————————————————————————————————
+    /// A connection's databases.
     ///
-    /// **La connexion voyage entière, mot de passe compris**, là où le jeton
-    /// Sentry est relu par le worker. La raison de cette dérogation est que
-    /// la raison de la règle ne s'applique pas : `db::Connection` a un `Debug`
-    /// écrit à la main qui masque le mot de passe, donc rien ne l'écrit dans
-    /// une trace. Et le prix serait réel : il y a plusieurs connexions, il
-    /// faudrait en désigner une par un identifiant et la relire depuis le
-    /// fichier de réglages, dont l'écriture est différée d'une demi-seconde —
-    /// une connexion qu'on vient de saisir serait interrogée avec ce qu'elle
-    /// contenait avant.
+    /// **The connection travels whole, password included**, where the Sentry
+    /// token is read back by the worker. The reason for that exception is that
+    /// the reason for the rule does not apply: `db::Connection` has a `Debug`
+    /// written by hand that masks the password, so nothing writes it into a
+    /// trace. And the price would be real: there are several connections, one
+    /// would have to be named by an id and read back from the settings file,
+    /// whose write is deferred by half a second — a connection just typed in
+    /// would be queried with what it held before.
     DbDatabases {
         connection: crate::db::Connection,
     },
@@ -260,38 +256,37 @@ pub enum Cmd {
         database: String,
         table: String,
     },
-    /// Les colonnes de toutes les tables d'une base, d'un coup.
+    /// The columns of every table of a database, in one go.
     ///
-    /// C'est ce qui rend le filtre et les complétions possibles sans déplier
-    /// l'arbre table par table : une connexion, une requête, trois cents
-    /// tables.
+    /// It is what makes the filter and the completions possible without
+    /// unfolding the tree table by table: one connection, one query, three
+    /// hundred tables.
     DbAllColumns {
         connection: crate::db::Connection,
         database: String,
     },
-    /// Exécute une requête et rend une page de résultats.
+    /// Runs a query and returns one page of results.
     ///
-    /// `database` est la base courante de la console — celle que `USE`
-    /// choisirait. `None` pour SQLite, qui n'en a qu'une.
+    /// `database` is the console's current database — the one `USE` would
+    /// choose. `None` for SQLite, which has only one.
     DbQuery {
         connection: crate::db::Connection,
         database: Option<String>,
         sql: String,
         offset: usize,
         limit: usize,
-        /// De quoi reconnaître la réponse de **cet** envoi.
+        /// What is needed to recognise **this** request's answer.
         ///
-        /// Comparer la requête ne suffit pas : changer de page, trier et
-        /// charger la suite rejouent tous le même texte, et la console doit
-        /// pouvoir écarter la réponse d'un geste qu'un autre a remplacé. Un
-        /// compteur qui ne recule jamais le dit sans ambiguïté.
+        /// Comparing the query is not enough: changing page, sorting and loading
+        /// more all replay the same text, and the console has to be able to drop
+        /// the answer of a gesture another has replaced. A counter that never
+        /// goes back says it unambiguously.
         request: u64,
     },
-    /// Rejoue une requête et en écrit le résultat **entier** dans un fichier
-    /// CSV.
+    /// Replays a query and writes its **whole** result into a CSV file.
     ///
-    /// Le chemin est choisi par un sélecteur natif avant l'envoi : un worker
-    /// ne pose pas de question.
+    /// The path is chosen by a native picker before the send: a worker asks no
+    /// questions.
     DbExport {
         connection: crate::db::Connection,
         database: Option<String>,
@@ -299,75 +294,74 @@ pub enum Cmd {
         path: std::path::PathBuf,
     },
 
-    // — Fichiers du projet ————————————————————————————————————————
-    /// Liste les fichiers du worktree, suivis et nouveaux non ignorés.
+    // — Project files —————————————————————————————————————————————
+    /// Lists the worktree's files, tracked and new-but-not-ignored.
     ListFiles {
         worktree: WorktreeId,
         ignored: bool,
     },
-    /// Lit un fichier pour l'éditer.
+    /// Reads a file for editing.
     ReadFile {
         worktree: WorktreeId,
         path: PathBuf,
     },
-    /// Écrit un fichier, sauf si son empreinte a changé depuis la lecture.
+    /// Writes a file, unless its digest has changed since the read.
     WriteFile {
         worktree: WorktreeId,
         path: PathBuf,
         content: String,
-        /// Empreinte du contenu lu. `None` écrase sans regarder — réservé à
-        /// une sauvegarde qu'on a explicitement confirmée.
+        /// Digest of the content read. `None` overwrites without looking —
+        /// reserved for a save that has been explicitly confirmed.
         expect: Option<u64>,
     },
-    /// Renomme, supprime ou crée un fichier ou un dossier.
+    /// Renames, deletes or creates a file or a folder.
     FileOp {
         worktree: WorktreeId,
         op: crate::files::Op,
     },
-    /// Lit le dossier de notes d'un worktree — un fichier Markdown par note,
-    /// plus l'index de relecture.
+    /// Reads a worktree's notes folder — one Markdown file per note, plus the
+    /// review index.
     ///
-    /// Le worker ne rend que du texte : c'est `ui::vault` qui sait ce qu'un
-    /// fichier contient, et l'analyse se teste sans toucher au disque.
+    /// The worker only returns text: it is `ui::vault` that knows what a file
+    /// contains, and the parsing can be tested without touching the disk.
     ReadNotes {
         worktree: WorktreeId,
         dir: PathBuf,
     },
-    /// Aligne le dossier de notes sur ce que Claudhub a en mémoire.
+    /// Aligns the notes folder on what Claudhub holds in memory.
     ///
-    /// La liste est **exhaustive** : le worker écrit ce qui a changé et efface
-    /// ce qui porte notre marque sans y figurer plus — c'est ainsi qu'une note
-    /// supprimée disparaît, et qu'un fichier renommé dans le coffre ne fait
-    /// pas un doublon. Ce qu'un autre a écrit n'est jamais touché.
+    /// The list is **exhaustive**: the worker writes what has changed and erases
+    /// what carries our mark without appearing in it any more — that is how a
+    /// deleted note disappears, and how a file renamed in the vault does not
+    /// make a duplicate. What somebody else wrote is never touched.
     WriteNotes {
         worktree: WorktreeId,
         dir: PathBuf,
         files: Vec<(String, String)>,
     },
-    /// Écrit un fichier du coffre, sauf s'il a changé depuis qu'on l'a lu.
+    /// Writes a vault file, unless it has changed since we read it.
     ///
-    /// Une commande à part de `WriteNotes`, et conditionnelle, parce que ces
-    /// fichiers-là ne sont **pas à nous** : l'agent du worktree coche dans
-    /// `TODO.md` pendant qu'on le regarde. L'empreinte est celle de ce qu'on
-    /// avait sous les yeux ; un écart veut dire qu'il a écrit entre-temps, et
-    /// écrire au jugé effacerait son travail. C'est le garde de `files::write`,
-    /// pour la même raison.
+    /// A command separate from `WriteNotes`, and conditional, because those
+    /// files are **not ours**: the worktree's agent ticks things off in
+    /// `TODO.md` while we watch. The digest is that of what we had in front of
+    /// us; a mismatch means it wrote in the meantime, and writing blind would
+    /// erase its work. It is `files::write`'s guard, for the same reason.
     ///
-    /// **Un texte vide efface le fichier.** Dans un coffre, un fichier vide ne
-    /// se distingue pas d'un fichier absent, et en laisser un par worktree
-    /// ouvert est précisément ce que `notes_on_disk` évite ailleurs.
+    /// **Empty text erases the file.** In a vault, an empty file cannot be told
+    /// from an absent one, and leaving one per opened worktree is precisely what
+    /// `notes_on_disk` avoids elsewhere.
     WriteVaultFile {
         worktree: WorktreeId,
-        /// Le chemin complet du fichier : il vit dans le coffre, hors du
-        /// worktree, et n'a pas de chemin relatif à lui donner.
+        /// The file's full path: it lives in the vault, outside the worktree,
+        /// and has no relative path to be given.
         path: PathBuf,
         text: String,
         expect: Option<u64>,
     },
-    /// Lance l'éditeur externe sur un fichier, à une ligne donnée.
+    /// Launches the external editor on a file, at a given line.
     ///
-    /// Le modèle de commande voyage ici pour la même raison que celle de
-    /// `SuggestMessage` : les réglages sont ceux de la vue, pas du worker.
+    /// The command template travels here for the same reason as
+    /// `SuggestMessage`'s: the settings are the view's, not the worker's.
     OpenExternal {
         worktree: WorktreeId,
         path: PathBuf,
@@ -375,23 +369,23 @@ pub enum Cmd {
         editor: String,
     },
 
-    // — Surveillance de fichiers ——————————————————————————————————
-    // La surveillance vit avec les workers et non dans la vue : c'est le
-    // disque du worktree qu'elle regarde, et ce disque est celui du serveur
-    // quand les workers tournent dans WSL. Ces quatre ordres ne passent par
-    // aucune file — `Handle::send` les remet directement au thread du
-    // surveillant — et ce qui en revient est un [`Evt::FilesChanged`].
-    /// Surveille un worktree : les dossiers que git connaît, sans récursion,
-    /// plus son `HEAD` et son `index`.
+    // — File watching —————————————————————————————————————————————
+    // Watching lives with the workers and not in the view: it is the worktree's
+    // disk it looks at, and that disk is the server's when the workers run in
+    // WSL. These four orders go through no queue — `Handle::send` hands them
+    // straight to the watcher thread — and what comes back is an
+    // [`Evt::FilesChanged`].
+    /// Watches a worktree: the folders git knows, without recursion, plus its
+    /// `HEAD` and its `index`.
     Watch {
         worktree: WorktreeId,
     },
     Unwatch {
         worktree: WorktreeId,
     },
-    /// Surveille un dossier tel quel, sans récursion ni git : le coffre de
-    /// notes d'un worktree. Sans effet tant que le dossier n'existe pas —
-    /// l'ordre est à renvoyer après l'avoir créé.
+    /// Watches a folder as it is, without recursion or git: a worktree's notes
+    /// vault. No effect while the folder does not exist — the order is to be
+    /// sent again after creating it.
     WatchDir {
         dir: PathBuf,
     },
@@ -562,19 +556,17 @@ pub enum Evt {
         main: PathBuf,
         name: String,
         worktrees: Vec<Worktree>,
-        /// Le checkout d'où l'ouverture a été demandée, quand c'en est un.
-        /// Lancer `claudhub` depuis un worktree doit ouvrir *ce* worktree, pas le
-        /// dépôt principal qui se trouve en tête de la liste.
+        /// The checkout the opening was asked from, when it is one. Launching
+        /// `claudhub` from a worktree must open *that* worktree, not the main
+        /// repository that happens to head the list.
         opened_at: Option<WorktreeId>,
     },
-    /// Un dépôt qu'on n'a pas pu ouvrir : le dossier a disparu, ou ce n'en
-    /// est pas un.
+    /// A repository we could not open: the folder has vanished, or it is not one.
     ///
-    /// Un événement à lui plutôt qu'un `Failed` : ce n'est pas une opération
-    /// qui a échoué mais un dépôt qui manque, et ce qu'il faut en faire dépend
-    /// de la façon dont il est arrivé là. Mémorisé, il doit rester **visible**
-    /// pour qu'on puisse le retirer ; désigné à l'instant dans un sélecteur de
-    /// dossier, il n'a qu'à se dire.
+    /// An event of its own rather than a `Failed`: it is not an operation that
+    /// failed but a repository that is missing, and what to do with it depends
+    /// on how it got there. Remembered, it has to stay **visible** so it can be
+    /// removed; named just now in a folder picker, it only has to be said.
     RepoUnavailable {
         path: PathBuf,
         message: String,
@@ -600,33 +592,33 @@ pub enum Evt {
     Branches {
         main: PathBuf,
         branches: Vec<Branch>,
-        /// Branche d'intégration du dépôt, telle que git la déclare
-        /// (`origin/HEAD`, puis `init.defaultBranch`, puis les noms usuels qui
-        /// existent vraiment). `None` sur un dépôt qui n'en a aucune : la
-        /// revue de branche n'a alors rien à quoi se comparer.
+        /// The repository's integration branch, as git declares it
+        /// (`origin/HEAD`, then `init.defaultBranch`, then the usual names that
+        /// really exist). `None` on a repository that has none: the branch
+        /// review then has nothing to compare itself against.
         default_base: Option<String>,
     },
     Summaries {
         summaries: Vec<(WorktreeId, Summary)>,
     },
-    /// Le dépôt vient d'être relevé sans qu'on l'ait demandé. Ce qu'il porte
-    /// n'est pas un résultat mais une occasion : l'avance et le retard sur
-    /// l'amont ont pu changer, et ils se lisent dans le statut.
+    /// The repository has just been fetched without being asked. What it carries
+    /// is not a result but an occasion: the ahead and behind counts may have
+    /// changed, and they are read from the status.
     Fetched {
         main: PathBuf,
     },
-    /// Le message que l'agent propose pour ce qui est indexé.
+    /// The message the agent proposes for what is staged.
     ///
-    /// Il porte son worktree parce qu'il arrive plusieurs secondes après la
-    /// demande : on a pu changer de worktree entre-temps, et poser ce
-    /// message-là dans le champ d'un autre serait le pire des services.
+    /// It carries its worktree because it arrives several seconds after the
+    /// request: one may have changed worktree in the meantime, and putting that
+    /// message into another's field would be the worst of services.
     CommitMessage {
         worktree: WorktreeId,
         message: String,
     },
-    /// Ce que le `wt.toml` d'un dépôt déclare. `None` quand il n'y en a pas —
-    /// le cas courant, et pas une erreur : les gestes de `wt` disparaissent
-    /// simplement du menu.
+    /// What a repository's `wt.toml` declares. `None` when there is none — the
+    /// common case, and not an error: `wt`'s gestures simply disappear from the
+    /// menu.
     WtProject {
         main: PathBuf,
         project: Option<crate::wt::Snapshot>,
@@ -677,64 +669,63 @@ pub enum Evt {
     Agents {
         agents: crate::agent::Agents,
     },
-    /// Le coffre d'un worktree vient d'être écrit.
+    /// A worktree's vault has just been written.
     ///
-    /// La vue tient déjà ce qu'elle a écrit ; ce que cet événement porte est
-    /// autre chose : le **dossier peut venir de naître** avec ce fichier, et
-    /// tant qu'il n'existait pas il n'y avait rien à surveiller. C'est le seul
-    /// moment où l'on sait qu'il est là.
+    /// The view already holds what it wrote; what this event carries is
+    /// something else: the **folder may have just been born** with this file,
+    /// and while it did not exist there was nothing to watch. It is the only
+    /// moment we know it is there.
     VaultWritten {
         worktree: WorktreeId,
     },
-    /// Des chemins surveillés ont changé — un lot par fenêtre de
-    /// regroupement du surveillant (250 ms), ce qui en fait un seul
-    /// événement sur le fil au lieu d'un par fichier d'une compilation.
+    /// Watched paths have changed — one batch per debounce window of the watcher
+    /// (250 ms), which makes it a single event on the wire instead of one per
+    /// file of a build.
     ///
-    /// Les chemins sont quelconques : c'est la vue qui les rattache aux
-    /// worktrees ouverts, elle seule sait lesquels le sont.
+    /// The paths are arbitrary: it is the view that attaches them to the open
+    /// worktrees, being the only one to know which are open.
     FilesChanged {
         paths: Vec<PathBuf>,
     },
 
     // — Transport ——————————————————————————————————————————————————
-    // Jamais produits par un worker : c'est le client du transport distant
-    // (`runtime::remote`) qui les synthétise, à la poignée de main et à la
-    // mort du serveur. Ils passent par le canal d'événements parce que c'est
-    // le seul flux que la vue draine — un second canal serait une seconde
-    // pompe.
-    /// Le serveur a répondu à la poignée de main : ce qu'il sait et que la
-    /// vue ne peut pas deviner de sa machine à elle.
+    // Never produced by a worker: it is the remote transport's client
+    // (`runtime::remote`) that synthesises them, at the handshake and at the
+    // server's death. They go through the event channel because it is the only
+    // stream the view drains — a second channel would be a second pump.
+    /// The server answered the handshake: what it knows and the view cannot
+    /// guess about its own machine.
     ServerHello {
         build: String,
-        /// Son répertoire de lancement — c'est lui qui vaut comme « dossier
-        /// courant » quand les workers tournent ailleurs.
+        /// Its launch directory — that is what counts as the "current folder"
+        /// when the workers run elsewhere.
         cwd: PathBuf,
         running_under_wsl: bool,
-        /// Ses `/etc/shells`, pour le formulaire des réglages.
+        /// Its `/etc/shells`, for the settings form.
         shells: Vec<String>,
     },
-    /// Le serveur est parti — fin de flux ou trame illisible. La revue reste
-    /// affichée mais plus rien ne bouge : la vue le dit et propose de
-    /// relancer.
+    /// The server has gone — end of stream or unreadable frame. The review stays
+    /// on screen but nothing moves any more: the view says so and offers to
+    /// relaunch.
     ServerLost {
         message: String,
     },
-    /// Le contenu du dossier de notes : nom de fichier et texte.
+    /// The notes folder's content: file name and text.
     NotesRead {
         worktree: WorktreeId,
         files: Vec<(String, String)>,
     },
-    /// Les bases d'une connexion, ou ce qui a empêché de les lire.
+    /// A connection's databases, or what prevented reading them.
     ///
-    /// **Un `Result` dans l'événement plutôt qu'un `Evt::Failed`.** Un échec
-    /// de lecture appartient à l'endroit de l'arbre qui l'a demandé — c'est
-    /// là qu'il se lit, sous le nœud qu'on vient de déplier — et non à la
-    /// barre d'état, qui l'aurait remplacé par le message suivant. C'est
-    /// aussi ce qui rend la ligne « en erreur » distincte de la ligne « pas
-    /// encore chargée ».
+    /// **A `Result` in the event rather than an `Evt::Failed`.** A read failure
+    /// belongs to the place in the tree that asked for it — that is where it is
+    /// read, under the node just unfolded — and not to the status bar, which
+    /// would have replaced it with the next message. It is also what makes the
+    /// "in error" row distinct from the "not loaded yet" one.
     DbDatabases {
-        /// La connexion visée, par sa clé : les réglages ont pu changer entre
-        /// la demande et la réponse, et un indice ne désignerait plus la même.
+        /// The connection aimed at, by its key: the settings may have changed
+        /// between the request and the answer, and an index would no longer name
+        /// the same one.
         key: String,
         databases: DbResult<Vec<crate::db::Database>>,
     },
@@ -754,35 +745,34 @@ pub enum Evt {
         database: String,
         columns: DbResult<std::collections::BTreeMap<String, Vec<crate::db::Column>>>,
     },
-    /// Le résultat d'une requête, et le temps qu'elle a mis.
+    /// A query's result, and how long it took.
     ///
-    /// La durée est mesurée **dans le worker** : depuis la vue, elle
-    /// comprendrait l'attente dans la file et le prochain tour de la pompe
-    /// d'événements, ce qui ferait passer une requête d'une milliseconde pour
-    /// une requête de vingt.
+    /// The duration is measured **in the worker**: from the view it would
+    /// include the wait in the queue and the next turn of the event pump, which
+    /// would make a one-millisecond query look like a twenty-millisecond one.
     DbRows {
-        /// L'envoi auquel ces lignes répondent. Voir `Cmd::DbQuery`.
+        /// The request these rows answer. See `Cmd::DbQuery`.
         request: u64,
         rows: DbResult<crate::db::Rows>,
         elapsed_ms: u64,
     },
-    /// Un export CSV a abouti, ou non.
+    /// A CSV export succeeded, or did not.
     DbExported {
         path: std::path::PathBuf,
-        /// Le nombre de lignes écrites.
+        /// The number of rows written.
         rows: DbResult<u64>,
     },
     History {
         worktree: WorktreeId,
         range: LogRange,
         commits: Vec<Commit>,
-        /// Une entrée par commit, dans le même ordre : la vue les affiche côte
-        /// à côte et un décalage ferait pointer chaque trait sur le mauvais.
+        /// One entry per commit, in the same order: the view shows them side by
+        /// side and being off by one would make each line point at the wrong one.
         graph: Vec<GraphRow>,
     },
-    /// Une opération d'écriture a abouti. `output` est la sortie de git, que
-    /// la vue affiche telle quelle : c'est elle qui dit ce qui a été poussé,
-    /// avancé ou créé, et la reformuler n'apporterait que des approximations.
+    /// A write operation succeeded. `output` is git's output, which the view
+    /// shows as it is: it is what says what was pushed, advanced or created, and
+    /// rewording it would only add approximations.
     Done {
         worktree: Option<WorktreeId>,
         action: Action,

@@ -1,15 +1,15 @@
-//! Réglages persistants.
+//! Persistent settings.
 //!
-//! Un seul fichier JSON dans le répertoire de configuration de l'utilisateur.
-//! Tout y est optionnel : une clé absente reprend sa valeur par défaut, ce qui
-//! rend l'ajout d'un réglage compatible avec les fichiers déjà écrits, et un
-//! fichier illisible n'empêche jamais Claudhub de démarrer.
+//! A single JSON file in the user's configuration directory. Everything in it is
+//! optional: a missing key takes its default value, which makes adding a setting
+//! compatible with files already written, and an unreadable file never prevents
+//! Claudhub from starting.
 //!
-//! Les réglages vivent dans un global gpui plutôt que dans `ClaudhubApp` : le
-//! formulaire de gpui-component lit et écrit chaque champ à travers des
-//! fermetures qui ne reçoivent qu'un `App`, sans accès à l'entité racine.
-//! Passer par un global est ce qui permet d'écrire un réglage depuis
-//! n'importe où — le formulaire, un raccourci de zoom, la molette.
+//! The settings live in a gpui global rather than in `ClaudhubApp`:
+//! gpui-component's form reads and writes each field through closures that only
+//! receive an `App`, with no access to the root entity. Going through a global
+//! is what makes it possible to write a setting from anywhere — the form, a zoom
+//! shortcut, the wheel.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -17,31 +17,30 @@ use std::time::Duration;
 use gpui::{App, BorrowAppContext};
 use serde::{Deserialize, Serialize};
 
-/// Police d'interface embarquée. Elle est toujours disponible, ce qui en fait
-/// le seul défaut qu'on puisse promettre.
+/// Embedded interface font. It is always available, which makes it the only
+/// default we can promise.
 pub const DEFAULT_UI_FONT: &str = "Inter";
-/// Police à chasse fixe embarquée, celle du terminal et des diffs.
+/// Embedded fixed-pitch font, the terminal's and the diffs'.
 pub const DEFAULT_MONO_FONT: &str = "JetBrains Mono";
 
-/// Ce qui rédige un message de commit quand rien n'est configuré.
+/// What writes a commit message when nothing is configured.
 ///
-/// `-p` fait de `claude` un filtre : il lit son prompt sur l'entrée standard
-/// et écrit sa réponse sur la sortie, sans session ni interface. Le modèle est
-/// nommé parce qu'un résumé de diff n'a pas de quoi occuper le plus gros, et
-/// que celui-ci répond en quelques secondes.
+/// `-p` makes `claude` a filter: it reads its prompt from standard input and
+/// writes its answer to the output, with no session and no interface. The model
+/// is named because summarising a diff is no work for the biggest one, and this
+/// one answers in a few seconds.
 pub const DEFAULT_COMMIT_MESSAGE_COMMAND: &str = "claude -p --model sonnet";
 
-/// Palettes de repli : celles que gpui-component fournit, et qui existent donc
-/// même si le répertoire de thèmes est vide ou illisible.
+/// Fallback palettes: the ones gpui-component provides, and which therefore
+/// exist even if the theme directory is empty or unreadable.
 pub const DEFAULT_LIGHT_THEME: &str = "Default Light";
 pub const DEFAULT_DARK_THEME: &str = "Default Dark";
 
-/// Délai avant écriture du fichier après une modification.
+/// Delay before the file is written after a change.
 ///
-/// Un champ de saisie émet une valeur par frappe et la molette un cran par
-/// encoche : écrire à chaque fois ferait des dizaines d'ouvertures de fichier
-/// pour un geste. Une demi-seconde est assez courte pour qu'une fermeture
-/// brutale ne perde rien de visible.
+/// An input field emits a value per keystroke and the wheel one per notch:
+/// writing every time would mean dozens of file opens for one gesture. Half a
+/// second is short enough that an abrupt shutdown loses nothing visible.
 const SAVE_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -50,13 +49,12 @@ pub enum ThemeMode {
     Light,
     #[default]
     Dark,
-    /// Suit le réglage clair/sombre du système.
+    /// Follows the system's light/dark setting.
     System,
 }
 
 impl ThemeMode {
-    /// Valeur telle qu'elle circule dans le formulaire, qui ne manipule que
-    /// des chaînes.
+    /// The value as it travels through the form, which only handles strings.
     pub fn as_key(self) -> &'static str {
         match self {
             Self::Light => "light",
@@ -89,7 +87,7 @@ impl LanguageChoice {
             Self::Fr => "fr",
             Self::En => "en",
             Self::System => {
-                // `fr-BE`, `fr_FR.UTF-8` : seule la langue nous intéresse.
+                // `fr-BE`, `fr_FR.UTF-8`: only the language interests us.
                 let locale = std::env::var("LC_ALL")
                     .or_else(|_| std::env::var("LC_MESSAGES"))
                     .or_else(|_| std::env::var("LANG"))
@@ -120,32 +118,32 @@ impl LanguageChoice {
     }
 }
 
-/// Un agent de codage qu'on sait lancer.
+/// A coding agent we know how to launch.
 ///
-/// Plusieurs profils et non un seul réglage : dès qu'on envoie du texte à un
-/// agent, on veut choisir lequel. `env` est ce qui porte le modèle
-/// (`ANTHROPIC_MODEL`, une clé par profil…) — « configurer plusieurs modèles »
-/// n'appelle donc aucune dépendance HTTP, seulement une variable de plus.
+/// Several profiles and not a single setting: as soon as text is sent to an
+/// agent, one wants to choose which. `env` is what carries the model
+/// (`ANTHROPIC_MODEL`, one key per profile…) — "configuring several models"
+/// therefore calls for no HTTP dependency, only one more variable.
 ///
-/// `command` et `args` sont **séparés** : découper une ligne de commande sur
-/// les espaces casse sur tout chemin qui en contient un, et c'est le genre de
-/// panne qu'on ne comprend qu'après avoir lu le code.
+/// `command` and `args` are **separate**: splitting a command line on spaces
+/// breaks on any path containing one, and that is the kind of failure you only
+/// understand after reading the code.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct AgentProfile {
-    /// Ce que le menu affiche. Vide, c'est le nom du programme qui sert.
+    /// What the menu shows. Empty, the program's name is used.
     pub name: String,
     pub command: String,
     pub args: Vec<String>,
-    /// Variables ajoutées à l'environnement du pty.
+    /// Variables added to the pty's environment.
     ///
-    /// `BTreeMap` et non `HashMap` : JSON sérialisé dans un ordre différent à
-    /// chaque écriture ferait un fichier qui change sans que rien n'ait changé.
+    /// `BTreeMap` and not `HashMap`: JSON serialised in a different order on
+    /// every write would make a file that changes with nothing having changed.
     pub env: std::collections::BTreeMap<String, String>,
 }
 
 impl AgentProfile {
-    /// Le profil livré par défaut, celui qui donne son nom au projet.
+    /// The profile shipped by default, the one that gives the project its name.
     pub fn claude() -> Self {
         Self {
             name: "claude".into(),
@@ -155,7 +153,7 @@ impl AgentProfile {
         }
     }
 
-    /// Un profil bâti à partir d'une ligne de commande entière.
+    /// A profile built from a whole command line.
     pub fn from_command_line(line: &str) -> Option<Self> {
         let mut parts = split_command(line).into_iter();
         let command = parts.next()?;
@@ -168,7 +166,7 @@ impl AgentProfile {
         })
     }
 
-    /// Le nom affiché : le sien, sinon celui du programme.
+    /// The displayed name: its own, or the program's.
     pub fn label(&self) -> &str {
         non_empty(&self.name, &self.command)
     }
@@ -177,15 +175,15 @@ impl AgentProfile {
         (self.command.clone(), self.args.clone())
     }
 
-    /// La ligne de commande telle qu'on la saisit, guillemets remis.
+    /// The command line as it is typed in, quotes put back.
     pub fn command_line(&self) -> String {
         join_command(
             std::iter::once(self.command.as_str()).chain(self.args.iter().map(String::as_str)),
         )
     }
 
-    /// L'environnement tel qu'on le saisit : `CLÉ=valeur`, séparés par des
-    /// espaces, avec les mêmes règles de guillemets que la ligne de commande.
+    /// The environment as it is typed in: `KEY=value`, space-separated, with the
+    /// same quoting rules as the command line.
     pub fn env_line(&self) -> String {
         join_command(self.env.iter().map(|(key, value)| format!("{key}={value}")))
     }
@@ -201,33 +199,33 @@ impl AgentProfile {
     }
 }
 
-/// Le nom d'un programme, dépouillé de son chemin.
+/// A program's name, stripped of its path.
 fn command_name(command: &str) -> &str {
     command.rsplit('/').next().unwrap_or(command)
 }
 
-// Le découpage d'une ligne de commande vit dans `crate::cmdline` : les
-// workers s'en servent aussi, et un binaire serveur sans gpui doit pouvoir le
-// faire. Ré-exporté ici parce que c'est le formulaire qui s'en sert le plus.
+// Splitting a command line lives in `crate::cmdline`: the workers use it too,
+// and a server binary without gpui has to be able to do it. Re-exported here
+// because the form is what uses it most.
 pub use crate::cmdline::{join_command, split_command};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerminalSettings {
-    /// Programme lancé dans un nouvel onglet. Vide = le shell de connexion.
+    /// Program launched in a new tab. Empty = the login shell.
     pub shell: String,
-    /// Police du terminal. Vide = celle des diffs, pour que régler la chasse
-    /// fixe une fois suffise au cas courant.
+    /// The terminal's font. Empty = the diffs', so that setting the fixed pitch
+    /// once is enough for the common case.
     pub font_family: String,
     pub font_size: f32,
     pub scrollback: usize,
-    /// Ancien réglage, remplacé par `agents`. Il n'est plus lu qu'une fois, à
-    /// la migration, puis vidé — mais il reste déclaré, faute de quoi le
-    /// fichier d'un utilisateur qui n'a pas encore migré perdrait sa commande.
+    /// An old setting, replaced by `agents`. It is only read once, at migration,
+    /// then emptied — but it stays declared, otherwise the file of a user who
+    /// has not migrated yet would lose their command.
     pub agent_command: String,
-    /// Les agents qu'on sait lancer, dans l'ordre du menu.
+    /// The agents we know how to launch, in menu order.
     pub agents: Vec<AgentProfile>,
-    /// Nom du profil lancé par défaut. Vide, ou inconnu : le premier.
+    /// Name of the profile launched by default. Empty, or unknown: the first.
     pub default_agent: String,
 }
 
@@ -237,13 +235,13 @@ impl Default for TerminalSettings {
             shell: String::new(),
             font_family: String::new(),
             font_size: 13.0,
-            // 10 000 lignes : de quoi remonter la sortie d'une suite de tests
-            // sans que la mémoire d'une dizaine d'onglets se remarque.
+            // 10,000 lines: enough to scroll back through a test suite's output
+            // without the memory of a dozen tabs being noticeable.
             scrollback: 10_000,
             agent_command: "claude".into(),
-            // Vide par défaut : `migrate_agents` la remplit, ce qui fait du
-            // même code le chemin de l'installation neuve et celui de la
-            // reprise d'un fichier écrit par une version antérieure.
+            // Empty by default: `migrate_agents` fills it, which makes the same
+            // code both the fresh-install path and the path for picking up a
+            // file written by an earlier version.
             agents: Vec::new(),
             default_agent: String::new(),
         }
@@ -251,23 +249,23 @@ impl Default for TerminalSettings {
 }
 
 impl TerminalSettings {
-    /// Le programme à lancer, découpé en commande et arguments.
+    /// The program to launch, split into command and arguments.
     ///
-    /// Rend `None` pour un réglage vide, ce qui laisse alacritty ouvrir le
-    /// shell de connexion tel que `/etc/passwd` le déclare. Le réglage accepte
-    /// une ligne de commande entière — `fish -l`, `tmux new-session -A -s
-    /// claudhub` — parce qu'un shell nu n'est pas toujours ce qu'on veut ouvrir.
+    /// Returns `None` for an empty setting, which leaves alacritty to open the
+    /// login shell as `/etc/passwd` declares it. The setting accepts a whole
+    /// command line — `fish -l`, `tmux new-session -A -s claudhub` — because a
+    /// bare shell is not always what one wants to open.
     pub fn program(&self) -> Option<(String, Vec<String>)> {
         let mut parts = split_command(&self.shell).into_iter();
         let program = parts.next()?;
         Some((program, parts.collect()))
     }
 
-    /// Reprend `agent_command` sous forme de profil.
+    /// Picks `agent_command` up as a profile.
     ///
-    /// Sans risque : `#[serde(default)]` fait qu'un fichier sans `agents` est
-    /// lu avec une liste vide, et c'est exactement le cas qu'on rattrape ici.
-    /// L'ancien champ est vidé pour que la reprise n'ait lieu qu'une fois.
+    /// Without risk: `#[serde(default)]` means a file with no `agents` is read
+    /// with an empty list, and that is exactly the case caught here. The old
+    /// field is emptied so the pick-up only happens once.
     pub fn migrate_agents(&mut self) {
         if !self.agents.is_empty() {
             self.agent_command.clear();
@@ -279,7 +277,7 @@ impl TerminalSettings {
         self.agent_command.clear();
     }
 
-    /// Le profil lancé quand on ne dit pas lequel.
+    /// The profile launched when nobody says which.
     pub fn default_profile(&self) -> Option<&AgentProfile> {
         self.agents
             .iter()
@@ -287,11 +285,11 @@ impl TerminalSettings {
             .or_else(|| self.agents.first())
     }
 
-    /// Les noms de programme à chercher dans `/proc`.
+    /// The program names to look for in `/proc`.
     ///
-    /// Tous les profils et non le seul courant : un agent lancé depuis un
-    /// terminal à côté compte autant que celui qu'on a démarré ici, et n'en
-    /// chercher qu'un n'en verrait qu'un sur deux.
+    /// Every profile and not only the current one: an agent launched from a
+    /// terminal alongside counts as much as the one started here, and looking
+    /// for only one would see only half of them.
     pub fn agent_programs(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .agents
@@ -304,7 +302,7 @@ impl TerminalSettings {
         names
     }
 
-    /// Police effective : la sienne, sinon celle des diffs.
+    /// The effective font: its own, or the diffs'.
     pub fn family<'a>(&'a self, mono: &'a str) -> &'a str {
         if self.font_family.is_empty() {
             mono
@@ -318,134 +316,128 @@ impl TerminalSettings {
 #[serde(default)]
 pub struct Settings {
     pub theme: ThemeMode,
-    /// Palettes nommées, une par apparence. Deux réglages et non un seul :
-    /// `theme` dit s'il fait clair ou sombre — le système peut en décider —
-    /// et ceux-ci disent *quelle* palette porte chacune des deux apparences.
+    /// Named palettes, one per appearance. Two settings and not one: `theme`
+    /// says whether it is light or dark — the system may decide — and these say
+    /// *which* palette carries each of the two appearances.
     pub light_theme: String,
     pub dark_theme: String,
     pub language: LanguageChoice,
-    /// Police de l'interface : libellés, menus, listes.
+    /// The interface font: labels, menus, lists.
     pub ui_font_family: String,
-    /// Police à chasse fixe : diffs, sha, chemins alignés.
+    /// The fixed-pitch font: diffs, shas, aligned paths.
     pub mono_font_family: String,
     pub font_size: f32,
-    /// Taille du texte des diffs, indépendante de celle de l'interface : on
-    /// grossit du code pour le relire sans vouloir grossir toute la fenêtre.
+    /// The diffs' text size, independent of the interface's: one enlarges code
+    /// to read it without wanting to enlarge the whole window.
     pub diff_font_size: f32,
     pub start_maximized: bool,
     pub terminal: TerminalSettings,
-    /// Dépôts rouverts au démarrage, dans l'ordre d'ouverture.
+    /// Repositories reopened at startup, in the order they were opened.
     pub repositories: Vec<PathBuf>,
-    /// Nombre de lignes de contexte autour d'un hunk dans la revue.
+    /// Number of context lines around a hunk in the review.
     pub diff_context: usize,
-    /// Liste des fichiers en arborescence de dossiers plutôt qu'à plat.
+    /// The file list as a folder tree rather than flat.
     pub review_tree: bool,
-    /// Diff en deux colonnes — ancienne version à gauche, nouvelle à droite —
-    /// plutôt qu'en une seule liste.
+    /// Diff in two columns — old version on the left, new on the right — rather
+    /// than as a single list.
     pub diff_split: bool,
-    /// Afficher le fichier entier autour des modifications, et non seulement
-    /// leurs quelques lignes de contexte.
+    /// Show the whole file around the changes, and not only their few lines of
+    /// context.
     pub diff_whole_file: bool,
-    /// Renvoyer les lignes longues à la ligne, en vue à deux colonnes.
+    /// Wrap long lines, in two-column view.
     ///
-    /// Vrai par défaut, et c'est là que ça compte : une colonne fait la moitié
-    /// de la vue, et la moindre ligne un peu longue obligeait à défiler
-    /// horizontalement tout le fichier — la largeur étant celle de la plus
-    /// longue ligne, une seule suffisait à la donner à toutes. En une seule
-    /// colonne, la ligne dispose de toute la largeur et le repli se discute ;
-    /// il n'a donc pas lieu.
+    /// True by default, and this is where it counts: a column is half the view,
+    /// and the slightest long line forced horizontal scrolling of the whole file
+    /// — the width being that of the longest line, one was enough to give it to
+    /// all. In a single column the line has the whole width and wrapping is
+    /// debatable; so it does not happen.
     pub diff_wrap: bool,
-    /// « Mettre à jour depuis la base » rejoue la branche au lieu de fusionner.
+    /// "Update from base" replays the branch instead of merging.
     ///
-    /// Les deux se défendent et le choix est une habitude d'équipe : un
-    /// historique linéaire d'un côté, la trace de ce qui a été intégré et
-    /// quand de l'autre. Merge par défaut, parce qu'il ne réécrit rien et ne
-    /// casse donc jamais une branche déjà poussée.
+    /// Both are defensible and the choice is a team habit: a linear history on
+    /// one side, the trace of what was integrated and when on the other. Merge by
+    /// default, because it rewrites nothing and therefore never breaks a branch
+    /// already pushed.
     pub update_with_rebase: bool,
-    /// Intégrer force un commit de fusion, même quand l'avance rapide serait
-    /// possible : c'est ce qui garde une trace de la branche d'agent.
+    /// Integrating forces a merge commit, even when a fast-forward would be
+    /// possible: that is what keeps a trace of the agent's branch.
     pub integrate_no_ff: bool,
-    /// Commande de l'éditeur externe, avec `{path}` et `{line}`.
+    /// The external editor's command, with `{path}` and `{line}`.
     ///
-    /// L'édition dans Claudhub reste légère : une retouche courte ici, le vrai
-    /// travail dans l'éditeur de son choix. Vide, le geste disparaît des menus
-    /// plutôt que d'échouer.
+    /// Editing in Claudhub stays light: a short touch-up here, the real work in
+    /// the editor of your choice. Empty, the gesture disappears from the menus
+    /// rather than failing.
     pub external_editor: String,
-    /// Montrer aussi les fichiers que `.gitignore` écarte, dans l'explorateur.
+    /// Also show the files `.gitignore` leaves out, in the explorer.
     pub show_ignored_files: bool,
-    /// Minutes entre deux `git fetch` automatiques. `0` : aucun.
+    /// Minutes between two automatic `git fetch`es. `0`: none.
     ///
-    /// Sans lui, « en retard de trois commits » n'apparaît qu'après un fetch
-    /// demandé à la main — c'est-à-dire quand on se doutait déjà de quelque
-    /// chose. Un relevé régulier est ce qui rend le compte du bouton digne de
-    /// confiance ; c'est ce que font les clients git de bureau, et ils le
-    /// règlent tous.
+    /// Without it, "three commits behind" only appears after a fetch asked for
+    /// by hand — that is, once one already suspected something. A regular
+    /// reading is what makes the button's count trustworthy; it is what desktop
+    /// git clients do, and they all have a setting for it.
     pub auto_fetch_minutes: u32,
-    /// Ce qui rédige un message de commit à partir du diff indexé.
+    /// What writes a commit message from the staged diff.
     ///
-    /// Un programme et non une API : c'est la décision de cadrage de Claudhub,
-    /// et elle vaut ici comme pour les agents du terminal. Le diff lui arrive
-    /// par l'entrée standard, sa sortie standard est le message. Un modèle
-    /// rapide suffit — d'où `sonnet` par défaut, la rédaction d'un résumé
-    /// n'ayant pas de quoi occuper le plus gros. Vide, le bouton disparaît.
+    /// A program and not an API: that is Claudhub's framing decision, and it
+    /// holds here as for the terminal's agents. The diff reaches it on standard
+    /// input, its standard output is the message. A fast model is enough — hence
+    /// `sonnet` by default, writing a summary being no work for the biggest one.
+    /// Empty, the button disappears.
     pub commit_message_command: String,
-    /// Organisation Sentry. Le *projet*, lui, dépend du dépôt et vit dans le
-    /// magasin d'état, pas ici.
+    /// The Sentry organisation. The *project*, for its part, belongs to the
+    /// repository and lives in the state store, not here.
     pub sentry_org: String,
-    /// Jeton d'API, à défaut de `SENTRY_TOKEN`.
+    /// API token, failing `SENTRY_TOKEN`.
     ///
-    /// L'environnement l'emporte : ce fichier est en 0600, ce qui ne fait pas
-    /// de lui un coffre, et un jeton qui traîne dans une sauvegarde de
-    /// configuration est un jeton qui fuit.
+    /// The environment wins: this file is 0600, which does not make it a vault,
+    /// and a token lying around in a configuration backup is a token that leaks.
     pub sentry_token: String,
-    /// Requête envoyée à Sentry. Vide : les issues non résolues.
+    /// The query sent to Sentry. Empty: the unresolved issues.
     pub sentry_query: String,
-    /// Parcourir les diffs et l'arborescence avec les touches de vim.
+    /// Browse diffs and the tree with vim's keys.
     ///
-    /// Désactivé par défaut, et il faut que ça le reste : ces liaisons sont
-    /// des **lettres nues**, et elles prennent la place de tout ce qu'une
-    /// lettre pourrait faire ailleurs. Ce n'est pas un mode d'édition — il n'y
-    /// a rien à éditer dans un diff — mais la main gauche sur la rangée de
-    /// repos pour relire.
+    /// Off by default, and it has to stay that way: those bindings are **bare
+    /// letters**, and they take the place of everything a letter could do
+    /// elsewhere. It is not an editing mode — there is nothing to edit in a diff
+    /// — but the left hand on the home row for reviewing.
     pub vim_mode: bool,
-    /// Où les notes de relecture sont écrites, un fichier Markdown par note.
+    /// Where the review notes are written, one Markdown file per note.
     ///
-    /// Vide : `<config>/notes`. Le champ existe pour pointer un coffre —
-    /// Obsidian, ou n'importe quel dossier qu'on tient déjà — parce qu'une
-    /// note de relecture est du texte qu'on écrit, et qu'elle n'a rien à faire
-    /// enfermée dans un JSON d'état que rien d'autre ne sait lire.
+    /// Empty: `<config>/notes`. The field exists to point at a vault — Obsidian,
+    /// or any folder you already keep — because a review note is text that gets
+    /// written, and it has no business being locked in a state JSON nothing else
+    /// can read.
     pub notes_dir: String,
-    /// La distribution WSL où tournent les workers, sous Windows.
+    /// The WSL distribution the workers run in, on Windows.
     ///
-    /// Vide : elle n'a pas encore été choisie, et l'interface la demande au
-    /// premier démarrage. Un réglage et non une détection à chaque fois : une
-    /// machine a souvent plusieurs distributions, et ce n'est pas une question
-    /// à reposer à chaque ouverture. Sans effet ailleurs que sous Windows, où
-    /// les workers sont dans le même processus.
+    /// Empty: it has not been chosen yet, and the interface asks for it on first
+    /// startup. A setting and not a detection every time: a machine often has
+    /// several distributions, and it is not a question to ask again on every
+    /// opening. No effect outside Windows, where the workers are in the same
+    /// process.
     pub wsl_distro: String,
-    /// Vues que l'utilisateur a masquées, par nom de panneau du dock.
+    /// Views the user has hidden, by dock panel name.
     ///
-    /// Ici et non dans `layout.json` : c'est un choix qu'on fait une fois — je
-    /// ne me sers pas de Sentry, je ne veux pas des branches — pas la
-    /// géométrie d'une fenêtre. `LAYOUT_VERSION` jette la disposition dès que
-    /// les panneaux changent de nom, et ce choix-là n'a pas à disparaître
-    /// avec elle.
+    /// Here and not in `layout.json`: it is a choice made once — I do not use
+    /// Sentry, I do not want the branches — not the geometry of a window.
+    /// `LAYOUT_VERSION` throws the layout away as soon as the panels change
+    /// name, and that choice has no business disappearing with it.
     ///
-    /// Une liste de noms plutôt qu'un booléen par panneau : un panneau ajouté
-    /// est visible sans que ce fichier ait à le savoir.
+    /// A list of names rather than a boolean per panel: an added panel is
+    /// visible without this file having to know about it.
     pub hidden_panels: Vec<String>,
-    /// Les bases de données du panneau « Bases ».
+    /// The "Databases" panel's databases.
     ///
-    /// Déclarées ici comme les profils d'agent, et pour la même raison : c'est
-    /// le deuxième niveau du système d'extension — une déclaration, pas du
-    /// code. Une connexion n'appartient pas à un dépôt : on relit un projet
-    /// dans plusieurs worktrees et la base de développement est la même.
+    /// Declared here like the agent profiles, and for the same reason: it is the
+    /// second level of the extension system — a declaration, not code. A
+    /// connection does not belong to a repository: one reviews a project in
+    /// several worktrees and the development database is the same.
     pub databases: Vec<crate::db::Connection>,
-    /// Lignes rendues par page dans la console SQL.
+    /// Rows returned per page in the SQL console.
     ///
-    /// Une page et non tout le résultat : un `SELECT *` sur une table de deux
-    /// millions de lignes remplirait la mémoire de la fenêtre avant d'avoir
-    /// affiché quoi que ce soit.
+    /// One page and not the whole result: a `SELECT *` on a two-million-row
+    /// table would fill the window's memory before showing anything at all.
     pub db_page_size: usize,
 }
 
@@ -488,17 +480,17 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Le délai entre deux fetch automatiques, ou `None` quand il n'y en a pas.
+    /// The delay between two automatic fetches, or `None` when there is none.
     pub fn auto_fetch_period(&self) -> Option<std::time::Duration> {
         (self.auto_fetch_minutes > 0)
             .then(|| std::time::Duration::from_secs(u64::from(self.auto_fetch_minutes) * 60))
     }
 
-    /// La racine des notes, `~` développé.
+    /// The notes root, `~` expanded.
     ///
-    /// Un chemin qu'on saisit dans un formulaire s'écrit `~/Coffre/…` — c'est
-    /// ainsi qu'on le donne à un shell —, et le passer tel quel à `std::fs`
-    /// créerait un dossier nommé `~` dans le répertoire courant.
+    /// A path typed into a form is written `~/Vault/…` — that is how it is given
+    /// to a shell — and passing it as it is to `std::fs` would create a folder
+    /// named `~` in the current directory.
     pub fn notes_root(&self) -> Option<PathBuf> {
         let text = self.notes_dir.trim();
         if text.is_empty() {
@@ -511,15 +503,14 @@ impl Settings {
     }
 }
 
-/// Contexte demandé à git pour « tout le fichier ».
+/// The context asked of git for "the whole file".
 ///
-/// `git diff` n'a pas d'option « fichier entier » : on lui demande un contexte
-/// plus grand que n'importe quel fichier, qu'il ramène de lui-même à ce qui
-/// existe.
+/// `git diff` has no "whole file" option: we ask it for a context larger than
+/// any file, which it brings back to what exists by itself.
 pub const WHOLE_FILE_CONTEXT: usize = 1_000_000;
 
 impl Settings {
-    /// Lignes de contexte à demander pour le fichier affiché.
+    /// Context lines to ask for on the displayed file.
     pub fn context_lines(&self) -> usize {
         if self.diff_whole_file {
             WHOLE_FILE_CONTEXT
@@ -581,12 +572,12 @@ impl Settings {
         self.repositories.retain(|p| p != main);
     }
 
-    /// Police effective de l'interface, jamais vide.
+    /// The interface's effective font, never empty.
     pub fn ui_font(&self) -> &str {
         non_empty(&self.ui_font_family, DEFAULT_UI_FONT)
     }
 
-    /// Police effective à chasse fixe, jamais vide.
+    /// The effective fixed-pitch font, never empty.
     pub fn mono_font(&self) -> &str {
         non_empty(&self.mono_font_family, DEFAULT_MONO_FONT)
     }
@@ -605,19 +596,19 @@ fn non_empty<'a>(value: &'a str, fallback: &'a str) -> &'a str {
     }
 }
 
-/// Zone dont la taille de texte se règle indépendamment.
+/// An area whose text size is set independently.
 ///
-/// Deux zones et non une seule : grossir la sortie d'un agent pour la lire ne
-/// doit pas déplacer le code qu'on relit à côté.
+/// Two areas and not one: enlarging an agent's output to read it must not move
+/// the code being reviewed beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Zoom {
     Diff,
     Terminal,
 }
 
-/// En dessous de huit points le texte n'est plus lisible, au-dessus de
-/// trente-deux une seule ligne de diff occupe la vue : ce sont les deux façons
-/// de rendre l'interface inutilisable, et la molette y arrive vite.
+/// Below eight points the text is no longer readable, above thirty-two a single
+/// diff line fills the view: those are the two ways of making the interface
+/// unusable, and the wheel gets there fast.
 pub const MIN_FONT_SIZE: f32 = 8.0;
 pub const MAX_FONT_SIZE: f32 = 32.0;
 
@@ -633,8 +624,8 @@ impl Settings {
         }
     }
 
-    /// Ajoute `steps` points à la taille d'une zone. Rend vrai si quelque
-    /// chose a changé — au bout de la course, il n'y a rien à réafficher.
+    /// Adds `steps` points to an area's size. Returns true if something changed
+    /// — at the end of the travel, there is nothing to redraw.
     pub fn zoom(&mut self, zone: Zoom, steps: f32) -> bool {
         let size = self.size_of(zone);
         let next = clamp_font_size(*size + steps);
@@ -660,15 +651,15 @@ impl Settings {
 
 pub struct SettingsStore {
     settings: Settings,
-    /// Vrai quand une écriture différée est déjà programmée : les
-    /// modifications suivantes s'y agrègent au lieu d'en programmer une autre.
+    /// True when a deferred write is already scheduled: later changes join it
+    /// instead of scheduling another.
     saving: bool,
 }
 
 impl gpui::Global for SettingsStore {}
 
 impl Settings {
-    /// Installe les réglages chargés. À appeler une fois, au démarrage.
+    /// Installs the loaded settings. To be called once, at startup.
     pub fn init_global(self, cx: &mut App) {
         cx.set_global(SettingsStore {
             settings: self,
@@ -680,13 +671,12 @@ impl Settings {
         &cx.global::<SettingsStore>().settings
     }
 
-    /// Modifie les réglages, applique ce qui se voit tout de suite et
-    /// programme l'écriture.
+    /// Changes the settings, applies what shows at once and schedules the write.
     ///
-    /// Le thème est ré-appliqué à chaque modification, y compris celles qui ne
-    /// le concernent pas : c'est lui qui porte polices et taille de texte, et
-    /// distinguer les champs qui l'affectent des autres coûterait plus de code
-    /// qu'un `refresh_windows` de trop.
+    /// The theme is re-applied on every change, including those that do not
+    /// concern it: it is what carries the fonts and the text size, and telling
+    /// the fields that affect it from the others would cost more code than one
+    /// `refresh_windows` too many.
     pub fn update_global(cx: &mut App, f: impl FnOnce(&mut Settings)) {
         let before = Self::global(cx).clone();
         cx.update_global::<SettingsStore, _>(|store, _| f(&mut store.settings));
@@ -721,14 +711,13 @@ fn schedule_save(cx: &mut App) {
     .detach();
 }
 
-// --- Choix proposés dans le formulaire --------------------------------------
+// --- Choices offered in the form --------------------------------------------
 
-/// Fragments de noms qui trahissent une police à chasse fixe.
+/// Name fragments that give away a fixed-pitch font.
 ///
-/// Il n'existe pas d'interrogation portable de cette propriété dans gpui : on
-/// se rabat sur la convention de nommage, qui couvre les familles qu'un
-/// développeur a installées. La liste reste modifiable à la main dans le
-/// fichier de réglages pour les cas qu'elle rate.
+/// There is no portable way to query that property in gpui: we fall back on the
+/// naming convention, which covers the families a developer will have installed.
+/// The list stays editable by hand in the settings file for the cases it misses.
 const MONO_HINTS: [&str; 14] = [
     "mono",
     "code",
@@ -751,16 +740,16 @@ pub fn is_monospace_name(name: &str) -> bool {
     MONO_HINTS.iter().any(|hint| name.contains(hint))
 }
 
-/// Familles proposées pour un champ de police.
+/// Families offered for a font field.
 ///
-/// La police embarquée est toujours présente, même si le système ne la connaît
-/// pas : c'est celle qui sert de recours, et un choix qu'on ne peut pas
-/// reprendre après en être parti serait un piège.
+/// The embedded font is always present, even if the system does not know it: it
+/// is the one used as a fallback, and a choice that cannot be taken back after
+/// leaving it would be a trap.
 pub fn font_choices(installed: &[String], monospace_only: bool, embedded: &str) -> Vec<String> {
     let mut names: Vec<String> = installed
         .iter()
-        // Les polices d'icônes et les variantes privées commencent par un
-        // point sur macOS ; elles n'ont rien à faire dans une liste de choix.
+        // Icon fonts and private variants start with a dot on macOS; they have
+        // no business in a list of choices.
         .filter(|name| !name.starts_with('.'))
         .filter(|name| !monospace_only || is_monospace_name(name))
         .cloned()
@@ -771,7 +760,7 @@ pub fn font_choices(installed: &[String], monospace_only: bool, embedded: &str) 
     names
 }
 
-/// Shells déclarés par le système, tels que `/etc/shells` les liste.
+/// Shells declared by the system, as `/etc/shells` lists them.
 pub fn parse_shells(text: &str) -> Vec<String> {
     let mut shells: Vec<String> = text
         .lines()
@@ -783,29 +772,29 @@ pub fn parse_shells(text: &str) -> Vec<String> {
     shells
 }
 
-/// Les shells que le serveur distant a annoncés dans sa poignée de main.
+/// The shells the remote server announced in its handshake.
 ///
-/// Un statique, et non un champ de `ClaudhubApp` : le formulaire déclare
-/// chaque champ par des fermetures qui ne reçoivent qu'un `App`, sans accès à
-/// l'entité racine — c'est déjà ce qui a mis les réglages dans un global.
-/// Vide en mode local, où `/etc/shells` est le bon fichier.
+/// A static, and not a field of `ClaudhubApp`: the form declares each field
+/// through closures that only receive an `App`, with no access to the root
+/// entity — that is already what put the settings in a global. Empty in local
+/// mode, where `/etc/shells` is the right file.
 static SERVER_SHELLS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
 
-/// Retient ce que le serveur vient d'annoncer. Rappelé à chaque poignée de
-/// main, reconnexions comprises : on change parfois de distro entre deux.
+/// Records what the server has just announced. Called on every handshake,
+/// reconnections included: one sometimes changes distribution in between.
 pub fn set_server_shells(shells: Vec<String>) {
     if let Ok(mut current) = SERVER_SHELLS.write() {
         *current = shells;
     }
 }
 
-/// Le shell de connexion de l'utilisateur dans la distribution, tel que
-/// `/etc/passwd` le déclare là-bas.
+/// The user's login shell inside the distribution, as `/etc/passwd` declares it
+/// over there.
 ///
-/// Retenu au moment où l'on installe le serveur, parce que c'est le seul
-/// moment où on peut le demander : un terminal ouvert par `wsl.exe --exec`
-/// n'a pas de shell pour interroger `$SHELL`, et c'est justement un shell
-/// qu'on veut y lancer.
+/// Recorded at the moment the server is installed, because that is the only
+/// moment it can be asked for: a terminal opened by `wsl.exe --exec` has no
+/// shell to query `$SHELL` from, and a shell is precisely what we want to launch
+/// there.
 static SERVER_SHELL: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
 
 pub fn set_server_shell(shell: String) {
@@ -822,12 +811,12 @@ pub fn server_shell() -> Option<String> {
         .filter(|shell| !shell.is_empty())
 }
 
-/// Shells proposés : ceux du système qui existent encore sur le disque.
+/// The shells offered: those of the system that still exist on disk.
 ///
-/// Ceux du **serveur** quand il y en a un : c'est sa machine qui lancera le
-/// shell, et la nôtre n'a pas les mêmes — sous Windows elle n'a même pas
-/// d'`/etc/shells`. Ils arrivent déjà filtrés par leur existence là-bas, ce
-/// que nous ne pourrions pas vérifier d'ici.
+/// The **server's** when there is one: it is its machine that will launch the
+/// shell, and ours does not have the same — on Windows it does not even have an
+/// `/etc/shells`. They arrive already filtered by their existence over there,
+/// which we could not check from here.
 pub fn available_shells() -> Vec<String> {
     if let Ok(shells) = SERVER_SHELLS.read() {
         if !shells.is_empty() {
@@ -841,13 +830,13 @@ pub fn available_shells() -> Vec<String> {
         .collect()
 }
 
-/// Où la disposition des panneaux est enregistrée.
+/// Where the panel layout is saved.
 ///
-/// À part des réglages : ce n'est pas une préférence qu'on écrit à la main
-/// mais l'état d'une fenêtre, volumineux et illisible, et un utilisateur qui
-/// ouvre `settings.json` n'a pas à le trouver là.
-/// Le répertoire où Claudhub range ce qu'il retient : réglages, disposition
-/// des panneaux, thèmes.
+/// Separate from the settings: it is not a preference written by hand but a
+/// window's state, bulky and unreadable, and a user opening `settings.json` has
+/// no business finding it there.
+/// The directory where Claudhub files what it remembers: settings, panel
+/// layout, themes.
 pub fn config_dir() -> Option<PathBuf> {
     directories::ProjectDirs::from("be", "acetics", "claudhub")
         .map(|dirs| dirs.config_dir().to_path_buf())
@@ -861,16 +850,16 @@ fn settings_path() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("settings.json"))
 }
 
-/// Reprend la configuration écrite sous l'ancien nom du projet.
+/// Picks up the configuration written under the project's former name.
 ///
-/// Perch est devenu Claudhub, et le répertoire de configuration porte le nom
-/// du projet : sans reprise, un utilisateur retrouverait au lancement une
-/// fenêtre neuve, ses dépôts et sa disposition oubliés. Le déplacement est
-/// fait une seule fois — s'il existe déjà un répertoire au nouveau nom, c'est
-/// que la reprise a eu lieu, ou que l'utilisateur a commencé avec Claudhub.
+/// Perch became Claudhub, and the configuration directory carries the project's
+/// name: without a pick-up, a user would find a brand-new window at launch,
+/// their repositories and their layout forgotten. The move happens once only —
+/// if a directory under the new name already exists, either the pick-up has
+/// happened or the user started with Claudhub.
 ///
-/// À appeler avant la première lecture des réglages. Ce code n'a de raison
-/// d'être que le temps que les installations existantes soient passées.
+/// To be called before the first read of the settings. This code only has a
+/// reason to exist until the existing installations have moved over.
 pub fn migrate_from_perch() {
     let (Some(new), Some(old)) = (
         config_dir(),
@@ -886,16 +875,16 @@ pub fn migrate_from_perch() {
         log::warn!("reprise de l'ancienne configuration : {e}");
         return;
     }
-    // La disposition nomme ses panneaux, et ces noms ont changé avec le
-    // projet : sans cette réécriture, le dock ne retrouverait aucun de ses
-    // panneaux et repartirait de la disposition par défaut.
+    // The layout names its panels, and those names changed with the project:
+    // without this rewrite, the dock would find none of its panels and would
+    // start again from the default layout.
     if let Some(path) = layout_path() {
         if let Ok(text) = std::fs::read_to_string(&path) {
             let _ = std::fs::write(&path, text.replace("Perch", "Claudhub"));
         }
     }
-    // Les thèmes livrés sont réécrits sous leur nouveau nom au démarrage : les
-    // anciens feraient double emploi dans la liste, avec les mêmes noms.
+    // The bundled themes are rewritten under their new name at startup: the old
+    // ones would be duplicates in the list, with the same names.
     if let Ok(entries) = std::fs::read_dir(new.join("themes")) {
         for entry in entries.flatten() {
             if entry.file_name().to_string_lossy().starts_with("perch-") {
@@ -906,12 +895,12 @@ pub fn migrate_from_perch() {
     log::info!("configuration reprise depuis {}", old.display());
 }
 
-/// Écrit en 0600 sous Unix : le fichier porte les chemins des dépôts et la
-/// ligne de commande de l'agent, qui ne regardent pas les autres comptes de la
+/// Written 0600 on Unix: the file carries the repositories' paths and the
+/// agent's command line, which are none of the other accounts' business on the
 /// machine.
 ///
-/// Partagé avec le magasin d'état (`store.rs`), qui porte des notes de
-/// relecture et n'a pas plus à être lisible par tout le monde.
+/// Shared with the state store (`store.rs`), which carries review notes and has
+/// no more reason to be readable by everybody.
 #[cfg(unix)]
 pub(super) fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
     use std::io::Write;
@@ -923,8 +912,8 @@ pub(super) fn write_private(path: &Path, contents: &str) -> std::io::Result<()> 
         .truncate(true)
         .mode(0o600)
         .open(path)?;
-    // `mode` ne s'applique qu'à la création : un fichier écrit par une version
-    // antérieure garderait ses permissions d'origine.
+    // `mode` only applies at creation: a file written by an earlier version
+    // would keep its original permissions.
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     file.write_all(contents.as_bytes())
 }
@@ -940,14 +929,14 @@ mod tests {
 
     #[test]
     fn missing_keys_take_their_defaults() {
-        // Un fichier écrit par une version qui ignorait `terminal` doit
-        // continuer de se charger.
+        // A file written by a version that knew nothing of `terminal` must keep
+        // loading.
         let s: Settings = serde_json::from_str(r#"{"theme":"light"}"#).unwrap();
         assert_eq!(s.theme, ThemeMode::Light);
         assert_eq!(s.terminal.scrollback, 10_000);
         assert_eq!(s.diff_context, 3);
-        // Les champs ajoutés après coup aussi : c'est le cas de tous les
-        // fichiers déjà écrits sur le disque des utilisateurs.
+        // The fields added afterwards too: that is the case for every file
+        // already written on a user's disk.
         assert_eq!(s.ui_font_family, DEFAULT_UI_FONT);
         assert_eq!(s.mono_font_family, DEFAULT_MONO_FONT);
     }
@@ -968,16 +957,16 @@ mod tests {
 
     #[test]
     fn system_language_follows_the_environment() {
-        // La valeur exacte dépend de l'environnement de test ; seule la forme
-        // compte : deux lettres connues du catalogue.
+        // The exact value depends on the test environment; only the shape
+        // matters: two letters the catalogue knows.
         assert!(matches!(LanguageChoice::System.to_lang_id(), "fr" | "en"));
         assert_eq!(LanguageChoice::Fr.to_lang_id(), "fr");
     }
 
     #[test]
     fn an_emptied_font_falls_back_instead_of_disappearing() {
-        // Vider le champ dans le formulaire ne doit pas rendre le texte
-        // invisible : c'est le geste naturel avant de saisir autre chose.
+        // Clearing the field in the form must not make the text invisible: it is
+        // the natural gesture before typing something else.
         let mut s = Settings {
             ui_font_family: "  ".into(),
             mono_font_family: String::new(),
@@ -985,7 +974,7 @@ mod tests {
         };
         assert_eq!(s.ui_font(), DEFAULT_UI_FONT);
         assert_eq!(s.mono_font(), DEFAULT_MONO_FONT);
-        // Le terminal sans police propre suit celle des diffs.
+        // The terminal with no font of its own follows the diffs'.
         assert_eq!(s.terminal_font(), DEFAULT_MONO_FONT);
         s.mono_font_family = "Iosevka".into();
         assert_eq!(s.terminal_font(), "Iosevka");
@@ -998,12 +987,12 @@ mod tests {
         let mut s = Settings::default();
         assert!(s.zoom(Zoom::Diff, 2.));
         assert_eq!(s.diff_font_size, 15.0);
-        // Le terminal ne bouge pas avec les diffs.
+        // The terminal does not move with the diffs.
         assert_eq!(s.terminal.font_size, 13.0);
 
         assert!(s.zoom(Zoom::Diff, 1_000.));
         assert_eq!(s.diff_font_size, MAX_FONT_SIZE);
-        // Au bout de la course, rien à réafficher : c'est ce que dit le faux.
+        // At the end of the travel, nothing to redraw: that is what false says.
         assert!(!s.zoom(Zoom::Diff, 1.));
 
         assert!(s.reset_zoom(Zoom::Diff));
@@ -1014,8 +1003,7 @@ mod tests {
     #[test]
     fn the_shell_setting_becomes_a_command_line() {
         let mut s = TerminalSettings::default();
-        // Vide : c'est le shell de connexion, et personne d'autre n'a à
-        // décider lequel.
+        // Empty: it is the login shell, and nobody else has to decide which.
         assert_eq!(s.program(), None);
         s.shell = "   ".into();
         assert_eq!(s.program(), None);
@@ -1023,9 +1011,8 @@ mod tests {
         s.shell = "fish".into();
         assert_eq!(s.program(), Some(("fish".into(), vec![])));
 
-        // Une ligne de commande entière : ouvrir directement une session tmux
-        // est un usage courant, et un shell nu n'est pas toujours ce qu'on
-        // veut.
+        // A whole command line: opening a tmux session directly is a common use,
+        // and a bare shell is not always what one wants.
         s.shell = "tmux new-session -A -s claudhub".into();
         assert_eq!(
             s.program(),
@@ -1043,9 +1030,9 @@ mod tests {
 
     #[test]
     fn the_old_agent_command_becomes_a_profile() {
-        // Le fichier d'un utilisateur qui n'a jamais vu les profils. Le chemin
-        // y est entre guillemets, ce que l'ancien découpage ne savait pas
-        // lire : la reprise en profite pour le remettre d'aplomb.
+        // The file of a user who has never seen the profiles. The path in it is
+        // quoted, which the old splitting could not read: the pick-up takes the
+        // chance to set it straight.
         let mut terminal: TerminalSettings =
             serde_json::from_str(r#"{"agent_command":"\"/opt/a b/claude\" --resume"}"#).unwrap();
         terminal.migrate_agents();
@@ -1053,15 +1040,15 @@ mod tests {
         assert_eq!(terminal.agents[0].command, "/opt/a b/claude");
         assert_eq!(terminal.agents[0].args, vec!["--resume"]);
         assert_eq!(terminal.agents[0].label(), "claude");
-        // Vidé : la reprise n'a lieu qu'une fois.
+        // Emptied: the pick-up only happens once.
         assert!(terminal.agent_command.is_empty());
 
-        // Une installation neuve passe par le même chemin.
+        // A fresh install goes down the same path.
         let mut fresh = TerminalSettings::default();
         fresh.migrate_agents();
         assert_eq!(fresh.agents, vec![AgentProfile::claude()]);
 
-        // Un fichier qui a déjà des profils n'est pas touché.
+        // A file that already has profiles is not touched.
         let mut kept = TerminalSettings {
             agents: vec![AgentProfile {
                 name: "aider".into(),
@@ -1099,8 +1086,8 @@ mod tests {
             default_agent: "sonnet".into(),
             ..Default::default()
         };
-        // Dédoublonné sur le nom du programme : deux profils du même agent ne
-        // le font pas compter deux fois dans /proc.
+        // Deduplicated on the program name: two profiles of the same agent do
+        // not make it count twice in /proc.
         assert_eq!(terminal.agent_programs(), vec!["aider", "claude"]);
         assert_eq!(terminal.default_profile().unwrap().name, "sonnet");
     }
@@ -1137,7 +1124,7 @@ mod tests {
         let mono = font_choices(&installed, true, DEFAULT_MONO_FONT);
         assert_eq!(mono, vec!["Fira Code", DEFAULT_MONO_FONT]);
 
-        // Sans le filtre, l'interface voit tout — sauf les familles privées.
+        // Without the filter, the interface sees everything — except the private families.
         let all = font_choices(&installed, false, DEFAULT_UI_FONT);
         assert_eq!(all, vec!["Fira Code", "Inter"]);
     }

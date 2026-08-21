@@ -1,14 +1,14 @@
-//! Le sélecteur de base de comparaison.
+//! The comparison base selector.
 //!
-//! Une entrée n'est pas qu'un nom. Choisir entre `dev`, `origin/dev` et
-//! `wt/dev-2` demande de savoir laquelle a bougé en dernier et ce qu'elle
-//! porte — sans quoi il faut sortir de Claudhub pour interroger git avant de
-//! pouvoir cliquer. Ces informations sont déjà lues avec la liste des
-//! branches : les afficher ne coûte aucune commande de plus.
+//! An entry is more than a name. Choosing between `dev`, `origin/dev` and
+//! `wt/dev-2` means knowing which moved last and what it carries — otherwise
+//! you have to leave Claudhub and ask git before you can click. That
+//! information is already read along with the branch list: showing it costs no
+//! extra command.
 //!
-//! Elles sont montrées dans l'entrée elle-même plutôt que dans une bulle
-//! d'aide : on parcourt une liste du regard, et une information qui demande de
-//! s'arrêter sur chaque ligne pour la révéler n'aide pas à comparer.
+//! It is shown in the entry itself rather than in a tooltip: a list is scanned
+//! by eye, and information that requires stopping on each row to reveal it does
+//! not help you compare.
 
 use gpui::{div, prelude::*, px, App, IntoElement, SharedString, Window};
 use gpui_component::{h_flex, select::SelectItem, v_flex, ActiveTheme};
@@ -16,7 +16,7 @@ use gpui_component::{h_flex, select::SelectItem, v_flex, ActiveTheme};
 use crate::git::{Branch, BranchKind};
 use crate::tr;
 
-/// Une branche telle que le sélecteur la propose.
+/// A branch as the selector offers it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseChoice {
     pub name: SharedString,
@@ -24,8 +24,8 @@ pub struct BaseChoice {
     pub author: SharedString,
     pub date: SharedString,
     pub remote: bool,
-    /// Vrai quand c'est la branche déployée dans le worktree qu'on regarde :
-    /// la comparer à elle-même ne donnerait rien.
+    /// True when this is the branch checked out in the worktree being looked
+    /// at: comparing it to itself would show nothing.
     pub is_head: bool,
 }
 
@@ -41,11 +41,11 @@ impl BaseChoice {
         }
     }
 
-    /// La seconde ligne : ce que la branche porte, et depuis quand.
+    /// The second line: what the branch carries, and since when.
     ///
-    /// Les morceaux vides sont écartés plutôt que d'être remplacés par un
-    /// tiret : un dépôt fraîchement cloné n'a pas d'auteur relatif à montrer,
-    /// et une ponctuation qui n'entoure rien se lit comme une donnée perdue.
+    /// Empty pieces are dropped rather than replaced by a dash: a freshly
+    /// cloned repository has no relative author to show, and punctuation around
+    /// nothing reads like lost data.
     pub fn detail(&self) -> String {
         [
             self.subject.as_ref(),
@@ -112,8 +112,8 @@ fn tag(label: SharedString, cx: &App) -> impl IntoElement {
         .child(label)
 }
 
-/// Largeur du menu. Deux lignes de texte demandent de la place ; sous cette
-/// largeur, le sujet du commit est tronqué au point de ne plus rien dire.
+/// Menu width. Two lines of text need room; below this width the commit
+/// subject is truncated to the point of saying nothing.
 pub const MENU_WIDTH: gpui::Pixels = px(420.);
 
 #[cfg(test)]

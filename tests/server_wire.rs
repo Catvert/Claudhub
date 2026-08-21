@@ -1,10 +1,10 @@
-//! La chaîne complète du transport distant, sur cette machine.
+//! The whole remote transport chain, on this machine.
 //!
-//! C'est le portillon du mode serveur : le vrai binaire `claudhub-server`
-//! (cargo le construit pour ce test), la vraie poignée de main, un `Cmd` qui
-//! descend et l'`Evt` qui remonte. La fenêtre n'est pas là, mais tout ce qui
-//! la sépare du serveur l'est — `CLAUDHUB_SERVER_CMD` branche exactement ce
-//! chemin dans l'application.
+//! This is the gate for server mode: the real `claudhub-server` binary (cargo
+//! builds it for this test), the real handshake, a `Cmd` going down and the
+//! `Evt` coming back. The window is not here, but everything between it and
+//! the server is — `CLAUDHUB_SERVER_CMD` wires exactly this path into the
+//! application.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use claudhub::runtime::remote::connect;
 use claudhub::runtime::{Cmd, Evt};
 
-/// Le prochain événement, avec l'impatience d'un test : le canal est drainé
-/// par une pompe gpui dans l'application, ici par une boucle courte.
+/// The next event, with a test's impatience: the channel is drained by a gpui
+/// pump in the application, here by a short loop.
 fn next(events: &async_channel::Receiver<Evt>) -> Evt {
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {

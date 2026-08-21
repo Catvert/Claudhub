@@ -1,44 +1,43 @@
-//! L'exécuteur asynchrone partagé.
+//! The shared async executor.
 //!
-//! Claudhub reste un programme à threads : les workers de `runtime::mod`
-//! consomment des `Cmd` et lancent des sous-processus git, parce qu'un `fork`
-//! bloque de toute façon et qu'il n'y a rien à entrelacer entre l'appel et le
-//! résultat. Ce module n'y change rien — il **ajoute** un exécuteur tokio à
-//! côté, pour les bibliothèques qui n'ont pas d'interface bloquante.
+//! Claudhub stays a threaded program: the workers in `runtime::mod` consume
+//! `Cmd`s and spawn git subprocesses, because a `fork` blocks anyway and there
+//! is nothing to interleave between the call and the result. This module
+//! changes none of that — it **adds** a tokio executor alongside, for the
+//! libraries that have no blocking interface.
 //!
-//! La première est `sqlx`, dont tout le pilote est asynchrone. Ce qu'il
-//! apporte et qu'un pilote bloquant ne pouvait pas donner :
+//! The first is `sqlx`, whose driver is async throughout. What it brings that a
+//! blocking driver could not:
 //!
-//! - **Un vrai délai.** `tokio::time::timeout` abandonne la requête en cours
-//!   en laissant tomber son futur. Un pilote bloquant, lui, n'a rien à
-//!   annuler : il faut le convaincre de s'arrêter tout seul — un rappel de
-//!   progression pour SQLite, un délai de socket pour MySQL — et ce qui n'est
-//!   pas prévu par le pilote ne s'interrompt pas du tout.
-//! - **Une seule pile pour ce qui viendra.** Un client HTTP asynchrone pour
-//!   Sentry, des sous-processus git lancés de front (`tokio::process`), un
-//!   surveillant de fichiers : tout ce qui voudra de l'asynchrone trouvera
-//!   l'exécuteur ici plutôt que d'en amener un second.
+//! - **A timeout that really cancels.** `tokio::time::timeout` abandons the
+//!   running query by dropping its future. A blocking driver has nothing to
+//!   cancel: it has to be talked into stopping by some means of its own — a
+//!   progress callback for SQLite, a socket timeout for MySQL — and whatever
+//!   the driver did not plan for does not get interrupted at all.
+//! - **One stack for what comes next.** An async HTTP client for Sentry, git
+//!   subprocesses launched side by side (`tokio::process`), a file watcher:
+//!   anything wanting async will find the executor here rather than bringing a
+//!   second one along.
 //!
-//! **Le pont est `block_on`, et il est à un seul endroit** — le worker qui
-//! traite la commande. C'est ce qui garde `runtime::handle` synchrone et pur :
-//! il rend un `Vec<Evt>`, il ne connaît pas le canal, et il se teste. Un
-//! worker qui attend un futur attend exactement comme il attendait `git`.
+//! **The bridge is `block_on`, and it lives in exactly one place** — the worker
+//! handling the command. That is what keeps `runtime::handle` synchronous and
+//! pure: it returns a `Vec<Evt>`, it knows nothing of the channel, and it can
+//! be tested. A worker awaiting a future waits exactly as it waited for `git`.
 //!
-//! **Jamais depuis le thread d'interface.** `block_on` y figerait la fenêtre,
-//! ce qui est précisément ce que le protocole `Cmd`/`Evt` existe pour éviter ;
-//! gpui a d'ailleurs son propre exécuteur pour ce dont la vue a besoin.
+//! **Never from the interface thread.** `block_on` would freeze the window
+//! there, which is precisely what the `Cmd`/`Evt` protocol exists to avoid;
+//! gpui has its own executor for what the view needs.
 
 use std::sync::OnceLock;
 
 use tokio::runtime::Runtime;
 
-/// Threads de l'exécuteur.
+/// Executor threads.
 ///
-/// Deux, et non le nombre de cœurs que tokio prend par défaut : ce qui tourne
-/// dessus attend une socket ou un fichier, il n'y a pas de calcul à répartir,
-/// et une machine à seize cœurs n'a aucune raison de porter seize threads
-/// endormis. C'est aussi ce qui borne la concurrence vers un serveur qu'on ne
-/// veut pas inonder.
+/// Two, and not the core count tokio takes by default: what runs on them is
+/// waiting on a socket or a file, there is no computation to spread, and a
+/// sixteen-core machine has no reason to carry sixteen sleeping threads. It
+/// also bounds concurrency towards a server we would rather not flood.
 const WORKERS: usize = 2;
 
 fn runtime() -> &'static Runtime {

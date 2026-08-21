@@ -1,31 +1,30 @@
-//! L'explorateur de projet, et la retouche d'un fichier.
+//! The project explorer, and touching up a file.
 //!
-//! **L'arbre vient d'un seul appel git** (`ls-files --cached --others
-//! --exclude-standard`), pas d'un parcours de disque : un projet Laravel a
-//! quarante mille répertoires, et les ouvrir un par un coûterait un appel
-//! système chacun pour arriver aux sept cents qui portent du code.
+//! **The tree comes from a single git call** (`ls-files --cached --others
+//! --exclude-standard`), not from a disk walk: a Laravel project has forty
+//! thousand directories, and opening them one by one would cost one system call
+//! each to reach the seven hundred that carry code.
 //!
-//! **L'arbre est construit une fois**, à l'arrivée de la liste et à chaque
-//! repli, et rangé derrière un `Rc`. Contrairement à la liste de revue — qui
-//! compte des centaines d'entrées — celle-ci en compte des dizaines de
-//! milliers : la reconstruire à chaque frame ferait tomber l'interface.
+//! **The tree is built once**, when the list arrives and on every collapse, and
+//! filed behind an `Rc`. Unlike the review list — which counts hundreds of
+//! entries — this one counts tens of thousands: rebuilding it on every frame
+//! would bring the interface down.
 //!
-//! **Il se parcourt au clavier**, comme celui de PhpStorm : haut et bas d'une
-//! ligne à l'autre de la liste *affichée*, droite pour déplier, gauche pour
-//! replier ou remonter au dossier parent, Entrée pour ouvrir. D'où un contexte
-//! clavier à lui (`ClaudhubExplorer`), les flèches nues appartenant sinon à la
-//! relecture du diff.
+//! **It is browsed with the keyboard**, like PhpStorm's: up and down from one
+//! row of the *displayed* list to the next, right to unfold, left to collapse or
+//! to go up to the parent folder, Enter to open. Hence a key context of its own
+//! (`ClaudhubExplorer`), the bare arrows otherwise belonging to diff review.
 //!
-//! **Le curseur est un chemin, pas un indice.** L'arbre se reconstruit à
-//! chaque repli, à chaque frappe de recherche et à chaque relecture de la
-//! liste : un indice y désignerait une autre ligne d'une fois sur l'autre.
+//! **The cursor is a path, not an index.** The tree is rebuilt on every
+//! collapse, on every search keystroke and on every re-read of the list: an
+//! index there would name a different row from one time to the next.
 //!
-//! **Ouvert et sous le curseur sont deux choses**, et se voient différemment :
-//! on parcourt l'arbre au clavier sans quitter le fichier qu'on relit.
+//! **Open and under the cursor are two things**, and they look different: one
+//! browses the tree with the keyboard without leaving the file being reviewed.
 //!
-//! **L'édition reste légère.** Retouche courte ici, vrai travail dans
-//! l'éditeur externe de son choix : Claudhub ne devient pas un IDE, et
-//! `external_editor` est ce qui rend ce partage praticable.
+//! **Editing stays light.** A short touch-up here, the real work in the external
+//! editor of your choice: Claudhub does not become an IDE, and `external_editor`
+//! is what makes that division workable.
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -48,27 +47,27 @@ use crate::ui::settings::Settings;
 use crate::ui::theme::status_color;
 use crate::ui::tree;
 
-/// Les fichiers d'un worktree, et l'arbre qu'on en tire.
+/// A worktree's files, and the tree drawn from them.
 pub struct Explorer {
-    /// La liste plate, telle que git la rend : c'est elle la référence, et
-    /// l'arbre n'en est qu'un affichage.
+    /// The flat list, as git returns it: it is the reference, and the tree is
+    /// only a display of it.
     pub files: Vec<PathBuf>,
-    /// L'arbre affiché, reconstruit à chaque repli et jamais dans un rendu.
+    /// The displayed tree, rebuilt on every collapse and never in a render.
     pub rows: Rc<Vec<tree::Entry>>,
     pub collapsed: std::collections::HashSet<PathBuf>,
-    /// Une demande est partie et n'est pas revenue : sans ce garde, chaque
-    /// frame du panneau relancerait `ls-files`.
+    /// A request has gone out and not come back: without this guard, every frame
+    /// of the panel would restart `ls-files`.
     pub pending: bool,
-    /// Les fichiers ignorés étaient-ils demandés, pour savoir quand relire.
+    /// Were the ignored files asked for, so we know when to re-read.
     pub ignored: bool,
-    /// La recherche pour laquelle `rows` a été construit. Comparée au rendu :
-    /// c'est le prix de n'avoir personne à prévenir quand elle change.
+    /// The search `rows` was built for. Compared at render time: that is the
+    /// price of having nobody to notify when it changes.
     pub query: String,
-    /// La ligne sur laquelle le clavier travaille — un fichier ou un dossier.
+    /// The row the keyboard works on — a file or a folder.
     ///
-    /// Un **chemin** et non un indice : l'arbre se reconstruit à chaque repli,
-    /// à chaque frappe de recherche et à chaque relecture de la liste, et un
-    /// indice y désignerait une autre ligne d'une fois sur l'autre.
+    /// A **path** and not an index: the tree is rebuilt on every collapse, on
+    /// every search keystroke and on every re-read of the list, and an index
+    /// there would name a different row from one time to the next.
     pub cursor: Option<PathBuf>,
 }
 
@@ -88,9 +87,9 @@ impl Default for Explorer {
 
 impl Explorer {
     fn rebuild(&mut self) {
-        // Pendant une recherche, les replis sont ignorés et l'arbre est réduit
-        // à ce qui correspond : un fichier trouvé dans un dossier fermé ne se
-        // verrait pas, et la recherche paraîtrait n'avoir rien trouvé.
+        // During a search, collapses are ignored and the tree is reduced to what
+        // matches: a file found in a closed folder would not be visible, and the
+        // search would look as if it had found nothing.
         let keep: Option<Vec<usize>> = (!self.query.trim().is_empty()).then(|| {
             self.files
                 .iter()
@@ -109,7 +108,7 @@ impl Explorer {
         self.rows = Rc::new(rows);
     }
 
-    /// Le chemin d'une entrée affichée, dossier ou fichier.
+    /// A displayed entry's path, folder or file.
     fn path_at(&self, index: usize) -> Option<PathBuf> {
         match self.rows.get(index)? {
             tree::Entry::Dir { path, .. } => Some(path.clone()),
@@ -117,7 +116,7 @@ impl Explorer {
         }
     }
 
-    /// Où se trouve un chemin dans la liste affichée, s'il y est encore.
+    /// Where a path sits in the displayed list, if it is still there.
     fn row_of(&self, wanted: &Path) -> Option<usize> {
         (0..self.rows.len()).find(|index| self.path_at(*index).as_deref() == Some(wanted))
     }
@@ -126,11 +125,11 @@ impl Explorer {
         matches!(self.rows.get(index), Some(tree::Entry::Dir { .. }))
     }
 
-    /// Ouvre tous les dossiers qui mènent à un chemin.
+    /// Opens every folder leading to a path.
     ///
-    /// Retirer chaque ancêtre suffit, y compris avec les chaînes fusionnées :
-    /// `app/Http/Livewire/Forms` tient sur une ligne mais reste un ancêtre du
-    /// fichier qu'elle contient.
+    /// Removing each ancestor is enough, merged chains included:
+    /// `app/Http/Livewire/Forms` fits on one line but is still an ancestor of
+    /// the file it contains.
     fn reveal(&mut self, path: &Path) {
         let mut changed = false;
         for ancestor in path.ancestors().skip(1) {
@@ -141,10 +140,10 @@ impl Explorer {
         }
     }
 
-    /// Replie tout ce qui est ouvert au premier niveau et en dessous.
+    /// Collapses everything open at the first level and below.
     fn collapse_all(&mut self) {
-        // Tous les dossiers, et non seulement ceux qu'on voit : ce qu'un
-        // dossier fermé cache doit l'être aussi quand on le rouvrira.
+        // Every folder, and not only the visible ones: what a closed folder
+        // hides has to be closed too when it is reopened.
         for path in &self.files {
             for ancestor in path.ancestors().skip(1) {
                 if !ancestor.as_os_str().is_empty() {
@@ -155,14 +154,14 @@ impl Explorer {
         self.rebuild();
     }
 
-    /// Déplie tout un sous-arbre.
+    /// Unfolds a whole subtree.
     fn expand_under(&mut self, root: &Path) {
         self.collapsed
             .retain(|path| !path.starts_with(root) && path != root);
         self.rebuild();
     }
 
-    /// Replie tout un sous-arbre, sa racine comprise.
+    /// Collapses a whole subtree, its root included.
     fn collapse_under(&mut self, root: &Path) {
         for path in &self.files {
             if !path.starts_with(root) {
@@ -179,34 +178,34 @@ impl Explorer {
     }
 }
 
-/// Un fichier ouvert dans l'éditeur intégré.
+/// A file open in the built-in editor.
 pub struct Editing {
     pub worktree: PathBuf,
     pub path: PathBuf,
-    /// L'entité de saisie, créée **une fois** à l'ouverture du fichier :
-    /// recréée dans un rendu, elle perdrait curseur et sélection à la première
-    /// frappe.
+    /// The input entity, created **once** when the file is opened: recreated in
+    /// a render, it would lose the cursor and the selection on the first
+    /// keystroke.
     pub input: Entity<EditorState>,
-    /// Empreinte du contenu lu, ce qui permet de refuser d'écraser le travail
-    /// d'un agent.
+    /// Digest of the content read, which makes it possible to refuse to
+    /// overwrite an agent's work.
     pub hash: u64,
-    /// Ce qui est à l'écran diffère de ce qui est sur le disque.
+    /// What is on screen differs from what is on disk.
     pub dirty: bool,
 }
 
 impl ClaudhubApp {
-    // — L'arbre ————————————————————————————————————————————————
+    // — The tree ————————————————————————————————————————————————
 
     fn explorer(&mut self) -> Option<&mut Explorer> {
         let worktree = self.active.clone()?;
         Some(self.explorers.entry(worktree).or_default())
     }
 
-    /// Demande la liste des fichiers, si elle manque ou si le réglage a changé.
+    /// Asks for the file list, if it is missing or if the setting has changed.
     ///
-    /// Appelée au rendu du panneau : c'est lui qui sait ce qu'il affiche, et
-    /// charger la liste d'avance coûterait une commande pour un onglet que
-    /// personne n'ouvrira.
+    /// Called when the panel renders: it is what knows what it shows, and
+    /// loading the list in advance would cost a command for a tab nobody will
+    /// open.
     pub(super) fn ensure_project_files(&mut self, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
@@ -239,8 +238,8 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Amène la ligne du curseur sous les yeux, sans faire sauter la liste
-    /// quand elle y est déjà.
+    /// Brings the cursor's row into view, without making the list jump when it
+    /// is already there.
     fn reveal_cursor(&mut self) {
         let Some(explorer) = self.explorer() else {
             return;
@@ -256,10 +255,10 @@ impl ClaudhubApp {
             .scroll_to_item(index, gpui::ScrollStrategy::Top);
     }
 
-    /// Monte ou descend d'une ligne dans l'arborescence affichée.
+    /// Moves up or down one row in the displayed tree.
     ///
-    /// La liste affichée, replis compris : c'est celle que l'œil suit, et
-    /// descendre dans un dossier fermé mènerait à des lignes invisibles.
+    /// The displayed list, collapses included: it is the one the eye follows,
+    /// and descending into a closed folder would lead to invisible rows.
     pub(super) fn step_project_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(explorer) = self.explorer() else {
             return;
@@ -273,8 +272,8 @@ impl ClaudhubApp {
             .clone()
             .and_then(|path| explorer.row_of(&path))
             .map(|index| index as isize);
-        // Sans curseur, la première flèche entre par le bout vers lequel elle
-        // pointe, comme la relecture d'un diff.
+        // With no cursor, the first arrow enters from the end it points at, like
+        // diff review.
         let next = match current {
             Some(index) => (index + delta).clamp(0, count as isize - 1),
             None if delta > 0 => 0,
@@ -285,7 +284,7 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Porte le curseur au premier ou au dernier de la liste affichée.
+    /// Takes the cursor to the first or the last of the displayed list.
     pub(super) fn jump_project_cursor(&mut self, last: bool, cx: &mut Context<Self>) {
         let Some(explorer) = self.explorer() else {
             return;
@@ -299,11 +298,11 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Déplie ou replie au curseur.
+    /// Unfolds or collapses at the cursor.
     ///
-    /// Sur un fichier, la flèche gauche remonte au dossier parent et la droite
-    /// descend d'une ligne : c'est ce que fait tout explorateur, et une touche
-    /// inerte se lit comme une touche cassée.
+    /// On a file, the left arrow goes up to the parent folder and the right one
+    /// goes down a row: that is what every explorer does, and an inert key reads
+    /// as a broken key.
     pub(super) fn fold_project_cursor(&mut self, open: bool, cx: &mut Context<Self>) {
         let Some(explorer) = self.explorer() else {
             return;
@@ -331,8 +330,8 @@ impl ClaudhubApp {
             self.step_project_cursor(1, cx);
             return;
         }
-        // Remonter au dossier qui contient la ligne : le premier ancêtre qui
-        // soit lui-même affiché, les chaînes fusionnées sautant des niveaux.
+        // Going up to the folder containing the row: the first ancestor that is
+        // itself displayed, merged chains skipping levels.
         let parent = path
             .ancestors()
             .skip(1)
@@ -345,7 +344,7 @@ impl ClaudhubApp {
         }
     }
 
-    /// Entrée : ouvre le fichier, ou replie le dossier.
+    /// Enter: opens the file, or collapses the folder.
     pub(super) fn activate_project_cursor(&mut self, cx: &mut Context<Self>) {
         let Some(explorer) = self.explorer() else {
             return;
@@ -363,12 +362,12 @@ impl ClaudhubApp {
         }
     }
 
-    /// Montre dans l'arbre le fichier qu'on est en train de regarder.
+    /// Shows in the tree the file currently being looked at.
     ///
-    /// Le geste « scroll from source » de PhpStorm : on relit un diff, on veut
-    /// voir où le fichier vit. Il déplie ce qu'il faut pour l'atteindre, et
-    /// n'est **pas** automatique — une liste qui saute toute seule à chaque
-    /// clic dans la revue est un mouvement de trop.
+    /// PhpStorm's "scroll from source" gesture: you are reading a diff and want
+    /// to see where the file lives. It unfolds what is needed to reach it, and
+    /// is **not** automatic — a list that jumps by itself on every click in the
+    /// review is one movement too many.
     pub(super) fn reveal_open_file(&mut self, cx: &mut Context<Self>) {
         let path = self
             .editing
@@ -390,11 +389,11 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Donne le focus à l'arbre et y pose le curseur.
+    /// Gives the tree focus and puts the cursor in it.
     ///
-    /// Sans le focus, la flèche qui suit le clic partirait au diff : les
-    /// liaisons se départagent sur le contexte du nœud focalisé, et l'arbre
-    /// n'est pas focalisé du seul fait qu'on a cliqué dedans.
+    /// Without the focus, the arrow following the click would go to the diff:
+    /// the bindings are settled on the focused node's context, and the tree is
+    /// not focused merely because it was clicked in.
     pub(super) fn focus_project_tree(
         &mut self,
         path: PathBuf,
@@ -422,11 +421,11 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Copie le chemin d'une entrée, relatif au worktree ou absolu.
+    /// Copies an entry's path, relative to the worktree or absolute.
     ///
-    /// Les deux servent, et pas aux mêmes choses : le relatif se colle dans
-    /// l'invite d'un agent, qui travaille depuis le worktree ; l'absolu dans
-    /// un terminal ouvert ailleurs.
+    /// Both are used, and not for the same things: the relative one is pasted
+    /// into an agent's prompt, which works from the worktree; the absolute one
+    /// into a terminal opened elsewhere.
     pub(super) fn copy_project_path(
         &mut self,
         path: &Path,
@@ -450,8 +449,8 @@ impl ClaudhubApp {
 
     pub(super) fn toggle_ignored_files(&mut self, cx: &mut Context<Self>) {
         Settings::update_global(cx, |s| s.show_ignored_files = !s.show_ignored_files);
-        // La liste change d'ordre de grandeur : on la redemande plutôt que de
-        // filtrer celle qu'on a, qui n'a jamais vu les fichiers ignorés.
+        // The list changes order of magnitude: we ask for it again rather than
+        // filter the one we have, which has never seen the ignored files.
         if let Some(explorer) = self.explorer() {
             explorer.files.clear();
             explorer.rebuild();
@@ -459,9 +458,9 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    // — Lire et écrire ————————————————————————————————————————
+    // — Reading and writing ———————————————————————————————————
 
-    /// Ouvre un fichier dans l'éditeur intégré.
+    /// Opens a file in the built-in editor.
     pub(super) fn open_in_editor(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
@@ -470,7 +469,7 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Reçoit un contenu et installe l'éditeur.
+    /// Receives a content and installs the editor.
     pub(super) fn file_content_arrived(
         &mut self,
         worktree: PathBuf,
@@ -479,21 +478,21 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Le langage se déduit de l'extension, comme pour la coloration d'un
-        // diff : c'est la même table, PHP compris.
+        // The language follows from the extension, as for a diff's highlighting:
+        // it is the same table, PHP included.
         let language = crate::ui::highlight::language_for_path(&path).unwrap_or("text");
         let input = cx.new(|cx| {
-            // `EditorState` et non `InputState` : la refonte des saisies a
-            // séparé les trois modes en trois types — une ligne, du texte
-            // multiligne, du code. Les fonctions de code (langage, numéros de
-            // ligne, LSP) n'existent que sur le troisième.
+            // `EditorState` and not `InputState`: the input rework split the
+            // three modes into three types — one line, multi-line text, code.
+            // The code features (language, line numbers, LSP) only exist on the
+            // third.
             EditorState::new(window, cx)
                 .language(language)
                 .line_number(true)
                 .default_value(content.text)
         });
-        // La souscription est posée ici, une fois par fichier ouvert : c'est
-        // elle qui allume l'indicateur de modification non enregistrée.
+        // The subscription is set up here, once per opened file: it is what
+        // lights the unsaved-change indicator.
         cx.subscribe(&input, |this, _, event, cx| {
             if !matches!(event, gpui_component::input::InputEvent::Change) {
                 return;
@@ -511,10 +510,10 @@ impl ClaudhubApp {
             hash: content.hash,
             dirty: false,
         });
-        // Un fichier qui s'ouvre appelle l'écran où il s'édite. Le geste vient
-        // de l'explorateur — donc de cet écran-là la plupart du temps — mais
-        // aussi d'une ligne de diff, et y répondre en silence sur l'écran d'à
-        // côté serait un fichier ouvert que personne ne voit.
+        // A file that opens calls up the screen it is edited on. The gesture
+        // comes from the explorer — so from that screen most of the time — but
+        // also from a diff line, and answering it silently on the screen next
+        // door would be an opened file nobody sees.
         self.enter_workspace(crate::ui::workspace::Workspace::Files, window, cx);
         self.set_panel_visible(crate::ui::panels::EditorPanel::NAME, true, cx);
         cx.notify();
@@ -529,13 +528,13 @@ impl ClaudhubApp {
             worktree: editing.worktree.clone(),
             path: editing.path.clone(),
             content: content.clone(),
-            // L'empreinte de ce qu'on avait lu : un agent qui a écrit entre
-            // temps fait refuser l'enregistrement plutôt que d'être écrasé.
+            // The digest of what we had read: an agent that wrote in the
+            // meantime makes the save be refused rather than be overwritten.
             expect: Some(editing.hash),
         });
-        // L'empreinte suit ce qu'on vient d'envoyer : sans cela, deux
-        // enregistrements d'affilée feraient refuser le second, le fichier
-        // ayant changé — par nous.
+        // The digest follows what has just been sent: without that, two saves in
+        // a row would make the second be refused, the file having changed — by
+        // us.
         if let Some(editing) = self.editing.as_mut() {
             editing.hash = files::digest(&content);
             editing.dirty = false;
@@ -543,7 +542,7 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Ferme l'éditeur, en demandant confirmation si le fichier a changé.
+    /// Closes the editor, asking for confirmation if the file has changed.
     pub(super) fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editing) = self.editing.as_ref() else {
             return;
@@ -577,11 +576,11 @@ impl ClaudhubApp {
         });
     }
 
-    /// Ouvre un fichier dans l'éditeur externe, à une ligne donnée.
+    /// Opens a file in the external editor, at a given line.
     ///
-    /// Le geste existe **depuis une ligne de diff** autant que depuis
-    /// l'explorateur : c'est le cas d'usage réel — on relit, quelque chose
-    /// cloche, on l'ouvre là où c'est.
+    /// The gesture exists **from a diff line** as much as from the explorer:
+    /// that is the real use case — you are reviewing, something is off, you open
+    /// it where it is.
     pub(super) fn open_externally(&mut self, path: PathBuf, line: usize, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
@@ -600,8 +599,7 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Ouvre le fichier du diff dans l'éditeur externe, à la ligne
-    /// sélectionnée.
+    /// Opens the diff's file in the external editor, at the selected line.
     pub(super) fn open_diff_externally(&mut self, cx: &mut Context<Self>) {
         let split = Settings::global(cx).diff_split;
         let Some(state) = self.active_review() else {
@@ -636,14 +634,14 @@ impl ClaudhubApp {
             return;
         };
         self.git.send(Cmd::FileOp { worktree, op });
-        // La liste est relue : `ls-files` seul sait ce que git suit désormais.
+        // The list is re-read: only `ls-files` knows what git now tracks.
         if let Some(explorer) = self.explorer() {
             explorer.files.clear();
         }
         cx.notify();
     }
 
-    // — Le panneau ——————————————————————————————————————————————
+    // — The panel  ——————————————————————————————————————————————
 
     pub(super) fn render_files(
         &mut self,
@@ -680,9 +678,9 @@ impl ClaudhubApp {
         let files = Rc::new(explorer.files.clone());
         let cursor = explorer.cursor.clone();
         let count = rows.len();
-        // Le statut git est déjà là : l'afficher ne coûte qu'une consultation
-        // par ligne visible, et c'est ce qui fait la différence entre une
-        // liste de fichiers et un explorateur de projet.
+        // The git status is already here: showing it costs only one lookup per
+        // visible row, and it is what makes the difference between a file list
+        // and a project explorer.
         let status: Rc<std::collections::HashMap<PathBuf, crate::git::StatusCode>> = Rc::new(
             self.review
                 .get(&worktree)
@@ -709,10 +707,10 @@ impl ClaudhubApp {
         let entity = cx.entity();
         let look = Look::of(cx);
 
-        // Rien à montrer, et rien en route : c'est un projet vide ou une
-        // recherche sans résultat. Pendant le premier `ls-files`, la liste
-        // reste blanche — annoncer « aucun fichier » puis les afficher se lit
-        // comme un défaut d'affichage.
+        // Nothing to show, and nothing under way: it is an empty project or a
+        // search with no result. During the first `ls-files`, the list stays
+        // blank — announcing "no file" and then showing them reads as a display
+        // glitch.
         if count == 0 && !pending {
             return v_flex()
                 .size_full()
@@ -738,8 +736,8 @@ impl ClaudhubApp {
             .child(
                 div()
                     .id("project-tree")
-                    // Les flèches appartiennent à l'arbre tant qu'il a le
-                    // focus : c'est ce contexte-là que leur prédicat lit.
+                    // The arrows belong to the tree while it has focus: that is
+                    // the context their predicate reads.
                     .key_context(crate::ui::shortcuts::explorer_context(vim))
                     .track_focus(&focus)
                     .flex_1()
@@ -768,9 +766,8 @@ impl ClaudhubApp {
                                     .collect::<Vec<_>>()
                             })
                             .size_full()
-                            // Voir `review.rs` : le retrait appartient à la
-                            // liste, une marge sur une entrée de
-                            // `uniform_list` étant ignorée.
+                            // See `review.rs`: the inset belongs to the list, a
+                            // margin on a `uniform_list` entry being ignored.
                             .px_1()
                             .track_scroll(&scroll.clone()),
                             cx,
@@ -780,12 +777,11 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// L'en-tête : le projet, ce qu'il pèse, et les gestes de l'arbre.
+    /// The header: the project, what it weighs, and the tree's gestures.
     ///
-    /// Trois boutons et un menu plutôt que six boutons : le panneau est
-    /// étroit par nature — c'est une colonne de noms de fichiers — et ce qui
-    /// ne sert qu'une fois de temps en temps n'a pas à y prendre la place de
-    /// ce qui sert à chaque relecture.
+    /// Three buttons and a menu rather than six buttons: the panel is narrow by
+    /// nature — it is a column of file names — and what serves once in a while
+    /// has no business taking the room there of what serves on every review.
     fn render_files_bar(
         &mut self,
         worktree: &Path,
@@ -833,9 +829,9 @@ impl ClaudhubApp {
                     .icon(icon("search"))
                     .tooltip(tr!("files-search"))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        // Le panneau devient la cible de la recherche : le
-                        // bouton est dans son en-tête, et cliquer dedans ne
-                        // passe pas forcément par le contenu.
+                        // The panel becomes the search's target: the button is in
+                        // its header, and clicking in it does not necessarily go
+                        // through the content.
                         this.touch_pane(crate::ui::find::Pane::Files, cx);
                         this.open_find(window, cx);
                     })),
@@ -895,11 +891,11 @@ impl ClaudhubApp {
             )
     }
 
-    /// Demande un chemin et crée le fichier ou le dossier.
+    /// Asks for a path and creates the file or the folder.
     ///
-    /// `parent` préremplit le champ : c'est ce qui fait la différence entre
-    /// « nouveau fichier » et « nouveau fichier *ici* », le second étant le
-    /// geste qu'on a réellement depuis un clic droit sur un dossier.
+    /// `parent` prefills the field: that is what makes the difference between
+    /// "new file" and "new file *here*", the second being the gesture one really
+    /// has from a right click on a folder.
     fn prompt_new_path(
         &mut self,
         parent: Option<PathBuf>,
@@ -959,8 +955,8 @@ impl ClaudhubApp {
         );
     }
 
-    /// Confirme avant de supprimer : c'est le seul geste de l'explorateur que
-    /// git ne rattrape pas quand le fichier n'est pas suivi.
+    /// Confirms before deleting: it is the explorer's only gesture git does not
+    /// catch when the file is untracked.
     fn confirm_delete(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let label = SharedString::from(path.display().to_string());
         let entity = cx.entity();
@@ -985,13 +981,13 @@ impl ClaudhubApp {
         });
     }
 
-    // — L'éditeur ————————————————————————————————————————————
+    // — The editor ———————————————————————————————————————————
 
-    /// L'éditeur intégré, quand un fichier y est ouvert.
+    /// The built-in editor, when a file is open in it.
     ///
-    /// Il prend la place du diff plutôt que d'occuper un panneau à lui : on
-    /// regarde l'un *ou* l'autre, et deux onglets à faire basculer pour un
-    /// geste qui vient de l'explorateur seraient un aller-retour de trop.
+    /// It takes the diff's place rather than occupying a panel of its own: one
+    /// looks at one *or* the other, and two tabs to switch between for a gesture
+    /// coming from the explorer would be one round trip too many.
     pub(super) fn render_editor(
         &mut self,
         _window: &mut Window,
@@ -1023,9 +1019,9 @@ impl ClaudhubApp {
                                 .font_family(mono)
                                 .child(label),
                         )
-                        // Une pastille et non un astérisque dans le titre :
-                        // le titre est déjà un chemin tronqué, et un caractère
-                        // de plus au bout ne se voit pas.
+                        // A badge and not an asterisk in the title: the title is
+                        // already a truncated path, and one more character at the
+                        // end goes unseen.
                         .when(dirty, |el| {
                             el.child(div().size(px(7.)).rounded_full().bg(cx.theme().warning))
                         })
@@ -1065,19 +1061,19 @@ impl ClaudhubApp {
     }
 }
 
-/// Ce qui ne dépend pas de la ligne : couleurs et géométrie.
+/// What does not depend on the row: colours and geometry.
 ///
-/// Lu une fois par frame et non par entrée visible — la fermeture de la liste
-/// virtualisée tourne pour chaque ligne à l'écran, animation de molette
-/// comprise, et `cx.theme()` emprunte le contexte.
+/// Read once per frame and not per visible entry — the virtualised list's
+/// closure runs for every row on screen, wheel animation included, and
+/// `cx.theme()` borrows the context.
 struct Look {
     height: Pixels,
-    /// Le rayon du fond d'une ligne. Une ligne survolée ou ouverte est une
-    /// pastille posée dans la liste, pas une bande qui la traverse.
+    /// A row's background radius. A hovered or open row is a pill laid in the
+    /// list, not a band crossing it.
     radius: Pixels,
     muted: gpui::Hsla,
     accent: gpui::Hsla,
-    /// Le filet vertical d'un niveau d'indentation.
+    /// The vertical rule of one indentation level.
     guide: gpui::Hsla,
     folder: gpui::Hsla,
 }
@@ -1089,22 +1085,22 @@ impl Look {
             radius: cx.theme().radius,
             muted: cx.theme().muted_foreground,
             accent: cx.theme().accent,
-            // Assez pâle pour se lire comme une trame et non comme un
-            // séparateur : ces filets sont là par dizaines à l'écran.
+            // Pale enough to read as a texture and not as a separator: these
+            // rules are on screen by the dozen.
             guide: cx.theme().border.opacity(0.7),
             folder: cx.theme().muted_foreground,
         }
     }
 }
 
-/// Largeur d'un niveau d'indentation, et du filet qui le marque.
+/// The width of one indentation level, and of the rule marking it.
 const INDENT: f32 = 12.;
 
-/// Les filets verticaux des niveaux parents.
+/// The vertical rules of the parent levels.
 ///
-/// C'est ce qui rend une arborescence profonde lisible : sans eux, à six
-/// niveaux d'indentation — le cas courant sur un projet Laravel — plus rien ne
-/// dit à quel dossier une ligne appartient.
+/// It is what makes a deep tree readable: without them, at six levels of
+/// indentation — the common case on a Laravel project — nothing says any more
+/// which folder a row belongs to.
 fn indent_guides(depth: usize, look: &Look) -> impl IntoIterator<Item = gpui::Div> + use<> {
     let guide = look.guide;
     (0..depth).map(move |_| {
@@ -1117,7 +1113,7 @@ fn indent_guides(depth: usize, look: &Look) -> impl IntoIterator<Item = gpui::Di
     })
 }
 
-/// Une ligne de l'explorateur : un dossier repliable ou un fichier.
+/// One row of the explorer: a collapsible folder or a file.
 #[allow(clippy::too_many_arguments)]
 fn render_row(
     rows: &Rc<Vec<tree::Entry>>,
@@ -1171,10 +1167,9 @@ fn render_row(
                     .xsmall()
                     .text_color(look.muted),
                 )
-                // Le dossier porte son propre glyphe, ouvert ou fermé : le
-                // chevron dit l'état du repli, l'icône dit qu'on regarde un
-                // dossier — c'est ce qui distingue une arborescence d'une
-                // liste indentée.
+                // The folder carries its own glyph, open or closed: the chevron
+                // says the state of the collapse, the icon says one is looking at
+                // a folder — that is what tells a tree from an indented list.
                 .child(
                     icon(if *collapsed { "folder" } else { "folder-open" })
                         .xsmall()
@@ -1212,9 +1207,9 @@ fn render_row(
                 .pr_2()
                 .items_center()
                 .cursor_pointer()
-                // Ouvert et sous le curseur sont deux choses : on parcourt
-                // l'arbre au clavier sans quitter le fichier qu'on relit, et
-                // ne montrer que l'un des deux perdrait l'autre.
+                // Open and under the cursor are two things: one browses the tree
+                // with the keyboard without leaving the file being reviewed, and
+                // showing only one of the two would lose the other.
                 .when(is_open, |el| el.bg(look.accent))
                 .when(at_cursor && !is_open, |el| el.bg(look.accent.opacity(0.5)))
                 .hover(|s| s.bg(look.accent.opacity(0.4)))
@@ -1225,8 +1220,8 @@ fn render_row(
                     });
                 })
                 .children(indent_guides(*depth, look))
-                // La place du chevron qu'un fichier n'a pas : sans elle, les
-                // noms de fichiers et ceux des dossiers ne s'alignent pas.
+                // The place of the chevron a file does not have: without it, file
+                // names and folder names do not line up.
                 .child(div().w(px(14.)).flex_none())
                 .child(crate::ui::file_icons::file_icon(&path, cx))
                 .child(
@@ -1252,7 +1247,7 @@ fn render_row(
     }
 }
 
-/// Le menu d'un dossier : créer dedans, et le déplier ou le replier en bloc.
+/// A folder's menu: create inside it, and unfold or collapse it wholesale.
 fn dir_menu(
     menu: gpui_component::menu::PopupMenu,
     entity: &Entity<ClaudhubApp>,
@@ -1310,7 +1305,7 @@ fn dir_menu(
     )
 }
 
-/// Le menu d'un fichier.
+/// A file's menu.
 fn file_menu(
     menu: gpui_component::menu::PopupMenu,
     entity: &Entity<ClaudhubApp>,
@@ -1349,9 +1344,9 @@ fn file_menu(
             }),
     )
     .separator()
-    // « Ici » veut dire dans le dossier du fichier : on clique droit sur un
-    // voisin de ce qu'on veut créer, jamais sur le dossier lui-même quand la
-    // liste en montre déjà le contenu.
+    // "Here" means in the file's folder: one right-clicks a neighbour of what is
+    // to be created, never the folder itself when the list already shows its
+    // contents.
     .item(
         PopupMenuItem::new(tr!("files-new-here"))
             .icon(icon("file-plus"))

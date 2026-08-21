@@ -1,16 +1,16 @@
-//! Claudhub — poste de travail de revue de code et de pilotage d'agents de
-//! codage en terminal, organisé par worktree git.
+//! Claudhub — a workstation for code review and for driving terminal coding
+//! agents, organised by git worktree.
 //!
-//! La bibliothèque porte tout ; deux binaires s'y branchent : `claudhub`
-//! (l'interface gpui) et `claudhub-server` (les mêmes workers, headless,
-//! derrière stdin/stdout — c'est lui qui tourne dans WSL2 quand l'interface
-//! est un `.exe` Windows). La feature `ui`, active par défaut, porte tout ce
-//! qui touche gpui : le serveur se construit avec `--no-default-features`, et
-//! c'est ce qui garantit qu'aucun module du cœur n'en dépend.
+//! The library carries everything; two binaries plug into it: `claudhub` (the
+//! gpui interface) and `claudhub-server` (the same workers, headless, behind
+//! stdin/stdout — the one that runs inside WSL2 when the interface is a
+//! Windows `.exe`). The `ui` feature, on by default, carries everything that
+//! touches gpui: the server builds with `--no-default-features`, and that is
+//! what guarantees no core module depends on it.
 
-// rust-i18n lit les catalogues à la compilation via sa macro procédurale ;
-// Cargo, lui, ne saurait pas qu'il faut recompiler quand seule une traduction
-// change. Ces deux `include_str!` sont là uniquement pour cette invalidation.
+// rust-i18n reads the catalogues at compile time through its proc macro;
+// Cargo, for its part, would not know to rebuild when only a translation
+// changes. These two `include_str!` exist solely for that invalidation.
 #[cfg(feature = "ui")]
 const _: &str = include_str!("../assets/i18n/en.json");
 #[cfg(feature = "ui")]
@@ -36,10 +36,10 @@ pub mod wsl;
 pub mod wslpath;
 pub mod wt;
 
-/// Évite une allocation par chaîne traduite : les catalogues compilés rendent
-/// des `Cow::Borrowed(&'static str)`, et une clé sans interpolation devient un
-/// `SharedString` statique. À l'échelle d'une frame qui en rend des centaines,
-/// c'est la différence entre gratuit et mesurable.
+/// Avoids one allocation per translated string: compiled catalogues yield
+/// `Cow::Borrowed(&'static str)`, and a key without interpolation becomes a
+/// static `SharedString`. Across a frame that renders hundreds of them, that is
+/// the difference between free and measurable.
 #[cfg(feature = "ui")]
 pub fn i18n_shared(value: std::borrow::Cow<'static, str>) -> gpui::SharedString {
     match value {
@@ -48,10 +48,9 @@ pub fn i18n_shared(value: std::borrow::Cow<'static, str>) -> gpui::SharedString 
     }
 }
 
-/// Toute chaîne visible par l'utilisateur passe par là. Rend un
-/// `SharedString`, jamais un `String`. Le macro n'existe que sous la feature
-/// `ui` : un module du cœur qui s'en servirait casserait la compilation du
-/// serveur, et c'est le garde voulu.
+/// Every user-visible string goes through this. Yields a `SharedString`, never
+/// a `String`. The macro only exists under the `ui` feature: a core module
+/// using it would break the server build, and that is the intended guard.
 #[cfg(feature = "ui")]
 #[macro_export]
 macro_rules! tr {

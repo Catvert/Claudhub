@@ -1,19 +1,18 @@
-//! Le panneau « Bases » : un explorateur de schémas.
+//! The "Databases" panel: a schema explorer.
 //!
-//! Quatre niveaux — connexion, base, table, colonne — dépliés **à la
-//! demande** : un serveur de développement porte des dizaines de bases et
-//! chacune des centaines de tables, et tout charger à l'ouverture du panneau
-//! ferait payer à chaque démarrage ce dont on ne regarde qu'un coin. C'est
-//! l'explorateur de PhpStorm, et le geste est le même : on déplie ce qu'on
-//! cherche.
+//! Four levels — connection, database, table, column — unfolded **on demand**: a
+//! development server carries dozens of databases and each of them hundreds of
+//! tables, and loading everything when the panel opens would make every startup
+//! pay for something only a corner of which is ever looked at. It is PhpStorm's
+//! explorer, and the gesture is the same: you unfold what you are looking for.
 //!
-//! Ce panneau **ne modifie jamais rien** : il lit des schémas. Ce qui écrit,
-//! c'est la console SQL d'à côté (`ui::db_query`), et seulement dans les
-//! limites que le compte de connexion autorise.
+//! This panel **never modifies anything**: it reads schemas. What writes is the
+//! SQL console beside it (`ui::db_query`), and only within the limits the
+//! connection account allows.
 //!
-//! Les connexions viennent des réglages, comme les profils d'agent : c'est le
-//! deuxième niveau du système d'extension décrit dans CLAUDE.md — une
-//! déclaration, pas du code.
+//! The connections come from the settings, like the agent profiles: it is the
+//! second level of the extension system described in CLAUDE.md — a declaration,
+//! not code.
 
 use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
@@ -34,16 +33,16 @@ use crate::ui::find::Pane;
 use crate::ui::icons::icon;
 use crate::ui::settings::Settings;
 
-/// Largeur d'un niveau d'indentation, et du filet qui le marque. La même que
-/// celle de l'explorateur de projet : ce sont deux arbres côte à côte.
+/// The width of one indentation level, and of the rule marking it. The same as
+/// the project explorer's: they are two trees side by side.
 const INDENT: f32 = 12.;
 
-/// Ce qu'on sait d'une lecture : rien, elle est partie, elle est arrivée, elle
-/// a échoué.
+/// What is known about a read: nothing, it has gone out, it has arrived, it has
+/// failed.
 ///
-/// Quatre états et non un `Option<Result<…>>` : « pas encore demandé » et « en
-/// route » se dessinent différemment — un nœud vide et une roue qui tourne —
-/// et les confondre fait relancer la commande à chaque frame.
+/// Four states and not an `Option<Result<…>>`: "not asked yet" and "under way"
+/// draw differently — an empty node and a spinner — and confusing them makes the
+/// command restart on every frame.
 #[derive(Debug)]
 pub enum Load<T> {
     Idle,
@@ -60,7 +59,7 @@ impl<T> Load<T> {
         }
     }
 
-    /// Une lecture qui n'a pas abouti se relance ; une lecture en route, non.
+    /// A read that did not succeed is restarted; a read under way is not.
     fn needs_loading(&self) -> bool {
         matches!(self, Load::Idle | Load::Failed(_))
     }
@@ -68,8 +67,8 @@ impl<T> Load<T> {
 
 pub struct ConnectionState {
     pub config: db::Connection,
-    /// L'identité de la connexion, mot de passe exclu : c'est par elle que les
-    /// réponses des workers retrouvent leur place.
+    /// The connection's identity, password excluded: it is by this that the
+    /// workers' answers find their place again.
     pub key: String,
     pub expanded: bool,
     pub databases: Load<Vec<DatabaseState>>,
@@ -87,12 +86,12 @@ pub struct TableState {
     pub columns: Load<Vec<db::Column>>,
 }
 
-/// Une ligne affichée.
+/// A displayed row.
 ///
-/// Des **indices** et non des valeurs : la même colonne apparaît sous sa table
-/// dépliée et dans le résultat d'un filtre, et un arbre de dix mille entrées
-/// ferait sinon autant de clones de chaînes à chaque reconstruction. C'est la
-/// raison qui vaut déjà pour `ui::tree`.
+/// **Indices** and not values: the same column appears under its unfolded table
+/// and in a filter's result, and a tree of ten thousand entries would otherwise
+/// make that many string clones on every rebuild. It is the reason that already
+/// holds for `ui::tree`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
     Connection {
@@ -113,7 +112,7 @@ pub enum Entry {
         table: usize,
         column: usize,
     },
-    /// Une ligne qui dit ce qui se passe : un chargement en cours, une erreur.
+    /// A row saying what is happening: a load under way, an error.
     Status {
         depth: usize,
         loading: bool,
@@ -133,33 +132,31 @@ impl Entry {
     }
 }
 
-/// L'état du panneau.
+/// The panel's state.
 #[derive(Default)]
 pub struct DbState {
     pub connections: Vec<ConnectionState>,
-    /// Les lignes affichées, reconstruites à chaque changement d'état, jamais
-    /// au rendu : la fermeture d'`uniform_list` tourne pour chaque ligne
-    /// visible à chaque frame.
+    /// The displayed rows, rebuilt on every state change, never at render time:
+    /// `uniform_list`'s closure runs for every visible row on every frame.
     pub entries: Vec<Entry>,
-    /// La requête de recherche pour laquelle `entries` a été bâtie.
+    /// The search query `entries` was built for.
     pub query: String,
-    /// La ligne sous le curseur, par indice dans `entries`.
+    /// The row under the cursor, by index into `entries`.
     ///
-    /// Un indice et non une identité — contrairement à l'explorateur de
-    /// projet, dont l'arbre se reconstruit sous le curseur à chaque frappe :
-    /// ici la reconstruction est rare, et un indice suffit.
+    /// An index and not an identity — unlike the project explorer, whose tree is
+    /// rebuilt under the cursor on every keystroke: here the rebuild is rare,
+    /// and an index is enough.
     pub cursor: Option<usize>,
-    /// Les connexions qu'un « tout indexer » est en train de parcourir.
+    /// The connections an "index everything" is walking through.
     pub indexing: HashSet<String>,
 }
 
 impl ClaudhubApp {
-    /// Aligne la liste des connexions sur les réglages.
+    /// Brings the connection list into line with the settings.
     ///
-    /// Appelée au rendu, comme tout ce qui dépend d'un réglage. L'état d'une
-    /// connexion est **repris par sa clé** : corriger un mot de passe ou
-    /// renommer une connexion ne doit pas refermer l'arbre qu'on venait de
-    /// déplier.
+    /// Called at render time, like everything that depends on a setting. A
+    /// connection's state is **picked up by its key**: fixing a password or
+    /// renaming a connection must not close the tree just unfolded.
     pub(super) fn sync_db_connections(&mut self, cx: &mut Context<Self>) {
         let wanted: Vec<db::Connection> = Settings::global(cx)
             .databases
@@ -195,7 +192,7 @@ impl ClaudhubApp {
                 }
             })
             .collect();
-        // Les clés d'indexation survivraient à la connexion qu'elles visent.
+        // The index keys would outlive the connection they name.
         self.db
             .indexing
             .retain(|key| self.db.connections.iter().any(|state| &state.key == key));
@@ -239,7 +236,7 @@ impl ClaudhubApp {
         }
     }
 
-    /// L'indice de la connexion qui porte cette clé.
+    /// The index of the connection carrying this key.
     fn connection_by_key(&self, key: &str) -> Option<usize> {
         self.db
             .connections
@@ -247,7 +244,7 @@ impl ClaudhubApp {
             .position(|state| state.key == key)
     }
 
-    // — Chargements ————————————————————————————————————————————————
+    // — Loads       ————————————————————————————————————————————————
 
     fn db_load_databases(&mut self, connection: usize, cx: &mut Context<Self>) {
         let Some(state) = self.db.connections.get_mut(connection) else {
@@ -304,10 +301,10 @@ impl ClaudhubApp {
         self.db_rebuild(cx);
     }
 
-    /// Charge les colonnes de **toutes** les tables d'une base.
+    /// Loads the columns of **every** table of a database.
     ///
-    /// Une commande et non une par table : c'est ce qui rend le filtre et les
-    /// complétions abordables sur un schéma de trois cents tables.
+    /// One command and not one per table: that is what makes the filter and the
+    /// completions affordable on a three-hundred-table schema.
     fn db_load_all_columns(&mut self, connection: usize, database: usize, cx: &mut Context<Self>) {
         let Some(config) = self.connection_at(connection).map(|s| s.config.clone()) else {
             return;
@@ -330,7 +327,7 @@ impl ClaudhubApp {
         self.db_rebuild(cx);
     }
 
-    // — Arrivées ———————————————————————————————————————————————————
+    // — Arrivals ———————————————————————————————————————————————————
 
     pub(super) fn db_databases_arrived(
         &mut self,
@@ -428,8 +425,8 @@ impl ClaudhubApp {
         let Some(index) = self.connection_by_key(&key) else {
             return;
         };
-        // La console SQL complète sur ce que le panneau a indexé : elle
-        // profite donc de la même lecture, sans en lancer une seconde.
+        // The SQL console completes on what the panel has indexed: it therefore
+        // benefits from the same read, without starting a second one.
         if let Ok(indexed) = &columns {
             self.db_schema_indexed(&key, &database, indexed);
         }
@@ -442,9 +439,9 @@ impl ClaudhubApp {
                     Ok(mut indexed) => {
                         for table in tables.iter_mut() {
                             if matches!(table.columns, Load::Loading) {
-                                // Une table absente du lot a disparu entre la
-                                // demande et la réponse : la marquer chargée
-                                // évite de la redemander à chaque frame.
+                                // A table missing from the batch vanished
+                                // between the request and the answer: marking it
+                                // loaded avoids asking for it on every frame.
                                 table.columns = Load::Ready(
                                     indexed.remove(&table.info.name).unwrap_or_default(),
                                 );
@@ -481,12 +478,12 @@ impl ClaudhubApp {
             .position(|state| state.info.name == name)
     }
 
-    // — L'arbre ————————————————————————————————————————————————————
+    // — The tree ————————————————————————————————————————————————————
 
-    /// Reconstruit les lignes affichées.
+    /// Rebuilds the displayed rows.
     pub(super) fn db_rebuild(&mut self, cx: &mut Context<Self>) {
-        // La ligne sous le curseur est suivie par sa valeur, pas par son
-        // indice : un dépliage insère des lignes au-dessus d'elle.
+        // The row under the cursor is followed by its value, not by its index:
+        // unfolding inserts rows above it.
         let previous = self
             .db
             .cursor
@@ -575,12 +572,12 @@ impl ClaudhubApp {
         entries
     }
 
-    /// L'arbre filtré : les tables et les colonnes dont le nom correspond, avec
-    /// leurs ancêtres, **sans tenir compte des replis**.
+    /// The filtered tree: the tables and columns whose name matches, with their
+    /// ancestors, **ignoring collapses**.
     ///
-    /// Un résultat caché dans un nœud replié ne se verrait pas, et la
-    /// recherche paraîtrait n'avoir rien trouvé — c'est la règle que suivent
-    /// déjà l'explorateur et la liste de revue.
+    /// A result hidden inside a collapsed node would not be visible, and the
+    /// search would look as if it had found nothing — it is the rule the
+    /// explorer and the review list already follow.
     fn db_filtered_entries(&self, query: &str) -> Vec<Entry> {
         let hit = |name: &str| crate::ui::find::matches(query, name);
         let mut entries = Vec::new();
@@ -647,13 +644,12 @@ impl ClaudhubApp {
         entries
     }
 
-    /// Lance ce qu'il faut pour que le filtre voie l'arbre entier.
+    /// Starts what is needed for the filter to see the whole tree.
     ///
-    /// **Les connexions qu'on n'a jamais dépliées sont laissées tranquilles** :
-    /// taper trois lettres dans un champ de recherche ne doit pas ouvrir une
-    /// connexion vers un serveur de production. Ce que ce parcours complète,
-    /// c'est ce qui est déjà ouvert ; « tout indexer » est le geste qui se
-    /// connecte partout, et il est explicite.
+    /// **Connections never unfolded are left alone**: typing three letters into
+    /// a search field must not open a connection to a production server. What
+    /// this walk completes is what is already open; "index everything" is the
+    /// gesture that connects everywhere, and it is explicit.
     fn db_index_for_filter(&mut self, cx: &mut Context<Self>) {
         for connection in 0..self.db.connections.len() {
             let Some(state) = self.connection_at(connection) else {
@@ -679,19 +675,19 @@ impl ClaudhubApp {
         }
     }
 
-    /// Indexe tout, y compris ce qui n'a jamais été déplié.
+    /// Indexes everything, including what has never been unfolded.
     ///
-    /// À la différence de l'indexation implicite du filtre, celui-ci **se
-    /// connecte partout, exprès** : c'est ce qu'on demande quand on veut que
-    /// la recherche et les complétions couvrent le schéma entier.
+    /// Unlike the filter's implicit indexing, this one **connects everywhere, on
+    /// purpose**: it is what one asks for when the search and the completions
+    /// should cover the whole schema.
     pub(super) fn db_index_all(&mut self, cx: &mut Context<Self>) {
         for connection in 0..self.db.connections.len() {
             let Some(state) = self.db.connections.get(connection) else {
                 continue;
             };
             self.db.indexing.insert(state.key.clone());
-            // Une demande explicite retente ce qui avait échoué ; la
-            // continuation, elle, ne retente jamais — ce serait une boucle.
+            // An explicit request retries what had failed; the continuation, for
+            // its part, never retries — that would be a loop.
             if state.databases.needs_loading() {
                 self.db_load_databases(connection, cx);
             } else if state.databases.ready().is_some() {
@@ -701,8 +697,8 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Fait avancer l'indexation d'une connexion à chaque lecture qui arrive,
-    /// jusqu'à ce qu'il ne reste rien à demander.
+    /// Advances a connection's indexing on every read that arrives, until there
+    /// is nothing left to ask for.
     fn db_continue_indexing(&mut self, connection: usize, cx: &mut Context<Self>) {
         let Some(key) = self.connection_at(connection).map(|s| s.key.clone()) else {
             return;
@@ -746,7 +742,7 @@ impl ClaudhubApp {
         }
     }
 
-    /// Oublie ce qu'on savait d'une connexion, et le relit si elle est ouverte.
+    /// Forgets what was known of a connection, and re-reads it if it is open.
     pub(super) fn db_refresh(&mut self, connection: Option<usize>, cx: &mut Context<Self>) {
         let targets: Vec<usize> = match connection {
             Some(index) => vec![index],
@@ -764,7 +760,7 @@ impl ClaudhubApp {
         self.db_rebuild(cx);
     }
 
-    /// Déplie ou replie la ligne, et lance la lecture qui manque.
+    /// Unfolds or collapses the row, and starts the missing read.
     pub(super) fn db_toggle(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(entry) = self.db.entries.get(index).cloned() else {
             return;
@@ -829,7 +825,7 @@ impl ClaudhubApp {
         }
     }
 
-    // — Le clavier —————————————————————————————————————————————————
+    // — The keyboard —————————————————————————————————————————————————
 
     pub(super) fn db_step_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
         if self.db.entries.is_empty() {
@@ -846,8 +842,8 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Droite : déplier, ou descendre d'une ligne. Gauche : replier, ou
-    /// remonter au parent. Ce sont les gestes de tout explorateur.
+    /// Right: unfold, or go down one row. Left: collapse, or go up to the
+    /// parent. They are every explorer's gestures.
     pub(super) fn db_fold_cursor(&mut self, open: bool, cx: &mut Context<Self>) {
         let Some(index) = self.db.cursor else { return };
         let Some(entry) = self.db.entries.get(index).cloned() else {
@@ -871,7 +867,7 @@ impl ClaudhubApp {
         }
     }
 
-    /// Entrée : ouvrir une console sur la ligne, comme un double-clic.
+    /// Enter: open a console on the row, like a double click.
     pub(super) fn db_open_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self.db.cursor else { return };
         let Some(entry) = self.db.entries.get(index).cloned() else {
@@ -884,11 +880,11 @@ impl ClaudhubApp {
         }
     }
 
-    /// Ouvre la console SQL sur ce que désigne une ligne.
+    /// Opens the SQL console on what a row names.
     ///
-    /// Une table donne un `SELECT * FROM …` tout prêt : c'est la première
-    /// chose qu'on écrit après avoir trouvé une table, et le taper à chaque
-    /// fois est ce qui fait qu'on ne se sert pas d'un explorateur.
+    /// A table gives a ready-made `SELECT * FROM …`: it is the first thing one
+    /// writes after finding a table, and typing it every time is what makes
+    /// people not use an explorer.
     pub(super) fn open_db_console(
         &mut self,
         entry: &Entry,
@@ -931,7 +927,7 @@ impl ClaudhubApp {
         self.start_db_console(config, database, table, window, cx);
     }
 
-    // — Le rendu ———————————————————————————————————————————————————
+    // — Rendering ———————————————————————————————————————————————————
 
     pub(super) fn render_db(
         &mut self,
@@ -997,8 +993,8 @@ impl ClaudhubApp {
             .child(
                 div()
                     .id("db-tree")
-                    // Les flèches appartiennent à cet arbre quand il a le
-                    // focus, comme celles de l'explorateur au sien.
+                    // The arrows belong to this tree when it has the focus, like
+                    // the explorer's to its own.
                     .key_context(crate::ui::shortcuts::db_context(vim))
                     .track_focus(&focus)
                     .flex_1()
@@ -1017,9 +1013,9 @@ impl ClaudhubApp {
                                     .collect::<Vec<_>>()
                             })
                             .size_full()
-                            // Le retrait appartient à la liste : une marge posée
-                            // sur une entrée d'`uniform_list` est ignorée, la
-                            // liste calculant elle-même la taille de ses items.
+                            // The inset belongs to the list: a margin set on a
+                            // `uniform_list` entry is ignored, the list computing
+                            // its items' size itself.
                             .px_1()
                             .track_scroll(&scroll.clone()),
                             cx,
@@ -1087,7 +1083,7 @@ fn status(depth: usize, loading: bool, message: SharedString) -> Entry {
     }
 }
 
-/// Ce que le thème donne à une ligne, lu une fois par frame et non par ligne.
+/// What the theme gives a row, read once per frame and not per row.
 #[derive(Clone)]
 struct Look {
     height: gpui::Pixels,
@@ -1129,11 +1125,11 @@ fn indent_guides(depth: usize, look: &Look) -> impl IntoIterator<Item = gpui::Di
     })
 }
 
-/// Une ligne de l'arbre.
+/// One row of the tree.
 ///
-/// L'état est relu ici, dans la fermeture de la liste, et non recopié dans
-/// `Entry` : une entrée ne porte que des indices, et le nom d'une table n'a
-/// pas à être cloné à chaque reconstruction pour être affiché quelques frames.
+/// The state is re-read here, inside the list's closure, and not copied into
+/// `Entry`: an entry carries only indices, and a table's name has no business
+/// being cloned on every rebuild to be shown for a few frames.
 fn render_row(
     entries: &Rc<Vec<Entry>>,
     index: usize,
@@ -1201,8 +1197,8 @@ fn render_row(
         .hover(|s| s.bg(look.accent.opacity(0.4)))
         .on_click(move |_, window, cx| {
             click.update(cx, |this, cx| {
-                // Le clic reprend le focus : sans cela, les flèches
-                // continueraient de parcourir l'explorateur de projet.
+                // The click takes the focus back: without that, the arrows would
+                // go on browsing the project explorer.
                 this.db_focus.clone().focus(window, cx);
                 this.db_toggle(index, cx);
             });
@@ -1217,8 +1213,8 @@ fn render_row(
                 .xsmall()
                 .text_color(look.muted)
                 .into_any_element(),
-            // La place du chevron qu'une colonne n'a pas : sans elle, les noms
-            // ne s'alignent pas d'un niveau à l'autre.
+            // The place of the chevron a column does not have: without it, the
+            // names do not line up from one level to the next.
             None => div().w(px(14.)).flex_none().into_any_element(),
         })
         .child(icon(glyph).xsmall().text_color(tint))
@@ -1243,10 +1239,10 @@ fn render_row(
         .into_any_element()
 }
 
-/// L'icône, la teinte, le nom, le détail et l'infobulle d'une ligne.
+/// A row's icon, tint, name, detail and tooltip.
 ///
-/// Une seule fonction pour les quatre niveaux : ce sont les mêmes quatre
-/// choses, et les séparer ferait quatre fois la même mise en page.
+/// A single function for all four levels: they are the same four things, and
+/// separating them would make the same layout four times.
 #[allow(clippy::type_complexity)]
 fn describe(
     app: &ClaudhubApp,
@@ -1338,9 +1334,9 @@ fn describe(
         } => {
             let state = app.table_at(connection, database, table)?;
             let info = state.columns.ready()?.get(column)?;
-            // La clé primaire et la clé étrangère portent le même glyphe et
-            // deux teintes : c'est la même famille — ce par quoi une ligne se
-            // désigne —, et deux dessins différents ne diraient rien de plus.
+            // The primary key and the foreign key carry the same glyph and two
+            // tints: it is the same family — what a row is named by — and two
+            // different drawings would say nothing more.
             let (glyph, tint) = if info.primary_key {
                 ("tag", look.warning)
             } else if info.foreign_key.is_some() {
@@ -1387,7 +1383,7 @@ fn describe(
     }
 }
 
-/// Le menu d'une ligne : interroger, rafraîchir, copier, retirer.
+/// A row's menu: query, refresh, copy, remove.
 fn row_menu(popup: PopupMenu, entity: &Entity<ClaudhubApp>, entry: &Entry) -> PopupMenu {
     let is_table = matches!(entry, Entry::Table { .. } | Entry::Column { .. });
     let is_connection = matches!(entry, Entry::Connection { .. });
@@ -1437,8 +1433,8 @@ fn row_menu(popup: PopupMenu, entity: &Entity<ClaudhubApp>, entry: &Entry) -> Po
 }
 
 impl ClaudhubApp {
-    /// Rafraîchit ce que désigne une ligne, et rien de plus : rouvrir tout un
-    /// serveur pour relire une table serait une commande par base.
+    /// Refreshes what a row names, and nothing more: reopening a whole server to
+    /// re-read one table would be one command per database.
     pub(super) fn db_refresh_entry(&mut self, entry: &Entry, cx: &mut Context<Self>) {
         match *entry {
             Entry::Connection { connection } => self.db_refresh(Some(connection), cx),
@@ -1518,11 +1514,11 @@ impl ClaudhubApp {
         })
     }
 
-    /// Retire une connexion des réglages.
+    /// Removes a connection from the settings.
     ///
-    /// Par sa **valeur** et non par son indice : les réglages ont pu être
-    /// réécrits depuis que le menu s'est ouvert, et un indice périmé
-    /// supprimerait la voisine.
+    /// By its **value** and not by its index: the settings may have been
+    /// rewritten since the menu opened, and a stale index would delete the
+    /// neighbour.
     fn db_remove_connection(&mut self, entry: &Entry, cx: &mut Context<Self>) {
         let Entry::Connection { connection } = *entry else {
             return;

@@ -19,11 +19,11 @@ use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
 use crate::ui::settings::Settings;
 
-/// Ce qu'une ligne de la barre latérale affiche d'un worktree.
+/// What a sidebar row shows of a worktree.
 ///
-/// Le résumé vaut `None` tant que le premier balayage n'est pas revenu : une
-/// ligne vide se lit « on ne sait pas encore », ce qui est vrai, là où un zéro
-/// affirmerait à tort qu'il n'y a rien à relire.
+/// The summary is `None` until the first sweep has come back: an empty row reads
+/// as "we do not know yet", which is true, where a zero would wrongly claim
+/// there is nothing to review.
 struct WorktreeRow {
     path: PathBuf,
     label: String,
@@ -58,10 +58,10 @@ fn volume(summary: crate::git::Summary, cx: &gpui::App) -> impl IntoElement {
         })
 }
 
-/// La pastille d'un agent : pleine quand il travaille, creuse quand il attend.
+/// An agent's badge: filled when it works, hollow when it waits.
 ///
-/// Une pastille et non un mot : la ligne porte déjà un nom et une branche, et
-/// c'est une information qu'on lit du coin de l'œil en parcourant la liste.
+/// A badge and not a word: the row already carries a name and a branch, and this
+/// is information read out of the corner of the eye while scanning the list.
 fn agent_badge(agent: &crate::ui::app::AgentState, cx: &gpui::App) -> impl IntoElement {
     let color = if agent.working {
         cx.theme().warning
@@ -81,8 +81,8 @@ fn agent_badge(agent: &crate::ui::app::AgentState, cx: &gpui::App) -> impl IntoE
                     el.border_1().border_color(color.opacity(0.8))
                 }),
         )
-        // Deux agents dans le même worktree, cela arrive : on le dit plutôt
-        // que de laisser croire qu'il n'y en a qu'un.
+        // Two agents in the same worktree does happen: we say so rather than
+        // let it look as if there were only one.
         .when(agent.count > 1, |el| {
             el.child(
                 div()
@@ -91,8 +91,8 @@ fn agent_badge(agent: &crate::ui::app::AgentState, cx: &gpui::App) -> impl IntoE
                     .child(agent.count.to_string()),
             )
         })
-        // Le nom de l'agent dès qu'il y a plus d'un profil à distinguer : la
-        // pastille dit qu'il s'en passe quelque chose, elle ne dit pas qui.
+        // The agent's name as soon as there is more than one profile to tell
+        // apart: the badge says something is going on, it does not say who.
         .child(
             div()
                 .text_xs()
@@ -594,10 +594,10 @@ impl ClaudhubApp {
             .flat_map(|repo| repo.worktrees.iter().map(|w| w.path.clone()))
             .collect();
         self.repos.retain(|repo| repo.main != main);
-        // Ce qu'on gardait de ses worktrees n'a plus d'objet. Le magasin
-        // d'état, lui, n'est pas purgé : notes et replis attendent le jour où
-        // le dépôt est rouvert, et les effacer ici ferait d'un rangement une
-        // perte.
+        // What we kept of its worktrees has no further purpose. The state store,
+        // for its part, is not purged: notes and collapses wait for the day the
+        // repository is reopened, and erasing them here would turn a tidy-up
+        // into a loss.
         for worktree in &closed {
             self.review.remove(worktree);
             self.terminals.remove(worktree);
@@ -616,8 +616,8 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Ouvre un dépôt. Le sélecteur de dossier natif est asynchrone : la
-    /// réponse revient dans une tâche, d'où le `spawn`.
+    /// Opens a repository. The native folder picker is asynchronous: the answer
+    /// comes back in a task, hence the `spawn`.
     fn prompt_open_repository(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: false,
@@ -642,14 +642,13 @@ impl ClaudhubApp {
         .detach();
     }
 
-    /// Le chemin que le sélecteur natif a rendu, tel que le serveur le
-    /// comprendra.
+    /// The path the native picker returned, as the server will understand it.
     ///
-    /// Sous Windows, le dialogue rend `\\wsl.localhost\Ubuntu\home\…` ou
-    /// `C:\…` ; le fil, lui, ne transporte que des chemins Linux — c'est le
-    /// disque du serveur qui fait foi. C'est l'un des rares points où un
-    /// chemin **entre** par le monde Windows, et donc l'un des rares où il
-    /// faut le traduire. Ailleurs, il n'y a rien à faire.
+    /// On Windows the dialog returns `\\wsl.localhost\Ubuntu\home\…` or `C:\…`;
+    /// the wire, for its part, carries only Linux paths — the server's disk is
+    /// authoritative. It is one of the few points where a path **enters** from
+    /// the Windows world, and therefore one of the few where it has to be
+    /// translated. Elsewhere there is nothing to do.
     fn repo_path_for_server(&self, path: PathBuf, cx: &App) -> Result<PathBuf, SharedString> {
         if !cfg!(windows) {
             return Ok(path);
@@ -658,9 +657,9 @@ impl ClaudhubApp {
         let Some(translated) = crate::wslpath::to_linux(&path) else {
             return Err(tr!("repo-not-in-wsl"));
         };
-        // Un dépôt d'une **autre** distribution que celle du serveur : son
-        // chemin est valide là-bas et introuvable ici, et l'ouvrir donnerait
-        // un dossier vide sans dire pourquoi.
+        // A repository from a **different** distribution than the server's: its
+        // path is valid over there and unreachable here, and opening it would
+        // give an empty folder without saying why.
         if let Some(other) = translated
             .distro
             .filter(|d| !d.eq_ignore_ascii_case(&distro))
@@ -676,10 +675,11 @@ impl ClaudhubApp {
             tr!("worktree-new-placeholder"),
             window,
             cx,
-            // Le nom saisi, puis ce que le projet demande : ses `[[prompt]]`
-            // deviennent un dialogue, ses copies et ses ports sont faits par
-            // `wt`. Sans `wt.toml`, l'ajout git nu suffit — un dépôt sans
-            // configuration doit pouvoir gagner un worktree quand même.
+            // The name typed in, then what the project asks for: its
+            // `[[prompt]]`s become a dialog, its copies and its ports are done
+            // by `wt`. Without a `wt.toml`, the bare git add is enough — a
+            // repository with no configuration must still be able to gain a
+            // worktree.
             move |this, name, window, cx| {
                 this.start_worktree(main.clone(), name, None, window, cx);
             },
@@ -707,9 +707,9 @@ impl ClaudhubApp {
                         this.git.send(Cmd::RemoveWorktree {
                             main: main.clone(),
                             path: path.clone(),
-                            // Sans `force`, git refuse de retirer un worktree
-                            // qui a des modifications — c'est la protection
-                            // qu'on veut ici, et le message le dira.
+                            // Without `force`, git refuses to remove a worktree
+                            // that has changes — that is the protection we want
+                            // here, and the message will say so.
                             force: false,
                         });
                         cx.notify();

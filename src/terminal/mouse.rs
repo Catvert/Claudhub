@@ -1,35 +1,35 @@
-//! Le rapport de souris.
+//! Mouse reporting.
 //!
-//! Un programme plein écran peut demander à **recevoir** la souris plutôt que
-//! de laisser le terminal en faire ce qu'il veut : c'est ainsi qu'une liste se
-//! choisit au clic et qu'un panneau défile à la molette. Il l'annonce par un
-//! mode privé, alacritty le retient dans `TermMode`, et c'est à nous de lui
-//! envoyer les séquences correspondantes.
+//! A full-screen program can ask to **receive** the mouse rather than let the
+//! terminal do what it likes with it: that is how a list is picked by click
+//! and a pane scrolls by wheel. It announces this through a private mode,
+//! alacritty remembers it in `TermMode`, and it is up to us to send the
+//! matching sequences.
 //!
-//! Sans cela, la molette retombait sur les flèches — trois par cran, la
-//! convention des terminaux quand personne n'écoute la souris — et un agent
-//! qui, lui, écoute, recevait des déplacements de curseur au lieu d'un
-//! défilement. Il le dit, d'ailleurs : « scroll wheel is sending arrow keys ».
+//! Without that, the wheel fell back to arrows — three per notch, the terminal
+//! convention when nobody listens to the mouse — and an agent that does listen
+//! received cursor moves instead of scrolling. It says so, in fact: "scroll
+//! wheel is sending arrow keys".
 //!
-//! Trois encodages coexistent, et le programme choisit :
+//! Three encodings coexist, and the program chooses:
 //!
-//! - **SGR** (`1006`), le seul qui n'ait pas de bord : les nombres sont écrits
-//!   en décimal, donc une colonne au-delà de la 223e s'y exprime. C'est ce que
-//!   demande tout ce qui a été écrit ces quinze dernières années.
-//! - **UTF-8** (`1005`), une rustine sur le précédent.
-//! - **Le format d'origine**, un octet par nombre, où rien ne dépasse la
-//!   223e colonne — un terminal en faisait cent trente quand il a été défini.
-//!   L'événement y est **abandonné** plutôt que rogné : rapporter un clic sur
-//!   la mauvaise cellule est pire que de n'en rapporter aucun.
+//! - **SGR** (`1006`), the only one with no edge: the numbers are written in
+//!   decimal, so a column past the 223rd can be expressed. It is what
+//!   everything written in the last fifteen years asks for.
+//! - **UTF-8** (`1005`), a patch over the previous one.
+//! - **The original format**, one byte per number, where nothing goes past the
+//!   223rd column — a terminal was a hundred and thirty wide when it was
+//!   defined. The event is **given up** there rather than clamped: reporting a
+//!   click on the wrong cell is worse than reporting none.
 //!
-//! Rien ici ne parle au pty ni à la grille : ce sont des octets déduits d'un
-//! événement et d'un mode, donc c'est testable — comme `keys`.
+//! Nothing here talks to the pty or to the grid: these are bytes derived from
+//! an event and a mode, so it is testable — like `keys`.
 
 use alacritty_terminal::term::TermMode;
 use gpui::Modifiers;
 
-/// Ce qui a bougé. Les molettes en font partie : le protocole les traite comme
-/// des boutons, numérotés à part.
+/// What moved. Wheels count: the protocol treats them as buttons, numbered
+/// separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
     Left,
@@ -55,21 +55,21 @@ impl Button {
     }
 }
 
-/// Ce qui arrive au bouton.
+/// What happens to the button.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Press,
     Release,
-    /// Un déplacement, bouton tenu ou non. C'est le seul cas où le programme
-    /// peut ne rien avoir demandé alors qu'il écoute les clics.
+    /// A move, button held or not. This is the only case where the program may
+    /// have asked for nothing while still listening for clicks.
     Move,
 }
 
-/// Un événement de souris, en cellules de la grille (indices à partir de zéro,
-/// comme partout ailleurs chez nous ; le protocole, lui, compte à partir de un).
+/// A mouse event, in grid cells (zero-based indices, as everywhere else here;
+/// the protocol itself counts from one).
 #[derive(Debug, Clone, Copy)]
 pub struct Report {
-    /// `None` sur un déplacement sans bouton tenu.
+    /// `None` on a move with no button held.
     pub button: Option<Button>,
     pub action: Action,
     pub column: usize,
@@ -77,17 +77,16 @@ pub struct Report {
     pub modifiers: Modifiers,
 }
 
-/// Les octets à écrire dans le pty, ou `None` quand le programme n'a rien
-/// demandé de tel — auquel cas l'appelant reste libre du geste : défiler
-/// l'historique, sélectionner du texte.
+/// The bytes to write to the pty, or `None` when the program asked for nothing
+/// of the sort — in which case the caller stays free to do as it likes: scroll
+/// the scrollback, select text.
 pub fn report(mode: TermMode, event: Report) -> Option<Vec<u8>> {
     if !mode.intersects(TermMode::MOUSE_MODE) {
         return None;
     }
-    // Un déplacement n'est rapporté que si le programme l'a demandé : `1002`
-    // pendant qu'un bouton est tenu, `1003` en permanence. Les envoyer à un
-    // programme qui n'écoute que les clics remplirait le pty à chaque geste de
-    // la main.
+    // A move is only reported if the program asked for it: `1002` while a
+    // button is held, `1003` all the time. Sending them to a program that only
+    // listens for clicks would fill the pty on every movement of the hand.
     if event.action == Action::Move {
         let wanted = if event.button.is_some() {
             TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION
@@ -100,9 +99,9 @@ pub fn report(mode: TermMode, event: Report) -> Option<Vec<u8>> {
     }
 
     let button = event.button.unwrap_or(Button::Left);
-    // Le format d'origine n'a pas de relâchement par bouton : il rend le
-    // même code pour les trois, et le programme se souvient de celui qui était
-    // enfoncé. SGR, lui, distingue par la lettre finale.
+    // The original format has no per-button release: it returns the same code
+    // for all three, and the program remembers which was down. SGR, for its
+    // part, distinguishes them by the final letter.
     let released = event.action == Action::Release;
     let sgr = mode.contains(TermMode::SGR_MOUSE);
     let mut code = if released && !sgr { 3 } else { button.code() };
@@ -135,19 +134,18 @@ pub fn report(mode: TermMode, event: Report) -> Option<Vec<u8>> {
     ])
 }
 
-/// Le décalage de trente-deux du format d'origine, qui met chaque nombre dans
-/// un octet imprimable. Au-delà de la 223e cellule il n'y a plus de place, et
-/// il n'y a rien à rapporter d'honnête.
+/// The original format's offset of thirty-two, which puts every number in a
+/// printable byte. Past the 223rd cell there is no room left, and nothing
+/// honest to report.
 fn offset(value: usize) -> Option<u32> {
     (value <= 223).then(|| value as u32 + 32)
 }
 
-/// Les modificateurs, tels que xterm les ajoute au code du bouton.
+/// The modifiers, as xterm adds them to the button code.
 ///
-/// **Pas sur la molette** : ses codes 64 et 65 portent déjà le bit 6, et lui
-/// ajouter Ctrl (16) donnerait un nombre qu'aucun programme ne lit comme un
-/// cran de molette. C'est aussi que Ctrl+molette appartient au terminal, qui
-/// en fait son zoom.
+/// **Not on the wheel**: its codes 64 and 65 already carry bit 6, and adding
+/// Ctrl (16) would give a number no program reads as a wheel notch. Also,
+/// Ctrl+wheel belongs to the terminal, which turns it into zoom.
 fn modifier_bits(modifiers: &Modifiers, button: Button) -> u8 {
     if button.is_wheel() {
         return 0;
@@ -183,8 +181,8 @@ mod tests {
         TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE
     }
 
-    /// Le cas qui nous a été signalé : un agent demande la souris, la molette
-    /// doit lui parvenir comme telle et non en flèches.
+    /// The case that was reported to us: an agent asks for the mouse, and the
+    /// wheel must reach it as such and not as arrows.
     #[test]
     fn a_wheel_notch_is_a_button_of_its_own() {
         let up = report(sgr(), at(Some(Button::WheelUp), Action::Press, 0, 0));
@@ -193,8 +191,8 @@ mod tests {
         assert_eq!(down.as_deref(), Some(&b"\x1b[<65;10;5M"[..]));
     }
 
-    /// Sans demande du programme, rien ne part : la molette reste au terminal,
-    /// qui en fait son historique.
+    /// Without the program asking, nothing goes out: the wheel stays with the
+    /// terminal, which turns it into scrollback.
     #[test]
     fn nothing_is_reported_to_a_program_that_asked_for_nothing() {
         assert!(report(
@@ -204,8 +202,8 @@ mod tests {
         .is_none());
     }
 
-    /// SGR distingue le relâchement par sa lettre finale ; le format d'origine
-    /// n'a qu'un code pour les trois boutons.
+    /// SGR tells a release by its final letter; the original format has only
+    /// one code for all three buttons.
     #[test]
     fn a_release_is_told_differently_by_the_two_encodings() {
         let modern = report(sgr(), at(Some(Button::Right), Action::Release, 2, 3));

@@ -1,21 +1,20 @@
-//! Ce que Claudhub retient d'un worktree entre deux lancements.
+//! What Claudhub remembers about a worktree between runs.
 //!
-//! À part des réglages, et pour la même raison qu'eux : ce n'est pas une
-//! préférence qu'on écrit à la main mais l'état d'un travail en cours — la
-//! base à laquelle on compare un worktree d'agent, les dossiers qu'on a
-//! repliés, le prochain numéro de note. Un `settings.json` où l'on trouverait
-//! quelques centaines de lignes par dépôt ne serait plus modifiable.
+//! Separate from the settings, and for the same reason: this is not a
+//! preference written by hand but the state of work in progress — the base a
+//! worktree is compared against, the folders collapsed in it, the next note
+//! number. A `settings.json` holding a few hundred lines per repository would
+//! no longer be editable.
 //!
-//! Ce fichier est écrit **depuis le thread d'interface**, ce qui déroge à
-//! « `src/ui/` ne fait jamais d'entrée-sortie ». C'est le précédent de
-//! `settings.rs` et la même raison : quelques kilo-octets écrits une fois par
-//! demi-seconde ne valent pas un aller-retour par le protocole. La règle vise
-//! les commandes git, dont la plus rapide coûte déjà une frame, pas la
-//! préférence qu'on range.
+//! This file is written **from the interface thread**, which departs from
+//! "`src/ui/` never does I/O". That is `settings.rs`'s precedent and the same
+//! reason: a few kilobytes written once every half second are not worth a
+//! round trip through the protocol. The rule targets git commands, whose
+//! fastest already costs a frame, not the preference being put away.
 //!
-//! Comme les réglages, tout y est optionnel (`#[serde(default)]`) : un champ
-//! ajouté ne casse pas un fichier déjà écrit, et un fichier illisible n'empêche
-//! jamais de démarrer.
+//! Like the settings, everything here is optional (`#[serde(default)]`): an
+//! added field does not break a file already written, and an unreadable file
+//! never prevents startup.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -26,58 +25,57 @@ use serde::{Deserialize, Serialize};
 
 use crate::ui::notes::Note;
 
-/// Même délai que les réglages : assez court pour qu'une fermeture brutale ne
-/// perde rien de visible, assez long pour qu'un glissement de souris n'écrive
-/// pas un fichier par image.
+/// The same delay as the settings: short enough that an abrupt shutdown loses
+/// nothing visible, long enough that a mouse drag does not write one file per
+/// frame.
 const SAVE_DELAY: Duration = Duration::from_millis(500);
 
-/// Ce qui survit au redémarrage pour un checkout donné.
+/// What survives a restart for a given checkout.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorktreeState {
-    /// Dépôt principal dont ce checkout dépend.
+    /// The main repository this checkout belongs to.
     ///
-    /// Il ne sert qu'à la purge, et il lui est indispensable : sans lui, une
-    /// entrée absente de la liste des worktrees d'un dépôt qu'on vient
-    /// d'ouvrir ne se distingue pas d'une entrée appartenant à un dépôt qu'on
-    /// n'a pas encore ouvert — et l'oublier reviendrait à effacer les notes
-    /// d'un worktree bien vivant.
+    /// It only serves the purge, and is indispensable to it: without it, an
+    /// entry missing from the worktree list of a repository just opened cannot
+    /// be told from an entry belonging to a repository not yet opened — and
+    /// forgetting it would erase the notes of a perfectly live worktree.
     pub repo: PathBuf,
-    /// Base de comparaison de la revue de branche. Le choix est propre au
-    /// worktree, et le réapprendre à chaque lancement était le manque que ce
-    /// magasin comble en premier.
+    /// The branch review's comparison base. The choice belongs to the
+    /// worktree, and relearning it on every launch was the first gap this
+    /// store filled.
     pub base: Option<String>,
-    /// Dossiers repliés dans la liste de revue.
+    /// Folders collapsed in the review list.
     ///
-    /// Un `Vec` et non un `HashSet` : c'est la forme que JSON sait écrire, et
-    /// la vue en refait un ensemble à la lecture.
+    /// A `Vec` and not a `HashSet`: that is the shape JSON can write, and the
+    /// view turns it back into a set on load.
     pub collapsed: Vec<PathBuf>,
-    /// Notes de relecture d'un fichier d'état antérieur, et rien d'autre.
+    /// Review notes from an earlier state file, and nothing else.
     ///
-    /// Elles vivent désormais dans un dossier de fichiers Markdown : ce champ
-    /// n'existe que pour les y verser une fois, à l'arrivée du dossier, après
-    /// quoi il est vidé. Rien ne l'écrit plus.
+    /// They now live in a folder of Markdown files: this field exists only to
+    /// pour them in once, when the folder arrives, after which it is emptied.
+    /// Nothing writes it any more.
     pub notes: Vec<Note>,
-    /// Prochain identifiant de note. Il ne se déduit pas de `notes` : une note
-    /// supprimée libérerait son numéro, et une note envoyée à l'agent y serait
-    /// désignée par un numéro qui vaudrait pour une autre.
+    /// The next note id. It cannot be derived from `notes`: a deleted note
+    /// would free its number, and a note already sent to the agent is referred
+    /// to there by a number that would then mean another one.
     pub next_note: u64,
 }
 
-/// Ce qui survit au redémarrage pour un dépôt, worktrees confondus.
+/// What survives a restart for a repository, worktrees taken together.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RepoState {
-    /// Projet Sentry, qui dépend du dépôt et non du worktree ni du compte.
+    /// The Sentry project, which belongs to the repository, not to the worktree or the account.
     pub sentry_project: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Store {
-    /// Clé : le chemin du checkout, comme partout ailleurs dans Claudhub.
+    /// Key: the checkout path, as everywhere else in Claudhub.
     pub worktrees: HashMap<PathBuf, WorktreeState>,
-    /// Clé : le chemin du dépôt principal.
+    /// Key: the main repository path.
     pub repos: HashMap<PathBuf, RepoState>,
 }
 
@@ -120,22 +118,22 @@ impl Store {
         self.worktrees.get(path)
     }
 
-    /// L'état d'un checkout, créé au besoin.
+    /// A checkout's state, created if needed.
     ///
-    /// Le dépôt est exigé à l'écriture parce que c'est le seul moment où on le
-    /// connaît à coup sûr, et que la purge en dépend.
+    /// The repository is required on write because that is the only moment we
+    /// know it for sure, and the purge depends on it.
     pub fn worktree_mut(&mut self, path: &Path, repo: &Path) -> &mut WorktreeState {
         let state = self.worktrees.entry(path.to_path_buf()).or_default();
         state.repo = repo.to_path_buf();
         state
     }
 
-    /// Oublie les checkouts d'un dépôt qui n'existent plus.
+    /// Forgets the checkouts of a repository that no longer exist.
     ///
-    /// Appelée quand git vient d'énumérer les worktrees : c'est le seul moment
-    /// où la liste est sûre. Les entrées d'un autre dépôt — et celles écrites
-    /// avant que le champ `repo` existe, dont le dépôt est vide — sont
-    /// laissées intactes : mieux vaut une entrée morte qu'une note effacée.
+    /// Called when git has just enumerated the worktrees: that is the only
+    /// moment the list is certain. Entries from another repository — and those
+    /// written before the `repo` field existed, whose repository is empty — are
+    /// left untouched: a dead entry is better than an erased note.
     pub fn forget_missing(&mut self, repo: &Path, alive: &[PathBuf]) {
         self.worktrees.retain(|path, state| {
             state.repo.as_os_str().is_empty() || state.repo != repo || alive.contains(path)
@@ -147,15 +145,15 @@ impl Store {
 
 pub struct StateStore {
     store: Store,
-    /// Vrai quand une écriture différée est déjà programmée : les
-    /// modifications suivantes s'y agrègent au lieu d'en programmer une autre.
+    /// True when a deferred write is already scheduled: later changes join it
+    /// instead of scheduling another.
     saving: bool,
 }
 
 impl gpui::Global for StateStore {}
 
 impl Store {
-    /// Installe l'état chargé. À appeler une fois, au démarrage.
+    /// Installs the loaded state. To be called once, at startup.
     pub fn init_global(self, cx: &mut App) {
         cx.set_global(StateStore {
             store: self,
@@ -167,11 +165,10 @@ impl Store {
         &cx.global::<StateStore>().store
     }
 
-    /// Modifie l'état et programme son écriture.
+    /// Changes the state and schedules its write.
     ///
-    /// Aucun effet de bord visible, contrairement aux réglages : rien ici ne
-    /// porte de police ni de thème, et la vue qui appelle sait déjà ce qu'elle
-    /// doit réafficher.
+    /// No visible side effect, unlike the settings: nothing here carries a font
+    /// or a theme, and the calling view already knows what it has to redraw.
     pub fn update_global(cx: &mut App, f: impl FnOnce(&mut Store)) {
         let changed = cx.update_global::<StateStore, _>(|store, _| {
             let before = store.store.clone();
@@ -203,7 +200,7 @@ fn schedule_save(cx: &mut App) {
     .detach();
 }
 
-/// Où l'état est rangé, à côté des réglages et de la disposition.
+/// Where the state is kept, beside the settings and the layout.
 fn state_path() -> Option<PathBuf> {
     crate::ui::settings::config_dir().map(|dir| dir.join("state.json"))
 }
@@ -214,9 +211,9 @@ mod tests {
 
     #[test]
     fn missing_keys_take_their_defaults() {
-        // Un fichier écrit par une version qui ignorait les notes doit
-        // continuer de se charger — c'est le cas de tous ceux déjà sur le
-        // disque des utilisateurs dès qu'on ajoute un champ.
+        // A file written by a version that knew nothing of notes must keep
+        // loading — which is the case for every file already on a user's disk
+        // as soon as we add a field.
         let store: Store =
             serde_json::from_str(r#"{"worktrees":{"/w":{"base":"origin/main"}}}"#).unwrap();
         let state = store.worktree(Path::new("/w")).unwrap();
@@ -243,12 +240,12 @@ mod tests {
         let mut store = Store::default();
         store.worktree_mut(Path::new("/r/a"), Path::new("/r")).base = Some("dev".into());
         store.worktree_mut(Path::new("/r/b"), Path::new("/r")).base = Some("dev".into());
-        // Un autre dépôt, qui n'est pas concerné par cette énumération.
+        // Another repository, not concerned by this enumeration.
         store
             .worktree_mut(Path::new("/other/a"), Path::new("/other"))
             .base = Some("main".into());
-        // Et une entrée écrite avant que le dépôt soit retenu : on ne sait pas
-        // à qui elle appartient, donc on n'y touche pas.
+        // And an entry written before the repository was recorded: we do not
+        // know whom it belongs to, so we leave it alone.
         store.worktrees.insert(
             PathBuf::from("/legacy"),
             WorktreeState {

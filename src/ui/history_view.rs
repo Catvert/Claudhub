@@ -1,11 +1,10 @@
-//! Le panneau d'historique et son graphe.
+//! The history panel and its graph.
 //!
-//! Le graphe est dessiné, pas écrit en caractères : une courbe rend le
-//! rattachement d'une branche lisible d'un coup d'œil là où un `|/` demande
-//! d'être déchiffré. Chaque ligne peint sa propre portion — les traits qui la
-//! traversent, ceux qui s'y referment, ceux qui en partent — ce qui permet à
-//! la liste de rester virtualisée : une ligne se dessine sans rien savoir de
-//! celles qu'on ne voit pas.
+//! The graph is drawn, not written in characters: a curve makes a branch's
+//! attachment readable at a glance where a `|/` has to be deciphered. Each row
+//! paints its own portion — the lines crossing it, those closing on it, those
+//! leaving it — which is what lets the list stay virtualised: a row draws
+//! without knowing anything about the ones out of sight.
 
 use std::rc::Rc;
 
@@ -25,22 +24,21 @@ use crate::runtime::Cmd;
 use crate::tr;
 use crate::ui::app::{ClaudhubApp, History};
 
-/// Largeur d'une colonne du graphe.
+/// Width of one graph column.
 const LANE: Pixels = px(14.);
-// La hauteur d'une ligne se déduit de la taille du texte
-// (`theme::row_height`) : la liste réserve la hauteur d'un seul élément et ne
-// mesure rien, si bien qu'une ligne trop haute recouvre la suivante dès qu'on
-// grossit la police.
+// A row's height follows from the text size (`theme::row_height`): the list
+// reserves the height of a single element and measures nothing, so a row that
+// is too tall covers the next one as soon as the font grows.
 const DOT: Pixels = px(7.);
 const STROKE: Pixels = px(1.5);
-/// Nombre de commits demandés. Au-delà, l'historique se lit par recherche, pas
-/// par défilement — et un `git log` sans limite sur un dépôt ancien coûte des
-/// secondes pour des lignes que personne n'atteindra.
+/// Number of commits asked for. Beyond that, history is read by search, not by
+/// scrolling — and an unbounded `git log` on an old repository costs seconds
+/// for rows nobody will reach.
 const LIMIT: usize = 2_000;
 
-/// Couleur d'une colonne. Les teintes tournent pour que deux branches
-/// voisines ne se confondent pas ; elles n'ont pas d'autre sens, git n'ayant
-/// aucune notion d'identité de branche au niveau d'un commit.
+/// A column's colour. The hues rotate so two neighbouring branches are not
+/// confused; they have no other meaning, git having no notion of branch
+/// identity at commit level.
 fn lane_color(column: usize, cx: &gpui::App) -> Hsla {
     const HUES: [f32; 6] = [0.58, 0.35, 0.08, 0.78, 0.14, 0.95];
     let theme = cx.theme();
@@ -53,7 +51,7 @@ fn lane_color(column: usize, cx: &gpui::App) -> Hsla {
 }
 
 impl ClaudhubApp {
-    /// Charge l'historique du worktree courant s'il ne l'est pas déjà.
+    /// Loads the current worktree's history if it is not loaded already.
     pub(super) fn ensure_history(&mut self, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
@@ -85,9 +83,9 @@ impl ClaudhubApp {
             return;
         }
         state.history_range = range.clone();
-        // L'historique précédent est jeté tout de suite : le garder le temps du
-        // chargement donnerait l'impression que le bouton n'a rien fait, puis
-        // que la liste change toute seule.
+        // The previous history is thrown away at once: keeping it while loading
+        // would give the impression that the button did nothing, then that the
+        // list changes by itself.
         state.history = None;
         state.history_pending = true;
         self.git.send(Cmd::LoadHistory {
@@ -98,7 +96,7 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Affiche le diff d'un commit.
+    /// Shows a commit's diff.
     pub(super) fn open_commit(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
@@ -114,8 +112,8 @@ impl ClaudhubApp {
         };
 
         state.commit = Some(commit.id.clone());
-        // Le premier parent : c'est la comparaison qu'attend un relecteur
-        // devant un merge, celle qui montre ce que la fusion a apporté.
+        // The first parent: it is the comparison a reviewer expects in front of
+        // a merge, the one showing what the merge brought in.
         let range = DiffRange::Commit {
             id: commit.id.clone(),
             parent: commit.parents.first().cloned(),
@@ -124,8 +122,8 @@ impl ClaudhubApp {
         state.selected = None;
         state.diff = None;
         state.diff_selection = None;
-        // Les diffs d'un autre commit n'ont plus d'usage : les garder ferait
-        // enfler l'état d'un domaine par commit consulté.
+        // Another commit's diffs are of no further use: keeping them would
+        // swell the state by one range per commit looked at.
         state
             .files
             .retain(|kept, _| !matches!(kept, DiffRange::Commit { .. }));
@@ -136,20 +134,20 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Un commit correspond-il à la requête ? Son sujet, son auteur, son
-    /// abrégé : les trois choses par lesquelles on retrouve un commit.
+    /// Does a commit match the query? Its subject, its author, its short hash:
+    /// the three things a commit is found by.
     pub(super) fn commit_matches(commit: &crate::git::Commit, query: &str) -> bool {
         crate::ui::find::matches(query, &commit.summary)
             || crate::ui::find::matches(query, &commit.author)
             || crate::ui::find::matches(query, &commit.short)
     }
 
-    /// Sélectionne le commit trouvé suivant, et l'amène dans la vue.
+    /// Selects the next matching commit, and brings it into view.
     ///
-    /// Le graphe interdit de filtrer : ses traits relient une ligne à ses
-    /// voisines, et retirer une ligne du milieu ferait pointer chacun d'eux
-    /// sur le mauvais commit. La recherche éteint donc ce qui ne correspond
-    /// pas, et cette touche va d'une trouvaille à la suivante.
+    /// The graph forbids filtering: its lines join a row to its neighbours, and
+    /// removing a row from the middle would make every one of them point at the
+    /// wrong commit. The search therefore dims what does not match, and this key
+    /// goes from one find to the next.
     pub(super) fn step_history_match(&mut self, delta: isize, cx: &mut Context<Self>) {
         let query = self.query(crate::ui::find::Pane::History, cx);
         if query.trim().is_empty() {
@@ -170,8 +168,8 @@ impl ClaudhubApp {
             .and_then(|id| history.commits.iter().position(|c| c.id == id))
             .map(|index| index as isize)
             .unwrap_or(if delta > 0 { -1 } else { count as isize });
-        // La recherche boucle : on cherche à faire le tour de ce qu'on a
-        // trouvé, pas à buter au bout de la liste.
+        // The search wraps: the point is to go round what was found, not to hit
+        // the end of the list.
         for step in 1..=count as isize {
             let index = (from + delta * step).rem_euclid(count as isize) as usize;
             if Self::commit_matches(&history.commits[index], &query) {
@@ -275,11 +273,11 @@ impl ClaudhubApp {
                     uniform_list("history", count, move |visible, _window, cx| {
                         visible
                             .map(|ix| {
-                                // Filtrer est impossible ici : les traits du graphe
-                                // relient une ligne à ses voisines, et en retirer
-                                // une du milieu ferait pointer chacun d'eux sur le
-                                // mauvais commit. Ce qui ne correspond pas
-                                // s'éteint donc, et reste à sa place.
+                                // Filtering is impossible here: the graph's
+                                // lines join a row to its neighbours, and
+                                // removing one from the middle would make every
+                                // one of them point at the wrong commit. What
+                                // does not match is dimmed, and stays in place.
                                 let dimmed = !query.is_empty()
                                     && !history
                                         .commits
@@ -305,9 +303,9 @@ impl ClaudhubApp {
             ),
         );
 
-        // Le graphe seul ne dit pas ce qu'un commit a touché : la liste de ses
-        // fichiers va dessous, sinon sélectionner un commit n'ouvre que son
-        // premier fichier et les autres restent invisibles.
+        // The graph alone does not say what a commit touched: the list of its
+        // files goes underneath, otherwise selecting a commit opens only its
+        // first file and the others stay invisible.
         let Some(range) = commit_range else {
             return graph.into_any_element();
         };
@@ -329,7 +327,7 @@ fn render_commit(
     gutter: Pixels,
     selected: Option<&str>,
     row_height: Pixels,
-    // Le commit ne correspond pas à la recherche en cours.
+    // The commit does not match the running search.
     dimmed: bool,
     entity: &Entity<ClaudhubApp>,
     cx: &mut gpui::App,
@@ -358,13 +356,13 @@ fn render_commit(
         .items_center()
         .gap_2()
         .pr_2()
-        // Une ligne d'historique tient sur une ligne : sans cela, un sha ou un
-        // nom d'auteur un peu long revient à la ligne, dépasse la hauteur
-        // réservée par la liste virtualisée et recouvre le résumé du commit.
+        // A history row fits on one line: without this, a slightly long sha or
+        // author name wraps, exceeds the height the virtualised list reserved
+        // and covers the commit's summary.
         .overflow_hidden()
         .whitespace_nowrap()
-        // Éteint plutôt que masqué : la ligne garde sa place, donc le graphe
-        // garde ses traits.
+        // Dimmed rather than hidden: the row keeps its place, so the graph keeps
+        // its lines.
         .when(dimmed, |el| el.opacity(0.35))
         .cursor_pointer()
         .when(is_selected, |el| el.bg(accent))
@@ -376,8 +374,8 @@ fn render_commit(
         .child(
             div()
                 .flex_none()
-                // Dix caractères de chasse fixe : la longueur que git donne à
-                // `%h` sur un dépôt de cette taille, plus une marge.
+                // Ten fixed-pitch characters: the length git gives `%h` on a
+                // repository this size, plus a margin.
                 .w(px(84.))
                 .font_family(cx.theme().mono_font_family.clone())
                 .text_xs()
@@ -423,10 +421,10 @@ fn render_commit(
         .into_any_element()
 }
 
-/// Peint la portion de graphe d'une ligne.
+/// Paints a row's portion of the graph.
 ///
-/// Les traits sont dessinés avant la puce pour qu'elle les recouvre : une
-/// courbe qui arrive sur un commit doit disparaître sous lui, pas le traverser.
+/// The lines are drawn before the bullet so it covers them: a curve arriving on
+/// a commit must disappear under it, not cross it.
 fn paint_graph(row: &GraphRow, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut gpui::App) {
     let x = |column: usize| bounds.origin.x + LANE * column as f32 + LANE / 2.;
     let top = bounds.origin.y;
@@ -437,10 +435,9 @@ fn paint_graph(row: &GraphRow, bounds: Bounds<Pixels>, window: &mut Window, cx: 
         let mut path = PathBuilder::stroke(STROKE);
         path.move_to(from);
         match ctrl {
-            // Une courbe dont le point de contrôle est à l'aplomb du départ :
-            // le trait quitte sa colonne verticalement puis s'infléchit, ce qui
-            // donne le raccord doux des visualiseurs d'historique plutôt qu'un
-            // angle vif.
+            // A curve whose control point is directly above the start: the line
+            // leaves its column vertically then bends, which gives the soft
+            // join of history viewers rather than a sharp angle.
             Some(ctrl) => path.curve_to(to, ctrl),
             None => path.line_to(to),
         }
@@ -449,7 +446,7 @@ fn paint_graph(row: &GraphRow, bounds: Bounds<Pixels>, window: &mut Window, cx: 
         }
     };
 
-    // Les branches qui ne font que passer.
+    // The branches that only pass through.
     for &column in &row.through {
         let color = lane_color(column, cx);
         line(
@@ -460,10 +457,10 @@ fn paint_graph(row: &GraphRow, bounds: Bounds<Pixels>, window: &mut Window, cx: 
         );
     }
 
-    // Le trait vertical du commit lui-même : depuis le haut s'il a un enfant
-    // au-dessus, vers le bas s'il a un parent en dessous. On les dessine dans
-    // tous les cas : la première et la dernière ligne se contentent d'un demi
-    // segment, ce qui est exactement ce qu'on veut voir aux extrémités.
+    // The commit's own vertical line: from the top if it has a child above,
+    // towards the bottom if it has a parent below. Both are drawn in every
+    // case: the first and the last row simply get half a segment, which is
+    // exactly what we want to see at the ends.
     let own = lane_color(row.column, cx);
     line(
         gpui::point(x(row.column), top),
@@ -472,8 +469,8 @@ fn paint_graph(row: &GraphRow, bounds: Bounds<Pixels>, window: &mut Window, cx: 
         own,
     );
 
-    // Les rails qui se referment sur ce commit : ils descendent de leur colonne
-    // et rejoignent la puce.
+    // The lanes that close on this commit: they come down from their column and
+    // join the bullet.
     for &column in &row.incoming {
         let color = lane_color(column, cx);
         line(
@@ -484,7 +481,7 @@ fn paint_graph(row: &GraphRow, bounds: Bounds<Pixels>, window: &mut Window, cx: 
         );
     }
 
-    // Les parents placés ailleurs : le trait part de la puce vers leur colonne.
+    // The parents placed elsewhere: the line goes from the bullet to their column.
     for &column in &row.outgoing {
         let color = lane_color(column, cx);
         line(
@@ -495,7 +492,7 @@ fn paint_graph(row: &GraphRow, bounds: Bounds<Pixels>, window: &mut Window, cx: 
         );
     }
 
-    // La puce, en dernier pour couvrir les traits qui l'atteignent.
+    // The bullet, last so it covers the lines reaching it.
     let radius = DOT / 2.;
     window.paint_quad(gpui::fill(
         Bounds::new(

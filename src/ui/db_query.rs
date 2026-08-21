@@ -1,32 +1,31 @@
-//! La console SQL.
+//! The SQL console.
 //!
-//! Un éditeur en haut, le résultat en dessous : c'est la console de PhpStorm,
-//! et c'est la forme qu'ont toutes celles qu'on a déjà sous les doigts.
+//! An editor at the top, the result underneath: it is PhpStorm's console, and it
+//! is the shape of every one already under our fingers.
 //!
-//! **Elle prend la place du diff**, comme l'éditeur intégré et pour la même
-//! raison : on regarde l'un *ou* l'autre, et un onglet de plus dans le centre
-//! serait un aller-retour à chaque requête. C'est aussi ce qui la rend
-//! atteignable — le dock de gpui-component ne sait pas activer un onglet
-//! depuis le code (`TabPanel::set_active_ix` est privé), si bien qu'un
-//! panneau à elle se serait ouvert sans se montrer.
+//! **It takes the diff's place**, like the built-in editor and for the same
+//! reason: one looks at one *or* the other, and one more tab in the centre would
+//! be a round trip on every query. It is also what makes it reachable —
+//! gpui-component's dock cannot activate a tab from code
+//! (`TabPanel::set_active_ix` is private), so a panel of its own would have
+//! opened without showing itself.
 //!
-//! **Une seule console à la fois.** Zed en ouvre une par onglet ; ici la place
-//! centrale est unique, et deux consoles superposées demanderaient une barre
-//! d'onglets à nous. Ouvrir une console sur une autre table remplace la
-//! précédente, dont la requête est de toute façon dans l'historique de
-//! l'éditeur.
+//! **One console at a time.** Zed opens one per tab; here the central slot is
+//! unique, and two stacked consoles would need a tab bar of our own. Opening a
+//! console on another table replaces the previous one, whose query is in the
+//! editor's history anyway.
 //!
-//! ## La fenêtre de résultats
+//! ## The result window
 //!
-//! Ce qui est affiché n'est pas « la page *n* » mais une **fenêtre** sur le
-//! résultat : elle commence à `offset`, elle compte `shown` lignes, et elle
-//! **grandit** quand le défilement atteint le bas (`load_more`). Les deux
-//! gestes de pagination la déplacent d'un bloc, le défilement la prolonge —
-//! et dans les deux cas c'est le même envoi, à un `offset` différent.
+//! What is displayed is not "page *n*" but a **window** onto the result: it
+//! starts at `offset`, it counts `shown` rows, and it **grows** when scrolling
+//! reaches the bottom (`load_more`). The two paging gestures move it by a block,
+//! scrolling extends it — and in both cases it is the same request, at a
+//! different `offset`.
 //!
-//! C'est ce qui permet de parcourir un million de lignes sans jamais en
-//! charger plus qu'on n'en a lu, et sans le saut de contexte qu'un « page
-//! suivante » impose à l'œil au milieu d'une lecture.
+//! That is what makes it possible to browse a million rows without ever loading
+//! more than has been read, and without the context jump a "next page" imposes
+//! on the eye in the middle of a read.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -57,27 +56,27 @@ use crate::ui::icons::icon;
 use crate::ui::motion::Axes;
 use crate::ui::settings::Settings;
 
-/// Les tailles de fenêtre proposées par la barre.
+/// The window sizes the bar offers.
 ///
-/// Quatre valeurs plutôt qu'un champ de saisie : c'est un ordre de grandeur
-/// qu'on choisit — « de quoi voir », « de quoi chercher » — et non un nombre
-/// qu'on ajuste à l'unité.
+/// Four values rather than an input field: it is an order of magnitude one
+/// chooses — "enough to see", "enough to search" — and not a number adjusted to
+/// the unit.
 const PAGE_SIZES: [usize; 4] = [100, 500, 1_000, 5_000];
 
-/// Le tri demandé à la console : une colonne, un sens.
+/// The sort asked of the console: one column, one direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sort {
-    /// L'indice de la colonne dans le résultat, qui est aussi son rang dans
-    /// l'`ORDER BY` que `db::order_by` écrit.
+    /// The column's index in the result, which is also its rank in the
+    /// `ORDER BY` `db::order_by` writes.
     pub column: usize,
     pub ascending: bool,
 }
 
-/// Un rectangle de cellules, tel que la souris le dessine.
+/// A rectangle of cells, as the mouse draws it.
 ///
-/// **Une ancre et un curseur, et non deux coins ordonnés** : c'est l'ancre
-/// qu'un Maj+clic garde et le curseur qu'il déplace, et les ordonner à la
-/// construction perdrait de quel bout la sélection a commencé.
+/// **An anchor and a cursor, and not two ordered corners**: it is the anchor a
+/// Shift+click keeps and the cursor it moves, and ordering them at construction
+/// would lose which end the selection started from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
     pub anchor: (usize, usize),
@@ -104,69 +103,69 @@ impl Selection {
         self.rows().contains(&row) && self.columns().contains(&column)
     }
 
-    /// Le nombre de cellules, qui décide de la forme de la copie : une seule
-    /// sort telle quelle, plusieurs sortent en colonnes.
+    /// The number of cells, which decides the shape of the copy: a single one
+    /// comes out as it is, several come out in columns.
     fn count(&self) -> usize {
         (self.rows().count()) * (self.columns().count())
     }
 }
 
-/// Ce que la console affiche et ce qu'elle attend.
+/// What the console shows and what it waits for.
 #[derive(Default)]
 pub struct QueryState {
-    /// La connexion de la console, quand il y en a une ouverte. `None` : le
-    /// panneau central montre le diff.
+    /// The console's connection, when one is open. `None`: the central panel
+    /// shows the diff.
     pub connection: Option<db::Connection>,
-    /// La base courante, celle qu'un `USE` choisirait. `None` pour SQLite,
-    /// qui n'en a qu'une.
+    /// The current database, the one a `USE` would choose. `None` for SQLite,
+    /// which has only one.
     pub database: Option<String>,
-    /// La requête telle qu'elle est partie.
+    /// The query as it went out.
     ///
-    /// C'est elle que rejouent la pagination, le tri et l'export, et non le
-    /// texte de l'éditeur : on continue de taper pendant qu'une requête
-    /// tourne, et la suite doit porter sur ce qu'on regarde.
+    /// It is what paging, sorting and exporting replay, and not the editor's
+    /// text: one keeps typing while a query runs, and what follows has to be
+    /// about what is on screen.
     pub sent: Option<String>,
-    /// Le tri demandé, appliqué par le moteur autour de `sent`.
+    /// The sort asked for, applied by the engine around `sent`.
     pub sort: Option<Sort>,
-    /// La requête se laisse trier — voir `db::can_order`. Connu seulement une
-    /// fois les colonnes revenues, d'où sa place ici plutôt qu'à l'envoi.
+    /// The query lets itself be sorted — see `db::can_order`. Only known once
+    /// the columns have come back, hence its place here rather than at send time.
     pub can_sort: bool,
-    /// Le dernier envoi. C'est lui qui identifie la réponse qu'on attend :
-    /// changer de page, trier et prolonger rejouent tous le même texte.
+    /// The last request. It is what identifies the answer being waited for:
+    /// changing page, sorting and extending all replay the same text.
     pub request: u64,
-    /// L'envoi en cours prolonge la fenêtre au lieu de la remplacer.
+    /// The running request extends the window instead of replacing it.
     pub appending: bool,
     pub running: bool,
     pub error: Option<SharedString>,
-    /// Ce que la fenêtre affichée rapporte, pour la barre d'état et la
-    /// pagination. Les lignes, elles, vivent dans le délégué de la table.
+    /// What the displayed window reports, for the status bar and the paging. The
+    /// rows themselves live in the table's delegate.
     pub offset: usize,
     pub shown: usize,
     pub more: bool,
     pub affected: Option<u64>,
     pub has_columns: bool,
     pub elapsed_ms: u64,
-    /// Un export est parti et n'est pas revenu.
+    /// An export has gone out and not come back.
     pub exporting: bool,
 }
 
-/// Les noms que la console sait compléter.
+/// The names the console knows how to complete.
 ///
-/// Rangé derrière un `RefCell` parce que le fournisseur de complétions est un
-/// `Rc<dyn CompletionProvider>` que l'éditeur tient, et qu'il faut pouvoir
-/// remplir après coup — l'indexation d'un schéma arrive plusieurs secondes
-/// après l'ouverture de la console.
+/// Filed behind a `RefCell` because the completion provider is an
+/// `Rc<dyn CompletionProvider>` the editor holds, and it has to be fillable
+/// afterwards — indexing a schema arrives several seconds after the console
+/// opens.
 #[derive(Default)]
 pub struct SchemaIndex {
-    /// La base à laquelle cet index correspond : une console rouverte
-    /// ailleurs ne doit pas proposer les tables de la précédente.
+    /// The database this index corresponds to: a console reopened elsewhere must
+    /// not offer the previous one's tables.
     pub database: Option<String>,
-    /// `(table, colonnes)`, dans l'ordre du schéma.
+    /// `(table, columns)`, in schema order.
     pub tables: Vec<(String, Vec<String>)>,
 }
 
-/// Les mots-clés proposés quand aucun schéma n'est indexé — et à côté des
-/// noms de tables quand il l'est.
+/// The keywords offered when no schema is indexed — and beside the table names
+/// when one is.
 const KEYWORDS: &[&str] = &[
     "SELECT",
     "FROM",
@@ -223,52 +222,49 @@ const KEYWORDS: &[&str] = &[
     "EXPLAIN",
 ];
 
-/// Le résultat d'une requête, tel que la table le lit.
+/// A query's result, as the table reads it.
 ///
-/// Le délégué **est** le résultat : la table de gpui-component demande ses
-/// cellules une par une au fil du défilement, et lui donner autre chose qu'un
-/// accès direct aux lignes ferait une copie par cellule visible et par frame.
+/// The delegate **is** the result: gpui-component's table asks for its cells one
+/// by one as the scrolling goes, and giving it anything other than direct access
+/// to the rows would make one copy per visible cell per frame.
 #[derive(Default)]
 pub struct Results {
     pub rows: db::Rows,
     widths: Vec<gpui::Pixels>,
     mono: Option<gpui::SharedString>,
-    /// Le tri en vigueur, qui décide de la flèche des en-têtes.
+    /// The sort in force, which decides the headers' arrow.
     sort: Option<Sort>,
-    /// Les en-têtes réagissent au clic.
+    /// The headers react to a click.
     sortable: bool,
-    /// Le résultat continue au-delà de la fenêtre : c'est ce qui autorise le
-    /// défilement à en demander la suite.
+    /// The result continues past the window: it is what allows scrolling to ask
+    /// for more of it.
     more: bool,
-    /// Une page est déjà partie. Sans ce garde, chaque frame passée en bas de
-    /// la liste en redemanderait une.
+    /// A page has already gone out. Without this guard, every frame spent at the
+    /// bottom of the list would ask for another.
     loading: bool,
-    /// Le rectangle de cellules sélectionné, s'il y en a un.
+    /// The selected rectangle of cells, if there is one.
     ///
-    /// **La sélection est la nôtre et non celle de la table.** Celle de
-    /// gpui-component ne connaît qu'une cellule (`selected_cell`), or ce
-    /// qu'on copie d'une grille de résultats est presque toujours une colonne
-    /// entière ou un bloc. Deux mécanismes se disputeraient le clic et la
-    /// couleur de fond ; il n'y en a donc qu'un, et `cell_selectable` reste
-    /// éteint.
+    /// **The selection is ours and not the table's.** gpui-component's knows
+    /// only one cell (`selected_cell`), whereas what one copies from a result
+    /// grid is almost always a whole column or a block. Two mechanisms would
+    /// fight over the click and the background colour; there is therefore only
+    /// one, and `cell_selectable` stays off.
     selection: Option<Selection>,
-    /// Un glissement est en cours : les cellules survolées étendent le
-    /// rectangle.
+    /// A drag is under way: the hovered cells extend the rectangle.
     dragging: bool,
-    /// L'application, pour lui reporter un tri ou une demande de suite.
+    /// The application, to report a sort or a request for more to it.
     ///
-    /// **Faible**, comme les panneaux du dock : l'application tient la table,
-    /// et une référence forte fermerait le cycle.
+    /// **Weak**, like the dock's panels: the application holds the table, and a
+    /// strong reference would close the cycle.
     app: Option<WeakEntity<ClaudhubApp>>,
 }
 
-/// Largeur d'une cellule, déduite du contenu.
+/// A cell's width, derived from the content.
 ///
-/// Mesurée sur les cinquante premières lignes seulement : une fenêtre en
-/// compte mille, et la colonne la plus large de la fenêtre n'est pas celle
-/// qu'on regarde. Bornée des deux côtés — une colonne `id` ne doit pas être un
-/// filet, et un `TEXT` de dix mille caractères ne doit pas pousser toutes les
-/// autres hors de vue.
+/// Measured on the first fifty rows only: a window holds a thousand, and the
+/// window's widest column is not the one being looked at. Bounded on both sides
+/// — an `id` column must not be a thread, and a ten-thousand-character `TEXT`
+/// must not push all the others out of sight.
 fn column_width(rows: &db::Rows, index: usize) -> gpui::Pixels {
     let mut chars = rows
         .columns
@@ -301,15 +297,14 @@ impl Results {
         }
     }
 
-    /// Le tri qu'un clic sur `column` demande : croissant, puis décroissant,
-    /// puis plus de tri du tout.
+    /// The sort a click on `column` asks for: ascending, then descending, then
+    /// no sort at all.
     ///
-    /// **La table propose son propre enchaînement et il est ignoré.** Le sien
-    /// part du décroissant, ce qui surprend sur une grille de résultats ; et
-    /// surtout il vit dans son état à elle, que `refresh` reconstruit à partir
-    /// de `column()` à chaque résultat. Une seule des deux mémoires peut faire
-    /// foi, et c'est celle de la console — c'est elle qui décide de la requête
-    /// envoyée.
+    /// **The table offers its own sequence and it is ignored.** Its own starts
+    /// from descending, which is surprising on a result grid; and above all it
+    /// lives in its own state, which `refresh` rebuilds from `column()` on every
+    /// result. Only one of the two memories can be authoritative, and it is the
+    /// console's — it is what decides the query sent.
     fn next_sort(&self, column: usize) -> Option<Sort> {
         match self.sort {
             Some(sort) if sort.column == column && sort.ascending => Some(Sort {
@@ -324,10 +319,10 @@ impl Results {
         }
     }
 
-    /// Un clic pose la sélection, ou l'étend si Maj est enfoncée.
+    /// A click sets the selection, or extends it if Shift is held.
     ///
-    /// Le glissement s'arme ici : c'est l'enfoncement qui commence une
-    /// sélection, pas le relâchement — sans quoi on ne pourrait pas la tirer.
+    /// The drag is armed here: it is the press that starts a selection, not the
+    /// release — otherwise it could not be dragged out.
     fn press(&mut self, row: usize, column: usize, extend: bool) {
         self.selection = match (extend, self.selection) {
             (true, Some(selection)) => Some(Selection {
@@ -339,9 +334,8 @@ impl Results {
         self.dragging = true;
     }
 
-    /// Étend la sélection au passage de la souris. Rend vrai si quelque chose
-    /// a bougé — repeindre à chaque pixel parcouru serait du travail pour
-    /// rien.
+    /// Extends the selection as the mouse passes. Returns true if something
+    /// moved — repainting on every pixel crossed would be work for nothing.
     fn drag_to(&mut self, row: usize, column: usize) -> bool {
         let Some(selection) = self.selection.as_mut() else {
             return false;
@@ -353,7 +347,7 @@ impl Results {
         true
     }
 
-    /// Tout le résultat chargé, coin à coin.
+    /// The whole loaded result, corner to corner.
     fn select_all(&mut self) {
         let (rows, columns) = (self.rows.rows.len(), self.rows.columns.len());
         self.selection = match (rows, columns) {
@@ -365,12 +359,11 @@ impl Results {
         };
     }
 
-    /// Le texte de ce qui est sélectionné, prêt pour le presse-papiers.
+    /// The text of what is selected, ready for the clipboard.
     ///
-    /// **Une cellule seule sort telle quelle** : c'est un identifiant qu'on
-    /// va coller dans une autre requête, pas un tableau — l'encadrer de
-    /// guillemets serait une corvée de plus à chaque collage. Plusieurs
-    /// cellules sortent en colonnes séparées par des tabulations.
+    /// **A single cell comes out as it is**: it is an identifier that will be
+    /// pasted into another query, not a table — quoting it would be one more
+    /// chore on every paste. Several cells come out in tab-separated columns.
     fn selected_text(&self, headers: bool) -> Option<String> {
         let selection = self.selection?;
         if !headers && selection.count() == 1 {
@@ -393,7 +386,7 @@ impl Results {
         Some(out)
     }
 
-    /// Tout le résultat chargé, en-tête compris.
+    /// The whole loaded result, header included.
     fn all_text(&self) -> String {
         let mut out = db::tsv_line(self.rows.columns.iter().map(|name| Some(name.as_str())));
         for row in &self.rows.rows {
@@ -402,8 +395,8 @@ impl Results {
         out
     }
 
-    /// Une ligne entière, en-tête compris — c'est ce qu'on relit dans un
-    /// message quand on demande « regarde cet enregistrement ».
+    /// A whole row, header included — it is what gets read back in a message
+    /// when asking "look at this record".
     fn row_text(&self, row: usize) -> Option<String> {
         let cells = self.rows.rows.get(row)?;
         let mut out = db::tsv_line(self.rows.columns.iter().map(|name| Some(name.as_str())));
@@ -415,12 +408,12 @@ impl Results {
         self.rows.rows.get(row)?.get(column)?.as_ref()
     }
 
-    /// Reporte un geste de la table à l'application.
+    /// Reports a table gesture to the application.
     ///
-    /// **Différé**, et ce n'est pas une précaution : la table appelle son
-    /// délégué au milieu d'un `update` sur elle-même, et l'application répond
-    /// en remplaçant ce délégué — donc en réempruntant l'entité qu'on est en
-    /// train d'emprunter, ce que gpui refuse par une panique.
+    /// **Deferred**, and that is not a precaution: the table calls its delegate
+    /// in the middle of an `update` on itself, and the application answers by
+    /// replacing that delegate — so by re-borrowing the entity currently
+    /// borrowed, which gpui refuses with a panic.
     fn report(
         &self,
         cx: &mut App,
@@ -452,17 +445,16 @@ impl TableDelegate for Results {
         let column = Column::new(name.clone(), name)
             .width(self.widths.get(index).copied().unwrap_or(px(120.)))
             .resizable(true)
-            // Le rembourrage passe de la colonne à nos éléments : sans cela,
-            // huit pixels de chaque côté d'une cellule ne répondent pas au
-            // clic, et une cellule qu'il faut viser n'est pas une cellule
-            // qu'on sélectionne.
+            // The padding moves from the column to our elements: without that,
+            // eight pixels on each side of a cell do not answer the click, and a
+            // cell that has to be aimed at is not a cell one selects.
             .p_0();
         if !self.sortable {
             return column;
         }
-        // La flèche est peinte à partir d'ici, et `refresh` relit cette
-        // fonction à chaque résultat : c'est ce qui remet l'affichage
-        // d'accord avec le tri réellement envoyé.
+        // The arrow is painted from here, and `refresh` re-reads this function
+        // on every result: that is what brings the display back into line with
+        // the sort actually sent.
         match self.sort {
             Some(sort) if sort.column == index && sort.ascending => column.ascending(),
             Some(sort) if sort.column == index => column.descending(),
@@ -481,11 +473,11 @@ impl TableDelegate for Results {
         self.report(cx, move |this, cx| this.sort_db_query(next, cx));
     }
 
-    /// L'en-tête entier est cliquable, et pas seulement sa petite flèche.
+    /// The whole header is clickable, and not just its little arrow.
     ///
-    /// C'est le geste de DataGrip et de PhpStorm : on vise le nom de la
-    /// colonne. La flèche que la table peint à côté reste le repère de l'état
-    /// et déclenche la même chose.
+    /// It is DataGrip's and PhpStorm's gesture: one aims at the column's name.
+    /// The arrow the table paints beside it stays the state's cue and triggers
+    /// the same thing.
     fn render_th(
         &mut self,
         index: usize,
@@ -528,9 +520,9 @@ impl TableDelegate for Results {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let cell = self.rows.rows.get(row).and_then(|row| row.get(column));
-        // `NULL` est une valeur et non un texte : l'éteindre est ce qui le
-        // distingue de la chaîne « NULL » qu'une colonne peut contenir, et
-        // c'est bien deux choses différentes que le résultat porte.
+        // `NULL` is a value and not a text: dimming it is what tells it from the
+        // string "NULL" a column may contain, and the result really does carry
+        // two different things.
         let (text, null) = match cell {
             Some(Some(value)) => (SharedString::from(value.clone()), false),
             _ => (SharedString::new_static("NULL"), true),
@@ -552,10 +544,10 @@ impl TableDelegate for Results {
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |table, event: &gpui::MouseDownEvent, window, cx| {
-                    // Un clic dans la grille **prend le focus**, comme un clic
-                    // sur une ligne de diff : sans cela le `Ctrl+C` qui suit
-                    // part à qui l'avait — le terminal, l'éditeur de requête —
-                    // et le contexte `ClaudhubQuery` n'est pas dans la pile.
+                    // A click in the grid **takes the focus**, like a click on a
+                    // diff line: without that the `Ctrl+C` that follows goes to
+                    // whoever had it — the terminal, the query editor — and the
+                    // `ClaudhubQuery` context is not in the stack.
                     let focus = table.focus_handle(cx);
                     window.focus(&focus, cx);
                     table
@@ -564,9 +556,9 @@ impl TableDelegate for Results {
                     cx.notify();
                 }),
             )
-            // Le bouton est revérifié à chaque déplacement et pas seulement à
-            // l'enfoncement : un relâchement hors de la fenêtre n'envoie
-            // aucun événement, et la sélection suivrait le curseur après coup.
+            // The button is rechecked on every movement and not only on the
+            // press: a release outside the window sends no event, and the
+            // selection would follow the cursor afterwards.
             .on_mouse_move(
                 cx.listener(move |table, event: &gpui::MouseMoveEvent, _window, cx| {
                     if !table.delegate().dragging {
@@ -581,9 +573,9 @@ impl TableDelegate for Results {
                     }
                 }),
             )
-            // Un clic droit **hors** de la sélection la remplace ; dedans, il
-            // la garde — sans quoi le menu « copier la sélection » copierait
-            // la seule cellule qu'on vient de viser.
+            // A right click **outside** the selection replaces it; inside, it
+            // keeps it — otherwise the "copy selection" menu would copy the one
+            // cell just aimed at.
             .on_mouse_down(
                 gpui::MouseButton::Right,
                 cx.listener(move |table, _event, _window, cx| {
@@ -602,12 +594,12 @@ impl TableDelegate for Results {
             .child(text)
     }
 
-    /// Le menu du clic droit.
+    /// The right-click menu.
     ///
-    /// Il porte ce qu'on fait d'un résultat qu'on regarde : copier ce qu'on a
-    /// sélectionné, la ligne entière, tout, ou l'écrire dans un fichier. Les
-    /// entrées portent toutes une icône — c'est la convention de tous les
-    /// menus de Claudhub, et une seule entrée sans icône décale les autres.
+    /// It carries what one does with a result being looked at: copy what has
+    /// been selected, the whole row, everything, or write it to a file. Every
+    /// entry carries an icon — it is the convention of all Claudhub's menus, and
+    /// a single entry without one shifts the others.
     fn context_menu(
         &mut self,
         row: usize,
@@ -675,7 +667,7 @@ impl TableDelegate for Results {
             .unwrap_or_default()
     }
 
-    /// Le défilement peut demander la suite tant qu'il en reste.
+    /// Scrolling can ask for more as long as there is some left.
     fn has_more(&self, _: &App) -> bool {
         self.more && !self.loading
     }
@@ -690,11 +682,11 @@ impl TableDelegate for Results {
 }
 
 impl ClaudhubApp {
-    /// Ouvre la console sur une connexion, et éventuellement sur une table.
+    /// Opens the console on a connection, and possibly on a table.
     ///
-    /// Une table donne un `SELECT * FROM …` **et le lance** : « interroger
-    /// cette table » qui n'afficherait rien tant qu'on n'a pas trouvé le
-    /// bouton serait un geste à moitié fait.
+    /// A table gives a `SELECT * FROM …` **and runs it**: "query this table"
+    /// showing nothing until the button has been found would be a gesture half
+    /// done.
     pub(super) fn start_db_console(
         &mut self,
         connection: db::Connection,
@@ -703,8 +695,8 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // La console prend la place du diff, donc aussi celle de l'éditeur
-        // intégré : les trois se disputent le même panneau.
+        // The console takes the diff's place, so also the built-in editor's: all
+        // three fight over the same panel.
         self.editing = None;
         let changed =
             self.query.connection.as_ref() != Some(&connection) || self.query.database != database;
@@ -723,24 +715,23 @@ impl ClaudhubApp {
                 db::Engine::Sqlite => format!("\"{table}\""),
                 db::Engine::Mysql => format!("`{table}`"),
             };
-            // Sans `LIMIT` : la fenêtre de résultats en tient déjà lieu, et
-            // une borne écrite dans le texte survivrait à la requête suivante
-            // qu'on écrit par-dessus.
+            // No `LIMIT`: the result window already stands for one, and a bound
+            // written into the text would outlive the query one writes over it.
             let sql = format!("SELECT * FROM {quoted};");
             self.db_query_input.update(cx, |state, cx| {
                 state.set_value(sql, window, cx);
             });
             self.run_db_query(cx);
         }
-        // Ouvrir une console appelle l'écran des bases : le geste vient de
-        // l'arbre des schémas, qui y vit, mais aussi du menu d'une table
-        // ouverte ailleurs.
+        // Opening a console calls up the databases screen: the gesture comes
+        // from the schema tree, which lives there, but also from the menu of a
+        // table opened elsewhere.
         self.enter_workspace(crate::ui::workspace::Workspace::Db, window, cx);
         self.set_panel_visible(crate::ui::panels::ConsolePanel::NAME, true, cx);
         cx.notify();
     }
 
-    /// Referme la console et rend le centre au diff.
+    /// Closes the console and gives the centre back to the diff.
     pub(super) fn close_db_console(&mut self, cx: &mut Context<Self>) {
         self.query = QueryState::default();
         self.set_db_rows(db::Rows::default(), cx);
@@ -751,10 +742,10 @@ impl ClaudhubApp {
         self.query.connection.is_some()
     }
 
-    /// Demande les noms que la console complétera.
+    /// Asks for the names the console will complete.
     ///
-    /// C'est la même commande que celle du panneau : si l'arbre a déjà indexé
-    /// cette base, la réponse remplit les deux.
+    /// It is the same command as the panel's: if the tree has already indexed
+    /// this database, the answer fills both.
     fn index_db_schema(
         &mut self,
         connection: &db::Connection,
@@ -764,8 +755,8 @@ impl ClaudhubApp {
         let database = match (connection.engine, database) {
             (db::Engine::Sqlite, _) => "main".to_string(),
             (db::Engine::Mysql, Some(name)) => name.to_string(),
-            // Sans base choisie, il n'y a pas de schéma à indexer : les
-            // complétions se limitent aux mots-clés.
+            // With no database chosen, there is no schema to index: the
+            // completions are limited to the keywords.
             (db::Engine::Mysql, None) => return,
         };
         self.db_schema.borrow_mut().database = None;
@@ -775,7 +766,7 @@ impl ClaudhubApp {
         });
     }
 
-    /// Range un schéma qui vient d'arriver, s'il est celui de la console.
+    /// Files a schema that has just arrived, if it is the console's.
     pub(super) fn db_schema_indexed(
         &mut self,
         key: &str,
@@ -808,10 +799,10 @@ impl ClaudhubApp {
             .collect();
     }
 
-    /// Lance ce qu'il y a dans l'éditeur.
+    /// Runs whatever is in the editor.
     ///
-    /// Le tri repart de zéro : il porte sur une colonne du résultat, et rien
-    /// ne dit que la nouvelle requête ait la même.
+    /// The sort starts again from scratch: it is about a column of the result,
+    /// and nothing says the new query has the same one.
     pub(super) fn run_db_query(&mut self, cx: &mut Context<Self>) {
         let sql = self.db_query_input.read(cx).value().to_string();
         if sql.trim().is_empty() {
@@ -823,18 +814,17 @@ impl ClaudhubApp {
         self.send_db_query(0, false, cx);
     }
 
-    /// Trie le résultat, ou lui retire son tri.
+    /// Sorts the result, or removes its sort.
     ///
-    /// La fenêtre revient à son début : les lignes qui la remplissaient ne
-    /// sont plus les premières de rien.
+    /// The window goes back to its start: the rows that filled it are no longer
+    /// the first of anything.
     pub(super) fn sort_db_query(&mut self, sort: Option<Sort>, cx: &mut Context<Self>) {
         if !self.query.can_sort || self.query.sort == sort {
             return;
         }
         self.query.sort = sort;
-        // La flèche suit le geste et non la réponse : une requête met parfois
-        // une seconde, et un en-tête qui ne bouge pas se lit comme un clic
-        // perdu.
+        // The arrow follows the gesture and not the answer: a query sometimes
+        // takes a second, and a header that does not move reads as a lost click.
         self.db_table.update(cx, |state, cx| {
             state.delegate_mut().sort = sort;
             state.refresh(cx);
@@ -842,16 +832,16 @@ impl ClaudhubApp {
         self.send_db_query(0, false, cx);
     }
 
-    /// Déplace la fenêtre.
+    /// Moves the window.
     pub(super) fn page_db_query(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.send_db_query(offset, false, cx);
     }
 
-    /// Prolonge la fenêtre : le défilement est arrivé en bas.
+    /// Extends the window: scrolling has reached the bottom.
     pub(super) fn extend_db_rows(&mut self, cx: &mut Context<Self>) {
         if self.query.running || !self.query.more {
-            // La table s'est mise en attente avant de nous appeler ; sans
-            // cela, elle n'en sortirait plus.
+            // The table put itself in a waiting state before calling us; without
+            // this, it would never come out of it.
             self.db_table.update(cx, |state, _| {
                 state.delegate_mut().loading = false;
             });
@@ -861,8 +851,8 @@ impl ClaudhubApp {
         self.send_db_query(next, true, cx);
     }
 
-    /// La requête telle qu'elle part vraiment : celle qu'on a lancée, et le
-    /// tri qu'on a demandé autour.
+    /// The query as it really goes out: the one that was run, and the sort asked
+    /// for around it.
     fn effective_sql(&self) -> Option<String> {
         let sent = self.query.sent.clone()?;
         match self.query.sort {
@@ -894,12 +884,12 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Le résultat d'une requête.
+    /// A query's result.
     ///
-    /// Il est **écarté s'il ne répond pas au dernier envoi** : on relance
-    /// avant que le précédent soit revenu — en changeant de page, en triant,
-    /// en descendant —, et afficher la réponse en retard remplacerait ce qu'on
-    /// regarde par ce qu'on ne regarde plus.
+    /// It is **dropped if it does not answer the last request**: one restarts
+    /// before the previous has come back — by changing page, by sorting, by
+    /// scrolling down — and showing the late answer would replace what is being
+    /// looked at with what is not.
     pub(super) fn db_rows_arrived(
         &mut self,
         request: u64,
@@ -941,11 +931,11 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Remplace le contenu de la table.
+    /// Replaces the table's content.
     ///
-    /// La table est une entité créée une fois : la reconstruire à chaque
-    /// résultat perdrait les largeurs qu'on vient de régler à la souris et
-    /// remettrait le défilement en haut au milieu d'une pagination.
+    /// The table is an entity created once: rebuilding it on every result would
+    /// lose the widths just adjusted with the mouse and would put the scrolling
+    /// back to the top in the middle of paging.
     fn set_db_rows(&mut self, rows: db::Rows, cx: &mut Context<Self>) {
         let results = Results::new(rows, &self.query, cx);
         self.db_table.update(cx, |state, cx| {
@@ -954,13 +944,13 @@ impl ClaudhubApp {
         });
     }
 
-    /// Ajoute une page sous celles qu'on regarde.
+    /// Appends a page under the ones being looked at.
     ///
-    /// Les largeurs ne sont **pas** recalculées : elles ont été déduites de la
-    /// première page, et les revoir à chaque prolongement ferait bouger les
-    /// colonnes sous les yeux de qui défile. `refresh` n'est pas appelé non
-    /// plus — il remettrait le défilement en haut, ce qui est exactement le
-    /// contraire de ce qu'on vient de demander.
+    /// The widths are **not** recomputed: they were derived from the first page,
+    /// and revisiting them on every extension would move the columns under the
+    /// eyes of whoever is scrolling. `refresh` is not called either — it would
+    /// put the scrolling back to the top, which is exactly the opposite of what
+    /// was just asked for.
     fn extend_db_table(&mut self, rows: db::Rows, cx: &mut Context<Self>) {
         self.db_table.update(cx, |state, cx| {
             let delegate = state.delegate_mut();
@@ -971,7 +961,7 @@ impl ClaudhubApp {
         });
     }
 
-    /// Sélectionne tout le résultat chargé.
+    /// Selects the whole loaded result.
     pub(super) fn select_whole_db_result(&mut self, cx: &mut Context<Self>) {
         self.db_table.update(cx, |state, cx| {
             state.delegate_mut().select_all();
@@ -979,11 +969,11 @@ impl ClaudhubApp {
         });
     }
 
-    /// Copie ce qui est sélectionné.
+    /// Copies what is selected.
     ///
-    /// Une cellule nulle copie **du vide** et non le mot « NULL » : ce mot est
-    /// la façon dont la grille montre l'absence de valeur, et il ne veut plus
-    /// rien dire une fois collé ailleurs.
+    /// A null cell copies **nothing** and not the word "NULL": that word is how
+    /// the grid shows the absence of a value, and it means nothing once pasted
+    /// elsewhere.
     pub(super) fn copy_db_selection(&mut self, headers: bool, cx: &mut Context<Self>) {
         let Some(text) = self.db_table.read(cx).delegate().selected_text(headers) else {
             return;
@@ -991,7 +981,7 @@ impl ClaudhubApp {
         self.put_on_clipboard(text, cx);
     }
 
-    /// Copie une ligne entière, avec les noms de colonnes au-dessus.
+    /// Copies a whole row, with the column names above it.
     pub(super) fn copy_db_row(&mut self, row: usize, cx: &mut Context<Self>) {
         let Some(text) = self.db_table.read(cx).delegate().row_text(row) else {
             return;
@@ -999,8 +989,8 @@ impl ClaudhubApp {
         self.put_on_clipboard(text, cx);
     }
 
-    /// Copie tout le résultat **chargé** — pas tout le résultat de la
-    /// requête, qui est ce que l'export écrit.
+    /// Copies the whole **loaded** result — not the query's whole result, which
+    /// is what the export writes.
     pub(super) fn copy_db_all(&mut self, cx: &mut Context<Self>) {
         let table = self.db_table.read(cx);
         if table.delegate().rows.columns.is_empty() {
@@ -1010,11 +1000,11 @@ impl ClaudhubApp {
         self.put_on_clipboard(text, cx);
     }
 
-    /// `Ctrl+C` : la sélection s'il y en a une, tout sinon.
+    /// `Ctrl+C`: the selection if there is one, everything otherwise.
     ///
-    /// Copier tout faute de sélection est ce que fait déjà la vue de diff :
-    /// sur une grille de résultats le geste n'a pas d'autre sens, et refuser
-    /// d'agir serait un refus poli sans raison.
+    /// Copying everything for want of a selection is already what the diff view
+    /// does: on a result grid the gesture has no other meaning, and refusing to
+    /// act would be a polite refusal for no reason.
     pub(super) fn copy_db_result(&mut self, cx: &mut Context<Self>) {
         if self.db_table.read(cx).delegate().selection.is_some() {
             self.copy_db_selection(false, cx);
@@ -1029,10 +1019,10 @@ impl ClaudhubApp {
         self.announce(tr!("db-copied", { n: lines }), cx);
     }
 
-    /// Demande où écrire, puis lance l'export.
+    /// Asks where to write, then starts the export.
     ///
-    /// Le sélecteur natif est asynchrone, d'où le `spawn` : c'est le même
-    /// chemin que l'ouverture d'un dépôt.
+    /// The native picker is asynchronous, hence the `spawn`: it is the same path
+    /// as opening a repository.
     pub(super) fn export_db_csv(&mut self, cx: &mut Context<Self>) {
         if self.query.exporting || self.query.sent.is_none() {
             return;
@@ -1061,11 +1051,10 @@ impl ClaudhubApp {
         else {
             return;
         };
-        // Le fichier est choisi ici et écrit par le worker : sous Windows,
-        // c'est donc l'un des rares endroits où un chemin entre par ce
-        // monde-ci et doit ressortir dans celui du serveur. Un dossier que la
-        // distribution n'atteint pas — un partage réseau — est refusé plutôt
-        // qu'exporté nulle part.
+        // The file is chosen here and written by the worker: on Windows, this is
+        // therefore one of the few places where a path enters from this world
+        // and has to come out in the server's. A folder the distribution cannot
+        // reach — a network share — is refused rather than exported nowhere.
         let path = if cfg!(windows) {
             match crate::wslpath::for_server(&path) {
                 Some(path) => path,
@@ -1087,8 +1076,8 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Un export est revenu. Le chemin est dit en entier : c'est la seule
-    /// chose qu'on ait à retenir pour le retrouver.
+    /// An export has come back. The path is given in full: it is the only thing
+    /// one needs to remember to find it again.
     pub(super) fn db_exported(
         &mut self,
         path: std::path::PathBuf,
@@ -1098,10 +1087,10 @@ impl ClaudhubApp {
         self.query.exporting = false;
         match rows {
             Ok(count) => {
-                // Le serveur rend le chemin qu'il a écrit, donc un chemin
-                // Linux : on le rend à l'utilisateur dans le monde où il l'a
-                // choisi, sans quoi il lirait `/mnt/c/…` d'un fichier qu'il
-                // ira chercher dans son explorateur.
+                // The server returns the path it wrote, so a Linux path: we give
+                // it back to the user in the world they chose it in, otherwise
+                // they would read `/mnt/c/…` of a file they will go looking for
+                // in their explorer.
                 let path = if cfg!(windows) {
                     let distro = crate::ui::settings::Settings::global(cx).wsl_distro.clone();
                     crate::wslpath::to_windows(&path, &distro)
@@ -1132,17 +1121,16 @@ impl ClaudhubApp {
         let results = self.render_db_results(window, cx);
         v_flex()
             .id("db-console")
-            // Le contexte de la console : c'est lui qui donne `Ctrl+Entrée` à
-            // la requête plutôt qu'au commit, et `Ctrl+C` à la grille plutôt
-            // qu'au diff.
+            // The console's context: it is what gives `Ctrl+Enter` to the query
+            // rather than to the commit, and `Ctrl+C` to the grid rather than to
+            // the diff.
             .key_context(crate::ui::shortcuts::query_context())
             .size_full()
             .child(bar)
             .child(
-                // L'éditeur et la grille se partagent la hauteur, et le
-                // partage se règle : on écrit une requête de vingt lignes,
-                // puis on lit trois cents lignes de résultat, et aucune
-                // proportion figée ne convient aux deux.
+                // The editor and the grid share the height, and the share is
+                // adjustable: one writes a twenty-line query, then reads three
+                // hundred rows of result, and no fixed proportion suits both.
                 v_resizable("db-split")
                     .with_state(&split)
                     .child(
@@ -1234,7 +1222,7 @@ impl ClaudhubApp {
             )
     }
 
-    /// Ce que la barre dit de la fenêtre affichée.
+    /// What the bar says about the displayed window.
     fn db_status_text(&self) -> SharedString {
         if self.query.running {
             return tr!("db-running");
@@ -1263,7 +1251,7 @@ impl ClaudhubApp {
         })
     }
 
-    /// Les deux gestes qui déplacent la fenêtre, quand le résultat en dépasse.
+    /// The two gestures that move the window, when the result overflows it.
     fn render_db_pagination(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         if !self.query.has_columns || (self.query.offset == 0 && !self.query.more) {
             return None;
@@ -1309,8 +1297,8 @@ impl ClaudhubApp {
         )
     }
 
-    /// La taille de la fenêtre, qui est un réglage : on la choisit une fois
-    /// pour toutes les consoles, pas à chaque requête.
+    /// The window's size, which is a setting: it is chosen once for every
+    /// console, not on every query.
     fn render_page_size(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = Settings::global(cx).db_page_size.max(1);
         Button::new("db-page-size")
@@ -1355,9 +1343,8 @@ impl ClaudhubApp {
                 .into_any_element()
         };
         if let Some(error) = self.query.error.clone() {
-            // L'erreur du moteur, telle quelle : c'est elle qui dit la ligne
-            // et la colonne fautives, et la reformuler n'apporterait que des
-            // approximations.
+            // The engine's error, as it is: it is what says the offending line
+            // and column, and rewording it would only add approximations.
             return div()
                 .id("db-error")
                 .size_full()
@@ -1382,10 +1369,10 @@ impl ClaudhubApp {
         if self.query.shown == 0 {
             return centered(tr!("db-no-rows"), false, cx);
         }
-        // Le lissage de la molette, comme partout ailleurs : la grille fait
-        // couramment mille lignes, et un cran qui saute trois lignes d'un coup
-        // fait perdre sa place à l'œil. La table peint ses propres barres,
-        // d'où `smoothed` et non `scrolled`.
+        // Wheel smoothing, as everywhere else: the grid routinely runs to a
+        // thousand rows, and a notch jumping three lines at once makes the eye
+        // lose its place. The table paints its own bars, hence `smoothed` and
+        // not `scrolled`.
         let handle = self.db_table.read(cx).vertical_scroll_handle.clone();
         self.smoothed(
             "db-results",
@@ -1399,12 +1386,12 @@ impl ClaudhubApp {
     }
 }
 
-/// Complète les mots-clés SQL, les tables et les colonnes du schéma indexé.
+/// Completes SQL keywords, and the indexed schema's tables and columns.
 ///
-/// **Le fournisseur filtre lui-même** : la liste de gpui-component affiche ce
-/// qu'on lui rend, en surlignant le préfixe, sans rien écarter. Un schéma de
-/// trois cents tables proposerait sinon trois cents lignes à la première
-/// lettre tapée.
+/// **The provider filters itself**: gpui-component's list shows what it is
+/// given, highlighting the prefix, without dropping anything. A three-hundred-
+/// table schema would otherwise offer three hundred rows on the first letter
+/// typed.
 pub struct SqlCompletions {
     pub schema: Rc<RefCell<SchemaIndex>>,
 }
@@ -1420,8 +1407,8 @@ impl CompletionProvider for SqlCompletions {
     ) -> Task<anyhow::Result<CompletionResponse>> {
         let source = text.to_string();
         let offset = offset.min(source.len());
-        // Le mot en cours : ce qui précède le curseur et qui pourrait être un
-        // identifiant. C'est lui que la complétion remplace.
+        // The word in progress: what precedes the cursor and could be an
+        // identifier. It is what the completion replaces.
         let start = source[..offset]
             .char_indices()
             .rev()
@@ -1431,8 +1418,8 @@ impl CompletionProvider for SqlCompletions {
             .unwrap_or(offset);
         let prefix = source[start..offset].to_lowercase();
 
-        // Un identifiant suivi d'un point restreint les candidats aux colonnes
-        // de cette table : `users.` ne propose que ce qu'`users` contient.
+        // An identifier followed by a dot narrows the candidates to that table's
+        // columns: `users.` only offers what `users` contains.
         let qualifier = source[..start].strip_suffix('.').map(|before| {
             before
                 .chars()
@@ -1481,10 +1468,10 @@ impl CompletionProvider for SqlCompletions {
             }
         }
 
-        // Le remplacement est donné explicitement : la plage de repli de
-        // l'éditeur part du premier caractère du mot **déclencheur**, qui
-        // englobe le `users.` d'une colonne qualifiée — on remplacerait la
-        // table par sa colonne.
+        // The replacement is given explicitly: the editor's fallback range
+        // starts at the first character of the **trigger** word, which takes in
+        // the `users.` of a qualified column — the table would be replaced by
+        // its column.
         let range = lsp_types::Range {
             start: text.offset_to_position(start),
             end: text.offset_to_position(offset),
@@ -1516,7 +1503,7 @@ impl CompletionProvider for SqlCompletions {
     }
 }
 
-/// L'état du partage éditeur / résultats, créé une fois avec la fenêtre.
+/// The editor/results split state, created once with the window.
 pub fn split_state(cx: &mut App) -> gpui::Entity<ResizableState> {
     cx.new(|_| ResizableState::default())
 }
@@ -1525,7 +1512,7 @@ pub fn split_state(cx: &mut App) -> gpui::Entity<ResizableState> {
 mod tests {
     use super::*;
 
-    /// Un résultat de trois lignes, dont un nul et une valeur à virgule.
+    /// A three-row result, with one null and one value carrying a comma.
     fn results() -> Results {
         Results {
             rows: db::Rows {
@@ -1557,7 +1544,7 @@ mod tests {
         assert_eq!(selection.count(), 6);
     }
 
-    /// Maj+clic déplace le curseur et garde l'ancre ; un clic nu recommence.
+    /// Shift+click moves the cursor and keeps the anchor; a bare click starts over.
     #[test]
     fn a_shift_click_extends_and_a_plain_click_restarts() {
         let mut results = results();
@@ -1570,21 +1557,21 @@ mod tests {
         assert_eq!(results.selection.unwrap().count(), 1);
     }
 
-    /// Une cellule seule sort telle quelle : c'est une valeur qu'on va coller
-    /// dans une requête, et l'encadrer serait une corvée à chaque collage.
+    /// A single cell comes out as it is: it is a value that will be pasted into
+    /// a query, and quoting it would be a chore on every paste.
     #[test]
     fn a_single_cell_is_copied_raw() {
         let mut results = results();
         results.press(2, 1, false);
         assert_eq!(results.selected_text(false).unwrap(), "c,d@x");
 
-        // Avec les en-têtes, elle redevient un tableau — et la virgule ne se
-        // fait plus encadrer, le presse-papiers séparant par des tabulations.
+        // With the headers it becomes a table again — and the comma is no longer
+        // quoted, the clipboard separating with tabs.
         assert_eq!(results.selected_text(true).unwrap(), "email\nc,d@x\n");
     }
 
-    /// Un bloc sort en colonnes, et une valeur nulle sort vide plutôt que
-    /// sous le mot « NULL » qui n'a de sens que dans la grille.
+    /// A block comes out in columns, and a null value comes out empty rather
+    /// than under the word "NULL", which only means something in the grid.
     #[test]
     fn a_block_is_copied_in_columns_and_null_is_empty() {
         let mut results = results();
@@ -1597,8 +1584,8 @@ mod tests {
         assert_eq!(results.all_text(), results.selected_text(true).unwrap());
     }
 
-    /// Une ligne se copie avec ses noms de colonnes : c'est ce qu'on relit
-    /// dans un message, où « 3, c,d@x, Eve » ne dirait rien.
+    /// A row is copied with its column names: it is what gets read back in a
+    /// message, where "3, c,d@x, Eve" would say nothing.
     #[test]
     fn a_row_is_copied_under_its_headers() {
         let results = results();
@@ -1609,8 +1596,8 @@ mod tests {
         assert!(results.row_text(9).is_none());
     }
 
-    /// Un résultat vide n'a rien à sélectionner : `Ctrl+A` ne doit pas poser
-    /// un rectangle sur zéro cellule, que la copie lirait hors des bornes.
+    /// An empty result has nothing to select: `Ctrl+A` must not lay a rectangle
+    /// over zero cells, which copying would read out of bounds.
     #[test]
     fn there_is_nothing_to_select_in_an_empty_result() {
         let mut results = Results::default();

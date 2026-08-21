@@ -1,16 +1,16 @@
-//! Le client du transport distant : un `claudhub-server` en processus enfant.
+//! The remote transport client: a `claudhub-server` child process.
 //!
-//! `connect` lance l'enfant et rend la même paire que `runtime::spawn` — un
-//! [`Handle`] et un récepteur d'[`Evt`] — si bien que la vue ne sait pas où
-//! les workers vivent. Trois threads font le pont : l'écrivain (file de `Cmd`
-//! → stdin de l'enfant), le lecteur (stdout de l'enfant → canal d'`Evt`), et
-//! le pompier de stderr (→ nos traces).
+//! `connect` launches the child and returns the same pair as `runtime::spawn`
+//! — a [`Handle`] and an [`Evt`] receiver — so the view does not know where
+//! the workers live. Three threads bridge it: the writer (`Cmd` queue → the
+//! child's stdin), the reader (the child's stdout → the `Evt` channel), and
+//! the stderr pump (→ our traces).
 //!
-//! **Rien ici ne bloque l'appelant.** `connect` rend la main dès l'enfant
-//! lancé : un `wsl.exe` froid met des secondes à démarrer, et c'est le thread
-//! d'interface qui appelle. La poignée de main se fait dans le lecteur, qui
-//! la traduit en [`Evt::ServerHello`] — ou en [`Evt::ServerLost`] si les
-//! versions ne s'accordent pas, avec de quoi le dire à l'utilisateur.
+//! **Nothing here blocks the caller.** `connect` returns as soon as the child
+//! is launched: a cold `wsl.exe` takes seconds to start, and it is the
+//! interface thread calling. The handshake happens in the reader, which
+//! translates it into [`Evt::ServerHello`] — or [`Evt::ServerLost`] if the
+//! versions disagree, with something to tell the user.
 
 use std::io::BufRead;
 use std::process::{Command, Stdio};
@@ -18,24 +18,24 @@ use std::process::{Command, Stdio};
 use super::wire::{self, Hello};
 use super::{Cmd, Evt, Handle};
 
-/// La ligne de commande dictée par l'environnement, s'il y en a une.
+/// The command line dictated by the environment, if there is one.
 ///
-/// C'est le levier de test : sous Linux,
-/// `CLAUDHUB_SERVER_CMD=target/debug/claudhub-server` exerce tout le fil sans
-/// Windows ni WSL. Il l'emporte sur la mise en route automatique, ce qui en
-/// fait aussi la sortie de secours quand celle-ci se trompe.
+/// This is the test lever: on Linux,
+/// `CLAUDHUB_SERVER_CMD=target/debug/claudhub-server` exercises the whole wire
+/// without Windows or WSL. It wins over the automatic startup, which also
+/// makes it the escape hatch when that startup gets it wrong.
 pub fn command_from_env() -> Option<Vec<String>> {
     let line = std::env::var("CLAUDHUB_SERVER_CMD").ok()?;
     let parts = crate::cmdline::split_command(&line);
     (!parts.is_empty()).then_some(parts)
 }
 
-/// Installe au besoin le serveur dans la distribution, puis s'y connecte.
+/// Installs the server into the distribution if needed, then connects to it.
 ///
-/// Les deux premières étapes parlent à `wsl.exe` et peuvent durer plusieurs
-/// secondes — une distribution endormie met du temps à s'éveiller, et douze
-/// mégaoctets à copier ne sont pas gratuits. **Jamais depuis le thread
-/// d'interface** : c'est la fenêtre qui serait figée pendant ce temps.
+/// The first two steps talk to `wsl.exe` and can take several seconds — a
+/// sleeping distribution is slow to wake, and twelve megabytes to copy are not
+/// free. **Never from the interface thread**: the window would be frozen for
+/// that whole time.
 pub fn connect_wsl(
     distro: &str,
     cwd: Option<&str>,

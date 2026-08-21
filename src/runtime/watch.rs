@@ -1,14 +1,14 @@
-//! Surveillance des fichiers d'un worktree.
+//! Watching a worktree's files.
 //!
-//! C'est ce qui rend la revue vivante quand le travail se fait ailleurs : un
-//! agent qui écrit dans le terminal intégré, un `git commit` tapé à la main,
-//! un éditeur externe. Sans cela il faudrait appuyer sur « actualiser » après
-//! chaque action, ce qui, dans un outil dont le sujet est justement de
-//! regarder ce qu'un autre processus fabrique, est le mauvais défaut.
+//! This is what keeps the review alive when the work happens elsewhere: an
+//! agent writing in the built-in terminal, a `git commit` typed by hand, an
+//! external editor. Without it you would have to press "refresh" after every
+//! action, which, in a tool whose whole subject is watching what another
+//! process makes, is the wrong default.
 //!
-//! Deux sources d'événements comptent : l'arborescence de travail, et
-//! `.git/HEAD` / `.git/index` — sans ces deux-là, un commit tapé au clavier
-//! laisserait le panneau afficher des fichiers qui ne sont plus modifiés.
+//! Two event sources matter: the working tree, and `.git/HEAD` / `.git/index` —
+//! without those two, a commit typed at the keyboard would leave the panel
+//! showing files that are no longer modified.
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -19,52 +19,49 @@ use std::time::Duration;
 use notify::RecursiveMode;
 use notify_debouncer_full::{new_debouncer, DebouncedEvent};
 
-/// Ce que le thread de surveillance sait faire.
+/// What the watcher thread knows how to do.
 enum Order {
     Watch(PathBuf),
     Unwatch(PathBuf),
-    /// Un dossier seul, sans récursion et sans passer par git : le coffre de
-    /// notes d'un worktree, qui n'est pas un dépôt et dont `ls-files` ne dirait
-    /// rien.
+    /// A folder on its own, without recursion and without going through git:
+    /// a worktree's notes vault, which is not a repository and about which
+    /// `ls-files` would say nothing.
     WatchDir(PathBuf),
     UnwatchDir(PathBuf),
 }
 
-/// Fenêtre de regroupement. Une compilation touche des milliers de fichiers ;
-/// rafraîchir à chaque écriture reviendrait à lancer `git status` en boucle.
-/// Un quart de seconde reste imperceptible et ramène une rafale à un seul
-/// rafraîchissement.
+/// Debounce window. A build touches thousands of files; refreshing on every
+/// write would amount to running `git status` in a loop. A quarter of a second
+/// stays imperceptible and reduces a burst to a single refresh.
 const DEBOUNCE: Duration = Duration::from_millis(250);
 
-/// La façade côté interface : elle ne fait qu'envoyer des ordres.
+/// The interface-side facade: all it does is send orders.
 ///
-/// Poser une surveillance récursive coûte un appel système par dossier — près
-/// d'une demi-seconde sur une arborescence de quarante mille répertoires, ce
-/// qui est une demi-seconde de fenêtre figée si on le fait dans le thread qui
-/// dessine. L'ordre part donc dans un thread dédié et le sélecteur de worktree
-/// rend la main tout de suite.
+/// Setting up a recursive watch costs one system call per folder — nearly half
+/// a second on a tree of forty thousand directories, which is half a second of
+/// frozen window if done in the thread that draws. The order therefore goes
+/// into a dedicated thread and the worktree picker returns immediately.
 pub struct Watcher {
     orders: mpsc::Sender<Order>,
 }
 
 impl Watcher {
-    /// Démarre la surveillance et rend le récepteur des chemins modifiés.
+    /// Starts watching and returns the receiver of changed paths.
     ///
-    /// Ce que le récepteur livre est un **lot** de chemins quelconques sous
-    /// les worktrees surveillés — un lot par fenêtre de regroupement, ce qui
-    /// en fait un seul `Evt` sur le fil ; c'est à l'appelant de rattacher
-    /// chaque chemin au worktree qu'il connaît, lui seul sachant lesquels
-    /// sont ouverts.
+    /// What the receiver delivers is a **batch** of arbitrary paths under the
+    /// watched worktrees — one batch per debounce window, which makes it a
+    /// single `Evt` on the wire; it is up to the caller to attach each path to
+    /// the worktree it knows, being the only one to know which are open.
     pub fn new() -> anyhow::Result<(Self, async_channel::Receiver<Vec<PathBuf>>)> {
-        // Canal async : c'est une tâche gpui qui le draine, et elle ne peut pas
-        // se permettre d'attendre sur un `recv` bloquant.
+        // Async channel: a gpui task drains it, and it cannot afford to wait on
+        // a blocking `recv`.
         let (tx, rx) = async_channel::unbounded::<Vec<PathBuf>>();
         let (raw_tx, raw_rx) = mpsc::channel();
         let mut debouncer = new_debouncer(DEBOUNCE, None, raw_tx)?;
         let (order_tx, order_rx) = mpsc::channel::<Order>();
 
-        // Un thread pour poser et retirer les surveillances, opérations longues
-        // sur une grosse arborescence.
+        // One thread to set up and remove the watches, long operations on a
+        // large tree.
         std::thread::Builder::new()
             .name("claudhub-watch-orders".into())
             .spawn(move || {
@@ -97,12 +94,12 @@ impl Watcher {
                             }
                         }
                         Order::WatchDir(path) => {
-                            // Un dossier qui n'existe pas encore n'est pas une
-                            // erreur : c'est un worktree qu'on n'a pas annoté.
-                            // Il n'entre dans `watched` que si la surveillance
-                            // a réellement été posée, faute de quoi l'ordre
-                            // qu'on renverra après l'avoir créé serait pris
-                            // pour un doublon et ne poserait rien.
+                            // A folder that does not exist yet is not an error:
+                            // it is a worktree that has not been annotated. It
+                            // only enters `watched` if the watch was really set
+                            // up, otherwise the order sent again after creating
+                            // it would be taken for a duplicate and set up
+                            // nothing.
                             if watched.contains(&path) || !path.is_dir() {
                                 continue;
                             }
@@ -122,8 +119,8 @@ impl Watcher {
                 }
             })?;
 
-        // Un thread de traduction : il ne garde d'un lot que les chemins qui
-        // changent quelque chose, dédoublonnés.
+        // A translation thread: from a batch it keeps only the paths that change
+        // something, deduplicated.
         std::thread::Builder::new()
             .name("claudhub-watch".into())
             .spawn(move || {
@@ -146,8 +143,8 @@ impl Watcher {
         Ok((Self { orders: order_tx }, rx))
     }
 
-    /// Surveille un worktree. Appeler deux fois est sans effet, et l'appel rend
-    /// la main immédiatement : le travail se fait ailleurs.
+    /// Watches a worktree. Calling twice has no effect, and the call returns
+    /// immediately: the work happens elsewhere.
     pub fn watch(&self, worktree: &Path) {
         let _ = self.orders.send(Order::Watch(worktree.to_path_buf()));
     }
@@ -156,11 +153,11 @@ impl Watcher {
         let _ = self.orders.send(Order::Unwatch(worktree.to_path_buf()));
     }
 
-    /// Surveille un dossier tel quel, sans récursion.
+    /// Watches a folder as it is, without recursion.
     ///
-    /// C'est ce qu'il faut pour un coffre de notes : ni git, ni sous-dossiers,
-    /// et un seul appel système. Ce qui en revient passe par le même canal —
-    /// l'appelant sait, lui, à quel worktree ce dossier appartient.
+    /// That is what a notes vault needs: no git, no subfolders, and a single
+    /// system call. What comes back goes through the same channel — the caller
+    /// is the one who knows which worktree that folder belongs to.
     pub fn watch_dir(&self, dir: &Path) {
         let _ = self.orders.send(Order::WatchDir(dir.to_path_buf()));
     }
@@ -170,7 +167,7 @@ impl Watcher {
     }
 }
 
-/// Les chemins d'un événement qui méritent un rafraîchissement.
+/// The paths of an event that deserve a refresh.
 fn interesting_paths(event: &DebouncedEvent) -> Vec<PathBuf> {
     if !changes_content(&event.kind) {
         return Vec::new();
@@ -183,18 +180,17 @@ fn interesting_paths(event: &DebouncedEvent) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Vrai pour un événement susceptible de changer ce que `git status` répond.
+/// True for an event likely to change what `git status` answers.
 ///
-/// Le filtre décisif est `Access` : inotify signale chaque **ouverture** de
-/// fichier, et c'est nous qui les ouvrons. `git status` lisait le worktree,
-/// chaque lecture produisait un événement, chaque événement déclenchait un
-/// `git status` — une boucle qui tournait à plein régime, invisible tant que la
-/// liste ne se vidait pas entre deux réponses.
+/// The decisive filter is `Access`: inotify reports every **opening** of a
+/// file, and we are the ones opening them. `git status` read the worktree, each
+/// read produced an event, each event triggered a `git status` — a loop running
+/// flat out, invisible as long as the list did not empty between two answers.
 ///
-/// Les métadonnées sont écartées pour la même raison : une date d'accès ou un
-/// mode qui change ne change rien à ce que git voit. `Any` et `Other` sont
-/// gardés — c'est ainsi que `notify` signale un débordement de sa file, après
-/// lequel on a justement tout à relire.
+/// Metadata is left out for the same reason: an access time or a mode changing
+/// changes nothing of what git sees. `Any` and `Other` are kept — that is how
+/// `notify` reports an overflow of its queue, after which there is precisely
+/// everything to re-read.
 fn changes_content(kind: &notify::EventKind) -> bool {
     use notify::event::{EventKind, ModifyKind};
     match kind {
@@ -205,20 +201,20 @@ fn changes_content(kind: &notify::EventKind) -> bool {
     }
 }
 
-/// Tout ce qui est sous `.git/` est écarté sauf les quelques références dont
-/// la modification change ce que `git status` répond : sans ce filtre, chaque
-/// commande git déclencherait une dizaine de rafraîchissements pour ses
-/// fichiers de verrou, ses journaux et ses objets fraîchement écrits.
+/// Everything under `.git/` is left out except the few references whose change
+/// alters what `git status` answers: without this filter, every git command
+/// would trigger a dozen refreshes for its lock files, its logs and its
+/// freshly written objects.
 fn is_interesting(path: &Path) -> bool {
     let text = path.to_string_lossy();
     let Some(pos) = text.find("/.git/") else {
-        // Hors de `.git/` : c'est du travail, ça compte — y compris un
-        // `Cargo.lock`, qui est un fichier suivi comme un autre.
+        // Outside `.git/`: this is work, it counts — including a `Cargo.lock`,
+        // which is a tracked file like any other.
         return !text.ends_with("/.git");
     };
     let inside = &text[pos + "/.git/".len()..];
-    // Les verrous sont créés puis détruits par toute commande git : ils
-    // annoncent une écriture qui n'a pas encore eu lieu.
+    // Locks are created then destroyed by every git command: they announce a
+    // write that has not happened yet.
     if inside.ends_with(".lock") {
         return false;
     }
@@ -229,40 +225,24 @@ fn is_interesting(path: &Path) -> bool {
         || inside.starts_with("refs/")
 }
 
-/// Les dossiers d'un worktree qui valent la peine d'être surveillés.
+/// True if this path is on a Windows drive mounted by WSL.
 ///
-/// Ce sont ceux que git connaît : les dossiers contenant un fichier suivi, ou
-/// un fichier nouveau qui n'est pas ignoré. C'est `git ls-files` qui les
-/// donne, en une commande et quelques dizaines de millisecondes.
+/// It is the only case where watching fails **silently**: on drvfs (`/mnt/c`,
+/// `/mnt/d`…), `notify` sets up its watches without error and never delivers an
+/// event, because the WSL kernel has nothing to translate — the writes happen
+/// on the Windows side. The whole promise of "the review follows without being
+/// asked" then vanishes in silence, and it is up to the interface to say so.
 ///
-/// Surveiller le worktree en bloc coûterait cent fois plus cher pour rien. Sur
-/// l'application qui a motivé ce filtre, quarante mille répertoires existent
-/// mais sept cent vingt et un contiennent du code : le reste est `vendor/`,
-/// `node_modules/` et surtout `storage/`, que Laravel ne déclare pas ignoré
-/// dossier par dossier et qu'un serveur de développement réécrit sans arrêt.
-/// Chacune de ces écritures produisait un réveil, donc un `git status`, donc
-/// un rechargement de la revue — en boucle.
-///
-/// Vrai si ce chemin est sur un disque Windows monté par WSL.
-///
-/// C'est le seul cas où la surveillance échoue **sans rien dire** : sur drvfs
-/// (`/mnt/c`, `/mnt/d`…), `notify` pose ses surveillances sans erreur et ne
-/// livre jamais un événement, parce que le noyau WSL n'a rien à traduire — les
-/// écritures ont lieu côté Windows. Toute la promesse « la revue suit sans
-/// qu'on lui demande » disparaît alors en silence, et c'est à l'interface de
-/// le dire.
-///
-/// Le repli par sondage serait pire : `git status` y coûte déjà plusieurs fois
-/// ce qu'il coûte sur le système de fichiers Linux, et le lancer sur un
-/// minuteur ferait payer en permanence ce que le déplacement du dépôt vers
-/// `~` supprime d'un coup.
+/// A polling fallback would be worse: `git status` already costs several times
+/// there what it costs on the Linux filesystem, and putting it on a timer would
+/// make you pay permanently for what moving the repository to `~` removes at a
+/// stroke.
 pub fn on_windows_filesystem(path: &Path) -> bool {
     running_under_wsl() && is_windows_mount(path)
 }
 
-/// Le noyau de WSL porte « microsoft » dans sa version, sous WSL1 comme sous
-/// WSL2 ; c'est la façon dont tout le monde le reconnaît, faute d'autre
-/// marqueur stable.
+/// WSL's kernel carries "microsoft" in its version, under WSL1 as under WSL2;
+/// that is how everybody recognises it, for want of another stable marker.
 pub(crate) fn running_under_wsl() -> bool {
     static WSL: OnceLock<bool> = OnceLock::new();
     *WSL.get_or_init(|| {
@@ -272,12 +252,11 @@ pub(crate) fn running_under_wsl() -> bool {
     })
 }
 
-/// `/mnt/c`, `/mnt/d`… — la façon dont WSL monte les lecteurs Windows.
+/// `/mnt/c`, `/mnt/d`… — the way WSL mounts Windows drives.
 ///
-/// La racine d'automontage se configure (`/etc/wsl.conf`), donc la
-/// reconnaissance rate les installations qui l'ont déplacée. C'est assumé :
-/// ce test ne sert qu'à afficher un avertissement, et un avertissement qui
-/// manque vaut mieux qu'un avertissement qui ment.
+/// The automount root is configurable (`/etc/wsl.conf`), so the recognition
+/// misses installations that have moved it. That is accepted: this test only
+/// serves to show a warning, and a missing warning is better than a lying one.
 pub(crate) fn is_windows_mount(path: &Path) -> bool {
     let mut parts = path.components();
     if parts.next() != Some(Component::RootDir) {
@@ -294,14 +273,27 @@ pub(crate) fn is_windows_mount(path: &Path) -> bool {
     }
 }
 
-/// Chaque dossier est surveillé **sans récursion** : ses sous-dossiers sont
-/// déjà dans la liste s'ils contiennent quelque chose, et un dossier créé plus
-/// tard est signalé par son parent, ce qui suffit à déclencher le
-/// rafraîchissement qui le découvrira.
+/// The folders of a worktree worth watching.
 ///
-/// `.git` est ajouté à part : sa racine pour `HEAD` et `index`, et `refs/`
-/// récursivement puisqu'il est petit. Le prendre en entier ramènerait les
-/// milliers de répertoires d'objets.
+/// They are the ones git knows: the folders containing a tracked file, or a new
+/// file that is not ignored. `git ls-files` is what gives them, in one command
+/// and a few tens of milliseconds.
+///
+/// Watching the worktree wholesale would cost a hundred times more for nothing.
+/// On the application that motivated this filter, forty thousand directories
+/// exist but seven hundred and twenty-one contain code: the rest is `vendor/`,
+/// `node_modules/` and above all `storage/`, which Laravel does not declare
+/// ignored folder by folder and which a development server rewrites constantly.
+/// Every one of those writes produced a wake-up, so a `git status`, so a reload
+/// of the review — in a loop.
+///
+/// Each folder is watched **without recursion**: its subfolders are already in
+/// the list if they contain anything, and a folder created later is reported by
+/// its parent, which is enough to trigger the refresh that will discover it.
+///
+/// `.git` is added separately: its root for `HEAD` and `index`, and `refs/`
+/// recursively since it is small. Taking it whole would bring back the
+/// thousands of object directories.
 fn watchable_directories(worktree: &Path) -> Vec<(PathBuf, RecursiveMode)> {
     let mut dirs: Vec<(PathBuf, RecursiveMode)> = Vec::new();
 
@@ -314,7 +306,7 @@ fn watchable_directories(worktree: &Path) -> Vec<(PathBuf, RecursiveMode)> {
             );
             dirs.push((worktree.to_path_buf(), RecursiveMode::NonRecursive));
         }
-        // Sans git sous la main, tout surveiller reste juste, seulement lent.
+        // Without git to hand, watching everything is still correct, only slow.
         None => dirs.push((worktree.to_path_buf(), RecursiveMode::Recursive)),
     }
 
@@ -328,8 +320,7 @@ fn watchable_directories(worktree: &Path) -> Vec<(PathBuf, RecursiveMode)> {
     dirs
 }
 
-/// Les dossiers contenant un fichier que git suit, ou un fichier nouveau qu'il
-/// n'ignore pas.
+/// The folders containing a file git tracks, or a new file it does not ignore.
 fn tracked_directories(worktree: &Path) -> Option<HashSet<PathBuf>> {
     use std::process::{Command, Stdio};
 
@@ -368,12 +359,12 @@ fn tracked_directories(worktree: &Path) -> Option<HashSet<PathBuf>> {
     Some(dirs)
 }
 
-/// Le répertoire git d'un checkout.
+/// A checkout's git directory.
 ///
-/// Dans le dépôt principal c'est `.git/`. Dans un worktree lié, `.git` est un
-/// *fichier* qui pointe vers `<principal>/.git/worktrees/<nom>` : c'est là que
-/// vivent le `HEAD` et l'`index` de ce checkout, et les surveiller au mauvais
-/// endroit revient à ne rien surveiller du tout.
+/// In the main repository it is `.git/`. In a linked worktree, `.git` is a
+/// *file* pointing at `<main>/.git/worktrees/<name>`: that is where this
+/// checkout's `HEAD` and `index` live, and watching them in the wrong place
+/// amounts to watching nothing at all.
 fn git_dir(worktree: &Path) -> Option<PathBuf> {
     let entry = worktree.join(".git");
     if entry.is_dir() {
@@ -394,16 +385,16 @@ fn git_dir(worktree: &Path) -> Option<PathBuf> {
 mod tests {
     use notify::event::{AccessKind, CreateKind, EventKind, MetadataKind, ModifyKind};
 
-    /// Le défaut qui faisait tourner Claudhub en boucle : inotify signale chaque
-    /// ouverture de fichier, `git status` en ouvre des milliers, et chaque
-    /// événement relançait un `git status`.
+    /// The flaw that made Claudhub loop: inotify reports every file opening,
+    /// `git status` opens thousands of them, and each event restarted a `git
+    /// status`.
     #[test]
     fn opening_a_file_is_not_a_change() {
         assert!(!changes_content(&EventKind::Access(AccessKind::Open(
             notify::event::AccessMode::Any
         ))));
         assert!(!changes_content(&EventKind::Access(AccessKind::Read)));
-        // Une date d'accès n'apprend rien non plus à git.
+        // An access time teaches git nothing either.
         assert!(!changes_content(&EventKind::Modify(ModifyKind::Metadata(
             MetadataKind::AccessTime
         ))));
@@ -438,7 +429,7 @@ mod tests {
     fn work_tree_changes_are_interesting() {
         assert!(is_interesting(Path::new("/repo/src/main.rs")));
         assert!(is_interesting(Path::new("/repo/assets/i18n/fr.json")));
-        // Un fichier suivi qui s'appelle `.lock` reste du travail.
+        // A tracked file called `.lock` is still work.
         assert!(is_interesting(Path::new("/repo/Cargo.lock")));
     }
 
@@ -448,7 +439,7 @@ mod tests {
         assert!(is_interesting(Path::new("/repo/.git/index")));
         assert!(is_interesting(Path::new("/repo/.git/refs/heads/main")));
 
-        // Bruit de toute commande git.
+        // Noise from every git command.
         assert!(!is_interesting(Path::new("/repo/.git/index.lock")));
         assert!(!is_interesting(Path::new("/repo/.git/logs/HEAD")));
         assert!(!is_interesting(Path::new("/repo/.git/objects/ab/cdef")));

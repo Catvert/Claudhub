@@ -1,18 +1,18 @@
-//! Embarque le serveur headless dans l'exécutable de l'interface.
+//! Embeds the headless server into the interface executable.
 //!
-//! Sous Windows, les workers tournent dans une distribution WSL2 et il faut y
-//! poser un binaire. Le livrer *à côté* de l'exécutable marchait, mais laissait
-//! deux fichiers dans l'archive dont un que personne ne sait quoi faire — et
-//! rien n'empêchait de garder un vieux serveur à côté d'une interface neuve.
+//! On Windows the workers run inside a WSL2 distribution, which needs a binary
+//! of its own. Shipping it *beside* the executable worked, but left two files
+//! in the archive — one of which nobody knew what to do with — and nothing
+//! stopped an old server from sitting next to a fresh interface.
 //!
-//! `CLAUDHUB_EMBED_SERVER` désigne le binaire à embarquer ; la CI le pose après
-//! avoir construit la cible musl. Sans lui — c'est le cas de tout build de
-//! développement, qui n'a pas croisé-compilé quoi que ce soit — la constante
-//! vaut `None` et `wsl::ensure_installed` retombe sur le fichier voisin.
+//! `CLAUDHUB_EMBED_SERVER` names the binary to embed; CI sets it once the musl
+//! target is built. Without it — the case for every development build, which
+//! has cross-compiled nothing — the constant is `None` and
+//! `wsl::ensure_installed` falls back to the neighbouring file.
 //!
-//! Le chemin est écrit par `{:?}`, qui rend un littéral Rust échappé : sous
-//! Windows il contient des antislashs, et les recopier tels quels donnerait des
-//! séquences d'échappement au milieu du chemin.
+//! The path is written with `{:?}`, which yields an escaped Rust literal: on
+//! Windows it contains backslashes, and copying them verbatim would put escape
+//! sequences in the middle of the path.
 
 use std::path::PathBuf;
 

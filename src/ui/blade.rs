@@ -1,19 +1,19 @@
-//! Coloration des vues Blade.
+//! Highlighting for Blade views.
 //!
-//! Blade n'est pas un langage que tree-sitter connaît : aucune grammaire n'en
-//! est publiée, et la grammaire PHP ne voit dans `@foreach` ou `{{ $x }}` que
-//! du texte HTML. Une vue Blade arrivait donc dans la revue avec ses balises
-//! colorées et tout son propre vocabulaire en gris.
+//! Blade is not a language tree-sitter knows: no grammar is published for it,
+//! and the PHP grammar sees nothing but HTML text in `@foreach` or `{{ $x }}`.
+//! A Blade view therefore arrived in the review with its tags coloured and all
+//! of its own vocabulary in grey.
 //!
-//! La parade est une surcouche : la grammaire PHP colore ce qu'elle sait lire
-//! — HTML, attributs, blocs `<?php` —, puis ce module repasse dessus les
-//! constructions de Blade. C'est un scanner à la main, pas un parseur, ce qui
-//! est assumé : la syntaxe de Blade tient en trois formes, et un parseur
-//! complet coûterait bien plus que ce qu'il rendrait.
+//! The answer is an overlay: the PHP grammar colours what it can read — HTML,
+//! attributes, `<?php` blocks — then this module paints Blade's constructs on
+//! top. It is a hand-written scanner, not a parser, and that is accepted:
+//! Blade's syntax fits in three shapes, and a full parser would cost far more
+//! than it would return.
 //!
-//! Ce que la surcouche reconnaît : les directives (`@if`, `@endforeach`, avec
-//! leur argument entre parenthèses), les échos (`{{ }}`, `{!! !!}`) et les
-//! commentaires (`{{-- --}}`), y compris sur plusieurs lignes.
+//! What the overlay recognises: directives (`@if`, `@endforeach`, with their
+//! parenthesised argument), echoes (`{{ }}`, `{!! !!}`) and comments
+//! (`{{-- --}}`), including across several lines.
 
 use std::ops::Range;
 use std::path::Path;
@@ -23,22 +23,22 @@ use gpui_component::highlighter::HighlightTheme;
 use super::highlight::LineStyles;
 use crate::git::FileDiff;
 
-/// Vrai pour une vue Blade.
+/// True for a Blade view.
 ///
-/// Le nom complet, pas l'extension : `facture.blade.php` a `php` pour
-/// extension, et c'est bien du PHP — mais avec un dialecte en plus.
+/// The full name, not the extension: `invoice.blade.php` has `php` for an
+/// extension, and it really is PHP — but with an extra dialect.
 pub fn is_blade(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.to_ascii_lowercase().ends_with(".blade.php"))
 }
 
-/// Repasse les constructions Blade par-dessus les styles de la grammaire PHP.
+/// Paints Blade's constructs over the PHP grammar's styles.
 pub fn overlay(diff: &FileDiff, theme: &HighlightTheme, styles: &mut [Vec<LineStyles>]) {
     for (h, hunk) in diff.hunks.iter().enumerate() {
-        // L'état des commentaires repart de zéro à chaque hunk : ce qui les
-        // sépare a été élidé, et rien ne dit qu'un `{{--` resté ouvert plus
-        // haut n'a pas été refermé dans le trou.
+        // Comment state starts again from scratch at each hunk: what separates
+        // them has been elided, and nothing says a `{{--` left open above was
+        // not closed inside the gap.
         let mut open_comment = false;
         for (l, line) in hunk.lines.iter().enumerate() {
             let found = scan(&line.text, &mut open_comment);
@@ -50,11 +50,11 @@ pub fn overlay(diff: &FileDiff, theme: &HighlightTheme, styles: &mut [Vec<LineSt
     }
 }
 
-/// Remplace dans `target` ce que la surcouche recouvre.
+/// Replaces in `target` whatever the overlay covers.
 ///
-/// Les styles de la grammaire qui touchent une plage Blade sont retirés plutôt
-/// que superposés : le rendu attend des plages triées et disjointes, et un
-/// mot-clé à moitié recouvert ne veut rien dire de toute façon.
+/// The grammar's styles touching a Blade range are removed rather than layered:
+/// rendering expects sorted, disjoint ranges, and a half-covered keyword means
+/// nothing anyway.
 fn apply(found: &[(Range<usize>, Scope)], theme: &HighlightTheme, target: &mut LineStyles) {
     let styled: Vec<(Range<usize>, gpui::HighlightStyle)> = found
         .iter()
@@ -72,11 +72,11 @@ fn apply(found: &[(Range<usize>, Scope)], theme: &HighlightTheme, target: &mut L
     target.sort_by_key(|(range, _)| range.start);
 }
 
-/// Découpe une ligne en plages Blade, chacune avec le nom de style qu'elle
-/// mérite. Les plages rendues sont triées et disjointes.
+/// Cuts a line into Blade ranges, each with the style name it deserves. The
+/// ranges returned are sorted and disjoint.
 ///
-/// `open_comment` porte le seul état qui traverse les lignes : un `{{--` non
-/// refermé.
+/// `open_comment` carries the only state crossing lines: a `{{--` left
+/// unclosed.
 fn scan(line: &str, open_comment: &mut bool) -> Vec<(Range<usize>, Scope)> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -118,8 +118,8 @@ fn scan(line: &str, open_comment: &mut bool) -> Vec<(Range<usize>, Scope)> {
         } else if let Some(len) = component(rest, &mut out, i) {
             i += len;
         } else if rest.starts_with("@@") {
-            // `@@if` est la façon d'écrire un `@if` littéral : ce n'est pas
-            // une directive, et le signaler comme telle serait faux.
+            // `@@if` is how a literal `@if` is written: it is not a directive,
+            // and reporting it as one would be wrong.
             i += 2;
         } else if rest.starts_with('@') && starts_a_directive(line, i) {
             i += directive(rest, &mut out, i);
@@ -130,37 +130,37 @@ fn scan(line: &str, open_comment: &mut bool) -> Vec<(Range<usize>, Scope)> {
     out
 }
 
-/// Ce qu'une plage Blade est, indépendamment du nom que le thème donne à sa
-/// couleur.
+/// What a Blade range is, independently of the name the theme gives its
+/// colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scope {
     Comment,
-    /// `@if`, `@endforeach` : le vocabulaire de Blade lui-même.
+    /// `@if`, `@endforeach`: Blade's own vocabulary.
     Directive,
-    /// Ce qui distingue `{{ $x }}` du texte autour.
+    /// What tells `{{ $x }}` apart from the text around it.
     Delimiter,
-    /// Ce que Blade fait évaluer par PHP — l'intérieur d'un écho, l'argument
-    /// d'une directive.
+    /// What Blade has PHP evaluate — the inside of an echo, a directive's
+    /// argument.
     Expression,
-    /// Le nom d'une balise de composant : `<x-forms.input>`, `<livewire:…>`.
+    /// A component tag's name: `<x-forms.input>`, `<livewire:…>`.
     Component,
 }
 
 impl Scope {
-    /// Noms de style à essayer, du plus juste au plus sûrement présent.
+    /// Style names to try, from the most accurate to the most surely present.
     ///
-    /// Un thème n'a pas à définir toute la nomenclature, et les nôtres n'ont
-    /// ni `punctuation` ni `operator` : sans repli, les délimiteurs d'un écho
-    /// restaient de la couleur du texte, c'est-à-dire invisibles.
+    /// A theme does not have to define the whole nomenclature, and ours have
+    /// neither `punctuation` nor `operator`: without a fallback, an echo's
+    /// delimiters stayed the colour of the text, that is, invisible.
     fn candidates(self) -> &'static [&'static str] {
         match self {
             Scope::Comment => &["comment"],
             Scope::Directive => &["keyword"],
             Scope::Delimiter => &["punctuation.special", "tag"],
             Scope::Expression => &["embedded", "variable"],
-            // La couleur d'une balise, et non une couleur à eux : un
-            // composant *est* une balise pour qui lit la vue, et lui en
-            // donner une autre ferait croire à une construction différente.
+            // A tag's colour, and not a colour of their own: a component *is* a
+            // tag to whoever reads the view, and giving it another would suggest
+            // a different construct.
             Scope::Component => &["tag", "keyword"],
         }
     }
@@ -170,26 +170,25 @@ impl Scope {
     }
 }
 
-/// Le nom d'une balise de composant : `<x-forms.input>`, `</x-layout.app>`,
-/// `<livewire:compteur>`. Rend la longueur consommée, délimiteurs compris.
+/// A component tag's name: `<x-forms.input>`, `</x-layout.app>`,
+/// `<livewire:counter>`. Returns the length consumed, delimiters included.
 ///
-/// **Le point est la raison d'être de ce cas.** La grammaire HTML ne connaît
-/// pas de nom de balise pointé : dans `<x-layout.app>` elle lit `x-layout`
-/// comme une balise et `.app` comme un **attribut**, si bien que le nom du
-/// composant se coupe en deux couleurs en son milieu. Or les composants d'un
-/// projet Laravel vivent en sous-dossiers, et le point y est donc la règle
-/// plutôt que l'exception.
+/// **The dot is this case's reason for being.** The HTML grammar knows no
+/// dotted tag name: in `<x-layout.app>` it reads `x-layout` as a tag and `.app`
+/// as an **attribute**, so the component's name is cut into two colours in its
+/// middle. And a Laravel project's components live in subfolders, so the dot is
+/// the rule there rather than the exception.
 ///
-/// Le nom entier est repeint d'un seul tenant, ce qui recouvre au passage la
-/// lecture fautive de la grammaire — `apply` retire ce qui chevauche.
+/// The whole name is repainted in one piece, which incidentally covers the
+/// grammar's faulty reading — `apply` removes what overlaps.
 fn component(rest: &str, out: &mut Vec<(Range<usize>, Scope)>, at: usize) -> Option<usize> {
     let after_bracket = rest.strip_prefix('<')?;
     let (closing, name) = match after_bracket.strip_prefix('/') {
         Some(name) => (1, name),
         None => (0, after_bracket),
     };
-    // Les deux préfixes que Laravel se réserve. Tout le reste est du HTML
-    // ordinaire, que la grammaire lit très bien elle-même.
+    // The two prefixes Laravel reserves for itself. Everything else is ordinary
+    // HTML, which the grammar reads perfectly well itself.
     if !name.starts_with("x-") && !name.starts_with("livewire:") {
         return None;
     }
@@ -201,7 +200,7 @@ fn component(rest: &str, out: &mut Vec<(Range<usize>, Scope)>, at: usize) -> Opt
     Some(1 + closing + len)
 }
 
-/// Un écho `{{ … }}` ou `{!! … !!}`. Rend la longueur consommée.
+/// An echo `{{ … }}` or `{!! … !!}`. Returns the length consumed.
 fn echo(
     rest: &str,
     open: &str,
@@ -223,8 +222,8 @@ fn echo(
             out.push((stop..stop + close.len(), Scope::Delimiter));
             Some(open.len() + end + close.len())
         }
-        // Un écho qui ne se referme pas sur sa ligne : le reste lui appartient
-        // quand même, et la ligne suivante repartira du texte ordinaire.
+        // An echo that does not close on its line: the rest belongs to it all
+        // the same, and the next line will start again from ordinary text.
         None => {
             if !body.is_empty() {
                 out.push((at + open.len()..at + rest.len(), Scope::Expression));
@@ -234,8 +233,8 @@ fn echo(
     }
 }
 
-/// Une directive `@nom` et, s'il y en a un, son argument entre parenthèses.
-/// Rend la longueur consommée — au moins 1, pour que le scanner avance.
+/// A directive `@name` and, if there is one, its parenthesised argument.
+/// Returns the length consumed — at least 1, so the scanner moves on.
 fn directive(rest: &str, out: &mut Vec<(Range<usize>, Scope)>, at: usize) -> usize {
     let name: usize = rest[1..]
         .chars()
@@ -247,9 +246,8 @@ fn directive(rest: &str, out: &mut Vec<(Range<usize>, Scope)>, at: usize) -> usi
     }
     out.push((at..at + 1 + name, Scope::Directive));
     let mut i = 1 + name;
-    // Blade tolère une espace avant la parenthèse (`@if ($x)`), mais pas un
-    // saut de ligne : chercher plus loin attraperait un texte qui n'a rien à
-    // voir.
+    // Blade tolerates a space before the parenthesis (`@if ($x)`), but not a
+    // newline: looking further would catch text that has nothing to do with it.
     let spaces: usize = rest[i..].chars().take_while(|c| *c == ' ').count();
     if !rest[i + spaces..].starts_with('(') {
         return i;
@@ -262,14 +260,14 @@ fn directive(rest: &str, out: &mut Vec<(Range<usize>, Scope)>, at: usize) -> usi
             }
             i + len
         }
-        // Parenthèse non refermée sur la ligne : on laisse le reste au texte
-        // ordinaire plutôt que de deviner.
+        // Parenthesis not closed on the line: we leave the rest to ordinary
+        // text rather than guess.
         None => i,
     }
 }
 
-/// Longueur de `(…)`, parenthèses comprises, en tenant compte de
-/// l'imbrication et des chaînes — `@if ($x == ')')` n'est pas rare.
+/// Length of `(…)`, parentheses included, accounting for nesting and strings —
+/// `@if ($x == ')')` is not rare.
 fn argument(rest: &str) -> Option<usize> {
     let mut depth = 0usize;
     let mut quote: Option<char> = None;
@@ -289,10 +287,10 @@ fn argument(rest: &str) -> Option<usize> {
             '\'' | '"' => quote = Some(c),
             '(' => depth += 1,
             ')' => {
-                // Ne peut pas arriver depuis `directive`, qui n'appelle
-                // qu'avec une parenthèse ouvrante ; rendre `None` plutôt que
-                // de soustraire à zéro garde la fonction sûre si elle sert
-                // ailleurs.
+                // Cannot happen from `directive`, which only calls with an
+                // opening parenthesis; returning `None` rather than subtracting
+                // from zero keeps the function safe should it be used
+                // elsewhere.
                 if depth == 0 {
                     return None;
                 }
@@ -307,11 +305,11 @@ fn argument(rest: &str) -> Option<usize> {
     None
 }
 
-/// Vrai si le `@` en `at` ouvre une directive.
+/// True if the `@` at `at` opens a directive.
 ///
-/// Ce qui le précède tranche : une adresse électronique dans le corps de la
-/// page (`contact@exemple.fr`) et un `@media` de feuille de style ont la même
-/// forme, seul le caractère d'avant les distingue.
+/// What precedes it decides: an e-mail address in the page body
+/// (`contact@example.com`) and a stylesheet's `@media` have the same shape,
+/// only the preceding character tells them apart.
 fn starts_a_directive(line: &str, at: usize) -> bool {
     let before = line[..at].chars().next_back();
     match before {
@@ -320,9 +318,9 @@ fn starts_a_directive(line: &str, at: usize) -> bool {
     }
 }
 
-/// Longueur du prochain caractère : avancer d'un octet couperait un caractère
-/// accentué en deux, et les plages rendues ne seraient plus des frontières
-/// valides.
+/// Length of the next character: advancing by one byte would cut an accented
+/// character in two, and the ranges returned would no longer be valid
+/// boundaries.
 fn next_char(rest: &str) -> usize {
     rest.chars().next().map_or(1, char::len_utf8)
 }
@@ -335,8 +333,8 @@ mod tests {
         scan(line, &mut false)
     }
 
-    /// Rend ce qu'une plage recouvre, pour lire les tests sans compter les
-    /// octets à la main.
+    /// Returns what a range covers, so the tests can be read without counting
+    /// bytes by hand.
     fn covered<'a>(line: &'a str, found: &[(Range<usize>, Scope)]) -> Vec<(&'a str, Scope)> {
         found
             .iter()

@@ -1,18 +1,17 @@
-//! Les issues Sentry d'un projet, et de quoi les rapprocher du code.
+//! A project's Sentry issues, and what is needed to bring them near the code.
 //!
-//! Claudhub **lit** Sentry ; il ne lui envoie jamais rien. Un rapport d'erreur
-//! est un point de départ comme un autre — souvent meilleur qu'une intention,
-//! parce qu'il porte déjà la trace et le fichier fautif — et le geste utile
-//! est de le confier à un agent avec le code autour des frames de
-//! l'application.
+//! Claudhub **reads** Sentry; it never sends it anything. An error report is a
+//! starting point like any other — often better than an intention, because it
+//! already carries the trace and the offending file — and the useful gesture is
+//! to hand it to an agent along with the code around the application's frames.
 //!
-//! Le jeton se lit **d'abord dans `SENTRY_TOKEN`**, et n'est rangé dans le
-//! fichier de réglages qu'à défaut : ce fichier est en 0600, ce qui ne fait
-//! pas de lui un coffre.
+//! The token is read **from `SENTRY_TOKEN` first**, and only put in the
+//! settings file for want of that: the file is 0600, which does not make it a
+//! vault.
 //!
-//! Comme tous les formats que nous parsons, celui-ci est testé sur une
-//! fixture : une API distante change sans prévenir, et un champ renommé se
-//! voit ici plutôt qu'à l'exécution sous la forme d'une liste vide.
+//! Like every format we parse, this one is tested on a fixture: a remote API
+//! changes without warning, and a renamed field shows up here rather than at
+//! run time as an empty list.
 
 use std::path::Path;
 use std::time::Duration;
@@ -20,56 +19,56 @@ use std::time::Duration;
 use anyhow::{bail, Context as _, Result};
 use serde::Deserialize;
 
-/// L'API publique de Sentry. Une instance auto-hébergée se règle par
-/// `SENTRY_URL`, parce que c'est la seule chose qui change.
+/// Sentry's public API. A self-hosted instance is configured through
+/// `SENTRY_URL`, because that is the only thing that changes.
 const DEFAULT_HOST: &str = "https://sentry.io";
 
-/// Une API distante met parfois plusieurs secondes ; au-delà, c'est qu'elle ne
-/// répondra pas. Le même raisonnement que le délai des commandes git.
+/// A remote API sometimes takes several seconds; past that, it will not answer.
+/// The same reasoning as the git command timeout.
 const TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Une issue, réduite à ce que le panneau affiche.
+/// An issue, cut down to what the panel shows.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Issue {
     pub id: String,
-    /// `ValueError`, `TypeError`… ce que Sentry appelle le type.
+    /// `ValueError`, `TypeError`… what Sentry calls the type.
     pub title: String,
-    /// Le message, quand il ajoute quelque chose au titre.
+    /// The message, when it adds something to the title.
     pub culprit: String,
     /// `error`, `warning`, `fatal`…
     pub level: String,
     pub count: u64,
-    /// Dernière occurrence, telle que Sentry l'écrit (ISO 8601).
+    /// Last occurrence, as Sentry writes it (ISO 8601).
     pub last_seen: String,
     pub permalink: String,
 }
 
-/// Une ligne d'une pile d'appels.
+/// One line of a call stack.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Frame {
-    /// Chemin tel que Sentry le connaît. Il n'est pas toujours relatif au
-    /// dépôt — d'où `Frame::repo_path`, qui fait de son mieux.
+    /// Path as Sentry knows it. It is not always relative to the repository —
+    /// hence `Frame::repo_path`, which does its best.
     pub filename: String,
     pub function: String,
     pub line: usize,
-    /// La frame appartient-elle au code de l'application, par opposition aux
-    /// dépendances. C'est celle-là qu'on veut lire.
+    /// Does the frame belong to the application's code, as opposed to the
+    /// dependencies. That is the one we want to read.
     pub in_app: bool,
-    /// Le code autour, tel que Sentry le renvoie : `(numéro, ligne)`.
+    /// The surrounding code, as Sentry returns it: `(number, line)`.
     ///
-    /// Il vient de l'événement, donc du code **déployé** au moment de
-    /// l'erreur : c'est justement ce qu'on veut citer, et le relire sur disque
-    /// donnerait la version d'aujourd'hui.
+    /// It comes from the event, so from the code **deployed** at the time of the
+    /// error: that is precisely what we want to quote, and re-reading it from
+    /// disk would give today's version.
     pub context: Vec<(usize, String)>,
 }
 
 impl Frame {
-    /// Le chemin ramené au dépôt, quand on peut.
+    /// The path brought back to the repository, when possible.
     ///
-    /// Sentry écrit souvent un chemin absolu du serveur
-    /// (`/var/www/app/Http/Kernel.php`) ou un module (`app.http.kernel`). On
-    /// coupe au premier segment qui existe dans le worktree ; à défaut, on
-    /// rend le chemin tel quel et l'utilisateur voit ce que Sentry a dit.
+    /// Sentry often writes an absolute server path
+    /// (`/var/www/app/Http/Kernel.php`) or a module (`app.http.kernel`). We cut
+    /// at the first segment that exists in the worktree; failing that, we return
+    /// the path as it is and the user sees what Sentry said.
     pub fn repo_path(&self, worktree: &Path) -> String {
         let normalized = self.filename.replace('\\', "/");
         let parts: Vec<&str> = normalized.split('/').filter(|p| !p.is_empty()).collect();
@@ -83,19 +82,19 @@ impl Frame {
     }
 }
 
-/// L'événement le plus récent d'une issue : sa pile et son message.
+/// An issue's most recent event: its stack and its message.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Event {
     pub message: String,
-    /// Les frames, de la plus ancienne à la plus récente — l'ordre de Sentry,
-    /// et celui d'une trace lue de haut en bas.
+    /// The frames, oldest to newest — Sentry's order, and that of a trace read
+    /// top to bottom.
     pub frames: Vec<Frame>,
 }
 
-// — Ce que l'API renvoie ——————————————————————————————————————————
+// — What the API returns ————————————————————————————————————————————
 //
-// Des structures à part, `#[serde(default)]` partout : l'API ajoute et retire
-// des champs, et un champ manquant ne doit pas vider la liste entière.
+// Separate structures, `#[serde(default)]` everywhere: the API adds and removes
+// fields, and a missing field must not empty the whole list.
 
 #[derive(Deserialize)]
 #[serde(default)]
@@ -117,9 +116,9 @@ impl Default for RawIssue {
             title: String::new(),
             culprit: String::new(),
             level: String::new(),
-            // Sentry écrit le compte en **chaîne** dans la liste des issues et
-            // en nombre ailleurs : la valeur brute est gardée et convertie à
-            // la main, sinon la moitié des réponses ne se lit pas.
+            // Sentry writes the count as a **string** in the issue list and as a
+            // number elsewhere: the raw value is kept and converted by hand,
+            // otherwise half the responses fail to read.
             count: serde_json::Value::Null,
             last_seen: String::new(),
             permalink: String::new(),
@@ -231,9 +230,9 @@ fn collect_frames(stacktrace: Option<&serde_json::Value>, out: &mut Vec<Frame>) 
             function: raw.function,
             line: raw.line_no.unwrap_or(0),
             in_app: raw.in_app,
-            // `context` est une liste de paires `[numéro, source]` ; tout ce
-            // qui n'a pas cette forme est ignoré plutôt que de faire échouer
-            // la lecture de la trace entière.
+            // `context` is a list of `[number, source]` pairs; anything not of
+            // that shape is ignored rather than failing the read of the whole
+            // trace.
             context: raw
                 .context
                 .iter()
@@ -248,15 +247,15 @@ fn collect_frames(stacktrace: Option<&serde_json::Value>, out: &mut Vec<Frame>) 
     }
 }
 
-/// Le prompt qu'on livre à un agent : le titre, le message, la trace, et le
-/// code autour des frames de l'application.
+/// The prompt handed to an agent: the title, the message, the trace, and the
+/// code around the application's frames.
 ///
-/// Les frames hors application sont **citées sans leur code** : une pile de
-/// framework fait cent lignes, et ce n'est pas là qu'est le bug. Fonction
-/// libre et testée, comme celle des notes : c'est la pièce à verrouiller.
+/// Frames outside the application are **quoted without their code**: a framework
+/// stack is a hundred lines, and that is not where the bug is. A free, tested
+/// function, like the notes': it is the piece to lock down.
 ///
-/// L'introduction arrive traduite de la vue : `tr!` appartient à la feature
-/// `ui`, et ce module doit compiler dans le serveur headless.
+/// The introduction arrives already translated from the view: `tr!` belongs to
+/// the `ui` feature, and this module has to compile in the headless server.
 pub fn prompt(intro: &str, issue: &Issue, event: &Event, worktree: &Path) -> String {
     let mut out = String::new();
     out.push_str(intro);
@@ -288,8 +287,8 @@ pub fn prompt(intro: &str, issue: &Issue, event: &Event, worktree: &Path) -> Str
         out.push_str(&format!("\n## {path}:{}\n", frame.line));
         out.push_str("```\n");
         for (number, text) in &frame.context {
-            // La ligne fautive est marquée : c'est la seule information que la
-            // numérotation ne donne pas d'un coup d'œil.
+            // The offending line is marked: it is the only piece of information
+            // the numbering does not give at a glance.
             let marker = if *number == frame.line { ">" } else { " " };
             out.push_str(&format!("{marker} {number:>5} {text}\n"));
         }
@@ -301,7 +300,7 @@ pub fn prompt(intro: &str, issue: &Issue, event: &Event, worktree: &Path) -> Str
     out
 }
 
-/// Le jeton d'API : l'environnement d'abord, le fichier de réglages à défaut.
+/// The API token: the environment first, the settings file failing that.
 pub fn token(fallback: &str) -> Option<String> {
     std::env::var("SENTRY_TOKEN")
         .ok()
@@ -357,7 +356,7 @@ pub fn issues(org: &str, project: &str, query: &str, token: &str) -> Result<Vec<
     parse_issues(&get(&url, token)?)
 }
 
-/// L'événement le plus récent d'une issue.
+/// An issue's most recent event.
 pub fn latest_event(issue: &str, token: &str) -> Result<Event> {
     let url = format!(
         "{}/api/0/issues/{}/events/latest/",
@@ -367,12 +366,12 @@ pub fn latest_event(issue: &str, token: &str) -> Result<Event> {
     parse_event(&get(&url, token)?)
 }
 
-/// Encodage minimal d'un composant d'URL.
+/// Minimal encoding of a URL component.
 ///
-/// Une requête Sentry contient des espaces et des deux-points
-/// (`is:unresolved environment:production`) : les laisser passer tels quels
-/// donne une URL invalide, et tirer une dépendance pour trois caractères
-/// serait cher payé.
+/// A Sentry query contains spaces and colons
+/// (`is:unresolved environment:production`): letting them through as they are
+/// gives an invalid URL, and pulling in a dependency for three characters would
+/// be dear.
 fn urlencode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -447,15 +446,15 @@ mod tests {
 
     #[test]
     fn issues_survive_a_count_written_as_a_string() {
-        // Sentry écrit le compte en chaîne dans la liste et en nombre
-        // ailleurs : lire les deux est ce qui évite une liste vide un jour
-        // sur deux.
+        // Sentry writes the count as a string in the list and as a number
+        // elsewhere: reading both is what avoids an empty list every other
+        // day.
         let issues = parse_issues(ISSUES).unwrap();
         assert_eq!(issues.len(), 2);
         assert_eq!(issues[0].id, "4508");
         assert_eq!(issues[0].count, 137);
         assert_eq!(issues[0].level, "error");
-        // Une issue sans culprit ni permalink se lit quand même.
+        // An issue with no culprit and no permalink still reads.
         assert_eq!(issues[1].count, 3);
         assert!(issues[1].culprit.is_empty());
     }
@@ -510,14 +509,14 @@ mod tests {
         std::fs::write(dir.join("app/Http/Kernel.php"), "").unwrap();
 
         let frame = Frame {
-            // Le chemin du serveur, tel que Sentry le connaît.
+            // The server path, as Sentry knows it.
             filename: "/var/www/releases/42/app/Http/Kernel.php".into(),
             ..Default::default()
         };
         assert_eq!(frame.repo_path(&dir), "app/Http/Kernel.php");
 
-        // Ce qu'on ne retrouve pas est rendu tel quel : mieux vaut montrer ce
-        // que Sentry a dit qu'un chemin inventé.
+        // What cannot be found is returned as it is: better to show what Sentry
+        // said than an invented path.
         let unknown = Frame {
             filename: "node_modules/x/index.js".into(),
             ..Default::default()

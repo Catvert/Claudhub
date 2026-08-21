@@ -1,15 +1,14 @@
-//! La mise en route du serveur, sous Windows.
+//! Starting the server, on Windows.
 //!
-//! Sur cette plateforme, les workers ne vivent pas dans ce processus mais dans
-//! une distribution WSL2, et il faut donc : savoir laquelle, y installer le
-//! binaire livré à côté de l'exécutable, l'y lancer, et dire à l'utilisateur
-//! où l'on en est. Ailleurs, ce module ne fait rien — les workers sont déjà là.
+//! On that platform the workers do not live in this process but in a WSL2
+//! distribution, so we must: know which one, install the binary shipped beside
+//! the executable into it, launch it there, and tell the user where things
+//! stand. Elsewhere this module does nothing — the workers are already here.
 //!
-//! **Tout ce qui parle à `wsl.exe` part dans un thread.** Réveiller une
-//! distribution endormie prend des secondes, et copier douze mégaoctets n'est
-//! pas gratuit : c'est exactement ce que la règle « `src/ui/` ne fait jamais
-//! d'entrée-sortie » existe pour éviter. La vue ne garde qu'un état
-//! d'avancement et le peint.
+//! **Everything that talks to `wsl.exe` goes into a thread.** Waking a
+//! sleeping distribution takes seconds, and copying twelve megabytes is not
+//! free: this is exactly what the "`src/ui/` never does I/O" rule exists to
+//! avoid. The view only keeps a progress state and paints it.
 
 use gpui::{div, prelude::*, px, Context, Render, SharedString, Window};
 use gpui_component::{
@@ -23,33 +22,31 @@ use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
 use crate::ui::settings::Settings;
 
-/// Où en est le serveur, du point de vue de la fenêtre.
+/// Where the server stands, from the window's point of view.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ServerState {
-    /// Les workers sont dans ce processus : il n'y a rien à en dire, et la
-    /// barre d'état reste muette.
+    /// The workers are in this process: there is nothing to say about it, and
+    /// the status bar stays silent.
     #[default]
     Local,
-    /// En route — distribution interrogée, binaire installé, connexion
-    /// ouverte. Le message dit laquelle de ces étapes.
+    /// Starting up — distribution queried, binary installed, connection
+    /// opened. The message says which of those steps.
     Starting(SharedString),
-    /// Debout et répondant.
+    /// Up and answering.
     Up,
-    /// Tombé, ou jamais parti. Le message est celui du transport, et il est
-    /// gardé en entier : c'est la seule chose qui dise *pourquoi*.
+    /// Down, or never started. The message is the transport's, kept whole: it
+    /// is the only thing that says *why*.
     Down(String),
 }
 
-/// La question posée au premier démarrage, tant qu'aucune distribution n'est
-/// choisie.
+/// The question asked on first startup, while no distribution is chosen.
 ///
-/// **C'est une entité à elle, et non un champ de `ClaudhubApp`.** La fermeture
-/// que `open_dialog` retient est un `Fn` rappelé à **chaque frame**, depuis le
-/// rendu de la vue racine — c'est-à-dire au milieu d'un emprunt de
-/// `ClaudhubApp`. Y toucher à l'application, fût-ce pour la lire, panique
-/// (« cannot update … while it is already being updated ») : le choix vit donc
-/// dans son propre état, que le dialogue affiche comme n'importe quelle vue
-/// enfant.
+/// **It is an entity of its own, not a field of `ClaudhubApp`.** The closure
+/// `open_dialog` keeps is an `Fn` called back on **every frame**, from the root
+/// view's render — that is, in the middle of a borrow of `ClaudhubApp`.
+/// Touching the application there, even to read it, panics ("cannot update …
+/// while it is already being updated"): the choice therefore lives in a state
+/// of its own, which the dialog displays like any child view.
 pub struct WslPrompt {
     pub distros: Vec<String>,
     pub chosen: usize,
@@ -108,16 +105,16 @@ impl ClaudhubApp {
         }
     }
 
-    /// Reprend la mise en route après un échec, à la demande.
+    /// Resumes startup after a failure, on request.
     ///
-    /// Manuelle et non automatique : un serveur qui meurt en boucle se
-    /// relancerait en boucle, et l'utilisateur est le seul à savoir s'il vient
-    /// de fermer sa distribution ou de mettre à jour son installation.
+    /// Manual and not automatic: a server dying in a loop would relaunch in a
+    /// loop, and the user is the only one who knows whether they have just
+    /// closed their distribution or updated their installation.
     pub(super) fn restart_backend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.start_backend(window, cx);
     }
 
-    /// Demande dans quelle distribution les workers doivent tourner.
+    /// Asks which distribution the workers should run in.
     fn ask_wsl_distro(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.server_state = ServerState::Starting(tr!("server-listing"));
         cx.notify();
@@ -125,9 +122,9 @@ impl ClaudhubApp {
             let found = in_a_thread(crate::wsl::distributions).await;
             this.update_in(cx, |app, window, cx| match found {
                 Ok(distros) => {
-                    // L'état reste « en route » tant que la question est
-                    // posée : annoncer un serveur indisponible pendant qu'on
-                    // demande où le mettre serait se plaindre de soi-même.
+                    // The state stays "starting" while the question is being
+                    // asked: announcing an unavailable server while asking
+                    // where to put it would be complaining about ourselves.
                     app.wsl_prompt = Some(cx.new(|_| WslPrompt { distros, chosen: 0 }));
                     app.open_wsl_dialog(window, cx);
                 }
@@ -138,12 +135,12 @@ impl ClaudhubApp {
         .detach();
     }
 
-    /// Le dialogue de choix, et ce qu'il déclenche.
+    /// The choice dialog, and what it triggers.
     ///
-    /// Rien dans la fermeture ne touche à `ClaudhubApp` : elle est rappelée au
-    /// rendu, donc pendant qu'il est emprunté. La liste des distributions
-    /// s'affiche par son entité (voir `WslPrompt`), et les deux boutons ne
-    /// s'exécutent qu'au clic, où l'emprunt est rendu.
+    /// Nothing in the closure touches `ClaudhubApp`: it is called back at
+    /// render time, so while it is borrowed. The distribution list displays
+    /// through its entity (see `WslPrompt`), and the two buttons only run on
+    /// click, where the borrow has been given back.
     fn open_wsl_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let entity = cx.entity();
         let Some(prompt) = self.wsl_prompt.clone() else {
@@ -167,8 +164,8 @@ impl ClaudhubApp {
                     true
                 })
                 .on_cancel(move |_, _window, cx| {
-                    // Refuser de choisir laisse la fenêtre ouverte et sans
-                    // workers : c'est dit, plutôt que d'attendre en silence.
+                    // Refusing to choose leaves the window open and without
+                    // workers: that is said, rather than waiting in silence.
                     cancel.update(cx, |this, cx| {
                         this.wsl_prompt = None;
                         this.server_state = ServerState::Down(tr!("server-wsl-none").to_string());
@@ -179,7 +176,7 @@ impl ClaudhubApp {
         });
     }
 
-    /// Retient le choix et lance la mise en route.
+    /// Records the choice and starts the server up.
     fn accept_wsl_distro(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(prompt) = self.wsl_prompt.take() else {
             return;
@@ -188,20 +185,20 @@ impl ClaudhubApp {
         let Some(distro) = prompt.distros.get(prompt.chosen).cloned() else {
             return;
         };
-        // Retenu avant de connecter : la question ne se repose pas au
-        // démarrage suivant, même si celui-ci échoue — on n'a pas envie de
-        // rechoisir sa distribution parce que WSL dormait.
+        // Recorded before connecting: the question is not asked again on the
+        // next start, even if this one fails — nobody wants to re-pick their
+        // distribution because WSL was asleep.
         Settings::update_global(cx, |settings| settings.wsl_distro = distro.clone());
         self.connect_wsl(distro, window, cx);
     }
 
-    /// Installe le serveur au besoin, puis s'y connecte.
+    /// Installs the server if needed, then connects to it.
     fn connect_wsl(&mut self, distro: String, window: &mut Window, cx: &mut Context<Self>) {
         self.server_state =
             ServerState::Starting(tr!("server-starting", { distro: distro.clone() }));
         cx.notify();
-        // Le répertoire de démarrage du serveur décide du dépôt qui s'ouvre :
-        // celui qu'on regardait, à défaut aucun.
+        // The server's start directory decides which repository opens: the one
+        // being looked at, or none.
         let cwd = self
             .active
             .as_ref()
@@ -210,9 +207,9 @@ impl ClaudhubApp {
             let opened = in_a_thread(move || remote::connect_wsl(&distro, cwd.as_deref())).await;
             this.update_in(cx, |app, window, cx| match opened {
                 Ok((git, events, probe)) => {
-                    // Le shell de connexion de là-bas : c'est lui qu'un
-                    // onglet de terminal lancera, et le seul moment où on
-                    // pouvait le demander est celui-ci.
+                    // The login shell from over there: it is what a terminal
+                    // tab will launch, and this is the only moment we could ask
+                    // for it.
                     crate::ui::settings::set_server_shell(probe.shell);
                     app.backend_ready(git, events, window, cx);
                 }
@@ -223,7 +220,7 @@ impl ClaudhubApp {
         .detach();
     }
 
-    /// Connecte une ligne de commande explicite.
+    /// Connects an explicit command line.
     fn connect_argv(&mut self, argv: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.server_state = ServerState::Starting(tr!("server-listing"));
         cx.notify();
@@ -238,10 +235,10 @@ impl ClaudhubApp {
         .detach();
     }
 
-    /// Le serveur répond : on lui donne le manche et on l'écoute.
+    /// The server answers: we give it the handle and listen to it.
     ///
-    /// L'ancienne pompe s'éteint d'elle-même, son canal étant clos avec le
-    /// transport qu'elle drainait.
+    /// The old pump shuts down by itself, its channel closing with the
+    /// transport it drained.
     fn backend_ready(
         &mut self,
         git: crate::runtime::Handle,
@@ -251,16 +248,16 @@ impl ClaudhubApp {
     ) {
         self.git = git;
         self.pump_events(events, window, cx);
-        // Le serveur neuf ne sait rien de ce qu'on avait ouvert : on lui
-        // redonne les dépôts, et la surveillance du worktree affiché. Le
-        // reste — statut, diff — se redemande par les chemins habituels.
+        // The fresh server knows nothing of what was open: we hand it the
+        // repositories back, and the watch on the displayed worktree. The rest
+        // — status, diff — is asked again through the usual paths.
         //
-        // **Deux sources, et il en faut deux.** Ceux qu'on avait ouverts, pour
-        // une relance après la mort du serveur ; et ceux que les réglages
-        // retiennent, pour le démarrage — `ClaudhubApp::new` les a demandés
-        // alors que le manche était encore vide, et ces commandes-là ont été
-        // jetées. Sans la seconde, une fenêtre Windows rouvrait toujours vide
-        // alors que la liste, elle, n'avait rien perdu.
+        // **Two sources, and both are needed.** The ones we had open, for a
+        // relaunch after the server's death; and the ones the settings
+        // remember, for startup — `ClaudhubApp::new` asked for them while the
+        // handle was still empty, and those commands were dropped. Without the
+        // second, a Windows window always reopened empty even though the list
+        // itself had lost nothing.
         let mut mains: Vec<std::path::PathBuf> =
             self.repos.iter().map(|repo| repo.main.clone()).collect();
         for path in Settings::global(cx).repositories.clone() {
@@ -336,11 +333,11 @@ impl ClaudhubApp {
     }
 }
 
-/// Exécute un travail bloquant dans un thread et rend sa réponse.
+/// Runs a blocking job in a thread and returns its answer.
 ///
-/// Un thread plutôt que l'exécuteur de fond de gpui : ce qui se passe ici
-/// attend `wsl.exe` pendant des secondes, et occuper un fil de l'exécuteur
-/// tout ce temps priverait le reste de la fenêtre du sien.
+/// A thread rather than gpui's background executor: what happens here waits on
+/// `wsl.exe` for seconds, and occupying one of the executor's threads all that
+/// time would deprive the rest of the window of it.
 async fn in_a_thread<T, F>(work: F) -> anyhow::Result<T>
 where
     T: Send + 'static,

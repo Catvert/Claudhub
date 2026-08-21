@@ -1,44 +1,42 @@
-//! Lire, retoucher et ranger les fichiers d'un worktree.
+//! Reading, editing and filing a worktree's files.
 //!
-//! Tout ce qui touche au disque hors de git : la lecture d'un fichier pour
-//! l'éditer, son écriture, les renommages et les suppressions, et le lancement
-//! de l'éditeur externe. Comme la couche git, rien ici ne doit être appelé
-//! depuis le thread d'interface.
+//! Everything touching the disk outside git: reading a file to edit it, writing
+//! it, renames and deletions, and launching the external editor. Like the git
+//! layer, nothing here may be called from the interface thread.
 //!
-//! **L'écriture est conditionnelle.** Un agent écrit dans les mêmes fichiers
-//! pendant qu'on les lit : `expect` porte l'empreinte de ce qu'on avait sous
-//! les yeux, et l'écriture est refusée si le fichier a changé depuis. C'est la
-//! seule façon de ne pas effacer une heure de travail d'un agent avec une
-//! correction de faute de frappe.
+//! **Writing is conditional.** An agent writes in the same files while we read
+//! them: `expect` carries the digest of what we had in front of us, and the
+//! write is refused if the file has changed since. It is the only way not to
+//! erase an hour of an agent's work with a typo fix.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-/// Au-delà, l'éditeur intégré n'est pas une bonne idée : `InputState` documente
-/// cinquante mille lignes, et une fenêtre figée est un pire service qu'un
-/// refus.
+/// Past this, the built-in editor is not a good idea: `InputState` documents
+/// fifty thousand lines, and a frozen window is a worse service than a
+/// refusal.
 pub const MAX_LINES: usize = 50_000;
 
-/// Ce qu'on a lu, et de quoi vérifier qu'on écrit bien par-dessus.
+/// What we read, and what is needed to check we are writing over it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Content {
     pub text: String,
-    /// Empreinte du texte lu.
+    /// Digest of the text read.
     ///
-    /// Elle ne sert qu'à comparer deux lectures dans la même session : c'est
-    /// exactement la garantie qu'on veut — « ce fichier a-t-il changé depuis
-    /// que je l'ai ouvert ? » — et elle n'a pas à survivre au redémarrage.
+    /// It only serves to compare two reads within the same session: that is
+    /// exactly the guarantee wanted — "has this file changed since I opened
+    /// it?" — and it has no need to survive a restart.
     pub hash: u64,
 }
 
-/// Empreinte d'un texte, pour la détection d'écriture concurrente.
+/// A text's digest, for detecting concurrent writes.
 ///
-/// FNV-1a écrit à la main, et non `DefaultHasher` : l'empreinte est produite
-/// par le worker et comparée par la vue, qui seront deux **binaires** quand le
-/// worker tournera dans le serveur WSL — or `DefaultHasher` ne promet rien
-/// d'un processus à l'autre. FNV-1a est défini par ses deux constantes, et un
-/// test fige une valeur connue pour qu'aucun changement ne passe inaperçu.
+/// FNV-1a written by hand, and not `DefaultHasher`: the digest is produced by
+/// the worker and compared by the view, which will be two **binaries** once the
+/// worker runs in the WSL server — and `DefaultHasher` promises nothing from
+/// one process to the next. FNV-1a is defined by its two constants, and a test
+/// pins a known value so no change goes unnoticed.
 pub fn digest(text: &str) -> u64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -119,7 +117,7 @@ pub enum Op {
 }
 
 impl Op {
-    /// Le chemin sur lequel l'opération porte, pour le message de résultat.
+    /// The path the operation acts on, for the result message.
     pub fn target(&self) -> &Path {
         match self {
             Self::Rename { to, .. } => to,
@@ -342,10 +340,10 @@ pub fn sync_notes(dir: &Path, files: &[(String, String)]) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// L'empreinte est comparée entre deux processus — la vue et le serveur —
-    /// et doit donc être identique d'un binaire à l'autre. Ces valeurs sont
-    /// celles de FNV-1a 64 bits ; si ce test casse, c'est que l'algorithme a
-    /// changé, et toute empreinte retenue par une session en cours ment.
+    /// The digest is compared between two processes — the view and the server —
+    /// so it has to be identical from one binary to the next. These values are
+    /// FNV-1a 64-bit's; if this test breaks, the algorithm has changed, and
+    /// every digest a running session holds is a lie.
     #[test]
     fn the_digest_is_stable_across_binaries() {
         assert_eq!(digest(""), 0xcbf2_9ce4_8422_2325);
@@ -354,10 +352,10 @@ mod tests {
         assert_ne!(digest("Claudhub\n"), digest("Claudhub"));
     }
 
-    /// La chaîne complète du dossier de notes : ce qu'on écrit se relit, ce
-    /// qui n'est plus dans la liste s'en va, et ce que nous n'avons pas écrit
-    /// reste. Le seul test de ce module qui touche au disque, comme celui de
-    /// la surveillance : c'est la seule façon de prouver l'effacement.
+    /// The whole chain of the notes folder: what we write reads back, what is
+    /// no longer in the list goes away, and what we did not write stays. The
+    /// only test in this module that touches the disk, like the watcher's: it
+    /// is the only way to prove the erasure.
     #[test]
     fn the_notes_folder_keeps_what_is_not_ours() {
         let dir = std::env::temp_dir().join(format!("claudhub-notes-{}", std::process::id()));
@@ -399,8 +397,8 @@ mod tests {
                 vec!["--line".into(), "7".into(), "/p/src/main.rs".into()]
             ))
         );
-        // Sans `{path}`, le chemin va à la fin : c'est ce qu'attend un éditeur
-        // qui ne sait rien des lignes.
+        // Without `{path}`, the path goes at the end: that is what an editor
+        // knowing nothing of lines expects.
         assert_eq!(
             editor_command("gedit", path, 1),
             Some(("gedit".into(), vec!["/p/src/main.rs".into()]))
@@ -429,7 +427,7 @@ mod tests {
     fn a_null_byte_gives_away_a_binary() {
         assert!(looks_binary(b"\x7fELF\0\0"));
         assert!(!looks_binary(b"fn main() {}\n"));
-        // Au-dela du premier bloc, on ne regarde pas : c'est le critere de git.
+        // Past the first block we do not look: that is git's criterion.
         let mut long = vec![b'a'; 9000];
         long.push(0);
         assert!(!looks_binary(&long));

@@ -1,16 +1,16 @@
-//! Découpage et recomposition d'une ligne de commande.
+//! Splitting and rebuilding a command line.
 //!
-//! Hors de `src/ui/` parce que les deux bouts s'en servent : le formulaire des
-//! réglages écrit des morceaux et les relit en une ligne, et les workers
-//! (`files::open_external`, `commit_msg::ask`) découpent ce que les réglages
-//! leur passent — un binaire serveur sans gpui doit pouvoir le faire aussi.
+//! Outside `src/ui/` because both ends use it: the settings form writes pieces
+//! and reads them back as one line, and the workers (`files::open_external`,
+//! `commit_msg::ask`) split what the settings hand them — a server binary
+//! without gpui has to be able to do it too.
 
-/// Découpe une ligne de commande en honorant les guillemets.
+/// Splits a command line, honouring quotes.
 ///
-/// `split_whitespace` casse sur tout chemin contenant une espace — et sous
-/// Windows comme sous macOS, c'est le cas courant. Les règles sont celles d'un
-/// shell POSIX réduites à l'essentiel : `'…'` littéral, `"…"` avec échappement
-/// par contre-oblique, contre-oblique hors guillemets.
+/// `split_whitespace` breaks on any path containing a space — and on Windows
+/// as on macOS, that is the common case. The rules are a POSIX shell's, cut
+/// down to the essentials: `'…'` literal, `"…"` with backslash escapes,
+/// backslash outside quotes.
 pub fn split_command(line: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
@@ -25,7 +25,7 @@ pub fn split_command(line: &str) -> Vec<String> {
             (Some(_), c) => current.push(c),
             (None, '\'') | (None, '"') => {
                 quote = Some(c);
-                // Un argument vide est un argument : `--sep ''` en est un.
+                // An empty argument is an argument: `--sep ''` is one.
                 started = true;
             }
             (None, '\\') => current.push(chars.next().unwrap_or('\\')),
@@ -44,18 +44,18 @@ pub fn split_command(line: &str) -> Vec<String> {
     parts
 }
 
-/// Recompose une ligne de commande à partir de ses morceaux.
+/// Rebuilds a command line from its pieces.
 ///
-/// L'aller-retour avec `split_command` doit être fidèle : le formulaire écrit
-/// des morceaux et les relit en une ligne, et un chemin avec une espace ne
-/// doit pas se scinder en deux au premier passage.
+/// The round trip with `split_command` has to be faithful: the form writes
+/// pieces and reads them back as one line, and a path with a space must not
+/// split in two on the first pass.
 pub fn join_command(parts: impl IntoIterator<Item = impl AsRef<str>>) -> String {
     parts
         .into_iter()
         .map(|part| {
             let part = part.as_ref();
-            // La contre-oblique aussi : hors guillemets elle échappe, et un
-            // chemin Windows perdrait les siennes au premier aller-retour.
+            // Backslashes too: outside quotes they escape, and a Windows path
+            // would lose its own on the first round trip.
             if part.is_empty()
                 || part
                     .chars()

@@ -1,15 +1,13 @@
-//! Panneau des branches.
+//! The branches panel.
 //!
-//! Il sert à deux choses : basculer le worktree courant sur une autre branche,
-//! et créer un worktree à partir d'une branche existante — le geste de départ
-//! d'une relecture, quand le travail d'un agent est arrivé sur une branche
-//! qu'on n'a pas encore déployée.
+//! It serves two purposes: switching the current worktree to another branch,
+//! and creating a worktree from an existing branch — the opening gesture of a
+//! review, when an agent's work has landed on a branch not yet checked out.
 //!
-//! La liste est virtualisée et filtrable. Un dépôt vivant a des dizaines de
-//! branches : les reconstruire toutes à chaque frame — deux boutons chacune —
-//! coûte cher pour des lignes qu'on ne voit pas, et les parcourir du regard
-//! pour en trouver une dont on connaît le nom est ce qu'un champ de recherche
-//! évite.
+//! The list is virtualised and filterable. A living repository has dozens of
+//! branches: rebuilding them all on every frame — two buttons each — is
+//! expensive for rows nobody sees, and scanning them by eye to find one whose
+//! name you already know is exactly what a search field saves.
 
 use std::path::PathBuf;
 
@@ -27,10 +25,10 @@ use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
 
-/// Une entrée de la liste.
+/// One row of the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Row {
-    /// L'en-tête d'un groupe : les locales d'abord, les distantes ensuite.
+    /// A group heading: the locals first, the remotes after.
     Group(BranchKind),
     Branch(BranchRow),
 }
@@ -40,26 +38,26 @@ struct BranchRow {
     name: String,
     kind: BranchKind,
     is_head: bool,
-    /// Ce que la branche porte, en une ligne : son dernier sujet et sa date.
+    /// What the branch carries, in one line: its last subject and its date.
     detail: String,
     ahead: usize,
     behind: usize,
-    /// Worktree qui la détient déjà. Git refuse deux checkouts de la même
-    /// branche : le dire avant d'essayer vaut mieux qu'une erreur.
+    /// Worktree that already holds it. Git refuses two checkouts of the same
+    /// branch: saying so beforehand beats an error.
     taken_by: Option<PathBuf>,
 }
 
 impl BranchRow {
-    /// Ni déployable ici, ni déployable ailleurs : elle est déjà quelque part.
+    /// Neither checkable out here nor elsewhere: it is already somewhere.
     fn taken(&self) -> bool {
         self.taken_by.is_some() && !self.is_head
     }
 }
 
-/// Met les branches en liste, filtrées et groupées.
+/// Turns the branches into a list, filtered and grouped.
 ///
-/// Fonction libre et testée : c'est la seule décision de cette vue — laquelle
-/// apparaît, sous quel groupe.
+/// A free, tested function: it is this view's only decision — which one
+/// appears, under which group.
 fn rows_for(branches: &[Branch], filter: &str) -> Vec<Row> {
     let needle = filter.trim().to_lowercase();
     let mut rows = Vec::new();
@@ -80,9 +78,8 @@ fn rows_for(branches: &[Branch], filter: &str) -> Vec<Row> {
                 })
             })
             .collect();
-        // Un groupe vide n'a pas d'en-tête : sur une recherche qui ne trouve
-        // que des distantes, un titre « Locales » suivi de rien se lit comme
-        // un défaut d'affichage.
+        // An empty group has no heading: on a search that finds only remotes, a
+        // "Local" title followed by nothing reads like a display glitch.
         if !matching.is_empty() {
             rows.push(Row::Group(kind));
             rows.extend(matching);
@@ -91,11 +88,11 @@ fn rows_for(branches: &[Branch], filter: &str) -> Vec<Row> {
     rows
 }
 
-/// La seconde ligne : le sujet du dernier commit, puis sa date.
+/// The second line: the last commit's subject, then its date.
 ///
-/// Les morceaux vides sont écartés plutôt que d'être séparés par un point
-/// médian qui n'entoure rien — un dépôt fraîchement cloné n'a pas toujours de
-/// sujet à montrer.
+/// Empty pieces are dropped rather than separated by a middle dot surrounding
+/// nothing — a freshly cloned repository does not always have a subject to
+/// show.
 fn detail(branch: &Branch) -> String {
     [branch.subject.as_str(), branch.date.as_str()]
         .into_iter()
@@ -161,11 +158,11 @@ impl ClaudhubApp {
 
         let entity = cx.entity();
         let count = rows.len();
-        // **Une seule hauteur pour toutes les entrées**, en-têtes de groupe
-        // compris. `uniform_list` mesure un élément et réserve sa hauteur pour
-        // tous : donner une hauteur d'une ligne à l'en-tête et de deux aux
-        // branches faisait déborder chaque branche sur la suivante, les noms
-        // venant se dessiner par-dessus les détails de la ligne précédente.
+        // **A single height for every entry**, group headings included.
+        // `uniform_list` measures one element and reserves its height for all:
+        // giving the heading a one-line height and the branches a two-line one
+        // made every branch spill onto the next, the names drawing over the
+        // previous row's details.
         let height = crate::ui::theme::tall_row_height(cx);
 
         v_flex()
@@ -222,10 +219,10 @@ impl ClaudhubApp {
         );
     }
 
-    /// Déploie une branche existante dans un worktree neuf.
+    /// Checks an existing branch out into a fresh worktree.
     ///
-    /// Le dossier prend le nom de la branche, les barres obliques devenant des
-    /// tirets : `origin/feat/x` ne peut pas être un nom de dossier.
+    /// The folder takes the branch's name, slashes becoming dashes:
+    /// `origin/feat/x` cannot be a folder name.
     fn worktree_from_branch(&mut self, main: PathBuf, branch: String, cx: &mut Context<Self>) {
         let local = branch
             .strip_prefix("origin/")
@@ -251,9 +248,9 @@ impl ClaudhubApp {
 }
 
 fn render_group(kind: BranchKind, height: gpui::Pixels, cx: &mut gpui::App) -> gpui::AnyElement {
-    // Le titre se pose en bas de sa bande plutôt qu'en son milieu : il annonce
-    // ce qui suit, et le coller à sa liste dit mieux ce qu'il regroupe qu'un
-    // texte flottant au centre d'une hauteur qu'il n'occupe pas.
+    // The title sits at the bottom of its band rather than in its middle: it
+    // announces what follows, and pinning it to its list says better what it
+    // groups than text floating in the centre of a height it does not fill.
     h_flex()
         .h(height)
         .w_full()
@@ -284,8 +281,8 @@ fn render_branch(
     let muted = cx.theme().muted_foreground;
     let taken = row.taken();
     let detail = if let Some(path) = row.taken_by.as_ref().filter(|_| !row.is_head) {
-        // Où elle est déployée importe plus que ce qu'elle porte : c'est ce qui
-        // explique pourquoi les deux boutons sont éteints.
+        // Where it is checked out matters more than what it carries: that is
+        // what explains why both buttons are disabled.
         format!(
             "{} {}",
             tr!("branch-checked-out"),
@@ -295,12 +292,11 @@ fn render_branch(
         row.detail.clone()
     };
 
-    // Deux éléments et non un : `uniform_list` pose ses entrées à une taille
-    // qu'il calcule lui-même, et une **marge** sur l'entrée est ignorée. Le
-    // retrait est donc un rembourrage du conteneur, et c'est l'enfant qui porte
-    // le fond arrondi — sans quoi une ligne sélectionnée traverserait le
-    // panneau d'un bord à l'autre, ce qui est le geste graphique d'un
-    // gestionnaire de fichiers de 2005.
+    // Two elements and not one: `uniform_list` lays its entries out at a size it
+    // computes itself, and a **margin** on the entry is ignored. The inset is
+    // therefore padding on the container, and it is the child that carries the
+    // rounded background — otherwise a selected row would cross the panel from
+    // edge to edge, which is the graphical gesture of a 2005 file manager.
     div()
         .h(height)
         .w_full()
@@ -346,8 +342,8 @@ fn render_branch(
                             )
                         }),
                 )
-                // Le retard avant l'avance : c'est ce qu'il faut intégrer avant de
-                // pouvoir pousser.
+                // Behind before ahead: that is what has to be integrated before
+                // you can push.
                 .when(row.behind > 0, |el| {
                     el.child(
                         div()
@@ -461,8 +457,8 @@ mod tests {
             branch("origin/Feature-X", BranchKind::Remote),
         ];
         let rows = rows_for(&branches, "feature");
-        // Plus aucune locale ne correspond : son en-tête disparaît avec elle,
-        // sans quoi un titre suivi de rien se lit comme un défaut d'affichage.
+        // No local matches any more: its heading disappears with it, otherwise
+        // a title followed by nothing reads like a display glitch.
         assert_eq!(
             rows,
             vec![

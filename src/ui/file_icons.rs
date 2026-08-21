@@ -1,47 +1,46 @@
-//! L'icône et la teinte d'un fichier, d'après son nom.
+//! A file's icon and tint, from its name.
 //!
-//! Trois listes s'en servent — l'explorateur, les modifications, la revue de
-//! branche : le geste central de Claudhub est de parcourir des listes de
-//! fichiers, et reconnaître un `.php` d'un `.md` d'un coup d'œil vaut la table
-//! que cela coûte.
+//! Three lists use it — the explorer, the changes, the branch review: Claudhub's
+//! central gesture is scanning lists of files, and telling a `.php` from a `.md`
+//! at a glance is worth the table it costs.
 //!
-//! **Un glyphe par langage, pas un glyphe par famille.** Les icônes de Lucide
-//! livrées avec Claudhub ne connaissent que des catégories : tout le code y
-//! serait le même `file-code`, et une liste de deux cents fichiers n'y
-//! gagnerait rien. Les marques viennent donc de `simple-icons` (CC0), rangées
-//! dans `assets/icons/lang/` — un dossier à part, parce qu'elles n'ont ni la
-//! même licence ni le même dessin : les nôtres sont des traits, celles-ci des
-//! aplats. Les marques restent la propriété de leurs titulaires ; ce sont des
-//! repères visuels, pas une revendication.
+//! **One glyph per language, not one glyph per family.** The Lucide icons
+//! shipped with Claudhub know only categories: all code would be the same
+//! `file-code` there, and a list of two hundred files would gain nothing. The
+//! brand marks therefore come from `simple-icons` (CC0), filed under
+//! `assets/icons/lang/` — a separate folder, because they have neither the same
+//! licence nor the same drawing: ours are strokes, these are solid shapes. The
+//! marks remain the property of their holders; they are visual cues, not a
+//! claim.
 //!
-//! **La teinte vient de la coloration syntaxique du thème**, pas d'une palette
-//! à nous et pas des couleurs de marque. Trois raisons : ces noms de style
-//! existent dans tous les thèmes livrés — `theme::tests::keys_of` le
-//! verrouille —, ils s'accordent au diff affiché à côté, et ils suivent le
-//! thème clair ou sombre sans qu'on s'en occupe. Une couleur de marque figée,
-//! elle, disparaît sur la moitié des thèmes : un logo noir sur fond sombre est
-//! un trou. La teinte n'a donc **aucun sens sémantique** — un `.rs` n'est pas
-//! « un type » — c'est une convention d'affichage, assumée comme telle.
+//! **The tint comes from the theme's syntax highlighting**, not from a palette
+//! of our own and not from brand colours. Three reasons: those style names exist
+//! in every bundled theme — `theme::tests::keys_of` locks that down — they agree
+//! with the diff shown beside them, and they follow the light or dark theme
+//! without our doing anything. A fixed brand colour, on the other hand,
+//! disappears on half the themes: a black logo on a dark background is a hole.
+//! The tint therefore has **no semantic meaning** — a `.rs` is not "a type" — it
+//! is a display convention, accepted as such.
 //!
-//! Un thème de l'utilisateur peut ne pas définir toute la nomenclature, d'où
-//! la liste de noms candidats, du plus juste au plus sûrement présent — le
-//! même procédé que `blade::Scope::candidates`, et pour la même raison : sans
-//! repli, l'icône prendrait la couleur du texte et la distinction
-//! disparaîtrait.
+//! A user's theme may not define the whole nomenclature, hence the list of
+//! candidate names, from the most accurate to the most surely present — the same
+//! device as `blade::Scope::candidates`, and for the same reason: without a
+//! fallback, the icon would take the text's colour and the distinction would
+//! vanish.
 
 use std::path::Path;
 
 use gpui::{App, Hsla};
 use gpui_component::ActiveTheme;
 
-/// Ce qu'une ligne montre d'un fichier.
+/// What a row shows of a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileLook {
-    /// Nom de l'icône, tel que `icons::icon` l'attend — `lang/php` pour une
-    /// marque, `file-text` pour une catégorie.
+    /// The icon's name, as `icons::icon` expects it — `lang/php` for a brand
+    /// mark, `file-text` for a category.
     pub icon: &'static str,
-    /// Noms de style de coloration à essayer, du plus juste au plus sûrement
-    /// présent. Vide : la couleur du texte ambiant.
+    /// Highlight style names to try, from the most accurate to the most surely
+    /// present. Empty: the ambient text colour.
     pub scopes: &'static [&'static str],
 }
 
@@ -50,7 +49,7 @@ impl FileLook {
         Self { icon, scopes }
     }
 
-    /// La teinte, prise dans la coloration du thème.
+    /// The tint, taken from the theme's highlighting.
     pub fn color(&self, cx: &App) -> Option<Hsla> {
         let theme = &cx.theme().highlight_theme;
         self.scopes
@@ -60,8 +59,8 @@ impl FileLook {
     }
 }
 
-// Les teintes, nommées une fois : la table en compte deux cents entrées, et
-// une portée écrite en clair à chaque ligne s'y trompe tôt ou tard.
+// The tints, named once: the table has two hundred entries, and a scope written
+// out on every line gets it wrong sooner or later.
 const S_NONE: &[&str] = &[];
 const S_TYPE: &[&str] = &["type", "constructor"];
 const S_KEYWORD: &[&str] = &["keyword"];
@@ -74,7 +73,7 @@ const S_TITLE: &[&str] = &["title", "text.literal"];
 const S_NUMBER: &[&str] = &["number"];
 const S_COMMENT: &[&str] = &["comment"];
 
-/// Le fichier qu'on ne reconnaît pas : ni forme ni couleur particulière.
+/// The file we do not recognise: no particular shape or colour.
 const PLAIN: FileLook = FileLook::new("file", S_NONE);
 
 static BY_EXTENSION: &[(&str, FileLook)] = &[
@@ -358,7 +357,7 @@ static BY_PREFIX: &[(&str, FileLook)] = &[
     ("jsconfig", FileLook::new("lang/javascript", S_STRING)),
 ];
 
-/// Les doubles extensions, essayées avant l'extension simple.
+/// The double extensions, tried before the plain one.
 static BY_SUFFIX: &[(&str, FileLook)] = &[
     (".blade.php", FileLook::new("lang/laravel", S_TAG)),
     (".d.ts", FileLook::new("lang/typescript", S_COMMENT)),
@@ -367,14 +366,14 @@ static BY_SUFFIX: &[(&str, FileLook)] = &[
     (".tar.xz", FileLook::new("archive", S_COMMENT)),
 ];
 
-/// L'apparence d'un fichier.
+/// A file's look.
 ///
-/// Trois passes, de la plus précise à la plus large. Le **nom entier** vient
-/// en premier : `Dockerfile` et `.gitignore` n'ont pas d'extension,
-/// `package.json` en a une qui ne dit pas qu'il s'agit de npm, et
-/// `Cargo.toml` mérite le logo de Rust plutôt que celui de TOML. Viennent
-/// ensuite les **familles d'outils**, qui se déclinent (`.eslintrc`,
-/// `.eslintrc.json`, `eslint.config.js`), puis l'**extension**.
+/// Three passes, from the most precise to the widest. The **whole name** comes
+/// first: `Dockerfile` and `.gitignore` have no extension, `package.json` has
+/// one that does not say it belongs to npm, and `Cargo.toml` deserves Rust's
+/// logo rather than TOML's. Then come the **tool families**, which have
+/// variants (`.eslintrc`, `.eslintrc.json`, `eslint.config.js`), then the
+/// **extension**.
 pub fn look_of(path: &Path) -> FileLook {
     let name = path
         .file_name()
@@ -390,10 +389,10 @@ pub fn look_of(path: &Path) -> FileLook {
     {
         return *look;
     }
-    // Les doubles extensions : c'est la première qui porte le sens, et
-    // `Path::extension` n'en voit que la seconde. Une vue Blade est du
-    // balisage avant d'être du PHP — la coloration fait déjà cette
-    // distinction, l'icône n'a pas à la contredire.
+    // The double extensions: it is the first that carries the meaning, and
+    // `Path::extension` only sees the second. A Blade view is markup before it
+    // is PHP — the highlighting already makes that distinction, and the icon has
+    // no business contradicting it.
     for (suffix, look) in BY_SUFFIX {
         if name.ends_with(suffix) {
             return *look;
@@ -406,10 +405,10 @@ pub fn look_of(path: &Path) -> FileLook {
         .unwrap_or(PLAIN)
 }
 
-/// L'icône d'un fichier, teintée.
+/// A file's icon, tinted.
 ///
-/// Un `div` autour de l'icône plutôt qu'une couleur posée dessus : `Icon`
-/// hérite de la couleur du texte, et c'est le conteneur qui la fixe.
+/// A `div` around the icon rather than a colour set on it: `Icon` inherits the
+/// text colour, and it is the container that fixes it.
 pub fn file_icon(path: &Path, cx: &App) -> gpui::AnyElement {
     use gpui::prelude::*;
     use gpui_component::Sizable;

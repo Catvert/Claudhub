@@ -1,21 +1,20 @@
-//! Coloration syntaxique des diffs.
+//! Syntax highlighting for diffs.
 //!
-//! Le contenu d'un diff est du code, et c'est le code qu'on relit — pas les
-//! marqueurs `+`/`-`. Claudhub colore donc les lignes avec la grammaire du
-//! *fichier*, pas avec la grammaire `diff`.
+//! A diff's content is code, and it is the code that gets reviewed — not the
+//! `+`/`-` markers. Claudhub therefore colours the lines with the *file's*
+//! grammar, not with the `diff` grammar.
 //!
-//! Le problème que cela pose : un hunk n'est pas un fichier. Il commence au
-//! milieu d'une fonction, saute des dizaines de lignes, et mêle deux versions
-//! du texte. La parade est de reconstruire les deux versions — l'ancienne
-//! (contexte + lignes supprimées) et la nouvelle (contexte + lignes ajoutées)
-//! — de colorer chacune **une seule fois**, puis de redistribuer les styles
-//! ligne par ligne. Le parse reste imparfait aux frontières des hunks, où il
-//! manque au parseur ce qui a été élidé ; en pratique il s'en remet, parce que
-//! les grammaires tree-sitter récupèrent sur erreur.
+//! The problem that raises: a hunk is not a file. It starts in the middle of a
+//! function, skips dozens of lines, and mixes two versions of the text. The
+//! answer is to rebuild both versions — the old one (context + removed lines)
+//! and the new one (context + added lines) — colour each **once only**, then
+//! redistribute the styles line by line. The parse stays imperfect at hunk
+//! boundaries, where the parser is missing what was elided; in practice it
+//! recovers, because tree-sitter grammars recover on error.
 //!
-//! Le coût est payé une fois par fichier ouvert, à l'arrivée du diff, jamais
-//! pendant un rendu : `SyntaxHighlighter::new` compile les requêtes de la
-//! grammaire, ce qui n'a rien à faire dans une frame.
+//! The cost is paid once per opened file, when the diff arrives, never during a
+//! render: `SyntaxHighlighter::new` compiles the grammar's queries, which has no
+//! business happening inside a frame.
 
 use std::ops::Range;
 use std::path::Path;
@@ -29,20 +28,20 @@ use gpui_component::input::Rope;
 use super::blade;
 use crate::git::{DiffLineKind, FileDiff};
 
-/// Enregistre les grammaires que gpui-component n'embarque pas.
+/// Registers the grammars gpui-component does not embed.
 ///
-/// PHP en est absent, alors que c'est le langage de la moitié des dépôts que
-/// Claudhub sert à relire ; sa grammaire est donc liée en direct et déclarée dans
-/// le registre partagé, d'où le reste de la bibliothèque la retrouvera sous le
-/// nom `php` comme n'importe quelle autre.
+/// PHP is missing from it, although it is the language of half the repositories
+/// Claudhub serves to review; its grammar is therefore linked directly and
+/// declared in the shared registry, from which the rest of the library will find
+/// it under the name `php` like any other.
 ///
-/// À appeler une fois au démarrage, avant tout rendu : le registre est un
-/// singleton verrouillé, et l'enregistrer sous une frappe reviendrait à le
-/// faire pendant qu'un highlighter le lit.
+/// To be called once at startup, before any render: the registry is a locked
+/// singleton, and registering under a keystroke would amount to doing it while a
+/// highlighter reads it.
 pub fn register_languages() {
-    // Les injections décrivent le HTML qui entoure le PHP et le SQL des
-    // chaînes de requête : sans elles, un fichier Blade ou une vue n'aurait de
-    // couleurs que dans ses balises `<?php`.
+    // The injections describe the HTML surrounding the PHP and the SQL of query
+    // strings: without them, a Blade file or a view would only have colours in
+    // its `<?php` tags.
     let injections = format!("{}\n{HTML_INJECTION}", tree_sitter_php::INJECTIONS_QUERY);
     let php = LanguageConfig::new(
         "php",
@@ -55,38 +54,37 @@ pub fn register_languages() {
     LanguageRegistry::singleton().register("php", &php);
 }
 
-/// L'injection HTML, écrite ici parce que la caisse ne la livre pas.
+/// The HTML injection, written here because the crate does not ship it.
 ///
-/// `tree_sitter_php::INJECTIONS_QUERY` est `queries/injections.scm`, et il ne
-/// couvre que phpdoc et les heredocs. Le HTML qui **entoure** le code — donc
-/// la totalité d'une vue Blade, et tout ce qui est hors `<?php` dans un
-/// fichier ordinaire — vit dans un second fichier, `queries/injections-text.scm`,
-/// que les liaisons Rust n'exposent sous aucune constante. Il fallait donc le
-/// recopier : sans lui, une vue arrivait entièrement grise, balises comprises,
-/// et rien ne le signalait — une injection qui ne trouve pas sa grammaire ne
-/// produit pas d'erreur, seulement du texte nu.
+/// `tree_sitter_php::INJECTIONS_QUERY` is `queries/injections.scm`, and it only
+/// covers phpdoc and heredocs. The HTML that **surrounds** the code — so the
+/// whole of a Blade view, and everything outside `<?php` in an ordinary file —
+/// lives in a second file, `queries/injections-text.scm`, which the Rust
+/// bindings expose under no constant. It therefore had to be copied: without it,
+/// a view arrived entirely grey, tags included, and nothing said so — an
+/// injection that does not find its grammar raises no error, only bare text.
 ///
-/// `injection.combined` réunit tous les fragments de texte en un seul arbre,
-/// ce qui est la seule lecture juste : une balise ouverte avant un `<?php` se
-/// referme après, et les traiter séparément ferait deux documents mal formés.
+/// `injection.combined` gathers every text fragment into a single tree, which is
+/// the only correct reading: a tag opened before a `<?php` closes after it, and
+/// treating them separately would give two malformed documents.
 const HTML_INJECTION: &str = r#"
 ((text) @injection.content
  (#set! injection.language "html")
  (#set! injection.combined))
 "#;
 
-/// Les styles d'une ligne, en décalages d'octets relatifs à son texte.
+/// A line's styles, as byte offsets relative to its text.
 pub type LineStyles = Vec<(Range<usize>, HighlightStyle)>;
 
-/// Les styles d'un diff entier, indexés `[hunk][ligne]`.
+/// A whole diff's styles, indexed `[hunk][line]`.
 #[derive(Default)]
 pub struct DiffHighlights {
     hunks: Vec<Vec<LineStyles>>,
 }
 
 impl DiffHighlights {
-    /// Les styles d'une ligne, ou une tranche vide si le fichier n'a pas de
-    /// grammaire connue — auquel cas la vue affiche du texte nu.
+    /// A line's styles, or an empty slice if the file has no known grammar — in
+    /// which case the view shows bare text.
     pub fn line(&self, hunk: usize, line: usize) -> &[(Range<usize>, HighlightStyle)] {
         self.hunks
             .get(hunk)
@@ -100,9 +98,8 @@ impl DiffHighlights {
         self.hunks.is_empty()
     }
 
-    /// Colore un diff. Rend un ensemble vide si l'extension n'est associée à
-    /// aucune grammaire, ce qui est le cas le plus fréquent (fichiers de
-    /// données, textes, binaires).
+    /// Colours a diff. Returns an empty set if the extension maps to no
+    /// grammar, which is the most frequent case (data files, texts, binaries).
     pub fn compute(path: &Path, diff: &FileDiff, theme: &HighlightTheme) -> Self {
         let Some(language) = language_for_path(path) else {
             return Self::default();
@@ -111,37 +108,33 @@ impl DiffHighlights {
             return Self::default();
         }
 
-        // Deux passes : l'ancienne version puis la nouvelle. Les lignes de
-        // contexte appartiennent aux deux, et reçoivent les styles de la
-        // seconde — elles sont identiques des deux côtés, donc le choix est
-        // sans conséquence, mais il faut en faire un.
+        // Two passes: the old version then the new one. Context lines belong to
+        // both, and receive the second's styles — they are identical on both
+        // sides, so the choice has no consequence, but one has to be made.
         let mut styles: Vec<Vec<LineStyles>> = diff
             .hunks
             .iter()
             .map(|hunk| vec![LineStyles::new(); hunk.lines.len()])
             .collect();
 
-        // Une vue Blade est du HTML avant d'être du PHP : lui préfixer une
-        // balise d'ouverture ferait lire ses balises comme du code. Ses
-        // constructions propres — directives, échos, commentaires — sont
-        // ajoutées après coup, la grammaire PHP n'en connaissant aucune.
+        // A Blade view is HTML before it is PHP: prefixing an opening tag would
+        // make its tags read as code. Its own constructs — directives, echoes,
+        // comments — are added afterwards, the PHP grammar knowing none of them.
         let blade = blade::is_blade(path);
 
-        // Une seule instance pour les deux passes : `SyntaxHighlighter::new`
-        // compile les requêtes de la grammaire — près de quarante
-        // millisecondes pour JavaScript — alors que `update` ne fait que
-        // reparser un texte. En créer deux doublait le coût fixe de chaque
-        // fichier ouvert.
+        // A single instance for both passes: `SyntaxHighlighter::new` compiles
+        // the grammar's queries — nearly forty milliseconds for JavaScript —
+        // whereas `update` only reparses a text. Creating two doubled the fixed
+        // cost of every opened file.
         let mut highlighter = SyntaxHighlighter::new(language);
         for side in [Side::Old, Side::New] {
             let (mut text, mut spans) = build_side(diff, side);
             if spans.is_empty() {
                 continue;
             }
-            // Le fragment reçoit d'abord de quoi être reconnu par sa
-            // grammaire. Les positions des lignes suivent le décalage : le
-            // prologue n'appartient à aucune d'elles, ses styles sont donc
-            // ignorés d'eux-mêmes.
+            // The fragment first receives what its grammar needs to recognise
+            // it. The line positions follow the offset: the prologue belongs to
+            // none of them, so its styles are ignored by themselves.
             let prologue = if blade { "" } else { prologue(language, &text) };
             if !prologue.is_empty() {
                 text.insert_str(0, prologue);
@@ -179,19 +172,19 @@ impl Side {
     }
 }
 
-/// Ce qu'il faut écrire devant un fragment pour que sa grammaire le
-/// reconnaisse.
+/// What has to be written in front of a fragment for its grammar to recognise
+/// it.
 ///
-/// PHP est le cas qui l'impose : sans `<?php`, sa grammaire lit **tout** le
-/// fragment comme du texte HTML, et pas une couleur n'en sort. Or un hunk
-/// commence presque toujours au milieu du fichier, donc après la balise
-/// d'ouverture — c'est le cas courant, pas l'exception, ce qui explique que la
-/// coloration paraissait cassée « très souvent ».
+/// PHP is the case that forces it: without `<?php`, its grammar reads the
+/// **whole** fragment as HTML text, and not one colour comes out. And a hunk
+/// almost always starts in the middle of the file, so after the opening tag —
+/// that is the common case, not the exception, which explains why the
+/// highlighting seemed broken "very often".
 ///
-/// Le prologue n'est ajouté que s'il manque : une vue dont le hunk contient le
-/// début du fichier commence bien par `<?php` ou par du HTML, et lui en
-/// préfixer un second casserait le parse. Les vues Blade n'en reçoivent jamais
-/// — voir `blade`.
+/// The prologue is only added if it is missing: a view whose hunk contains the
+/// start of the file does begin with `<?php` or with HTML, and prefixing a
+/// second one would break the parse. Blade views never receive one — see
+/// `blade`.
 fn prologue(language: &str, fragment: &str) -> &'static str {
     match language {
         "php" if !opens_php(fragment) => "<?php\n",
@@ -199,11 +192,11 @@ fn prologue(language: &str, fragment: &str) -> &'static str {
     }
 }
 
-/// Vrai si le fragment porte déjà une balise d'ouverture PHP, ou du HTML qui
-/// en attend une plus loin.
+/// True if the fragment already carries a PHP opening tag, or HTML expecting one
+/// further down.
 ///
-/// Le HTML compte : une vue commence par `<div>` et bascule en PHP ensuite,
-/// et la grammaire complète est faite pour ce mélange.
+/// The HTML counts: a view starts with `<div>` and switches to PHP afterwards,
+/// and the full grammar is made for that mixture.
 fn opens_php(fragment: &str) -> bool {
     fragment
         .lines()
@@ -212,21 +205,21 @@ fn opens_php(fragment: &str) -> bool {
         || fragment.trim_start().starts_with('<')
 }
 
-/// Combien de lignes on examine avant de conclure qu'il manque la balise.
+/// How many lines are examined before concluding the tag is missing.
 ///
-/// Tout le fragment serait inutile : une balise qui n'apparaît qu'à la
-/// cinquantième ligne laisse de toute façon les précédentes sans couleur, et
-/// c'est justement ce qu'on veut corriger.
+/// The whole fragment would be pointless: a tag that only appears on the
+/// fiftieth line leaves the preceding ones colourless anyway, and that is
+/// precisely what we are fixing.
 const PROLOGUE_LOOKAHEAD: usize = 3;
 
-/// Où se trouve une ligne du diff dans le texte reconstruit.
+/// Where a diff line sits in the rebuilt text.
 struct Span {
     hunk: usize,
     line: usize,
     range: Range<usize>,
 }
 
-/// Reconstruit une version du fichier et note la position de chaque ligne.
+/// Rebuilds one version of the file and records each line's position.
 fn build_side(diff: &FileDiff, side: Side) -> (String, Vec<Span>) {
     let mut text = String::new();
     let mut spans = Vec::new();
@@ -248,12 +241,12 @@ fn build_side(diff: &FileDiff, side: Side) -> (String, Vec<Span>) {
     (text, spans)
 }
 
-/// Redistribue les styles du texte reconstruit vers les lignes du diff.
+/// Redistributes the rebuilt text's styles onto the diff's lines.
 ///
-/// Les deux listes sont triées par décalage croissant, ce qui permet un seul
-/// parcours conjoint : un style qui déborde d'une ligne sur la suivante est
-/// coupé à la frontière plutôt que jeté — c'est le cas d'une chaîne
-/// multiligne, dont chaque morceau doit rester coloré.
+/// Both lists are sorted by increasing offset, which allows a single joint walk:
+/// a style spilling from one line onto the next is cut at the boundary rather
+/// than thrown away — that is the case of a multi-line string, each piece of
+/// which has to stay coloured.
 fn distribute(
     highlighted: &[(Range<usize>, HighlightStyle)],
     spans: &[Span],
@@ -264,16 +257,15 @@ fn distribute(
         let Some(target) = out.get_mut(span.hunk).and_then(|h| h.get_mut(span.line)) else {
             continue;
         };
-        // Une ligne de contexte appartient aux deux versions et est donc
-        // visitée deux fois : la seconde passe remplace la première au lieu de
-        // s'y ajouter. Accumuler produirait des plages en double et non
-        // triées, ce que le rendu traduit en décalage silencieux de toute la
-        // coloration à partir du doublon.
+        // A context line belongs to both versions and is therefore visited
+        // twice: the second pass replaces the first instead of adding to it.
+        // Accumulating would produce duplicated, unsorted ranges, which
+        // rendering turns into a silent shift of the whole highlighting from the
+        // duplicate on.
         target.clear();
-        // Avance jusqu'au premier style qui touche cette ligne. Les deux
-        // listes étant triées, ce curseur ne recule jamais : le parcours est
-        // linéaire et non quadratique, ce qui compte sur un diff de plusieurs
-        // milliers de lignes.
+        // Advance to the first style touching this line. Both lists being
+        // sorted, this cursor never goes back: the walk is linear and not
+        // quadratic, which matters on a diff of several thousand lines.
         while next < highlighted.len() && highlighted[next].0.end <= span.range.start {
             next += 1;
         }
@@ -293,16 +285,15 @@ fn distribute(
     }
 }
 
-/// Grammaire associée à une extension.
+/// The grammar associated with an extension.
 ///
-/// La liste ne couvre que ce que `gpui-component` embarque avec la
-/// caractéristique `tree-sitter-languages` : une extension absente rend
-/// `None`, et la vue affiche du texte nu plutôt qu'une coloration fausse.
-/// Certains langages embarqués (`swift`, `csharp`, `proto`, `cmake`,
-/// `graphql`) ont une requête de coloration vide en amont ; les lister
-/// n'apporterait rien, ils sont donc omis.
+/// The list only covers what `gpui-component` embeds with the
+/// `tree-sitter-languages` feature: a missing extension returns `None`, and the
+/// view shows bare text rather than wrong highlighting. Some embedded languages
+/// (`swift`, `csharp`, `proto`, `cmake`, `graphql`) have an empty highlight
+/// query upstream; listing them would bring nothing, so they are omitted.
 pub fn language_for_path(path: &Path) -> Option<&'static str> {
-    // Quelques fichiers se reconnaissent à leur nom, pas à leur extension.
+    // A few files are recognised by their name, not by their extension.
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
         match name {
             "Makefile" | "makefile" | "GNUmakefile" => return Some("make"),
@@ -326,9 +317,9 @@ pub fn language_for_path(path: &Path) -> Option<&'static str> {
         "ex" | "exs" => "elixir",
         "zig" => "zig",
         "sh" | "bash" | "zsh" => "bash",
-        // Les vues Blade sont du PHP entrecoupé de HTML : la grammaire PHP les
-        // couvre par ses injections, et sa directive `@if` non reconnue coûte
-        // moins qu'un fichier entier sans couleurs.
+        // Blade views are PHP interspersed with HTML: the PHP grammar covers
+        // them through its injections, and its unrecognised `@if` directive
+        // costs less than a whole file with no colours.
         "php" | "phtml" | "blade" => "php",
         "css" | "scss" => "css",
         "html" | "htm" => "html",
@@ -342,18 +333,18 @@ pub fn language_for_path(path: &Path) -> Option<&'static str> {
     })
 }
 
-/// Pose des fonds par-dessus une coloration existante.
+/// Lays backgrounds over an existing highlighting.
 ///
-/// C'est ce qui rend visible une occurrence de recherche **dans** du code
-/// coloré : le fond marque la trouvaille, la grammaire garde ses couleurs de
-/// texte. Repeindre la ligne entière ferait perdre l'un ou l'autre.
+/// It is what makes a search hit visible **inside** coloured code: the
+/// background marks the find, the grammar keeps its text colours. Repainting the
+/// whole line would lose one or the other.
 ///
-/// Les deux invariants de `with_highlights` valent ici aussi, et gpui n'en
-/// vérifie aucun : les plages rendues sont **triées et disjointes** — la
-/// fonction convertit en longueurs de runs consécutives, et une plage
-/// désordonnée décale tout ce qui suit — et les décalages sont en **octets**.
-/// `base` et `marks` doivent l'être également, chacun de son côté ; ils
-/// peuvent en revanche se chevaucher entre eux, c'est même le cas courant.
+/// `with_highlights`'s two invariants hold here too, and gpui checks neither:
+/// the ranges returned are **sorted and disjoint** — the function converts them
+/// into consecutive run lengths, and an out-of-order range shifts everything
+/// after it — and the offsets are in **bytes**. `base` and `marks` have to be so
+/// as well, each on its own; they may on the other hand overlap each other,
+/// which is in fact the common case.
 pub fn overlay(
     base: &[(Range<usize>, HighlightStyle)],
     marks: &[(Range<usize>, gpui::Hsla)],
@@ -361,9 +352,9 @@ pub fn overlay(
     if marks.is_empty() {
         return base.to_vec();
     }
-    // Toutes les frontières des deux découpages : entre deux d'entre elles, ni
-    // le style de fond ni celui du texte ne change, et le segment est donc
-    // uniforme par construction.
+    // Every boundary of both partitions: between two of them, neither the
+    // background style nor the text style changes, so the segment is uniform by
+    // construction.
     let mut cuts: Vec<usize> = Vec::with_capacity((base.len() + marks.len()) * 2);
     for (range, _) in base {
         cuts.push(range.start);
@@ -389,16 +380,16 @@ pub fn overlay(
             .map(|(_, color)| *color);
         let (Some(mut style), mark) = (style.or(mark.map(|_| HighlightStyle::default())), mark)
         else {
-            // Ni coloration ni occurrence : le texte reste au style ambiant,
-            // et une plage sans effet n'a rien à faire dans la liste.
+            // Neither highlighting nor hit: the text stays at the ambient style,
+            // and a range with no effect has no business in the list.
             continue;
         };
         if let Some(color) = mark {
             style.background_color = Some(color);
         }
-        // Deux segments voisins de même style se recollent : `with_highlights`
-        // en fait des runs, et deux runs identiques côte à côte sont un coût
-        // de mise en page pour rien.
+        // Two neighbouring segments of the same style are glued back together:
+        // `with_highlights` turns them into runs, and two identical runs side by
+        // side are a layout cost for nothing.
         match out.last_mut() {
             Some((last, previous)) if last.end == start && *previous == style => last.end = end,
             _ => out.push((start..end, style)),
@@ -409,8 +400,8 @@ pub fn overlay(
 
 #[cfg(test)]
 mod tests {
-    /// Un fond posé au milieu d'un mot coloré doit découper ce mot en trois,
-    /// et non remplacer sa couleur.
+    /// A background laid in the middle of a coloured word must split that word
+    /// into three, and not replace its colour.
     #[test]
     fn a_mark_splits_the_style_it_falls_inside() {
         let red = HighlightStyle {
@@ -434,7 +425,7 @@ mod tests {
         assert!(out[0].1.background_color.is_none());
     }
 
-    /// Sans coloration dessous, l'occurrence est le seul style de la ligne.
+    /// With no highlighting underneath, the hit is the line's only style.
     #[test]
     fn a_mark_on_bare_text_stands_alone() {
         let yellow = gpui::yellow();
@@ -444,7 +435,7 @@ mod tests {
         assert_eq!(out[0].1.background_color, Some(yellow));
     }
 
-    /// L'invariant que gpui ne vérifie pas : trié et disjoint.
+    /// The invariant gpui does not check: sorted and disjoint.
     #[test]
     fn the_result_stays_sorted_and_disjoint() {
         let style = |c| HighlightStyle {
@@ -509,9 +500,9 @@ mod tests {
         assert_eq!(language_for_path(Path::new("app/index.tsx")), Some("tsx"));
         assert_eq!(language_for_path(Path::new("Makefile")), Some("make"));
         assert_eq!(language_for_path(Path::new("Cargo.toml")), Some("toml"));
-        // Insensible à la casse de l'extension.
+        // Case-insensitive on the extension.
         assert_eq!(language_for_path(Path::new("SCRIPT.SH")), Some("bash"));
-        // Inconnu : pas de coloration plutôt qu'une mauvaise.
+        // Unknown: no highlighting rather than a wrong one.
         assert_eq!(language_for_path(Path::new("data.bin")), None);
         assert_eq!(language_for_path(Path::new("LICENSE")), None);
     }
@@ -561,8 +552,8 @@ mod tests {
         let highlights =
             DiffHighlights::compute(Path::new("src/x.rs"), &d, &HighlightTheme::default_dark());
 
-        // Sans le décalage, les styles de la seconde ligne pointeraient
-        // au-delà de son texte et le rendu paniquerait ou décalerait tout.
+        // Without the offset, the second line's styles would point past its text
+        // and rendering would panic or shift everything.
         for (hunk, count) in [(0usize, 2usize)] {
             for l in 0..count {
                 let text_len = d.hunks[hunk].lines[l].text.len();
@@ -622,9 +613,9 @@ mod php_tests {
             .count()
     }
 
-    /// Le cas courant, et celui qui paraissait cassé : un hunk pris au milieu
-    /// d'un fichier ne contient pas `<?php`, et sans lui la grammaire PHP lit
-    /// tout le fragment comme du texte HTML — pas une couleur.
+    /// The common case, and the one that seemed broken: a hunk taken from the
+    /// middle of a file does not contain `<?php`, and without it the PHP grammar
+    /// reads the whole fragment as HTML text — not one colour.
     #[test]
     fn a_hunk_taken_mid_file_is_still_coloured() {
         register_languages();
@@ -705,7 +696,7 @@ mod php_tests {
             &HighlightTheme::default_dark(),
         );
 
-        // La balise et son attribut, vus par la grammaire.
+        // The tag and its attribute, seen by the grammar.
         let div = styles.line(0, 0);
         let text = &diff.hunks[0].lines[0].text;
         for word in ["div", "class"] {
@@ -716,8 +707,8 @@ mod php_tests {
             );
         }
 
-        // Le nom d'un composant pointé tient en **une** plage et une seule
-        // couleur : la grammaire, elle, y lirait une balise puis un attribut.
+        // A dotted component name fits in **one** range and one colour: the
+        // grammar, for its part, would read a tag there and then an attribute.
         for line in [1, 2] {
             let text = &diff.hunks[0].lines[line].text;
             let dot = text.find(".app").expect("le point du composant");
@@ -758,8 +749,8 @@ mod php_tests {
         );
     }
 
-    /// Et un fichier PHP ordinaire n'y passe pas : `@` y est un opérateur, pas
-    /// une directive.
+    /// And an ordinary PHP file does not go through it: `@` there is an
+    /// operator, not a directive.
     #[test]
     fn a_plain_php_file_is_not_treated_as_blade() {
         assert!(!crate::ui::blade::is_blade(Path::new("app/Facture.php")));
@@ -768,16 +759,15 @@ mod php_tests {
         )));
     }
 
-    /// Et le prologue ne doit pas casser ce qui marchait : un fragment qui
-    /// porte déjà la balise, ou du HTML qui l'attend, n'en reçoit pas un
-    /// second.
+    /// And the prologue must not break what already worked: a fragment already
+    /// carrying the tag, or HTML expecting it, does not receive a second one.
     #[test]
     fn a_fragment_that_opens_php_keeps_its_own_prologue() {
         assert_eq!(prologue("php", "class A {}"), "<?php\n");
         assert_eq!(prologue("php", "<?php\nclass A {}"), "");
         assert_eq!(prologue("php", "<div>\n<?= $x ?>"), "");
         assert_eq!(prologue("php", "  <?php echo 1;"), "");
-        // Les autres langages n'ont rien à préfixer.
+        // The other languages have nothing to prefix.
         assert_eq!(prologue("rust", "fn main() {}"), "");
     }
     use super::*;
@@ -822,7 +812,7 @@ mod php_tests {
             &diff,
             &HighlightTheme::default_dark(),
         );
-        // La ligne de la déclaration de classe porte au moins un mot-clé.
+        // The class declaration's line carries at least one keyword.
         assert!(
             !highlights.line(0, 1).is_empty(),
             "la grammaire PHP n'est pas prise en compte"

@@ -1,17 +1,17 @@
-//! Le fil entre l'interface et `claudhub-server` : trames et format.
+//! The wire between the interface and `claudhub-server`: frames and format.
 //!
-//! Une trame est une longueur sur quatre octets petit-boutistes puis un corps
-//! postcard. Les `Cmd` descendent par l'entrée standard du serveur, les `Evt`
-//! remontent par sa sortie standard — **stdout appartient au fil** : un
-//! `println!` dans du code worker le corromprait, les traces vont sur stderr.
+//! A frame is a four-byte little-endian length followed by a postcard body.
+//! `Cmd`s go down the server's standard input, `Evt`s come back up its
+//! standard output — **stdout belongs to the wire**: a `println!` in worker
+//! code would corrupt it, traces go to stderr.
 //!
-//! Les secrets voyagent en clair : le fil est un tube privé vers un processus
-//! enfant de la même session, pas un réseau. C'est le même niveau de
-//! confiance qu'une variable d'environnement.
+//! Secrets travel in the clear: the wire is a private pipe to a child process
+//! of the same session, not a network. It is the same level of trust as an
+//! environment variable.
 //!
-//! Un chemin non-UTF-8 ne se sérialise pas (c'est `PathBuf` qui refuse, quel
-//! que soit le format) : l'envoi le journalise et l'écarte plutôt que de
-//! fermer le fil — voir [`write_frame`].
+//! A non-UTF-8 path does not serialise (it is `PathBuf` that refuses, whatever
+//! the format): sending logs it and drops it rather than closing the wire —
+//! see [`write_frame`].
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -63,8 +63,8 @@ impl Hello {
     }
 }
 
-/// Les shells de `/etc/shells` qui existent vraiment. Vide ailleurs que sous
-/// Unix, ce qui est la bonne réponse : la liste n'est qu'une suggestion.
+/// The shells in `/etc/shells` that really exist. Empty outside Unix, which is
+/// the right answer: the list is only a suggestion.
 fn login_shells() -> Vec<String> {
     let text = std::fs::read_to_string("/etc/shells").unwrap_or_default();
     text.lines()
@@ -231,7 +231,7 @@ mod tests {
         assert!(read_frame::<Cmd>(&mut input).unwrap().is_none());
     }
 
-    /// Une longueur aberrante est une erreur, pas une allocation.
+    /// An absurd length is an error, not an allocation.
     #[test]
     fn a_desynchronised_stream_is_refused() {
         let mut input: &[u8] = &[0xff, 0xff, 0xff, 0xff];

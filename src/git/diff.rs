@@ -1,9 +1,9 @@
-//! Diffs : la liste des fichiers touchés, et le contenu d'un fichier découpé
-//! en hunks pour la vue de revue.
+//! Diffs: the list of touched files, and one file's content cut into hunks for
+//! the review view.
 //!
-//! Claudhub ne calcule pas de diff lui-même — git le fait mieux, avec la
-//! détection de renommage, les règles de `.gitattributes` et les filtres de
-//! l'utilisateur. Ce module ne fait que lire sa sortie unifiée.
+//! Claudhub does not compute a diff itself — git does it better, with rename
+//! detection, `.gitattributes` rules and the user's filters. This module only
+//! reads its unified output.
 
 use std::path::{Path, PathBuf};
 
@@ -11,37 +11,36 @@ use anyhow::Result;
 
 use super::{git, split_nul};
 
-/// L'empreinte de l'arbre vide, telle que git la calcule partout.
+/// The empty tree's digest, as git computes it everywhere.
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
-/// Ce que la revue compare.
+/// What the review compares.
 ///
-/// `Hash` parce que les fichiers de chaque domaine sont rangés par domaine :
-/// deux panneaux montrent deux listes en même temps, et elles ne se
-/// chevauchent pas.
-/// Sérialisable : une note de relecture retient le domaine où elle a été
-/// prise, et le magasin d'état la relit au lancement suivant.
+/// `Hash` because each range's files are filed by range: two panels show two
+/// lists at the same time, and they do not overlap.
+/// Serialisable: a review note remembers the range it was taken in, and the
+/// state store reads it back on the next launch.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Range {
-    /// Tout ce qui sépare le répertoire de travail de HEAD, indexé ou non.
+    /// Everything separating the working tree from HEAD, staged or not.
     ///
-    /// Claudhub ne propose pas de comparer séparément l'index et le répertoire de
-    /// travail : la distinction est un détail de plomberie git, et la vue de
-    /// revue la restitue par une case à cocher par fichier plutôt que par deux
-    /// listes qu'il faut mentalement recoudre.
+    /// Claudhub does not offer to compare the index and the working tree
+    /// separately: the distinction is a git plumbing detail, and the review view
+    /// renders it through one checkbox per file rather than two lists that have
+    /// to be stitched back together mentally.
     Working,
-    /// Un commit précis, comparé à son premier parent.
+    /// One specific commit, compared against its first parent.
     ///
-    /// `parent` est explicite plutôt que déduit d'un `^` : un commit racine
-    /// n'a pas de parent, et `<sha>^` y échoue au lieu de rendre le diff
-    /// complet du premier commit.
+    /// `parent` is explicit rather than derived from a `^`: a root commit has no
+    /// parent, and `<sha>^` fails there instead of returning the first commit's
+    /// full diff.
     Commit { id: String, parent: Option<String> },
-    /// Revue de branche : de la divergence d'avec `base` jusqu'à HEAD.
+    /// Branch review: from the divergence with `base` up to HEAD.
     ///
-    /// Écrit `base...HEAD` (trois points) et non `base..HEAD` : le premier
-    /// part du point de divergence, donc ne montre que ce que la branche a
-    /// écrit, là où le second y mêlerait tout ce qui a atterri sur la base
-    /// depuis — du bruit que le relecteur n'a pas à lire.
+    /// Written `base...HEAD` (three dots) and not `base..HEAD`: the former
+    /// starts at the divergence point, so it shows only what the branch wrote,
+    /// where the latter would mix in everything that has landed on the base
+    /// since — noise the reviewer has no business reading.
     Branch { base: String },
 }
 
@@ -52,24 +51,24 @@ impl Range {
             Self::Branch { base } => vec![format!("{base}...HEAD")],
             Self::Commit { id, parent } => match parent {
                 Some(parent) => vec![parent.clone(), id.clone()],
-                // L'arbre vide : le seul point de comparaison d'un commit sans
-                // parent. Son empreinte est une constante de git, la même dans
-                // tous les dépôts.
+                // The empty tree: the only comparison point for a commit with
+                // no parent. Its digest is a git constant, the same in every
+                // repository.
                 None => vec![EMPTY_TREE.to_string(), id.clone()],
             },
         }
     }
 }
 
-/// Un fichier de la liste de revue, avec son volume de modifications.
+/// A file in the review list, with its change volume.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DiffFile {
     pub path: PathBuf,
-    /// Ancien chemin d'un renommage.
+    /// Former path of a rename.
     pub original: Option<PathBuf>,
     pub added: usize,
     pub removed: usize,
-    /// git ne compte pas les lignes d'un binaire : rien à afficher côté texte.
+    /// git does not count a binary's lines: nothing to show on the text side.
     pub binary: bool,
 }
 
@@ -78,15 +77,15 @@ pub enum DiffLineKind {
     Context,
     Added,
     Removed,
-    /// « \ No newline at end of file » — à afficher, jamais à compter.
+    /// "\ No newline at end of file" — to be shown, never counted.
     NoNewline,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DiffLine {
     pub kind: DiffLineKind,
-    /// Numéros dans l'ancien et le nouveau fichier ; une ligne ajoutée n'a pas
-    /// d'ancien numéro, une ligne supprimée pas de nouveau.
+    /// Numbers in the old and the new file; an added line has no old number, a
+    /// removed line no new one.
     pub old_no: Option<usize>,
     pub new_no: Option<usize>,
     pub text: String,
@@ -94,23 +93,23 @@ pub struct DiffLine {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Hunk {
-    /// L'en-tête `@@ … @@` tel quel, avec la section que git y ajoute.
+    /// The `@@ … @@` header as it is, with the section git adds to it.
     pub header: String,
     pub old_start: usize,
     pub new_start: usize,
     pub lines: Vec<DiffLine>,
 }
 
-/// Le diff d'un seul fichier.
+/// A single file's diff.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileDiff {
     pub hunks: Vec<Hunk>,
     pub binary: bool,
-    /// Diff tronqué par git (fichier très gros) ou vide.
+    /// Diff truncated by git (very large file) or empty.
     pub empty: bool,
 }
 
-/// Liste les fichiers du domaine de revue avec leur volume.
+/// Lists the review range's files with their volume.
 pub fn files(dir: &Path, range: &Range) -> Result<Vec<DiffFile>> {
     let mut args: Vec<String> = vec!["diff".into(), "--numstat".into(), "-z".into(), "-M".into()];
     args.extend(range.args());
@@ -118,17 +117,17 @@ pub fn files(dir: &Path, range: &Range) -> Result<Vec<DiffFile>> {
     Ok(parse_numstat(&out))
 }
 
-/// Diff d'un fichier unique.
+/// A single file's diff.
 ///
-/// `context` est le nombre de lignes autour de chaque modification ; la vue le
-/// remonte quand on demande « plus de contexte ».
+/// `context` is the number of lines around each change; the view raises it when
+/// "more context" is asked for.
 pub fn file(dir: &Path, range: &Range, path: &Path, context: usize) -> Result<FileDiff> {
     let mut args: Vec<String> = vec![
         "diff".into(),
         format!("-U{context}"),
         "-M".into(),
-        // Sans cela, un `diff.external` ou un pilote de `.gitattributes`
-        // remplace la sortie unifiée par un format que nous ne savons pas lire.
+        // Without this, a `diff.external` or a `.gitattributes` driver replaces
+        // the unified output with a format we do not know how to read.
         "--no-ext-diff".into(),
         "--no-color".into(),
     ];
@@ -139,16 +138,16 @@ pub fn file(dir: &Path, range: &Range, path: &Path, context: usize) -> Result<Fi
     Ok(parse_unified(&out))
 }
 
-/// Le texte brut de ce qui est indexé, tel que git l'écrit.
+/// The raw text of what is staged, as git writes it.
 ///
-/// Ni `DiffFile` ni `FileDiff` : ce diff-là n'est pas affiché, il est **lu par
-/// un agent** à qui l'on demande un message de commit. Le format unifié est
-/// justement ce qu'un modèle sait lire, et le redécouper pour le recomposer
-/// ensuite ne ferait que perdre les en-têtes qui disent quel fichier change.
+/// Neither `DiffFile` nor `FileDiff`: that diff is not displayed, it is **read
+/// by an agent** asked for a commit message. The unified format is precisely
+/// what a model can read, and cutting it up only to recompose it afterwards
+/// would just lose the headers that say which file changes.
 ///
-/// Le contexte est réduit à trois lignes : ce qu'on paie ici, c'est le nombre
-/// de jetons envoyés. Un binaire modifié n'y met qu'une ligne — git ne
-/// l'écrit pas sans `--text`, et c'est ce qu'on veut.
+/// The context is cut down to three lines: what is paid for here is the number
+/// of tokens sent. A changed binary only puts one line in it — git does not
+/// write it without `--text`, and that is what we want.
 pub fn staged_text(dir: &Path) -> Result<String> {
     git(
         dir,
@@ -163,16 +162,15 @@ pub fn staged_text(dir: &Path) -> Result<String> {
     )
 }
 
-/// Diff d'un fichier non suivi : git ne le connaît pas, donc `diff` seul rend
-/// une sortie vide. `--no-index` contre `/dev/null` produit le même format que
-/// pour les autres fichiers, ce qui évite un second chemin d'affichage.
+/// An untracked file's diff: git does not know it, so `diff` alone returns
+/// empty output. `--no-index` against `/dev/null` produces the same format as
+/// for other files, which avoids a second display path.
 pub fn untracked_file(dir: &Path, path: &Path) -> Result<FileDiff> {
     let full = dir.join(path);
-    // `--no-index` sort avec le code 1 dès qu'il y a une différence, ce qui
-    // est le cas normal ici : le fichier entier *est* la différence. Passer
-    // par `git` jetterait la sortie avec l'« erreur », et le fichier
-    // s'affichait vide — c'est ce qui faisait croire qu'un fichier nouveau
-    // n'était pas lisible.
+    // `--no-index` exits with code 1 as soon as there is a difference, which is
+    // the normal case here: the whole file *is* the difference. Going through
+    // `git` would throw the output away along with the "error", and the file
+    // displayed empty — that is what made a new file look unreadable.
     let out = super::git_tolerant(
         dir,
         &[
@@ -188,8 +186,8 @@ pub fn untracked_file(dir: &Path, path: &Path) -> Result<FileDiff> {
     Ok(parse_unified(&out))
 }
 
-/// `--numstat -z` : `ajouts\tsuppressions\tchemin\0`, et pour un renommage
-/// `ajouts\tsuppressions\t\0ancien\0nouveau\0`.
+/// `--numstat -z`: `added\tremoved\tpath\0`, and for a rename
+/// `added\tremoved\t\0old\0new\0`.
 fn parse_numstat(out: &str) -> Vec<DiffFile> {
     let mut files = Vec::new();
     let mut records = split_nul(out);
@@ -198,10 +196,10 @@ fn parse_numstat(out: &str) -> Vec<DiffFile> {
         let added = f.next().unwrap_or("");
         let removed = f.next().unwrap_or("");
         let path = f.next().unwrap_or("");
-        // git écrit « - » pour un binaire, dont les lignes n'ont pas de sens.
+        // git writes "-" for a binary, whose line counts make no sense.
         let binary = added == "-" || removed == "-";
         let (path, original) = if path.is_empty() {
-            // Renommage : le chemin est vide et suivi de deux enregistrements.
+            // Rename: the path is empty and followed by two records.
             let old = records.next().unwrap_or("");
             let new = records.next().unwrap_or("");
             (new.to_string(), Some(PathBuf::from(old)))
@@ -293,7 +291,7 @@ fn parse_unified(out: &str) -> FileDiff {
     diff
 }
 
-/// `@@ -12,7 +12,9 @@ fn quelque_chose()` → (12, 12).
+/// `@@ -12,7 +12,9 @@ fn something()` → (12, 12).
 fn parse_hunk_header(line: &str) -> (usize, usize) {
     let mut old = 1;
     let mut new = 1;
@@ -311,11 +309,10 @@ fn parse_hunk_header(line: &str) -> (usize, usize) {
     (old, new)
 }
 
-/// Reconstitue un patch applicable pour un seul hunk.
+/// Rebuilds an applicable patch for a single hunk.
 ///
-/// C'est ce que la vue envoie à `git apply --cached` pour indexer un morceau
-/// isolé : git n'a pas de commande « ajoute ce hunk-là », seulement l'index
-/// et un patch.
+/// This is what the view sends to `git apply --cached` to stage an isolated
+/// piece: git has no "add that hunk" command, only the index and a patch.
 pub fn hunk_patch(path: &Path, original: Option<&Path>, hunk: &Hunk, reverse: bool) -> String {
     let new_path = path.to_string_lossy();
     let old_path = original
@@ -343,8 +340,8 @@ pub fn hunk_patch(path: &Path, original: Option<&Path>, hunk: &Hunk, reverse: bo
         patch.push_str(&line.text);
         patch.push('\n');
     }
-    // `reverse` n'inverse pas le texte : `git apply --reverse` s'en charge, et
-    // il le fait juste, y compris pour les fins de fichier sans saut de ligne.
+    // `reverse` does not flip the text: `git apply --reverse` takes care of it,
+    // and does it right, including for file endings without a newline.
     let _ = reverse;
     patch
 }
@@ -353,13 +350,12 @@ pub fn hunk_patch(path: &Path, original: Option<&Path>, hunk: &Hunk, reverse: bo
 mod tests {
     use super::*;
 
-    /// Le fichier nouveau se lit entièrement.
+    /// A new file reads whole.
     ///
-    /// `--no-index` sort avec le code 1 dès qu'il trouve une différence, et
-    /// c'est le cas normal ici : le fichier entier *est* la différence. Une
-    /// lecture qui traite ce code comme un échec rend un diff vide, et la vue
-    /// affiche « aucune modification » sur un fichier qui n'est que des
-    /// ajouts.
+    /// `--no-index` exits with code 1 as soon as it finds a difference, and that
+    /// is the normal case here: the whole file *is* the difference. A read
+    /// treating that code as a failure returns an empty diff, and the view shows
+    /// "no change" on a file that is nothing but additions.
     #[test]
     fn an_untracked_file_is_read_whole() {
         let dir = tempdir();
@@ -488,7 +484,7 @@ index 1234567..89abcde 100644
         };
         assert_eq!(with_parent.args(), vec!["def", "abc"]);
 
-        // Un commit racine se compare à l'arbre vide : `abc^` n'existe pas.
+        // A root commit compares against the empty tree: `abc^` does not exist.
         let root = Range::Commit {
             id: "abc".into(),
             parent: None,

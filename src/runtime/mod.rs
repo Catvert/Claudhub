@@ -1,14 +1,14 @@
-//! Les workers git.
+//! The git workers.
 //!
-//! Un petit groupe de threads OS consomme le même canal de commandes et
-//! répond par des événements. Des threads plutôt qu'un exécuteur async parce
-//! que `std::process::Command` bloque de toute façon : une commande git, c'est
-//! un `fork`, une attente, et rien à entrelacer entre les deux.
+//! A small group of OS threads consumes the same command channel and answers
+//! with events. Threads rather than an async executor because
+//! `std::process::Command` blocks anyway: a git command is a `fork`, a wait, and
+//! nothing to interleave between the two.
 //!
-//! Plusieurs threads plutôt qu'un seul parce qu'un `git fetch` sur un dépôt
-//! distant lent gèlerait sinon le rafraîchissement du statut et l'affichage
-//! des diffs. Git protège lui-même l'index par un verrou `index.lock` ; deux
-//! écritures concurrentes échouent proprement au lieu de se corrompre.
+//! Several threads rather than one because a `git fetch` on a slow remote would
+//! otherwise freeze the status refresh and the diff display. Git protects the
+//! index itself with an `index.lock`; two concurrent writes fail cleanly instead
+//! of corrupting each other.
 
 pub mod executor;
 pub mod protocol;
@@ -56,17 +56,16 @@ fn is_network(cmd: &Cmd) -> bool {
     )
 }
 
-/// Les bases de données ont leur propre file.
+/// The databases have their own queue.
 ///
-/// Ni celle des lectures — un `SELECT` malheureux y emporterait un worker sur
-/// trois et le diff attendrait derrière —, ni celle du réseau : une requête de
-/// trente secondes retarderait un `fetch`, et un `fetch` lent retarderait la
-/// lecture d'un schéma. Ce sont deux mondes qui n'ont aucune raison de se
-/// croiser.
+/// Neither the reads' — an unlucky `SELECT` there would take one worker in three
+/// and the diff would wait behind it — nor the network's: a thirty-second query
+/// would delay a `fetch`, and a slow `fetch` would delay reading a schema. They
+/// are two worlds with no reason to cross.
 ///
-/// Deux workers, parce que déplier un schéma en demande plusieurs à la fois —
-/// les tables d'une base, puis toutes ses colonnes — et qu'ils attendent une
-/// socket, pas un cœur.
+/// Two workers, because unfolding a schema asks for several at once — a
+/// database's tables, then all its columns — and they wait on a socket, not on a
+/// core.
 fn is_db(cmd: &Cmd) -> bool {
     matches!(
         cmd,
@@ -79,11 +78,11 @@ fn is_db(cmd: &Cmd) -> bool {
     )
 }
 
-/// Le balayage de fond : résumé de chaque worktree et recherche des agents.
+/// The background sweep: each worktree's summary and the search for agents.
 ///
-/// Il a sa propre file pour la même raison que le réseau : il porte sur tous
-/// les worktrees ouverts, il revient toutes les quelques secondes, et il ne
-/// doit jamais passer devant le diff qu'on vient de demander.
+/// It has its own queue for the same reason as the network: it covers every open
+/// worktree, it comes back every few seconds, and it must never get in front of
+/// the diff just asked for.
 fn is_background(cmd: &Cmd) -> bool {
     matches!(
         cmd,
@@ -91,12 +90,12 @@ fn is_background(cmd: &Cmd) -> bool {
     )
 }
 
-/// Les opérations de `wt` qui lancent les hooks du projet.
+/// The `wt` operations that run the project's hooks.
 ///
-/// Elles ont la file du réseau, et pour la même raison : un `post_new` qui
-/// installe des dépendances, un `up` qui démarre des conteneurs, cela dure des
-/// minutes. Les mettre avec les lectures reviendrait à figer la revue le temps
-/// d'un `composer install`.
+/// They get the network queue, and for the same reason: a `post_new` installing
+/// dependencies, an `up` starting containers, that takes minutes. Putting them
+/// with the reads would amount to freezing the review for the length of a
+/// `composer install`.
 fn is_long(cmd: &Cmd) -> bool {
     matches!(
         cmd,
@@ -104,13 +103,12 @@ fn is_long(cmd: &Cmd) -> bool {
     )
 }
 
-/// De quoi parler aux workers, où qu'ils tournent.
+/// What is needed to talk to the workers, wherever they run.
 ///
-/// `Local` est le mode normal : les files de ce processus. `Remote` est le
-/// fil vers un `claudhub-server` — une seule voie, c'est le serveur qui
-/// refait le tri entre ses files à l'arrivée. Le même `send` pour les deux :
-/// les soixante-dix points d'envoi de la vue n'ont pas à savoir où les
-/// workers vivent.
+/// `Local` is the normal mode: this process's queues. `Remote` is the wire to a
+/// `claudhub-server` — a single channel, and the server sorts them back into its
+/// queues on arrival. The same `send` for both: the view's seventy send sites
+/// have no business knowing where the workers live.
 pub struct Handle {
     inner: HandleInner,
 }
@@ -121,51 +119,49 @@ enum HandleInner {
         network: async_channel::Sender<Cmd>,
         background: async_channel::Sender<Cmd>,
         databases: async_channel::Sender<Cmd>,
-        /// La cinquième voie : les ordres de surveillance ne passent par
-        /// aucune file — poser une surveillance est déjà différé dans le
-        /// thread du surveillant, et la faire attendre derrière un diff
-        /// n'aurait pas de sens. `None` quand la surveillance n'a pas pu
-        /// démarrer : les ordres sont alors jetés, et la revue ne se
-        /// rafraîchit qu'à la main.
+        /// The fifth channel: watch orders go through no queue — setting up a
+        /// watch is already deferred into the watcher thread, and making it wait
+        /// behind a diff would make no sense. `None` when watching could not
+        /// start: the orders are then dropped, and the review only refreshes by
+        /// hand.
         watcher: Option<watch::Watcher>,
     },
     Remote(async_channel::Sender<Cmd>),
-    /// Aucun worker : les commandes sont jetées.
+    /// No worker at all: the commands are dropped.
     ///
-    /// L'état d'avant la connexion, sous Windows, où les workers vivent dans
-    /// une distribution qu'il faut d'abord réveiller. Jeter est le bon
-    /// comportement : les faire attendre en file les livrerait toutes d'un
-    /// coup à l'ouverture, et retomber sur des workers locaux ferait
-    /// travailler `git.exe` sur des chemins Windows, en silence et à côté de
-    /// la plaque.
+    /// The state before the connection, on Windows, where the workers live in a
+    /// distribution that has to be woken first. Dropping is the right behaviour:
+    /// queueing them would deliver them all at once on opening, and falling back
+    /// to local workers would make `git.exe` work on Windows paths, silently and
+    /// wide of the mark.
     ///
-    /// **Corollaire, et il s'est payé** : ce qui n'est demandé qu'une fois, au
-    /// démarrage, ne revient pas tout seul. `ClaudhubApp::backend_ready` est
-    /// l'endroit où cela se rattrape, et il doit y reposer *tout* ce que la
-    /// fenêtre a demandé trop tôt — la liste des dépôts mémorisés y a manqué,
-    /// et une fenêtre Windows rouvrait vide à chaque lancement.
+    /// **Corollary, and it has been paid for**: what is only asked once, at
+    /// startup, does not come back by itself. `ClaudhubApp::backend_ready` is
+    /// where that is caught up, and it has to re-send *everything* the window
+    /// asked for too early — the list of remembered repositories was missing
+    /// there, and a Windows window reopened empty on every launch.
     Pending,
 }
 
 impl Handle {
-    /// Le manche d'un transport distant : tout part dans la même voie, vers
-    /// le thread qui écrit les trames.
+    /// A remote transport's handle: everything goes down the same channel,
+    /// towards the thread that writes the frames.
     pub(crate) fn remote(wire: async_channel::Sender<Cmd>) -> Self {
         Self {
             inner: HandleInner::Remote(wire),
         }
     }
 
-    /// Un manche sans workers, en attendant qu'un serveur réponde.
+    /// A handle with no workers, while waiting for a server to answer.
     pub fn pending() -> Self {
         Self {
             inner: HandleInner::Pending,
         }
     }
 
-    /// Envoie une commande dans la file qui lui convient. L'échec (canal
-    /// fermé) n'arrive qu'à l'extinction — ou, en distant, à la mort du
-    /// serveur, que la vue apprend par `Evt::ServerLost` : rien à dire ici.
+    /// Sends a command into the queue that suits it. Failure (closed channel)
+    /// only happens at shutdown — or, remotely, at the server's death, which the
+    /// view learns through `Evt::ServerLost`: nothing to say here.
     pub fn send(&self, cmd: Cmd) {
         match &self.inner {
             HandleInner::Local {
@@ -213,7 +209,7 @@ fn route_watch(watcher: Option<&watch::Watcher>, cmd: Cmd) -> Option<Cmd> {
     None
 }
 
-/// Démarre les workers et rend de quoi leur parler et les écouter.
+/// Starts the workers and returns what is needed to talk and listen to them.
 pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
     let (read_tx, read_rx) = async_channel::unbounded::<Cmd>();
     let (net_tx, net_rx) = async_channel::unbounded::<Cmd>();
@@ -224,17 +220,17 @@ pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
     for n in 0..READERS {
         worker(format!("claudhub-git-{n}"), read_rx.clone(), evt_tx.clone());
     }
-    // Un seul pour le réseau : deux `fetch` simultanés sur le même dépôt se
-    // disputeraient le verrou des références sans rien accélérer.
+    // Only one for the network: two simultaneous `fetch`es on the same
+    // repository would fight over the reference lock without speeding anything up.
     worker("claudhub-git-net".into(), net_rx, evt_tx.clone());
     worker("claudhub-scan".into(), bg_rx, evt_tx.clone());
     for n in 0..DB_WORKERS {
         worker(format!("claudhub-db-{n}"), db_rx.clone(), evt_tx.clone());
     }
 
-    // La surveillance de fichiers vit ici et non dans la vue : ses lots
-    // deviennent des `Evt::FilesChanged` sur le même canal que tout le reste —
-    // un seul flux à faire passer sur un fil, local ou distant.
+    // File watching lives here and not in the view: its batches become
+    // `Evt::FilesChanged` on the same channel as everything else — a single
+    // stream to push over a wire, local or remote.
     let watcher = match watch::Watcher::new() {
         Ok((watcher, changes)) => {
             let forward = evt_tx.clone();
@@ -576,6 +572,8 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
             )));
             vec![Evt::DbExported { path, rows }]
         }
+
+        // — Project files ———————————————————————————————————————————————
         Cmd::ListFiles { worktree, ignored } => match repo::list_files(&worktree, ignored) {
             Ok(files) => vec![Evt::ProjectFiles { worktree, files }],
             Err(e) => vec![fail(Some(worktree), Action::Read, e)],
@@ -630,6 +628,8 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
             Ok(program) => vec![done(Some(worktree), Action::OpenExternal, program)],
             Err(e) => vec![fail(Some(worktree), Action::OpenExternal, e)],
         },
+
+        // — `wt` and the worktrees ——————————————————————————————————————
         Cmd::WtLoad { main } => {
             let project = crate::wt::snapshot(&main);
             vec![Evt::WtProject { main, project }]
@@ -951,9 +951,9 @@ fn integrate(main: &Path, branch: &str, base: &str, no_ff: bool) -> Result<Strin
 fn open_repo(path: &Path) -> Result<Evt> {
     let r = repo::Repo::discover(path)?;
     let worktrees = r.worktrees()?;
-    // Le chemin demandé peut être un sous-dossier du checkout ; on retient le
-    // worktree le plus profond qui le contient, sinon un worktree imbriqué
-    // dans un autre serait attribué au mauvais.
+    // The requested path may be a subfolder of the checkout; we keep the deepest
+    // worktree containing it, otherwise a worktree nested in another would be
+    // attributed to the wrong one.
     let requested = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let opened_at = worktrees
         .iter()
@@ -968,9 +968,9 @@ fn open_repo(path: &Path) -> Result<Evt> {
     })
 }
 
-/// Toute écriture est suivie d'une relecture du statut : c'est ce qui garde le
-/// panneau de revue exact sans que la vue ait à savoir quelle commande touche
-/// quoi. Le coût est un `git status` de plus par action déclenchée à la main.
+/// Every write is followed by a re-read of the status: that is what keeps the
+/// review panel accurate without the view having to know which command touches
+/// what. The cost is one more `git status` per action triggered by hand.
 fn write_then_refresh(
     worktree: PathBuf,
     action: Action,

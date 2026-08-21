@@ -1,14 +1,14 @@
-//! Les conflits, et le garde-fou d'une opération à mi-chemin.
+//! Conflicts, and the guard rail of a half-finished operation.
 //!
-//! Un merge interrompu laisse le dépôt dans un état que rien ne nomme :
-//! l'index porte des conflits, `HEAD` ne désigne pas ce qu'on croit, et la
-//! liste des modifications se remplit de fichiers qu'on n'a pas touchés. Tant
-//! qu'il dure, la barre d'état le dit et propose d'en sortir.
+//! An interrupted merge leaves the repository in a state nothing names: the
+//! index carries conflicts, `HEAD` does not point where you think, and the
+//! change list fills with files you never touched. While it lasts, the status
+//! bar says so and offers a way out.
 //!
-//! **Une vue à trois volets n'est pas promise ici.** Les trois actions par
-//! fichier — garder la nôtre, garder la leur, ouvrir dans l'éditeur — tiennent
-//! en peu de code et couvrent ce qu'on fait dans la grande majorité des cas ;
-//! une fusion à la main se fait dans l'éditeur, qui sait déjà le faire.
+//! **A three-pane view is not promised here.** The three per-file actions —
+//! keep ours, keep theirs, open in the editor — fit in little code and cover
+//! what one does in the vast majority of cases; a merge by hand happens in the
+//! editor, which already knows how.
 
 use std::path::PathBuf;
 
@@ -55,7 +55,7 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Marque un fichier résolu : c'est une indexation, et rien d'autre.
+    /// Marks a file resolved: that is a staging, and nothing else.
     pub(super) fn mark_resolved(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
@@ -144,8 +144,8 @@ impl ClaudhubApp {
                 .into_any_element();
         }
 
-        // Peu de fichiers, presque toujours : une liste virtualisée n'aurait
-        // rien à économiser, et chaque ligne porte trois boutons.
+        // Few files, almost always: a virtualised list would have nothing to
+        // save, and each row carries three buttons.
         let rows: Vec<_> = files
             .into_iter()
             .enumerate()
@@ -249,9 +249,9 @@ impl ClaudhubApp {
             )
     }
 
-    /// Continuer / Abandonner. Les mêmes deux boutons dans la barre d'état et
-    /// dans le panneau : c'est la seule chose à faire d'une opération à
-    /// mi-chemin, et la chercher à un seul endroit serait une chasse au trésor.
+    /// Continue / Abort. The same two buttons in the status bar and in the
+    /// panel: it is the only thing to do with a half-finished operation, and
+    /// looking for it in a single place would be a treasure hunt.
     pub(super) fn render_pending_buttons(
         &self,
         scope: &'static str,
@@ -275,7 +275,7 @@ impl ClaudhubApp {
             )
     }
 
-    /// Ce que la barre d'état affiche d'une opération en cours.
+    /// What the status bar shows of an operation in progress.
     pub(super) fn render_pending_bar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let kind = self.pending_operation()?;
         let warning = cx.theme().warning;

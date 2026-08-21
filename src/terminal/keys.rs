@@ -1,33 +1,33 @@
-//! Traduction d'une frappe gpui en octets pour le pty.
+//! Turning a gpui keystroke into bytes for the pty.
 //!
-//! Il n'y a pas de norme unique : les séquences ci-dessous sont celles que
-//! xterm émet et que toutes les terminfo `xterm-256color` décrivent, ce qui
-//! est le contrat que nous annonçons au programme via `TERM`.
+//! There is no single standard: the sequences below are the ones xterm emits
+//! and every `xterm-256color` terminfo describes, which is the contract we
+//! announce to the program through `TERM`.
 //!
-//! Deux modes changent ce qui part sur le fil. En mode « curseur applicatif »
-//! (DECCKM, demandé par vim, less, la plupart des interfaces plein écran) les
-//! flèches commencent par `ESC O` et non `ESC [`. En mode « clavier
-//! applicatif » le pavé numérique change aussi ; nous ne le distinguons pas,
-//! aucun programme courant ne s'y fiant plus.
+//! Two modes change what goes out on the wire. In "application cursor" mode
+//! (DECCKM, requested by vim, less, most full-screen interfaces) the arrows
+//! start with `ESC O` rather than `ESC [`. In "application keypad" mode the
+//! numeric keypad changes too; we do not distinguish it, no common program
+//! relying on it any more.
 
 use alacritty_terminal::term::TermMode;
 use gpui::Keystroke;
 
-/// Rend les octets à écrire dans le pty, ou `None` si la frappe n'a rien à y
-/// faire (une touche morte, un modificateur seul, un raccourci de Claudhub).
+/// Returns the bytes to write to the pty, or `None` if the keystroke has no
+/// business there (a dead key, a lone modifier, a Claudhub shortcut).
 pub fn key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
     let m = &keystroke.modifiers;
     let key = keystroke.key.as_str();
 
-    // Les raccourcis de l'application (Ctrl/Cmd+T, Cmd+W…) sont interceptés
-    // en amont par les actions gpui ; ce qui arrive ici avec la touche système
-    // n'a rien à faire dans le terminal.
+    // The application's shortcuts (Ctrl/Cmd+T, Cmd+W…) are intercepted
+    // upstream by gpui actions; whatever reaches here with the platform key
+    // has no business in the terminal.
     if m.platform {
         return None;
     }
 
-    // Le préfixe ESC de Meta : c'est ce que fait tout terminal pour Alt+x, et
-    // ce sur quoi comptent readline et emacs.
+    // Meta's ESC prefix: it is what every terminal does for Alt+x, and what
+    // readline and emacs count on.
     let alt = |mut bytes: Vec<u8>| -> Option<Vec<u8>> {
         if m.alt {
             bytes.insert(0, 0x1b);
@@ -35,11 +35,11 @@ pub fn key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
         Some(bytes)
     };
 
-    // Les touches de déplacement, dont la forme dépend du mode applicatif.
+    // Movement keys, whose form depends on application mode.
     let cursor = |letter: char| -> Option<Vec<u8>> {
-        // Avec un modificateur, xterm passe à la forme longue `ESC [ 1 ; n X`,
-        // où n encode shift/alt/ctrl. C'est ce qui permet à un éditeur de
-        // distinguer Ctrl+Droite d'une simple flèche.
+        // With a modifier, xterm switches to the long form `ESC [ 1 ; n X`,
+        // where n encodes shift/alt/ctrl. That is what lets an editor tell
+        // Ctrl+Right from a plain arrow.
         if let Some(n) = modifier_code(m) {
             return Some(format!("\x1b[1;{n}{letter}").into_bytes());
         }
@@ -51,7 +51,7 @@ pub fn key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
         Some(format!("{intro}{letter}").into_bytes())
     };
 
-    // Les touches d'édition, de la forme `ESC [ n ~`.
+    // Editing keys, of the form `ESC [ n ~`.
     let tilde = |n: u8| -> Option<Vec<u8>> {
         match modifier_code(m) {
             Some(code) => Some(format!("\x1b[{n};{code}~").into_bytes()),
@@ -104,12 +104,12 @@ pub fn key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
                     bytes
                 });
             }
-            // Le cas ordinaire : le caractère que la disposition clavier a
-            // effectivement produit, accents et dispositions non latines
-            // compris. `key` seul donnerait l'équivalent ASCII de la touche.
+            // The ordinary case: the character the keyboard layout actually
+            // produced, accents and non-Latin layouts included. `key` alone
+            // would give the key's ASCII equivalent.
             let text = keystroke.key_char.as_deref().or({
-                // Une touche d'une seule lettre sans key_char (certaines
-                // dispositions) reste utilisable telle quelle.
+                // A single-letter key with no key_char (some layouts) stays
+                // usable as it is.
                 (key.chars().count() == 1).then_some(key)
             })?;
             alt(text.as_bytes().to_vec())
@@ -117,16 +117,16 @@ pub fn key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
     }
 }
 
-/// Le code de modificateur d'xterm : 1 + shift(1) + alt(2) + ctrl(4).
+/// xterm's modifier code: 1 + shift(1) + alt(2) + ctrl(4).
 fn modifier_code(m: &gpui::Modifiers) -> Option<u8> {
     let code = 1 + u8::from(m.shift) + 2 * u8::from(m.alt) + 4 * u8::from(m.control);
     (code > 1).then_some(code)
 }
 
-/// L'octet de contrôle d'une touche combinée à Ctrl.
+/// The control byte for a key combined with Ctrl.
 ///
-/// Ctrl+A..Z valent 1..26 ; les quelques symboles qui suivent viennent du
-/// codage ASCII d'origine, où Ctrl efface simplement le bit 6.
+/// Ctrl+A..Z are 1..26; the few symbols that follow come from the original
+/// ASCII encoding, where Ctrl simply clears bit 6.
 fn control_byte(key: &str) -> Option<u8> {
     let c = key.chars().next()?;
     if key.chars().count() != 1 {
@@ -141,7 +141,7 @@ fn control_byte(key: &str) -> Option<u8> {
         ']' => Some(0x1d),
         '^' => Some(0x1e),
         '_' => Some(0x1f),
-        // Ctrl+/ vaut 0x1f dans tous les terminaux, d'où l'annulation d'emacs.
+        // Ctrl+/ is 0x1f in every terminal, hence emacs's undo.
         '/' => Some(0x1f),
         '?' => Some(0x7f),
         _ => None,
@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn alt_prefixes_with_escape() {
-        // Alt+f, le « mot suivant » de readline.
+        // Alt+f, readline's "forward word".
         assert_eq!(bytes("alt-f", TermMode::empty()), b"\x1bf");
         assert_eq!(bytes("alt-ctrl-a", TermMode::empty()), vec![0x1b, 0x01]);
     }
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn platform_shortcuts_stay_in_the_application() {
-        // Cmd/Super+T ouvre un onglet Claudhub : rien ne doit partir au shell.
+        // Cmd/Super+T opens a Claudhub tab: nothing must go to the shell.
         assert_eq!(key_bytes(&stroke("cmd-t"), TermMode::empty()), None);
     }
 }

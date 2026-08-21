@@ -1,11 +1,11 @@
-//! Le panneau Sentry : des issues, leur trace, et de quoi les confier.
+//! The Sentry panel: issues, their trace, and what is needed to hand them over.
 //!
-//! C'est la boucle complète que ce jalon ferme : du rapport d'erreur au
-//! worktree relu. On lit une issue, on clique une frame pour ouvrir le code
-//! fautif, et on confie le tout à un agent — soit dans le worktree courant,
-//! soit dans un worktree neuf créé pour l'occasion.
+//! This is the complete loop this milestone closes: from the error report to
+//! the reviewed worktree. You read an issue, click a frame to open the
+//! offending code, and hand the whole thing to an agent — either in the current
+//! worktree, or in a fresh worktree created for the occasion.
 //!
-//! Claudhub **n'envoie rien** à Sentry : il lit.
+//! Claudhub **sends nothing** to Sentry: it reads.
 
 use std::path::PathBuf;
 
@@ -23,26 +23,26 @@ use crate::ui::icons::icon;
 use crate::ui::settings::Settings;
 use crate::ui::store::Store;
 
-/// Ce que le panneau Sentry affiche.
+/// What the Sentry panel shows.
 #[derive(Default)]
 pub struct SentryState {
     pub issues: Vec<Issue>,
     pub selected: Option<String>,
-    /// L'événement de l'issue choisie, quand il est arrivé.
+    /// The chosen issue's event, once it has arrived.
     pub event: Option<Event>,
-    /// Une requête est partie et n'est pas revenue. Sans ce garde, chaque
-    /// frame du panneau rappellerait l'API.
+    /// A request has gone out and not come back. Without this guard, every frame
+    /// of the panel would call the API again.
     pub loading: bool,
-    /// Une demande a déjà été faite : le panneau ne recharge pas tout seul, une
-    /// API distante n'ayant pas à être interrogée à chaque ouverture d'onglet.
+    /// A request has already been made: the panel does not reload by itself, a
+    /// remote API having no business being queried on every tab opening.
     pub asked: bool,
 }
 
 impl ClaudhubApp {
-    /// Le projet Sentry du dépôt courant, tel que le magasin le retient.
+    /// The current repository's Sentry project, as the store remembers it.
     ///
-    /// Le projet dépend du **dépôt** et non du compte : deux dépôts d'une même
-    /// organisation n'ont pas les mêmes erreurs.
+    /// The project belongs to the **repository** and not to the account: two
+    /// repositories of the same organisation do not have the same errors.
     fn sentry_project(&self, cx: &gpui::App) -> Option<String> {
         let main = self.main_of(self.active.as_deref()?)?;
         Store::global(cx)
@@ -101,8 +101,8 @@ impl ClaudhubApp {
         event: Event,
         cx: &mut Context<Self>,
     ) {
-        // Une réponse en retard, pour une issue qu'on ne regarde plus,
-        // remplacerait la trace par la mauvaise.
+        // A late answer, for an issue no longer being looked at, would replace
+        // the trace with the wrong one.
         if self.sentry.selected.as_deref() == Some(issue.as_str()) {
             self.sentry.event = Some(event);
             cx.notify();
@@ -120,7 +120,7 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Le prompt d'une issue, quand sa trace est là.
+    /// An issue's prompt, once its trace is here.
     fn issue_prompt(&self) -> Option<String> {
         let worktree = self.active.as_deref()?;
         let event = self.sentry.event.as_ref()?;
@@ -130,7 +130,7 @@ impl ClaudhubApp {
         Some(crate::sentry::prompt(&intro, issue, event, worktree))
     }
 
-    /// Confie l'issue à l'agent du worktree courant.
+    /// Hands the issue to the current worktree's agent.
     pub(super) fn hand_issue_to_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(text), Some(worktree)) = (self.issue_prompt(), self.active.clone()) else {
             return;
@@ -140,12 +140,12 @@ impl ClaudhubApp {
         self.show_terminal_panel(window, cx);
     }
 
-    /// Ouvre un worktree pour cette issue, et y démarre l'agent avec le
-    /// rapport.
+    /// Opens a worktree for this issue, and starts the agent there with the
+    /// report.
     ///
-    /// C'est la boucle complète : du rapport d'erreur au worktree relu. La
-    /// création passe par `wt`, donc par les copies, les ports et les hooks du
-    /// projet — un worktree où l'agent peut travailler tout de suite.
+    /// This is the complete loop: from the error report to the reviewed
+    /// worktree. Creation goes through `wt`, so through the project's copies,
+    /// ports and hooks — a worktree where the agent can start work at once.
     pub(super) fn open_worktree_for_issue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(text), Some(id)) = (self.issue_prompt(), self.sentry.selected.clone()) else {
             return;
@@ -154,19 +154,19 @@ impl ClaudhubApp {
             return;
         };
         let slug = format!("sentry-{id}");
-        // Le worktree n'existe pas encore : le prompt est retenu et livré à
-        // l'arrivée de la liste des worktrees, quand `wt` a fini ses hooks.
+        // The worktree does not exist yet: the prompt is held and delivered when
+        // the worktree list arrives, once `wt` has finished its hooks.
         if let Some(root) = self.wt_project(&main).map(|project| project.root.clone()) {
             self.awaiting_agent = Some((root.join(&slug), text));
         }
         self.start_worktree(main, slug, None, window, cx);
     }
 
-    /// Livre le prompt en attente, si le worktree qu'il vise vient d'arriver.
+    /// Delivers the pending prompt, if the worktree it targets has just arrived.
     ///
-    /// Appelé à chaque `Evt::Worktrees` : c'est le seul signal qui dise que
-    /// `wt` a terminé — la création lance des hooks qui durent des minutes, et
-    /// rien d'autre ne marque leur fin.
+    /// Called on every `Evt::Worktrees`: it is the only signal that says `wt`
+    /// has finished — creation runs hooks that take minutes, and nothing else
+    /// marks their end.
     pub(super) fn deliver_awaited_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((path, _)) = self.awaiting_agent.as_ref() else {
             return;
@@ -189,11 +189,11 @@ impl ClaudhubApp {
         self.show_terminal_panel(window, cx);
     }
 
-    /// Ouvre le fichier d'une frame, à sa ligne.
+    /// Opens a frame's file, at its line.
     ///
-    /// L'éditeur externe d'abord, s'il est configuré : c'est lui qui sait
-    /// ouvrir à une ligne. À défaut, l'éditeur intégré, qui ouvre au moins le
-    /// bon fichier.
+    /// The external editor first, if it is configured: it is the one that knows
+    /// how to open at a line. Failing that, the built-in editor, which at least
+    /// opens the right file.
     fn open_frame(&mut self, path: PathBuf, line: usize, cx: &mut Context<Self>) {
         if Settings::global(cx).external_editor.trim().is_empty() {
             self.open_in_editor(path, cx);
@@ -260,16 +260,15 @@ impl ClaudhubApp {
                 .child(empty(tr!("sentry-configure"), cx))
                 .into_any_element();
         }
-        // Le premier chargement se fait au rendu, une seule fois : une API
-        // distante n'a pas à être interrogée à chaque ouverture d'onglet, ni
-        // à chaque frame.
+        // The first load happens at render time, once only: a remote API has no
+        // business being queried on every tab opening, nor on every frame.
         if !self.sentry.asked {
             self.load_issues(cx);
         }
 
-        // Le filtre porte sur ce qui est déjà chargé, et non sur la requête
-        // envoyée à Sentry (`sentry_query`, un réglage) : on cherche parmi les
-        // issues qu'on a sous les yeux, sans attendre un aller-retour réseau.
+        // The filter applies to what is already loaded, and not to the query
+        // sent to Sentry (`sentry_query`, a setting): you search among the
+        // issues in front of you, without waiting for a network round trip.
         let issues: Vec<_> = self
             .sentry
             .issues
@@ -379,7 +378,7 @@ impl ClaudhubApp {
             })
     }
 
-    /// La trace de l'issue choisie, avec ses frames cliquables.
+    /// The chosen issue's trace, with its clickable frames.
     fn render_trace(
         &mut self,
         window: &mut Window,
@@ -413,8 +412,8 @@ impl ClaudhubApp {
                     .text_xs()
                     .font_family(mono.clone())
                     .cursor_pointer()
-                    // Les frames de l'application ressortent : c'est là qu'est
-                    // le bug, le reste est le chemin qui y a mené.
+                    // The application's frames stand out: that is where the bug
+                    // is, the rest is the path that led there.
                     .when(!frame.in_app, |el| el.text_color(muted))
                     .hover(|s| s.bg(cx.theme().accent.opacity(0.4)))
                     .on_click(cx.listener(move |this, _, _window, cx| {

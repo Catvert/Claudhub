@@ -1,15 +1,14 @@
-//! SQLite, par `sqlx`.
+//! SQLite, through `sqlx`.
 //!
-//! Le fichier est ouvert en **lecture seule** : la console SQL sert à
-//! interroger une base de développement pendant qu'on relit le code qui
-//! l'écrit, et un `DELETE` parti d'un doigt qui a glissé n'y est jamais un
-//! service. Le moteur refuse alors l'écriture lui-même, ce qui vaut mieux
-//! qu'un filtre à nous sur le texte de la requête — on ne devine pas ce qu'une
-//! requête fait en la lisant.
+//! The file is opened **read-only**: the SQL console is for querying a
+//! development database while reviewing the code that writes it, and a
+//! `DELETE` from a slipped finger is never a service there. The engine
+//! refuses the write itself, which beats a filter of our own on the query
+//! text — you cannot tell what a query does by reading it.
 //!
-//! Le schéma se lit par les pragmas, qui s'interrogent comme des tables
-//! (`pragma_table_info(…)`) : c'est ce qui permet de les joindre et de les
-//! filtrer en SQL au lieu d'analyser une sortie.
+//! The schema is read through the pragmas, which can be queried like tables
+//! (`pragma_table_info(…)`): that is what makes it possible to join and filter
+//! them in SQL instead of parsing an output.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -77,9 +76,9 @@ async fn read_tables(db: &mut SqliteConnection, database: &str) -> Result<Vec<Ta
             Ok(Table {
                 name: row.try_get("name")?,
                 view: kind == "view",
-                // SQLite ne tient ni moteur, ni compte de lignes, ni taille par
-                // table : les demander coûterait un balayage complet par table,
-                // à chaque ouverture d'une base.
+                // SQLite keeps neither an engine, nor a row count, nor a size
+                // per table: asking for them would cost a full scan per table,
+                // on every opening of a database.
                 engine: None,
                 rows: None,
                 bytes: None,
@@ -101,9 +100,9 @@ pub async fn all_columns(
 ) -> Result<BTreeMap<String, Vec<Column>>> {
     let mut db = open(connection).await?;
     let mut out = BTreeMap::new();
-    // Les pragmas de SQLite ne s'interrogent que table par table : il n'y a
-    // pas d'`information_schema` à balayer d'un coup. Le gain reste entier —
-    // c'est une seule connexion, et c'est elle qui coûte.
+    // SQLite's pragmas can only be queried table by table: there is no
+    // `information_schema` to sweep in one go. The gain is intact all the same
+    // — this is a single connection, and the connection is what costs.
     for table in read_tables(&mut db, database).await? {
         let columns = read_columns(&mut db, database, &table.name).await?;
         out.insert(table.name, columns);
@@ -137,9 +136,9 @@ async fn read_columns(
             })
             .collect::<Result<_>>()?;
 
-    // Une colonne n'est dite unique que si un index unique porte sur elle
-    // **seule** : un index unique à plusieurs colonnes ne dit rien de chacune
-    // d'elles prise à part.
+    // A column is called unique only if a unique index covers it **alone**: a
+    // multi-column unique index says nothing about any one of them taken
+    // separately.
     let mut by_index: HashMap<String, Vec<String>> = HashMap::new();
     let indexed = sqlx::query(
         "SELECT il.name AS index_name, ii.name AS column_name \
@@ -176,9 +175,9 @@ async fn read_columns(
             let primary: i64 = row.try_get("pk")?;
             Ok(Column {
                 data_type: row.try_get("type")?,
-                // Une clé primaire d'un `INTEGER PRIMARY KEY` accepte NULL pour
-                // SQLite — c'est l'alias de `rowid` — mais l'annoncer nullable
-                // serait mentir sur ce qu'on peut y mettre.
+                // A primary key on an `INTEGER PRIMARY KEY` accepts NULL as far
+                // as SQLite is concerned — it is the `rowid` alias — but calling
+                // it nullable would lie about what can be put there.
                 nullable: not_null == 0 && primary == 0,
                 default: row.try_get("dflt_value")?,
                 primary_key: primary > 0,
@@ -201,10 +200,9 @@ pub async fn query(
     limit: usize,
 ) -> Result<Rows> {
     let mut db = open(connection).await?;
-    // `raw_sql` accepte plusieurs instructions — c'est ce qu'on colle depuis un
-    // fichier de migration — et `fetch_many` rend au fil de l'eau ce que
-    // chacune produit : un compte de lignes touchées pour une écriture, des
-    // lignes pour une lecture.
+    // `raw_sql` accepts several statements — that is what one pastes from a
+    // migration file — and `fetch_many` streams what each produces: a count of
+    // affected rows for a write, rows for a read.
     let mut stream = sqlx::raw_sql(sql).fetch_many(&mut db);
     let mut out = Rows {
         offset,
@@ -237,7 +235,7 @@ pub async fn query(
     Ok(out)
 }
 
-/// Écrit le résultat entier au fil de l'eau. Voir `super::export_csv`.
+/// Writes the whole result as it streams. See `super::export_csv`.
 pub async fn export(
     connection: &Connection,
     sql: &str,
@@ -275,10 +273,9 @@ fn value_to_cell(row: &SqliteRow, index: usize) -> Cell {
         Ok(_) => {}
         Err(_) => return Some("?".to_string()),
     }
-    // L'ordre compte : SQLite n'a pas de type par colonne mais un type par
-    // valeur, et le premier décodage qui réussit décide de l'affichage. Le
-    // texte d'abord, parce qu'un entier stocké en texte doit se lire tel qu'il
-    // est écrit.
+    // The order matters: SQLite has no type per column but a type per value,
+    // and the first successful decode decides the display. Text first, because
+    // an integer stored as text has to read as it was written.
     if let Ok(value) = row.try_get::<String, _>(index) {
         return Some(value);
     }

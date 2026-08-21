@@ -1,5 +1,5 @@
-//! Branches : la liste du sélecteur, et les questions fermées que posent les
-//! opérations de worktree.
+//! Branches: the selector's list, and the closed questions worktree operations
+//! ask.
 
 use std::path::{Path, PathBuf};
 
@@ -10,7 +10,7 @@ use super::{git, git_ok, git_opt};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BranchKind {
     Local,
-    /// Branche de suivi à distance (`origin/…`) sans équivalent local.
+    /// Remote-tracking branch (`origin/…`) with no local counterpart.
     Remote,
 }
 
@@ -25,29 +25,28 @@ pub struct Upstream {
 pub struct Branch {
     pub name: String,
     pub kind: BranchKind,
-    /// Vrai pour la branche de HEAD dans le checkout interrogé.
+    /// True for HEAD's branch in the checkout being queried.
     pub is_head: bool,
-    /// Date du dernier commit, en relatif (« il y a 3 jours »), telle que git
-    /// la formule — nous n'avons pas à la recalculer.
+    /// Date of the last commit, relative ("3 days ago"), as git phrases it — we
+    /// have no need to recompute it.
     pub date: String,
     pub subject: String,
-    /// Auteur du dernier commit. Dans un dépôt d'équipe, c'est ce qui
-    /// distingue deux branches au nom voisin plus sûrement que leur date.
+    /// Author of the last commit. In a team repository, this tells two
+    /// similarly named branches apart more reliably than their date.
     pub author: String,
     pub upstream: Option<Upstream>,
-    /// Worktree qui a déjà cette branche déployée. Git refuse deux checkouts
-    /// de la même branche : le dire avant d'essayer vaut mieux qu'une erreur.
+    /// Worktree that already has this branch checked out. Git refuses two
+    /// checkouts of the same branch: saying so beforehand beats an error.
     pub checked_out_at: Option<PathBuf>,
 }
 
-/// Liste les branches, locales d'abord puis les distantes sans jumelle
-/// locale, du commit le plus récent au plus ancien.
+/// Lists the branches, local first then the remotes with no local twin, from
+/// the most recent commit to the oldest.
 pub fn list(main: &Path) -> Result<Vec<Branch>> {
-    // Le séparateur doit être un caractère qu'un sujet de commit ne contient
-    // pas ; `%00` est écrit littéralement par for-each-ref comme un octet nul.
-    // L'auteur est en dernier : ajouter un champ à la fin garde les sorties
-    // écrites par une version antérieure lisibles, un champ absent valant la
-    // chaîne vide.
+    // The separator has to be a character a commit subject does not contain;
+    // `%00` is written literally by for-each-ref as a null byte. The author
+    // comes last: adding a field at the end keeps outputs written by an earlier
+    // version readable, a missing field being the empty string.
     const FORMAT: &str = "%(refname:short)%00%(HEAD)%00%(committerdate:relative)%00\
                           %(contents:subject)%00%(upstream:short)%00%(upstream:track)%00\
                           %(authorname)";
@@ -76,8 +75,8 @@ pub fn list(main: &Path) -> Result<Vec<Branch>> {
         .lines()
         .filter_map(|line| parse_ref(line, &locals))
         .collect();
-    // for-each-ref trie par date sur l'ensemble ; on veut les locales d'abord,
-    // chaque groupe restant trié par date (le tri stable de Rust le garantit).
+    // for-each-ref sorts by date across the whole set; we want the locals
+    // first, each group staying sorted by date (Rust's stable sort guarantees it).
     branches.sort_by_key(|b| match b.kind {
         BranchKind::Local => 0,
         BranchKind::Remote => 1,
@@ -107,11 +106,11 @@ fn parse_ref(line: &str, locals: &[String]) -> Option<Branch> {
     };
 
     if kind == BranchKind::Remote {
-        // `refs/remotes/origin/HEAD` est un alias, pas une branche.
+        // `refs/remotes/origin/HEAD` is an alias, not a branch.
         if name.ends_with("/HEAD") {
             return None;
         }
-        // Une distante déjà présente localement n'apporte rien au sélecteur.
+        // A remote already present locally adds nothing to the selector.
         if let Some((_, short)) = name.split_once('/') {
             if locals.iter().any(|l| l == short) {
                 return None;
@@ -138,7 +137,7 @@ fn parse_ref(line: &str, locals: &[String]) -> Option<Branch> {
     })
 }
 
-/// `%(upstream:track)` vaut « [ahead 2, behind 3] », « [gone] » ou rien.
+/// `%(upstream:track)` is "[ahead 2, behind 3]", "[gone]" or nothing.
 fn parse_track(track: &str) -> (usize, usize) {
     let inner = track.trim().trim_start_matches('[').trim_end_matches(']');
     let mut ahead = 0;
@@ -171,7 +170,7 @@ pub fn local_exists(main: &Path, branch: &str) -> bool {
     )
 }
 
-/// Worktree qui détient déjà cette branche, s'il y en a un.
+/// The worktree already holding this branch, if there is one.
 pub fn checked_out_at(main: &Path, branch: &str) -> Option<PathBuf> {
     let out = git_opt(main, &["worktree", "list", "--porcelain"])?;
     let mut current: Option<&str> = None;
@@ -186,19 +185,19 @@ pub fn checked_out_at(main: &Path, branch: &str) -> Option<PathBuf> {
     None
 }
 
-/// Point de divergence entre `branch` et sa base : c'est ce commit-là que la
-/// vue « diff de branche » compare à HEAD, et non la pointe de la base — sans
-/// quoi le diff inclut tout ce qui a atterri sur la base entre-temps, que
-/// l'auteur de la branche n'a ni écrit ni à relire.
+/// The divergence point between `branch` and its base: it is that commit the
+/// "branch diff" view compares against HEAD, and not the base's tip —
+/// otherwise the diff includes everything that landed on the base meanwhile,
+/// which the branch's author neither wrote nor has to review.
 pub fn merge_base(dir: &Path, a: &str, b: &str) -> Option<String> {
     git_opt(dir, &["merge-base", a, b]).filter(|s| !s.is_empty())
 }
 
-/// Devine la branche d'intégration du dépôt.
+/// Guesses the repository's integration branch.
 ///
-/// L'ordre suit ce qui fait autorité : ce que le dépôt distant déclare comme
-/// sa branche par défaut, puis la configuration locale, puis les deux noms
-/// usuels — et seulement s'ils existent.
+/// The order follows what is authoritative: what the remote declares as its
+/// default branch, then the local configuration, then the two usual names —
+/// and only if they exist.
 pub fn default_base(main: &Path) -> Option<String> {
     if let Some(head) = git_opt(
         main,
@@ -219,9 +218,9 @@ pub fn default_base(main: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Rattache une branche sans amont à `origin/<branche>` pour que le premier
-/// `git push` n'ait pas besoin de `-u`. La référence distante n'existe pas
-/// encore : c'est justement ce que le push créera.
+/// Attaches a branch with no upstream to `origin/<branch>` so the first `git
+/// push` does not need `-u`. The remote reference does not exist yet: that is
+/// precisely what the push will create.
 pub(crate) fn ensure_upstream(main: &Path, branch: &str) {
     let merge_key = format!("branch.{branch}.merge");
     if git_opt(main, &["config", "--get", &merge_key]).is_some() {
@@ -286,7 +285,7 @@ mod tests {
         assert_eq!(parse_track("[ahead 3]"), (3, 0));
         assert_eq!(parse_track("[behind 2]"), (0, 2));
         assert_eq!(parse_track("[ahead 1, behind 2]"), (1, 2));
-        // « [gone] » : l'amont a disparu, ni avance ni retard mesurables.
+        // "[gone]": the upstream has vanished, neither ahead nor behind measurable.
         assert_eq!(parse_track("[gone]"), (0, 0));
         assert_eq!(parse_track(""), (0, 0));
     }

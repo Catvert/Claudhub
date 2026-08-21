@@ -1,42 +1,40 @@
-//! Les barres de défilement, et le lissage de la molette.
+//! Scrollbars, and wheel smoothing.
 //!
-//! Une liste virtualisée ne dit pas d'elle-même où l'on en est : `uniform_list`
-//! ne peint que ses entrées, et rien dans la fenêtre ne distingue « il reste
-//! trois lignes » de « il en reste trois mille ». Un diff de relecture d'agent
-//! en fait couramment plusieurs milliers, et l'explorateur d'un projet Laravel
-//! quarante mille : la barre est le seul repère de position qu'ait ce genre de
-//! liste.
+//! A virtualised list says nothing about where you are: `uniform_list` paints
+//! only its entries, and nothing in the window distinguishes "three lines
+//! left" from "three thousand left". An agent-review diff routinely runs to
+//! several thousand, and a Laravel project's explorer to forty thousand: the
+//! bar is the only positional cue such a list has.
 //!
-//! Elle se pose **par-dessus** le contenu et non à côté : elle se positionne
-//! en absolu, d'où le `relative` du conteneur. Lui réserver une colonne
-//! rognerait la largeur utile de chaque panneau de seize pixels, et la moitié
-//! d'entre eux n'ont pas de quoi défiler la plupart du temps.
+//! It sits **over** the content rather than beside it: it is positioned
+//! absolutely, hence the container's `relative`. Reserving a column for it
+//! would cut sixteen pixels of usable width from every panel, and half of them
+//! have nothing to scroll most of the time.
 //!
-//! Trois détails, tous constatés à l'écran et aucun deviné :
+//! Three details, all observed on screen and none guessed:
 //!
-//! - **`min_h_0` et `min_w_0`.** Le conteneur est un élément flex, dont la
-//!   taille minimale vaut par défaut celle de son contenu : sans eux, il prend
-//!   la hauteur des huit mille lignes de l'arbre et la largeur du plus long
-//!   nom de fichier. La liste, elle, reste à la bonne taille — c'est la barre
-//!   qui va se peindre trois cents pixels à droite du panneau, hors de vue.
-//! - **`overflow_hidden`**, pour la même raison en aval : ce qui dépasse du
-//!   conteneur ne doit pas recouvrir le panneau voisin.
-//! - **`scrollbar()` de gpui-component plutôt qu'un enfant `Scrollbar` nu.**
-//!   L'extension enveloppe la barre d'une couche absolue calée sur les quatre
-//!   bords ; posée nue, elle ne reçoit pas de bornes utilisables et ne peint
-//!   rien du tout. C'est le seul point de cette liste qui ne se déduit pas de
-//!   la mise en page.
+//! - **`min_h_0` and `min_w_0`.** The container is a flex item, whose minimum
+//!   size defaults to its content's: without them it takes the height of the
+//!   tree's eight thousand rows and the width of the longest file name. The
+//!   list itself stays the right size — it is the bar that paints three
+//!   hundred pixels to the right of the panel, out of sight.
+//! - **`overflow_hidden`**, for the same reason downstream: what overflows the
+//!   container must not cover the neighbouring panel.
+//! - **gpui-component's `scrollbar()` rather than a bare `Scrollbar` child.**
+//!   The extension wraps the bar in an absolute layer pinned to all four
+//!   edges; placed bare, it gets no usable bounds and paints nothing at all.
+//!   This is the only point in this list that does not follow from the layout.
 //!
-//! Le conteneur de la barre est aussi le bon endroit pour l'écouteur de
-//! molette : il ne défile pas lui-même, donc son gestionnaire s'exécute après
-//! celui de la liste — ce que `ui::motion` attend, puisqu'il reprend un saut
-//! déjà appliqué. Une seule clé sert de nom à la barre et de clé au
-//! mouvement, si bien qu'aucun panneau ne peut animer le décalage d'un autre.
+//! The bar's container is also the right place for the wheel listener: it does
+//! not scroll itself, so its handler runs after the list's — which is what
+//! `ui::motion` expects, since it takes over a jump already applied. A single
+//! key names the bar and keys the motion, so no panel can animate another's
+//! offset.
 //!
-//! L'identifiant est **donné au conteneur**, et il est distinct par appel : la
-//! couche que pose `scrollbar()` s'appelle toujours `scrollbar_layer`, et sans
-//! parent identifié les panneaux partageraient l'état — survol, glissement —
-//! d'une seule et même barre.
+//! The id is **given to the container**, and it is distinct per call: the layer
+//! `scrollbar()` installs is always called `scrollbar_layer`, and without an
+//! identified parent the panels would share the state — hover, drag — of one
+//! and the same bar.
 
 use gpui::{div, prelude::*, AnyElement, Context, SharedString, Stateful, Window};
 use gpui_component::scroll::{ScrollableElement, ScrollbarAxis, ScrollbarHandle};
@@ -44,11 +42,11 @@ use gpui_component::scroll::{ScrollableElement, ScrollbarAxis, ScrollbarHandle};
 use crate::ui::app::ClaudhubApp;
 use crate::ui::motion::{Axes, ScrollMotion};
 
-/// Une barre verticale, **sans** lissage de la molette.
+/// A vertical bar, **without** wheel smoothing.
 ///
-/// Pour ce qui n'est pas un panneau : la fenêtre d'aide est bâtie dans une
-/// fermeture de dialogue, qui ne reçoit qu'un `App` et ne peut donc pas
-/// s'abonner à la molette par `cx.listener`.
+/// For what is not a panel: the help window is built inside a dialog closure,
+/// which only receives an `App` and therefore cannot subscribe to the wheel
+/// through `cx.listener`.
 pub fn vertical<H: ScrollbarHandle + Clone>(
     id: impl Into<SharedString>,
     handle: &H,
@@ -62,11 +60,11 @@ pub fn vertical<H: ScrollbarHandle + Clone>(
     )
 }
 
-/// Une barre sur les deux axes, **sans** lissage de la molette.
+/// A bar on both axes, **without** wheel smoothing.
 ///
-/// Le seul panneau qui en veuille est le diff : ses lignes ne sont jamais
-/// renvoyées à la ligne, donc il déborde aussi en largeur, et sa molette est
-/// déjà prise par le zoom — il avance son mouvement lui-même.
+/// The only panel that wants one is the diff: its lines never wrap, so it
+/// overflows in width too, and its wheel is already taken by zoom — it drives
+/// its own motion.
 pub fn both<H: ScrollbarHandle + Clone>(
     id: impl Into<SharedString>,
     handle: &H,
@@ -92,10 +90,10 @@ fn wrap<H: ScrollbarHandle + Clone>(
         .scrollbar(handle, axis)
 }
 
-/// Ce dont on sait tirer la poignée que gpui anime réellement.
+/// What we can pull the handle gpui actually animates out of.
 ///
-/// `UniformListScrollHandle` n'est pas une poignée : c'est un état de liste
-/// qui en contient une, et c'est cette dernière que la molette déplace.
+/// `UniformListScrollHandle` is not a handle: it is a list state containing
+/// one, and that inner handle is what the wheel moves.
 pub trait Scrollable: ScrollbarHandle + Clone {
     fn base(&self) -> gpui::ScrollHandle;
 }
@@ -119,27 +117,26 @@ impl Scrollable for gpui_component::VirtualListScrollHandle {
 }
 
 impl ClaudhubApp {
-    /// Le lissage d'un panneau, créé à sa première molette.
+    /// A panel's smoothing, created on its first wheel event.
     ///
-    /// La clé est **l'identifiant de la barre** : une seule valeur pour les
-    /// deux, et il n'y a pas moyen d'animer le mouvement d'un panneau sur le
-    /// décalage d'un autre — ce qui le ferait sauter d'un bout à l'autre.
+    /// The key is **the bar's id**: one value for both, and there is no way to
+    /// animate one panel's motion on another's offset — which would make it
+    /// jump from one end to the other.
     pub(super) fn motion(&mut self, id: SharedString, axes: Axes) -> &mut ScrollMotion {
         self.motions
             .entry(id)
             .or_insert_with(|| ScrollMotion::new(axes))
     }
 
-    /// Le seul lissage, pour ce qui peint déjà sa propre barre.
+    /// Smoothing alone, for what already paints its own bar.
     ///
-    /// La table de résultats de la console SQL est dans ce cas : elle pose ses
-    /// deux barres elle-même, et lui en ajouter une troisième par-dessus en
-    /// ferait deux à la même place. Le mouvement, lui, n'a rien à voir avec la
-    /// barre — c'est l'écouteur de molette d'un ancêtre non défilant, et c'est
-    /// la seule chose dont on ait besoin ici.
+    /// The SQL console's result table is such a case: it installs both its bars
+    /// itself, and adding a third on top would make two in the same place. The
+    /// motion has nothing to do with the bar — it is the wheel listener of a
+    /// non-scrolling ancestor, and that is all we need here.
     ///
-    /// L'identifiant reste la clé du mouvement, comme pour `scrolled` : deux
-    /// panneaux ne peuvent pas animer le même décalage.
+    /// The id stays the motion's key, as for `scrolled`: two panels cannot
+    /// animate the same offset.
     pub(super) fn smoothed<H: Scrollable>(
         &mut self,
         id: impl Into<SharedString>,
@@ -167,21 +164,21 @@ impl ClaudhubApp {
             ))
     }
 
-    /// Un contenu défilant, sa barre, et le lissage de sa molette.
+    /// Scrolling content, its bar, and its wheel smoothing.
     ///
-    /// L'écouteur est posé sur le conteneur de la barre, qui ne défile pas
-    /// lui-même : il s'exécute donc **après** celui de la liste, en phase de
-    /// remontée, ce qui est exactement ce que `ScrollMotion::on_wheel`
-    /// attend — il reprend un saut déjà appliqué.
+    /// The listener sits on the bar's container, which does not scroll itself:
+    /// it therefore runs **after** the list's, in the bubble phase, which is
+    /// exactly what `ScrollMotion::on_wheel` expects — it takes over a jump
+    /// already applied.
     pub(super) fn scrolled<H: Scrollable>(
         &mut self,
         id: impl Into<SharedString>,
         handle: &H,
         axes: Axes,
         window: &Window,
-        // Le contenu **avant** le contexte : il est bâti avec un `&mut
-        // Context`, et un argument qui l'emprunte déjà en partage l'en
-        // empêcherait — les arguments s'évaluent de gauche à droite.
+        // The content **before** the context: it is built with a `&mut
+        // Context`, and an argument already borrowing it in shared mode would
+        // prevent that — arguments evaluate left to right.
         content: impl IntoElement,
         cx: &Context<Self>,
     ) -> Stateful<gpui::Div> {

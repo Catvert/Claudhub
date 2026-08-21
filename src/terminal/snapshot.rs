@@ -1,10 +1,10 @@
-//! Copie de la grille du terminal en une forme que la vue sait dessiner.
+//! Copying the terminal grid into a shape the view can draw.
 //!
-//! La vue ne touche jamais au `Term` : elle reçoit un `Snapshot`, c'est-à-dire
-//! des lignes de texte et des runs de style. Deux raisons : le verrou de la
-//! grille est partagé avec la boucle d'E/S et ne doit pas être tenu pendant le
-//! rendu, et un instantané est comparable d'une frame à l'autre, ce qui permet
-//! de ne redessiner que ce qui a changé.
+//! The view never touches the `Term`: it receives a `Snapshot`, that is, lines
+//! of text and style runs. Two reasons: the grid's lock is shared with the I/O
+//! loop and must not be held during rendering, and a snapshot is comparable
+//! from one frame to the next, which makes it possible to redraw only what
+//! changed.
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
@@ -12,25 +12,24 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 
-/// Une couleur de cellule.
+/// A cell's colour.
 ///
-/// `Default` n'est pas résolue ici : c'est le thème de Claudhub qui décide de
-/// quoi a l'air « la couleur de texte normale », et il peut changer sans que
-/// le terminal ait rien à réémettre.
+/// `Default` is not resolved here: it is Claudhub's theme that decides what
+/// "normal text colour" looks like, and it can change without the terminal
+/// having anything to re-emit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Paint {
     Default,
     Rgb(u8, u8, u8),
 }
 
-/// Une suite de cellules de même style, fusionnées en un seul run.
+/// A run of cells sharing a style, merged into one segment.
 ///
-/// Fusionner divise par vingt le nombre de runs de style qu'une ligne de
-/// sortie ordinaire produit — la plupart des cellules d'un terminal partagent
-/// le style de leur voisine.
+/// Merging divides by twenty the number of style runs an ordinary output line
+/// produces — most of a terminal's cells share their neighbour's style.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
-    /// Décalage en octets dans le texte de la ligne.
+    /// Byte offset in the line's text.
     pub start: usize,
     pub end: usize,
     pub fg: Paint,
@@ -39,16 +38,16 @@ pub struct Segment {
     pub italic: bool,
     pub underline: bool,
     pub strikethrough: bool,
-    /// Texte masqué (`ESC[8m`) : les mots de passe tapés dans certains outils.
+    /// Hidden text (`ESC[8m`): the passwords typed into some tools.
     pub hidden: bool,
-    /// Inversion vidéo : c'est ici qu'elle est appliquée, en échangeant `fg`
-    /// et `bg`, pour que la vue n'ait pas à connaître la notion.
+    /// Video inversion: it is applied here, by swapping `fg` and `bg`, so the
+    /// view has no need to know the notion.
     pub inverse: bool,
-    /// Cellule prise dans la sélection de l'utilisateur.
+    /// Cell taken by the user's selection.
     ///
-    /// C'est un attribut de style comme les autres, ce qui n'est pas un
-    /// détail : la fusion des runs le prend en compte toute seule, donc une
-    /// sélection découpe les runs exactement où il faut, sans code dédié.
+    /// It is a style attribute like the others, which is not a detail: run
+    /// merging takes it into account by itself, so a selection splits the runs
+    /// exactly where it must, with no dedicated code.
     pub selected: bool,
 }
 
@@ -60,8 +59,8 @@ pub struct Line {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cursor {
-    /// Ligne à l'écran, ou `None` quand le curseur est hors de la zone
-    /// visible parce qu'on a fait défiler l'historique.
+    /// Line on screen, or `None` when the cursor is outside the visible area
+    /// because the scrollback has been scrolled.
     pub line: Option<usize>,
     pub column: usize,
     pub visible: bool,
@@ -71,8 +70,8 @@ pub struct Cursor {
 pub struct Snapshot {
     pub lines: Vec<Line>,
     pub cursor: Option<Cursor>,
-    /// Nombre de lignes d'historique au-dessus de la vue : ce qui permet
-    /// d'afficher « vous ne regardez pas le bas ».
+    /// Number of scrollback lines above the view: what makes it possible to
+    /// show "you are not looking at the bottom".
     pub display_offset: usize,
     pub total_history: usize,
 }
@@ -89,14 +88,14 @@ pub(crate) fn capture<T: EventListener>(term: &Term<T>) -> Snapshot {
     let mut line_index: Option<usize> = None;
 
     for indexed in content.display_iter {
-        // Les lignes du parcours sont numérotées depuis le **bas** de
-        // l'historique : la première visible est `-display_offset`, et donc
-        // négative dès qu'on a remonté la molette. Le décalage les ramène en
-        // coordonnées de viewport, `0` étant la ligne du haut.
+        // The lines of the walk are numbered from the **bottom** of the
+        // scrollback: the first visible one is `-display_offset`, and therefore
+        // negative as soon as the wheel has been scrolled up. The offset brings
+        // them back into viewport coordinates, `0` being the top line.
         //
-        // Sans lui, `max(0)` écrasait à l'indice 0 toutes les lignes venues du
-        // passé : elles s'accumulaient dans une seule, ce qui faisait
-        // « disparaître » l'écran dès qu'on remontait.
+        // Without it, `max(0)` crushed every line from the past onto index 0:
+        // they piled up into a single one, which made the screen "disappear"
+        // as soon as you scrolled up.
         let index = viewport_line(indexed.point.line.0, display_offset).unwrap_or(0);
         if line_index != Some(index) {
             if line_index.is_some() {
@@ -106,9 +105,9 @@ pub(crate) fn capture<T: EventListener>(term: &Term<T>) -> Snapshot {
         }
 
         let cell = indexed.cell;
-        // Les cellules de continuation d'un caractère large n'ont pas de
-        // contenu propre : le glyphe précédent occupe déjà la place, et écrire
-        // leur espace décalerait tout ce qui suit.
+        // The continuation cells of a wide character have no content of their
+        // own: the previous glyph already occupies the space, and writing their
+        // blank would shift everything after it.
         if cell
             .flags
             .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
@@ -120,8 +119,8 @@ pub(crate) fn capture<T: EventListener>(term: &Term<T>) -> Snapshot {
         style.selected = selection.is_some_and(|range| range.contains(indexed.point));
         let start = line.text.len();
         line.text.push(cell.c);
-        // Les combinants d'une cellule (accents, sélecteurs d'émoji) font
-        // partie du même glyphe et donc du même run.
+        // A cell's combining marks (accents, emoji selectors) are part of the
+        // same glyph and therefore of the same run.
         for zw in cell.zerowidth().into_iter().flatten() {
             line.text.push(*zw);
         }
@@ -146,9 +145,9 @@ pub(crate) fn capture<T: EventListener>(term: &Term<T>) -> Snapshot {
     }
 
     let cursor_point = content.cursor.point;
-    // Le curseur est repéré dans la même numérotation que les cellules, et
-    // suit donc le même décalage : remonter l'historique le fait descendre
-    // hors de la vue, où il ne doit plus être dessiné.
+    // The cursor is located in the same numbering as the cells, and therefore
+    // follows the same offset: scrolling back makes it move below the view,
+    // where it must no longer be drawn.
     let screen_lines = lines.len();
     let cursor = Some(Cursor {
         line: viewport_line(cursor_point.line.0, display_offset).filter(|l| *l < screen_lines),
@@ -164,16 +163,16 @@ pub(crate) fn capture<T: EventListener>(term: &Term<T>) -> Snapshot {
     }
 }
 
-/// Passe d'une ligne de la grille à sa ligne du viewport.
+/// Turns a grid line into its viewport line.
 ///
-/// Rend `None` pour ce qui reste au-dessus de la vue — impossible pour les
-/// cellules parcourues, mais pas pour le curseur, qui garde sa place pendant
-/// qu'on remonte l'historique.
+/// Returns `None` for what stays above the view — impossible for the cells
+/// walked, but not for the cursor, which keeps its place while the scrollback
+/// is scrolled.
 fn viewport_line(line: i32, display_offset: usize) -> Option<usize> {
     usize::try_from(line + display_offset as i32).ok()
 }
 
-/// Clôt la ligne en cours et la range, en repartant d'une ligne vide.
+/// Closes the current line and files it, starting again from an empty one.
 fn flush(lines: &mut Vec<Line>, line: &mut Line, pending: &mut Option<Segment>) {
     if let Some(seg) = pending.take() {
         line.segments.push(seg);
@@ -182,9 +181,9 @@ fn flush(lines: &mut Vec<Line>, line: &mut Line, pending: &mut Option<Segment>) 
 }
 
 fn push_line(lines: &mut Vec<Line>, mut line: Line) {
-    // Les espaces de fin sont ce que le terminal met partout où rien n'a été
-    // écrit ; les garder ferait payer la largeur complète de la grille à
-    // chaque ligne, pour un résultat identique à l'écran.
+    // Trailing spaces are what the terminal puts everywhere nothing was
+    // written; keeping them would make every line pay for the grid's full
+    // width, for an identical result on screen.
     let trimmed = line.text.trim_end_matches(' ').len();
     if trimmed < line.text.len() {
         line.text.truncate(trimmed);
@@ -240,12 +239,12 @@ fn style_of(
     }
 }
 
-/// Résout une couleur de cellule.
+/// Resolves a cell's colour.
 ///
-/// L'ordre est celui de la spécification : ce que le programme a redéfini par
-/// OSC 4 prime sur la palette intégrée. `bold` promeut les huit premières
-/// couleurs vers leur variante claire, comme le font tous les terminaux depuis
-/// que « gras » signifiait « intense » sur un tube cathodique.
+/// The order is the specification's: what the program redefined through OSC 4
+/// wins over the built-in palette. `bold` promotes the first eight colours to
+/// their bright variant, as every terminal has done since "bold" meant
+/// "intense" on a cathode-ray tube.
 fn resolve(
     color: Color,
     colors: &alacritty_terminal::term::color::Colors,
@@ -307,9 +306,9 @@ fn default_palette(index: usize) -> (u8, u8, u8) {
     match index {
         0..=15 => BASE[index],
         16..=231 => {
-            // Cube de couleurs : chaque composante prend six valeurs, dont le
-            // premier palier saute à 0x5f — c'est la table d'xterm, pas une
-            // progression linéaire.
+            // Colour cube: each component takes six values, the first step
+            // jumping to 0x5f — that is xterm's table, not a linear
+            // progression.
             const LEVELS: [u8; 6] = [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
             let n = index - 16;
             (LEVELS[(n / 36) % 6], LEVELS[(n / 6) % 6], LEVELS[n % 6])
@@ -318,8 +317,8 @@ fn default_palette(index: usize) -> (u8, u8, u8) {
             let v = 8 + 10 * (index as u8 - 232);
             (v, v, v)
         }
-        // Au-delà de 255 se trouvent Foreground/Background/Cursor, déjà
-        // traités plus haut ; un index inconnu vaut la couleur par défaut.
+        // Past 255 come Foreground/Background/Cursor, already handled above; an
+        // unknown index takes the default colour.
         _ => (0xe5, 0xe5, 0xe5),
     }
 }
@@ -333,7 +332,7 @@ mod tests {
 
     use crate::terminal::TermSize;
 
-    /// Fait avaler une suite d'octets à un vrai `Term` et rend l'instantané.
+    /// Feeds a real `Term` a stream of bytes and returns the snapshot.
     fn render(input: &str) -> Snapshot {
         let size = TermSize::new(20, 4, 8, 16);
         let mut term = Term::new(Config::default(), &size, VoidListener);
@@ -450,7 +449,7 @@ mod tests {
         let mut parser: Processor<StdSyncHandler> = Processor::new();
         parser.advance(&mut term, b"abcdef");
 
-        // Sélectionne « bcd ».
+        // Selects "bcd".
         let mut selection = Selection::new(
             SelectionType::Simple,
             Point::new(Line(0), Column(1)),

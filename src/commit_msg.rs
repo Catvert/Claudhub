@@ -1,19 +1,19 @@
-//! Proposer un message de commit à partir de ce qui est indexé.
+//! Proposing a commit message from what is staged.
 //!
-//! **Pas d'API, un sous-processus.** C'est la même décision de cadrage que
-//! partout ailleurs : l'IA de Claudhub passe par un programme que
-//! l'utilisateur a déjà installé et authentifié — `claude -p`, ou ce qu'il
-//! préfère —, jamais par une clé d'API et un client HTTP à nous. Le prix d'un
-//! `fork` est sans commune mesure avec celui d'une dépendance qui aurait sa
-//! propre authentification, ses propres quotas et son propre format d'erreur.
+//! **No API, a subprocess.** This is the same framing decision as everywhere
+//! else: Claudhub's AI goes through a program the user has already installed
+//! and authenticated — `claude -p`, or whatever they prefer — never through an
+//! API key and an HTTP client of our own. The price of a `fork` bears no
+//! comparison to that of a dependency with its own authentication, its own
+//! quotas and its own error format.
 //!
-//! Le diff part par **l'entrée standard** et non en argument : une ligne de
-//! commande a une longueur maximale — de l'ordre de deux mégaoctets sous
-//! Linux, mais c'est le tout qui compte, environnement compris — et un diff de
-//! relecture d'agent la frôle. Un tube n'a pas de bord.
+//! The diff goes out on **standard input** and never as an argument: a command
+//! line has a maximum length — around two megabytes on Linux, but it is the
+//! total that counts, environment included — and an agent-review diff brushes
+//! against it. A pipe has no edge.
 //!
-//! Rien ici ne connaît gpui, et `prompt` comme `clean` sont libres de toute
-//! entrée-sortie : c'est ce qui les rend testables.
+//! Nothing here knows gpui, and both `prompt` and `clean` are free of I/O:
+//! that is what makes them testable.
 
 use std::io::Write;
 use std::path::Path;
@@ -91,17 +91,17 @@ fn truncate(text: &str, max: usize) -> (&str, bool) {
     (&text[..end], true)
 }
 
-/// Ce que l'agent a répondu, ramené à un message de commit.
+/// What the agent answered, brought back to a commit message.
 ///
-/// Un modèle encadre volontiers sa réponse d'un bloc de code ou de guillemets
-/// malgré la consigne, et ce sont des caractères qui finiraient tels quels
-/// dans l'historique du dépôt. Le nettoyage est ici, pur et testé, plutôt que
-/// dans la vue.
+/// A model readily wraps its answer in a code block or in quotes despite the
+/// instruction, and those are characters that would end up as they are in the
+/// repository's history. The cleanup lives here, pure and tested, rather than
+/// in the view.
 pub fn clean(output: &str) -> String {
     let mut text = output.trim();
 
-    // Un bloc de code : la première ligne porte la clôture et parfois un nom
-    // de langage, la dernière la referme.
+    // A code block: the first line carries the fence and sometimes a language
+    // name, the last one closes it.
     if text.starts_with("```") {
         if let Some(rest) = text.split_once('\n').map(|(_, rest)| rest) {
             text = rest.trim_end();
@@ -112,9 +112,8 @@ pub fn clean(output: &str) -> String {
     }
 
     let text = text.trim();
-    // Des guillemets autour du tout, et seulement s'ils encadrent vraiment :
-    // un message qui commence *et* finit par une citation en garderait les
-    // siens.
+    // Quotes around the whole thing, and only if they really enclose it: a
+    // message that both starts *and* ends with a quotation would keep its own.
     let unquoted = ['"', '\'']
         .iter()
         .find_map(|q| {

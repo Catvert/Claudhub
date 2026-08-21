@@ -1,10 +1,10 @@
-//! L'entité racine : l'état de la fenêtre et la pompe d'événements.
+//! The root entity: the window's state and the event pump.
 //!
-//! Les sous-vues ne sont pas des entités séparées mais des `impl ClaudhubApp`
-//! répartis par fichier (`sidebar`, `review`, `branches`). Tout ce qu'elles
-//! affichent vient du même état, et le faire circuler entre entités coûterait
-//! plus de code qu'il n'en économise. Les terminaux font exception : ils ont
-//! leur propre cycle de vie et sont des `Entity<TerminalView>`.
+//! The sub-views are not separate entities but `impl ClaudhubApp` blocks spread
+//! across files (`sidebar`, `review`, `branches`). Everything they show comes
+//! from the same state, and passing it between entities would cost more code
+//! than it saves. The terminals are the exception: they have their own lifetime
+//! and are `Entity<TerminalView>`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,34 +34,31 @@ use crate::ui::settings::Settings;
 use crate::ui::store::Store;
 use crate::ui::terminal_view::TerminalGroup;
 
-/// Version de la disposition enregistrée. À incrémenter quand les panneaux
-/// changent de nom ou de nature, pour que gpui-component écarte une
-/// disposition qu'il ne saurait plus reconstruire.
-// 9 : le schéma de `DockAreaState` a changé avec la refonte du dock. Une
-// disposition écrite par la version précédente se relirait de travers plutôt
-// que de refuser franchement, ce qui donne une fenêtre pleine de cadres vides.
-// 10 : le panneau « Bases » est apparu. Une disposition écrite avant lui ne le
-// contient pas, et rien ne l'y ajouterait : la vue existerait sans onglet.
-// 11 : les écrans. Le fichier ne porte plus une disposition mais quatre, et le
-// panneau central s'est scindé en trois — un fichier d'avant n'a ni la forme
-// ni les noms qu'il faut.
+/// Version of the saved layout. To be incremented when the panels change name or
+/// nature, so gpui-component discards a layout it could no longer rebuild.
+// 9: `DockAreaState`'s schema changed with the dock rework. A layout written by
+// the previous version would read back crooked rather than be plainly refused,
+// which gives a window full of empty frames.
+// 10: the "Databases" panel appeared. A layout written before it does not
+// contain it, and nothing would add it: the view would exist with no tab.
+// 11: the screens. The file no longer carries one layout but one per screen, and the
+// central panel split into three — a file from before has neither the shape nor
+// the names needed.
 const LAYOUT_VERSION: usize = 11;
 
-/// Les dispositions enregistrées, une par écran.
+/// The saved layouts, one per screen.
 ///
-/// **Un fichier et non quatre** : c'est l'état d'*une* fenêtre, et le lire en
-/// morceaux ne rendrait service à personne — surtout pas à qui l'ouvre pour
-/// comprendre pourquoi son écran est de travers. La version enveloppe le tout
-/// : les écrans peuvent apparaître, disparaître et se renommer, et une carte
-/// de noms inconnus ne construit rien.
+/// **One file and not one per screen**: it is *one* window's state, and reading it in
+/// pieces would serve nobody — least of all whoever opens it to understand why
+/// their screen is crooked. The version wraps the whole thing: screens can
+/// appear, disappear and be renamed, and a map of unknown names builds nothing.
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct Layouts {
     version: Option<usize>,
-    /// L'écran qu'on regardait en fermant.
+    /// The screen being looked at when closing.
     ///
-    /// Il vit ici et non dans les réglages : c'est l'état d'une fenêtre, au
-    /// même titre que la place des panneaux, et non une préférence qu'on
-    /// écrit à la main.
+    /// It lives here and not in the settings: it is a window's state, just like
+    /// the panels' places, and not a preference written by hand.
     current: Option<String>,
     workspaces: std::collections::BTreeMap<String, gpui_component::dock::DockAreaState>,
 }
@@ -74,8 +71,8 @@ fn load_layouts() -> Layouts {
         return Layouts::default();
     };
     match serde_json::from_str::<Layouts>(&text) {
-        // Une disposition illisible n'est pas une raison de ne pas démarrer :
-        // on repart de celle par défaut.
+        // An unreadable layout is no reason not to start: we begin again from
+        // the default one.
         Ok(layouts) if layouts.version == Some(LAYOUT_VERSION) => layouts,
         Ok(_) => Layouts::default(),
         Err(e) => {
@@ -287,46 +284,44 @@ impl Default for ReviewState {
     }
 }
 
-/// Ce qu'on sait des agents d'un worktree.
+/// What is known about a worktree's agents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentState {
     pub count: usize,
-    /// Les agents trouvés, par nom de programme et sans doublon.
+    /// The agents found, by program name and without duplicates.
     ///
-    /// La barre latérale dit *quel* agent tourne : à deux profils près, « un
-    /// agent travaille ici » ne dit pas lequel, et c'est justement ce qu'on
-    /// regarde en parcourant la liste.
+    /// The sidebar says *which* agent is running: with two profiles, "an agent
+    /// works here" does not say which, and that is precisely what one looks at
+    /// while scanning the list.
     pub programs: Vec<String>,
-    /// Vrai quand au moins un agent a consommé du processeur depuis le relevé
-    /// précédent.
+    /// True when at least one agent has used CPU since the previous reading.
     ///
-    /// C'est une approximation assumée : rien dans un processus ne dit « je
-    /// réfléchis » ou « j'attends une réponse ». Un agent qui travaille redessine
-    /// son affichage plusieurs fois par seconde et se voit ; un agent qui attend
-    /// une réponse de l'utilisateur ne coûte rien.
+    /// It is an accepted approximation: nothing in a process says "I am
+    /// thinking" or "I am waiting for an answer". An agent at work redraws its
+    /// display several times a second and is seen; an agent waiting for the
+    /// user's answer costs nothing.
     pub working: bool,
 }
 
-/// Consommation en dessous de laquelle un agent est réputé en attente.
+/// The usage below which an agent is deemed to be waiting.
 ///
-/// Un tic vaut dix millisecondes de processeur. Trois tics sur un intervalle
-/// de trois secondes, c'est un pour cent d'un cœur : au-dessus, il se passe
-/// quelque chose ; en dessous, c'est le clignotement d'un curseur.
+/// One tick is ten milliseconds of CPU. Three ticks over a three-second
+/// interval is one percent of a core: above that, something is happening; below,
+/// it is a cursor blinking.
 const AGENT_BUSY_TICKS: u64 = 3;
 
-/// Période du relevé des agents. Une lecture de `/proc`, sans processus
-/// lancé : assez court pour qu'un agent qui se met au travail se voie.
+/// The period of the agent reading. A read of `/proc`, with no process
+/// launched: short enough for an agent starting work to be seen.
 const AGENT_PERIOD: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Un résumé sur cinq relevés.
+/// One summary every five readings.
 ///
-/// Le résumé coûte **deux commandes git par worktree** ; à ce prix, le faire
-/// aussi souvent que le relevé des agents ferait tourner un worker en
-/// permanence sur une dizaine de worktrees. Un compte de lignes qui a dix
-/// secondes de retard ne trompe personne.
+/// The summary costs **two git commands per worktree**; at that price, doing it
+/// as often as the agent reading would keep a worker busy permanently across a
+/// dozen worktrees. A line count ten seconds out of date fools nobody.
 const SUMMARY_EVERY: u32 = 5;
 
-/// Le résultat de la dernière action, affiché dans la barre d'état.
+/// The last action's result, shown in the status bar.
 pub struct Toast {
     pub text: SharedString,
     pub error: bool,
@@ -643,8 +638,8 @@ fn view_toggle(app: Entity<ClaudhubApp>, name: &'static str, title: &'static str
             .w_full()
             .gap_2()
             .items_center()
-            // La colonne de la coche est réservée en permanence : sans elle,
-            // les noms danseraient d'un cran à chaque bascule.
+            // The tick's column is reserved permanently: without it, the names
+            // would jump one notch on every toggle.
             .child(
                 div()
                     .w(px(14.))
@@ -659,17 +654,17 @@ fn view_toggle(app: Entity<ClaudhubApp>, name: &'static str, title: &'static str
 }
 
 impl ClaudhubApp {
-    /// Les workers du démarrage : ceux de ce processus, ou aucun.
+    /// The startup workers: this process's, or none.
     ///
-    /// Aucun quand ils vivront ailleurs — sous Windows, ou quand
-    /// `CLAUDHUB_SERVER_CMD` désigne un serveur. La connexion, elle, se fait
-    /// après, dans une tâche : réveiller une distribution prend des secondes,
-    /// et le constructeur d'une entité gpui ne peut pas les payer.
+    /// None when they will live elsewhere — on Windows, or when
+    /// `CLAUDHUB_SERVER_CMD` names a server. The connection happens afterwards,
+    /// in a task: waking a distribution takes seconds, and a gpui entity's
+    /// constructor cannot pay for them.
     fn spawn_backend() -> (runtime::Handle, async_channel::Receiver<Evt>, bool) {
         if runtime::remote::command_from_env().is_some() || cfg!(windows) {
-            // Le manche reste vide jusqu'à ce que le serveur réponde.
-            // Retomber sur des workers locaux ferait travailler `git.exe` sur
-            // des chemins Windows, en silence et à côté de la plaque.
+            // The handle stays empty until the server answers. Falling back to
+            // local workers would make `git.exe` work on Windows paths, silently
+            // and wide of the mark.
             let (_closed, events) = async_channel::unbounded();
             return (runtime::Handle::pending(), events, true);
         }
@@ -727,8 +722,8 @@ impl ClaudhubApp {
             )
             .searchable(true)
         });
-        // Souscrit une fois, dans le constructeur : une souscription posée
-        // pendant un rendu s'accumulerait à chaque frame.
+        // Subscribed once, in the constructor: a subscription set up during a
+        // render would pile up on every frame.
         cx.subscribe(&base_select, |this, _, event, cx| {
             let SelectEvent::Confirm(Some(base)) = event else {
                 return;
@@ -1021,9 +1016,9 @@ impl ClaudhubApp {
             self.git.send(Cmd::LoadSummaries {
                 worktrees: worktrees.clone(),
             });
-            // Le relevé de `wt` suit celui des résumés : ce sont des commandes
-            // shell déclarées par le projet, une par worktree, et il n'y a
-            // aucune raison de les lancer plus souvent qu'un `git status`.
+            // The `wt` reading follows the summaries': these are shell commands
+            // declared by the project, one per worktree, and there is no reason
+            // to run them more often than a `git status`.
             self.scan_wt();
         }
         let programs = Settings::global(cx).terminal.agent_programs();
@@ -1033,17 +1028,17 @@ impl ClaudhubApp {
         });
     }
 
-    /// Va chercher les nouveautés des dépôts ouverts, à la période réglée.
+    /// Goes to fetch what is new in the open repositories, at the configured period.
     ///
-    /// Un horodatage plutôt qu'un compte de tics : la période se règle en
-    /// minutes et le balayage bat toutes les deux secondes, si bien qu'un
-    /// compteur de tics n'aurait pas de rapport lisible avec le réglage. C'est
-    /// aussi ce qui fait que changer le réglage vaut tout de suite.
+    /// A timestamp rather than a tick count: the period is set in minutes and the
+    /// sweep beats every two seconds, so a tick counter would bear no readable
+    /// relation to the setting. It is also what makes changing the setting take
+    /// effect at once.
     ///
-    /// Le premier passage a lieu dès que le premier dépôt est ouvert : ce
-    /// qu'on veut savoir en arrivant, c'est justement ce qui a changé pendant
-    /// qu'on n'était pas là. Tant qu'aucun dépôt n'est ouvert, rien n'est
-    /// noté — sinon l'ouverture attendrait la période entière.
+    /// The first pass happens as soon as the first repository is open: what one
+    /// wants to know on arriving is precisely what changed while one was away.
+    /// While no repository is open, nothing is recorded — otherwise the opening
+    /// would wait for a whole period.
     fn auto_fetch_now(&mut self, cx: &mut Context<Self>) {
         let Some(period) = Settings::global(cx).auto_fetch_period() else {
             return;
@@ -1068,11 +1063,11 @@ impl ClaudhubApp {
         }
     }
 
-    /// Enregistre la disposition, une fois le calme revenu.
+    /// Saves the layout, once things have settled.
     ///
-    /// L'état est relu au moment d'écrire et non à l'appel : l'ouverture d'une
-    /// zone d'accueil est différée d'une frame, et le capturer tout de suite
-    /// enregistrerait l'état d'avant le geste.
+    /// The state is re-read at write time and not at call time: opening a dock
+    /// zone is deferred by one frame, and capturing it at once would save the
+    /// state from before the gesture.
     fn schedule_layout_save(&mut self, cx: &mut Context<Self>) {
         if self.layout_save_scheduled {
             return;
@@ -1101,11 +1096,11 @@ impl ClaudhubApp {
         .detach();
     }
 
-    /// Draine les événements des workers par lots.
+    /// Drains the workers' events in batches.
     ///
-    /// Par lots parce qu'un `update_in` par événement force un cycle d'effets
-    /// gpui à chaque fois : une ouverture de dépôt qui en produit une dizaine
-    /// coûterait dix rendus au lieu d'un.
+    /// In batches because one `update_in` per event forces a gpui effect cycle
+    /// every time: opening a repository, which produces a dozen of them, would
+    /// cost ten renders instead of one.
     pub(super) fn pump_events(
         &mut self,
         events: async_channel::Receiver<Evt>,
@@ -1152,12 +1147,12 @@ impl ClaudhubApp {
             }
         })
         .detach();
-        // `subscribe_in` et non `subscribe` : vider un champ demande une
-        // fenêtre, que l'événement seul ne porte pas.
+        // `subscribe_in` and not `subscribe`: clearing a field needs a window,
+        // which the event alone does not carry.
         //
-        // Entrée ajoute et laisse le champ prêt pour la suivante : une liste se
-        // remplit d'une traite, et reprendre la souris entre deux tâches est le
-        // geste qu'on cherchait justement à supprimer.
+        // Enter adds and leaves the field ready for the next: a list is filled
+        // in one go, and picking the mouse back up between two tasks is exactly
+        // the gesture this was meant to remove.
         cx.subscribe_in(
             &self.task_input.clone(),
             window,
@@ -1171,9 +1166,9 @@ impl ClaudhubApp {
             },
         )
         .detach();
-        // Entrée valide, et perdre le focus aussi : `InputState` n'a pas
-        // d'événement d'échappement, et abandonner une correction parce qu'on a
-        // cliqué à côté serait le plus mauvais des deux défauts.
+        // Enter confirms, and so does losing the focus: `InputState` has no
+        // escape event, and abandoning a correction because one clicked
+        // elsewhere would be the worse of the two flaws.
         cx.subscribe_in(
             &self.task_edit_input.clone(),
             window,
@@ -1205,7 +1200,7 @@ impl ClaudhubApp {
         .detach();
     }
 
-    /// Écrit la note libre du worktree affiché, ou l'efface si elle est vide.
+    /// Writes the displayed worktree's free note, or erases it if it is empty.
     fn persist_journal(&mut self, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
@@ -1217,9 +1212,9 @@ impl ClaudhubApp {
         let Some(state) = self.review.get_mut(&worktree) else {
             return;
         };
-        // Rien tant que le dossier n'a pas répondu : ce qu'on a en mémoire au
-        // démarrage est une page blanche, et l'écrire effacerait la note qu'on
-        // n'a pas encore lue.
+        // Nothing while the folder has not answered: what is held in memory at
+        // startup is a blank page, and writing it would erase the note that has
+        // not been read yet.
         if !state.notes_loaded || state.journal == text {
             return;
         }
@@ -1233,13 +1228,13 @@ impl ClaudhubApp {
         });
     }
 
-    /// Remet dans la zone de saisie la note du worktree affiché.
+    /// Puts the displayed worktree's note back into the input.
     ///
-    /// Jamais pendant qu'on y écrit : le coffre est relu à chaque écriture —
-    /// la nôtre comprise —, et remettre le texte du disque sous les doigts
-    /// déplacerait le curseur au milieu d'une phrase. Ce qui arrive d'ailleurs
-    /// pendant qu'on tape attendra donc le prochain chargement, et c'est le bon
-    /// arbitrage : deux mains sur le même paragraphe n'ont pas de fusion.
+    /// Never while it is being written in: the vault is re-read on every write —
+    /// ours included — and putting the disk's text back under one's fingers
+    /// would move the cursor into the middle of a sentence. What arrives
+    /// meanwhile will therefore wait for the next load, and that is the right
+    /// trade: two hands on the same paragraph have no merge.
     fn sync_journal_input(&mut self, worktree: &Path, window: &mut Window, cx: &mut Context<Self>) {
         if self.active.as_deref() != Some(worktree) {
             return;
@@ -1266,8 +1261,8 @@ impl ClaudhubApp {
         let Some(active) = self.active.clone() else {
             return;
         };
-        // Le coffre n'est pas dans le worktree, et ce qui y change ne se lit
-        // pas avec `git status` : c'est le dossier lui-même qu'il faut relire.
+        // The vault is not inside the worktree, and what changes there is not
+        // read with `git status`: it is the folder itself that has to be re-read.
         if let Some(vault) = self.notes_dir(&active, cx) {
             if path.starts_with(&vault) {
                 self.git.send(Cmd::ReadNotes {
@@ -1277,9 +1272,9 @@ impl ClaudhubApp {
                 return;
             }
         }
-        // Un worktree lié vit à l'intérieur d'un autre chez certains agencements ;
-        // ne réagir que pour le checkout affiché évite un rafraîchissement en
-        // double et une liste qui clignote.
+        // A linked worktree lives inside another in some arrangements; reacting
+        // only for the displayed checkout avoids a double refresh and a
+        // flickering list.
         if !path.starts_with(&active) {
             return;
         }
@@ -2014,10 +2009,10 @@ impl ClaudhubApp {
         if self.active.as_deref() == Some(path.as_path()) {
             return;
         }
-        // Le coffre est surveillé comme le worktree, et pour la même raison :
-        // le travail s'y fait ailleurs. Un agent qui coche une tâche dans
-        // `TODO.md` ou qui répond dans une note doit se voir tout de suite,
-        // sans quoi il faudrait changer de worktree et revenir.
+        // The vault is watched like the worktree, and for the same reason: the
+        // work happens elsewhere in it. An agent ticking a task in `TODO.md` or
+        // answering in a note has to be seen at once, otherwise one would have
+        // to change worktree and come back.
         let previous_vault = self
             .active
             .as_deref()
@@ -2037,21 +2032,21 @@ impl ClaudhubApp {
         }
         self.active = Some(path.clone());
         self.ensure_review(&path, cx);
-        // La note libre suit le worktree affiché : la zone de saisie est
-        // unique, et garder le texte du précédent le ferait écrire ici.
+        // The free note follows the displayed worktree: the input is unique, and
+        // keeping the previous one's text would write it here.
         self.sync_journal_input(&path, window, cx);
         self.request_status(path);
-        // Chaque worktree a sa base : le sélecteur doit montrer celle-ci, pas
-        // celle du worktree qu'on vient de quitter.
+        // Every worktree has its base: the selector has to show this one, not
+        // the one of the worktree just left.
         self.refresh_base_choices(window, cx);
         cx.notify();
     }
 
-    /// Ouvre un fichier dans la vue de diff.
+    /// Opens a file in the diff view.
     ///
-    /// Le domaine vient du panneau d'où le clic part : « Modifications » et
-    /// « Revue de branche » montrent le même fichier de deux façons, et c'est
-    /// la liste qu'on a cliquée qui décide de laquelle.
+    /// The range comes from the panel the click starts in: "Changes" and "Branch
+    /// review" show the same file two ways, and it is the list clicked that
+    /// decides which.
     pub(super) fn open_file(
         &mut self,
         worktree: PathBuf,
@@ -2063,13 +2058,13 @@ impl ClaudhubApp {
             return;
         };
         state.selected = Some(path.clone());
-        // Le diff précédent est effacé tout de suite : garder celui d'un autre
-        // fichier le temps de la lecture donnerait l'impression que le clic
-        // n'a rien fait, puis que le contenu change tout seul.
+        // The previous diff is cleared at once: keeping another file's for the
+        // length of the read would give the impression that the click did
+        // nothing, and then that the content changes by itself.
         state.diff = None;
         state.diff_selection = None;
-        // Un saut armé par une flèche ne survit pas à un autre geste : ouvrir
-        // un fichier à la souris doit l'ouvrir en haut.
+        // A jump armed by an arrow does not survive another gesture: opening a
+        // file with the mouse has to open it at the top.
         state.pending_jump = None;
         state.range = range.clone();
         let untracked = state
@@ -2084,32 +2079,32 @@ impl ClaudhubApp {
             context: Settings::global(cx).context_lines(),
             untracked,
         });
-        // La liste suit le fichier ouvert : une flèche qui change de fichier
-        // le laisserait sinon hors de vue, et on relirait sans savoir où on en
-        // est. Le défilement est non strict — un fichier déjà visible ne fait
-        // pas sauter la liste sous les yeux.
+        // The list follows the open file: an arrow that changes file would
+        // otherwise leave it out of view, and one would review without knowing
+        // where one is. The scrolling is non-strict — an already-visible file
+        // does not make the list jump under one's eyes.
         self.reveal_file(&range, &path, cx);
         cx.notify();
     }
 
-    /// La poignée de défilement de la liste d'un domaine, créée à la demande.
+    /// A range's list scroll handle, created on demand.
     ///
-    /// Jamais reconstruite : une poignée neuve par frame remettrait la liste en
-    /// haut à chaque image.
+    /// Never rebuilt: a fresh handle per frame would put the list back at the
+    /// top on every frame.
     pub(super) fn file_scroll(&mut self, range: &DiffRange) -> gpui::UniformListScrollHandle {
         self.file_scroll.entry(range.clone()).or_default().clone()
     }
 
-    /// La poignée de défilement d'un panneau non virtualisé.
+    /// A non-virtualised panel's scroll handle.
     pub(super) fn scroll_of(&mut self, key: &'static str) -> gpui::ScrollHandle {
         self.scrolls.entry(key).or_default().clone()
     }
 
-    /// Redemande le diff du fichier affiché.
+    /// Asks for the displayed file's diff again.
     ///
-    /// Ce qu'il contient dépend de réglages qui changent en cours de
-    /// relecture — le contexte, et « tout le fichier » : il faut alors le
-    /// relire, git étant seul à savoir ce que les lignes élidées contenaient.
+    /// What it contains depends on settings that change mid-review — the
+    /// context, and "the whole file": it then has to be re-read, git alone
+    /// knowing what the elided lines contained.
     pub(super) fn reload_diff(&mut self, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
@@ -2123,11 +2118,10 @@ impl ClaudhubApp {
         self.open_file(worktree, path, range, cx);
     }
 
-    /// Demande la liste des fichiers d'un domaine, si elle manque.
+    /// Asks for a range's file list, if it is missing.
     ///
-    /// Appelée au rendu du panneau qui l'affiche : c'est lui qui sait ce qu'il
-    /// montre, et le charger d'avance coûterait une commande pour un onglet
-    /// que personne n'ouvrira.
+    /// Called when the panel showing it renders: it is what knows what it shows,
+    /// and loading it in advance would cost a command for a tab nobody will open.
     pub(super) fn ensure_files(&mut self, range: DiffRange, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
@@ -2154,12 +2148,12 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    // — Accès à l'état ——————————————————————————————————————————
+    // — Access to the state ——————————————————————————————————————
 
-    /// Remplit le sélecteur de base avec les branches du dépôt courant.
+    /// Fills the base selector with the current repository's branches.
     ///
-    /// Les locales d'abord, puis les distantes : c'est l'ordre dans lequel on
-    /// les cherche, et `branch::list` les rend déjà ainsi.
+    /// The locals first, then the remotes: it is the order one looks for them
+    /// in, and `branch::list` already returns them that way.
     fn refresh_base_choices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
@@ -2182,11 +2176,11 @@ impl ClaudhubApp {
         });
     }
 
-    /// Change la base de comparaison du worktree courant.
+    /// Changes the current worktree's comparison base.
     ///
-    /// Le choix est propre au worktree : comparer un worktree d'agent à `dev`
-    /// et un autre à la branche d'où il est parti est le cas normal, pas
-    /// l'exception.
+    /// The choice belongs to the worktree: comparing one agent worktree against
+    /// `dev` and another against the branch it started from is the normal case,
+    /// not the exception.
     pub(super) fn set_base(&mut self, base: String, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
@@ -2198,18 +2192,15 @@ impl ClaudhubApp {
             return;
         }
         state.base = Some(base.clone());
-        // Bascule sur la revue de branche : choisir une base en regardant ses
-        // modifications en cours n'aurait aucun effet visible, ce qui ferait
-        // croire que le sélecteur ne marche pas.
-        // Les listes de branche portaient sur l'ancienne base : les oublier
-        // les fait redemander au prochain rendu du panneau.
+        // The branch lists were about the old base: forgetting them makes them
+        // be asked for again on the panel's next render.
         state
             .files
             .retain(|range, _| !matches!(range, DiffRange::Branch { .. }));
         state
             .pending_files
             .retain(|range| !matches!(range, DiffRange::Branch { .. }));
-        // L'historique de branche dépend de la même base.
+        // The branch history depends on the same base.
         if let Some(state) = self.review.get_mut(&worktree) {
             state.history = None;
         }
@@ -2217,13 +2208,12 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Crée l'état d'un worktree, en y remettant ce que le magasin en avait
-    /// retenu.
+    /// Creates a worktree's state, putting back into it what the store had kept.
     ///
-    /// La base relue **l'emporte** sur celle que git devine : c'est un choix
-    /// de l'utilisateur, et le redeviner à chaque lancement était exactement
-    /// le manque que le magasin comble. Le repli des dossiers vient du même
-    /// endroit, pour la même raison.
+    /// The base read back **wins** over the one git guesses: it is a choice of
+    /// the user's, and guessing it again on every launch was exactly the gap the
+    /// store fills. The folder collapses come from the same place, for the same
+    /// reason.
     fn ensure_review(&mut self, worktree: &Path, cx: &App) {
         if self.review.contains_key(worktree) {
             return;
@@ -2233,14 +2223,13 @@ impl ClaudhubApp {
         if let Some(saved) = saved {
             state.base = saved.base;
             state.collapsed = saved.collapsed.into_iter().collect();
-            // Un fichier écrit avant que ce champ existe porte zéro, et une
-            // note d'identifiant nul se confondrait avec l'absence de note.
+            // A file written before this field existed carries zero, and a note
+            // with a null id would be confused with the absence of a note.
             state.next_note = saved.next_note.max(1);
         }
         self.review.insert(worktree.to_path_buf(), state);
-        // Les notes vivent dans un dossier, et un dossier se lit dans un
-        // worker : un coffre sur un disque lent figerait la fenêtre le temps
-        // d'un `read_dir`.
+        // The notes live in a folder, and a folder is read in a worker: a vault
+        // on a slow disk would freeze the window for the length of a `read_dir`.
         if let Some(dir) = self.notes_dir(worktree, cx) {
             self.git.send(Cmd::ReadNotes {
                 worktree: worktree.to_path_buf(),
@@ -2249,15 +2238,15 @@ impl ClaudhubApp {
         }
     }
 
-    /// Le dossier de notes d'un worktree, sous la racine des réglages.
+    /// A worktree's notes folder, under the settings' root.
     pub(super) fn notes_dir(&self, worktree: &Path, cx: &App) -> Option<PathBuf> {
         let main = self.main_of(worktree)?;
         let root = Settings::global(cx).notes_root()?;
-        // Le coffre est lu et écrit par les workers, et l'agent le reçoit
-        // dans son environnement : c'est donc un chemin **du serveur** qu'il
-        // faut, jamais celui du monde d'où vient le réglage. Sous Windows,
-        // `<config>/notes` devient un chemin de la distribution ; un coffre
-        // déjà pointé sur `/home/…` passe tel quel.
+        // The vault is read and written by the workers, and the agent receives it
+        // in its environment: it therefore has to be a path **of the server's**,
+        // never one of the world the setting comes from. On Windows,
+        // `<config>/notes` becomes a path in the distribution; a vault already
+        // pointed at `/home/…` passes through unchanged.
         let root = if cfg!(windows) {
             crate::wslpath::for_server(&root)?
         } else {
@@ -2266,11 +2255,11 @@ impl ClaudhubApp {
         Some(crate::ui::vault::dir_for(&root, &main, worktree))
     }
 
-    /// Écrit dans le magasin ce que le worktree courant a de persistant.
+    /// Writes into the store what the current worktree has that persists.
     ///
-    /// Un seul point d'écriture plutôt qu'un par champ : les trois tiennent
-    /// dans quelques kilo-octets, et les tenir à jour séparément multiplierait
-    /// les occasions d'en oublier un.
+    /// A single write site rather than one per field: the three fit in a few
+    /// kilobytes, and keeping them up to date separately would multiply the
+    /// chances of forgetting one.
     pub(super) fn persist_review(&mut self, worktree: &Path, cx: &mut App) {
         let Some(main) = self.main_of(worktree) else {
             return;
@@ -2278,8 +2267,8 @@ impl ClaudhubApp {
         let Some(state) = self.review.get(worktree) else {
             return;
         };
-        // Trié : un `HashSet` sérialisé dans un ordre différent à chaque
-        // écriture ferait un fichier qui change sans que rien n'ait changé.
+        // Sorted: a `HashSet` serialised in a different order on every write
+        // would make a file that changes with nothing having changed.
         let mut collapsed: Vec<PathBuf> = state.collapsed.iter().cloned().collect();
         collapsed.sort();
         let (base, next_note) = (state.base.clone(), state.next_note);
@@ -2292,13 +2281,12 @@ impl ClaudhubApp {
         self.persist_notes(worktree, cx);
     }
 
-    /// Aligne le dossier de notes du worktree sur ce qu'on a en mémoire.
+    /// Brings the worktree's notes folder into line with what is held in memory.
     ///
-    /// Sans minuterie, contrairement aux réglages et au magasin : ce qu'on
-    /// envoie est un ordre à un worker, pas une écriture, et une note se
-    /// valide au dialogue là où un champ de réglage émet une valeur par
-    /// frappe. Le worker, lui, ne réécrit pas un fichier dont le contenu n'a
-    /// pas bougé.
+    /// Without a timer, unlike the settings and the store: what is sent is an
+    /// order to a worker, not a write, and a note is confirmed in a dialog where
+    /// a settings field emits a value per keystroke. The worker, for its part,
+    /// does not rewrite a file whose content has not moved.
     pub(super) fn persist_notes(&mut self, worktree: &Path, cx: &App) {
         let Some(dir) = self.notes_dir(worktree, cx) else {
             return;
@@ -2306,8 +2294,8 @@ impl ClaudhubApp {
         let Some(state) = self.review.get_mut(worktree) else {
             return;
         };
-        // Rien tant que le dossier n'a pas répondu : écrire une liste vide
-        // effacerait des notes qu'on n'a pas encore lues.
+        // Nothing while the folder has not answered: writing an empty list would
+        // erase notes that have not been read yet.
         if !state.notes_loaded {
             return;
         }
@@ -2337,10 +2325,10 @@ impl ClaudhubApp {
         });
     }
 
-    /// (Re)pose la surveillance du coffre du worktree affiché.
+    /// (Re)installs the watch on the displayed worktree's vault.
     ///
-    /// Sans effet s'il est déjà surveillé, et sans effet si le dossier n'existe
-    /// pas encore — l'ordre est simplement à renvoyer après l'avoir créé.
+    /// No effect if it is already watched, and no effect if the folder does not
+    /// exist yet — the order simply has to be sent again after creating it.
     fn watch_vault(&mut self, worktree: &Path, cx: &App) {
         if self.active.as_deref() != Some(worktree) {
             return;
@@ -2351,17 +2339,17 @@ impl ClaudhubApp {
         self.git.send(Cmd::WatchDir { dir: vault });
     }
 
-    /// La vue en deux colonnes est-elle repliée ?
+    /// Is the two-column view wrapped?
     ///
-    /// La question décide de **quelle liste est affichée**, donc de quelle
-    /// poignée porte le défilement : les deux ne sont jamais peintes en même
-    /// temps, et viser la mauvaise ferait défiler une liste qui n'est pas là.
+    /// The question decides **which list is displayed**, and therefore which
+    /// handle carries the scrolling: the two are never painted at the same time,
+    /// and aiming at the wrong one would scroll a list that is not there.
     pub(super) fn diff_wrapped(&self, cx: &App) -> bool {
         let settings = Settings::global(cx);
         settings.diff_split && settings.diff_wrap
     }
 
-    /// La poignée que gpui anime réellement pour le diff affiché.
+    /// The handle gpui really animates for the displayed diff.
     pub(super) fn diff_base_handle(&self, cx: &App) -> gpui::ScrollHandle {
         use crate::ui::scroll::Scrollable;
         if self.diff_wrapped(cx) {
@@ -2371,7 +2359,7 @@ impl ClaudhubApp {
         }
     }
 
-    /// Amène une entrée du diff dans la vue.
+    /// Brings a diff entry into view.
     pub(super) fn reveal_diff_row(&self, row: usize, strategy: gpui::ScrollStrategy, cx: &App) {
         if self.diff_wrapped(cx) {
             self.diff_wrap_scroll.scroll_to_item(row, strategy);
@@ -2380,10 +2368,10 @@ impl ClaudhubApp {
         }
     }
 
-    /// Marque des fichiers relus, ou rend leur relecture.
+    /// Marks files reviewed, or hands their review back.
     ///
-    /// Le volume est retenu au moment du clic : c'est lui qui périme la coche
-    /// quand un agent réécrit le fichier.
+    /// The volume is recorded at the moment of the click: it is what expires the
+    /// tick when an agent rewrites the file.
     pub(super) fn set_reviewed(
         &mut self,
         worktree: PathBuf,
@@ -2421,7 +2409,7 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Oublie ce qu'on retenait de worktrees que git ne liste plus.
+    /// Forgets what was kept of worktrees git no longer lists.
     fn forget_missing_worktrees(&mut self, main: &Path, cx: &mut App) {
         let Some(repo) = self.repos.iter().find(|r| r.main == main) else {
             return;
@@ -2431,7 +2419,7 @@ impl ClaudhubApp {
         Store::update_global(cx, |store| store.forget_missing(&main, &alive));
     }
 
-    /// Base de comparaison de la revue courante, si elle en a une.
+    /// The current review, if there is one.
     pub(super) fn active_review(&self) -> Option<&ReviewState> {
         self.active.as_ref().and_then(|p| self.review.get(p))
     }
@@ -2441,9 +2429,9 @@ impl ClaudhubApp {
         self.review.get_mut(&path)
     }
 
-    /// Dit quelque chose dans la barre d'état. Pour les gestes qui réussissent
-    /// sans rien changer à l'écran — copier, par exemple — c'est le seul
-    /// accusé de réception qu'on puisse donner.
+    /// Says something in the status bar. For the gestures that succeed without
+    /// changing anything on screen — copying, for instance — it is the only
+    /// acknowledgement one can give.
     pub(super) fn announce(&mut self, text: SharedString, cx: &mut Context<Self>) {
         self.toast = Some(Toast { text, error: false });
         cx.notify();
@@ -2484,9 +2472,9 @@ impl ClaudhubApp {
             .map(|w| w.path.clone())
     }
 
-    /// Base de comparaison d'un worktree : la branche d'intégration du dépôt,
-    /// sauf quand c'est justement celle qui y est déployée — comparer une
-    /// branche à elle-même ne montre rien.
+    /// A worktree's comparison base: the repository's integration branch, except
+    /// when that is precisely the one checked out there — comparing a branch
+    /// against itself shows nothing.
     fn default_base_for(&self, worktree: &Path) -> Option<String> {
         let repo = self.repo_of(worktree)?;
         let base = repo.default_base.as_deref()?;
@@ -2498,7 +2486,7 @@ impl ClaudhubApp {
         (Some(base) != current).then(|| base.to_string())
     }
 
-    // — Rendu ——————————————————————————————————————————————————
+    // — Rendering ——————————————————————————————————————————————————
 
     fn render_topbar(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let worktree = self.active_worktree();
@@ -2506,22 +2494,21 @@ impl ClaudhubApp {
             .map(|w| w.label())
             .unwrap_or_else(|| tr!("no-worktree").to_string());
 
-        // La barre du haut **est** la barre de titre de la fenêtre.
+        // The top bar **is** the window's title bar.
         //
-        // `TitleBar::title_bar_options()` demande à la plateforme de ne pas en
-        // dessiner une : sous Windows, la fenêtre n'avait donc plus de quoi
-        // être déplacée, réduite ni fermée. Il en faut une, et l'empiler
-        // au-dessus de celle-ci coûterait trente pixels pour redire ce qu'elle
-        // dit déjà — c'est le raisonnement qui a fait descendre le choix de
-        // l'écran dans la barre d'état. `TitleBar` apporte le déplacement, le
-        // double-clic qui agrandit et les boutons de la fenêtre ; nos actions
-        // vivent dedans. Elle garde notre hauteur et nos couleurs, pas les
-        // siennes.
+        // `TitleBar::title_bar_options()` asks the platform not to draw one: on
+        // Windows the window therefore had nothing left to be moved, minimised
+        // or closed by. One is needed, and stacking one above this would cost
+        // thirty pixels to repeat what it already says — that is the reasoning
+        // that moved the screen picker down into the status bar. `TitleBar`
+        // brings the drag, the double click that maximises and the window
+        // buttons; our actions live inside it. It keeps our height and our
+        // colours, not its own.
         //
-        // Les boutons posés dans la zone de déplacement restent cliquables :
-        // la région est rendue en `HTCAPTION`, mais gpui traite les messages
-        // souris de zone non cliente et les redistribue. C'est ce que fait la
-        // barre de titre de Zed, aux mêmes conditions.
+        // The buttons placed in the drag region stay clickable: the region is
+        // returned as `HTCAPTION`, but gpui handles non-client mouse messages
+        // and redistributes them. It is what Zed's title bar does, on the same
+        // terms.
         TitleBar::new()
             .h(super::theme::toolbar_height(cx))
             .border_color(cx.theme().border)
@@ -2534,18 +2521,17 @@ impl ClaudhubApp {
                     .gap_2()
                     .items_center()
                     .child(self.render_main_menu(cx))
-                    // Le worktree, et rien d'autre : la branche et sa
-                    // divergence sont descendues dans la barre d'état, qui ne
-                    // portait qu'un message épisodique pendant que celle-ci
-                    // débordait.
+                    // The worktree, and nothing else: the branch and its
+                    // divergence have moved down into the status bar, which
+                    // carried only an occasional message while this one
+                    // overflowed.
                     .child(div().font_semibold().text_sm().child(label))
                     .child(div().flex_1())
-                    // Ni `fetch`, ni `pull`, ni `push` : ils sont descendus
-                    // dans la barre du panneau « Modifications », où se fait
-                    // le reste du geste — cocher, valider, pousser.
-                    // L'historique et les branches sont, eux, des onglets du
-                    // dock : un bouton de plus ici ferait deux chemins pour le
-                    // même geste.
+                    // Neither `fetch`, nor `pull`, nor `push`: they have moved
+                    // down into the "Changes" panel's bar, where the rest of the
+                    // gesture happens — tick, commit, push. The history and the
+                    // branches, for their part, are dock tabs: one more button
+                    // here would make two paths for the same gesture.
                     .child(
                         Button::new("terminal")
                             .ghost()
@@ -2560,11 +2546,11 @@ impl ClaudhubApp {
             )
     }
 
-    /// Le menu de l'application.
+    /// The application's menu.
     ///
-    /// Un seul point d'entrée pour ce qui ne concerne pas le dépôt regardé —
-    /// réglages, disposition, sortie — plutôt que des boutons dispersés dans
-    /// une barre d'outils qui parle, elle, du worktree courant.
+    /// A single entry point for what is not about the repository being looked at
+    /// — settings, layout, quit — rather than buttons scattered through a
+    /// toolbar that talks about the current worktree.
     fn render_main_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         Button::new("main-menu")
@@ -2582,21 +2568,21 @@ impl ClaudhubApp {
                         entity.update(cx, |this, cx| this.open_settings(window, cx));
                     },
                 ))
-                // Les raccourcis sont ce qu'on cherche quand on ne sait plus :
-                // ils vivent donc là où l'on va chercher, à côté des réglages,
-                // et non dans une aide qu'il faudrait deviner.
+                // The shortcuts are what one looks for when one no longer knows:
+                // they therefore live where one goes looking, beside the
+                // settings, and not in a help one would have to guess at.
                 .item(
                     PopupMenuItem::new(tr!("shortcuts-title")).on_click(move |_, window, cx| {
                         for_shortcuts.update(cx, |this, cx| this.open_shortcuts(window, cx));
                     }),
                 )
-                // Les vues masquées n'ont plus d'onglet : c'est le seul
-                // endroit d'où les rappeler, et donc le seul endroit qui dise
-                // ce que la fenêtre ne montre pas.
-                // Les vues de **cet écran**, et non les onze de la fenêtre :
-                // masquer la console SQL depuis la revue ne ferait rien voir
-                // changer, et une entrée sans effet se lit comme une entrée
-                // cassée.
+                // Hidden views have no tab left: this is the only place to call
+                // them back from, and therefore the only place that says what the
+                // window is not showing.
+                // The views of **this screen**, and not the eleven of the window:
+                // hiding the SQL console from the review would make nothing
+                // visibly change, and an entry with no effect reads as a broken
+                // entry.
                 .submenu(tr!("menu-views"), window, cx, move |menu, _window, cx| {
                     let views = for_views.read(cx).workspace.views();
                     views.iter().fold(menu, |menu, &(name, title)| {
@@ -2659,24 +2645,24 @@ impl ClaudhubApp {
             .active_review()
             .map(|r| (r.status.ahead, r.status.behind))
             .unwrap_or((0, 0));
-        // Sur un disque Windows monté par WSL, la surveillance ne remonte
-        // rien : le dire est le seul moyen de distinguer « rien n'a changé »
-        // de « Claudhub ne voit plus rien ». Le calcul est refait à chaque frame
-        // parce qu'il ne coûte qu'une comparaison de composants de chemin,
-        // l'appartenance à WSL étant retenue une fois pour toutes.
+        // On a Windows drive mounted by WSL, watching reports nothing: saying so
+        // is the only way to tell "nothing has changed" from "Claudhub no longer
+        // sees anything". The computation is redone on every frame because it
+        // costs only a comparison of path components, membership of WSL being
+        // recorded once and for all.
         let unwatched = self.active.as_deref().is_some_and(|path| {
             crate::runtime::watch::on_windows_filesystem(path)
-                // En distant, c'est la machine du **serveur** qui sait si
-                // elle est sous WSL : sa poignée de main l'a dit, et le
-                // montage se reconnaît au chemin seul.
+                // Remotely, it is the **server's** machine that knows whether it
+                // is under WSL: its handshake said so, and the mount is
+                // recognised from the path alone.
                 || (self.server_wsl && crate::runtime::watch::is_windows_mount(path))
         });
         let muted = cx.theme().muted_foreground;
 
         h_flex()
-            // Une barre d'outils et non une ligne de liste : elle porte
-            // désormais des boutons, et vingt-deux pixels les feraient
-            // déborder sur le bas de la fenêtre.
+            // A toolbar and not a list row: it now carries buttons, and
+            // twenty-two pixels would make them spill over the bottom of the
+            // window.
             .h(super::theme::toolbar_height(cx))
             .w_full()
             .px_2()
@@ -2742,9 +2728,9 @@ impl Focusable for ClaudhubApp {
 impl Render for ClaudhubApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
-            // Le mode vim se lit au rendu et non à la construction : le
-            // contexte est ce qui allume ses liaisons, et le réglage se change
-            // en cours de route.
+            // Vim mode is read at render time and not at construction: the
+            // context is what turns its bindings on, and the setting changes
+            // along the way.
             .key_context(super::shortcuts::context(Settings::global(cx).vim_mode))
             .track_focus(&self.focus)
             .on_action(cx.listener(super::shortcuts::refresh))
@@ -2810,33 +2796,31 @@ impl Render for ClaudhubApp {
             .on_action(cx.listener(super::shortcuts::diff_page_down))
             .on_action(cx.listener(super::shortcuts::close_editor))
             .size_full()
-            // La gouttière et non le fond : ce qui se voit entre deux panneaux
-            // — les poignées de redimensionnement, une zone repliée — est le
-            // plan sur lequel les cartes sont posées, pas la surface d'une
-            // carte.
+            // The gutter and not the background: what shows between two panels —
+            // the resize handles, a collapsed zone — is the plane the cards sit
+            // on, not the surface of a card.
             .bg(super::theme::gutter(cx))
             .text_color(cx.theme().foreground)
             .child(self.render_topbar(window, cx))
-            // Le même souffle que le fork met entre les cartes, autour d'elles :
-            // sans ce rembourrage, les zones touchent les bords de la fenêtre,
-            // la barre du haut et la barre d'état, et les cartes ne respirent
-            // que de l'intérieur.
+            // The same breathing room the fork puts between the cards, around
+            // them: without this padding, the zones touch the window's edges, the
+            // top bar and the status bar, and the cards only breathe from the
+            // inside.
             .child(div().flex_1().min_h_0().p(px(4.)).child(self.dock.clone()))
             .child(self.render_status_bar(cx))
-            // Les couches de gpui-component doivent être ré-émises par la vue
-            // racine, sinon dialogues et notifications ne s'affichent nulle
-            // part.
+            // gpui-component's layers have to be re-emitted by the root view,
+            // otherwise dialogs and notifications appear nowhere.
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
     }
 }
 
 impl ClaudhubApp {
-    /// Ouvre un dialogue à une seule ligne de saisie.
+    /// Opens a dialog with a single input line.
     ///
-    /// L'`InputState` est créé ici et capturé par la fermeture : une entité
-    /// recréée à chaque frame perdrait le curseur, la sélection et le texte
-    /// dès le premier caractère.
+    /// The `InputState` is created here and captured by the closure: an entity
+    /// recreated on every frame would lose the cursor, the selection and the text
+    /// on the first character.
     pub(super) fn open_text_dialog(
         &mut self,
         title: SharedString,
@@ -2848,10 +2832,10 @@ impl ClaudhubApp {
         self.open_text_dialog_with(title, placeholder, "", window, cx, on_ok)
     }
 
-    /// La même chose, le champ déjà rempli.
+    /// The same thing, with the field already filled in.
     ///
-    /// « Nouveau fichier ici » a besoin du dossier sous le curseur : le
-    /// retaper à chaque fois est ce qui fait qu'on ne se sert pas du geste.
+    /// "New file here" needs the folder under the cursor: retyping it every time
+    /// is what makes the gesture go unused.
     pub(super) fn open_text_dialog_with(
         &mut self,
         title: SharedString,
@@ -2876,10 +2860,10 @@ impl ClaudhubApp {
                 .overlay_closable(false)
                 .close_button(false)
                 .child(gpui_component::input::Input::new(&input))
-                // La fenêtre est passée à la fermeture : ce qu'on lance
-                // ensuite — ouvrir un terminal, y livrer un texte — en a
-                // besoin, et la reprendre après coup demanderait une frame
-                // d'écart avec le geste.
+                // The window is passed to the closure: what is launched next —
+                // opening a terminal, delivering a text into it — needs it, and
+                // taking it back afterwards would mean one frame's gap with the
+                // gesture.
                 .on_ok(move |_, window, cx| {
                     let value = input.read(cx).value().to_string();
                     entity.update(cx, |this, cx| on_ok(this, value, window, cx));
@@ -2894,15 +2878,14 @@ impl ClaudhubApp {
         self.active.clone()
     }
 
-    /// Remet les panneaux à leur place d'origine.
+    /// Gives the current screen back its initial layout.
     ///
-    /// La sortie de secours d'un système où l'on peut tout déplacer : un
-    /// panneau glissé hors de vue n'a sinon aucun moyen de revenir.
-    /// Rend à l'écran courant sa disposition d'origine.
+    /// The escape hatch of a system where everything can be moved: a panel
+    /// dragged out of view has no other way back.
     ///
-    /// **Celui-ci et pas les quatre** : on casse la géométrie d'un écran en
-    /// tirant un séparateur de travers, pas celle de tous, et emporter les
-    /// trois autres ferait payer cher un geste de réparation.
+    /// **This one and not all four**: one breaks a screen's geometry by pulling
+    /// a separator crooked, not everyone's, and taking the other three along
+    /// would make a repair gesture expensive.
     pub(super) fn reset_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let this = cx.entity();
         let workspace = self.workspace;
@@ -2913,11 +2896,11 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Passe à un autre écran.
+    /// Switches to another screen.
     ///
-    /// Rien d'autre à faire que de changer de dock : l'état — le worktree
-    /// choisi, le fichier ouvert, la requête en cours — vit dans cette entité
-    /// et non dans les panneaux, et il est donc le même des quatre côtés.
+    /// Nothing to do but change dock: the state — the chosen worktree, the open
+    /// file, the running query — lives in this entity and not in the panels, and
+    /// is therefore the same on all four sides.
     pub(super) fn enter_workspace(
         &mut self,
         workspace: crate::ui::workspace::Workspace,
@@ -2940,11 +2923,11 @@ impl ClaudhubApp {
         self.set_panel_visible(super::panels::TerminalPanel::NAME, true, cx);
     }
 
-    /// Une vue est visible tant qu'on ne l'a pas masquée.
+    /// A view is visible until it has been hidden.
     ///
-    /// La question se pose par la négative : un panneau qu'on vient d'ajouter
-    /// s'affiche sans que rien n'ait à le déclarer, et un nom inconnu du
-    /// fichier de réglages — un panneau renommé — ne cache plus rien.
+    /// The question is asked in the negative: a panel just added shows up without
+    /// anything having to declare it, and a name unknown to the settings file — a
+    /// renamed panel — no longer hides anything.
     pub(super) fn panel_visible(&self, name: &str) -> bool {
         !self.hidden_panels.contains(name)
     }
@@ -2958,9 +2941,9 @@ impl ClaudhubApp {
         if !changed {
             return;
         }
-        // Trié avant d'être écrit, comme les replis du magasin : un ensemble
-        // sérialisé dans un ordre différent à chaque fois ferait un fichier de
-        // réglages qui change sans que rien n'ait changé.
+        // Sorted before being written, like the store's collapses: a set
+        // serialised in a different order every time would make a settings file
+        // that changes with nothing having changed.
         let mut hidden: Vec<String> = self.hidden_panels.iter().cloned().collect();
         hidden.sort();
         Settings::update_global(cx, |s| s.hidden_panels = hidden);
@@ -2972,12 +2955,12 @@ impl ClaudhubApp {
         self.set_panel_visible(name, !visible, cx);
     }
 
-    /// La zone que le zoom au clavier vise.
+    /// The area keyboard zoom aims at.
     ///
-    /// Le focus décide : un terminal qu'on regarde se grossit tout seul, et
-    /// partout ailleurs c'est le code relu qu'on veut agrandir. Demander à
-    /// l'utilisateur de désigner une zone avant de zoomer serait un geste de
-    /// plus pour une intention qui n'a jamais d'ambiguïté.
+    /// The focus decides: a terminal being looked at enlarges itself, and
+    /// everywhere else it is the reviewed code one wants larger. Asking the user
+    /// to name an area before zooming would be one more gesture for an intention
+    /// that is never ambiguous.
     fn zoom_zone(&self, window: &Window, cx: &App) -> crate::ui::settings::Zoom {
         let terminal_focused = self
             .active
@@ -3011,11 +2994,11 @@ impl ClaudhubApp {
         self.toggle_panel(super::panels::TerminalPanel::NAME, cx);
     }
 
-    /// Affiche ou masque la zone de gauche — dépôts, branches, fichiers.
+    /// Shows or hides the left zone — repositories, branches, files.
     ///
-    /// `toggle_dock` ne notifie que le dock intérieur, et c'est l'aire qu'on
-    /// observe pour enregistrer la disposition : sans ce `notify`, la fenêtre
-    /// rouvrirait avec la zone dans l'état d'avant le geste.
+    /// `toggle_dock` only notifies the inner dock, and it is the area we observe
+    /// to save the layout: without this `notify`, the window would reopen with
+    /// the zone in the state from before the gesture.
     pub(super) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dock.update(cx, |area, cx| {
             area.toggle_dock(gpui_component::dock::DockPlacement::Left, window, cx);
@@ -3023,11 +3006,11 @@ impl ClaudhubApp {
         });
     }
 
-    /// Les worktrees dans l'ordre où la barre latérale les affiche.
+    /// The worktrees in the order the sidebar shows them.
     ///
-    /// Les replis n'y changent rien : `Ctrl+3` doit désigner le même worktree
-    /// qu'on ait replié son dépôt ou non, sans quoi le raccourci ne serait
-    /// mémorisable que dans un seul état de la liste.
+    /// Collapses change nothing there: `Ctrl+3` has to name the same worktree
+    /// whether its repository is collapsed or not, otherwise the shortcut would
+    /// only be memorable in one state of the list.
     fn worktrees_in_order(&self) -> Vec<PathBuf> {
         self.repos
             .iter()
@@ -3070,11 +3053,11 @@ impl ClaudhubApp {
         }
     }
 
-    /// Coche ou décoche le fichier ouvert, comme un clic sur sa case.
+    /// Ticks or unticks the open file, like a click on its box.
     ///
-    /// Le statut est la seule source qui distingue l'index du répertoire de
-    /// travail : un fichier absent de sa liste n'est pas indexable — c'est un
-    /// fichier de commit, pas une modification en cours.
+    /// The status is the only source that tells the index from the working tree:
+    /// a file absent from its list is not stageable — it is a commit's file, not
+    /// a change in progress.
     pub(super) fn toggle_stage_of_open_file(&mut self, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;

@@ -1,14 +1,13 @@
-//! Créer, démarrer, intégrer et retirer un worktree.
+//! Creating, starting, integrating and removing a worktree.
 //!
-//! Deux sources se rejoignent ici : git, qui sait ajouter un checkout et
-//! fusionner une branche, et le `wt.toml` du projet, qui sait ce qu'il faut
-//! copier, quels ports allouer et quoi lancer ensuite.
+//! Two sources meet here: git, which knows how to add a checkout and merge a
+//! branch, and the project's `wt.toml`, which knows what has to be copied, which
+//! ports to allocate and what to launch next.
 //!
-//! **Le `wt.toml` est le système d'extension de Claudhub.** Les `[tasks.*]`
-//! d'un projet apparaissent dans le menu d'un worktree sans que Claudhub sache
-//! ce qu'elles font, ses `[[prompt]]` deviennent un dialogue, son
-//! `[status] up` une pastille dans la barre latérale. Rien de tout cela n'est
-//! compilé ici : c'est le fichier du projet qui le déclare.
+//! **The `wt.toml` is Claudhub's extension system.** A project's `[tasks.*]`
+//! appear in a worktree's menu without Claudhub knowing what they do, its
+//! `[[prompt]]`s become a dialog, its `[status] up` a badge in the sidebar. None
+//! of that is compiled here: the project's file is what declares it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -144,7 +143,7 @@ impl ClaudhubApp {
         self.wt_states.get(worktree)
     }
 
-    /// Le relevé de fond : état et adresses de chaque worktree que `wt` gère.
+    /// The background reading: state and addresses of every worktree `wt` manages.
     pub(super) fn scan_wt(&mut self) {
         let targets: Vec<(PathBuf, PathBuf)> = self
             .repos
@@ -162,12 +161,12 @@ impl ClaudhubApp {
         self.git.send(Cmd::WtScan { targets });
     }
 
-    // — Créer ————————————————————————————————————————————————
+    // — Create ————————————————————————————————————————————————
 
-    /// Démarre la création guidée d'un worktree.
+    /// Starts the guided creation of a worktree.
     ///
-    /// Sans `wt.toml`, on retombe sur l'ajout git nu : un dépôt sans
-    /// configuration doit pouvoir gagner un worktree quand même.
+    /// Without a `wt.toml`, we fall back to the bare git add: a repository with
+    /// no configuration must still be able to gain a worktree.
     pub(super) fn start_worktree(
         &mut self,
         main: PathBuf,
@@ -462,8 +461,8 @@ impl ClaudhubApp {
                 .close_button(false)
                 .on_ok(move |_, _window, cx| {
                     entity.update(cx, |this, cx| this.submit_answers(cx));
-                    // Le dialogue reste ouvert : la page suivante s'y affiche,
-                    // et c'est l'absence de nouvelle question qui le ferme.
+                    // The dialog stays open: the next page shows in it, and it is
+                    // the absence of a new question that closes it.
                     false
                 })
                 .on_cancel(move |_, _window, cx| {
@@ -637,8 +636,19 @@ impl ClaudhubApp {
             })
     }
 
-    /// Un choix multiple : une case par valeur, jointes par le séparateur que
-    /// le projet déclare.
+    /// A multiple choice: one box per value, joined by the separator the project
+    /// declares.
+    ///
+    /// **A search field as soon as the list is long, and a bounded height.** The
+    /// options often come from a shell command — on Acetics the tenants are a
+    /// MariaDB query, and there are eighty of them — and eighty checkboxes with
+    /// no way to narrow them is a list one scrolls past instead of reading. It
+    /// is what `wt`'s own interface does with skim, and it is the reason the
+    /// question exists at all.
+    ///
+    /// The filter hides rows; it never touches the answer. A tenant chosen then
+    /// filtered out stays chosen — the count says so — because a search that
+    /// silently unselects is the one way to clone the wrong databases.
     fn render_multi(
         &self,
         question: &wt::Question,
@@ -851,9 +861,9 @@ impl ClaudhubApp {
         group.update(cx, |group, cx| {
             group.open(
                 crate::ui::terminal_view::Launch {
-                    // Un shell et non le programme nu : une tâche est une
-                    // ligne de commande du projet, avec ses tubes et ses
-                    // redirections, et c'est un shell qui sait les lire.
+                    // A shell and not the bare program: a task is one of the
+                    // project's command lines, with its pipes and its
+                    // redirections, and it is a shell that can read them.
                     command: Some(("sh".into(), vec!["-lc".into(), line])),
                     env: launch.env.into_iter().collect(),
                     label: SharedString::from(task),
@@ -866,7 +876,7 @@ impl ClaudhubApp {
         self.show_terminal_panel(window, cx);
     }
 
-    /// Le slug d'un worktree, quand `wt` le connaît.
+    /// A worktree's slug, when `wt` knows it.
     fn wt_slug(&self, main: &Path, worktree: &Path) -> Option<String> {
         let root = &self.wt_project(main)?.root;
         let rest = worktree.strip_prefix(root).ok()?;
@@ -875,10 +885,10 @@ impl ClaudhubApp {
         parts.next().is_none().then_some(slug)
     }
 
-    // — Intégrer ————————————————————————————————————————————————
+    // — Integrate ——————————————————————————————————————————————
 
-    /// Met le worktree à jour depuis sa base : la base a avancé pendant que
-    /// l'agent travaillait.
+    /// Brings the worktree up to date from its base: the base has moved on while
+    /// the agent was working.
     pub(super) fn update_from_base(&mut self, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
@@ -998,7 +1008,7 @@ impl ClaudhubApp {
         });
     }
 
-    /// Le menu contextuel d'un worktree : git d'un côté, le projet de l'autre.
+    /// A worktree's context menu: git on one side, the project on the other.
     pub(super) fn worktree_menu(
         &mut self,
         menu: gpui_component::menu::PopupMenu,
@@ -1071,8 +1081,8 @@ impl ClaudhubApp {
             );
         }
 
-        // Les tâches du projet, telles qu'il les déclare. Claudhub ne sait pas
-        // ce qu'elles font, et c'est le principe.
+        // The project's tasks, as it declares them. Claudhub does not know what
+        // they do, and that is the point.
         if project.tasks.is_empty() {
             return menu;
         }

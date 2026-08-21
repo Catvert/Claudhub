@@ -200,27 +200,26 @@ fn choices(names: Vec<String>) -> Vec<(SharedString, SharedString)> {
         .collect()
 }
 
-/// Shells que le système déclare. Le menu ne fait que les proposer : le champ
-/// reste libre, et vide veut toujours dire « le shell de connexion ».
+/// Shells the system declares. The menu only offers them: the field stays free,
+/// and empty always means "the login shell".
 fn shell_choices() -> Vec<(SharedString, SharedString)> {
     choices(settings::available_shells())
 }
 
-/// L'état du champ « shell », gardé d'un rendu à l'autre.
+/// The state of the "shell" field, kept from one render to the next.
 ///
-/// La souscription vit dedans : un `Subscription` lâché se coupe, et le champ
-/// cesserait d'écrire dans les réglages dès la frame suivante.
+/// The subscription lives inside it: a dropped `Subscription` is cut, and the
+/// field would stop writing into the settings from the next frame on.
 struct ShellField {
     input: Entity<InputState>,
     _subscription: Subscription,
 }
 
-/// Le shell se saisit librement, et le menu ne fait que proposer.
+/// The shell is typed freely, and the menu only offers.
 ///
-/// Une liste fermée conviendrait si `/etc/shells` disait la vérité ; il ignore
-/// tout ce qui n'est pas installé par le système — un shell compilé à la main,
-/// un `nix run`, un `tmux new-session` — et on ne veut pas d'un réglage dont
-/// on sort en éditant un fichier JSON.
+/// A closed list would do if `/etc/shells` told the truth; it ignores everything
+/// not installed by the system — a shell compiled by hand, a `nix run`, a `tmux
+/// new-session` — and we do not want a setting you leave by editing a JSON file.
 fn shell_item(shells: Vec<(SharedString, SharedString)>) -> SettingItem {
     SettingItem::new(
         tr!("settings-shell"),
@@ -279,10 +278,10 @@ fn shell_item(shells: Vec<(SharedString, SharedString)>) -> SettingItem {
     .description(tr!("settings-shell-help"))
 }
 
-/// L'état d'une ligne de la table des profils, gardé d'un rendu à l'autre.
+/// The state of one row of the profiles table, kept from one render to the next.
 ///
-/// Les trois souscriptions vivent dedans : lâchées, elles se couperaient et
-/// les champs cesseraient d'écrire dans les réglages à la frame suivante.
+/// The three subscriptions live inside it: dropped, they would be cut and the
+/// fields would stop writing into the settings on the next frame.
 struct AgentField {
     name: Entity<InputState>,
     command: Entity<InputState>,
@@ -290,18 +289,17 @@ struct AgentField {
     _subscriptions: Vec<Subscription>,
 }
 
-/// La table des profils d'agent.
+/// The agent profiles table.
 ///
-/// Un champ sur mesure parce qu'il n'y a rien d'approchant dans le formulaire
-/// de gpui-component : ce sont des lignes qu'on ajoute et qu'on retire, avec
-/// trois saisies chacune.
+/// A bespoke field because there is nothing like it in gpui-component's form:
+/// these are rows added and removed, with three inputs each.
 ///
-/// **La clé d'état porte le nombre de profils** (`claudhub-agent-{n}-{i}`).
-/// `use_keyed_state` garde un état par clé : sans le compte, supprimer le
-/// premier profil laisserait les champs de la ligne 0 remplis avec l'ancien,
-/// et l'on écrirait dans les réglages ce qu'on croyait avoir supprimé.
-/// Renommer un profil, lui, ne change pas le compte — les champs gardent donc
-/// leur curseur pendant la frappe.
+/// **The state key carries the number of profiles** (`claudhub-agent-{n}-{i}`).
+/// `use_keyed_state` keeps one state per key: without the count, deleting the
+/// first profile would leave row 0's fields filled with the old one, and we
+/// would write into the settings what we thought we had deleted. Renaming a
+/// profile, on the other hand, does not change the count — so the fields keep
+/// their cursor while typing.
 fn agents_item() -> SettingItem {
     SettingItem::new(
         tr!("settings-agents"),
@@ -380,9 +378,8 @@ fn agent_row(
                     }
                     let value = input.read(cx).value().to_string();
                     edit_agent(index, cx, |profile| {
-                        // La ligne est découpée en honorant les guillemets :
-                        // un chemin contenant une espace ne doit pas devenir
-                        // deux arguments.
+                        // The line is split honouring quotes: a path containing
+                        // a space must not become two arguments.
                         let mut parts = settings::split_command(&value).into_iter();
                         profile.command = parts.next().unwrap_or_default();
                         profile.args = parts.collect();
@@ -431,10 +428,10 @@ fn agent_row(
         )
 }
 
-/// Le profil lancé quand on ne dit pas lequel.
+/// The profile launched when nobody says which.
 ///
-/// La liste des choix est relue à chaque rendu du formulaire : elle change
-/// pendant qu'on édite la table juste au-dessus.
+/// The list of choices is read again on every render of the form: it changes
+/// while the table just above is being edited.
 fn default_agent_item() -> SettingItem {
     SettingItem::new(
         tr!("settings-default-agent"),
@@ -464,11 +461,11 @@ fn default_agent_item() -> SettingItem {
     .description(tr!("settings-default-agent-help"))
 }
 
-/// Modifie un profil en place, si l'indice existe encore.
+/// Changes a profile in place, if the index still exists.
 ///
-/// L'indice peut être périmé d'une frame : une souscription posée pour la
-/// ligne 2 survit à la disparition de la ligne 2, et écrire hors des bornes
-/// paniquerait au milieu d'un rendu.
+/// The index may be one frame stale: a subscription set up for row 2 outlives
+/// row 2's disappearance, and writing out of bounds would panic in the middle of
+/// a render.
 fn edit_agent(index: usize, cx: &mut App, edit: impl FnOnce(&mut settings::AgentProfile)) {
     Settings::update_global(cx, |s| {
         if let Some(profile) = s.terminal.agents.get_mut(index) {
@@ -477,7 +474,7 @@ fn edit_agent(index: usize, cx: &mut App, edit: impl FnOnce(&mut settings::Agent
     });
 }
 
-/// Les palettes du registre pour une apparence donnée.
+/// The registry's palettes for a given appearance.
 fn theme_choices(mode: gpui_component::ThemeMode, cx: &App) -> Vec<(SharedString, SharedString)> {
     gpui_component::ThemeRegistry::global(cx)
         .sorted_themes()
@@ -651,9 +648,9 @@ fn terminal_page(
     shells: Vec<(SharedString, SharedString)>,
     mono_fonts: Vec<(SharedString, SharedString)>,
 ) -> SettingPage {
-    // La police du terminal reprend la liste des chasses fixes, précédée de
-    // l'entrée « comme les diffs » : le terminal a le droit de ne pas choisir,
-    // pour que régler la chasse fixe une fois suffise au cas courant.
+    // The terminal's font reuses the fixed-pitch list, preceded by the "same as
+    // the diffs" entry: the terminal is allowed not to choose, so that setting
+    // the fixed pitch once is enough for the common case.
     let mut fonts = vec![(SharedString::default(), tr!("settings-font-inherit"))];
     fonts.extend(mono_fonts);
 
@@ -717,12 +714,11 @@ fn terminal_page(
         )
 }
 
-/// Le clavier.
+/// The keyboard.
 ///
-/// Une page pour un seul réglage, et c'est assumé : le mode vim change le sens
-/// de la moitié des touches, et c'est le premier endroit où l'on va le
-/// chercher. Le rappel de `F1` y est parce qu'une aide qu'on ne trouve pas
-/// n'en est pas une.
+/// One page for a single setting, and that is accepted: vim mode changes the
+/// meaning of half the keys, and it is the first place one goes looking for it.
+/// The reminder about `F1` is there because help you cannot find is not help.
 fn keyboard_page() -> SettingPage {
     SettingPage::new(tr!("settings-page-keyboard")).group(
         SettingGroup::new().title(tr!("settings-group-vim")).item(
@@ -895,11 +891,11 @@ fn files_page() -> SettingPage {
                 )
                 .description(tr!("settings-notes-dir-help")),
             )
-            // La distribution ne se choisit ici qu'après coup : la question
-            // est posée au premier démarrage, où l'on ne connaît encore aucun
-            // réglage. Le champ existe pour en changer — une machine en a
-            // souvent plusieurs — et le changement ne vaut qu'au prochain
-            // lancement, le serveur en place ayant déjà ses dépôts ouverts.
+            // The distribution is only chosen here after the fact: the question
+            // is asked on first startup, where no setting is known yet. The
+            // field exists to change it — a machine often has several — and the
+            // change only takes effect on the next launch, the running server
+            // already having its repositories open.
             .item(
                 SettingItem::new(
                     tr!("settings-wsl-distro"),
@@ -929,15 +925,14 @@ fn files_page() -> SettingPage {
     )
 }
 
-/// Sentry : l'organisation et le jeton. Le **projet** dépend du dépôt et vit
-/// dans le magasin d'état, pas ici — deux dépôts d'une même organisation n'ont
-/// pas les mêmes erreurs.
-/// La page des bases de données.
+/// Sentry: the organisation and the token. The **project** belongs to the
+/// repository and lives in the state store, not here — two repositories of the
+/// same organisation do not have the same errors.
+/// The databases page.
 ///
-/// Les connexions se déclarent ici et nulle part ailleurs : c'est le
-/// deuxième niveau du système d'extension — une déclaration, pas du code —, le
-/// même que celui des profils d'agent, et le panneau « Bases » n'est que la
-/// vue de cette liste.
+/// Connections are declared here and nowhere else: it is the second level of the
+/// extension system — a declaration, not code — the same as the agent profiles',
+/// and the "Databases" panel is only the view of that list.
 fn databases_page() -> SettingPage {
     SettingPage::new(tr!("settings-page-databases")).group(
         SettingGroup::new().item(databases_item()).item(
@@ -963,23 +958,23 @@ fn databases_page() -> SettingPage {
     )
 }
 
-/// La table des connexions.
+/// The connections table.
 ///
-/// **Un `SettingItem::render` et non un `SettingItem::new`**, seul de toute
-/// cette fenêtre. Un item ordinaire met son libellé dans une colonne et son
-/// champ dans ce qui reste — quatre cents pixels, taillés pour une case à
-/// cocher ou un menu — et une connexion en demande cinq : nom, hôte, port,
-/// utilisateur, mot de passe. Le premier essai posait une largeur en dur, ce
-/// qui débordait de la colonne et sortait le sélecteur de moteur de l'écran.
-/// Un élément libre prend la page entière, et le titre est écrit à la main.
+/// **A `SettingItem::render` and not a `SettingItem::new`**, the only one in
+/// this whole window. An ordinary item puts its label in one column and its
+/// field in what is left — four hundred pixels, cut for a checkbox or a menu —
+/// and a connection needs five: name, host, port, user, password. The first
+/// attempt set a hard-coded width, which overflowed the column and pushed the
+/// engine picker off screen. A free element takes the whole page, and the title
+/// is written by hand.
 ///
-/// **La clé d'état porte le nombre de connexions**
-/// (`claudhub-database-{n}-{i}`), comme celle des profils d'agent et pour la
-/// même raison : `use_keyed_state` garde un état par clé, et sans le compte,
-/// supprimer la première connexion laisserait les champs de la ligne 0
-/// remplis avec l'ancienne — on écrirait dans les réglages ce qu'on croyait
-/// avoir supprimé. Changer de moteur, lui, ne change pas le compte : les
-/// champs gardent ce qu'on y avait tapé.
+/// **The state key carries the number of connections**
+/// (`claudhub-database-{n}-{i}`), like the agent profiles' and for the same
+/// reason: `use_keyed_state` keeps one state per key, and without the count,
+/// deleting the first connection would leave row 0's fields filled with the old
+/// one — we would write into the settings what we thought we had deleted.
+/// Changing engine, on the other hand, does not change the count: the fields
+/// keep what had been typed into them.
 fn databases_item() -> SettingItem {
     SettingItem::render(move |_, window, cx| {
         let connections = Settings::global(cx).databases.clone();
@@ -1021,7 +1016,7 @@ fn databases_item() -> SettingItem {
     })
 }
 
-/// Les champs d'une connexion, gardés d'un rendu à l'autre.
+/// A connection's fields, kept from one render to the next.
 struct DatabaseField {
     name: Entity<InputState>,
     path: Entity<InputState>,
@@ -1033,19 +1028,18 @@ struct DatabaseField {
     _subscriptions: Vec<Subscription>,
 }
 
-/// Une connexion : son nom, son moteur, et l'adresse que ce moteur demande.
+/// A connection: its name, its engine, and the address that engine asks for.
 ///
-/// **Le moteur se choisit par deux boutons et non par un menu déroulant.**
-/// C'est le premier geste — une connexion vide s'ouvre sur SQLite, et il faut
-/// pouvoir en sortir sans deviner qu'un bouton cache une liste. Les deux
-/// libellés se lisent d'un coup d'œil, ce qui est justement ce qu'on cherche
-/// quand on vient déclarer une base MariaDB.
+/// **The engine is chosen with two buttons and not with a dropdown.** It is the
+/// first gesture — an empty connection opens on SQLite, and one has to be able
+/// to leave it without guessing that a button hides a list. Both labels read at
+/// a glance, which is exactly what one is after when coming to declare a MariaDB
+/// database.
 ///
-/// **`min_w_0` sur chaque champ élastique** : la taille minimale d'un élément
-/// flex vaut par défaut celle de son contenu, et une saisie ne descend pas
-/// sous la sienne — sans lui, une ligne étroite pousse ses voisins dehors au
-/// lieu de les rétrécir. C'est le même piège que celui des barres de
-/// défilement.
+/// **`min_w_0` on every elastic field**: a flex item's minimum size defaults to
+/// its content's, and an input does not go below its own — without it, a narrow
+/// row pushes its neighbours out instead of shrinking them. It is the same trap
+/// as the scrollbars'.
 fn database_row(
     index: usize,
     count: usize,
@@ -1091,8 +1085,8 @@ fn database_row(
         );
         let port = field(
             tr!("settings-database-port"),
-            // Zéro veut dire « le port du moteur » : l'afficher ferait croire
-            // qu'on a choisi le port 0.
+            // Zero means "the engine's port": showing it would suggest that port
+            // 0 had been chosen.
             if values.port == 0 {
                 String::new()
             } else {
@@ -1137,8 +1131,8 @@ fn database_row(
             watch(&name, |c, v| c.name = v, cx),
             watch(&path, |c, v| c.path = v, cx),
             watch(&host, |c, v| c.host = v, cx),
-            // Un port illisible vaut zéro, c'est-à-dire « celui du moteur » :
-            // un champ à moitié tapé ne doit pas empêcher d'écrire la suite.
+            // An unreadable port counts as zero, that is, "the engine's": a
+            // half-typed field must not prevent writing the rest.
             watch(&port, |c, v| c.port = v.trim().parse().unwrap_or(0), cx),
             watch(&user, |c, v| c.user = v, cx),
             watch(&password, |c, v| c.password = v, cx),
@@ -1197,11 +1191,11 @@ fn database_row(
                     let chosen = engine == choice;
                     Button::new(("database-engine", index * 10 + choice as usize))
                         .small()
-                        // Plein contre contour, et non le seul état
-                        // « sélectionné » d'un bouton : sur deux boutons
-                        // voisins de même variante, la nuance qu'il apporte ne
-                        // se lit pas, et c'est justement la question qu'on se
-                        // pose en arrivant — lequel des deux est actif.
+                        // Solid against outline, and not a button's "selected"
+                        // state alone: on two neighbouring buttons of the same
+                        // variant, the nuance it brings does not read, and that
+                        // is precisely the question one asks on arriving — which
+                        // of the two is active.
                         .map(|button| {
                             if chosen {
                                 button.primary()
@@ -1269,10 +1263,10 @@ fn database_row(
         })
 }
 
-/// Modifie une connexion en place, si l'indice existe encore.
+/// Changes a connection in place, if the index still exists.
 ///
-/// Une souscription posée pour la ligne 2 survit d'une frame à la disparition
-/// de la ligne 2, et écrire hors des bornes paniquerait au milieu d'un rendu.
+/// A subscription set up for row 2 outlives row 2's disappearance by a frame,
+/// and writing out of bounds would panic in the middle of a render.
 fn edit_database(index: usize, cx: &mut App, edit: impl FnOnce(&mut crate::db::Connection)) {
     Settings::update_global(cx, |s| {
         if let Some(connection) = s.databases.get_mut(index) {
@@ -1571,8 +1565,8 @@ mod tests {
 
     #[test]
     fn the_detected_shells_are_absolute_paths() {
-        // Le menu remplit un champ qui sera exécuté : une entrée relative y
-        // dépendrait du répertoire courant du worktree.
+        // The menu fills a field that will be executed: a relative entry there
+        // would depend on the worktree's current directory.
         for (value, _) in shell_choices() {
             assert!(value.starts_with('/'), "{value}");
         }

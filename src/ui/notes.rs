@@ -1,19 +1,19 @@
-//! Les notes de relecture : ce qu'on a à dire sur un bout de code, et de quoi
-//! le renvoyer à l'agent qui l'a écrit.
+//! Review notes: what there is to say about a piece of code, and what is needed
+//! to send it back to the agent that wrote it.
 //!
-//! ## Pourquoi une note ne s'accroche pas à la sélection
+//! ## Why a note does not attach to the selection
 //!
-//! `ReviewState::diff_selection` est un couple d'indices dans la liste
-//! **affichée**. Il est invalidé par la bascule unifié/deux colonnes, par un
-//! changement de contexte, et par tout rechargement du diff — c'est-à-dire par
-//! chaque écriture de fichier dans le worktree. Une note qui s'y accrocherait
-//! pointerait sur autre chose quelques secondes plus tard.
+//! `ReviewState::diff_selection` is a pair of indices into the **displayed**
+//! list. It is invalidated by the unified/two-column switch, by a context
+//! change, and by any reload of the diff — that is, by every file write in the
+//! worktree. A note attached to it would point at something else a few seconds
+//! later.
 //!
-//! On retient donc des **numéros de ligne** — que git donne déjà — et
-//! **l'extrait de code** lui-même. Les numéros replacent la note dans le cas
-//! courant ; l'extrait la rattrape quand le fichier a bougé sous elle. Et si
-//! les deux échouent, la note est dite *décalée* et **reste dans la liste** :
-//! une note perdue en silence est pire que pas de note du tout.
+//! We therefore keep **line numbers** — which git already gives — and the
+//! **code excerpt** itself. The numbers relocate the note in the common case;
+//! the excerpt catches it when the file has moved under it. And if both fail,
+//! the note is called *drifted* and **stays in the list**: a note lost in
+//! silence is worse than no note at all.
 
 use std::path::PathBuf;
 
@@ -22,11 +22,11 @@ use serde::{Deserialize, Serialize};
 use crate::git::{DiffLineKind, DiffRange};
 use crate::ui::diff_view::{Rendered, Row};
 
-/// De quelle version du fichier une note parle.
+/// Which version of the file a note is about.
 ///
-/// Commenter du code supprimé a un sens — « pourquoi avoir enlevé ça ? » est
-/// une remarque de relecture aussi légitime qu'une autre — et une ligne
-/// supprimée n'a pas de numéro dans la nouvelle version.
+/// Commenting on removed code makes sense — "why was that taken out?" is as
+/// legitimate a review remark as any — and a removed line has no number in the
+/// new version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Side {
@@ -34,28 +34,28 @@ pub enum Side {
     New,
 }
 
-/// Une remarque prise sur une plage de lignes.
+/// A remark taken on a range of lines.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Note {
     pub id: u64,
-    /// Le domaine où la note a été prise. Une remarque sur ce que la branche a
-    /// écrit ne se relit pas dans les modifications en cours.
+    /// The range the note was taken in. A remark about what the branch wrote is
+    /// not read back in the changes in progress.
     pub range: DiffRange,
     pub path: PathBuf,
     pub side: Side,
-    /// Numéros de ligne, **jamais** des indices de liste : ceux-là ne
-    /// survivent pas au rechargement du diff.
+    /// Line numbers, **never** list indices: those do not survive a reload of
+    /// the diff.
     pub start: usize,
     pub end: usize,
-    /// Le code cité, tel que `Rendered::copy_text` le rend — sans `+`/`-`,
-    /// sans numéros, sans en-tête `@@`. C'est ce qui permet de retrouver la
-    /// note quand les numéros ont bougé, et ce qu'on cite dans le prompt.
+    /// The quoted code, as `Rendered::copy_text` returns it — no `+`/`-`, no
+    /// numbers, no `@@` header. It is what makes it possible to find the note
+    /// again when the numbers have moved, and what we quote in the prompt.
     pub excerpt: String,
-    /// La remarque elle-même.
+    /// The remark itself.
     pub body: String,
-    /// Envoyée à l'agent. Ce n'est pas la même chose que traitée : c'est la
-    /// relecture de la réponse qui clôt une note.
+    /// Sent to the agent. That is not the same as handled: it is the review of
+    /// the answer that closes a note.
     pub sent: bool,
     pub done: bool,
 }
@@ -78,8 +78,7 @@ impl Default for Note {
 }
 
 impl Note {
-    /// `chemin:début-fin`, la forme que tout le monde sait lire — et qu'un
-    /// agent sait ouvrir.
+    /// `path:start-end`, the form everybody can read — and an agent can open.
     pub fn location(&self) -> String {
         if self.start == self.end {
             format!("{}:{}", self.path.display(), self.start)
@@ -89,14 +88,14 @@ impl Note {
     }
 }
 
-/// Où une note se replace dans le diff affiché.
+/// Where a note goes back in the displayed diff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Anchor {
-    /// Aux numéros retenus, et le texte concorde : le cas courant.
+    /// At the recorded numbers, and the text agrees: the common case.
     At { from: usize, to: usize },
-    /// Le fichier a bougé, mais l'extrait s'y retrouve ailleurs.
+    /// The file has moved, but the excerpt is found elsewhere.
     Moved { from: usize, to: usize },
-    /// Ni les numéros ni l'extrait : la note reste, marquée décalée.
+    /// Neither numbers nor excerpt: the note stays, marked drifted.
     Drifted,
 }
 
@@ -109,11 +108,11 @@ impl Anchor {
     }
 }
 
-/// Replace une note dans un diff qui vient d'arriver.
+/// Puts a note back into a diff that has just arrived.
 ///
-/// Les indices rendus sont ceux de la liste **unifiée** (`Rendered::rows`),
-/// qui seule porte l'ordre du fichier ; la vue en deux colonnes s'y ramène
-/// comme elle le fait déjà pour la copie.
+/// The indices returned are those of the **unified** list (`Rendered::rows`),
+/// which alone carries the file's order; the two-column view maps back to it as
+/// it already does for copying.
 pub fn relocate(rendered: &Rendered, note: &Note) -> Anchor {
     if let Some((from, to)) = by_numbers(rendered, note) {
         if copied(rendered, from, to) == note.excerpt {
@@ -126,7 +125,7 @@ pub fn relocate(rendered: &Rendered, note: &Note) -> Anchor {
     }
 }
 
-/// La plage de lignes qui porte les numéros retenus, du côté retenu.
+/// The range of lines carrying the recorded numbers, on the recorded side.
 fn by_numbers(rendered: &Rendered, note: &Note) -> Option<(usize, usize)> {
     let mut bounds: Option<(usize, usize)> = None;
     for (index, row) in rendered.rows.iter().enumerate() {
@@ -138,9 +137,9 @@ fn by_numbers(rendered: &Rendered, note: &Note) -> Option<(usize, usize)> {
             Side::Old => source.old_no,
             Side::New => source.new_no,
         };
-        // Une ligne sans numéro de ce côté-là — un ajout vu depuis l'ancienne
-        // version — n'appartient pas à la plage : elle n'existe pas dans le
-        // fichier dont la note parle.
+        // A line with no number on that side — an addition seen from the old
+        // version — does not belong to the range: it does not exist in the file
+        // the note is about.
         let Some(number) = number else { continue };
         if number < note.start || number > note.end {
             continue;
@@ -153,19 +152,19 @@ fn by_numbers(rendered: &Rendered, note: &Note) -> Option<(usize, usize)> {
     bounds
 }
 
-/// Cherche l'extrait, ligne à ligne, dans tout le diff.
+/// Looks for the excerpt, line by line, in the whole diff.
 ///
-/// Une comparaison de lignes entières et non de sous-chaînes : c'est ce que la
-/// note a cité, et une correspondance partielle replacerait la remarque au
-/// milieu d'une ligne où elle ne veut rien dire.
+/// A comparison of whole lines and not of substrings: it is what the note
+/// quoted, and a partial match would put the remark in the middle of a line
+/// where it means nothing.
 fn by_excerpt(rendered: &Rendered, note: &Note) -> Option<(usize, usize)> {
     let needle: Vec<&str> = note.excerpt.lines().collect();
     if needle.is_empty() {
         return None;
     }
-    // Les entrées telles que la copie les rend : ni en-têtes, ni annotation
-    // « \ No newline ». L'indice de la ligne dans la liste unifiée est gardé à
-    // côté, seul moyen de revenir de l'une à l'autre.
+    // The entries as copying returns them: no headers, no "\ No newline"
+    // annotation. The line's index in the unified list is kept alongside, the
+    // only way back from one to the other.
     let hay: Vec<(usize, &str)> = rendered
         .rows
         .iter()
@@ -197,13 +196,12 @@ fn copied(rendered: &Rendered, from: usize, to: usize) -> String {
     rendered.copy_text(from, to, false)
 }
 
-/// Les lignes annotées d'un diff, une case par entrée de liste.
+/// The annotated lines of a diff, one slot per list entry.
 ///
-/// Deux vecteurs et non un seul : la liste unifiée et la liste en deux
-/// colonnes ne comptent pas les mêmes entrées, et la vue en change d'un
-/// raccourci. Les calculer tous les deux à l'arrivée du diff coûte deux
-/// parcours, contre un test par ligne visible et par frame si on le faisait
-/// dans la fermeture de rendu.
+/// Two vectors and not one: the unified list and the two-column list do not
+/// count the same entries, and the view switches between them with a shortcut.
+/// Computing both when the diff arrives costs two walks, against one test per
+/// visible line per frame if it were done in the render closure.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Marks {
     pub unified: Vec<bool>,
@@ -217,7 +215,7 @@ impl Marks {
     }
 }
 
-/// Marque les lignes que des notes recouvrent.
+/// Marks the lines the notes cover.
 pub fn marks(rendered: &Rendered, spans: &[(usize, usize)]) -> Marks {
     let mut unified = vec![false; rendered.rows.len()];
     for (from, to) in spans {
@@ -228,8 +226,8 @@ pub fn marks(rendered: &Rendered, spans: &[(usize, usize)]) -> Marks {
             *mark = true;
         }
     }
-    // La vue en colonnes se déduit de l'unifiée : une entrée y est annotée dès
-    // que l'une des lignes qu'elle recouvre l'est.
+    // The column view follows from the unified one: an entry is annotated as
+    // soon as one of the lines it covers is.
     let split = rendered
         .split
         .iter()
@@ -238,12 +236,12 @@ pub fn marks(rendered: &Rendered, spans: &[(usize, usize)]) -> Marks {
     Marks { unified, split }
 }
 
-/// Ce qu'une sélection donne comme note.
+/// What a selection gives as a note.
 ///
-/// Les numéros sont ceux du **premier et du dernier** de la plage qui en
-/// portent un du côté choisi. Un bloc entièrement fait de lignes de l'autre
-/// version n'en a aucun : la note s'ancre alors sur le côté opposé, qui est le
-/// seul à pouvoir la porter.
+/// The numbers are those of the **first and the last** of the range that carry
+/// one on the chosen side. A block made entirely of lines from the other
+/// version has none: the note then anchors on the opposite side, the only one
+/// able to carry it.
 pub fn anchor_selection(
     rendered: &Rendered,
     from: usize,
@@ -272,8 +270,8 @@ pub fn anchor_selection(
             });
         }
     }
-    // La nouvelle version d'abord : c'est celle qu'on relit, et une remarque
-    // porte presque toujours sur le code qui restera.
+    // The new version first: it is the one being reviewed, and a remark almost
+    // always concerns the code that will remain.
     match (new, old) {
         (Some((start, end)), _) => Some((Side::New, start, end)),
         (None, Some((start, end))) => Some((Side::Old, start, end)),
@@ -281,11 +279,11 @@ pub fn anchor_selection(
     }
 }
 
-/// Le message livré à l'agent.
+/// The message handed to the agent.
 ///
-/// C'est la pièce à verrouiller — le reste de l'envoi n'est que plomberie. Le
-/// format est celui qu'un agent lit sans instruction supplémentaire : un titre
-/// par emplacement, le code cité dans une clôture, la remarque en citation.
+/// This is the piece to lock down — the rest of the sending is plumbing. The
+/// format is the one an agent reads without further instruction: one heading per
+/// location, the code quoted inside a fence, the remark as a block quote.
 pub fn prompt(branch: &str, notes: &[Note]) -> String {
     let mut out = String::new();
     out.push_str(&crate::tr!("notes-prompt-intro", { branch: branch }));
@@ -302,27 +300,26 @@ pub fn prompt(branch: &str, notes: &[Note]) -> String {
         }
         out.push('\n');
     }
-    // Où répondre, et à quoi ne pas toucher.
+    // Where to answer, and what not to touch.
     //
-    // Les variables ne sont pas développées ici : elles sont dans
-    // l'environnement du pty (`CLAUDHUB_NOTES_DIR`, `CLAUDHUB_TODO`), et c'est
-    // l'agent qui les lit — ce qui garde cette fonction pure et testable, et
-    // fait qu'un prompt collé dans un autre terminal du même worktree marche
-    // aussi.
+    // The variables are not expanded here: they are in the pty's environment
+    // (`CLAUDHUB_NOTES_DIR`, `CLAUDHUB_TODO`), and it is the agent that reads
+    // them — which keeps this function pure and testable, and makes a prompt
+    // pasted into another terminal of the same worktree work too.
     out.push_str(&crate::tr!("notes-prompt-outro"));
     out.push('\n');
-    // Le dernier saut de ligne n'apporte rien et se voit dans l'invite d'un
-    // agent, qui l'affiche tel quel.
+    // The final newline adds nothing and shows up in an agent's prompt, which
+    // displays it as it is.
     while out.ends_with('\n') {
         out.pop();
     }
     out
 }
 
-/// Une question libre posée sur un bout de code, sans passer par une note.
+/// A free question asked about a piece of code, without going through a note.
 ///
-/// C'est le geste le plus fréquent en pratique : on relit, quelque chose
-/// intrigue, on demande — sans avoir de remarque à consigner.
+/// It is the most frequent gesture in practice: you read, something puzzles
+/// you, you ask — with no remark to record.
 pub fn ask(location: &str, path: &std::path::Path, excerpt: &str, question: &str) -> String {
     let mut out = String::new();
     out.push_str(&crate::tr!("notes-prompt-ask", { location: location }));
@@ -332,12 +329,12 @@ pub fn ask(location: &str, path: &std::path::Path, excerpt: &str, question: &str
     out
 }
 
-/// Une clôture de code, dont le nombre de tildes dépasse la plus longue suite
-/// que l'extrait contient.
+/// A code fence whose number of backticks exceeds the longest run the excerpt
+/// contains.
 ///
-/// Des accents graves suffiraient presque toujours ; presque, parce qu'un
-/// extrait de Markdown — ou ce fichier-ci — en contient, et refermerait la
-/// clôture au milieu du code cité.
+/// Backticks would almost always be enough; almost, because a Markdown excerpt
+/// — or this very file — contains some, and would close the fence in the middle
+/// of the quoted code.
 fn push_fence(out: &mut String, excerpt: &str, language: &str) {
     let longest = excerpt.split(|c| c != '`').map(str::len).max().unwrap_or(0);
     let fence = "`".repeat(longest.max(2) + 1);
@@ -352,10 +349,10 @@ fn push_fence(out: &mut String, excerpt: &str, language: &str) {
     out.push('\n');
 }
 
-/// Le nom de langage d'une clôture Markdown.
+/// The language name of a Markdown fence.
 ///
-/// La même table que la coloration, à un détail près : ce qu'elle ne connaît
-/// pas donne une clôture nue, et non une absence de clôture.
+/// The same table as the highlighting, with one difference: what it does not
+/// know gives a bare fence, and not an absent one.
 fn fence_language(path: &std::path::Path) -> &'static str {
     crate::ui::highlight::language_for_path(path).unwrap_or("")
 }
@@ -374,8 +371,8 @@ mod tests {
         }
     }
 
-    /// Un diff minuscule mais complet : du contexte, une suppression, un
-    /// ajout, et l'annotation de fin de fichier.
+    /// A tiny but complete diff: some context, a removal, an addition, and the
+    /// end-of-file annotation.
     fn sample() -> Rendered {
         let hunk = Hunk {
             header: "@@ -1,3 +1,3 @@".into(),
@@ -423,12 +420,12 @@ mod tests {
     #[test]
     fn a_note_returns_to_the_rows_it_was_taken_on() {
         let rendered = sample();
-        // Les lignes 2 et 3 de la liste : la suppression et l'ajout.
+        // Rows 2 and 3 of the list: the removal and the addition.
         let note = note_of(&rendered, 2, 3);
         assert_eq!(note.side, Side::New);
         assert_eq!((note.start, note.end), (2, 2));
-        // L'aller-retour rend exactement la plage qui porte ce numéro-là — la
-        // ligne supprimée n'a pas de numéro dans la nouvelle version.
+        // The round trip returns exactly the range carrying that number — the
+        // removed line has no number in the new version.
         assert_eq!(relocate(&rendered, &note), Anchor::Moved { from: 2, to: 3 });
     }
 
@@ -443,8 +440,8 @@ mod tests {
     #[test]
     fn a_removed_line_anchors_on_the_old_side() {
         let rendered = sample();
-        // La seule suppression : elle n'a pas de numéro dans la nouvelle
-        // version, donc la note ne peut s'ancrer que sur l'ancienne.
+        // The only removal: it has no number in the new version, so the note
+        // can only anchor on the old one.
         let note = note_of(&rendered, 2, 2);
         assert_eq!((note.side, note.start, note.end), (Side::Old, 2, 2));
         assert_eq!(relocate(&rendered, &note), Anchor::At { from: 2, to: 2 });
@@ -453,9 +450,9 @@ mod tests {
     #[test]
     fn the_no_newline_marker_is_never_part_of_an_excerpt() {
         let rendered = sample();
-        // La sélection va jusqu'au bout, annotation comprise : elle ne doit
-        // pas se retrouver dans le code cité, sinon la note ne se replace
-        // jamais — cette ligne n'est pas dans le fichier.
+        // The selection goes right to the end, annotation included: it must not
+        // end up in the quoted code, otherwise the note never relocates — that
+        // line is not in the file.
         let note = note_of(&rendered, 4, 5);
         assert!(!note.excerpt.contains("No newline"));
         assert_eq!(relocate(&rendered, &note), Anchor::At { from: 4, to: 4 });
@@ -465,8 +462,8 @@ mod tests {
     fn a_note_follows_its_excerpt_when_the_file_has_moved() {
         let rendered = sample();
         let mut note = note_of(&rendered, 3, 3);
-        // Vingt lignes ajoutées plus haut : les numéros ne valent plus rien,
-        // mais le code cité, lui, est toujours là.
+        // Twenty lines added above: the numbers are worthless now, but the
+        // quoted code is still there.
         note.start += 20;
         note.end += 20;
         assert_eq!(relocate(&rendered, &note), Anchor::Moved { from: 3, to: 3 });

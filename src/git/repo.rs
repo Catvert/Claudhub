@@ -1,4 +1,4 @@
-//! Découverte du dépôt, worktrees, et les opérations qui écrivent
+//! Repository discovery, worktrees, and the operations that write
 //! (stage, commit, fetch/pull/push, checkout).
 
 use std::ffi::OsString;
@@ -8,33 +8,34 @@ use anyhow::{anyhow, bail, Context, Result};
 
 use super::{git, git_ok, git_opt, split_nul};
 
-/// Un dépôt tel que Claudhub le voit : le dépôt principal et ses worktrees liés.
+/// A repository as Claudhub sees it: the main repository and its linked
+/// worktrees.
 ///
-/// `main` est toujours le dépôt d'origine, même si Claudhub a été ouvert sur un
-/// worktree : `--git-common-dir` pointe sur le `.git` partagé quel que soit le
-/// checkout d'où on l'interroge.
+/// `main` is always the original repository, even when Claudhub was opened on a
+/// worktree: `--git-common-dir` points at the shared `.git` whatever checkout it
+/// is asked from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Repo {
     pub main: PathBuf,
 }
 
-/// Un checkout : le principal ou un worktree lié.
+/// A checkout: the main one or a linked worktree.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Worktree {
     pub path: PathBuf,
-    /// Nom court de la branche, ou `None` en HEAD détachée.
+    /// Short branch name, or `None` on a detached HEAD.
     pub branch: Option<String>,
     pub head: String,
-    /// Le checkout principal, celui qu'on ne peut pas retirer.
+    /// The main checkout, the one that cannot be removed.
     pub is_main: bool,
     pub locked: bool,
-    /// Le dossier a disparu du disque ; `git worktree prune` le nettoiera.
+    /// The folder has vanished from disk; `git worktree prune` will clean it up.
     pub prunable: bool,
 }
 
 impl Worktree {
-    /// Nom affiché dans la barre latérale : le dernier segment du chemin, qui
-    /// est ce que l'utilisateur a tapé en créant le worktree.
+    /// Name shown in the sidebar: the path's last segment, which is what the
+    /// user typed when creating the worktree.
     pub fn label(&self) -> String {
         self.path
             .file_name()
@@ -72,8 +73,8 @@ impl Repo {
             .unwrap_or_else(|| self.main.display().to_string())
     }
 
-    /// Tous les checkouts, principal en tête (c'est l'ordre de `git worktree
-    /// list`, et celui qu'attend la barre latérale).
+    /// Every checkout, main one first (that is `git worktree list`'s order, and
+    /// the one the sidebar expects).
     pub fn worktrees(&self) -> Result<Vec<Worktree>> {
         let out = git(&self.main, &["worktree", "list", "--porcelain", "-z"])?;
         Ok(parse_worktree_list(&out))
@@ -108,8 +109,8 @@ impl Repo {
         Ok(())
     }
 
-    /// Retire un worktree. `force` va jusqu'à jeter des modifications non
-    /// validées — l'appelant est responsable d'avoir demandé confirmation.
+    /// Removes a worktree. `force` goes as far as discarding uncommitted
+    /// changes — the caller is responsible for having asked for confirmation.
     pub fn remove_worktree(&self, path: &Path, force: bool) -> Result<()> {
         let mut args: Vec<OsString> = vec!["worktree".into(), "remove".into()];
         if force {
@@ -122,11 +123,11 @@ impl Repo {
     }
 }
 
-/// Opérations menées *dans* un checkout donné.
+/// Operations carried out *inside* a given checkout.
 ///
-/// Elles prennent le répertoire en argument plutôt que d'être des méthodes de
-/// `Worktree` : la vue de revue les appelle sur le worktree sélectionné, qui
-/// est une donnée rafraîchie en permanence et pas un objet qu'on garde.
+/// They take the directory as an argument rather than being `Worktree` methods:
+/// the review view calls them on the selected worktree, which is data refreshed
+/// continuously and not an object we hold.
 pub fn stage(dir: &Path, paths: &[PathBuf]) -> Result<()> {
     if paths.is_empty() {
         return Ok(());
@@ -136,9 +137,9 @@ pub fn stage(dir: &Path, paths: &[PathBuf]) -> Result<()> {
     git(dir, &args).map(|_| ())
 }
 
-/// Dé-indexe sans toucher au fichier. `restore --staged` est la formulation
-/// moderne de `reset HEAD --`, et elle marche aussi sur un dépôt sans commit,
-/// là où `reset HEAD` échoue faute de HEAD.
+/// Unstages without touching the file. `restore --staged` is the modern
+/// wording of `reset HEAD --`, and it also works on a repository with no
+/// commit, where `reset HEAD` fails for want of a HEAD.
 pub fn unstage(dir: &Path, paths: &[PathBuf]) -> Result<()> {
     if paths.is_empty() {
         return Ok(());
@@ -148,8 +149,8 @@ pub fn unstage(dir: &Path, paths: &[PathBuf]) -> Result<()> {
     git(dir, &args).map(|_| ())
 }
 
-/// Jette les modifications du répertoire de travail. Destructif et sans
-/// filet : rien dans git ne permet de les retrouver ensuite.
+/// Discards the working tree's changes. Destructive and without a net: nothing
+/// in git makes it possible to get them back afterwards.
 pub fn discard(dir: &Path, paths: &[PathBuf]) -> Result<()> {
     if paths.is_empty() {
         return Ok(());
@@ -164,12 +165,12 @@ pub fn discard(dir: &Path, paths: &[PathBuf]) -> Result<()> {
     git(dir, &args).map(|_| ())
 }
 
-/// Supprime des fichiers que git ne suit pas.
+/// Deletes files git does not track.
 ///
-/// `git clean` et non `std::fs::remove_file` : il refuse ce qui est suivi, ce
-/// qui est la garantie qu'on veut ici — une erreur d'aiguillage dans la vue ne
-/// peut pas détruire un fichier versionné. `-d` couvre les dossiers, `-f`
-/// est exigé par git pour toute suppression.
+/// `git clean` and not `std::fs::remove_file`: it refuses what is tracked,
+/// which is the guarantee wanted here — a misrouted click in the view cannot
+/// destroy a versioned file. `-d` covers directories, `-f` is required by git
+/// for any deletion.
 pub fn clean(dir: &Path, paths: &[PathBuf]) -> Result<()> {
     if paths.is_empty() {
         return Ok(());
@@ -179,9 +180,9 @@ pub fn clean(dir: &Path, paths: &[PathBuf]) -> Result<()> {
     git(dir, &args).map(|_| ())
 }
 
-/// Applique (`reverse = false`) ou annule (`reverse = true`) un patch sur
-/// l'index : c'est ainsi que se fait l'indexation d'un hunk isolé, git n'ayant
-/// pas d'API pour « ajoute ce morceau-là ».
+/// Applies (`reverse = false`) or undoes (`reverse = true`) a patch on the
+/// index: that is how an isolated hunk is staged, git having no API for "add
+/// that piece".
 pub fn apply_patch(dir: &Path, patch: &str, reverse: bool) -> Result<()> {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -232,7 +233,7 @@ pub fn commit(dir: &Path, opts: CommitOptions<'_>) -> Result<String> {
     if opts.amend {
         args.push("--amend".into());
     }
-    // `-m` même en amend : sinon git ouvre l'éditeur, qui n'a pas de terminal.
+    // `-m` even when amending: otherwise git opens the editor, which has no terminal.
     args.push("-m".into());
     args.push(opts.message.into());
     git(dir, &args)
@@ -283,12 +284,12 @@ pub fn delete_branch(main: &Path, name: &str, force: bool) -> Result<()> {
     git(main, &["branch", flag, name]).map(|_| ())
 }
 
-/// Une opération git en cours, qui laisse le dépôt à mi-chemin.
+/// A git operation in progress, leaving the repository half-finished.
 ///
-/// Tant qu'elle dure, l'index porte des conflits et `HEAD` ne désigne pas ce
-/// qu'on croit. La barre d'état la nomme : sans cela, l'utilisateur se
-/// retrouve dans un état que Claudhub ne dit pas, à se demander pourquoi la
-/// liste des fichiers ressemble à ça.
+/// While it lasts, the index carries conflicts and `HEAD` does not point where
+/// you think. The status bar names it: without that, the user ends up in a
+/// state Claudhub does not describe, wondering why the file list looks the way
+/// it does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Pending {
     Merge,
@@ -298,7 +299,7 @@ pub enum Pending {
 }
 
 impl Pending {
-    /// Clé i18n du nom de l'opération.
+    /// The i18n key of the operation's name.
     pub fn key(self) -> &'static str {
         match self {
             Self::Merge => "pending-merge",
@@ -308,7 +309,7 @@ impl Pending {
         }
     }
 
-    /// Le sous-commande qui la continue ou l'abandonne.
+    /// The subcommand that continues or aborts it.
     fn command(self) -> &'static str {
         match self {
             Self::Merge => "merge",
@@ -319,26 +320,25 @@ impl Pending {
     }
 }
 
-/// Le répertoire git **de ce checkout**.
+/// The git directory **of this checkout**.
 ///
-/// Dans un worktree lié, `.git` est un *fichier* qui pointe vers
-/// `<principal>/.git/worktrees/<nom>` : c'est là que vivent son `HEAD`, son
-/// index et les marqueurs d'opération en cours. Les chercher dans `<dir>/.git`
-/// revient à ne jamais rien trouver.
+/// In a linked worktree, `.git` is a *file* pointing at
+/// `<main>/.git/worktrees/<name>`: that is where its `HEAD`, its index and the
+/// in-progress operation markers live. Looking for them in `<dir>/.git` amounts
+/// to never finding anything.
 pub fn git_dir(dir: &Path) -> Option<PathBuf> {
     let path = git_opt(dir, &["rev-parse", "--git-dir"])?;
     Some(absolute(dir, Path::new(&path)))
 }
 
-/// L'opération en cours, d'après les marqueurs que git laisse dans son
-/// répertoire.
+/// The operation in progress, from the markers git leaves in its directory.
 ///
-/// Fonction libre et sans sous-processus : `status` la rappelle à chaque
-/// rafraîchissement, et il en arrive un par écriture de fichier.
+/// A free function with no subprocess: `status` calls it on every refresh, and
+/// one arrives per file write.
 pub fn pending_in(git_dir: &Path) -> Option<Pending> {
-    // L'ordre compte : un rebase pose aussi `CHERRY_PICK_HEAD` en rejouant ses
-    // commits, et l'annoncer comme un picorage ferait proposer la mauvaise
-    // commande pour en sortir.
+    // The order matters: a rebase also sets `CHERRY_PICK_HEAD` while replaying
+    // its commits, and announcing it as a cherry-pick would offer the wrong
+    // command to get out of it.
     const MARKERS: [(&str, Pending); 5] = [
         ("rebase-merge", Pending::Rebase),
         ("rebase-apply", Pending::Rebase),
@@ -352,15 +352,15 @@ pub fn pending_in(git_dir: &Path) -> Option<Pending> {
         .map(|(_, kind)| kind)
 }
 
-/// L'opération en cours dans ce checkout, s'il y en a une.
+/// The operation in progress in this checkout, if there is one.
 pub fn pending(dir: &Path) -> Option<Pending> {
     pending_in(&git_dir(dir)?)
 }
 
-/// Intègre `from` dans la branche courante.
+/// Integrates `from` into the current branch.
 ///
-/// `--no-edit` parce qu'un message par défaut convient : le geste part d'un
-/// bouton, pas d'une ligne de commande où l'on aurait de quoi écrire.
+/// `--no-edit` because a default message will do: the gesture starts from a
+/// button, not from a command line where there would be room to write.
 pub fn merge(dir: &Path, from: &str, no_ff: bool) -> Result<String> {
     let mut args: Vec<&str> = vec!["merge", "--no-edit"];
     if no_ff {
@@ -404,22 +404,21 @@ pub fn resolve(dir: &Path, path: &Path, ours: bool) -> Result<()> {
     let mut args: Vec<OsString> = vec!["checkout".into(), flag.into(), "--".into()];
     args.push(path.as_os_str().to_os_string());
     git(dir, &args)?;
-    // Garder une version, c'est décider : le fichier passe à l'index, ce qui
-    // le fait sortir de la liste des conflits.
+    // Keeping a version is deciding: the file moves into the index, which takes
+    // it out of the conflict list.
     stage(dir, std::slice::from_ref(&path.to_path_buf()))
 }
 
-/// Tous les fichiers suivis et les nouveaux non ignorés, en **un seul appel**.
+/// Every tracked file and every non-ignored new one, in **a single call**.
 ///
-/// C'est déjà ce que fait la surveillance de fichiers pour décider quoi
-/// observer, et pour la même raison : un projet Laravel a quarante mille
-/// répertoires, et un parcours de disque dossier par dossier coûterait un
-/// appel système par répertoire pour arriver aux sept cents qui portent du
-/// code.
+/// It is already what the file watcher does to decide what to observe, and for
+/// the same reason: a Laravel project has forty thousand directories, and a
+/// disk walk folder by folder would cost one system call per directory to reach
+/// the seven hundred that carry code.
 ///
-/// `ignored` ajoute ce que `.gitignore` écarte — `vendor/`, `node_modules/`,
-/// `target/` : c'est un choix explicite, parce que la liste change alors
-/// d'ordre de grandeur.
+/// `ignored` adds what `.gitignore` leaves out — `vendor/`, `node_modules/`,
+/// `target/`: an explicit choice, because the list then changes order of
+/// magnitude.
 pub fn list_files(dir: &Path, ignored: bool) -> Result<Vec<PathBuf>> {
     let mut args: Vec<&str> = vec!["ls-files", "-z", "--cached", "--others"];
     if ignored {
@@ -429,13 +428,13 @@ pub fn list_files(dir: &Path, ignored: bool) -> Result<Vec<PathBuf>> {
     }
     let out = git(dir, &args)?;
     let mut files: Vec<PathBuf> = split_nul(&out).map(PathBuf::from).collect();
-    // `--cached --others` peut rendre deux fois le même chemin ; la liste est
-    // déjà triée par git, donc un dédoublonnage local suffit.
+    // `--cached --others` may return the same path twice; the list is already
+    // sorted by git, so a local dedup is enough.
     files.dedup();
     Ok(files)
 }
 
-/// Vrai si le checkout a des modifications non validées, suivies ou non.
+/// True if the checkout has uncommitted changes, tracked or not.
 pub fn is_dirty(dir: &Path) -> bool {
     git_opt(dir, &["status", "--porcelain"])
         .map(|s| !s.trim().is_empty())
@@ -446,11 +445,11 @@ pub fn is_repo(dir: &Path) -> bool {
     git_ok(dir, &["rev-parse", "--git-dir"])
 }
 
-/// Parse `git worktree list --porcelain -z`.
+/// Parses `git worktree list --porcelain -z`.
 ///
-/// Le format est une suite d'enregistrements `clé valeur` séparés par des
-/// octets nuls, un bloc par worktree, les blocs séparés par un enregistrement
-/// vide — que `split_nul` élimine, d'où le découpage sur `worktree `.
+/// The format is a sequence of `key value` records separated by null bytes, one
+/// block per worktree, blocks separated by an empty record — which `split_nul`
+/// removes, hence the split on `worktree `.
 fn parse_worktree_list(out: &str) -> Vec<Worktree> {
     let mut trees: Vec<Worktree> = Vec::new();
     for rec in split_nul(out) {
@@ -463,7 +462,7 @@ fn parse_worktree_list(out: &str) -> Vec<Worktree> {
                 path: PathBuf::from(value),
                 branch: None,
                 head: String::new(),
-                // Le premier bloc rendu par git est toujours le principal.
+                // The first block git returns is always the main one.
                 is_main: trees.is_empty(),
                 locked: false,
                 prunable: false,
@@ -488,14 +487,14 @@ fn parse_worktree_list(out: &str) -> Vec<Worktree> {
                     w.prunable = true;
                 }
             }
-            // "detached", "bare" : rien à retenir, `branch` reste None.
+            // "detached", "bare": nothing to keep, `branch` stays None.
             _ => {}
         }
     }
     trees
 }
 
-/// Chemin absolu d'un fichier du checkout, pour l'ouvrir dans un éditeur.
+/// Absolute path of a checkout file, to open it in an editor.
 pub fn absolute(dir: &Path, rel: &Path) -> PathBuf {
     if rel.is_absolute() {
         rel.to_path_buf()
@@ -510,7 +509,7 @@ mod tests {
 
     #[test]
     fn parses_a_main_repo_and_two_worktrees() {
-        // Tel que git l'écrit : enregistrements NUL, bloc vide entre worktrees.
+        // As git writes it: NUL records, empty block between worktrees.
         let out = "worktree /repo\0HEAD abc123\0branch refs/heads/main\0\0\
                    worktree /repo-wt/feat\0HEAD def456\0branch refs/heads/wt/feat\0\0\
                    worktree /repo-wt/gone\0HEAD 000000\0detached\0prunable gitdir file points to non-existent location\0\0";
@@ -525,7 +524,7 @@ mod tests {
         assert!(!trees[1].is_main);
         assert!(!trees[1].prunable);
 
-        // HEAD détachée : pas de branche, et git nous dit qu'il est élagable.
+        // Detached HEAD: no branch, and git tells us it is prunable.
         assert_eq!(trees[2].branch, None);
         assert!(trees[2].prunable);
         assert_eq!(trees[2].label(), "gone");

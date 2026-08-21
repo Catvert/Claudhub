@@ -1,22 +1,21 @@
-//! Raccourcis clavier.
+//! Keyboard shortcuts.
 //!
-//! Un terminal a besoin de presque toutes les combinaisons : Ctrl+C, Ctrl+D,
-//! Ctrl+L appartiennent au programme qui tourne dedans, pas à Claudhub. Les
-//! raccourcis de l'application passent donc par la touche système
-//! (`secondary-`, c'est-à-dire Ctrl sous Linux et Windows, Cmd sous macOS).
+//! A terminal needs almost every combination: Ctrl+C, Ctrl+D, Ctrl+L belong to
+//! the program running in it, not to Claudhub. The application's shortcuts
+//! therefore go through the platform key (`secondary-`, that is, Ctrl on Linux
+//! and Windows, Cmd on macOS).
 //!
-//! Ce qui ne suffit pas : sous Linux, `secondary` **est** Ctrl, et une liaison
-//! sur `secondary-r` prend le Ctrl+R du shell — la recherche dans
-//! l'historique — sans rien dire. D'où deux prédicats et non un : ce qui
-//! s'écrit avec une seule lettre (`WINDOW_PREDICATE`) laisse le terminal
-//! tranquille, ce qui demande Maj ou une touche de fonction
-//! (`PREDICATE`) vaut partout. Les terminaux eux-mêmes ont fixé cette
-//! convention : Ctrl+Maj+C pour copier, parce que Ctrl+C est pris.
+//! Which is not enough: on Linux, `secondary` **is** Ctrl, and a binding on
+//! `secondary-r` takes the shell's Ctrl+R — the reverse history search — without
+//! saying anything. Hence two predicates and not one: what is written with a
+//! single letter (`WINDOW_PREDICATE`) leaves the terminal alone, what needs
+//! Shift or a function key (`PREDICATE`) holds everywhere. The terminals
+//! themselves set that convention: Ctrl+Shift+C to copy, because Ctrl+C is
+//! taken.
 //!
-//! **Une seule table décrit chaque liaison** (`table!`), et c'est d'elle que
-//! sortent à la fois `bind_keys` et la fenêtre d'aide. Deux listes auraient
-//! divergé au premier ajout, et une aide qui ment sur les touches est pire
-//! qu'une absence d'aide.
+//! **A single table describes each binding** (`table!`), and both `bind_keys`
+//! and the help window come out of it. Two lists would have diverged on the
+//! first addition, and help that lies about the keys is worse than no help.
 
 use gpui::{actions, App, KeyBinding, KeyContext, SharedString, Window};
 
@@ -89,101 +88,100 @@ actions!(
     ]
 );
 
-/// Aller au n-ième écran.
+/// Go to the n-th screen.
 ///
-/// Une action *avec une donnée* plutôt que quatre actions, comme pour les
-/// worktrees : `Alt+1` à `Alt+4` font la même chose à un indice près.
+/// An action *with a payload* rather than four actions, as for the worktrees:
+/// `Alt+1` to `Alt+4` do the same thing up to an index.
 #[derive(Clone, PartialEq, Debug, Default, gpui::Action)]
 #[action(namespace = claudhub, no_json)]
 pub struct GoToWorkspace {
     pub index: usize,
 }
 
-/// Aller au n-ième worktree de la barre latérale.
+/// Go to the n-th worktree in the sidebar.
 ///
-/// Une action *avec une donnée* plutôt que neuf actions : `Ctrl+1` à `Ctrl+9`
-/// font la même chose à un indice près, et neuf gestionnaires identiques ne
-/// diraient rien de plus.
+/// An action *with a payload* rather than nine actions: `Ctrl+1` to `Ctrl+9` do
+/// the same thing up to an index, and nine identical handlers would say nothing
+/// more.
 #[derive(Clone, PartialEq, Debug, Default, gpui::Action)]
 #[action(namespace = claudhub, no_json)]
 pub struct SelectWorktree {
     pub index: usize,
 }
 
-/// Prédicat des liaisons. Les couches de gpui-component (dialogue, menu,
-/// popover) sont exclues : un raccourci qui se déclenche derrière un dialogue
-/// agit sur un état que l'utilisateur ne regarde pas.
+/// The bindings' predicate. gpui-component's layers (dialog, menu, popover) are
+/// excluded: a shortcut firing behind a dialog acts on state the user is not
+/// looking at.
 ///
-/// À ne pas confondre avec `context()` : ceci est une *expression*, évaluée
-/// contre la pile de contextes du nœud focalisé, et elle n'a de sens que dans
-/// `KeyBinding::new`. La passer à `key_context` fait boucler le parseur.
+/// Not to be confused with `context()`: this is an *expression*, evaluated
+/// against the focused node's context stack, and it only makes sense inside
+/// `KeyBinding::new`. Passing it to `key_context` makes the parser loop.
 const PREDICATE: &str = "Claudhub && !Dialog && !PopupMenu && !Popover";
 
-/// Prédicat de la validation d'un commit.
+/// The commit confirmation's predicate.
 ///
-/// `Ctrl+Entrée` est aussi la touche qui lance une requête dans toutes les
-/// consoles SQL qu'on a déjà sous les doigts. Les deux ne peuvent pas coexister
-/// sur la même touche sans que l'une prenne l'autre, et c'est la console qui
-/// gagne quand on écrit dedans : elle est plus profonde dans la pile de
-/// contextes, mais l'exclusion est écrite plutôt que déduite — une résolution
-/// par profondeur est exactement le genre de chose qu'on ne relit pas.
+/// `Ctrl+Enter` is also the key that runs a query in every SQL console one
+/// already has under one's fingers. The two cannot coexist on the same key
+/// without one taking the other, and it is the console that wins when one is
+/// typing in it: it is deeper in the context stack, but the exclusion is written
+/// out rather than inferred — resolution by depth is exactly the kind of thing
+/// nobody rereads.
 const COMMIT_PREDICATE: &str = "Claudhub && !Dialog && !PopupMenu && !Popover && !ClaudhubQuery";
 
-/// Prédicat de ce qui s'écrit avec la touche système et **une seule lettre**.
+/// The predicate of what is written with the platform key and **a single letter**.
 ///
-/// Sous Linux, `secondary-s` *est* Ctrl+S, c'est-à-dire XOFF, et `secondary-r`
-/// est la recherche arrière du shell. Une liaison qui vaudrait aussi dans le
-/// terminal les lui prendrait en silence — et l'agent qui tourne dedans est
-/// justement ce qu'on est venu piloter.
+/// On Linux, `secondary-s` *is* Ctrl+S, that is, XOFF, and `secondary-r` is the
+/// shell's reverse search. A binding that held in the terminal too would take
+/// them silently — and the agent running in it is precisely what one came to
+/// drive.
 const WINDOW_PREDICATE: &str = "Claudhub && !Dialog && !PopupMenu && !Popover && !ClaudhubTerminal";
 
-/// Prédicat de la copie depuis le diff.
+/// The predicate of copying from the diff.
 ///
-/// `Ctrl+C` appartient d'abord à qui a le focus : le champ de message de commit
-/// a sa propre copie, et le terminal transmet la touche au programme qui
-/// tourne. Sans ces deux exclusions, copier une ligne saisie dans le message de
-/// commit rendrait le diff à la place.
+/// `Ctrl+C` belongs first to whoever has the focus: the commit message field has
+/// its own copy, and the terminal passes the key to the running program. Without
+/// those two exclusions, copying a line typed into the commit message would give
+/// the diff instead.
 const COPY_PREDICATE: &str = "Claudhub && !Dialog && !PopupMenu && !Popover && !Input \
      && !ClaudhubTerminal && !ClaudhubQuery";
 
-/// Prédicat de la copie depuis la grille de résultats.
+/// The predicate of copying from the result grid.
 ///
-/// La console occupe la place du diff : `Ctrl+C` y copie une cellule ou le
-/// résultat, jamais le fichier relu — d'où l'exclusion réciproque dans
-/// `COPY_PREDICATE`. L'éditeur de requête, lui, garde la sienne, comme le
-/// champ de message de commit.
+/// The console takes the diff's place: `Ctrl+C` there copies a cell or the
+/// result, never the reviewed file — hence the reciprocal exclusion in
+/// `COPY_PREDICATE`. The query editor keeps its own, like the commit message
+/// field.
 const QUERY_COPY_PREDICATE: &str = "ClaudhubQuery && !Input && !PopupMenu && !Popover";
 
-/// Prédicat de la navigation au clavier.
+/// The keyboard navigation predicate.
 ///
-/// Les flèches nues sont les seules touches de Claudhub qui ne passent pas par la
-/// touche système, et c'est ce qui les rend délicates : elles appartiennent à
-/// qui a le focus. Un champ de saisie déplace son curseur, un terminal les
-/// transmet au programme, un menu change d'entrée — ces trois-là sont donc
-/// exclus, comme pour la copie.
+/// The bare arrows are the only Claudhub keys that do not go through the
+/// platform key, and that is what makes them delicate: they belong to whoever
+/// has the focus. An input field moves its cursor, a terminal passes them to the
+/// program, a menu changes entry — those three are therefore excluded, as for
+/// copying.
 ///
-/// L'explorateur en est exclu à son tour : ses flèches lui appartiennent — on
-/// y parcourt une arborescence, pas un diff — et deux jeux de liaisons sur la
-/// même touche ne se départageraient pas.
+/// The explorer is excluded in turn: its arrows belong to it — one browses a
+/// tree there, not a diff — and two sets of bindings on the same key would not
+/// be settled.
 const NAVIGATION_PREDICATE: &str = "Claudhub && !Dialog && !PopupMenu && !Popover && !Input \
      && !ClaudhubTerminal && !ClaudhubExplorer && !ClaudhubDb";
 
-/// Prédicat de la navigation en mode vim.
+/// The vim navigation predicate.
 ///
-/// `ClaudhubVim` est **sur le même nœud** que `Claudhub` — la vue racine — et
-/// ce n'est pas un détail de style : `depth_of` évalue chaque identifiant
-/// contre un seul niveau de la pile de contextes, si bien que deux
-/// identifiants déclarés à deux profondeurs différentes ne se rencontrent
-/// jamais dans un `&&`.
+/// `ClaudhubVim` is **on the same node** as `Claudhub` — the root view — and
+/// that is not a style detail: `depth_of` evaluates each identifier against one
+/// single level of the context stack, so two identifiers declared at two
+/// different depths never meet in an `&&`.
 const VIM_PREDICATE: &str = "Claudhub && ClaudhubVim && !Dialog && !PopupMenu && !Popover \
      && !Input && !ClaudhubTerminal && !ClaudhubExplorer && !ClaudhubDb";
 
-/// Le contexte que la vue racine déclare. Des identifiants, pas un prédicat :
-/// c'est le nom auquel `PREDICATE` se réfère.
+/// The context the root view declares. Identifiers, not a predicate: it is the
+/// name `PREDICATE` refers to.
 ///
-/// `ClaudhubVim` s'y ajoute quand le mode vim est actif, et cela suffit à
-/// l'allumer ou à l'éteindre : le contexte est recalculé à chaque rendu, alors
-/// que les liaisons sont posées une fois pour toutes au démarrage.
+/// `ClaudhubVim` is added to it when vim mode is on, and that is enough to turn
+/// it on or off: the context is recomputed on every render, whereas the bindings
+/// are installed once and for all at startup.
 pub fn context(vim: bool) -> KeyContext {
     let mut context = KeyContext::default();
     context.add("Claudhub");
@@ -193,18 +191,18 @@ pub fn context(vim: bool) -> KeyContext {
     context
 }
 
-// Actions traitées par le terminal qui a le focus, et non par la fenêtre.
-// Les noms portent leur objet (`CopySelection` plutôt que `Copy`) : une action
-// nommée `Copy` entrerait en collision avec le trait du même nom, que tout
-// module Rust a dans son périmètre.
+// Actions handled by the focused terminal, and not by the window.
+// The names carry their object (`CopySelection` rather than `Copy`): an action
+// named `Copy` would collide with the trait of the same name, which every Rust
+// module has in scope.
 actions!(
     claudhub_terminal,
     [CopySelection, PasteClipboard, SelectAllText]
 );
 
-/// Contexte déclaré par une vue de terminal. Les trois raccourcis ci-dessous
-/// n'existent que là : `Ctrl+Maj+C` ailleurs dans l'interface n'aurait rien à
-/// copier, et `Ctrl+C` tout court appartient au programme qui tourne.
+/// The context a terminal view declares. The three shortcuts below only exist
+/// there: `Ctrl+Shift+C` elsewhere in the interface would have nothing to copy,
+/// and a plain `Ctrl+C` belongs to the running program.
 const TERMINAL_PREDICATE: &str = "ClaudhubTerminal";
 
 pub fn terminal_context() -> KeyContext {
@@ -213,10 +211,10 @@ pub fn terminal_context() -> KeyContext {
     context
 }
 
-/// Contexte déclaré par une barre de recherche.
+/// The context a search bar declares.
 ///
-/// `Échap` la ferme, et n'a rien à fermer ailleurs : la lier globalement
-/// ferait d'une touche d'annulation universelle le geste d'un panneau.
+/// `Esc` closes it, and has nothing to close elsewhere: binding it globally
+/// would turn a universal cancel key into one panel's gesture.
 const FIND_PREDICATE: &str = "ClaudhubFind";
 
 pub fn find_context() -> KeyContext {
@@ -225,26 +223,26 @@ pub fn find_context() -> KeyContext {
     context
 }
 
-/// Contexte déclaré par l'arbre de l'explorateur.
+/// The context the explorer's tree declares.
 ///
-/// Les flèches y parcourent une arborescence : haut et bas d'une ligne à
-/// l'autre, droite pour déplier, gauche pour replier ou remonter au dossier
-/// parent. Ce sont celles de PhpStorm, et de tout explorateur.
+/// The arrows browse a tree there: up and down from one row to the next, right
+/// to unfold, left to collapse or to go up to the parent folder. They are
+/// PhpStorm's, and every explorer's.
 const EXPLORER_PREDICATE: &str = "ClaudhubExplorer";
 
-/// Les mêmes en mode vim. `ClaudhubVim` doit être déclaré **par l'arbre
-/// lui-même** et non par la racine : voir `VIM_PREDICATE`.
+/// The same in vim mode. `ClaudhubVim` has to be declared **by the tree itself**
+/// and not by the root: see `VIM_PREDICATE`.
 const VIM_EXPLORER_PREDICATE: &str = "ClaudhubExplorer && ClaudhubVim";
 
-/// Contexte déclaré par l'arbre des bases.
+/// The context the databases tree declares.
 ///
-/// Les mêmes flèches que l'explorateur de projet, sur un autre arbre : celui
-/// qui a le focus les prend. Sans ce contexte, elles appartiendraient à la
-/// relecture du diff, et parcourir un schéma ferait défiler le code d'à côté.
+/// The same arrows as the project explorer, on another tree: whichever has the
+/// focus takes them. Without this context they would belong to diff review, and
+/// browsing a schema would scroll the code beside it.
 const DB_PREDICATE: &str = "ClaudhubDb";
 
-/// Les mêmes en mode vim. `ClaudhubVim` doit être déclaré **par l'arbre
-/// lui-même** : voir `VIM_PREDICATE`.
+/// The same in vim mode. `ClaudhubVim` has to be declared **by the tree
+/// itself**: see `VIM_PREDICATE`.
 const VIM_DB_PREDICATE: &str = "ClaudhubDb && ClaudhubVim";
 
 pub fn db_context(vim: bool) -> KeyContext {
@@ -256,10 +254,10 @@ pub fn db_context(vim: bool) -> KeyContext {
     context
 }
 
-/// Contexte déclaré par la console SQL.
+/// The context the SQL console declares.
 ///
-/// `Ctrl+Entrée` y lance la requête plutôt que de valider un commit ; c'est la
-/// convention de toutes les consoles SQL.
+/// `Ctrl+Enter` runs the query there rather than confirming a commit; it is
+/// every SQL console's convention.
 const QUERY_PREDICATE: &str = "ClaudhubQuery";
 
 pub fn query_context() -> KeyContext {
@@ -277,7 +275,7 @@ pub fn explorer_context(vim: bool) -> KeyContext {
     context
 }
 
-/// Les familles de l'aide, dans l'ordre où elle les affiche.
+/// The help's families, in the order it shows them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Group {
     Window,
@@ -302,9 +300,9 @@ impl Group {
         Group::Terminal,
     ];
 
-    /// La clé i18n du titre. La clé et non le texte : un test vérifie que
-    /// toutes celles de ce module existent dans les deux catalogues, et il ne
-    /// peut le faire que sur des clés.
+    /// The i18n key of the title. The key and not the text: a test checks that
+    /// all of this module's exist in both catalogues, and it can only do that on
+    /// keys.
     pub fn key(self) -> &'static str {
         match self {
             Group::Window => "shortcut-group-window",
@@ -319,25 +317,24 @@ impl Group {
     }
 }
 
-/// Une liaison, telle que l'aide la montre.
+/// A binding, as the help shows it.
 ///
-/// Le même enregistrement sert à `bind_keys` : c'est la seule façon d'être sûr
-/// que l'aide dise ce que le clavier fait.
+/// The same record serves `bind_keys`: it is the only way to be sure the help
+/// says what the keyboard does.
 pub struct Entry {
     pub keys: &'static str,
     pub group: Group,
-    /// Clé i18n de la description.
+    /// The i18n key of the description.
     pub label: &'static str,
-    /// Gardé pour ce qu'il vaut au test : deux liaisons peuvent porter les
-    /// mêmes touches — `Entrée` ouvre un fichier dans l'explorateur et va à
-    /// l'occurrence suivante dans une recherche — à condition que leurs
-    /// prédicats ne se rencontrent pas.
+    /// Kept for what it is worth to the test: two bindings may carry the same
+    /// keys — `Enter` opens a file in the explorer and goes to the next hit in a
+    /// search — provided their predicates never meet.
     #[cfg_attr(not(test), allow(dead_code))]
     pub predicate: &'static str,
 }
 
-/// Déclare une famille de liaisons : les touches d'un côté, l'aide de l'autre,
-/// écrites une seule fois.
+/// Declares a family of bindings: the keys on one side, the help on the other,
+/// written once only.
 macro_rules! table {
     ($entries:ident, $bind:ident, [
         $($group:ident $keys:literal => $action:expr, $predicate:expr, $label:literal;)*
@@ -406,19 +403,19 @@ table!(STANDARD, standard_bindings, [
     Worktrees "secondary-8" => SelectWorktree { index: 7 }, PREDICATE, "shortcut-worktree";
     Worktrees "secondary-9" => SelectWorktree { index: 8 }, PREDICATE, "shortcut-worktree";
 
-    // ── Le dépôt ────────────────────────────────────────────────────────────
-    // Avec Maj, donc valables jusque dans le terminal : ces trois-là partent
-    // sur le réseau et ne dépendent pas de ce qu'on regarde.
+    // ── The repository ──────────────────────────────────────────────────────
+    // With Shift, so valid right into the terminal: those three go out over the
+    // network and do not depend on what is being looked at.
     Repository "secondary-shift-r" => Fetch, PREDICATE, "shortcut-fetch";
     Repository "secondary-shift-u" => Pull, PREDICATE, "shortcut-pull";
     Repository "secondary-shift-p" => Push, PREDICATE, "shortcut-push";
     Repository "secondary-enter" => Commit, COMMIT_PREDICATE, "shortcut-commit";
 
-    // ── La relecture ────────────────────────────────────────────────────────
-    // Les flèches nues vont d'une modification à la suivante — c'est le geste
-    // de la relecture, les lignes de contexte entre deux hunks n'ayant rien à
-    // montrer — et débordent sur le fichier voisin une fois le dernier hunk
-    // passé. La touche système descend à la ligne, Maj étend la sélection.
+    // ── Review ──────────────────────────────────────────────────────────────
+    // The bare arrows go from one change to the next — that is the review
+    // gesture, the context lines between two hunks having nothing to show — and
+    // overflow onto the neighbouring file once the last hunk is passed. The
+    // platform key steps by one line, Shift extends the selection.
     Review "up" => PreviousHunk, NAVIGATION_PREDICATE, "shortcut-previous-hunk";
     Review "down" => NextHunk, NAVIGATION_PREDICATE, "shortcut-next-hunk";
     Review "secondary-up" => PreviousLine, NAVIGATION_PREDICATE, "shortcut-previous-line";
@@ -431,13 +428,13 @@ table!(STANDARD, standard_bindings, [
     Review "pagedown" => DiffPageDown, NAVIGATION_PREDICATE, "shortcut-page-down";
     Review "home" => DiffStart, NAVIGATION_PREDICATE, "shortcut-diff-start";
     Review "end" => DiffEnd, NAVIGATION_PREDICATE, "shortcut-diff-end";
-    // Copier le code relu, et sa variante qui garde les marqueurs de patch.
+    // Copy the reviewed code, and its variant that keeps the patch markers.
     Review "secondary-c" => CopyDiff, COPY_PREDICATE, "shortcut-copy";
     Review "secondary-shift-c" => CopyDiffPatch, COPY_PREDICATE, "shortcut-copy-patch";
     Review "secondary-a" => SelectWholeDiff, COPY_PREDICATE, "shortcut-select-all";
-    // Annoter et demander partagent le prédicat de la copie : ils partent d'une
-    // sélection dans le diff, et n'ont rien à faire quand c'est un champ de
-    // saisie ou un terminal qui a le focus.
+    // Annotating and asking share the copy predicate: they start from a
+    // selection in the diff, and have nothing to do when an input field or a
+    // terminal has the focus.
     Review "secondary-shift-n" => AnnotateSelection, COPY_PREDICATE, "shortcut-annotate";
     Review "secondary-shift-k" => AskAgent, COPY_PREDICATE, "shortcut-ask";
     Review "secondary-shift-e" => SendNotes, PREDICATE, "shortcut-send-notes";
@@ -445,12 +442,12 @@ table!(STANDARD, standard_bindings, [
     Review "secondary-shift-f" => ToggleWholeFile, PREDICATE, "shortcut-whole-file";
     Review "secondary-shift-i" => ToggleStage, PREDICATE, "shortcut-stage";
     Review "secondary-shift-l" => ToggleReviewTree, PREDICATE, "shortcut-review-tree";
-    // Enregistrer et fermer visent l'éditeur intégré ; dans le terminal, Ctrl+S
-    // est XOFF et Ctrl+W efface un mot.
+    // Save and close target the built-in editor; in the terminal, Ctrl+S is XOFF
+    // and Ctrl+W deletes a word.
     Review "secondary-s" => SaveFile, WINDOW_PREDICATE, "shortcut-save";
     Review "secondary-w" => CloseEditor, WINDOW_PREDICATE, "shortcut-close-editor";
 
-    // ── L'explorateur ───────────────────────────────────────────────────────
+    // ── The explorer   ───────────────────────────────────────────────────────
     Explorer "up" => ExplorerUp, EXPLORER_PREDICATE, "shortcut-explorer-up";
     Explorer "down" => ExplorerDown, EXPLORER_PREDICATE, "shortcut-explorer-down";
     Explorer "left" => ExplorerLeft, EXPLORER_PREDICATE, "shortcut-explorer-collapse";
@@ -459,9 +456,9 @@ table!(STANDARD, standard_bindings, [
     Explorer "end" => ExplorerEnd, EXPLORER_PREDICATE, "shortcut-explorer-last";
     Explorer "enter" => ExplorerOpen, EXPLORER_PREDICATE, "shortcut-explorer-open";
 
-    // ── Les bases ───────────────────────────────────────────────────────────
-    // Le même jeu que l'explorateur, sur un autre arbre : c'est celui qui a le
-    // focus qui les prend.
+    // ── The databases ───────────────────────────────────────────────────────
+    // The same set as the explorer, on another tree: whichever has the focus
+    // takes them.
     Database "up" => DbUp, DB_PREDICATE, "shortcut-db-up";
     Database "down" => DbDown, DB_PREDICATE, "shortcut-db-down";
     Database "left" => DbLeft, DB_PREDICATE, "shortcut-db-collapse";
@@ -472,9 +469,9 @@ table!(STANDARD, standard_bindings, [
     Database "secondary-a" => SelectWholeResult, QUERY_COPY_PREDICATE, "shortcut-db-select-all";
     Database "secondary-shift-e" => ExportDbCsv, QUERY_PREDICATE, "shortcut-db-export";
 
-    // ── La recherche ────────────────────────────────────────────────────────
-    // `Ctrl+F` cherche dans le panneau où le dernier clic a eu lieu. Il est
-    // exclu du terminal et des champs de saisie, qui ont chacun la leur.
+    // ── Search ──────────────────────────────────────────────────────────────
+    // `Ctrl+F` searches in the panel where the last click happened. It is
+    // excluded from the terminal and from input fields, which each have their own.
     Search "secondary-f" => Find, COPY_PREDICATE, "shortcut-find";
     Search "secondary-g" => FindNext, WINDOW_PREDICATE, "shortcut-find-next";
     Search "enter" => FindNext, FIND_PREDICATE, "shortcut-find-next";
@@ -482,33 +479,33 @@ table!(STANDARD, standard_bindings, [
     Search "shift-enter" => FindPrevious, FIND_PREDICATE, "shortcut-find-previous";
     Search "escape" => CloseFind, FIND_PREDICATE, "shortcut-close-find";
 
-    // ── Les terminaux ───────────────────────────────────────────────────────
+    // ── The terminals ───────────────────────────────────────────────────────
     Terminal "secondary-shift-t" => NewTerminal, PREDICATE, "shortcut-new-terminal";
     Terminal "secondary-shift-w" => CloseTerminal, PREDICATE, "shortcut-close-terminal";
     Terminal "secondary-`" => ToggleTerminal, PREDICATE, "shortcut-toggle-terminal";
-    // La même chose sous une touche qu'on trouve sans regarder. Une lettre
-    // avec la touche système, donc hors du terminal (`WINDOW_PREDICATE`) : là,
-    // `Ctrl+T` appartient au programme qui tourne. C'est l'accent grave qui
-    // sert à le refermer quand on y a le focus.
+    // The same thing under a key found without looking. A letter with the
+    // platform key, so outside the terminal (`WINDOW_PREDICATE`): there,
+    // `Ctrl+T` belongs to the running program. It is the backtick that closes it
+    // again when it has the focus.
     Terminal "secondary-t" => ToggleTerminal, WINDOW_PREDICATE, "shortcut-toggle-terminal";
     Terminal "secondary-tab" => NextTerminal, PREDICATE, "shortcut-next-terminal";
     Terminal "secondary-shift-tab" => PreviousTerminal, PREDICATE, "shortcut-previous-terminal";
-    // Les conventions des terminaux : la touche système *avec* Maj, parce que
-    // `Ctrl+C` et `Ctrl+V` nus appartiennent au programme.
+    // The terminals' conventions: the platform key *with* Shift, because a bare
+    // `Ctrl+C` and `Ctrl+V` belong to the program.
     Terminal "secondary-shift-c" => CopySelection, TERMINAL_PREDICATE, "shortcut-terminal-copy";
     Terminal "secondary-shift-v" => PasteClipboard, TERMINAL_PREDICATE, "shortcut-terminal-paste";
     Terminal "secondary-shift-a" => SelectAllText, TERMINAL_PREDICATE, "shortcut-terminal-select-all";
 ]);
 
 table!(VIM, vim_bindings, [
-    // Pas de modes ni d'opérateurs : Claudhub n'est pas un éditeur, et son
-    // éditeur intégré appartient à gpui-component. Ce qui est repris, c'est la
-    // main gauche sur la rangée de repos pour parcourir un diff — ce qu'un
-    // relecteur fait mille fois par revue.
+    // No modes and no operators: Claudhub is not an editor, and its built-in
+    // editor belongs to gpui-component. What is taken over is the left hand on
+    // the home row to browse a diff — what a reviewer does a thousand times per
+    // review.
     Review "j" => NextLine, VIM_PREDICATE, "shortcut-next-line";
     Review "k" => PreviousLine, VIM_PREDICATE, "shortcut-previous-line";
-    // La convention de vim-gitgutter et de fugitive pour aller d'un bloc
-    // modifié au suivant.
+    // vim-gitgutter's and fugitive's convention for going from one changed block
+    // to the next.
     Review "] c" => NextHunk, VIM_PREDICATE, "shortcut-next-hunk";
     Review "[ c" => PreviousHunk, VIM_PREDICATE, "shortcut-previous-hunk";
     Review "l" => NextFile, VIM_PREDICATE, "shortcut-next-file";
@@ -537,14 +534,14 @@ table!(VIM, vim_bindings, [
 ]);
 
 pub fn init(cx: &mut App) {
-    // Les liaisons vim sont posées **toujours**, et c'est le contexte
-    // `ClaudhubVim` qui les allume : `bind_keys` s'appelle une fois au
-    // démarrage, alors que le réglage se change en cours de route.
+    // The vim bindings are installed **always**, and it is the `ClaudhubVim`
+    // context that turns them on: `bind_keys` is called once at startup, whereas
+    // the setting changes along the way.
     cx.bind_keys(standard_bindings());
     cx.bind_keys(vim_bindings());
 }
 
-/// Une famille de l'aide, prête à afficher.
+/// A help family, ready to display.
 pub struct Section {
     pub title: SharedString,
     pub rows: Vec<Row>,
@@ -555,19 +552,18 @@ pub struct Row {
     pub label: SharedString,
 }
 
-/// Les raccourcis, groupés, tels que la fenêtre d'aide les montre.
+/// The shortcuts, grouped, as the help window shows them.
 ///
-/// Les liaisons vim n'y figurent que quand le mode l'est : les afficher
-/// éteintes ferait une liste deux fois plus longue dont la moitié ne marche
-/// pas.
+/// The vim bindings only appear when the mode is on: showing them greyed out
+/// would make a list twice as long, half of which does not work.
 pub fn sheet(vim: bool) -> Vec<Section> {
     let labels = Labels::current();
     let mut sections = Vec::new();
     for group in Group::ORDER {
         let mut rows: Vec<Row> = Vec::new();
-        // Deux liaisons pour un même geste — F5 et Ctrl+R, Ctrl+1 à Ctrl+9,
-        // la flèche et son équivalent vim — tiennent sur une ligne : c'est le
-        // geste qu'on cherche dans cette liste, pas la touche.
+        // Two bindings for one gesture — F5 and Ctrl+R, Ctrl+1 to Ctrl+9, the
+        // arrow and its vim equivalent — fit on one line: it is the gesture one
+        // looks for in this list, not the key.
         let mut push = |entry: &Entry, keys: String| {
             let label = tr!(entry.label);
             match rows.iter_mut().find(|row| row.label == label) {
@@ -593,11 +589,11 @@ pub fn sheet(vim: bool) -> Vec<Section> {
     sections
 }
 
-/// Les mots que la lecture d'une touche emprunte à la langue.
+/// The words a key's rendering borrows from the language.
 ///
-/// Passés en argument plutôt que lus par `tr!` au fond de la fonction : c'est
-/// ce qui rend `pretty` libre et testable, et le catalogue n'est pas chargé
-/// dans un test unitaire.
+/// Passed as an argument rather than read with `tr!` deep inside the function:
+/// that is what makes `pretty` free and testable, and the catalogue is not
+/// loaded in a unit test.
 pub struct Labels {
     pub shift: SharedString,
     pub escape: SharedString,
@@ -618,21 +614,21 @@ impl Labels {
     }
 }
 
-/// Le nom de la touche système, tel que son clavier l'écrit.
+/// The platform key's name, as its keyboard spells it.
 const SECONDARY: &str = if cfg!(target_os = "macos") {
     "⌘"
 } else {
     "Ctrl"
 };
 
-/// Une liaison gpui rendue lisible : `secondary-shift-e` → `Ctrl+Maj+E`.
+/// A gpui binding rendered readable: `secondary-shift-e` → `Ctrl+Shift+E`.
 pub fn pretty(keys: &str, labels: &Labels) -> String {
     keys.split(' ')
         .map(|stroke| {
             let mut parts: Vec<String> = Vec::new();
             let mut rest = stroke;
-            // Le nom de la touche peut être un tiret (`secondary--`) : c'est
-            // le *dernier* segment, jamais un modificateur.
+            // The key's name may be a dash (`secondary--`): it is the *last*
+            // segment, never a modifier.
             while let Some((head, tail)) = rest.split_once('-') {
                 match head {
                     "secondary" | "cmd" | "ctrl" => parts.push(SECONDARY.to_string()),
@@ -663,18 +659,18 @@ fn key_name(key: &str, labels: &Labels) -> String {
         "right" => "→".to_string(),
         "pageup" => "Page ↑".to_string(),
         "pagedown" => "Page ↓".to_string(),
-        // Les touches de fonction s'écrivent en majuscule, les lettres aussi,
-        // et le reste — `,` `-` `` ` `` — tel quel.
+        // Function keys are written in upper case, letters too, and the rest —
+        // `,` `-` `` ` `` — as it is.
         other => other.to_uppercase(),
     }
 }
 
-/// Une liaison vim rendue **comme vim l'écrit** : `g g` → `gg`, `shift-g` →
+/// A vim binding rendered **the way vim writes it**: `g g` → `gg`, `shift-g` →
 /// `G`, `] c` → `]c`.
 ///
-/// Traduire ces touches comme les autres donnerait « Maj+G » là où tout ce que
-/// l'utilisateur connaît dit « G » : la notation fait partie de ce qu'il sait
-/// déjà, et la remplacer serait lui apprendre autre chose.
+/// Translating those keys like the others would give "Shift+G" where everything
+/// the user knows says "G": the notation is part of what they already know, and
+/// replacing it would be teaching them something else.
 pub fn vim_pretty(keys: &str) -> String {
     keys.split(' ')
         .map(|stroke| match stroke.split_once('-') {
@@ -686,10 +682,10 @@ pub fn vim_pretty(keys: &str) -> String {
         .join("")
 }
 
-/// Réunit deux façons de faire le même geste sur une seule ligne.
+/// Joins two ways of making the same gesture onto a single line.
 ///
-/// Une suite de touches numérotées — `Ctrl+1` … `Ctrl+9` — s'écrit comme une
-/// plage ; deux touches sans rapport s'écrivent l'une ou l'autre.
+/// A run of numbered keys — `Ctrl+1` … `Ctrl+9` — is written as a range; two
+/// unrelated keys are written as one or the other.
 fn merge(current: &str, next: &str) -> String {
     if let Some(start) = current.split(['…', '/']).next().map(str::trim) {
         if consecutive(start, next) || current.contains('…') {
@@ -700,11 +696,10 @@ fn merge(current: &str, next: &str) -> String {
     format!("{current} / {next}")
 }
 
-/// Deux touches qui ne diffèrent que par un chiffre qui se suit.
+/// Two keys differing only by a digit that follows on.
 ///
-/// Le découpage se fait sur le **caractère** et non sur l'octet : une touche
-/// s'écrit couramment `Ctrl+↓`, et couper un pas avant la fin d'une flèche
-/// est une panique.
+/// The split is done on the **character** and not on the byte: a key is commonly
+/// written `Ctrl+↓`, and cutting one step before the end of an arrow is a panic.
 fn consecutive(first: &str, next: &str) -> bool {
     fn trailing_digit(text: &str) -> Option<(&str, u32)> {
         let last = text.chars().next_back()?;
@@ -1350,22 +1345,22 @@ mod tests {
             keys = merge(&keys, &format!("Ctrl+{n}"));
         }
         assert_eq!(keys, "Ctrl+1 … Ctrl+9");
-        // Deux touches sans rapport restent deux façons de faire.
+        // Two unrelated keys stay two ways of doing it.
         assert_eq!(merge("F5", "Ctrl+R"), "F5 / Ctrl+R");
     }
 
-    /// `KeyBinding::new` **panique** sur une touche qu'elle ne sait pas lire,
-    /// et `init` tourne au démarrage : une faute de frappe dans la table ne se
-    /// verrait pas autrement qu'en lançant Claudhub.
+    /// `KeyBinding::new` **panics** on a key it cannot read, and `init` runs at
+    /// startup: a typo in the table would not show up any other way than by
+    /// launching Claudhub.
     #[test]
     fn every_keystroke_parses() {
         assert_eq!(standard_bindings().len(), STANDARD.len());
         assert_eq!(vim_bindings().len(), VIM.len());
     }
 
-    /// La clé du libellé est une **variable**, pas un littéral : si `tr!` ne
-    /// savait pas les traduire ainsi, l'aide afficherait `shortcut-refresh` à
-    /// la place du texte, et tous les autres tests passeraient quand même.
+    /// The label's key is a **variable**, not a literal: if `tr!` could not
+    /// translate them that way, the help would show `shortcut-refresh` instead
+    /// of the text, and every other test would still pass.
     #[test]
     fn the_sheet_is_translated_and_not_a_list_of_keys() {
         let sections = sheet(true);
@@ -1377,7 +1372,7 @@ mod tests {
                 assert!(!row.keys.is_empty());
             }
         }
-        // Le mode éteint, aucune touche de vim n'est proposée.
+        // With the mode off, no vim key is offered.
         let plain = sheet(false);
         let keys: Vec<&str> = plain
             .iter()
@@ -1386,8 +1381,8 @@ mod tests {
         assert!(!keys.iter().any(|k| k.contains("gg")), "{keys:?}");
     }
 
-    /// Une liaison dont l'aide n'aurait pas le texte s'afficherait sous la
-    /// forme de sa clé, ce qu'aucune relecture ne rattrape.
+    /// A binding whose help had no text would show as its key, which no review
+    /// catches.
     #[test]
     fn every_label_exists_in_both_catalogs() {
         const EN: &str = include_str!("../../assets/i18n/en.json");

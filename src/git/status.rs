@@ -1,11 +1,11 @@
-//! État du répertoire de travail : ce que le panneau « fichiers modifiés »
-//! affiche, et ce sur quoi il déclenche l'indexation.
+//! The working tree's state: what the "changed files" panel shows, and what it
+//! stages on.
 //!
-//! La source est `git status --porcelain=v2 -z --branch`. La v2 est la seule
-//! qui distingue nettement l'état de l'index de celui du répertoire de travail
-//! (un fichier peut être ajouté *et* remodifié), donne le score des renommages
-//! et sépare les chemins par des octets nuls — nécessaire dès qu'un fichier
-//! contient un espace, un guillemet ou un saut de ligne.
+//! The source is `git status --porcelain=v2 -z --branch`. v2 is the only one
+//! that clearly separates the index's state from the working tree's (a file can
+//! be added *and* modified again), gives the rename score, and separates paths
+//! with null bytes — needed as soon as a file contains a space, a quote or a
+//! newline.
 
 use std::path::{Path, PathBuf};
 
@@ -13,7 +13,7 @@ use anyhow::Result;
 
 use super::{git, split_nul};
 
-/// Le code d'un côté (index ou répertoire de travail) pour un fichier.
+/// One side's code (index or working tree) for a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StatusCode {
     Unmodified,
@@ -25,7 +25,7 @@ pub enum StatusCode {
     TypeChanged,
     Untracked,
     Ignored,
-    /// Fusion en conflit : les deux côtés portent ce code.
+    /// Merge conflict: both sides carry this code.
     Unmerged,
 }
 
@@ -45,7 +45,7 @@ impl StatusCode {
         }
     }
 
-    /// Lettre affichée dans la liste, à gauche du chemin.
+    /// The letter shown in the list, left of the path.
     pub fn letter(self) -> &'static str {
         match self {
             Self::Unmodified => " ",
@@ -62,27 +62,27 @@ impl StatusCode {
     }
 }
 
-/// Un fichier tel qu'il apparaît dans le panneau de revue.
+/// A file as it appears in the review panel.
 ///
-/// `index` et `worktree` sont indépendants : un fichier indexé puis remodifié
-/// est `index: Modified, worktree: Modified` et apparaît des deux côtés de la
-/// liste. C'est précisément ce que la v1 rendait pénible à lire.
+/// `index` and `worktree` are independent: a file staged then modified again is
+/// `index: Modified, worktree: Modified` and appears on both sides of the list.
+/// That is precisely what v1 made painful to read.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileStatus {
     pub path: PathBuf,
-    /// Ancien chemin d'un fichier renommé ou copié.
+    /// Former path of a renamed or copied file.
     pub original: Option<PathBuf>,
     pub index: StatusCode,
     pub worktree: StatusCode,
 }
 
 impl FileStatus {
-    /// A quelque chose à valider (une partie au moins est dans l'index).
+    /// Has something to commit (at least part of it is in the index).
     pub fn is_staged(&self) -> bool {
         !matches!(self.index, StatusCode::Unmodified | StatusCode::Untracked)
     }
 
-    /// A des modifications hors index.
+    /// Has changes outside the index.
     pub fn is_unstaged(&self) -> bool {
         !matches!(self.worktree, StatusCode::Unmodified)
     }
@@ -95,8 +95,8 @@ impl FileStatus {
         self.index == StatusCode::Unmerged || self.worktree == StatusCode::Unmerged
     }
 
-    /// Nom de fichier seul, pour la colonne de gauche ; le dossier est affiché
-    /// à côté, en atténué.
+    /// File name alone, for the left column; the directory is shown beside it,
+    /// dimmed.
     pub fn file_name(&self) -> String {
         self.path
             .file_name()
@@ -113,21 +113,21 @@ impl FileStatus {
     }
 }
 
-/// L'état complet d'un checkout à un instant donné.
+/// A checkout's full state at a given moment.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Status {
-    /// Branche courante, `None` en HEAD détachée.
+    /// Current branch, `None` on a detached HEAD.
     pub branch: Option<String>,
     pub upstream: Option<String>,
-    /// Commits d'avance et de retard sur l'amont, quand il y en a un.
+    /// Commits ahead of and behind the upstream, when there is one.
     pub ahead: usize,
     pub behind: usize,
     pub files: Vec<FileStatus>,
-    /// Merge, rebase ou picorage interrompu.
+    /// Interrupted merge, rebase or cherry-pick.
     ///
-    /// Il vit dans le statut parce qu'il se lit au même moment et qu'il change
-    /// la lecture de tout le reste : tant qu'il dure, l'index porte des
-    /// conflits et `HEAD` ne désigne pas ce qu'on croit.
+    /// It lives in the status because it is read at the same moment and it
+    /// changes how everything else reads: while it lasts, the index carries
+    /// conflicts and `HEAD` does not point where you think.
     pub pending: Option<super::repo::Pending>,
 }
 
@@ -149,11 +149,11 @@ impl Status {
     }
 }
 
-/// Lit l'état de `dir`.
+/// Reads `dir`'s state.
 ///
-/// Les fichiers ignorés ne sont pas demandés : une liste de revue noyée sous
-/// `target/` ou `node_modules/` n'a aucune valeur, et les énumérer coûte le
-/// parcours complet des dossiers exclus.
+/// Ignored files are not asked for: a review list drowned under `target/` or
+/// `node_modules/` has no value, and enumerating them costs a full walk of the
+/// excluded folders.
 pub fn status(dir: &Path) -> Result<Status> {
     let out = git(
         dir,
@@ -162,18 +162,18 @@ pub fn status(dir: &Path) -> Result<Status> {
             "--porcelain=v2",
             "--branch",
             "-z",
-            // `all` et non `normal` : sans cela, un dossier entièrement
-            // nouveau apparaît comme une seule entrée `dossier/` qu'on ne peut
-            // ni lire ni indexer fichier par fichier — et un worktree d'agent
-            // en crée. Le coût est un parcours complet des dossiers non
-            // versionnés *et non ignorés*, ce que `.gitignore` borne déjà.
+            // `all` and not `normal`: without it, a wholly new folder appears
+            // as a single `folder/` entry that can neither be read nor staged
+            // file by file — and an agent worktree creates some. The cost is a
+            // full walk of the untracked *and non-ignored* folders, which
+            // `.gitignore` already bounds.
             "--untracked-files=all",
         ],
     )?;
     let mut status = parse(&out);
-    // Un `rev-parse` de plus par rafraîchissement, et rien qu'un : les
-    // marqueurs se lisent ensuite sur le disque. C'est le prix pour ne pas
-    // laisser l'utilisateur dans un état à mi-chemin que rien ne nomme.
+    // One more `rev-parse` per refresh, and only one: the markers are then read
+    // from disk. That is the price of not leaving the user in a half-finished
+    // state nothing names.
     status.pending = super::repo::git_dir(dir)
         .as_deref()
         .and_then(super::repo::pending_in);
@@ -194,9 +194,9 @@ fn parse(out: &str) -> Status {
                 }
             }
             Some('2') => {
-                // Un renommage occupe deux enregistrements : l'entrée, puis
-                // l'ancien chemin. Consommer le second ici est ce qui garde
-                // l'itérateur aligné pour la suite.
+                // A rename takes two records: the entry, then the former path.
+                // Consuming the second here is what keeps the iterator aligned
+                // for what follows.
                 let original = records.next().map(PathBuf::from);
                 if let Some(mut f) = parse_ordinary(rec) {
                     f.original = original;
@@ -229,12 +229,12 @@ fn parse(out: &str) -> Status {
 fn parse_header(rec: &str, status: &mut Status) {
     let rest = rec.trim_start_matches("# ");
     if let Some(head) = rest.strip_prefix("branch.head ") {
-        // git écrit littéralement "(detached)" quand il n'y a pas de branche.
+        // git writes "(detached)" literally when there is no branch.
         status.branch = (head != "(detached)").then(|| head.to_string());
     } else if let Some(up) = rest.strip_prefix("branch.upstream ") {
         status.upstream = Some(up.to_string());
     } else if let Some(ab) = rest.strip_prefix("branch.ab ") {
-        // Format « +2 -3 ».
+        // Format "+2 -3".
         for part in ab.split_whitespace() {
             let n: usize = part[1..].parse().unwrap_or(0);
             match part.as_bytes().first() {
@@ -333,7 +333,7 @@ mod tests {
 
     #[test]
     fn separates_index_from_worktree() {
-        // Fichier indexé puis remodifié : les deux côtés doivent apparaître.
+        // File staged then modified again: both sides must appear.
         let out = rec(&["1 MM N... 100644 100644 100644 aaa bbb src/main.rs"]);
         let st = parse(&out);
         let f = &st.files[0];
@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn reads_a_rename_and_its_original_path() {
-        // L'ancien chemin est un enregistrement à part en mode -z.
+        // The former path is a separate record in -z mode.
         let out = rec(&[
             "2 R. N... 100644 100644 100644 aaa bbb R100 ui/new name.rs",
             "ui/old name.rs",
@@ -400,17 +400,17 @@ impl Summary {
     }
 }
 
-/// Au-delà de cette taille, un fichier nouveau n'est pas lu.
+/// Past this size, a new file is not read.
 ///
-/// Ce résumé tourne en boucle sur tous les worktrees ouverts : un export SQL
-/// ou une archive oubliée dans un coin ne doit pas se relire toutes les dix
-/// secondes. Le fichier compte quand même comme fichier touché.
+/// This summary runs in a loop over every open worktree: a SQL dump or an
+/// archive forgotten in a corner must not be re-read every ten seconds. The
+/// file still counts as a touched file.
 const MAX_UNTRACKED_READ: u64 = 1 << 20;
 
-/// Compte les lignes des fichiers nouveaux, que `--numstat` laisse de côté.
+/// Counts the lines of the new files, which `--numstat` leaves out.
 ///
-/// Un fichier binaire n'a pas de lignes ; il compte quand même comme fichier
-/// touché, ce que `files` porte déjà.
+/// A binary file has no lines; it still counts as a touched file, which `files`
+/// already carries.
 fn untracked_lines(dir: &std::path::Path, status: &Status) -> usize {
     status
         .files

@@ -1,29 +1,25 @@
-//! Les notes de relecture sur le disque, en Markdown.
+//! Review notes on disk, in Markdown.
 //!
-//! Une note est du texte qu'on écrit à propos d'un bout de code : c'est une
-//! note au sens d'Obsidian, et la ranger dans un JSON d'état revenait à
-//! l'enfermer là où rien ne sait la lire. Un **fichier par note**, dans un
-//! dossier qu'on choisit — celui d'un coffre, si l'on en tient un — et le
-//! suivi de relecture dans un index à côté.
+//! A note is text written about a piece of code: it is a note in Obsidian's
+//! sense, and filing it in a state JSON amounted to locking it where nothing
+//! can read it. **One file per note**, in a folder of your choosing — a vault's,
+//! if you keep one — and the review tracking in an index beside it.
 //!
-//! Ce module ne fait **aucune entrée-sortie** : il rend du texte et le relit.
-//! Les fichiers sont écrits et lus par un worker (`Cmd::ReadNotes`,
-//! `Cmd::WriteNotes`), parce qu'un coffre peut vivre sur un disque lent — un
-//! montage drvfs de WSL, un dossier synchronisé — et qu'une lecture de
-//! répertoire dans le thread d'interface s'y paierait en fenêtre figée.
+//! This module does **no I/O**: it renders text and reads it back. The files are
+//! written and read by a worker (`Cmd::ReadNotes`, `Cmd::WriteNotes`), because a
+//! vault may live on a slow disk — a WSL drvfs mount, a synced folder — and a
+//! directory read in the interface thread would be paid for in a frozen window.
 //!
-//! ## Ce que le format doit tenir
+//! ## What the format has to hold
 //!
-//! Le dossier est la **source de vérité** : ce qu'on corrige dans Obsidian
-//! revient dans Claudhub au prochain chargement du worktree. Le format doit
-//! donc être relu, et pas seulement écrit — d'où le frontmatter, plat et sans
-//! surprise, et l'extrait cité dans un bloc de code dont on choisit la
-//! clôture.
+//! The folder is the **source of truth**: what you fix in Obsidian comes back
+//! into Claudhub at the next load of the worktree. The format therefore has to
+//! be read back, and not only written — hence the frontmatter, flat and without
+//! surprises, and the excerpt quoted inside a code block whose fence we choose.
 //!
-//! On ne réécrit **que ce qui porte notre marque** (`claudhub:` en tête du
-//! frontmatter) : un dossier de coffre contient les notes de son propriétaire,
-//! et rien de ce que nous n'avons pas écrit ne doit disparaître parce qu'une
-//! note a changé de nom.
+//! We only rewrite **what carries our mark** (`claudhub:` at the head of the
+//! frontmatter): a vault folder contains its owner's notes, and nothing we did
+//! not write must disappear because a note changed name.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -31,13 +27,13 @@ use std::path::{Path, PathBuf};
 use crate::git::DiffRange;
 use crate::ui::notes::{Note, Side};
 
-/// Un fichier relu, et le volume qu'il avait au moment où on l'a coché.
+/// A reviewed file, and the volume it had when it was ticked.
 ///
-/// Le volume est ce qui **périme** la coche : un agent qui réécrit un fichier
-/// annule sa relecture, faute de quoi la case dirait « relu » d'un contenu que
-/// personne n'a lu. C'est le même garde que l'empreinte repassée à l'écriture
-/// d'un fichier, et la même approximation assumée qu'ailleurs : une
-/// modification qui laisse `+n −m` inchangé passe au travers.
+/// The volume is what **expires** the tick: an agent rewriting a file cancels
+/// its review, otherwise the box would say "reviewed" of content nobody has
+/// read. It is the same guard as the digest passed back on writing a file, and
+/// the same accepted approximation as elsewhere: a change that leaves `+n −m`
+/// unchanged slips through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reviewed {
     pub range: DiffRange,
@@ -46,24 +42,23 @@ pub struct Reviewed {
     pub removed: usize,
 }
 
-/// Une tâche de `TODO.md` : une case à cocher Markdown, et sa ligne.
+/// A `TODO.md` task: a Markdown checkbox, and its line.
 ///
-/// La ligne est retenue parce que c'est **elle** qu'on modifie : cocher ne
-/// réécrit pas le fichier, il retourne un caractère à un endroit connu. Tout
-/// ce qu'il y a autour — le texte d'un agent, ses sous-listes, ses liens —
-/// survit intact, ce qu'un rendu à partir de nos seules structures ne
-/// garantirait jamais.
+/// The line is kept because it is **it** that gets modified: ticking does not
+/// rewrite the file, it flips one character at a known place. Everything around
+/// it — an agent's text, its sub-lists, its links — survives intact, which
+/// rendering from our own structures alone could never guarantee.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Task {
     pub done: bool,
     pub label: String,
-    /// Indice de la ligne dans le fichier, à partir de zéro.
+    /// Index of the line in the file, from zero.
     pub line: usize,
-    /// Profondeur d'imbrication, en niveaux de deux espaces.
+    /// Nesting depth, in levels of two spaces.
     pub depth: usize,
 }
 
-/// `TODO.md` tel qu'il est sur le disque, et les tâches qu'on y a reconnues.
+/// `TODO.md` as it is on disk, and the tasks recognised in it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Todo {
     pub text: String,
@@ -76,11 +71,11 @@ impl Todo {
     }
 }
 
-/// Les cases à cocher d'un `TODO.md`.
+/// The checkboxes of a `TODO.md`.
 ///
-/// Tout le reste est ignoré et **conservé** : un titre, un paragraphe, une
-/// liste ordinaire. On ne lit pas un format à nous, on repère des cases dans
-/// du Markdown que quelqu'un d'autre écrit.
+/// Everything else is ignored and **kept**: a heading, a paragraph, an ordinary
+/// list. We are not reading a format of ours, we are spotting checkboxes in
+/// Markdown somebody else writes.
 pub fn parse_todo(text: &str) -> Todo {
     let mut tasks = Vec::new();
     for (line, raw) in text.lines().enumerate() {
@@ -111,11 +106,11 @@ pub fn parse_todo(text: &str) -> Todo {
     }
 }
 
-/// Coche ou décoche la tâche d'une ligne, et rend le fichier entier.
+/// Ticks or unticks the task on a line, and returns the whole file.
 ///
-/// `None` quand la ligne n'est plus une case à cocher : le fichier a changé
-/// sous nos pieds — un agent écrit dedans pendant qu'on le regarde — et
-/// écrire au jugé retournerait la mauvaise case.
+/// `None` when the line is no longer a checkbox: the file has changed under our
+/// feet — an agent writes in it while we watch — and writing blind would flip
+/// the wrong box.
 pub fn toggle_task(text: &str, line: usize, done: bool) -> Option<String> {
     let raw = text.lines().nth(line)?;
     let at = box_at(raw)?;
@@ -189,8 +184,8 @@ pub fn append_task(text: &str, label: &str) -> String {
     match tasks.last() {
         Some(last) => lines.insert(last.line + 1, entry),
         None => {
-            // Une ligne vide avant la première tâche : elle suit de la prose,
-            // et Markdown ne commence pas une liste collée à un paragraphe.
+            // A blank line before the first task: it follows prose, and Markdown
+            // does not start a list glued to a paragraph.
             if lines.last().is_some_and(|line| !line.trim().is_empty()) {
                 lines.push(String::new());
             }
@@ -202,11 +197,10 @@ pub fn append_task(text: &str, label: &str) -> String {
     out
 }
 
-/// Réécrit le libellé d'une tâche, en laissant sa case et son indentation.
+/// Rewrites a task's label, leaving its box and its indentation alone.
 ///
-/// `None` si la ligne n'est plus une case à cocher, comme pour `toggle_task` :
-/// le fichier a changé sous nos pieds, et réécrire au jugé emporterait la
-/// mauvaise ligne.
+/// `None` if the line is no longer a checkbox, as for `toggle_task`: the file
+/// has changed under our feet, and rewriting blind would take the wrong line.
 pub fn set_task_label(text: &str, line: usize, label: &str) -> Option<String> {
     let raw = text.lines().nth(line)?;
     let at = box_at(raw)?;
@@ -217,7 +211,7 @@ pub fn set_task_label(text: &str, line: usize, label: &str) -> Option<String> {
     ))
 }
 
-/// Retire la tâche d'une ligne.
+/// Removes the task on a line.
 pub fn remove_task(text: &str, line: usize) -> Option<String> {
     let raw = text.lines().nth(line)?;
     box_at(raw)?;
@@ -234,7 +228,7 @@ pub fn remove_task(text: &str, line: usize) -> Option<String> {
     Some(out)
 }
 
-/// La position de la case à cocher d'une ligne, s'il y en a une.
+/// The position of a line's checkbox, if it has one.
 fn box_at(raw: &str) -> Option<usize> {
     let trimmed = raw.trim_start();
     if !(trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ")) {
@@ -246,7 +240,7 @@ fn box_at(raw: &str) -> Option<usize> {
         .min()
 }
 
-/// Remplace une ligne, en gardant le reste du fichier au caractère près.
+/// Replaces one line, keeping the rest of the file character for character.
 fn replace_line(text: &str, line: usize, replacement: &str) -> String {
     let mut out = String::with_capacity(text.len() + replacement.len());
     for (i, current) in text.lines().enumerate() {
@@ -261,13 +255,13 @@ fn replace_line(text: &str, line: usize, replacement: &str) -> String {
     out
 }
 
-/// Le dossier d'un worktree : `<racine>/<dépôt>/<worktree>`.
+/// A worktree's folder: `<root>/<repository>/<worktree>`.
 ///
-/// Deux niveaux et non un chemin aplati : un coffre se parcourt à la main, et
-/// `Acetics/fix-login` s'y lit là où
-/// `home-finch-Projects-Acetics-fix-login` ne se lit pas. Deux dépôts de même
-/// nom se retrouveraient au même endroit ; c'est le prix de la lisibilité, et
-/// les notes y resteraient distinguées par leur `worktree`.
+/// Two levels and not a flattened path: a vault is browsed by hand, and
+/// `Acetics/fix-login` reads there where
+/// `home-finch-Projects-Acetics-fix-login` does not. Two repositories of the
+/// same name would end up in the same place; that is the price of readability,
+/// and the notes would still be told apart by their `worktree`.
 pub fn dir_for(root: &Path, repo: &Path, worktree: &Path) -> PathBuf {
     root.join(leaf(repo)).join(leaf(worktree))
 }
@@ -285,10 +279,10 @@ fn leaf(path: &Path) -> String {
     }
 }
 
-/// Ce qu'un nom de fichier ne peut pas porter.
+/// What a file name cannot carry.
 ///
-/// La liste est celle de Windows, la plus stricte des trois : un coffre se
-/// synchronise, et un nom qui passe ici doit passer là-bas.
+/// The list is Windows's, the strictest of the three: a vault gets synced, and a
+/// name that passes here has to pass over there.
 fn sanitize(text: &str) -> String {
     text.chars()
         .map(|c| match c {
@@ -302,13 +296,12 @@ fn sanitize(text: &str) -> String {
         .to_string()
 }
 
-/// Le nom du fichier d'une note.
+/// A note's file name.
 ///
-/// Fonction pure de son identifiant et de son fichier, et de rien d'autre :
-/// une note qui glisse de dix lignes ne doit pas changer de nom, sinon chaque
-/// écriture casserait les liens que le coffre porte vers elle. L'identifiant
-/// est en tête et rembourré, pour que l'ordre alphabétique du dossier soit
-/// l'ordre où les notes ont été prises.
+/// A pure function of its id and its file, and of nothing else: a note that
+/// slips by ten lines must not change name, otherwise every write would break
+/// the links the vault carries to it. The id comes first and padded, so the
+/// folder's alphabetical order is the order the notes were taken in.
 pub fn note_file(note: &Note) -> String {
     let stem = note
         .path
@@ -318,7 +311,7 @@ pub fn note_file(note: &Note) -> String {
     format!("{:04} {}.md", note.id, sanitize(&stem))
 }
 
-/// Une note en Markdown : les propriétés d'Obsidian, le code cité, la remarque.
+/// A note in Markdown: Obsidian's properties, the quoted code, the remark.
 pub fn render_note(note: &Note) -> String {
     let mut front = BTreeMap::new();
     front.insert("claudhub", "note".to_string());
@@ -368,11 +361,11 @@ pub fn render_note(note: &Note) -> String {
     out
 }
 
-/// Relit une note écrite par `render_note`, ou celle qu'on a retouchée.
+/// Reads back a note written by `render_note`, or one that has been edited.
 ///
-/// Rend `None` sur tout ce qui ne porte pas notre marque : un dossier de
-/// coffre contient d'autres notes, et les avaler comme des remarques de
-/// relecture en ferait disparaître à la première écriture.
+/// Returns `None` for anything that does not carry our mark: a vault folder
+/// contains other notes, and swallowing them as review remarks would make some
+/// disappear on the first write.
 pub fn parse_note(text: &str) -> Option<Note> {
     let (front, body) = front_matter(text)?;
     if front.get("claudhub").map(String::as_str) != Some("note") {
@@ -451,7 +444,7 @@ pub fn render_index(worktree: &Path, reviewed: &[Reviewed]) -> String {
     out
 }
 
-/// Relit l'index. Une case décochée est une relecture qu'on annule.
+/// Reads the index back. An unticked box is a review being cancelled.
 pub fn parse_index(text: &str) -> Vec<Reviewed> {
     let body = front_matter(text).map(|(_, body)| body).unwrap_or(text);
     let mut out = Vec::new();
@@ -473,8 +466,8 @@ pub fn parse_index(text: &str) -> Vec<Reviewed> {
     out
 }
 
-/// `chemin +12 −3`. Le volume est en fin de ligne, un chemin pouvant contenir
-/// une espace — on découpe donc par la droite.
+/// `path +12 −3`. The volume is at the end of the line, a path being allowed to
+/// contain a space — so we split from the right.
 fn entry_of(text: &str, range: DiffRange) -> Option<Reviewed> {
     let mut parts: Vec<&str> = text.trim().rsplitn(3, ' ').collect();
     parts.reverse();
@@ -512,11 +505,11 @@ fn range_of(key: &str) -> Option<DiffRange> {
     }
 }
 
-/// Le frontmatter, plat, et ce qui le suit.
+/// The frontmatter, flat, and what follows it.
 ///
-/// Un sous-ensemble de YAML assumé comme tel : nos clés sont des scalaires —
-/// des nombres, des booléens, des chemins — et embarquer un analyseur complet
-/// pour six lignes coûterait une dépendance de plus que ce qu'on écrit.
+/// A subset of YAML, accepted as such: our keys are scalars — numbers, booleans,
+/// paths — and embedding a full parser for six lines would cost one dependency
+/// more than what we write.
 fn front_matter(text: &str) -> Option<(BTreeMap<String, String>, &str)> {
     let rest = text.strip_prefix("---\n")?;
     let end = rest.find("\n---")?;
@@ -532,7 +525,7 @@ fn front_matter(text: &str) -> Option<(BTreeMap<String, String>, &str)> {
     Some((map, tail.trim_start_matches('\n')))
 }
 
-/// L'extrait cité, et la remarque qui le suit.
+/// The quoted excerpt, and the remark following it.
 fn split_excerpt(body: &str) -> (String, String) {
     let mut lines = body.lines().peekable();
     let mut before = Vec::new();
@@ -564,10 +557,10 @@ fn split_excerpt(body: &str) -> (String, String) {
     (excerpt.join("\n"), remark.join("\n").trim().to_string())
 }
 
-/// Une clôture plus longue que la plus longue suite d'accents graves du texte.
+/// A fence longer than the longest run of backticks in the text.
 ///
-/// Un diff de Markdown en contient, et une clôture à trois y refermerait le
-/// bloc au milieu de l'extrait.
+/// A Markdown diff contains some, and a fence of three would close the block in
+/// the middle of the excerpt.
 fn fence_for(text: &str) -> String {
     let mut longest = 0;
     let mut current = 0;
@@ -582,15 +575,15 @@ fn fence_for(text: &str) -> String {
     "`".repeat(longest.max(2) + 1)
 }
 
-/// Le langage du bloc de code, pour qu'Obsidian le colore.
+/// The code block's language, so Obsidian colours it.
 fn language(path: &Path) -> &'static str {
     crate::ui::highlight::language_for_path(path).unwrap_or("")
 }
 
-/// Une valeur de frontmatter qui ne se laisse pas relire de travers.
+/// A frontmatter value that cannot be read back crooked.
 ///
-/// Un chemin qui commence par `[` ou qui contient `: ` serait lu par Obsidian
-/// comme une liste ou comme une clé imbriquée. Les guillemets règlent les deux.
+/// A path starting with `[` or containing `: ` would be read by Obsidian as a
+/// list or as a nested key. Quotes settle both.
 fn scalar(value: &str) -> String {
     let plain = !value.is_empty()
         && !value.contains(": ")
@@ -654,9 +647,9 @@ mod tests {
         assert_eq!(parse_note(&text), Some(note));
     }
 
-    /// Le nom ne porte que l'identifiant et le fichier : une note qui glisse
-    /// de dix lignes garderait sinon un nom différent à chaque écriture, et
-    /// les liens du coffre pointeraient dans le vide.
+    /// The name carries only the id and the file: a note that slips by ten lines
+    /// would otherwise have a different name on every write, and the vault's
+    /// links would point into the void.
     #[test]
     fn the_file_name_ignores_the_lines() {
         let mut note = note();
@@ -722,7 +715,7 @@ mod tests {
         assert_eq!(back, want);
     }
 
-    /// Décocher dans Obsidian rend le fichier à relire.
+    /// Unticking in Obsidian hands the file back to be reviewed.
     #[test]
     fn an_unchecked_box_is_no_longer_reviewed() {
         let text = "## working\n- [ ] a.rs +1 −0\n- [x] b.rs +2 −0\n";

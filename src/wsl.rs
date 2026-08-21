@@ -139,9 +139,9 @@ pub fn ensure_installed(distro: &str, probe: &Probe) -> Result<String> {
         return Ok(target);
     }
 
-    // Écrit à côté puis renommé : un `mv` est atomique, si bien qu'une
-    // installation interrompue ne laisse pas un binaire tronqué que le
-    // lancement suivant prendrait pour bon.
+    // Written alongside then renamed: a `mv` is atomic, so an interrupted
+    // installation does not leave a truncated binary that the next launch would
+    // take for a good one.
     let script = install_script(&dir, &target, &probe.home, &id);
     let mut child = wsl()
         .args(["-d", distro, "--exec", "/bin/sh", "-c", &script])
@@ -184,11 +184,11 @@ fn install_script(dir: &str, target: &str, home: &str, id: &str) -> String {
     )
 }
 
-/// La ligne de commande qui lance le serveur dans la distro.
+/// The command line that launches the server inside the distribution.
 ///
-/// `--cd` n'est pas un confort : le serveur annonce son répertoire de
-/// démarrage dans sa poignée de main, et c'est ce qui ouvre le dépôt d'où
-/// l'on vient — le « lancé depuis son projet » du mode local.
+/// `--cd` is not a convenience: the server announces its start directory in its
+/// handshake, and that is what opens the repository one came from — local
+/// mode's "launched from its project".
 pub fn launch_argv(distro: &str, server: &str, cwd: Option<&str>) -> Vec<String> {
     let mut argv = vec!["wsl.exe".into(), "-d".into(), distro.to_string()];
     if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
@@ -200,17 +200,17 @@ pub fn launch_argv(distro: &str, server: &str, cwd: Option<&str>) -> Vec<String>
     argv
 }
 
-/// La ligne de commande d'un onglet de terminal, à travers `wsl.exe`.
+/// A terminal tab's command line, through `wsl.exe`.
 ///
-/// Sous Windows, les dépôts vivent dans la distribution : un terminal qui
-/// s'ouvrirait localement regarderait un chemin qui n'existe pas, et l'agent
-/// qu'on y lance ne verrait pas le code. Le pty, lui, reste local — c'est
-/// ConPTY qui le porte, et l'émulation ne change pas d'un octet.
+/// On Windows the repositories live in the distribution: a terminal opening
+/// locally would look at a path that does not exist, and the agent launched in
+/// it would not see the code. The pty stays local — ConPTY carries it — and the
+/// emulation does not change by a byte.
 ///
-/// L'environnement passe par `/usr/bin/env` et non par des variables du
-/// processus Windows : ce qui compte est ce que voit le processus **Linux**,
-/// et `wsl.exe` ne transmet pas l'environnement de son appelant.
-/// `--exec` évite qu'un shell intermédiaire re-découpe les arguments.
+/// The environment goes through `/usr/bin/env` and not through the Windows
+/// process's variables: what counts is what the **Linux** process sees, and
+/// `wsl.exe` does not forward its caller's environment. `--exec` prevents an
+/// intermediate shell from re-splitting the arguments.
 pub fn terminal_argv(
     distro: &str,
     cwd: &str,
@@ -233,10 +233,10 @@ pub fn terminal_argv(
             args.push(program);
             args.extend(rest);
         }
-        // Le shell de connexion, et **en connexion** (`-l`) : c'est ce que
-        // fait tout terminal, et c'est ce qui lit `.profile` — sans quoi le
-        // `PATH` de l'utilisateur manquerait la moitié de ses outils, dont
-        // souvent l'agent qu'il veut lancer.
+        // The login shell, and **as a login shell** (`-l`): it is what every
+        // terminal does, and it is what reads `.profile` — otherwise the user's
+        // `PATH` would miss half their tools, often including the agent they
+        // want to launch.
         None => {
             args.push(login_shell.to_string());
             args.push("-l".into());
@@ -245,9 +245,9 @@ pub fn terminal_argv(
     ("wsl.exe".to_string(), args)
 }
 
-/// L'empreinte d'un contenu, en hexadécimal — FNV-1a 64 bits, comme celle des
-/// fichiers ouverts, et pour la même raison : elle doit être la même d'un
-/// binaire à l'autre.
+/// A content's digest, in hexadecimal — FNV-1a 64-bit, like the one for open
+/// files, and for the same reason: it has to be the same from one binary to the
+/// next.
 pub fn content_id(bytes: &[u8]) -> String {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -276,17 +276,17 @@ fn run(distro: &str, script: &str) -> Result<String> {
 
 fn wsl() -> Command {
     let mut cmd = Command::new("wsl.exe");
-    // Depuis WSL 0.64, cette variable rend les sorties de `wsl.exe` en UTF-8 ;
-    // sans elle, `--list` répond en UTF-16, d'où le repli de `decode`.
+    // Since WSL 0.64 this variable makes `wsl.exe` output UTF-8; without it,
+    // `--list` answers in UTF-16, hence `decode`'s fallback.
     cmd.env("WSL_UTF8", "1");
     cmd
 }
 
-/// Décode ce que `wsl.exe` écrit, en UTF-8 comme en UTF-16.
+/// Decodes what `wsl.exe` writes, in UTF-8 as in UTF-16.
 ///
-/// Les versions d'avant `WSL_UTF8` répondent en UTF-16 petit-boutiste, ce qui
-/// donne, lu comme de l'UTF-8, un nom sur deux caractères et un octet nul
-/// entre chaque lettre — une liste de distributions parfaitement illisible.
+/// Versions from before `WSL_UTF8` answer in little-endian UTF-16, which, read
+/// as UTF-8, gives a two-character name with a null byte between each letter —
+/// a perfectly unreadable list of distributions.
 fn decode(bytes: &[u8]) -> String {
     let body = bytes.strip_prefix(&[0xFF, 0xFE]).unwrap_or(bytes);
     let nuls = body.iter().filter(|b| **b == 0).count();
@@ -358,14 +358,14 @@ mod tests {
         );
         assert!(!script.contains('"'), "{script}");
         assert!(!script.contains('\''), "{script}");
-        // Le renommage atomique, et la purge de ce qui n'est plus le build
-        // courant.
+        // The atomic rename, and the purge of what is no longer the current
+        // build.
         assert!(script.contains(".part"), "{script}");
         assert!(script.contains("! -name ff"), "{script}");
     }
 
-    /// Un onglet ordinaire ouvre le shell de connexion dans le worktree, avec
-    /// ce que l'agent a besoin de savoir dans son environnement.
+    /// An ordinary tab opens the login shell in the worktree, with what the
+    /// agent needs to know in its environment.
     #[test]
     fn a_terminal_opens_the_login_shell_where_the_work_is() {
         let env = [("CLAUDHUB_WORKTREE".to_string(), "/home/a/p".to_string())];
@@ -387,8 +387,8 @@ mod tests {
         );
     }
 
-    /// Une commande explicite — un agent, une tâche `wt` — passe entière, ses
-    /// arguments compris : c'est elle qu'on a demandé à lancer.
+    /// An explicit command — an agent, a `wt` task — passes through whole,
+    /// arguments included: it is what we asked to launch.
     #[test]
     fn an_explicit_command_keeps_its_arguments() {
         let command = Some((
@@ -396,8 +396,8 @@ mod tests {
             vec!["-lc".to_string(), "composer install && exit".to_string()],
         ));
         let (_, args) = terminal_argv("Ubuntu", "/home/a/p", "/bin/sh", command, &[]);
-        // L'argument composé reste **un seul** élément : le re-découper le
-        // ferait exécuter de travers.
+        // The composed argument stays **one** element: re-splitting it would
+        // run it crooked.
         assert_eq!(args.last().unwrap(), "composer install && exit");
         assert_eq!(args[args.len() - 3], "sh");
         assert!(!args.contains(&"-l".to_string()));
@@ -421,8 +421,8 @@ mod tests {
             launch_argv("Ubuntu", "/home/a/s", None),
             vec!["wsl.exe", "-d", "Ubuntu", "--exec", "/home/a/s"]
         );
-        // Une chaîne vide n'est pas un répertoire : elle ferait un `--cd`
-        // sans argument, et `wsl.exe` avalerait `--exec` à sa place.
+        // An empty string is not a directory: it would make a `--cd` with no
+        // argument, and `wsl.exe` would swallow `--exec` in its place.
         assert_eq!(
             launch_argv("Ubuntu", "/home/a/s", Some("")),
             vec!["wsl.exe", "-d", "Ubuntu", "--exec", "/home/a/s"]
