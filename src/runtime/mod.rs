@@ -135,9 +135,15 @@ enum HandleInner {
     /// L'état d'avant la connexion, sous Windows, où les workers vivent dans
     /// une distribution qu'il faut d'abord réveiller. Jeter est le bon
     /// comportement : les faire attendre en file les livrerait toutes d'un
-    /// coup à l'ouverture, alors que la vue les redemandera d'elle-même — et
-    /// surtout, retomber sur des workers locaux ferait travailler `git.exe`
-    /// sur des chemins Windows, en silence et à côté de la plaque.
+    /// coup à l'ouverture, et retomber sur des workers locaux ferait
+    /// travailler `git.exe` sur des chemins Windows, en silence et à côté de
+    /// la plaque.
+    ///
+    /// **Corollaire, et il s'est payé** : ce qui n'est demandé qu'une fois, au
+    /// démarrage, ne revient pas tout seul. `ClaudhubApp::backend_ready` est
+    /// l'endroit où cela se rattrape, et il doit y reposer *tout* ce que la
+    /// fenêtre a demandé trop tôt — la liste des dépôts mémorisés y a manqué,
+    /// et une fenêtre Windows rouvrait vide à chaque lancement.
     Pending,
 }
 

@@ -254,12 +254,21 @@ impl ClaudhubApp {
         // Le serveur neuf ne sait rien de ce qu'on avait ouvert : on lui
         // redonne les dépôts, et la surveillance du worktree affiché. Le
         // reste — statut, diff — se redemande par les chemins habituels.
-        for main in self
-            .repos
-            .iter()
-            .map(|repo| repo.main.clone())
-            .collect::<Vec<_>>()
-        {
+        //
+        // **Deux sources, et il en faut deux.** Ceux qu'on avait ouverts, pour
+        // une relance après la mort du serveur ; et ceux que les réglages
+        // retiennent, pour le démarrage — `ClaudhubApp::new` les a demandés
+        // alors que le manche était encore vide, et ces commandes-là ont été
+        // jetées. Sans la seconde, une fenêtre Windows rouvrait toujours vide
+        // alors que la liste, elle, n'avait rien perdu.
+        let mut mains: Vec<std::path::PathBuf> =
+            self.repos.iter().map(|repo| repo.main.clone()).collect();
+        for path in Settings::global(cx).repositories.clone() {
+            if !mains.contains(&path) {
+                mains.push(path);
+            }
+        }
+        for main in mains {
             self.git.send(crate::runtime::Cmd::OpenRepo(main));
         }
         if let Some(active) = self.active.clone() {
