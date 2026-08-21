@@ -43,16 +43,37 @@ pub fn register_languages() {
     // Les injections décrivent le HTML qui entoure le PHP et le SQL des
     // chaînes de requête : sans elles, un fichier Blade ou une vue n'aurait de
     // couleurs que dans ses balises `<?php`.
+    let injections = format!("{}\n{HTML_INJECTION}", tree_sitter_php::INJECTIONS_QUERY);
     let php = LanguageConfig::new(
         "php",
         tree_sitter_php::LANGUAGE_PHP.into(),
         vec!["html".into(), "sql".into()],
         tree_sitter_php::HIGHLIGHTS_QUERY,
-        tree_sitter_php::INJECTIONS_QUERY,
+        &injections,
         "",
     );
     LanguageRegistry::singleton().register("php", &php);
 }
+
+/// L'injection HTML, écrite ici parce que la caisse ne la livre pas.
+///
+/// `tree_sitter_php::INJECTIONS_QUERY` est `queries/injections.scm`, et il ne
+/// couvre que phpdoc et les heredocs. Le HTML qui **entoure** le code — donc
+/// la totalité d'une vue Blade, et tout ce qui est hors `<?php` dans un
+/// fichier ordinaire — vit dans un second fichier, `queries/injections-text.scm`,
+/// que les liaisons Rust n'exposent sous aucune constante. Il fallait donc le
+/// recopier : sans lui, une vue arrivait entièrement grise, balises comprises,
+/// et rien ne le signalait — une injection qui ne trouve pas sa grammaire ne
+/// produit pas d'erreur, seulement du texte nu.
+///
+/// `injection.combined` réunit tous les fragments de texte en un seul arbre,
+/// ce qui est la seule lecture juste : une balise ouverte avant un `<?php` se
+/// referme après, et les traiter séparément ferait deux documents mal formés.
+const HTML_INJECTION: &str = r#"
+((text) @injection.content
+ (#set! injection.language "html")
+ (#set! injection.combined))
+"#;
 
 /// Les styles d'une ligne, en décalages d'octets relatifs à son texte.
 pub type LineStyles = Vec<(Range<usize>, HighlightStyle)>;
@@ -644,19 +665,99 @@ mod php_tests {
         assert!(!styles.line(0, 3).is_empty(), "la directive fermante aussi");
 
         // La ligne d'écho porte à la fois la balise HTML, vue par la
-        // grammaire, et les délimitateurs, vus par la surcouche.
+        // grammaire, et les délimitateurs, vus par la surcouche. Le `<td>`
+        // est ce qui a longtemps manqué sans que rien ne le dise : voir
+        // `html_tags_are_coloured_in_a_view`.
         let echo = styles.line(0, 2);
+        let text = &diff.hunks[0].lines[2].text;
+        let td = text.find("td").expect("la balise du test");
+        assert!(
+            echo.iter().any(|(range, _)| range.contains(&td)),
+            "la balise HTML n'est pas colorée : {echo:?}"
+        );
         assert!(echo.len() >= 3, "styles de l'écho : {echo:?}");
         let mut last = 0;
         for (range, _) in echo {
             assert!(range.start >= last, "plages non triées : {echo:?}");
             last = range.end;
         }
-        let text = &diff.hunks[0].lines[2].text;
         assert!(
             last <= text.len(),
             "un style déborde de sa ligne : {last} > {}",
             text.len()
+        );
+    }
+
+    /// Le HTML d'une vue est coloré par la grammaire, pas par la surcouche.
+    ///
+    /// Ce test manquait, et son absence a coûté : les liaisons Rust de la
+    /// caisse PHP n'exposent que `injections.scm` — phpdoc et heredocs —, si
+    /// bien que l'injection HTML n'était jamais chargée et qu'une vue entière
+    /// arrivait grise, balises comprises. Une injection qui ne trouve pas sa
+    /// grammaire ne produit aucune erreur : seul un test peut le dire.
+    #[test]
+    fn html_tags_are_coloured_in_a_view() {
+        register_languages();
+        let source = "<div class=\"card\">\n\
+                      <x-layout.app title=\"Devis\">\n\
+                      </x-layout.app>";
+        let diff = hunk_of(source);
+        let styles = DiffHighlights::compute(
+            Path::new("resources/views/devis.blade.php"),
+            &diff,
+            &HighlightTheme::default_dark(),
+        );
+
+        // La balise et son attribut, vus par la grammaire.
+        let div = styles.line(0, 0);
+        let text = &diff.hunks[0].lines[0].text;
+        for word in ["div", "class"] {
+            let at = text.find(word).expect(word);
+            assert!(
+                div.iter().any(|(range, _)| range.contains(&at)),
+                "« {word} » sans couleur : {div:?}"
+            );
+        }
+
+        // Le nom d'un composant pointé tient en **une** plage et une seule
+        // couleur : la grammaire, elle, y lirait une balise puis un attribut.
+        for line in [1, 2] {
+            let text = &diff.hunks[0].lines[line].text;
+            let dot = text.find(".app").expect("le point du composant");
+            let styled = styles.line(0, line);
+            let holding: Vec<_> = styled
+                .iter()
+                .filter(|(range, _)| range.contains(&dot))
+                .collect();
+            assert_eq!(holding.len(), 1, "ligne {line} : {styled:?}");
+            let name = text.find("x-layout").expect("le nom");
+            assert!(
+                holding[0].0.contains(&name),
+                "le nom du composant est coupé : {styled:?}"
+            );
+        }
+    }
+
+    /// Le même bénéfice hors Blade : un fichier PHP ordinaire mêle du HTML à
+    /// son code, et c'est la même injection qui le colore.
+    #[test]
+    fn html_outside_php_tags_is_coloured_too() {
+        register_languages();
+        let source = "<ul class=\"liste\">\n\
+                      <?php echo $x; ?>\n\
+                      </ul>";
+        let diff = hunk_of(source);
+        let styles = DiffHighlights::compute(
+            Path::new("resources/views/legacy.php"),
+            &diff,
+            &HighlightTheme::default_dark(),
+        );
+        let text = &diff.hunks[0].lines[0].text;
+        let at = text.find("ul").expect("la balise");
+        assert!(
+            styles.line(0, 0).iter().any(|(r, _)| r.contains(&at)),
+            "le HTML hors des balises PHP reste gris : {:?}",
+            styles.line(0, 0)
         );
     }
 

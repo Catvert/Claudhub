@@ -159,7 +159,11 @@ Quatre points qui ne se devinent pas :
   Le lecteur du client la traduit en `Evt::ServerHello` — le seul flux que la
   vue draine — qui porte ce que la vue ne peut pas savoir de sa machine à
   elle : le `cwd` du serveur (c'est lui qui vaut « lancé depuis son projet »),
-  son appartenance à WSL, ses `/etc/shells`.
+  son appartenance à WSL, ses `/etc/shells`. Ces derniers vont dans un
+  **statique** de `settings.rs` et non dans `ClaudhubApp` : le formulaire
+  déclare ses champs par des fermetures qui ne reçoivent qu'un `App`, ce qui
+  est déjà la raison d'être du global des réglages. Ils arrivent filtrés par
+  leur existence **là-bas**, que nous ne pouvons pas vérifier d'ici.
 - **`connect` ne bloque jamais l'appelant** : un `wsl.exe` froid met des
   secondes, et c'est le thread d'interface qui appelle. Tout ce qui suit le
   lancement — poignée de main comprise — arrive en événements.
@@ -2164,22 +2168,40 @@ les styles du prologue, n'appartenant à aucune d'elles, s'ignorent d'eux-mêmes
 
 **Une vue Blade est du HTML avant d'être du PHP** (`ui::blade`). Aucune
 grammaire tree-sitter n'en est publiée, et la grammaire PHP ne voit dans
-`@foreach` ou `{{ $x }}` que du texte : la vue arrivait avec ses balises
-colorées et tout le vocabulaire de Blade en gris. La grammaire colore donc ce
-qu'elle sait lire, puis `blade::overlay` repasse dessus les directives, les
-échos et les commentaires — un scanner à la main, assumé comme tel. Deux
-conséquences à retenir : un `.blade.php` ne reçoit **jamais** de prologue, sinon
-ses balises seraient lues comme du code ; et un rôle Blade se traduit en style
-par une **liste de noms**, du plus juste au plus sûrement présent, parce que nos
+`@foreach` ou `{{ $x }}` que du texte. La grammaire colore donc ce qu'elle
+sait lire — HTML compris, par injection —, puis `blade::overlay` repasse
+dessus les directives, les échos, les commentaires et les **balises de
+composant** : un scanner à la main, assumé comme tel. Trois conséquences à
+retenir : un `.blade.php` ne reçoit **jamais** de prologue, sinon ses balises
+seraient lues comme du code ; un rôle Blade se traduit en style par une
+**liste de noms**, du plus juste au plus sûrement présent, parce que nos
 thèmes ne définissent ni `punctuation` ni `operator` — sans repli, les
-délimiteurs d'un écho restaient invisibles. `blade::tests::every_scope_resolves_to_a_colour`
-le vérifie, et `keys_of` compare désormais aussi les styles de coloration d'un
-thème à l'autre.
+délimiteurs d'un écho restaient invisibles ;
+`blade::tests::every_scope_resolves_to_a_colour` le vérifie, et `keys_of`
+compare désormais aussi les styles de coloration d'un thème à l'autre.
+
+**Un nom de composant pointé appartient à la surcouche.** La grammaire HTML ne
+connaît pas de nom de balise avec un point : dans `<x-layout.app>` elle lit
+`x-layout` comme une balise et `.app` comme un **attribut**, et le nom se coupe
+en deux couleurs en son milieu. Les composants d'un projet Laravel vivant en
+sous-dossiers, le point y est la règle : `blade::component` repeint donc le nom
+entier d'un seul tenant — `<x-…>`, `</x-…>` et `<livewire:…>` —, dans la
+couleur d'une balise et non dans une couleur à eux, un composant *étant* une
+balise pour qui lit la vue.
 
 PHP n'est pas dans les grammaires que gpui-component embarque, et c'est le
 langage de la moitié des dépôts qu'on relit : `highlight::register_languages`
-le déclare dans le registre partagé au démarrage, avec ses injections HTML et
-SQL. À appeler avant tout rendu — le registre est un singleton verrouillé.
+le déclare dans le registre partagé au démarrage. À appeler avant tout rendu —
+le registre est un singleton verrouillé.
+
+**L'injection HTML est recopiée chez nous** (`highlight::HTML_INJECTION`), et
+ce n'est pas un détail : `tree_sitter_php::INJECTIONS_QUERY` est
+`queries/injections.scm`, qui ne couvre que phpdoc et les heredocs. Le HTML
+qui *entoure* le code vit dans un second fichier, `queries/injections-text.scm`,
+que les liaisons Rust n'exposent sous aucune constante. Tant qu'on ne le
+passait pas, **toute vue arrivait grise, balises comprises** — une injection
+qui ne trouve pas sa grammaire ne produit aucune erreur, seulement du texte
+nu, et c'est pourquoi `html_tags_are_coloured_in_a_view` existe.
 
 `SyntaxHighlighter::new` compile les requêtes de la grammaire — près de
 quarante millisecondes pour JavaScript. Jamais dans un `render`, et **une seule

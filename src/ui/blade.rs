@@ -115,6 +115,8 @@ fn scan(line: &str, open_comment: &mut bool) -> Vec<(Range<usize>, Scope)> {
             i += len;
         } else if let Some(len) = echo(rest, "{{", "}}", &mut out, i) {
             i += len;
+        } else if let Some(len) = component(rest, &mut out, i) {
+            i += len;
         } else if rest.starts_with("@@") {
             // `@@if` est la façon d'écrire un `@if` littéral : ce n'est pas
             // une directive, et le signaler comme telle serait faux.
@@ -140,6 +142,8 @@ enum Scope {
     /// Ce que Blade fait évaluer par PHP — l'intérieur d'un écho, l'argument
     /// d'une directive.
     Expression,
+    /// Le nom d'une balise de composant : `<x-forms.input>`, `<livewire:…>`.
+    Component,
 }
 
 impl Scope {
@@ -154,12 +158,47 @@ impl Scope {
             Scope::Directive => &["keyword"],
             Scope::Delimiter => &["punctuation.special", "tag"],
             Scope::Expression => &["embedded", "variable"],
+            // La couleur d'une balise, et non une couleur à eux : un
+            // composant *est* une balise pour qui lit la vue, et lui en
+            // donner une autre ferait croire à une construction différente.
+            Scope::Component => &["tag", "keyword"],
         }
     }
 
     fn style(self, theme: &HighlightTheme) -> Option<gpui::HighlightStyle> {
         self.candidates().iter().find_map(|name| theme.style(name))
     }
+}
+
+/// Le nom d'une balise de composant : `<x-forms.input>`, `</x-layout.app>`,
+/// `<livewire:compteur>`. Rend la longueur consommée, délimiteurs compris.
+///
+/// **Le point est la raison d'être de ce cas.** La grammaire HTML ne connaît
+/// pas de nom de balise pointé : dans `<x-layout.app>` elle lit `x-layout`
+/// comme une balise et `.app` comme un **attribut**, si bien que le nom du
+/// composant se coupe en deux couleurs en son milieu. Or les composants d'un
+/// projet Laravel vivent en sous-dossiers, et le point y est donc la règle
+/// plutôt que l'exception.
+///
+/// Le nom entier est repeint d'un seul tenant, ce qui recouvre au passage la
+/// lecture fautive de la grammaire — `apply` retire ce qui chevauche.
+fn component(rest: &str, out: &mut Vec<(Range<usize>, Scope)>, at: usize) -> Option<usize> {
+    let after_bracket = rest.strip_prefix('<')?;
+    let (closing, name) = match after_bracket.strip_prefix('/') {
+        Some(name) => (1, name),
+        None => (0, after_bracket),
+    };
+    // Les deux préfixes que Laravel se réserve. Tout le reste est du HTML
+    // ordinaire, que la grammaire lit très bien elle-même.
+    if !name.starts_with("x-") && !name.starts_with("livewire:") {
+        return None;
+    }
+    let len = name
+        .find(|c: char| !(c.is_alphanumeric() || matches!(c, '-' | '.' | ':' | '_')))
+        .unwrap_or(name.len());
+    let start = at + 1 + closing;
+    out.push((start..start + len, Scope::Component));
+    Some(1 + closing + len)
 }
 
 /// Un écho `{{ … }}` ou `{!! … !!}`. Rend la longueur consommée.
@@ -449,6 +488,7 @@ mod tests {
                 Scope::Directive,
                 Scope::Delimiter,
                 Scope::Expression,
+                Scope::Component,
             ] {
                 assert!(
                     scope.style(&theme).is_some(),
@@ -457,6 +497,50 @@ mod tests {
                     scope.candidates()
                 );
             }
+        }
+    }
+
+    /// Le cas que la grammaire HTML ne sait pas lire : un nom de composant
+    /// pointé, qu'elle coupe en une balise et un attribut.
+    #[test]
+    fn a_dotted_component_name_is_one_range() {
+        let mut open = false;
+        let line = "<x-layout.app title=\"Devis\">";
+        let found = scan(line, &mut open);
+        let component: Vec<_> = found
+            .iter()
+            .filter(|(_, scope)| *scope == Scope::Component)
+            .collect();
+        assert_eq!(component.len(), 1, "{found:?}");
+        assert_eq!(&line[component[0].0.clone()], "x-layout.app");
+        // L'attribut qui suit n'est pas à nous : la grammaire le colore bien.
+        assert!(!line[component[0].0.clone()].contains("title"));
+    }
+
+    #[test]
+    fn a_closing_component_and_livewire_count_too() {
+        let mut open = false;
+        let line = "</x-forms.input><livewire:compteur :n=\"$n\" />";
+        let found: Vec<_> = scan(line, &mut open)
+            .into_iter()
+            .filter(|(_, scope)| *scope == Scope::Component)
+            .map(|(range, _)| line[range].to_string())
+            .collect();
+        assert_eq!(found, vec!["x-forms.input", "livewire:compteur"]);
+    }
+
+    /// Une balise ordinaire appartient à la grammaire, qui la lit très bien :
+    /// la surcouche n'a pas à y toucher, sous peine de recouvrir des styles
+    /// plus fins que les siens.
+    #[test]
+    fn an_ordinary_tag_is_left_to_the_grammar() {
+        let mut open = false;
+        for line in ["<div class=\"x\">", "</section>", "<xml-ish>", "a < b"] {
+            let found = scan(line, &mut open);
+            assert!(
+                !found.iter().any(|(_, scope)| *scope == Scope::Component),
+                "{line} : {found:?}"
+            );
         }
     }
 

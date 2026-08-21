@@ -774,8 +774,34 @@ pub fn parse_shells(text: &str) -> Vec<String> {
     shells
 }
 
+/// Les shells que le serveur distant a annoncés dans sa poignée de main.
+///
+/// Un statique, et non un champ de `ClaudhubApp` : le formulaire déclare
+/// chaque champ par des fermetures qui ne reçoivent qu'un `App`, sans accès à
+/// l'entité racine — c'est déjà ce qui a mis les réglages dans un global.
+/// Vide en mode local, où `/etc/shells` est le bon fichier.
+static SERVER_SHELLS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+/// Retient ce que le serveur vient d'annoncer. Rappelé à chaque poignée de
+/// main, reconnexions comprises : on change parfois de distro entre deux.
+pub fn set_server_shells(shells: Vec<String>) {
+    if let Ok(mut current) = SERVER_SHELLS.write() {
+        *current = shells;
+    }
+}
+
 /// Shells proposés : ceux du système qui existent encore sur le disque.
+///
+/// Ceux du **serveur** quand il y en a un : c'est sa machine qui lancera le
+/// shell, et la nôtre n'a pas les mêmes — sous Windows elle n'a même pas
+/// d'`/etc/shells`. Ils arrivent déjà filtrés par leur existence là-bas, ce
+/// que nous ne pourrions pas vérifier d'ici.
 pub fn available_shells() -> Vec<String> {
+    if let Ok(shells) = SERVER_SHELLS.read() {
+        if !shells.is_empty() {
+            return shells.clone();
+        }
+    }
     let text = std::fs::read_to_string("/etc/shells").unwrap_or_default();
     parse_shells(&text)
         .into_iter()

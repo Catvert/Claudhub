@@ -1493,11 +1493,14 @@ impl ClaudhubApp {
                 build,
                 cwd,
                 running_under_wsl,
-                shells: _,
+                shells,
             } => {
                 log::info!("serveur distant prêt (build {build})");
                 self.server_lost = None;
                 self.server_wsl = running_under_wsl;
+                // C'est le serveur qui lancera les shells : ce sont les siens
+                // que le formulaire doit proposer, pas ceux de cette machine.
+                crate::ui::settings::set_server_shells(shells);
                 // Le « lancé depuis son projet » du mode distant : c'est le
                 // répertoire du serveur qui le dit, pas le nôtre.
                 self.git.send(Cmd::OpenIfRepo(cwd));
