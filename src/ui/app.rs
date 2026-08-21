@@ -2990,11 +2990,23 @@ impl ClaudhubApp {
     }
 
     pub(super) fn toggle_terminal_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.toggle_panel(super::panels::TerminalPanel::NAME, cx);
-        // Showing them when there is none to show would be a gesture with no
-        // effect: the first one is opened on demand, never when a worktree is.
+        let worktree = self.active.clone();
+        // Nothing open yet: the button **shows**, whatever the flag said. The
+        // flag is on by default and there is no terminal at startup, so a plain
+        // toggle would spend the first click hiding an emptiness — a button
+        // that does nothing, which is how one concludes it is broken.
+        let empty = worktree
+            .as_deref()
+            .is_some_and(|worktree| self.terminals_of(worktree).is_empty());
+        if empty {
+            self.set_panel_visible(super::panels::TerminalPanel::NAME, true, cx);
+        } else {
+            self.toggle_panel(super::panels::TerminalPanel::NAME, cx);
+        }
+        // The first one is opened on demand, never when a worktree is: a shell
+        // nobody asked for is a process nobody asked for.
         if self.terminal_visible(cx) {
-            if let Some(worktree) = self.active.clone() {
+            if let Some(worktree) = worktree {
                 self.ensure_terminal(&worktree, window, cx);
             }
         }

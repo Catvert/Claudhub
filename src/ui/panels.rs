@@ -399,10 +399,18 @@ pub struct TerminalPanel {
 impl TerminalPanel {
     pub const NAME: &'static str = "ClaudhubTerminal";
 
+    /// `visible` is **given** and not read off the application.
+    ///
+    /// A terminal is opened from inside an `update` on `ClaudhubApp`, so the
+    /// entity is out of the table while this runs: reading it there panics with
+    /// "cannot read … while it is already being updated". Its caller holds a
+    /// `&self` on the application and knows the answer; the observation below
+    /// takes over from the next change.
     pub fn new(
         app: &Entity<ClaudhubApp>,
         worktree: std::path::PathBuf,
         view: Entity<crate::ui::terminal_view::TerminalView>,
+        visible: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let mine = worktree.clone();
@@ -420,7 +428,7 @@ impl TerminalPanel {
         cx.observe(&view, |_, _, cx| cx.notify()).detach();
         Self {
             app: app.downgrade(),
-            visible: app.read(cx).terminal_shown(&worktree, cx),
+            visible,
             worktree,
             view,
             group: None,
@@ -494,7 +502,14 @@ impl BasePanel for TerminalPanel {
         let Some(app) = self.app.upgrade() else {
             return;
         };
-        app.update(cx, |app, cx| app.close_terminal(id, window, cx));
+        // **Deferred**, and it is not a precaution: `on_removed` is called from
+        // inside the dock's own edit, and taking the four other faces down goes
+        // back through `DockArea::remove_panel` — including this area, which is
+        // in the middle of being updated. Straight through, that is the panic
+        // that reads "cannot update … while it is already being updated".
+        cx.defer_in(window, move |_, window, cx| {
+            app.update(cx, |app, cx| app.close_terminal(id, window, cx));
+        });
     }
 
     /// What `layout.json` keeps of a terminal: where it worked.

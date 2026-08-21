@@ -2000,6 +2000,19 @@ Sept points, et aucun ne se devine :
 - **Le « + » est descendu dans la barre d'état**, à côté de la bascule des
   terminaux : la barre du groupe n'existe plus, et celle du dock n'a pas de
   place pour un bouton.
+- **Un panneau de terminal ne lit pas l'application à sa construction.** Il est
+  bâti au milieu d'un `update` sur `ClaudhubApp`, donc l'entité est sortie de la
+  table : `app.read(cx)` y panique (« cannot read … while it is already being
+  updated »). Sa visibilité initiale lui est **donnée** par l'appelant, qui la
+  connaît, et l'observation prend le relais — même motif que le cache de
+  visibilité des autres panneaux.
+- **La fermeture est différée.** `on_removed` est appelé depuis l'édition du
+  dock lui-même, et emporter les quatre autres faces repasse par
+  `DockArea::remove_panel`, y compris sur l'aire en cours de modification. En
+  direct, c'est la panique jumelle de la précédente.
+- **La bascule ouvre quand il n'y a rien à montrer.** Le drapeau est vrai par
+  défaut et aucun terminal n'existe au démarrage : une bascule ordinaire
+  passerait le premier clic à masquer du vide, c'est-à-dire à ne rien faire.
 - **Montrer un terminal n'est pas lui donner le focus.** `reveal_terminal`
   passe par `TerminalPanel::activate`, qui demande à son `TabGroup` de
   sélectionner son onglet — un message livré dans un onglet caché est un message

@@ -1118,11 +1118,16 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         let app = cx.entity();
+        // Computed here and handed over: the panels are built inside this
+        // `update`, so they cannot read the application to find out for
+        // themselves — the entity is out of the table while this runs.
+        let visible = self.terminal_shown(&worktree, cx);
         let mut panels = Vec::new();
         for _ in crate::ui::workspace::Workspace::ALL {
             let (app, worktree, view) = (app.clone(), worktree.clone(), view.clone());
-            panels
-                .push(cx.new(|cx| crate::ui::panels::TerminalPanel::new(&app, worktree, view, cx)));
+            panels.push(cx.new(|cx| {
+                crate::ui::panels::TerminalPanel::new(&app, worktree, view, visible, cx)
+            }));
         }
         self.terminals.push(OpenTerminal {
             worktree: worktree.clone(),
