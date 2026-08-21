@@ -135,9 +135,8 @@ impl ClaudhubApp {
         let (Some(text), Some(worktree)) = (self.issue_prompt(), self.active.clone()) else {
             return;
         };
-        let group = self.terminal_group(&worktree, window, cx);
-        group.update(cx, |group, cx| group.send_to_agent(text, window, cx));
         self.show_terminal_panel(window, cx);
+        self.send_to_agent(&worktree, text, window, cx);
     }
 
     /// Opens a worktree for this issue, and starts the agent there with the
@@ -184,9 +183,8 @@ impl ClaudhubApp {
             return;
         };
         self.select_worktree(path.clone(), window, cx);
-        let group = self.terminal_group(&path, window, cx);
-        group.update(cx, |group, cx| group.send_to_agent(text, window, cx));
         self.show_terminal_panel(window, cx);
+        self.send_to_agent(&path, text, window, cx);
     }
 
     /// Opens a frame's file, at its line.

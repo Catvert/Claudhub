@@ -34,10 +34,6 @@ use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
 use crate::ui::panels;
 
-/// The terminals' initial height, the same on every screen: what is read
-/// there is of the same nature everywhere.
-const TERMINAL_HEIGHT: gpui::Pixels = px(220.);
-
 /// The initial width of the left column.
 const SIDEBAR_WIDTH: gpui::Pixels = px(280.);
 
@@ -70,6 +66,12 @@ pub enum Workspace {
 }
 
 impl Workspace {
+    /// Its rank in `ALL`, which is how a terminal's five panels are indexed —
+    /// one per screen, in this order.
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|w| *w == self).unwrap_or(0)
+    }
+
     pub const ALL: [Workspace; 5] = [
         Workspace::Review,
         Workspace::Files,
@@ -181,25 +183,13 @@ impl Workspace {
 /// `panel_handle` prevents.
 type View = std::sync::Arc<dyn gpui_component::dock::BasePanelView>;
 
-/// A centre's content, with the terminals underneath.
+/// The terminals are **no longer part of the default layout**.
 ///
-/// The terminals live in the **centre** and not in a dock zone: the last panel
-/// of a zone does not move, so a zone containing only one is frozen. Under the
-/// centre, the stack holds two — it can be dragged.
-fn with_terminal(
-    content: DockLayout,
-    terminal: View,
-    height: gpui::Pixels,
-    cx: &mut Context<DockArea>,
-) -> DockLayout {
-    DockLayout::v_split()
-        .child(content, Some(height - TERMINAL_HEIGHT))
-        .child(
-            DockLayout::tabs().panel_view(terminal, cx),
-            Some(TERMINAL_HEIGHT),
-        )
-}
-
+/// They used to be one permanent panel per screen, placed here under the
+/// centre. Each terminal is a panel of its own now — that is what lets it be
+/// dragged into a split — and there is none to place until one is opened:
+/// `ClaudhubApp::open_terminal` puts the first one in exactly this slot, under
+/// the whole centre, and the ones after it in its tab group.
 /// Builds the panels a screen needs, and installs its initial layout.
 ///
 /// Each screen has **its** instances, including of the two shared views: a
@@ -247,35 +237,30 @@ pub fn install_default_layout(
                     DockLayout::tabs().panel_view(panel!(BranchesPanel), cx),
                     Some(third),
                 );
-            let center = with_terminal(
-                DockLayout::h_split()
-                    // The ways of choosing what to review: what is left to do
-                    // and what we had to say, what changes now, what the branch
-                    // wrote, what is already committed. Tabs and not panels
-                    // side by side — they answer the same question.
-                    .child(
-                        DockLayout::tabs()
-                            // Notes first: they say where you stand, where the
-                            // ones after say what there is to read. That is
-                            // where you pick up a worktree left yesterday.
-                            .panel_view(panel!(NotesPanel), cx)
-                            .panel_view(panel!(ChangesPanel), cx)
-                            .panel_view(panel!(BranchPanel), cx)
-                            .panel_view(panel!(HistoryPanel), cx)
-                            // Hidden while there is nothing to resolve: a
-                            // permanent tab would shift the others aside to
-                            // serve one time in a hundred.
-                            .panel_view(panel!(ConflictsPanel), cx),
-                        Some(REVIEW_LIST_WIDTH),
-                    )
-                    .child(
-                        DockLayout::tabs().panel_view(panel!(DiffPanel), cx),
-                        Some(width - REVIEW_LIST_WIDTH),
-                    ),
-                panel!(TerminalPanel),
-                height,
-                cx,
-            );
+            // The ways of choosing what to review: what is left to do and what
+            // we had to say, what changes now, what the branch wrote, what is
+            // already committed. Tabs and not panels side by side — they answer
+            // the same question.
+            let center = DockLayout::h_split()
+                .child(
+                    DockLayout::tabs()
+                        // Notes first: they say where you stand, where the ones
+                        // after say what there is to read. That is where you
+                        // pick up a worktree left yesterday.
+                        .panel_view(panel!(NotesPanel), cx)
+                        .panel_view(panel!(ChangesPanel), cx)
+                        .panel_view(panel!(BranchPanel), cx)
+                        .panel_view(panel!(HistoryPanel), cx)
+                        // Hidden while there is nothing to resolve: a permanent
+                        // tab would shift the others aside to serve one time in
+                        // a hundred.
+                        .panel_view(panel!(ConflictsPanel), cx),
+                    Some(REVIEW_LIST_WIDTH),
+                )
+                .child(
+                    DockLayout::tabs().panel_view(panel!(DiffPanel), cx),
+                    Some(width - REVIEW_LIST_WIDTH),
+                );
             (Some(left), center)
         }
         // Editing: the project tree under the repositories, the editor in the
@@ -291,12 +276,7 @@ pub fn install_default_layout(
                     DockLayout::tabs().panel_view(panel!(FilesPanel), cx),
                     Some(height * 0.62),
                 );
-            let center = with_terminal(
-                DockLayout::tabs().panel_view(panel!(EditorPanel), cx),
-                panel!(TerminalPanel),
-                height,
-                cx,
-            );
+            let center = DockLayout::tabs().panel_view(panel!(EditorPanel), cx);
             (Some(left), center)
         }
         // The databases: the schema tree under the repositories, the console in
@@ -312,24 +292,14 @@ pub fn install_default_layout(
                     DockLayout::tabs().panel_view(panel!(DbPanel), cx),
                     Some(height * 0.62),
                 );
-            let center = with_terminal(
-                DockLayout::tabs().panel_view(panel!(ConsolePanel), cx),
-                panel!(TerminalPanel),
-                height,
-                cx,
-            );
+            let center = DockLayout::tabs().panel_view(panel!(ConsolePanel), cx);
             (Some(left), center)
         }
         // Sentry stands alone: the issue list and the trace of the one opened
         // are two halves of a single panel.
         Workspace::Sentry => {
             let left = DockLayout::tabs().panel_view(panel!(SidebarPanel), cx);
-            let center = with_terminal(
-                DockLayout::tabs().panel_view(panel!(SentryPanel), cx),
-                panel!(TerminalPanel),
-                height,
-                cx,
-            );
+            let center = DockLayout::tabs().panel_view(panel!(SentryPanel), cx);
             (Some(left), center)
         }
         // The settings take the whole width: the form has a sidebar of its own,
@@ -337,12 +307,7 @@ pub fn install_default_layout(
         // finding the field. The terminals stay underneath — a setting is
         // adjusted then checked, and what checks it is a shell.
         Workspace::Settings => {
-            let center = with_terminal(
-                DockLayout::tabs().panel_view(panel!(SettingsPanel), cx),
-                panel!(TerminalPanel),
-                height,
-                cx,
-            );
+            let center = DockLayout::tabs().panel_view(panel!(SettingsPanel), cx);
             (None, center)
         }
     };

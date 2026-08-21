@@ -730,11 +730,13 @@ pub fn new_terminal(
     let Some(worktree) = this.active_path() else {
         return;
     };
-    let group = this.terminal_group(&worktree, window, cx);
-    group.update(cx, |group, cx| {
-        group.open(crate::ui::terminal_view::Launch::shell(), window, cx);
-    });
     this.show_terminal_panel(window, cx);
+    this.open_terminal(
+        &worktree,
+        crate::ui::terminal_view::Launch::shell(),
+        window,
+        cx,
+    );
 }
 
 pub fn close_terminal(
@@ -746,11 +748,7 @@ pub fn close_terminal(
     let Some(worktree) = this.active_path() else {
         return;
     };
-    let group = this.terminal_group(&worktree, window, cx);
-    group.update(cx, |group, cx| {
-        let index = group.active_index();
-        group.close(index, window, cx);
-    });
+    this.close_focused_terminal(&worktree, window, cx);
 }
 
 pub fn toggle_terminal(
@@ -771,8 +769,7 @@ pub fn next_terminal(
     let Some(worktree) = this.active_path() else {
         return;
     };
-    let group = this.terminal_group(&worktree, window, cx);
-    group.update(cx, |group, cx| group.next(window, cx));
+    this.step_terminal(&worktree, 1, window, cx);
 }
 
 pub fn open_settings(
@@ -1176,8 +1173,7 @@ pub fn previous_terminal(
     let Some(worktree) = this.active_path() else {
         return;
     };
-    let group = this.terminal_group(&worktree, window, cx);
-    group.update(cx, |group, cx| group.previous(window, cx));
+    this.step_terminal(&worktree, -1, window, cx);
 }
 
 pub fn select_worktree(

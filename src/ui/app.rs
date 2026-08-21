@@ -32,7 +32,7 @@ use crate::ui::diff_view::Rendered;
 use crate::ui::icons::icon;
 use crate::ui::settings::Settings;
 use crate::ui::store::Store;
-use crate::ui::terminal_view::TerminalGroup;
+use crate::ui::terminal_view::OpenTerminal;
 
 /// Version of the saved layout. To be incremented when the panels change name or
 /// nature, so gpui-component discards a layout it could no longer rebuild.
@@ -44,7 +44,7 @@ use crate::ui::terminal_view::TerminalGroup;
 // 11: the screens. The file no longer carries one layout but one per screen, and the
 // central panel split into three — a file from before has neither the shape nor
 // the names needed.
-const LAYOUT_VERSION: usize = 11;
+const LAYOUT_VERSION: usize = 12;
 
 /// The saved layouts, one per screen.
 ///
@@ -80,6 +80,42 @@ fn load_layouts() -> Layouts {
             Layouts::default()
         }
     }
+}
+
+/// Takes the terminals out of a layout about to be written.
+///
+/// A terminal is the one panel whose content is a process, and `layout.json` is
+/// read on the next launch, when that process is long gone. A group left empty
+/// by the pruning goes too, otherwise the window would reopen with a bare tab
+/// bar where the terminals used to be.
+///
+/// Returns whether the node itself should be dropped by its parent.
+fn prune_terminals(state: &mut gpui_component::dock::PanelState) -> bool {
+    if state.panel_name == super::panels::TerminalPanel::NAME {
+        return true;
+    }
+    if state.children.is_empty() {
+        return false;
+    }
+    let doomed: Vec<usize> = state
+        .children
+        .iter_mut()
+        .enumerate()
+        .filter_map(|(ix, child)| prune_terminals(child).then_some(ix))
+        .collect();
+    for ix in doomed.into_iter().rev() {
+        state.children.remove(ix);
+        // A stack's sizes are positional: dropping a child without its size
+        // shifts every size that follows on to the wrong pane.
+        if let gpui_component::dock::PanelInfo::Stack { sizes, .. } = &mut state.info {
+            if ix < sizes.len() {
+                sizes.remove(ix);
+            }
+        }
+    }
+    // An empty container is not a container: only a leaf legitimately has no
+    // child, and a leaf is not what we have just emptied.
+    state.children.is_empty()
 }
 
 fn save_layouts(layouts: &Layouts) {
@@ -289,7 +325,10 @@ pub struct ClaudhubApp {
     /// The selected worktree: the key to almost everything else.
     pub(super) active: Option<PathBuf>,
     pub(super) review: HashMap<PathBuf, ReviewState>,
-    pub(super) terminals: HashMap<PathBuf, Entity<TerminalGroup>>,
+    /// Every open terminal, in the order they were opened, all worktrees
+    /// together. Each is a dock panel per screen sharing one pty — see
+    /// `terminal_view::Terminal`.
+    pub(super) terminals: Vec<OpenTerminal>,
     pub(super) commit_input: Entity<TextareaState>,
     /// The comparison base's selector. It is searchable: a living repository has
     /// dozens of branches, and scrolling a list of seventy entries to find one
@@ -683,7 +722,7 @@ impl ClaudhubApp {
             server_wsl: false,
             active: None,
             review: HashMap::new(),
-            terminals: HashMap::new(),
+            terminals: Vec::new(),
             commit_input,
             base_select,
             note_input,
@@ -1014,7 +1053,13 @@ impl ClaudhubApp {
                         .docks
                         .iter()
                         .map(|(workspace, area)| {
-                            (workspace.key().to_string(), area.read(cx).dump(cx))
+                            let mut state = area.read(cx).dump(cx);
+                            // The terminals are taken out before writing: a
+                            // terminal is a **process**, and a layout is read
+                            // long after that process has died. Rebuilding one
+                            // from its name would be a tab showing nothing.
+                            prune_terminals(&mut state.center);
+                            (workspace.key().to_string(), state)
                         })
                         .collect(),
                 };
@@ -1448,7 +1493,7 @@ impl ClaudhubApp {
             if !self.worktree_exists(&active) {
                 self.active = None;
                 self.review.remove(&active);
-                self.terminals.remove(&active);
+                self.close_terminals_of(&active, window, cx);
                 if let Some(first) = self.first_worktree() {
                     self.select_worktree(first, window, cx);
                 }
@@ -2589,6 +2634,77 @@ impl ClaudhubApp {
                         this.toggle_terminal_panel(window, cx);
                     })),
             )
+            // Opening one is not showing them, and the two used to be one
+            // gesture only because the terminals had a bar of their own with a
+            // `+` in it. That bar is the dock's now, and the dock has no room
+            // for a button: it comes here, beside the toggle it belongs with.
+            .when(self.terminal_visible(cx) && self.active.is_some(), |el| {
+                el.child(self.render_new_terminal(cx))
+            })
+    }
+
+    /// The "+" of the terminals: a shell, or one of the agent profiles.
+    ///
+    /// One entry per profile, as the group's bar used to offer: the menu is the
+    /// only place the choice arises, and a list coming from the settings saves
+    /// reopening them to launch something else.
+    fn render_new_terminal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        Button::new("new-terminal")
+            .ghost()
+            .xsmall()
+            .flex_shrink_0()
+            .icon(icon("plus"))
+            .tooltip(tr!("terminal-new"))
+            .dropdown_menu({
+                let entity = cx.entity();
+                move |menu, _window, cx| {
+                    let shell = entity.clone();
+                    let profiles = Settings::global(cx).terminal.agents.clone();
+                    let menu = menu.item(
+                        gpui_component::menu::PopupMenuItem::new(tr!("terminal-new"))
+                            .icon(icon("plus"))
+                            .on_click(move |_, window, cx| {
+                                shell.update(cx, |this, cx| {
+                                    let Some(worktree) = this.active.clone() else {
+                                        return;
+                                    };
+                                    this.open_terminal(
+                                        &worktree,
+                                        crate::ui::terminal_view::Launch::shell(),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }),
+                    );
+                    if profiles.is_empty() {
+                        return menu;
+                    }
+                    profiles
+                        .into_iter()
+                        .fold(menu.separator(), |menu, profile| {
+                            let entity = entity.clone();
+                            let label = SharedString::from(profile.label().to_string());
+                            menu.item(
+                                gpui_component::menu::PopupMenuItem::new(label)
+                                    .icon(icon("bot"))
+                                    .on_click(move |_, window, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            let Some(worktree) = this.active.clone() else {
+                                                return;
+                                            };
+                                            this.open_terminal(
+                                                &worktree,
+                                                crate::ui::terminal_view::Launch::agent(&profile),
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    }),
+                            )
+                        })
+                }
+            })
     }
 }
 
@@ -2792,8 +2908,23 @@ impl ClaudhubApp {
         self.panel_visible(super::panels::TerminalPanel::NAME)
     }
 
-    pub(super) fn show_terminal_panel(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    /// Whether *this* worktree's terminals are on screen.
+    ///
+    /// Two conditions, and the second is what makes a terminal keep its place:
+    /// the terminals of the worktrees one is not looking at stay in the dock's
+    /// tree, invisible. A `TabGroup` renders no tab for an invisible panel and
+    /// closes itself when none is left, so a zone empties and fills again with
+    /// nothing moved — which is why a terminal dragged into a split is still
+    /// there after a round trip through another worktree.
+    pub(super) fn terminal_shown(&self, worktree: &Path, cx: &App) -> bool {
+        self.terminal_visible(cx) && self.active.as_deref() == Some(worktree)
+    }
+
+    pub(super) fn show_terminal_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.set_panel_visible(super::panels::TerminalPanel::NAME, true, cx);
+        if let Some(worktree) = self.active.clone() {
+            self.ensure_terminal(&worktree, window, cx);
+        }
     }
 
     /// A view is visible until it has been hidden.
@@ -2835,12 +2966,7 @@ impl ClaudhubApp {
     /// to name an area before zooming would be one more gesture for an intention
     /// that is never ambiguous.
     fn zoom_zone(&self, window: &Window, cx: &App) -> crate::ui::settings::Zoom {
-        let terminal_focused = self
-            .active
-            .as_ref()
-            .and_then(|worktree| self.terminals.get(worktree))
-            .is_some_and(|group| group.read(cx).is_focused(window, cx));
-        if terminal_focused {
+        if self.terminal_focused(window, cx) {
             crate::ui::settings::Zoom::Terminal
         } else {
             crate::ui::settings::Zoom::Diff
@@ -2863,8 +2989,15 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    pub(super) fn toggle_terminal_panel(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn toggle_terminal_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.toggle_panel(super::panels::TerminalPanel::NAME, cx);
+        // Showing them when there is none to show would be a gesture with no
+        // effect: the first one is opened on demand, never when a worktree is.
+        if self.terminal_visible(cx) {
+            if let Some(worktree) = self.active.clone() {
+                self.ensure_terminal(&worktree, window, cx);
+            }
+        }
     }
 
     /// Shows or hides the left zone — repositories, branches, files.

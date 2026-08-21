@@ -592,7 +592,7 @@ impl ClaudhubApp {
         // into a loss.
         for worktree in &closed {
             self.review.remove(worktree);
-            self.terminals.remove(worktree);
+            self.close_terminals_of(worktree, window, cx);
             self.summaries.remove(worktree);
         }
         if self

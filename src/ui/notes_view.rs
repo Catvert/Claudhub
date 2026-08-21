@@ -681,9 +681,8 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let group = self.terminal_group(&worktree, window, cx);
-        group.update(cx, |group, cx| group.send_to_agent(text, window, cx));
         self.show_terminal_panel(window, cx);
+        self.send_to_agent(&worktree, text, window, cx);
     }
 
     // — The panel  ——————————————————————————————————————————————

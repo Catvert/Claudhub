@@ -103,8 +103,12 @@ pub fn register(app: &Entity<ClaudhubApp>, cx: &mut App) {
         EditorPanel => "ClaudhubEditor",
         ConsolePanel => "ClaudhubConsole",
         SettingsPanel => "ClaudhubSettings",
-        TerminalPanel => "ClaudhubTerminal",
     }
+    // No builder for the terminals, and it is not an oversight: they are the
+    // only panel whose content is a **process**, and a saved layout is read
+    // long after that process has died. They are pruned from the layout before
+    // it is written (`app::save_layouts`), so none is ever read back — see
+    // "Les terminaux dans le dock" in CLAUDE.md.
 }
 
 /// "Hide this view", the only entry the dock's `…` menu deserves.
@@ -358,14 +362,34 @@ impl Render for ConflictsPanel {
     }
 }
 
-/// The terminals hide without closing.
+/// One open terminal, as the dock shows it.
 ///
-/// `Panel::visible` rather than a collapsible dock zone: gpui-component forbids
-/// moving the last panel of a zone, and the terminals would then be frozen
-/// where they are.
+/// **A panel per terminal**, where there used to be one panel drawing a strip
+/// of tabs of its own. The dock's bar is that strip now, which is what lets a
+/// terminal be dragged into a split, sent to another zone or zoomed like any
+/// other view.
+///
+/// One panel per **screen** too: a panel belongs to a single dock area at a
+/// time and there are five, so five of these share one `TerminalView` — one
+/// pty, five faces. Only one dock is displayed at a time, so no two of them
+/// ever draw the same grid in the same frame.
+///
+/// It carries the terminal's worktree because that is what decides whether it
+/// is shown: the terminals of the worktree one is not looking at stay in the
+/// tree, invisible, which is what keeps a terminal dragged into a split exactly
+/// where it was put — including across a round trip through another worktree.
 pub struct TerminalPanel {
     app: WeakEntity<ClaudhubApp>,
-    focus: FocusHandle,
+    worktree: std::path::PathBuf,
+    view: Entity<crate::ui::terminal_view::TerminalView>,
+    /// The tab group showing it, as the dock hands it over.
+    ///
+    /// It is the only way in: `DockArea` keeps its groups to itself, and
+    /// `on_added_to` is the seam through which a panel learns which one it is
+    /// in. Without it, "show this terminal" could only be done by *moving* the
+    /// panel into its own group — which activates it, and reorders the tabs on
+    /// the way.
+    group: Option<gpui::WeakEntity<gpui_component::dock::TabGroup>>,
     /// Cached for the same reason as the conflicts panel's: `visible` is called
     /// while the layout is being built, so in the middle of
     /// `ClaudhubApp::new`.
@@ -375,9 +399,15 @@ pub struct TerminalPanel {
 impl TerminalPanel {
     pub const NAME: &'static str = "ClaudhubTerminal";
 
-    pub fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
-        cx.observe(app, |this: &mut Self, app, cx| {
-            let visible = app.read(cx).terminal_visible(cx);
+    pub fn new(
+        app: &Entity<ClaudhubApp>,
+        worktree: std::path::PathBuf,
+        view: Entity<crate::ui::terminal_view::TerminalView>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mine = worktree.clone();
+        cx.observe(app, move |this: &mut Self, app, cx| {
+            let visible = app.read(cx).terminal_shown(&mine, cx);
             if this.visible != visible {
                 this.visible = visible;
                 cx.emit(PanelEvent::LayoutChanged);
@@ -385,17 +415,48 @@ impl TerminalPanel {
             cx.notify();
         })
         .detach();
+        // The terminal redraws several times a second while an agent works, and
+        // its label — the running program — is the tab's title.
+        cx.observe(&view, |_, _, cx| cx.notify()).detach();
         Self {
             app: app.downgrade(),
-            focus: cx.focus_handle(),
-            visible: visible_at_startup(Self::NAME, cx),
+            visible: app.read(cx).terminal_shown(&worktree, cx),
+            worktree,
+            view,
+            group: None,
         }
+    }
+
+    /// Makes this terminal the displayed tab of its group.
+    ///
+    /// What "open a terminal" and "send this to the agent" need: the panel
+    /// exists and is in the right group, but the tab beside it is the one on
+    /// screen.
+    pub fn activate(panel: &Entity<Self>, window: &mut Window, cx: &mut App) {
+        let Some(group) = panel
+            .read(cx)
+            .group
+            .clone()
+            .and_then(|group| group.upgrade())
+        else {
+            return;
+        };
+        let me = gpui_component::dock::PanelId::from(panel.entity_id());
+        group.update(cx, |group, cx| {
+            if let Some(ix) = group
+                .panels()
+                .iter()
+                .position(|panel| panel.panel_id(cx) == me)
+            {
+                group.select_tab(ix, window, cx);
+            }
+        });
     }
 }
 
 impl Focusable for TerminalPanel {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.view.read(cx).focus_handle(cx)
     }
 }
 
@@ -405,42 +466,69 @@ impl BasePanel for TerminalPanel {
     fn panel_name(&self) -> &'static str {
         Self::NAME
     }
+    /// Closable, unlike every other panel of this window: closing a terminal
+    /// tab is how one ends a shell, and it is the only panel whose content is a
+    /// process rather than a view of the repository.
     fn closable(&self, _: &App) -> bool {
-        false
+        true
     }
     fn visible(&self, _: &App) -> bool {
         self.visible
     }
+
+    /// The pty dies with the tab, and takes its four other faces with it.
+    ///
+    /// `on_removed` fires on the one panel the user closed — one screen's —
+    /// and the other four would otherwise stay as tabs showing a dead shell.
+    fn on_added_to(
+        &mut self,
+        group: gpui::WeakEntity<gpui_component::dock::TabGroup>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        self.group = Some(group);
+    }
+
+    fn on_removed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.view.entity_id();
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        app.update(cx, |app, cx| app.close_terminal(id, window, cx));
+    }
+
+    /// What `layout.json` keeps of a terminal: where it worked.
+    ///
+    /// Not the pty, which does not survive the process, and not its scrollback.
+    /// A terminal read back is a **fresh shell in the same place** — the layout
+    /// comes back, the conversation does not, and pretending otherwise would be
+    /// worse than saying so.
+    fn dump(&self, _: &App) -> gpui_component::dock::PanelState {
+        let mut state = gpui_component::dock::PanelState::new(Self::NAME);
+        state.info = gpui_component::dock::PanelInfo::panel(
+            serde_json::json!({ "worktree": self.worktree }),
+        );
+        state
+    }
 }
 
 impl Panel for TerminalPanel {
-    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        tr!("panel-terminal")
+    /// The running program, which is what one looks for among five tabs — not
+    /// the word "Terminal" five times over.
+    fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.view.read(cx).label()
     }
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {
         zoom_in_toolbar()
     }
-
-    fn dropdown_menu(
-        &mut self,
-        menu: PopupMenu,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> PopupMenu {
-        hide_view(&self.app, Self::NAME, menu)
-    }
 }
 
 impl Render for TerminalPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(app) = self.app.upgrade() else {
-            return div().into_any_element();
-        };
-        let content = app.update(cx, |app, cx| {
-            app.render_terminals(window, cx).into_any_element()
-        });
-        pane_frame(content, cx).into_any_element()
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // No `pane_root`: the terminals have no search of their own, `Ctrl+F`
+        // there belonging to the program that runs.
+        pane_frame(self.view.clone(), cx).into_any_element()
     }
 }
 

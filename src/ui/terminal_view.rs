@@ -19,10 +19,9 @@ use gpui::{
     ScrollWheelEvent, SharedString, StyledText, TextRun, Window,
 };
 use gpui_component::{
-    button::{Button, ButtonVariants},
-    h_flex,
-    menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
-    v_flex, ActiveTheme, Sizable,
+    dock::{DockPlacement, InsertTarget, PanelId},
+    menu::{ContextMenuExt, PopupMenuItem},
+    v_flex, ActiveTheme,
 };
 
 use crate::terminal::{
@@ -1020,57 +1019,57 @@ impl Launch {
     }
 }
 
-/// A worktree's tabs.
-pub struct TerminalGroup {
-    worktree: PathBuf,
-    /// This worktree's notes folder, if it has one.
-    ///
-    /// It is here so it ends up in the pty's environment: an agent launched from
-    /// Claudhub has to know where the remarks sent to it are and the task list
-    /// it keeps. It is re-read by the application on every render, the notes
-    /// root being a setting that can change under us.
-    vault: Option<PathBuf>,
-    tabs: Vec<Entity<TerminalView>>,
-    active: usize,
-    /// Why the last tab could not open, if that applies.
-    error: Option<SharedString>,
+/// One open terminal: its pty, and the panels that show it.
+///
+/// **One dock panel per terminal**, and no longer one panel holding a strip of
+/// tabs of its own. The dock's tab bar *is* that strip now, which is what lets
+/// a terminal be dragged into a split, on to another zone, or zoomed like any
+/// other view — none of which a strip drawn by hand could offer.
+///
+/// The price is one panel **per screen**: a panel belongs to a single dock area
+/// at a time and there are five. All five render this same `view`, so there is
+/// still exactly one pty; and since only one dock is displayed at a time, no
+/// two of them ever draw the same grid in the same frame.
+pub struct OpenTerminal {
+    pub worktree: PathBuf,
+    pub view: Entity<TerminalView>,
+    /// The panels, in the order of `Workspace::ALL`.
+    pub panels: Vec<Entity<crate::ui::panels::TerminalPanel>>,
 }
 
-impl TerminalGroup {
-    pub fn new(worktree: PathBuf) -> Self {
-        Self {
-            worktree,
-            vault: None,
-            tabs: Vec::new(),
-            active: 0,
-            error: None,
-        }
+impl ClaudhubApp {
+    /// The terminals of the worktree being looked at, in the order they opened.
+    pub(super) fn terminals_of(&self, worktree: &Path) -> Vec<&OpenTerminal> {
+        self.terminals
+            .iter()
+            .filter(|terminal| terminal.worktree == worktree)
+            .collect()
     }
 
-    /// The notes folder to announce to the next tabs.
+    /// Opens a terminal on a worktree and shows it.
     ///
-    /// Without `cx.notify`: what changes is not what is displayed but what the
-    /// next pty will receive, and redrawing the group on every render would be a
-    /// loop.
-    pub fn set_vault(&mut self, vault: Option<PathBuf>) {
-        self.vault = vault;
-    }
-
-    /// Opens a tab. An empty `command` launches the user's shell.
-    ///
-    /// `agent` says whether what is launched is a coding agent: it is to that
-    /// tab that review notes will be delivered.
-    pub fn open(&mut self, mut launch: Launch, window: &mut Window, cx: &mut Context<Self>) {
+    /// It joins the tab group of the worktree's other terminals when there is
+    /// one — that is what makes the dock's bar read as *the* terminal bar — and
+    /// otherwise opens the slot under the centre, which is where the default
+    /// layout used to put the one permanent panel.
+    pub(super) fn open_terminal(
+        &mut self,
+        worktree: &Path,
+        mut launch: Launch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // What the agent needs to know about Claudhub, and no API will tell it:
         // where it works, where the review notes sent to it are, and which file
         // carries its task list. Environment variables rather than a protocol —
         // a shell sees them too, and an agent launched in a terminal alongside
         // only has to copy them.
-        launch.env.insert(
-            "CLAUDHUB_WORKTREE".into(),
-            self.worktree.display().to_string(),
-        );
-        if let Some(vault) = &self.vault {
+        launch
+            .env
+            .insert("CLAUDHUB_WORKTREE".into(), worktree.display().to_string());
+        // Read now and not at construction: the notes root is a setting, and a
+        // terminal opened after changing it has to receive the right folder.
+        if let Some(vault) = self.notes_dir(worktree, cx) {
             launch
                 .env
                 .insert("CLAUDHUB_NOTES_DIR".into(), vault.display().to_string());
@@ -1080,108 +1079,325 @@ impl TerminalGroup {
             );
         }
         // A pty we cannot open is a system problem: descriptor limit reached,
-        // `/dev/pts` missing. We give the tab up and say so, rather than panic
-        // in the middle of a render — which is what this code used to do, with a
-        // frozen window as its only symptom.
-        // The settings are re-read at opening rather than recorded at
-        // construction: changing the shell or the scrollback has to hold for the
-        // next tab, without having to close the others.
+        // `/dev/pts` missing. We give the terminal up and say so, rather than
+        // panic in the middle of a render — which is what this code used to do,
+        // with a frozen window as its only symptom.
+        //
+        // The settings are re-read at opening rather than recorded once:
+        // changing the shell or the scrollback has to hold for the next
+        // terminal, without having to close the others.
         let settings = Settings::global(cx).terminal.clone();
         let wsl = WslShell::current(cx);
-        let terminal = match TerminalView::open(&self.worktree, &launch, &settings, wsl.as_ref()) {
+        let terminal = match TerminalView::open(worktree, &launch, &settings, wsl.as_ref()) {
             Ok(terminal) => terminal,
             Err(e) => {
                 log::error!("opening the terminal: {e:#}");
-                self.error = Some(SharedString::from(e.to_string()));
+                self.toast = Some(crate::ui::app::Toast {
+                    text: SharedString::from(e.to_string()),
+                    error: true,
+                });
                 cx.notify();
                 return;
             }
         };
         let view =
             cx.new(|cx| TerminalView::attach(terminal, launch.label, launch.agent, window, cx));
-        self.error = None;
-        self.tabs.push(view);
-        self.active = self.tabs.len() - 1;
-        self.focus_active(window, cx);
-        cx.notify();
+        self.install_terminal(worktree.to_path_buf(), view, window, cx);
     }
 
-    /// True when the current tab has focus. That is what names the area the zoom
-    /// shortcuts aim at.
-    pub fn is_focused(&self, window: &Window, cx: &App) -> bool {
-        self.tabs
-            .get(self.active)
-            .is_some_and(|tab| tab.read(cx).focus_handle(cx).is_focused(window))
-    }
-
-    /// Opens a tab running the configured coding agent.
+    /// Puts a terminal's five panels into the five docks, and shows it.
     ///
-    /// The gesture lives with the other terminal openings — in the "+" button's
-    /// menu — and not in the window's toolbar: it is one more terminal in *this*
-    /// worktree, not an action on the repository.
-    pub fn open_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(profile) = Settings::global(cx).terminal.default_profile().cloned() else {
-            return;
-        };
-        self.open_profile(&profile, window, cx);
-    }
-
-    /// Opens a named profile.
-    pub fn open_profile(
+    /// Split out from `open_terminal` because the layout registry takes the
+    /// same path: a terminal read back from `layout.json` is a fresh pty that
+    /// has to be adopted exactly like one just opened.
+    pub(super) fn install_terminal(
         &mut self,
-        profile: &crate::ui::settings::AgentProfile,
+        worktree: PathBuf,
+        view: Entity<TerminalView>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if profile.command.trim().is_empty() {
+        let app = cx.entity();
+        let mut panels = Vec::new();
+        for _ in crate::ui::workspace::Workspace::ALL {
+            let (app, worktree, view) = (app.clone(), worktree.clone(), view.clone());
+            panels
+                .push(cx.new(|cx| crate::ui::panels::TerminalPanel::new(&app, worktree, view, cx)));
+        }
+        self.terminals.push(OpenTerminal {
+            worktree: worktree.clone(),
+            view: view.clone(),
+            panels: panels.clone(),
+        });
+        for (workspace, panel) in crate::ui::workspace::Workspace::ALL.into_iter().zip(panels) {
+            self.dock_terminal(workspace, &worktree, panel, window, cx);
+        }
+        let handle = view.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// Places one terminal panel in one screen's dock.
+    fn dock_terminal(
+        &mut self,
+        workspace: crate::ui::workspace::Workspace,
+        worktree: &Path,
+        panel: Entity<crate::ui::panels::TerminalPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dock) = self.docks.get(&workspace).cloned() else {
+            return;
+        };
+        // The node of a terminal already open on this worktree, in this dock:
+        // that is the tab group the new one joins.
+        let sibling = self
+            .terminals
+            .iter()
+            .filter(|terminal| terminal.worktree == worktree)
+            .filter_map(|terminal| terminal.panels.get(workspace.index()).cloned())
+            .rfind(|other| other.entity_id() != panel.entity_id());
+        dock.update(cx, |dock, cx| {
+            dock.add_panel(panel.clone(), DockPlacement::Center, None, window, cx);
+            let id = PanelId::from(panel.entity_id());
+            let target = sibling
+                .and_then(|sibling| {
+                    let node = dock
+                        .layout(DockPlacement::Center)?
+                        .find_panel_node(PanelId::from(sibling.entity_id()))?;
+                    Some(InsertTarget::Tabs {
+                        node,
+                        ix: None,
+                        // The tab one has just opened is the tab one looks at.
+                        activate: true,
+                    })
+                })
+                .or_else(|| {
+                    // No terminal here yet: the slot under the whole centre,
+                    // which is where the default layout put the permanent panel
+                    // before terminals became panels of their own.
+                    let node = dock.layout(DockPlacement::Center)?.root().id();
+                    Some(InsertTarget::Split {
+                        node,
+                        placement: gpui_base::Placement::Bottom,
+                        size: Some(TERMINAL_HEIGHT),
+                    })
+                });
+            if let Some(target) = target {
+                dock.move_panel(id, target, window, cx);
+            }
+        });
+    }
+
+    /// Closes a terminal: its pty, and its panel in each of the five docks.
+    ///
+    /// Called by whichever panel the user closed — one screen's — and it takes
+    /// the other four with it: they are five faces of one pty, and leaving four
+    /// of them pointing at a dead shell would be four tabs that do nothing.
+    pub(super) fn close_terminal(
+        &mut self,
+        view: gpui::EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self
+            .terminals
+            .iter()
+            .position(|terminal| terminal.view.entity_id() == view)
+        else {
+            return;
+        };
+        let terminal = self.terminals.remove(ix);
+        for (workspace, panel) in crate::ui::workspace::Workspace::ALL
+            .into_iter()
+            .zip(terminal.panels)
+        {
+            let Some(dock) = self.docks.get(&workspace).cloned() else {
+                continue;
+            };
+            dock.update(cx, |dock, cx| dock.remove_panel(panel, window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Drops every terminal of a worktree — the worktree is gone.
+    pub(super) fn close_terminals_of(
+        &mut self,
+        worktree: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let doomed: Vec<gpui::EntityId> = self
+            .terminals
+            .iter()
+            .filter(|terminal| terminal.worktree == worktree)
+            .map(|terminal| terminal.view.entity_id())
+            .collect();
+        for view in doomed {
+            self.close_terminal(view, window, cx);
+        }
+    }
+
+    /// Closes the terminal that has focus, or the worktree's last one.
+    ///
+    /// `Ctrl+W` names no tab: what one means is the terminal being typed in,
+    /// and failing that the one on screen — which, the tabs being in the order
+    /// they opened, is the last.
+    pub(super) fn close_focused_terminal(
+        &mut self,
+        worktree: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let doomed = self
+            .terminals
+            .iter()
+            .filter(|terminal| terminal.worktree == worktree)
+            .find(|terminal| terminal.view.read(cx).focus_handle(cx).is_focused(window))
+            .or_else(|| self.terminals_of(worktree).into_iter().next_back())
+            .map(|terminal| terminal.view.entity_id());
+        if let Some(view) = doomed {
+            self.close_terminal(view, window, cx);
+        }
+    }
+
+    /// Goes from one of the worktree's terminals to the next, and shows it.
+    ///
+    /// The dock has its own tab navigation, but it works on the group that has
+    /// focus and there are several on screen; this one names the terminals, and
+    /// only them, which is what the shortcut says.
+    pub(super) fn step_terminal(
+        &mut self,
+        worktree: &Path,
+        delta: isize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let terminals = self.terminals_of(worktree);
+        if terminals.is_empty() {
             return;
         }
-        self.open(Launch::agent(profile), window, cx);
+        let current = terminals
+            .iter()
+            .position(|terminal| terminal.view.read(cx).focus_handle(cx).is_focused(window))
+            .unwrap_or(0) as isize;
+        let next = (current + delta).rem_euclid(terminals.len() as isize) as usize;
+        let (view, panel) = {
+            let terminal = terminals[next];
+            (
+                terminal.view.clone(),
+                terminal.panels.get(self.workspace.index()).cloned(),
+            )
+        };
+        if let Some(panel) = panel {
+            crate::ui::panels::TerminalPanel::activate(&panel, window, cx);
+        }
+        let handle = view.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
     }
 
-    /// Delivers a text to this worktree's agent, and confirms it.
+    /// The worktree's terminals, opening one if it has none.
     ///
-    /// If there is no agent tab, one is opened — and the send is **deferred**:
-    /// an agent takes a second or two to show its prompt, and what arrives
-    /// before is read by the shell that has not been replaced yet, or simply
-    /// lost.
-    pub fn send_to_agent(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
-        match self.agent_tab(cx) {
-            Some(index) => {
-                self.active = index;
-                self.focus_active(window, cx);
-                self.deliver(index, text, cx);
-            }
-            None => {
-                self.open_agent(window, cx);
-                let Some(index) = self.agent_tab(cx) else {
-                    return;
-                };
-                self.active = index;
-                cx.spawn(async move |group, cx| {
-                    cx.background_executor().timer(AGENT_WARMUP).await;
-                    let _ = group.update(cx, |group, cx| group.deliver(index, text, cx));
-                })
-                .detach();
-            }
+    /// Opening on demand and not when the worktree opens: a shell nobody asked
+    /// for is a process nobody asked for.
+    pub(super) fn ensure_terminal(
+        &mut self,
+        worktree: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.terminals_of(worktree).is_empty() {
+            self.open_terminal(worktree, Launch::shell(), window, cx);
         }
     }
 
-    /// The most recent agent tab still running.
+    /// Opens a terminal running the configured coding agent.
+    pub(super) fn open_agent_terminal(
+        &mut self,
+        worktree: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = Settings::global(cx).terminal.default_profile().cloned() else {
+            return;
+        };
+        self.open_terminal(worktree, Launch::agent(&profile), window, cx);
+    }
+
+    /// True when one of this worktree's terminals has focus. That is what names
+    /// the area the zoom shortcuts aim at.
+    pub(super) fn terminal_focused(&self, window: &Window, cx: &App) -> bool {
+        self.terminals
+            .iter()
+            .any(|terminal| terminal.view.read(cx).focus_handle(cx).is_focused(window))
+    }
+
+    /// Hands a text to the worktree's agent, opening one if none is running.
+    pub(super) fn send_to_agent(
+        &mut self,
+        worktree: &Path,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(view) = self.agent_terminal(worktree, cx) {
+            // Its tab may be behind another's: focusing a panel does not make
+            // it the one on screen, and a message delivered into a hidden tab
+            // is a message nobody sees arrive.
+            self.reveal_terminal(&view, window, cx);
+            let handle = view.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+            self.deliver_to_terminal(view, text, cx);
+            return;
+        }
+        self.open_agent_terminal(worktree, window, cx);
+        let Some(view) = self.agent_terminal(worktree, cx) else {
+            return;
+        };
+        // Nothing in a pty says "I am ready", and what arrives before the prompt
+        // is read by the shell we have not replaced yet.
+        cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(AGENT_WARMUP).await;
+            view.update(cx, |view, cx| view.paste_text(&text, cx));
+            cx.background_executor().timer(SUBMIT_DELAY).await;
+            view.update(cx, |view, cx| view.submit(cx));
+        })
+        .detach();
+    }
+
+    /// Brings a terminal's tab to the front, on the screen being looked at.
+    fn reveal_terminal(
+        &mut self,
+        view: &Entity<TerminalView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let panel = self
+            .terminals
+            .iter()
+            .find(|terminal| terminal.view.entity_id() == view.entity_id())
+            .and_then(|terminal| terminal.panels.get(self.workspace.index()).cloned());
+        if let Some(panel) = panel {
+            crate::ui::panels::TerminalPanel::activate(&panel, window, cx);
+        }
+    }
+
+    /// The most recent agent terminal still running on this worktree.
     ///
     /// The most recent: it is the one being looked at, and relaunching an agent
     /// after quitting one is the normal gesture when the conversation has got
     /// bogged down.
-    fn agent_tab(&self, cx: &App) -> Option<usize> {
-        self.tabs
+    fn agent_terminal(&self, worktree: &Path, cx: &App) -> Option<Entity<TerminalView>> {
+        self.terminals
             .iter()
-            .enumerate()
+            .filter(|terminal| terminal.worktree == worktree)
             .rev()
-            .find(|(_, tab)| {
-                let tab = tab.read(cx);
-                tab.is_agent() && !tab.has_exited()
+            .find(|terminal| {
+                let view = terminal.view.read(cx);
+                view.is_agent() && !view.has_exited()
             })
-            .map(|(index, _)| index)
+            .map(|terminal| terminal.view.clone())
     }
 
     /// Pastes, then confirms in a **second** send.
@@ -1189,226 +1405,24 @@ impl TerminalGroup {
     /// The two are separated by a short silence: a TUI that has just received a
     /// bracketed paste may swallow a carriage return arriving right behind it,
     /// and the message would stay in the prompt without going out.
-    fn deliver(&mut self, index: usize, text: String, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.get(index).cloned() else {
-            return;
-        };
-        tab.update(cx, |view, cx| view.paste_text(&text, cx));
+    fn deliver_to_terminal(
+        &mut self,
+        view: Entity<TerminalView>,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        view.update(cx, |view, cx| view.paste_text(&text, cx));
         cx.spawn(async move |_, cx| {
             cx.background_executor().timer(SUBMIT_DELAY).await;
-            tab.update(cx, |view, cx| view.submit(cx));
+            view.update(cx, |view, cx| view.submit(cx));
         })
         .detach();
         cx.notify();
     }
-
-    pub fn close(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if index >= self.tabs.len() {
-            return;
-        }
-        self.tabs.remove(index);
-        self.active = self.active.min(self.tabs.len().saturating_sub(1));
-        self.focus_active(window, cx);
-        cx.notify();
-    }
-
-    pub fn next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tabs.is_empty() {
-            return;
-        }
-        self.active = (self.active + 1) % self.tabs.len();
-        self.focus_active(window, cx);
-        cx.notify();
-    }
-
-    pub fn previous(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tabs.is_empty() {
-            return;
-        }
-        self.active = (self.active + self.tabs.len() - 1) % self.tabs.len();
-        self.focus_active(window, cx);
-        cx.notify();
-    }
-
-    pub fn active_index(&self) -> usize {
-        self.active
-    }
-
-    fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = self.tabs.get(self.active) {
-            let handle = view.read(cx).focus.clone();
-            window.focus(&handle, cx);
-        }
-    }
 }
 
-impl Render for TerminalGroup {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = self.active;
-        let tabs: Vec<_> = self
-            .tabs
-            .iter()
-            .enumerate()
-            .map(|(ix, view)| (ix, view.read(cx).label(), view.read(cx).has_exited()))
-            .collect();
-
-        v_flex()
-            .size_full()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .child(
-                h_flex()
-                    .h(px(28.))
-                    .w_full()
-                    .px_1()
-                    .gap_1()
-                    .items_center()
-                    .bg(cx.theme().title_bar)
-                    .children(tabs.into_iter().map(|(ix, label, exited)| {
-                        h_flex()
-                            .id(("tab", ix))
-                            .h(px(22.))
-                            .px_2()
-                            .gap_1()
-                            .items_center()
-                            .rounded(cx.theme().radius)
-                            .cursor_pointer()
-                            .when(ix == active, |el| el.bg(cx.theme().accent))
-                            .hover(|s| s.bg(cx.theme().accent.opacity(0.5)))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.active = ix;
-                                this.focus_active(window, cx);
-                                cx.notify();
-                            }))
-                            .child(icon("terminal").xsmall())
-                            .child(
-                                div()
-                                    .max_w(px(160.))
-                                    .truncate()
-                                    .text_xs()
-                                    .when(exited, |el| el.text_color(cx.theme().muted_foreground))
-                                    .child(label),
-                            )
-                            .child(
-                                Button::new(("close-tab", ix))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(icon("x"))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.close(ix, window, cx);
-                                    })),
-                            )
-                    }))
-                    // The button follows the last tab rather than sticking to
-                    // the right edge: that is where the eye finishes reading the
-                    // tabs, and a button at the other end of the panel means
-                    // crossing the bar to open the next one.
-                    .child(
-                        Button::new("new-tab")
-                            .ghost()
-                            .xsmall()
-                            .icon(icon("plus"))
-                            .tooltip(tr!("terminal-new"))
-                            // One agent profile per entry: the menu is the only
-                            // place the choice arises, and a list coming from
-                            // the settings saves reopening them to launch
-                            // something else.
-                            .dropdown_menu({
-                                let entity = cx.entity();
-                                move |menu, _window, cx| {
-                                    let shell = entity.clone();
-                                    let profiles = Settings::global(cx).terminal.agents.clone();
-                                    let menu = menu.item(
-                                        PopupMenuItem::new(tr!("terminal-new"))
-                                            .icon(icon("plus"))
-                                            .on_click(move |_, window, cx| {
-                                                shell.update(cx, |this, cx| {
-                                                    this.open(Launch::shell(), window, cx)
-                                                });
-                                            }),
-                                    );
-                                    if profiles.is_empty() {
-                                        return menu;
-                                    }
-                                    profiles
-                                        .into_iter()
-                                        .fold(menu.separator(), |menu, profile| {
-                                            let entity = entity.clone();
-                                            let label =
-                                                SharedString::from(profile.label().to_string());
-                                            menu.item(
-                                                PopupMenuItem::new(label)
-                                                    .icon(icon("bot"))
-                                                    .on_click(move |_, window, cx| {
-                                                        entity.update(cx, |this, cx| {
-                                                            this.open_profile(&profile, window, cx)
-                                                        });
-                                                    }),
-                                            )
-                                        })
-                                }
-                            }),
-                    )
-                    .child(div().flex_1()),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .when_some(self.error.clone(), |el, message| {
-                        el.child(
-                            div()
-                                .p_3()
-                                .text_sm()
-                                .text_color(cx.theme().danger)
-                                .child(message),
-                        )
-                    })
-                    .children(self.tabs.get(active).cloned()),
-            )
-    }
-}
-
-impl ClaudhubApp {
-    pub(super) fn render_terminals(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let Some(worktree) = self.active.clone() else {
-            return div().into_any_element();
-        };
-        // The group is created on first request: opening a worktree must not
-        // launch a shell nobody needs.
-        let group = self.terminal_group(&worktree, window, cx);
-        group.into_any_element()
-    }
-
-    /// A worktree's group, created if needed with a first tab.
-    pub(super) fn terminal_group(
-        &mut self,
-        worktree: &Path,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<TerminalGroup> {
-        // Re-read on every call, so on every render of the panel: the notes root
-        // is a setting, and a tab opened after changing it has to receive the
-        // right folder.
-        let vault = self.notes_dir(worktree, cx);
-        if let Some(group) = self.terminals.get(worktree).cloned() {
-            group.update(cx, |group, _| group.set_vault(vault));
-            return group;
-        }
-        let path = worktree.to_path_buf();
-        let group = cx.new(|_| TerminalGroup::new(path));
-        group.update(cx, |group, cx| {
-            group.set_vault(vault);
-            group.open(Launch::shell(), window, cx);
-        });
-        self.terminals.insert(worktree.to_path_buf(), group.clone());
-        group
-    }
-}
+/// The height the first terminal of a screen opens at.
+const TERMINAL_HEIGHT: Pixels = px(260.);
 
 #[cfg(test)]
 mod tests {

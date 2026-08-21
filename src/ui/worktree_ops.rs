@@ -857,23 +857,21 @@ impl ClaudhubApp {
         if line.trim().is_empty() {
             return;
         }
-        let group = self.terminal_group(&worktree, window, cx);
-        group.update(cx, |group, cx| {
-            group.open(
-                crate::ui::terminal_view::Launch {
-                    // A shell and not the bare program: a task is one of the
-                    // project's command lines, with its pipes and its
-                    // redirections, and it is a shell that can read them.
-                    command: Some(("sh".into(), vec!["-lc".into(), line])),
-                    env: launch.env.into_iter().collect(),
-                    label: SharedString::from(task),
-                    agent: false,
-                },
-                window,
-                cx,
-            );
-        });
         self.show_terminal_panel(window, cx);
+        self.open_terminal(
+            &worktree,
+            crate::ui::terminal_view::Launch {
+                // A shell and not the bare program: a task is one of the
+                // project's command lines, with its pipes and its
+                // redirections, and it is a shell that can read them.
+                command: Some(("sh".into(), vec!["-lc".into(), line])),
+                env: launch.env.into_iter().collect(),
+                label: SharedString::from(task),
+                agent: false,
+            },
+            window,
+            cx,
+        );
     }
 
     /// A worktree's slug, when `wt` knows it.

@@ -1921,6 +1921,11 @@ Six pièges, tous rencontrés :
 - **`toggle_dock` ne notifie pas l'aire**, seulement le dock intérieur :
   l'observation qui enregistre ne se déclenche pas toute seule, d'où l'appel
   explicite.
+- **Un panneau ne s'active pas au clavier** — c'était vrai en 0.5.1, où
+  `TabPanel::set_active_ix` était privé ; la refonte du dock l'a rendu
+  possible : `TabGroup::select_tab` est public, et un panneau reçoit son groupe
+  par `Panel::on_added_to`. C'est ce qui permet aux terminaux d'être des
+  panneaux (voir « Les terminaux dans le dock »).
 - **Le dernier panneau d'une zone ne se déplace pas.** `is_last_panel` remonte
   la pile : un panneau seul dans un `TabPanel` seul dans son conteneur est
   figé. C'est pourquoi les terminaux vivent dans le centre, sous la revue, et
@@ -1953,6 +1958,52 @@ L'historique se charge au **rendu** de son onglet et non à la construction :
 c'est ce qui évite un `git log` que personne ne regardera. D'où
 `history_pending`, sans lequel chaque frame relancerait la commande pendant
 tout le temps de la lecture.
+
+### Les terminaux dans le dock
+
+**Un panneau par terminal**, là où il y avait un panneau qui dessinait sa
+propre rangée d'onglets. La barre du dock *est* cette rangée désormais, et
+c'est ce qui permet de glisser un terminal dans un split, de l'envoyer dans une
+autre zone ou de le zoomer comme n'importe quelle vue — rien de tout cela
+n'était offert par une rangée peinte à la main.
+
+Sept points, et aucun ne se devine :
+
+- **Cinq panneaux par terminal, un par écran.** Un panneau n'appartient qu'à
+  une aire à la fois et il y a cinq docks ; les cinq rendent la **même**
+  `Entity<TerminalView>`, donc il n'y a toujours qu'un pty. Un seul dock étant
+  affiché, deux d'entre eux ne peignent jamais la même grille dans la même
+  frame. `OpenTerminal::panels` les range dans l'ordre de `Workspace::ALL`, d'où
+  `Workspace::index`.
+- **La place se garde par l'invisibilité, pas par un déménagement.** Les
+  terminaux des worktrees qu'on ne regarde pas restent dans l'arbre du dock et
+  deviennent invisibles (`terminal_shown`) : un `TabGroup` ne rend pas d'onglet
+  pour un panneau invisible et se referme quand il n'en reste aucun. Un terminal
+  glissé dans un split est donc toujours là après un aller-retour par un autre
+  worktree — retirer puis reposer les panneaux aurait perdu leur place à chaque
+  bascule, ce qui aurait vidé le geste de son intérêt.
+- **Le premier terminal d'un écran ouvre son emplacement**, sous tout le centre
+  (`InsertTarget::Split` sur la racine), là où la disposition par défaut mettait
+  le panneau permanent ; les suivants rejoignent son groupe d'onglets
+  (`InsertTarget::Tabs`, `activate: true` — l'onglet qu'on vient d'ouvrir est
+  celui qu'on regarde).
+- **Fermer un onglet tue le pty et ses quatre autres faces.** `on_removed` ne
+  concerne que le panneau que l'utilisateur a fermé, celui d'un écran ; les
+  quatre autres resteraient des onglets montrant un shell mort.
+- **Les terminaux sont retirés de `layout.json` avant écriture**
+  (`app::prune_terminals`). Un terminal est le seul panneau dont le contenu est
+  un **processus**, et une disposition se relit longtemps après sa mort. Un
+  groupe vidé par la purge s'en va avec, et la taille correspondante est retirée
+  de la pile — les tailles d'un `Stack` sont positionnelles, en oublier une
+  décale toutes les suivantes. Corollaire connu : un terminal glissé dans une
+  zone latérale n'est pas purgé, `DockState::panel` étant privé.
+- **Le « + » est descendu dans la barre d'état**, à côté de la bascule des
+  terminaux : la barre du groupe n'existe plus, et celle du dock n'a pas de
+  place pour un bouton.
+- **Montrer un terminal n'est pas lui donner le focus.** `reveal_terminal`
+  passe par `TerminalPanel::activate`, qui demande à son `TabGroup` de
+  sélectionner son onglet — un message livré dans un onglet caché est un message
+  que personne ne voit arriver.
 
 ### Masquer une vue
 
