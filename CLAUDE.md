@@ -904,6 +904,16 @@ Cinq points sur l'anneau :
   cents dernières lignes. Le bouton « Copier », lui, prend tout ce que le
   filtre a gardé : ce qui part dans un rapport est le journal, pas sa fin.
 
+**Le journal est en anglais, et un test le garde.** La règle — le cœur en
+anglais, la documentation en français — n'en avait aucun, contrairement aux
+clés i18n. Elle passait inaperçue tant que ces lignes n'atteignaient qu'une
+console que personne n'ouvrait ; la page les montre telles quelles, et une
+ligne française au milieu de vingt anglaises se lit désormais comme une
+incohérence. `logging::tests::nothing_speaks_french_in_the_journal` relit les
+sources et n'inspecte que les littéraux d'un `log::` : élargir à toutes les
+chaînes de l'arbre attraperait les fixtures de tests, pleines d'accents
+exprès.
+
 Le niveau affiché vit dans `ClaudhubApp` et non dans les réglages : c'est une
 posture de lecture, qui change plusieurs fois pendant qu'on cherche, pas une
 préférence qu'on s'attend à retrouver le lendemain. Il s'ouvre sur `Trace`,

@@ -1091,7 +1091,7 @@ impl TerminalGroup {
         let terminal = match TerminalView::open(&self.worktree, &launch, &settings, wsl.as_ref()) {
             Ok(terminal) => terminal,
             Err(e) => {
-                log::error!("ouverture du terminal : {e:#}");
+                log::error!("opening the terminal: {e:#}");
                 self.error = Some(SharedString::from(e.to_string()));
                 cx.notify();
                 return;

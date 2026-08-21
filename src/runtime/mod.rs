@@ -244,12 +244,12 @@ pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
                     }
                 });
             if let Err(e) = spawned {
-                log::warn!("relais de surveillance indisponible : {e:#}");
+                log::warn!("no relay for the file watcher: {e:#}");
             }
             Some(watcher)
         }
         Err(e) => {
-            log::warn!("surveillance des fichiers indisponible : {e:#}");
+            log::warn!("no file watching: {e:#}");
             None
         }
     };

@@ -872,7 +872,7 @@ pub fn migrate_from_perch() {
         return;
     }
     if let Err(e) = std::fs::rename(&old, &new) {
-        log::warn!("reprise de l'ancienne configuration : {e}");
+        log::warn!("the former configuration could not be taken over: {e}");
         return;
     }
     // The layout names its panels, and those names changed with the project:
@@ -892,7 +892,7 @@ pub fn migrate_from_perch() {
             }
         }
     }
-    log::info!("configuration reprise depuis {}", old.display());
+    log::info!("configuration taken over from {}", old.display());
 }
 
 /// Written 0600 on Unix: the file carries the repositories' paths and the

@@ -146,6 +146,80 @@ pub fn init() {
 mod tests {
     use super::*;
 
+    /// Words that are French and are not English. Deliberately short, and
+    /// function words only: a list of nouns would catch a path or a program
+    /// name sooner or later.
+    const FRENCH: &[&str] = &[
+        "le", "la", "les", "un", "une", "des", "du", "dans", "pour", "qui", "que", "avec", "sans",
+        "est", "sont", "aucun", "cette", "ces", "depuis", "vers", "sur",
+    ];
+
+    /// The journal is written in English, and this is what keeps it that way.
+    ///
+    /// The rule — the core speaks English, the documentation French — had no
+    /// test, unlike the i18n catalogues which have one. It went unnoticed for
+    /// as long as those lines only reached a console nobody opened; the "Logs"
+    /// page shows them raw, so a stray French line is now a user-visible
+    /// inconsistency next to twenty English ones.
+    ///
+    /// Only `log::` literals, and only those on the macro's own line: this
+    /// looks at the text, not at the syntax, and widening it to every string
+    /// in the tree would catch test fixtures and the accented paths they are
+    /// full of on purpose.
+    #[test]
+    fn nothing_speaks_french_in_the_journal() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut caught = Vec::new();
+        for file in rust_files(&root) {
+            let text = std::fs::read_to_string(&file).expect("a source file");
+            for (no, line) in text.lines().enumerate() {
+                if !line.contains("log::") {
+                    continue;
+                }
+                for word in quoted(line)
+                    .split(|c: char| !c.is_alphabetic() && c != '\u{e9}' && c != '\u{e8}')
+                {
+                    let lower = word.to_lowercase();
+                    if !word.is_ascii() || FRENCH.contains(&lower.as_str()) {
+                        caught.push(format!("{}:{}: {}", file.display(), no + 1, line.trim()));
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(
+            caught.is_empty(),
+            "French in the journal:\n{}",
+            caught.join("\n")
+        );
+    }
+
+    /// The `"…"` pieces of a line, concatenated. Escapes are not handled: a
+    /// literal with a quote in it is not what this is looking for.
+    fn quoted(line: &str) -> String {
+        line.split('"')
+            .skip(1)
+            .step_by(2)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn rust_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut files = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return files;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(rust_files(&path));
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                files.push(path);
+            }
+        }
+        files
+    }
+
     #[test]
     fn a_duration_is_written_the_way_it_is_read() {
         // Milliseconds while they stay a number one can hold, then seconds:
