@@ -152,10 +152,32 @@ jobs:
         run: |
           cd artifacts/claudhub-windows-x86_64
           zip -r "$GITHUB_WORKSPACE/Claudhub-windows-x86_64.zip" .
+      # Prepended to the generated notes. Which file to take, and what to do
+      # with it, is the first question a release page has to answer — and the
+      # Windows archive holding two files is the one place where guessing
+      # wrong is easy.
       - uses: softprops/action-gh-release@v2
         with:
           draft: true
           generate_release_notes: true
+          body: |
+            ## Installation
+
+            **Windows** — `Claudhub-windows-x86_64.zip`. Dézippez les deux
+            fichiers **dans le même dossier** et lancez `claudhub.exe` :
+            `claudhub-server` n'est pas à installer, c'est l'application qui
+            s'en charge. Elle demande au premier démarrage dans quelle
+            distribution WSL2 travailler, y pose ce binaire, et s'y connecte.
+            La machine doit avoir WSL2 avec une distribution, et `git` dedans.
+
+            **Linux** — `Claudhub-x86_64.run` de préférence : il ne demande que
+            `sh`, `tar` et `gzip`, et se déballe une fois dans `~/.cache`.
+            `Claudhub-x86_64.AppImage` porte le même contenu mais exige un
+            `fusermount` sur la machine. Les deux embarquent leurs
+            bibliothèques ; le pilote Vulkan, `git` et l'agent viennent de
+            l'hôte.
+
+            ---
           files: |
             Claudhub-windows-x86_64.zip
             artifacts/claudhub-linux-x86_64/Claudhub-x86_64.AppImage
