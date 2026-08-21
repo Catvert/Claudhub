@@ -419,19 +419,36 @@ pub fn resolve(dir: &Path, path: &Path, ours: bool) -> Result<()> {
 /// `ignored` adds what `.gitignore` leaves out — `vendor/`, `node_modules/`,
 /// `target/`: an explicit choice, because the list then changes order of
 /// magnitude.
+///
+/// **Two commands in that case, and there is no way round it.** `--ignored` is
+/// not "add the ignored ones": it is a *filter*, and git says so — it shows
+/// only what an exclude pattern matches, so `--cached --others --ignored`
+/// returns the ignored files **alone**, without a single tracked one. It also
+/// refuses to run without `--exclude-standard`, which is the error this used to
+/// put in the journal: `ls-files --ignored needs some exclude pattern`. The
+/// union therefore takes one call for each half.
 pub fn list_files(dir: &Path, ignored: bool) -> Result<Vec<PathBuf>> {
-    let mut args: Vec<&str> = vec!["ls-files", "-z", "--cached", "--others"];
+    let mut files = list_of(dir, &["--cached", "--others", "--exclude-standard"])?;
     if ignored {
-        args.push("--ignored");
-    } else {
-        args.push("--exclude-standard");
+        files.extend(list_of(
+            dir,
+            &["--others", "--ignored", "--exclude-standard"],
+        )?);
+        // Two lists, each sorted, are not a sorted list — and the tree is built
+        // from the order git gives.
+        files.sort_unstable();
     }
-    let out = git(dir, &args)?;
-    let mut files: Vec<PathBuf> = split_nul(&out).map(PathBuf::from).collect();
-    // `--cached --others` may return the same path twice; the list is already
-    // sorted by git, so a local dedup is enough.
+    // `--cached --others` may return the same path twice; the list being sorted,
+    // a local dedup is enough.
     files.dedup();
     Ok(files)
+}
+
+fn list_of(dir: &Path, flags: &[&str]) -> Result<Vec<PathBuf>> {
+    let mut args: Vec<&str> = vec!["ls-files", "-z"];
+    args.extend_from_slice(flags);
+    let out = git(dir, &args)?;
+    Ok(split_nul(&out).map(PathBuf::from).collect())
 }
 
 /// True if the checkout has uncommitted changes, tracked or not.
@@ -506,6 +523,73 @@ pub fn absolute(dir: &Path, rel: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A small real repository: tracked code, a new file, an ignored folder.
+    fn scratch_repo(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("claudhub-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("vendor/pkg")).unwrap();
+        std::fs::write(root.join("src/code.rs"), "fn main() {}").unwrap();
+        std::fs::write(root.join("src/new.rs"), "// not added yet").unwrap();
+        std::fs::write(root.join("vendor/pkg/big.php"), "<?php").unwrap();
+        std::fs::write(root.join(".gitignore"), "vendor/\n").unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "T"],
+            vec!["add", "src/code.rs", ".gitignore"],
+        ] {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(&args)
+                .output()
+                .unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn showing_the_ignored_files_adds_them_instead_of_replacing_everything() {
+        // `--ignored` is a filter and not an addition: asking for it in the
+        // same call returned the ignored files alone — and git refused to run
+        // at all without `--exclude-standard`, which is what the journal was
+        // saying.
+        let root = scratch_repo("ls-files");
+
+        let plain = list_files(&root, false).unwrap();
+        assert!(plain.contains(&PathBuf::from("src/code.rs")), "{plain:?}");
+        assert!(
+            plain.contains(&PathBuf::from("src/new.rs")),
+            "a new file too"
+        );
+        assert!(
+            !plain.iter().any(|p| p.starts_with("vendor")),
+            "nothing ignored: {plain:?}"
+        );
+
+        let all = list_files(&root, true).unwrap();
+        assert!(
+            all.contains(&PathBuf::from("vendor/pkg/big.php")),
+            "the ignored files: {all:?}"
+        );
+        // And everything the plain listing had is still there.
+        for path in &plain {
+            assert!(
+                all.contains(path),
+                "{} is missing from {all:?}",
+                path.display()
+            );
+        }
+        // Sorted and without duplicates: the tree is built from this order.
+        let mut sorted = all.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(all, sorted);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn parses_a_main_repo_and_two_worktrees() {

@@ -47,6 +47,20 @@ use crate::ui::settings::Settings;
 use crate::ui::theme::status_color;
 use crate::ui::tree;
 
+/// Where the reading of a worktree's file list stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Listing {
+    /// Never asked for, or something has invalidated it.
+    Idle,
+    /// A command has gone out and has not come back.
+    Loading,
+    Ready,
+    /// git refused. Not asked again by itself: the panel renders at every
+    /// frame, and retrying there would be a git command per frame for as long
+    /// as the cause lasts.
+    Failed,
+}
+
 /// A worktree's files, and the tree drawn from them.
 pub struct Explorer {
     /// The flat list, as git returns it: it is the reference, and the tree is
@@ -55,9 +69,17 @@ pub struct Explorer {
     /// The displayed tree, rebuilt on every collapse and never in a render.
     pub rows: Rc<Vec<tree::Entry>>,
     pub collapsed: std::collections::HashSet<PathBuf>,
-    /// A request has gone out and not come back: without this guard, every frame
-    /// of the panel would restart `ls-files`.
-    pub pending: bool,
+    /// Where the reading of the list stands.
+    ///
+    /// Four states and not a `pending` flag, for the reason the database tree
+    /// already had them: "not asked for yet", "under way", "here" and "it
+    /// failed" are four different things, and the panel renders at every frame.
+    /// Confusing "under way" with "not asked for" restarts `ls-files` sixty
+    /// times a second; confusing "here" with "not asked for" does the same on
+    /// an empty project; and dropping "it failed" on the floor left the panel
+    /// stuck on "under way" for good — one `ls-files` that fails, and the tree
+    /// never came back for the rest of the session.
+    pub state: Listing,
     /// Were the ignored files asked for, so we know when to re-read.
     pub ignored: bool,
     /// The search `rows` was built for. Compared at render time: that is the
@@ -77,7 +99,7 @@ impl Default for Explorer {
             files: Vec::new(),
             rows: Rc::new(Vec::new()),
             collapsed: std::collections::HashSet::new(),
-            pending: false,
+            state: Listing::Idle,
             ignored: false,
             query: String::new(),
             cursor: None,
@@ -212,19 +234,39 @@ impl ClaudhubApp {
         };
         let ignored = Settings::global(cx).show_ignored_files;
         let explorer = self.explorers.entry(worktree.clone()).or_default();
-        if explorer.pending || (!explorer.files.is_empty() && explorer.ignored == ignored) {
-            return;
+        match explorer.state {
+            // Waiting for an answer: asking again would only queue a second
+            // command behind the first.
+            Listing::Loading => return,
+            // Already answered for the setting in force. A failure is not
+            // retried either, until something invalidates it — a toggle, a file
+            // operation, a refresh.
+            Listing::Ready | Listing::Failed if explorer.ignored == ignored => return,
+            _ => {}
         }
-        explorer.pending = true;
+        explorer.state = Listing::Loading;
         explorer.ignored = ignored;
         self.git.send(Cmd::ListFiles { worktree, ignored });
     }
 
     pub(super) fn project_files_arrived(&mut self, worktree: PathBuf, files: Vec<PathBuf>) {
         let explorer = self.explorers.entry(worktree).or_default();
-        explorer.pending = false;
+        explorer.state = Listing::Ready;
         explorer.files = files;
         explorer.rebuild();
+    }
+
+    /// git refused to list the files.
+    ///
+    /// Only what was under way: a failure that names this worktree while
+    /// nothing was expected of it — another read, another panel — has nothing
+    /// to say about the tree.
+    pub(super) fn project_files_failed(&mut self, worktree: &Path) {
+        if let Some(explorer) = self.explorers.get_mut(worktree) {
+            if explorer.state == Listing::Loading {
+                explorer.state = Listing::Failed;
+            }
+        }
     }
 
     pub(super) fn toggle_project_dir(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -452,6 +494,7 @@ impl ClaudhubApp {
         // The list changes order of magnitude: we ask for it again rather than
         // filter the one we have, which has never seen the ignored files.
         if let Some(explorer) = self.explorer() {
+            explorer.state = Listing::Idle;
             explorer.files.clear();
             explorer.rebuild();
         }
@@ -636,7 +679,7 @@ impl ClaudhubApp {
         self.git.send(Cmd::FileOp { worktree, op });
         // The list is re-read: only `ls-files` knows what git now tracks.
         if let Some(explorer) = self.explorer() {
-            explorer.files.clear();
+            explorer.state = Listing::Idle;
         }
         cx.notify();
     }
@@ -673,7 +716,7 @@ impl ClaudhubApp {
             explorer.rebuild();
         }
         let explorer = &*explorer;
-        let pending = explorer.pending;
+        let state = explorer.state;
         let rows = explorer.rows.clone();
         let files = Rc::new(explorer.files.clone());
         let cursor = explorer.cursor.clone();
@@ -711,7 +754,7 @@ impl ClaudhubApp {
         // search with no result. During the first `ls-files`, the list stays
         // blank — announcing "no file" and then showing them reads as a display
         // glitch.
-        if count == 0 && !pending {
+        if count == 0 && state != Listing::Loading {
             return v_flex()
                 .size_full()
                 .child(bar)

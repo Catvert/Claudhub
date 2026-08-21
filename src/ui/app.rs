@@ -1683,6 +1683,14 @@ impl ClaudhubApp {
         if action == Action::SuggestMessage {
             self.suggesting_message = None;
         }
+        // Same reason as the status above: without this, one `ls-files` that
+        // fails leaves the explorer waiting for an answer that will never come,
+        // and its tree stays empty for the rest of the session.
+        if action == Action::Read {
+            if let Some(worktree) = worktree.as_deref() {
+                self.project_files_failed(worktree);
+            }
+        }
         self.toast = Some(Toast {
             text: SharedString::from(message),
             error: true,
