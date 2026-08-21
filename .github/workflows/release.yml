@@ -39,7 +39,7 @@ jobs:
     name: Core tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Without the `ui` feature: this leg never compiles gpui, so it is also
@@ -54,7 +54,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
@@ -79,7 +79,7 @@ jobs:
     needs: server
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build the application
@@ -105,15 +105,18 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: cachix/install-nix-action@v31
         with:
           nix_path: nixpkgs=channel:nixos-unstable
-      # The cache name lives in a repository variable so it can differ from
-      # the project name; CACHIX_AUTH_TOKEN is a repository secret.
+      # Skipped unless the CACHIX_CACHE repository variable names a cache.
+      # No default: a guessed name fails the whole leg with "cache doesn't
+      # exist", and losing the release over a cache is a bad trade — without
+      # it the closure is merely rebuilt.
       - uses: cachix/cachix-action@v15
+        if: vars.CACHIX_CACHE != ''
         with:
-          name: ${{ vars.CACHIX_CACHE || 'claudhub' }}
+          name: ${{ vars.CACHIX_CACHE }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       # cargo comes from rustup, not from shell.nix: `nix-shell` is not pure
       # here, so the toolchain on PATH stays reachable inside it.
