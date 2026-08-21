@@ -1,0 +1,159 @@
+# Builds and publishes a release.
+#
+# Tags only: a release is a deliberate act, and every one of these jobs costs
+# a full rebuild of the gpui tree. Day-to-day checking is `just check`,
+# `just clippy`, `just test` and `just check-server` on the developer's
+# machine — the same gates this workflow runs, minus the packaging.
+#
+# Two deliverables, one per platform:
+#   - Windows: claudhub.exe with the Linux server binary beside it. They ship
+#     together and never apart — the .exe installs the server it finds next to
+#     itself into the WSL distribution, and a user holding only one of the two
+#     would have no way of knowing what is missing.
+#   - Linux: an AppImage and a self-extracting .run, both carrying the whole
+#     nix closure (see tools/make_appimage.sh).
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Needed by the publish job to create the GitHub release.
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Travels into the handshake through `option_env!` (wire::Hello.build), so
+  # two artifacts built from the same commit recognise each other.
+  CLAUDHUB_BUILD_ID: ${{ github.sha }}
+
+jobs:
+  test:
+    name: Core tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Without the `ui` feature: this leg never compiles gpui, so it is also
+      # the gate proving no core module depends on it.
+      - name: Test the core without gpui
+        run: cargo test --no-default-features
+      - name: Check the headless server
+        run: cargo check --no-default-features --bin claudhub-server
+
+  server:
+    name: Server (static musl)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      # Static on purpose: this binary is copied into whatever WSL
+      # distribution the user picked, and must not expect a glibc it has
+      # never met.
+      - name: Build the server
+        run: >-
+          cargo build --release --no-default-features --bin claudhub-server
+          --target x86_64-unknown-linux-musl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-musl
+          path: target/x86_64-unknown-linux-musl/release/claudhub-server
+          if-no-files-found: error
+
+  windows:
+    name: Windows (x86_64)
+    needs: server
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the application
+        run: cargo build --release --bin claudhub
+      - uses: actions/download-artifact@v4
+        with:
+          name: server-musl
+          path: server
+      - name: Assemble the bundle
+        shell: bash
+        run: |
+          mkdir -p bundle
+          cp target/release/claudhub.exe bundle/
+          cp server/claudhub-server bundle/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claudhub-windows-x86_64
+          path: bundle/
+          if-no-files-found: error
+
+  linux:
+    name: Linux (AppImage)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      # The cache name lives in a repository variable so it can differ from
+      # the project name; CACHIX_AUTH_TOKEN is a repository secret.
+      - uses: cachix/cachix-action@v15
+        with:
+          name: ${{ vars.CACHIX_CACHE || 'claudhub' }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      # cargo comes from rustup, not from shell.nix: `nix-shell` is not pure
+      # here, so the toolchain on PATH stays reachable inside it.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the application
+        run: nix-shell --quiet --run "cargo build --release --bin claudhub"
+      # Outside nix-shell on purpose: the script enters it by itself, and
+      # needs the host's view of the store to walk the closure.
+      - name: Package the AppImage
+        run: tools/make_appimage.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claudhub-linux-x86_64
+          path: |
+            target/appimage/Claudhub-x86_64.AppImage
+            target/appimage/Claudhub-x86_64.run
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    needs: [windows, linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      # Zipped rather than loose: the two Windows files must land in the same
+      # folder, and a release page offering them separately invites downloading
+      # only one.
+      - name: Zip the Windows bundle
+        run: |
+          cd artifacts/claudhub-windows-x86_64
+          zip -r "$GITHUB_WORKSPACE/Claudhub-windows-x86_64.zip" .
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            Claudhub-windows-x86_64.zip
+            artifacts/claudhub-linux-x86_64/Claudhub-x86_64.AppImage
+            artifacts/claudhub-linux-x86_64/Claudhub-x86_64.run

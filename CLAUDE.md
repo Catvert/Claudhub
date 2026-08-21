@@ -36,6 +36,25 @@ embarquer un Mesa casserait les machines NVIDIA ; et rien n'exporte
 du terminal) restent des programmes de l'hôte avec les bibliothèques de
 l'hôte. La machine cible fournit `git`, un pilote Vulkan, et l'agent.
 
+**La CI ne construit que des versions** (`.github/workflows/release.yml`,
+déclenché par un tag `v*` ou à la main). Pas à chaque commit : chacune de ces
+jambes recompile l'arbre gpui entier, et ce que la CI vérifierait, `just
+check`, `just clippy`, `just test` et `just check-server` le disent déjà sur
+la machine de développement — le workflow lance d'ailleurs les mêmes portes
+avant d'empaqueter. Elle produit deux livraisons : l'AppImage et le `.run`
+ci-dessus pour Linux, et pour Windows une archive contenant `claudhub.exe`
+**et** `claudhub-server` — les deux se livrent ensemble et jamais séparément,
+puisque l'exécutable installe dans la distribution celui qu'il trouve à côté
+de lui, et qu'un utilisateur qui n'en aurait qu'un ne saurait pas ce qui lui
+manque. Le serveur est lié en statique (musl) pour la même raison : il est
+copié dans une distribution dont on ne sait rien.
+
+La jambe Linux passe par Nix et pousse ce qu'elle construit dans Cachix
+(`CACHIX_AUTH_TOKEN` en secret, le nom du cache dans la variable
+`CACHIX_CACHE`), ce qui évite de reconstruire la closure à chaque version.
+Les fichiers sont attachés à une release **en brouillon** : c'est la dernière
+occasion de relire ce qui part avant de le rendre public.
+
 ## Architecture
 
 Trois couches, et une règle qui les sépare : **seule `src/ui/` connaît gpui, et

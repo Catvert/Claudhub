@@ -83,8 +83,12 @@ Categories=Development;
 Terminal=false
 EOF
 
-magick -background none -density 300 "$PROJ/assets/icons/git-branch.svg" \
-  -resize 256x256 -gravity center -extent 256x256 "$APPDIR/claudhub.png"
+# Par nix-shell comme le squashfs plus bas : ImageMagick n'est pas dans le
+# shell du projet, et la machine qui construit — un runner de CI, notamment —
+# n'a aucune raison de l'avoir, ni sous ce nom-là.
+nix-shell --quiet -p imagemagick --run \
+  "magick -background none -density 300 '$PROJ/assets/icons/git-branch.svg' \
+    -resize 256x256 -gravity center -extent 256x256 '$APPDIR/claudhub.png'"
 ln -sf claudhub.png "$APPDIR/.DirIcon"
 
 # --- empaquetage : squashfs + runtime type 2 concaténés — c'est exactement ce
