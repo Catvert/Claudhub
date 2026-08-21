@@ -13,6 +13,10 @@
 //! themselves set that convention: Ctrl+Shift+C to copy, because Ctrl+C is
 //! taken.
 //!
+//! **One letter is taken anyway**, and the exception says the rule: `Ctrl+T`
+//! hides the terminals, and what it hides is the terminal one is typing in. A
+//! binding that stopped at its edge would stop exactly where it is needed.
+//!
 //! **A single table describes each binding** (`table!`), and both `bind_keys`
 //! and the help window come out of it. Two lists would have diverged on the
 //! first addition, and help that lies about the keys is worse than no help.
@@ -482,12 +486,16 @@ table!(STANDARD, standard_bindings, [
     // ── The terminals ───────────────────────────────────────────────────────
     Terminal "secondary-shift-t" => NewTerminal, PREDICATE, "shortcut-new-terminal";
     Terminal "secondary-shift-w" => CloseTerminal, PREDICATE, "shortcut-close-terminal";
-    Terminal "secondary-`" => ToggleTerminal, PREDICATE, "shortcut-toggle-terminal";
-    // The same thing under a key found without looking. A letter with the
-    // platform key, so outside the terminal (`WINDOW_PREDICATE`): there,
-    // `Ctrl+T` belongs to the running program. It is the backtick that closes it
-    // again when it has the focus.
-    Terminal "secondary-t" => ToggleTerminal, WINDOW_PREDICATE, "shortcut-toggle-terminal";
+    // **The one letter taken from the terminal**, and the exception is the
+    // point: what this gesture does is hide the terminal one is typing in, so a
+    // binding that stops at its edge stops exactly where it is needed. Having
+    // to click elsewhere first to be allowed to close it is not a shortcut.
+    //
+    // It used to leave the terminal alone, with `secondary-\`` as the way back
+    // out. That backtick does not exist on an AZERTY keyboard — it is a dead key
+    // behind AltGr — so on half the keyboards there was no way at all. What is
+    // taken from the running program is readline's `transpose-chars`.
+    Terminal "secondary-t" => ToggleTerminal, PREDICATE, "shortcut-toggle-terminal";
     Terminal "secondary-tab" => NextTerminal, PREDICATE, "shortcut-next-terminal";
     Terminal "secondary-shift-tab" => PreviousTerminal, PREDICATE, "shortcut-previous-terminal";
     // The terminals' conventions: the platform key *with* Shift, because a bare

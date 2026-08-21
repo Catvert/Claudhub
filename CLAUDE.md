@@ -2886,6 +2886,16 @@ qui demande Maj ou une touche de fonction vaut partout (`PREDICATE`). C'est la
 convention que les terminaux ont eux-mêmes fixée : Ctrl+Maj+C pour copier,
 parce que Ctrl+C est pris.
 
+**Une seule lettre est prise quand même**, et l'exception dit la règle :
+`Ctrl+T` masque les terminaux, et ce qu'il masque est le terminal dans lequel
+on tape. Une liaison qui s'arrête à son bord s'arrête précisément là où on en a
+besoin — devoir cliquer ailleurs pour avoir le droit de le fermer n'est pas un
+raccourci. Elle laissait le terminal tranquille au départ, avec `Ctrl+\`` comme
+sortie de secours ; cet accent grave **n'existe pas sur un clavier AZERTY**, où
+il est une touche morte derrière AltGr, si bien qu'il n'y avait aucun moyen sur
+la moitié des claviers. Ce qu'on prend au programme est le `transpose-chars` de
+readline.
+
 **Un panneau ne s'active pas au clavier**, et ce n'est pas un oubli :
 `TabPanel::set_active_ix` est privé dans gpui-component 0.5.1 et rien de public
 n'en tient lieu. `Ctrl+1` à `Ctrl+9` désignent donc des **worktrees**, ce qui
