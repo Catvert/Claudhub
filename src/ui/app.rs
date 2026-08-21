@@ -341,10 +341,12 @@ pub struct ClaudhubApp {
     pub(super) git: runtime::Handle,
     pub(super) repos: Vec<RepoState>,
 
-    /// Le serveur distant est parti — le message du transport, à afficher
-    /// tant qu'on n'a pas relancé. `None` en mode local, où les workers ne
-    /// meurent qu'avec la fenêtre.
-    pub(super) server_lost: Option<String>,
+    /// Où en est le serveur : rien à dire en mode local, un message tant
+    /// qu'il démarre, et de quoi le relancer s'il tombe.
+    pub(super) server_state: super::server::ServerState,
+    /// La question du premier démarrage sous Windows, tant qu'aucune
+    /// distribution n'est choisie.
+    pub(super) wsl_prompt: Option<super::server::WslPrompt>,
     /// Le serveur tourne sous WSL (dit par sa poignée de main) : c'est là
     /// que « ce chemin est un montage Windows » a un sens, et la machine de
     /// la vue ne peut pas le savoir à sa place.
@@ -626,61 +628,22 @@ fn view_toggle(app: Entity<ClaudhubApp>, name: &'static str, title: &'static str
 }
 
 impl ClaudhubApp {
-    /// Les workers, locaux ou derrière un serveur distant.
+    /// Les workers du démarrage : ceux de ce processus, ou aucun.
     ///
-    /// Le mode distant se choisit par `CLAUDHUB_SERVER_CMD` — le chemin de
-    /// test Linux ↔ Linux, qui exerce tout le fil sans Windows ni WSL ; la
-    /// cible Windows le rendra automatique. Un lancement qui échoue retombe
-    /// sur les workers locaux plutôt que d'ouvrir une fenêtre sourde.
+    /// Aucun quand ils vivront ailleurs — sous Windows, ou quand
+    /// `CLAUDHUB_SERVER_CMD` désigne un serveur. La connexion, elle, se fait
+    /// après, dans une tâche : réveiller une distribution prend des secondes,
+    /// et le constructeur d'une entité gpui ne peut pas les payer.
     fn spawn_backend() -> (runtime::Handle, async_channel::Receiver<Evt>, bool) {
-        if let Some(target) = runtime::remote::target_from_env() {
-            match runtime::remote::connect(&target) {
-                Ok((git, events)) => return (git, events, true),
-                Err(e) => log::warn!("serveur distant indisponible, repli local : {e:#}"),
-            }
+        if runtime::remote::command_from_env().is_some() || cfg!(windows) {
+            // Le manche reste vide jusqu'à ce que le serveur réponde.
+            // Retomber sur des workers locaux ferait travailler `git.exe` sur
+            // des chemins Windows, en silence et à côté de la plaque.
+            let (_closed, events) = async_channel::unbounded();
+            return (runtime::Handle::pending(), events, true);
         }
         let (git, events) = runtime::spawn();
         (git, events, false)
-    }
-
-    /// Relance le serveur distant après sa mort, à la demande.
-    ///
-    /// Manuelle et non automatique : un serveur qui meurt en boucle se
-    /// relancerait en boucle, et c'est l'utilisateur qui sait s'il vient de
-    /// mettre à jour, de fermer sa distro, ou de tuer le mauvais processus.
-    /// L'ancienne pompe s'éteint d'elle-même — son canal est fermé, ses
-    /// émetteurs morts avec le serveur.
-    pub(super) fn reconnect_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(target) = runtime::remote::target_from_env() else {
-            return;
-        };
-        let (git, events) = match runtime::remote::connect(&target) {
-            Ok(pair) => pair,
-            Err(e) => {
-                self.server_lost = Some(format!("{e:#}"));
-                cx.notify();
-                return;
-            }
-        };
-        self.git = git;
-        self.server_lost = None;
-        self.pump_events(events, window, cx);
-        // Le serveur neuf ne sait rien : on lui redonne les dépôts ouverts,
-        // et la surveillance du worktree affiché — le reste (statut, diff)
-        // se redemande par les chemins habituels à l'arrivée des réponses.
-        for repo in &self.repos {
-            self.git.send(Cmd::OpenRepo(repo.main.clone()));
-        }
-        if let Some(active) = self.active.clone() {
-            self.git.send(Cmd::Watch {
-                worktree: active.clone(),
-            });
-            if let Some(vault) = self.notes_dir(&active, cx) {
-                self.git.send(Cmd::WatchDir { dir: vault });
-            }
-            self.request_status(active);
-        }
-        cx.notify();
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -838,7 +801,8 @@ impl ClaudhubApp {
         let mut app = Self {
             git,
             repos: Vec::new(),
-            server_lost: None,
+            server_state: super::server::ServerState::default(),
+            wsl_prompt: None,
             server_wsl: false,
             unavailable: Vec::new(),
             active: None,
@@ -929,6 +893,14 @@ impl ClaudhubApp {
                 app.git.send(Cmd::OpenIfRepo(cwd));
             }
         }
+        // La mise en route du serveur attend que la fenêtre soit montée : un
+        // dialogue a besoin des couches de `Root`, qui ne sont posées qu'au
+        // premier rendu.
+        cx.spawn_in(window, async move |this, cx| {
+            this.update_in(cx, |app, window, cx| app.start_backend(window, cx))
+                .ok();
+        })
+        .detach();
         app
     }
 
@@ -1056,7 +1028,7 @@ impl ClaudhubApp {
     /// Par lots parce qu'un `update_in` par événement force un cycle d'effets
     /// gpui à chaque fois : une ouverture de dépôt qui en produit une dizaine
     /// coûterait dix rendus au lieu d'un.
-    fn pump_events(
+    pub(super) fn pump_events(
         &mut self,
         events: async_channel::Receiver<Evt>,
         window: &mut Window,
@@ -1496,7 +1468,7 @@ impl ClaudhubApp {
                 shells,
             } => {
                 log::info!("serveur distant prêt (build {build})");
-                self.server_lost = None;
+                self.server_state = super::server::ServerState::Up;
                 self.server_wsl = running_under_wsl;
                 // C'est le serveur qui lancera les shells : ce sont les siens
                 // que le formulaire doit proposer, pas ceux de cette machine.
@@ -1508,7 +1480,7 @@ impl ClaudhubApp {
             }
             Evt::ServerLost { message } => {
                 log::warn!("serveur distant perdu : {message}");
-                self.server_lost = Some(message);
+                self.server_state = super::server::ServerState::Down(message);
                 cx.notify();
             }
             Evt::VaultWritten { worktree } => {
@@ -1751,7 +1723,7 @@ impl ClaudhubApp {
     // — Sélection ————————————————————————————————————————————————
 
     /// Demande un statut, sauf s'il y en a déjà un en vol pour ce worktree.
-    fn request_status(&mut self, worktree: PathBuf) {
+    pub(super) fn request_status(&mut self, worktree: PathBuf) {
         if self.pending_status.insert(worktree.clone()) {
             self.git.send(Cmd::RefreshStatus { worktree });
         }
@@ -2005,6 +1977,16 @@ impl ClaudhubApp {
     pub(super) fn notes_dir(&self, worktree: &Path, cx: &App) -> Option<PathBuf> {
         let main = self.main_of(worktree)?;
         let root = Settings::global(cx).notes_root()?;
+        // Le coffre est lu et écrit par les workers, et l'agent le reçoit
+        // dans son environnement : c'est donc un chemin **du serveur** qu'il
+        // faut, jamais celui du monde d'où vient le réglage. Sous Windows,
+        // `<config>/notes` devient un chemin de la distribution ; un coffre
+        // déjà pointé sur `/home/…` passe tel quel.
+        let root = if cfg!(windows) {
+            crate::wslpath::for_server(&root)?
+        } else {
+            root
+        };
         Some(crate::ui::vault::dir_for(&root, &main, worktree))
     }
 
@@ -2398,29 +2380,10 @@ impl ClaudhubApp {
             // Une opération à mi-chemin passe avant tout le reste : tant
             // qu'elle dure, ce que la revue affiche n'est pas ce qu'on croit.
             .children(self.render_pending_bar(cx))
-            // Le serveur parti passe avant les avertissements ordinaires :
+            // L'état du serveur passe avant les avertissements ordinaires :
             // tant qu'il manque, plus rien de ce que la fenêtre montre ne
             // bouge, et chaque geste part dans le vide.
-            .when_some(self.server_lost.clone(), |el, message| {
-                el.child(
-                    h_flex()
-                        .gap_1()
-                        .text_color(cx.theme().danger)
-                        .child(icon("triangle-alert").xsmall())
-                        .child(div().max_w(px(360.)).truncate().child(tr!("server-lost")))
-                        .child(
-                            Button::new("server-relaunch")
-                                .ghost()
-                                .xsmall()
-                                .label(tr!("server-relaunch"))
-                                .tooltip(message)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.reconnect_server(window, cx);
-                                })),
-                        ),
-                )
-                .child(Divider::vertical().h(px(12.)))
-            })
+            .children(self.render_server_status(cx))
             .when(unwatched, |el| {
                 el.child(
                     h_flex()

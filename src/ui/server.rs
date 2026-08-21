@@ -1,0 +1,341 @@
+//! La mise en route du serveur, sous Windows.
+//!
+//! Sur cette plateforme, les workers ne vivent pas dans ce processus mais dans
+//! une distribution WSL2, et il faut donc : savoir laquelle, y installer le
+//! binaire livré à côté de l'exécutable, l'y lancer, et dire à l'utilisateur
+//! où l'on en est. Ailleurs, ce module ne fait rien — les workers sont déjà là.
+//!
+//! **Tout ce qui parle à `wsl.exe` part dans un thread.** Réveiller une
+//! distribution endormie prend des secondes, et copier douze mégaoctets n'est
+//! pas gratuit : c'est exactement ce que la règle « `src/ui/` ne fait jamais
+//! d'entrée-sortie » existe pour éviter. La vue ne garde qu'un état
+//! d'avancement et le peint.
+
+use gpui::{div, prelude::*, px, Context, SharedString, Window};
+use gpui_component::{
+    button::{Button, ButtonVariants},
+    h_flex, v_flex, ActiveTheme, Selectable, Sizable, WindowExt,
+};
+
+use crate::runtime::remote;
+use crate::tr;
+use crate::ui::app::ClaudhubApp;
+use crate::ui::icons::icon;
+use crate::ui::settings::Settings;
+
+/// Où en est le serveur, du point de vue de la fenêtre.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ServerState {
+    /// Les workers sont dans ce processus : il n'y a rien à en dire, et la
+    /// barre d'état reste muette.
+    #[default]
+    Local,
+    /// En route — distribution interrogée, binaire installé, connexion
+    /// ouverte. Le message dit laquelle de ces étapes.
+    Starting(SharedString),
+    /// Debout et répondant.
+    Up,
+    /// Tombé, ou jamais parti. Le message est celui du transport, et il est
+    /// gardé en entier : c'est la seule chose qui dise *pourquoi*.
+    Down(String),
+}
+
+/// La question posée au premier démarrage, tant qu'aucune distribution n'est
+/// choisie.
+pub struct WslPrompt {
+    pub distros: Vec<String>,
+    pub chosen: usize,
+}
+
+impl ClaudhubApp {
+    /// Met le serveur en route, une fois la fenêtre construite.
+    ///
+    /// Appelé depuis une tâche et non depuis le constructeur : ouvrir un
+    /// dialogue demande une fenêtre déjà montée, et les couches de `Root` ne
+    /// sont posées qu'au premier rendu.
+    pub(super) fn start_backend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // La ligne de commande explicite l'emporte sur tout : c'est le levier
+        // de test, et la sortie de secours quand la mise en route se trompe.
+        if let Some(argv) = remote::command_from_env() {
+            self.connect_argv(argv, window, cx);
+            return;
+        }
+        if !cfg!(windows) {
+            return; // les workers de ce processus tournent déjà
+        }
+        let distro = Settings::global(cx).wsl_distro.clone();
+        if distro.trim().is_empty() {
+            self.ask_wsl_distro(window, cx);
+        } else {
+            self.connect_wsl(distro, window, cx);
+        }
+    }
+
+    /// Reprend la mise en route après un échec, à la demande.
+    ///
+    /// Manuelle et non automatique : un serveur qui meurt en boucle se
+    /// relancerait en boucle, et l'utilisateur est le seul à savoir s'il vient
+    /// de fermer sa distribution ou de mettre à jour son installation.
+    pub(super) fn restart_backend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_backend(window, cx);
+    }
+
+    /// Demande dans quelle distribution les workers doivent tourner.
+    fn ask_wsl_distro(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.server_state = ServerState::Starting(tr!("server-listing"));
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let found = in_a_thread(crate::wsl::distributions).await;
+            this.update_in(cx, |app, window, cx| match found {
+                Ok(distros) => {
+                    // L'état reste « en route » tant que la question est
+                    // posée : annoncer un serveur indisponible pendant qu'on
+                    // demande où le mettre serait se plaindre de soi-même.
+                    app.wsl_prompt = Some(WslPrompt { distros, chosen: 0 });
+                    app.open_wsl_dialog(window, cx);
+                }
+                Err(e) => app.server_failed(e, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Le dialogue de choix, et ce qu'il déclenche.
+    fn open_wsl_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let entity = cx.entity();
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            let (entity, cancel) = (entity.clone(), entity.clone());
+            dialog
+                .title(tr!("server-wsl-title"))
+                .child(
+                    v_flex()
+                        .w(px(420.))
+                        .gap_2()
+                        .child(div().text_sm().child(tr!("server-wsl-help")))
+                        .child(entity.clone().update(cx, |this, cx| {
+                            this.render_wsl_choices(cx).into_any_element()
+                        })),
+                )
+                .overlay_closable(false)
+                .close_button(false)
+                .on_ok(move |_, window, cx| {
+                    entity.update(cx, |this, cx| this.accept_wsl_distro(window, cx));
+                    true
+                })
+                .on_cancel(move |_, _window, cx| {
+                    // Refuser de choisir laisse la fenêtre ouverte et sans
+                    // workers : c'est dit, plutôt que d'attendre en silence.
+                    cancel.update(cx, |this, cx| {
+                        this.wsl_prompt = None;
+                        this.server_state = ServerState::Down(tr!("server-wsl-none").to_string());
+                        cx.notify();
+                    });
+                    true
+                })
+        });
+    }
+
+    /// Les distributions, une par ligne, celle qui est retenue cochée.
+    fn render_wsl_choices(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(prompt) = self.wsl_prompt.as_ref() else {
+            return v_flex();
+        };
+        let chosen = prompt.chosen;
+        v_flex()
+            .gap_1()
+            .children(
+                prompt
+                    .distros
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .map(|(index, name)| {
+                        Button::new(("wsl-distro", index))
+                            .ghost()
+                            .w_full()
+                            .justify_start()
+                            .selected(index == chosen)
+                            .icon(icon(if index == chosen {
+                                "circle-check"
+                            } else {
+                                "circle"
+                            }))
+                            .label(name)
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                if let Some(prompt) = this.wsl_prompt.as_mut() {
+                                    prompt.chosen = index;
+                                    cx.notify();
+                                }
+                            }))
+                    }),
+            )
+    }
+
+    /// Retient le choix et lance la mise en route.
+    fn accept_wsl_distro(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(prompt) = self.wsl_prompt.take() else {
+            return;
+        };
+        let Some(distro) = prompt.distros.get(prompt.chosen).cloned() else {
+            return;
+        };
+        // Retenu avant de connecter : la question ne se repose pas au
+        // démarrage suivant, même si celui-ci échoue — on n'a pas envie de
+        // rechoisir sa distribution parce que WSL dormait.
+        Settings::update_global(cx, |settings| settings.wsl_distro = distro.clone());
+        self.connect_wsl(distro, window, cx);
+    }
+
+    /// Installe le serveur au besoin, puis s'y connecte.
+    fn connect_wsl(&mut self, distro: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.server_state =
+            ServerState::Starting(tr!("server-starting", { distro: distro.clone() }));
+        cx.notify();
+        // Le répertoire de démarrage du serveur décide du dépôt qui s'ouvre :
+        // celui qu'on regardait, à défaut aucun.
+        let cwd = self
+            .active
+            .as_ref()
+            .and_then(|path| path.to_str().map(str::to_string));
+        cx.spawn_in(window, async move |this, cx| {
+            let opened = in_a_thread(move || remote::connect_wsl(&distro, cwd.as_deref())).await;
+            this.update_in(cx, |app, window, cx| match opened {
+                Ok((git, events, probe)) => {
+                    // Le shell de connexion de là-bas : c'est lui qu'un
+                    // onglet de terminal lancera, et le seul moment où on
+                    // pouvait le demander est celui-ci.
+                    crate::ui::settings::set_server_shell(probe.shell);
+                    app.backend_ready(git, events, window, cx);
+                }
+                Err(e) => app.server_failed(e, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Connecte une ligne de commande explicite.
+    fn connect_argv(&mut self, argv: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.server_state = ServerState::Starting(tr!("server-listing"));
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let opened = in_a_thread(move || remote::connect(&argv)).await;
+            this.update_in(cx, |app, window, cx| match opened {
+                Ok((git, events)) => app.backend_ready(git, events, window, cx),
+                Err(e) => app.server_failed(e, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Le serveur répond : on lui donne le manche et on l'écoute.
+    ///
+    /// L'ancienne pompe s'éteint d'elle-même, son canal étant clos avec le
+    /// transport qu'elle drainait.
+    fn backend_ready(
+        &mut self,
+        git: crate::runtime::Handle,
+        events: async_channel::Receiver<crate::runtime::Evt>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.git = git;
+        self.pump_events(events, window, cx);
+        // Le serveur neuf ne sait rien de ce qu'on avait ouvert : on lui
+        // redonne les dépôts, et la surveillance du worktree affiché. Le
+        // reste — statut, diff — se redemande par les chemins habituels.
+        for main in self
+            .repos
+            .iter()
+            .map(|repo| repo.main.clone())
+            .collect::<Vec<_>>()
+        {
+            self.git.send(crate::runtime::Cmd::OpenRepo(main));
+        }
+        if let Some(active) = self.active.clone() {
+            self.git.send(crate::runtime::Cmd::Watch {
+                worktree: active.clone(),
+            });
+            if let Some(vault) = self.notes_dir(&active, cx) {
+                self.git.send(crate::runtime::Cmd::WatchDir { dir: vault });
+            }
+            self.request_status(active);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn server_failed(&mut self, error: anyhow::Error, cx: &mut Context<Self>) {
+        let message = format!("{error:#}");
+        log::warn!("serveur indisponible : {message}");
+        self.server_state = ServerState::Down(message);
+        cx.notify();
+    }
+
+    /// Ce que la barre d'état dit du serveur, quand elle a quelque chose à en
+    /// dire.
+    ///
+    /// Rien en mode local ni quand il répond : une ligne permanente pour
+    /// annoncer que tout va bien userait la place où s'affiche ce qui ne va
+    /// pas.
+    pub(super) fn render_server_status(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let (color, label, detail, relaunch) = match &self.server_state {
+            ServerState::Local | ServerState::Up => return None,
+            ServerState::Starting(message) => (
+                cx.theme().muted_foreground,
+                message.clone(),
+                String::new(),
+                false,
+            ),
+            ServerState::Down(message) => (
+                cx.theme().danger,
+                tr!("server-unavailable"),
+                message.clone(),
+                true,
+            ),
+        };
+        Some(
+            h_flex()
+                .gap_1()
+                .text_color(color)
+                .child(icon(if relaunch {
+                    "triangle-alert"
+                } else {
+                    "loader-circle"
+                }))
+                .child(div().max_w(px(360.)).truncate().child(label))
+                .when(relaunch, |el| {
+                    el.child(
+                        Button::new("server-relaunch")
+                            .ghost()
+                            .xsmall()
+                            .label(tr!("server-relaunch"))
+                            .when(!detail.is_empty(), |b| b.tooltip(detail.clone()))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.restart_backend(window, cx);
+                            })),
+                    )
+                }),
+        )
+    }
+}
+
+/// Exécute un travail bloquant dans un thread et rend sa réponse.
+///
+/// Un thread plutôt que l'exécuteur de fond de gpui : ce qui se passe ici
+/// attend `wsl.exe` pendant des secondes, et occuper un fil de l'exécuteur
+/// tout ce temps priverait le reste de la fenêtre du sien.
+async fn in_a_thread<T, F>(work: F) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::Builder::new()
+        .name("claudhub-wsl".into())
+        .spawn(move || {
+            let _ = tx.send_blocking(work());
+        })?;
+    rx.recv().await?
+}

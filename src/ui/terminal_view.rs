@@ -95,14 +95,24 @@ impl TerminalView {
         working_directory: &Path,
         launch: &Launch,
         settings: &TerminalSettings,
+        wsl: Option<&WslShell>,
     ) -> anyhow::Result<Terminal> {
+        // Un onglet ordinaire prend le programme des réglages ; une commande
+        // explicite — l'agent, une tâche `wt` — passe avant, elle est
+        // justement ce qu'on a demandé à lancer.
+        let command = launch.command.clone().or_else(|| settings.program());
+        let spawned = match wsl {
+            Some(wsl) => wsl.wrap(working_directory, command, &launch.env),
+            None => Spawned {
+                cwd: working_directory.to_path_buf(),
+                command,
+                env: launch.env.clone(),
+            },
+        };
         Terminal::spawn(Spawn {
-            working_directory,
-            // Un onglet ordinaire prend le programme des réglages ; une
-            // commande explicite — l'agent — passe avant, elle est justement
-            // ce qu'on a demandé à lancer.
-            command: launch.command.clone().or_else(|| settings.program()),
-            env: launch.env.clone(),
+            working_directory: &spawned.cwd,
+            command: spawned.command,
+            env: spawned.env,
             // La vraie taille arrive au premier rendu ; celle-ci ne sert qu'à
             // ce que le shell ait une géométrie plausible avant sa première
             // invite.
@@ -910,6 +920,76 @@ fn rgb(r: u8, g: u8, b: u8) -> Hsla {
     .into()
 }
 
+/// La distribution où ouvrir les terminaux, sous Windows.
+///
+/// `None` partout ailleurs : le pty s'ouvre là où il a toujours été ouvert.
+/// Sous Windows en revanche, les dépôts vivent dans WSL — un terminal ouvert
+/// localement regarderait un chemin qui n'existe pas, et l'agent qu'on y
+/// lance ne verrait pas le code. Le pty reste local (ConPTY) : seul ce qui
+/// tourne dedans traverse.
+#[derive(Clone)]
+pub struct WslShell {
+    distro: String,
+    login_shell: String,
+}
+
+impl WslShell {
+    /// La distribution en service, s'il y en a une.
+    ///
+    /// Le shell de connexion vient de la distribution elle-même, retenu au
+    /// moment de l'installation du serveur ; à défaut `/bin/sh`, qui existe
+    /// partout.
+    pub fn current(cx: &gpui::App) -> Option<Self> {
+        if !cfg!(windows) {
+            return None;
+        }
+        let distro = Settings::global(cx).wsl_distro.trim().to_string();
+        (!distro.is_empty()).then(|| Self {
+            distro,
+            login_shell: crate::ui::settings::server_shell()
+                .unwrap_or_else(|| "/bin/sh".to_string()),
+        })
+    }
+
+    /// Ce que le pty local doit lancer pour que le travail se fasse là-bas.
+    ///
+    /// Le répertoire de travail du pty **Windows** devient un dossier
+    /// quelconque mais valide : le vrai répertoire, celui du dépôt, part dans
+    /// le `--cd` de `wsl.exe`. Lui passer le chemin Linux ferait échouer
+    /// l'ouverture avant même d'avoir commencé.
+    fn wrap(&self, worktree: &Path, command: Program, env: &HashMap<String, String>) -> Spawned {
+        // Trié : l'ordre d'une table de hachage change d'une exécution à
+        // l'autre, et une ligne de commande qui bouge sans raison est
+        // impossible à comparer quand il faut la lire dans une trace.
+        let mut vars: Vec<(String, String)> =
+            env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        vars.sort();
+        let (program, args) = crate::wsl::terminal_argv(
+            &self.distro,
+            &worktree.to_string_lossy(),
+            &self.login_shell,
+            command,
+            &vars,
+        );
+        Spawned {
+            cwd: std::env::temp_dir(),
+            command: Some((program, args)),
+            env: HashMap::new(),
+        }
+    }
+}
+
+/// Un programme et ses arguments, tels que le pty les recevra. `None` : le
+/// shell de connexion.
+type Program = Option<(String, Vec<String>)>;
+
+/// Ce qu'un onglet lance vraiment, une fois la plateforme prise en compte.
+struct Spawned {
+    cwd: PathBuf,
+    command: Program,
+    env: HashMap<String, String>,
+}
+
 /// Ce qu'il faut pour ouvrir un onglet.
 ///
 /// Un agrégat plutôt que quatre paramètres : un profil d'agent porte une
@@ -1020,7 +1100,8 @@ impl TerminalGroup {
         // construction : changer le shell ou le défilement arrière doit valoir
         // pour le prochain onglet, sans avoir à fermer les autres.
         let settings = Settings::global(cx).terminal.clone();
-        let terminal = match TerminalView::open(&self.worktree, &launch, &settings) {
+        let wsl = WslShell::current(cx);
+        let terminal = match TerminalView::open(&self.worktree, &launch, &settings, wsl.as_ref()) {
             Ok(terminal) => terminal,
             Err(e) => {
                 log::error!("ouverture du terminal : {e:#}");

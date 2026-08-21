@@ -130,6 +130,15 @@ enum HandleInner {
         watcher: Option<watch::Watcher>,
     },
     Remote(async_channel::Sender<Cmd>),
+    /// Aucun worker : les commandes sont jetées.
+    ///
+    /// L'état d'avant la connexion, sous Windows, où les workers vivent dans
+    /// une distribution qu'il faut d'abord réveiller. Jeter est le bon
+    /// comportement : les faire attendre en file les livrerait toutes d'un
+    /// coup à l'ouverture, alors que la vue les redemandera d'elle-même — et
+    /// surtout, retomber sur des workers locaux ferait travailler `git.exe`
+    /// sur des chemins Windows, en silence et à côté de la plaque.
+    Pending,
 }
 
 impl Handle {
@@ -138,6 +147,13 @@ impl Handle {
     pub(crate) fn remote(wire: async_channel::Sender<Cmd>) -> Self {
         Self {
             inner: HandleInner::Remote(wire),
+        }
+    }
+
+    /// Un manche sans workers, en attendant qu'un serveur réponde.
+    pub fn pending() -> Self {
+        Self {
+            inner: HandleInner::Pending,
         }
     }
 
@@ -168,6 +184,7 @@ impl Handle {
                 send_to(queue, cmd);
             }
             HandleInner::Remote(wire) => send_to(wire, cmd),
+            HandleInner::Pending => log::debug!("commande émise avant le serveur, jetée"),
         }
     }
 }

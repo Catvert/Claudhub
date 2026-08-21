@@ -18,23 +18,32 @@ use std::process::{Command, Stdio};
 use super::wire::{self, Hello};
 use super::{Cmd, Evt, Handle};
 
-/// Où trouver le serveur.
-#[derive(Debug, Clone)]
-pub enum Target {
-    /// Une ligne de commande explicite — le chemin de test : sous Linux,
-    /// `CLAUDHUB_SERVER_CMD=target/debug/claudhub-server` exerce tout le fil
-    /// sans Windows ni WSL.
-    Command(Vec<String>),
-}
-
-/// La cible dictée par l'environnement, s'il y en a une.
+/// La ligne de commande dictée par l'environnement, s'il y en a une.
 ///
-/// C'est la vue qui décide du mode (elle seule connaît les réglages) ; ceci
-/// n'est que le levier de test, lu partout pareil.
-pub fn target_from_env() -> Option<Target> {
+/// C'est le levier de test : sous Linux,
+/// `CLAUDHUB_SERVER_CMD=target/debug/claudhub-server` exerce tout le fil sans
+/// Windows ni WSL. Il l'emporte sur la mise en route automatique, ce qui en
+/// fait aussi la sortie de secours quand celle-ci se trompe.
+pub fn command_from_env() -> Option<Vec<String>> {
     let line = std::env::var("CLAUDHUB_SERVER_CMD").ok()?;
     let parts = crate::cmdline::split_command(&line);
-    (!parts.is_empty()).then_some(Target::Command(parts))
+    (!parts.is_empty()).then_some(parts)
+}
+
+/// Installe au besoin le serveur dans la distribution, puis s'y connecte.
+///
+/// Les deux premières étapes parlent à `wsl.exe` et peuvent durer plusieurs
+/// secondes — une distribution endormie met du temps à s'éveiller, et douze
+/// mégaoctets à copier ne sont pas gratuits. **Jamais depuis le thread
+/// d'interface** : c'est la fenêtre qui serait figée pendant ce temps.
+pub fn connect_wsl(
+    distro: &str,
+    cwd: Option<&str>,
+) -> anyhow::Result<(Handle, async_channel::Receiver<Evt>, crate::wsl::Probe)> {
+    let probe = crate::wsl::probe(distro)?;
+    let server = crate::wsl::ensure_installed(distro, &probe)?;
+    let (handle, events) = connect(&crate::wsl::launch_argv(distro, &server, cwd))?;
+    Ok((handle, events, probe))
 }
 
 /// Lance le serveur et rend de quoi lui parler et l'écouter.
@@ -42,9 +51,8 @@ pub fn target_from_env() -> Option<Target> {
 /// L'échec ici est celui du **lancement** (programme introuvable) ; tout ce
 /// qui arrive après — poignée de main, mort du serveur — remonte par le canal
 /// d'événements, la fenêtre étant déjà ouverte à ce moment-là.
-pub fn connect(target: &Target) -> anyhow::Result<(Handle, async_channel::Receiver<Evt>)> {
-    let Target::Command(parts) = target;
-    let (program, args) = parts
+pub fn connect(argv: &[String]) -> anyhow::Result<(Handle, async_channel::Receiver<Evt>)> {
+    let (program, args) = argv
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("cible de serveur vide"))?;
 

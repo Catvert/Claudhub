@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use claudhub::runtime::remote::{connect, Target};
+use claudhub::runtime::remote::connect;
 use claudhub::runtime::{Cmd, Evt};
 
 /// Le prochain événement, avec l'impatience d'un test : le canal est drainé
@@ -30,8 +30,8 @@ fn next(events: &async_channel::Receiver<Evt>) -> Evt {
 
 #[test]
 fn the_server_answers_over_the_wire() {
-    let target = Target::Command(vec![env!("CARGO_BIN_EXE_claudhub-server").to_string()]);
-    let (handle, events) = connect(&target).expect("lancement du serveur");
+    let argv = vec![env!("CARGO_BIN_EXE_claudhub-server").to_string()];
+    let (handle, events) = connect(&argv).expect("lancement du serveur");
 
     // La poignée de main d'abord, toujours : versions accordées, et ce que
     // le serveur sait de sa machine.
@@ -67,8 +67,7 @@ fn a_dead_server_is_reported_not_swallowed() {
     // Un « serveur » qui meurt avant de se présenter : c'est aussi ce que
     // voit la vue quand on tue le vrai en plein vol, et la réponse doit être
     // un événement qu'elle peut afficher, jamais un silence.
-    let target = Target::Command(vec!["true".to_string()]);
-    let (_handle, events) = connect(&target).expect("lancement");
+    let (_handle, events) = connect(&["true".to_string()]).expect("lancement");
     match next(&events) {
         Evt::ServerLost { message } => assert!(!message.is_empty()),
         other => panic!("attendu ServerLost, reçu {other:?}"),

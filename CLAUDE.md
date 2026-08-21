@@ -56,6 +56,8 @@ src/
   main.rs       le binaire de l'interface — trois lignes
   bin/server.rs le serveur headless (le transport arrive avec `runtime::wire`)
   cmdline.rs    découpe et recompose une ligne de commande (guillemets POSIX)
+  wsl.rs        la distro : la lister, y installer le serveur, l'y lancer,
+                et la ligne de commande d'un terminal
   wslpath.rs    chemins Windows ⇄ distro WSL, textuel et pur — n'existe
                 qu'aux bords : sélecteurs de fichiers, ouverture du coffre
   commit_msg.rs le message de commit proposé : prompt, nettoyage, agent
@@ -97,6 +99,8 @@ src/
     history_view.rs  l'historique et son graphe peint
     highlight.rs   coloration tree-sitter d'un diff
     sidebar.rs / review.rs / branches.rs / terminal_view.rs
+    server.rs       la mise en route du serveur WSL : la distro qu'on
+                    demande, l'installation, l'état qu'en dit la barre
     settings.rs     les réglages et leur global
     settings_view.rs  le formulaire, bâti sur `gpui_component::setting`
     tree.rs         chemins → arborescence repliable, en indices
@@ -178,7 +182,64 @@ Quatre points qui ne se devinent pas :
 Le levier de test est `CLAUDHUB_SERVER_CMD` (une ligne de commande, par
 exemple `target/debug/claudhub-server`) : tout le fil s'exerce sous Linux,
 sans Windows ni WSL. `tests/server_wire.rs` le fait à chaque `cargo test`,
-avec le vrai binaire.
+avec le vrai binaire. Il l'emporte sur la mise en route automatique, ce qui
+en fait aussi la sortie de secours quand celle-ci se trompe.
+
+### La cible Windows
+
+L'interface est un `.exe` gpui natif (DirectX), les workers tournent dans une
+distribution WSL2, et **seuls les terminaux n'y passent pas** : leur pty reste
+local — ConPTY — et c'est ce qui tourne dedans qui traverse. WSLg a été
+essayé d'abord et rendait mal ; c'est ce qui a décidé de la découpe.
+
+**Le binaire du serveur est livré à côté de l'exécutable**, et installé dans
+la distro à la première ouverture (`wsl::ensure_installed`). L'utilisateur n'a
+rien à faire : le `.exe` et `claudhub-server` sortent de la même archive, la
+CI les assemble, et l'installation se fait en écrivant le binaire **dans
+l'entrée standard** d'un `cat` lancé là-bas — ni partage réseau, ni chemin à
+traduire, ni bit d'exécution perdu par un zip.
+
+Cinq points qui ne se devinent pas :
+
+- **L'installation est adressée par le contenu**, jamais par un numéro de
+  version : l'empreinte du binaire nomme son dossier
+  (`~/.claudhub/bin/<empreinte>`). Une mise à jour s'installe donc d'elle-même,
+  deux `.exe` différents cohabitent, et une version de développement — qui n'a
+  pas de numéro — se comporte comme les autres. C'est le motif de
+  `tools/make_appimage.sh`, et la purge garde le dossier courant.
+- **Rien ne passe par un shell de connexion.** `wsl.exe --exec` lance le
+  programme directement : ce qui s'y écrit est un chemin absolu, jamais un `~`
+  que personne ne développerait. D'où `wsl::probe`, qui demande une fois pour
+  toutes où est le foyer de l'utilisateur **et quel shell lui appartient** —
+  ce dernier parce qu'un terminal ouvert par `--exec` n'a pas de shell pour
+  interroger `$SHELL`, et que c'est justement un shell qu'on veut y lancer.
+- **Le script d'installation n'a pas un seul guillemet**, délibérément : la
+  ligne traverse `CreateProcess` puis la reconstruction d'`argv` par
+  `wsl.exe`, et chaque guillemet y est une occasion de se faire manger. Un
+  test le verrouille.
+- **`wsl.exe --list` répond en UTF-16** sur les versions d'avant `WSL_UTF8` ;
+  lu comme de l'UTF-8, cela donne un nom sur deux caractères. `wsl::decode`
+  gère les deux, et un test le vérifie sur un nom accentué.
+- **Le manche reste vide tant que le serveur n'a pas répondu**
+  (`HandleInner::Pending`), plutôt que de retomber sur les workers locaux :
+  sous Windows, ceux-ci feraient travailler `git.exe` sur des chemins qui
+  n'existent pas, en silence et à côté de la plaque. Les commandes émises
+  avant sont jetées — la vue les repose d'elle-même.
+
+**Le fil ne transporte que des chemins Linux**, et la traduction n'existe
+qu'aux trois endroits où un chemin change de monde : le sélecteur de dossier
+(`\\wsl.localhost\…` ou `C:\…` → `/…`, en refusant le dépôt d'une *autre*
+distribution, qui s'ouvrirait vide), le coffre de notes (`notes_dir` rend un
+chemin du serveur, un coffre déjà pointé sur `/home/…` passant tel quel), et
+l'ouverture de ce coffre dans l'explorateur, qui refait le chemin inverse.
+`wslpath` est pur et testé sous Linux.
+
+**Les mêmes réglages, deux mondes.** `settings.json` et `state.json` restent
+côté Windows — c'est l'état de cette fenêtre-là — mais contiennent des chemins
+Linux, puisque c'est ce que le fil transporte. La liste de shells du
+formulaire et le shell de connexion des terminaux viennent, eux, du serveur :
+deux statiques dans `settings.rs`, parce que le formulaire déclare ses champs
+par des fermetures qui ne reçoivent qu'un `App`.
 
 Toute écriture git est suivie d'une relecture du statut (`write_then_refresh`),
 pour que la vue n'ait pas à savoir quelle commande touche quoi.

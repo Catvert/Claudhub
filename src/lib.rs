@@ -32,6 +32,7 @@ pub mod sentry;
 pub mod terminal;
 #[cfg(feature = "ui")]
 pub mod ui;
+pub mod wsl;
 pub mod wslpath;
 pub mod wt;
 

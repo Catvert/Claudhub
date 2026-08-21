@@ -26,6 +26,7 @@ mod panels;
 mod review;
 mod scroll;
 mod sentry_view;
+mod server;
 mod settings;
 mod settings_view;
 mod shortcuts;

@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use gpui::{div, prelude::*, px, Context, SharedString, Window};
+use gpui::{div, prelude::*, px, App, Context, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
@@ -17,6 +17,7 @@ use crate::runtime::Cmd;
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
+use crate::ui::settings::Settings;
 
 /// Ce qu'une ligne de la barre latérale affiche d'un worktree.
 ///
@@ -653,12 +654,43 @@ impl ClaudhubApp {
             };
             let _ = this.update(cx, |this, cx| {
                 for path in paths {
-                    this.git.send(Cmd::OpenRepo(path));
+                    match this.repo_path_for_server(path, cx) {
+                        Ok(path) => this.git.send(Cmd::OpenRepo(path)),
+                        Err(message) => this.announce(message, cx),
+                    }
                 }
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Le chemin que le sélecteur natif a rendu, tel que le serveur le
+    /// comprendra.
+    ///
+    /// Sous Windows, le dialogue rend `\\wsl.localhost\Ubuntu\home\…` ou
+    /// `C:\…` ; le fil, lui, ne transporte que des chemins Linux — c'est le
+    /// disque du serveur qui fait foi. C'est l'un des rares points où un
+    /// chemin **entre** par le monde Windows, et donc l'un des rares où il
+    /// faut le traduire. Ailleurs, il n'y a rien à faire.
+    fn repo_path_for_server(&self, path: PathBuf, cx: &App) -> Result<PathBuf, SharedString> {
+        if !cfg!(windows) {
+            return Ok(path);
+        }
+        let distro = Settings::global(cx).wsl_distro.clone();
+        let Some(translated) = crate::wslpath::to_linux(&path) else {
+            return Err(tr!("repo-not-in-wsl"));
+        };
+        // Un dépôt d'une **autre** distribution que celle du serveur : son
+        // chemin est valide là-bas et introuvable ici, et l'ouvrir donnerait
+        // un dossier vide sans dire pourquoi.
+        if let Some(other) = translated
+            .distro
+            .filter(|d| !d.eq_ignore_ascii_case(&distro))
+        {
+            return Err(tr!("repo-other-distro", { distro: other }));
+        }
+        Ok(translated.path)
     }
 
     fn prompt_new_worktree(&mut self, main: PathBuf, window: &mut Window, cx: &mut Context<Self>) {

@@ -816,6 +816,24 @@ fn files_page() -> SettingPage {
                 )
                 .description(tr!("settings-notes-dir-help")),
             )
+            // La distribution ne se choisit ici qu'après coup : la question
+            // est posée au premier démarrage, où l'on ne connaît encore aucun
+            // réglage. Le champ existe pour en changer — une machine en a
+            // souvent plusieurs — et le changement ne vaut qu'au prochain
+            // lancement, le serveur en place ayant déjà ses dépôts ouverts.
+            .item(
+                SettingItem::new(
+                    tr!("settings-wsl-distro"),
+                    SettingField::input(
+                        |cx: &App| Settings::global(cx).wsl_distro.clone().into(),
+                        |value: SharedString, cx: &mut App| {
+                            Settings::update_global(cx, |s| s.wsl_distro = value.to_string())
+                        },
+                    )
+                    .default_value(SharedString::default()),
+                )
+                .description(tr!("settings-wsl-distro-help")),
+            )
             .item(
                 SettingItem::new(
                     tr!("settings-show-ignored"),

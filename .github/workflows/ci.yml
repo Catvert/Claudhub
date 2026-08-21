@@ -63,18 +63,28 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    # Le serveur d'abord : c'est lui qui part dans l'archive, à côté de
+    # l'exécutable. Les deux ne se livrent pas séparément — le `.exe` installe
+    # celui qu'il trouve auprès de lui, et un utilisateur qui n'en aurait
+    # qu'un ne saurait pas ce qui lui manque.
+    needs: serveur-musl
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Le spike de la phase P3 : tant que `cargo check` n'est pas vert ici,
-      # inutile de payer un build release. Le jour où il l'est, ce pas et le
-      # suivant font le `.exe` livrable.
-      - name: Compilation (spike gpui/fork sur msvc)
-        run: cargo check --bin claudhub
       - name: Binaire release
         run: cargo build --release --bin claudhub
+      - uses: actions/download-artifact@v4
+        with:
+          name: claudhub-server-musl
+          path: serveur
+      - name: Assembler la livraison
+        shell: bash
+        run: |
+          mkdir -p claudhub
+          cp target/release/claudhub.exe claudhub/
+          cp serveur/claudhub-server claudhub/
       - uses: actions/upload-artifact@v4
         with:
           name: claudhub-windows
-          path: target/release/claudhub.exe
+          path: claudhub/

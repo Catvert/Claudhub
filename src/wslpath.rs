@@ -68,6 +68,20 @@ pub fn to_linux(path: &Path) -> Option<Translated> {
     None
 }
 
+/// Le chemin tel que le serveur le comprendra.
+///
+/// Un chemin déjà écrit à la façon de Linux passe tel quel — c'est le cas du
+/// coffre qu'on pointe soi-même sur `/home/…` —, un chemin Windows est
+/// traduit, et ce qui n'a pas d'équivalent rend `None` : un partage réseau
+/// n'est atteignable d'aucun des deux côtés, et le taire donnerait un dossier
+/// vide sans dire pourquoi.
+pub fn for_server(path: &Path) -> Option<PathBuf> {
+    if path.to_string_lossy().starts_with('/') {
+        return Some(path.to_path_buf());
+    }
+    to_linux(path).map(|translated| translated.path)
+}
+
 /// Traduit un chemin de la distro en chemin Windows : `/mnt/c/…` redevient
 /// `C:\…`, tout le reste passe par le partage `\\wsl.localhost\<distro>\…`.
 pub fn to_windows(path: &Path, distro: &str) -> PathBuf {

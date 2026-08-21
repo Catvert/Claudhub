@@ -415,6 +415,14 @@ pub struct Settings {
     /// note de relecture est du texte qu'on écrit, et qu'elle n'a rien à faire
     /// enfermée dans un JSON d'état que rien d'autre ne sait lire.
     pub notes_dir: String,
+    /// La distribution WSL où tournent les workers, sous Windows.
+    ///
+    /// Vide : elle n'a pas encore été choisie, et l'interface la demande au
+    /// premier démarrage. Un réglage et non une détection à chaque fois : une
+    /// machine a souvent plusieurs distributions, et ce n'est pas une question
+    /// à reposer à chaque ouverture. Sans effet ailleurs que sous Windows, où
+    /// les workers sont dans le même processus.
+    pub wsl_distro: String,
     /// Vues que l'utilisateur a masquées, par nom de panneau du dock.
     ///
     /// Ici et non dans `layout.json` : c'est un choix qu'on fait une fois — je
@@ -471,6 +479,7 @@ impl Default for Settings {
             sentry_query: String::new(),
             vim_mode: false,
             notes_dir: String::new(),
+            wsl_distro: String::new(),
             hidden_panels: Vec::new(),
             databases: Vec::new(),
             db_page_size: 500,
@@ -788,6 +797,29 @@ pub fn set_server_shells(shells: Vec<String>) {
     if let Ok(mut current) = SERVER_SHELLS.write() {
         *current = shells;
     }
+}
+
+/// Le shell de connexion de l'utilisateur dans la distribution, tel que
+/// `/etc/passwd` le déclare là-bas.
+///
+/// Retenu au moment où l'on installe le serveur, parce que c'est le seul
+/// moment où on peut le demander : un terminal ouvert par `wsl.exe --exec`
+/// n'a pas de shell pour interroger `$SHELL`, et c'est justement un shell
+/// qu'on veut y lancer.
+static SERVER_SHELL: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
+
+pub fn set_server_shell(shell: String) {
+    if let Ok(mut current) = SERVER_SHELL.write() {
+        *current = shell;
+    }
+}
+
+pub fn server_shell() -> Option<String> {
+    SERVER_SHELL
+        .read()
+        .ok()
+        .map(|shell| shell.clone())
+        .filter(|shell| !shell.is_empty())
 }
 
 /// Shells proposés : ceux du système qui existent encore sur le disque.

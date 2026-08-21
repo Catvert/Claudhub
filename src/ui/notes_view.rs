@@ -783,6 +783,19 @@ impl ClaudhubApp {
                             // « montre-moi ce dossier », et c'est au bureau de
                             // décider avec quoi — le même chemin que le bouton
                             // d'adresse d'un worktree.
+                            //
+                            // Le chemin est celui du serveur ; c'est ici, et
+                            // ici seulement, qu'il repasse dans le monde de
+                            // l'utilisateur — l'explorateur de Windows ne sait
+                            // rien de `/home/…`, mais il ouvre très bien
+                            // `\\wsl.localhost\…`.
+                            let dir = if cfg!(windows) {
+                                let distro =
+                                    crate::ui::settings::Settings::global(cx).wsl_distro.clone();
+                                crate::wslpath::to_windows(&dir, &distro)
+                            } else {
+                                dir.clone()
+                            };
                             cx.open_url(&format!("file://{}", dir.display()));
                         }),
                 )
