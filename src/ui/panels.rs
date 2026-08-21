@@ -19,7 +19,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::dock::{BasePanel, Panel, PanelControl, PanelEvent};
-use gpui_component::menu::ContextMenuExt as _;
+use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::ActiveTheme;
 use gpui_component::Sizable as _;
@@ -465,6 +465,69 @@ impl TerminalPanel {
     }
 }
 
+/// The "+" of the terminals: a shell, or one of the agent profiles.
+///
+/// One entry per profile, as the hand-painted strip used to offer: the menu is
+/// the only place the choice arises, and a list coming from the settings saves
+/// reopening them to launch something else.
+fn new_terminal_button(app: &WeakEntity<ClaudhubApp>) -> impl IntoElement {
+    let app = app.clone();
+    Button::new("new-terminal")
+        .ghost()
+        .xsmall()
+        .icon(crate::ui::icons::icon("plus"))
+        .tooltip(tr!("terminal-new"))
+        .dropdown_menu(move |menu, _window, cx| {
+            let shell = app.clone();
+            let profiles = Settings::global(cx).terminal.agents.clone();
+            let menu = menu.item(
+                PopupMenuItem::new(tr!("terminal-new"))
+                    .icon(crate::ui::icons::icon("plus"))
+                    .on_click(move |_, window, cx| {
+                        open_terminal(&shell, None, window, cx);
+                    }),
+            );
+            if profiles.is_empty() {
+                return menu;
+            }
+            profiles
+                .into_iter()
+                .fold(menu.separator(), |menu, profile| {
+                    let app = app.clone();
+                    let label = gpui::SharedString::from(profile.label().to_string());
+                    menu.item(
+                        PopupMenuItem::new(label)
+                            .icon(crate::ui::icons::icon("bot"))
+                            .on_click(move |_, window, cx| {
+                                open_terminal(&app, Some(profile.clone()), window, cx);
+                            }),
+                    )
+                })
+        })
+}
+
+/// Opens a shell, or an agent profile, on the worktree being looked at.
+fn open_terminal(
+    app: &WeakEntity<ClaudhubApp>,
+    profile: Option<crate::ui::settings::AgentProfile>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(app) = app.upgrade() else {
+        return;
+    };
+    app.update(cx, |app, cx| {
+        let Some(worktree) = app.active_path() else {
+            return;
+        };
+        let launch = match &profile {
+            Some(profile) => crate::ui::terminal_view::Launch::agent(profile),
+            None => crate::ui::terminal_view::Launch::shell(),
+        };
+        app.open_terminal(&worktree, launch, window, cx);
+    });
+}
+
 impl Focusable for TerminalPanel {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.view.read(cx).focus_handle(cx)
@@ -555,6 +618,9 @@ impl Panel for TerminalPanel {
             .map(|app| app.read(cx).terminal_label(id, cx))
             .unwrap_or_default();
         let rename = app.clone();
+        let last = app
+            .upgrade()
+            .is_some_and(|app| app.read(cx).is_last_terminal(id));
         gpui_component::h_flex()
             .id(("terminal-tab", id))
             .gap_1()
@@ -597,6 +663,13 @@ impl Panel for TerminalPanel {
                         });
                     }),
             )
+            // The "+" **follows the last tab** rather than sticking to the
+            // right edge of the bar. That is where the eye finishes reading the
+            // tabs, and a button at the other end of the panel makes one cross
+            // it to open the next terminal. It was the rule of the hand-painted
+            // strip this replaced, and the dock's bar offers no place for it —
+            // so it rides in the last tab's own title.
+            .when(last, |el| el.child(new_terminal_button(&self.app)))
     }
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {

@@ -2014,9 +2014,19 @@ Sept points, et aucun ne se devine :
   de la pile — les tailles d'un `Stack` sont positionnelles, en oublier une
   décale toutes les suivantes. Corollaire connu : un terminal glissé dans une
   zone latérale n'est pas purgé, `DockState::panel` étant privé.
-- **Le « + » est descendu dans la barre d'état**, à côté de la bascule des
-  terminaux : la barre du groupe n'existe plus, et celle du dock n'a pas de
-  place pour un bouton.
+- **Le « + » suit le dernier onglet**, et non le bord droit de la barre. C'est
+  là que l'œil finit de lire les onglets, et un bouton à l'autre bout du panneau
+  fait traverser la barre pour ouvrir le suivant — c'était déjà la règle de la
+  rangée peinte à la main. La barre du dock n'offrant aucune place pour un
+  bouton, il voyage dans le **titre du dernier terminal**, celui du worktree et
+  non du groupe : glissés dans deux splits, les terminaux font toujours une
+  seule liste, et un « + » est le bon nombre. C'est l'application qu'on
+  interroge pour savoir qui est le dernier, jamais le groupe — il est au milieu
+  de son propre rendu quand un onglet le demande, et c'est la panique que ce
+  module a déjà payée deux fois.
+- **La bascule de la barre d'état ouvre le premier.** Sans terminal il n'y a
+  pas d'onglet, donc pas de « + » : c'est par elle qu'on en obtient un, et elle
+  seule.
 - **Un panneau de terminal ne lit pas l'application à sa construction.** Il est
   bâti au milieu d'un `update` sur `ClaudhubApp`, donc l'entité est sortie de la
   table : `app.read(cx)` y panique (« cannot read … while it is already being

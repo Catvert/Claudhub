@@ -1212,6 +1212,26 @@ impl ClaudhubApp {
         });
     }
 
+    /// Is this the worktree's last terminal? The one whose tab carries the "+".
+    ///
+    /// The last of the **worktree** and not of the tab group: dragged into two
+    /// splits, the terminals still make one list, and one "+" is the right
+    /// number. Asked of the application and not of the group, which is in the
+    /// middle of its own render when a tab asks — reading it there is the
+    /// panic this module has already paid for twice.
+    pub(super) fn is_last_terminal(&self, view: gpui::EntityId) -> bool {
+        let Some(terminal) = self
+            .terminals
+            .iter()
+            .find(|terminal| terminal.view.entity_id() == view)
+        else {
+            return false;
+        };
+        self.terminals_of(&terminal.worktree)
+            .last()
+            .is_some_and(|last| last.view.entity_id() == view)
+    }
+
     /// What a terminal's tab says: the name given by hand, or the program.
     pub(super) fn terminal_label(&self, view: gpui::EntityId, cx: &App) -> SharedString {
         let Some(terminal) = self
