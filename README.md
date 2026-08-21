@@ -82,34 +82,44 @@ accessible, rien ne s'affiche.
 Lancé depuis un dépôt git, Claudhub l'ouvre. Les dépôts ouverts sont rouverts au
 démarrage suivant.
 
-## Sous Windows : par WSL2
+## Sous Windows : une fenêtre native, les workers dans WSL2
 
-Claudhub est une application Linux ; sous Windows elle se lance **depuis WSL2**,
-et WSLg l'affiche comme une fenêtre Windows ordinaire — barre de titre,
-Alt+Tab, presse-papiers partagé. Il n'y a pas de serveur X tiers à installer.
-Il n'y a pas non plus de version native : la détection des agents lit `/proc`,
-les terminaux sont de vrais pty, et le build passe par Nix.
+Claudhub se découpe en deux sous Windows : l'interface est un **exécutable
+natif** — vraie fenêtre, DirectX, polices du système —, et tout ce qui touche
+au dépôt tourne dans une **distribution WSL2**. C'est le modèle de VS Code
+Remote et de Zed : git, la surveillance de fichiers, les bases de données et
+la détection des agents s'exécutent là où vit le code, et ne traversent
+jamais la frontière autrement que par des messages.
 
-Prérequis :
+WSLg a été essayé d'abord, et écarté : le rendu y passe par un Vulkan émulé
+sur D3D12 qui n'est pas à la hauteur.
 
-- **Windows 11**, ou Windows 10 21H2 et plus avec WSL installé depuis le
-  Microsoft Store — l'ancien WSL2 intégré à Windows 10 n'a pas WSLg.
-- Un pilote **Vulkan** dans la distribution : gpui rend par Vulkan et n'a pas
-  de repli. `sudo apt install mesa-vulkan-drivers libvulkan1 vulkan-tools`,
-  puis `vulkaninfo --summary` doit nommer un pilote — `Microsoft Direct3D12`
-  (le GPU, par Mesa/dozen) ou `llvmpipe` (le rendu logiciel, lent mais
-  suffisant pour relire du code).
-- Quelques **polices** : une distribution WSL nue en a presque aucune, et les
-  listes de familles des réglages s'en ressentent
-  (`sudo apt install fonts-jetbrains-mono fonts-dejavu`).
+**L'installation tient en trois gestes.** Téléchargez l'archive Windows de la
+dernière [version](../../releases), dézippez-la — `claudhub.exe` et
+`claudhub-server` doivent rester **côte à côte** —, et lancez l'exécutable. Au
+premier démarrage il demande dans quelle distribution travailler, y installe
+le serveur tout seul, et s'y connecte. Rien à compiler, rien à copier à la
+main, et les mises à jour s'installent d'elles-mêmes : le serveur est adressé
+par l'empreinte de son contenu.
+
+Ce qu'il faut avoir : **WSL2** avec une distribution, et dedans **git** ainsi
+que l'agent que vous pilotez (`claude`, ou un autre). Il n'y a plus rien à
+installer côté graphique — ni pilote Vulkan, ni polices, ni serveur X : c'est
+Windows qui dessine.
+
+Les terminaux s'ouvrent eux aussi dans la distribution : leur émulation reste
+locale, mais le shell — et donc l'agent — tourne là-bas, dans le worktree, et
+voit le dépôt. Les chemins se traduisent d'un monde à l'autre aux quelques
+endroits où c'est nécessaire : le sélecteur de dossier accepte
+`\\wsl.localhost\<distribution>\home\…`, et le bouton qui ouvre le coffre de
+notes le rend à l'explorateur Windows.
 
 Et une règle qui n'est pas un détail de confort : **gardez vos dépôts dans le
 système de fichiers Linux** (`~/projets/…`), jamais sous `/mnt/c`. Sur les
-disques Windows montés par WSL, `inotify` ne remonte aucun événement — la revue
-cesse de se rafraîchir toute seule, sans erreur — et `git status` y est
+disques Windows montés par WSL, `inotify` ne remonte aucun événement — la
+revue cesse de se rafraîchir toute seule, sans erreur — et `git status` y est
 plusieurs fois plus lent. Claudhub reconnaît le cas et l'affiche dans la barre
-d'état, mais le remède est de déplacer le dépôt. Les éditeurs Windows y accèdent
-par `\\wsl$\<distribution>\home\…`, et VS Code s'y branche nativement.
+d'état, mais le remède est de déplacer le dépôt.
 
 ## Réglages
 
