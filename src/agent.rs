@@ -10,11 +10,7 @@
 //! this is not a feature whose absence breaks anything.
 
 use std::collections::HashMap;
-// `Path` is only used by what reads `/proc`, so only on Linux: elsewhere the
-// import would be a warning, and the project builds with `-D warnings`.
-#[cfg(target_os = "linux")]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The markers an agent session leaves in the environment.
 ///
@@ -77,6 +73,89 @@ pub struct Process {
 
 /// The agents found, by worktree.
 pub type Agents = HashMap<PathBuf, Vec<Process>>;
+
+/// What is known about a worktree's agents, as the sidebar shows it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct State {
+    pub count: usize,
+    /// The agents found, by program name and without duplicates.
+    ///
+    /// The sidebar says *which* agent runs: with two profiles, "an agent works
+    /// here" does not say which, and that is precisely what one looks at while
+    /// scanning the list.
+    pub programs: Vec<String>,
+    /// True when at least one agent has used CPU since the previous reading.
+    ///
+    /// It is an accepted approximation: nothing in a process says "I am
+    /// thinking" or "I am waiting for an answer". An agent at work redraws its
+    /// display several times a second and is seen; an agent waiting for the
+    /// user's answer costs nothing.
+    pub working: bool,
+}
+
+/// The usage below which an agent is deemed to be waiting.
+///
+/// One tick is ten milliseconds of CPU. Three ticks over a two-second interval
+/// is roughly one percent of a core: above that, something is happening; below,
+/// it is a cursor blinking.
+const BUSY_TICKS: u64 = 3;
+
+/// Turns successive readings of `/proc` into what the sidebar shows.
+///
+/// It exists because "an agent is working" is not something a reading says: it
+/// is the **difference** between two of them. The tracker is what holds the
+/// previous one, and it is deliberately free of any view type — this is the one
+/// decision of the sidebar that can be tested, and it lives here so the core's
+/// test run covers it.
+#[derive(Debug, Default)]
+pub struct Tracker {
+    /// CPU time at the previous reading, by pid. Rebuilt whole every time: a
+    /// pid that has gone must not keep a slot, and a pid reused by another
+    /// program would compare against a stranger.
+    cpu: HashMap<u32, u64>,
+    states: HashMap<PathBuf, State>,
+}
+
+impl Tracker {
+    /// Takes a reading in, and works out who is busy.
+    pub fn update(&mut self, agents: Agents) {
+        let mut states = HashMap::with_capacity(agents.len());
+        let mut cpu = HashMap::new();
+        for (worktree, processes) in agents {
+            let working = processes.iter().any(|process| {
+                let before = self.cpu.get(&process.pid).copied();
+                // A process seen for the first time has no variation: we call it
+                // waiting, and the next reading will decide. The opposite would
+                // make the list flicker on every agent that starts.
+                before.is_some_and(|before| process.cpu.saturating_sub(before) >= BUSY_TICKS)
+            });
+            for process in &processes {
+                cpu.insert(process.pid, process.cpu);
+            }
+            let mut programs: Vec<String> = processes
+                .iter()
+                .map(|process| process.program.clone())
+                .collect();
+            programs.sort();
+            programs.dedup();
+            states.insert(
+                worktree,
+                State {
+                    count: processes.len(),
+                    programs,
+                    working,
+                },
+            );
+        }
+        self.cpu = cpu;
+        self.states = states;
+    }
+
+    /// What is known about this worktree, if anything was found there.
+    pub fn get(&self, worktree: &Path) -> Option<&State> {
+        self.states.get(worktree)
+    }
+}
 
 /// Outside Linux there is no `/proc`: the list is empty, and the sidebar
 /// simply shows no agent.
@@ -213,6 +292,8 @@ pub fn parse_cpu_ticks(stat: &str) -> Option<u64> {
 mod tests {
     use super::*;
 
+    // Reads what only exists under `/proc`.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_program_name_ignores_its_path_and_arguments() {
         assert_eq!(command_name("claude"), "claude");
@@ -237,6 +318,8 @@ mod proc_tests {
         assert!(!cmdline_matches(b"/usr/bin/claudia\0", "claude"));
     }
 
+    // Reads what only exists under `/proc`.
+    #[cfg(target_os = "linux")]
     #[test]
     fn cpu_ticks_survive_a_program_name_full_of_parentheses() {
         // The case every naive /proc parser gets wrong.
@@ -245,6 +328,77 @@ mod proc_tests {
         assert_eq!(parse_cpu_ticks(stat), Some(157));
     }
 
+    fn process(pid: u32, program: &str, cpu: u64) -> Process {
+        Process {
+            pid,
+            program: program.into(),
+            cpu,
+        }
+    }
+
+    fn reading(processes: Vec<Process>) -> Agents {
+        Agents::from([(PathBuf::from("/p/repo"), processes)])
+    }
+
+    #[test]
+    fn a_first_reading_never_says_working() {
+        // Nothing to compare against yet: calling it busy would light up every
+        // agent the moment it starts, and go out on the next reading.
+        let mut tracker = Tracker::default();
+        tracker.update(reading(vec![process(1, "claude", 5_000)]));
+        let state = tracker.get(Path::new("/p/repo")).expect("the worktree");
+        assert_eq!(state.count, 1);
+        assert!(!state.working);
+    }
+
+    #[test]
+    fn burnt_ticks_are_what_makes_an_agent_working() {
+        let mut tracker = Tracker::default();
+        tracker.update(reading(vec![process(1, "claude", 100)]));
+        // Below the threshold: a blinking cursor, not a working agent.
+        tracker.update(reading(vec![process(1, "claude", 102)]));
+        assert!(!tracker.get(Path::new("/p/repo")).expect("state").working);
+        tracker.update(reading(vec![process(1, "claude", 200)]));
+        assert!(tracker.get(Path::new("/p/repo")).expect("state").working);
+        // And it goes out again once the agent hands back to its prompt.
+        tracker.update(reading(vec![process(1, "claude", 200)]));
+        assert!(!tracker.get(Path::new("/p/repo")).expect("state").working);
+    }
+
+    #[test]
+    fn a_counter_that_went_backwards_does_not_underflow() {
+        // A reused pid: the new process has burnt less than the old one.
+        let mut tracker = Tracker::default();
+        tracker.update(reading(vec![process(1, "claude", 9_000)]));
+        tracker.update(reading(vec![process(1, "aider", 12)]));
+        assert!(!tracker.get(Path::new("/p/repo")).expect("state").working);
+    }
+
+    #[test]
+    fn the_programs_are_named_once_each_and_in_order() {
+        let mut tracker = Tracker::default();
+        tracker.update(reading(vec![
+            process(1, "claude", 0),
+            process(2, "aider", 0),
+            process(3, "claude", 0),
+        ]));
+        let state = tracker.get(Path::new("/p/repo")).expect("state");
+        assert_eq!(state.count, 3);
+        assert_eq!(state.programs, vec!["aider", "claude"]);
+    }
+
+    #[test]
+    fn a_worktree_with_no_agent_left_is_forgotten() {
+        // The states are rebuilt whole: a badge left behind would say an agent
+        // is there long after it has gone.
+        let mut tracker = Tracker::default();
+        tracker.update(reading(vec![process(1, "claude", 0)]));
+        tracker.update(Agents::new());
+        assert!(tracker.get(Path::new("/p/repo")).is_none());
+    }
+
+    // Reads what only exists under `/proc`.
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_deepest_worktree_claims_the_process() {
         let worktrees = vec![PathBuf::from("/p/repo"), PathBuf::from("/p/repo/nested")];

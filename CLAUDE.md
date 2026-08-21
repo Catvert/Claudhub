@@ -98,6 +98,8 @@ src/
     branch.rs   `for-each-ref` → branches, amont, divergence
     diff.rs     `--numstat` et diff unifié → fichiers, hunks, lignes
     history.rs  `git log` → commits, et la disposition du graphe
+  agent.rs      les agents dans `/proc`, et le suivi qui dit lesquels
+                travaillent
   runtime/      les workers
     protocol.rs `Cmd` / `Evt` — des données, aucune logique, sérialisables
     mod.rs      quatre files, des threads consommant les mêmes canaux,
@@ -117,6 +119,10 @@ src/
   ui/           tout gpui
     mod.rs      `run()`, `AssetSource`, polices, i18n
     app.rs      `ClaudhubApp` : l'état, la pompe d'événements, le chrome
+    repos.rs        les dépôts ouverts et ceux qui manquent, et ce qu'on
+                    leur demande — sans gpui, donc testé
+    inflight.rs     les écritures en vol, et ce que la barre en dit —
+                    sans gpui, donc testé
     workspace.rs   les cinq écrans, leur dock et la barre qui les choisit
     diff_view.rs   la vue de diff, virtualisée
     history_view.rs  l'historique et son graphe peint
@@ -932,6 +938,12 @@ geste en est une.
   « Publication… » dit lequel des gestes qu'on vient de faire n'est pas fini.
   La liste est triée : un `HashSet` s'itère dans un ordre différent à chaque
   frame, et les mots danseraient.
+- **La décision est hors de la vue** (`ui::inflight::InFlight`). Poser une
+  clé qu'on ne reprend jamais est l'unique panne de cet indicateur, et c'est
+  une chose qui se teste — pas une chose qu'on surveille. Le module ne connaît
+  aucun type de gpui, comme `notes.rs` en face de `notes_view.rs`. Corollaire :
+  la barre trie sur la **clé** i18n et non sur le libellé traduit, si bien que
+  l'ordre des mots ne dépend plus de la langue.
 - **`Action::running_key` a un joker assumé.** Seules les opérations assez
   longues pour valoir une ligne sont nommées ; un `Stage` qui finit en dix
   millisecondes afficherait un message que personne n'a le temps de lire. Un
@@ -1962,6 +1974,11 @@ lance un agent depuis Claudhub, mais aussi depuis un terminal à côté, et c'es
 même travail qu'on veut voir. Le répertoire courant d'un processus dit dans
 quel worktree il travaille ; le worktree le plus profond l'emporte, faute de
 quoi un worktree imbriqué se verrait attribuer les agents de son parent.
+
+Le relevé lui-même ne dit pas qu'un agent travaille : c'est la **différence**
+entre deux relevés. `agent::Tracker` est ce qui retient le précédent, et il vit
+dans le cœur et non dans la vue — c'est la seule décision de la barre latérale
+qui se teste, et le cœur est ce que la CI exécute sans gpui.
 
 « En cours » veut dire **a consommé du processeur depuis le relevé
 précédent**. C'est une approximation assumée : rien dans un processus ne dit

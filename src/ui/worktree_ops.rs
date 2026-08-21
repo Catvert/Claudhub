@@ -370,7 +370,7 @@ impl ClaudhubApp {
                 );
             }
             WtTarget::Up { worktree } => {
-                self.wt_pending = Some(worktree);
+                self.flight.set_wt_target(worktree);
                 self.start(
                     None,
                     Action::WtUp,
@@ -780,7 +780,7 @@ impl ClaudhubApp {
         // Starting a project brings up containers and waits for them: tens of
         // seconds during which the only thing that says anything is happening is
         // this dot.
-        self.wt_pending = Some(worktree.to_path_buf());
+        self.flight.set_wt_target(worktree.to_path_buf());
         let cmd = Cmd::WtUp {
             main,
             slug,
@@ -793,7 +793,7 @@ impl ClaudhubApp {
         let Some(slug) = self.wt_slug(&main, worktree) else {
             return;
         };
-        self.wt_pending = Some(worktree.to_path_buf());
+        self.flight.set_wt_target(worktree.to_path_buf());
         self.start(None, Action::WtDown, Cmd::WtDown { main, slug }, cx);
     }
 
@@ -1140,7 +1140,7 @@ impl ClaudhubApp {
         // Starting or stopping is the only state the dot cannot show, being
         // neither of the two it knows: it becomes a spinner, and the row is the
         // only place that says anything for the next half-minute.
-        if self.wt_pending.as_deref() == Some(worktree) {
+        if self.flight.wt_target() == Some(worktree) {
             return Some(
                 h_flex()
                     .flex_none()

@@ -31,7 +31,7 @@ struct WorktreeRow {
     is_main: bool,
     prunable: bool,
     summary: Option<crate::git::Summary>,
-    agent: Option<crate::ui::app::AgentState>,
+    agent: Option<crate::agent::State>,
 }
 
 /// The volume of work in progress: lines added and removed.
@@ -62,7 +62,7 @@ fn volume(summary: crate::git::Summary, cx: &gpui::App) -> impl IntoElement {
 ///
 /// A badge and not a word: the row already carries a name and a branch, and this
 /// is information read out of the corner of the eye while scanning the list.
-fn agent_badge(agent: &crate::ui::app::AgentState, cx: &gpui::App) -> impl IntoElement {
+fn agent_badge(agent: &crate::agent::State, cx: &gpui::App) -> impl IntoElement {
     let color = if agent.working {
         cx.theme().warning
     } else {
@@ -254,7 +254,7 @@ impl ClaudhubApp {
         let query = self.query(crate::ui::find::Pane::Sidebar, cx);
         // Each repository's `wt.toml`, asked for once: it is what decides what a
         // worktree's menu offers.
-        let mains: Vec<PathBuf> = self.repos.iter().map(|repo| repo.main.clone()).collect();
+        let mains: Vec<PathBuf> = self.repos.mains();
         for main in &mains {
             self.ensure_wt_project(main);
         }
@@ -299,7 +299,8 @@ impl ClaudhubApp {
         // The repositories that do not open, filtered like the rest: the search
         // applies to what is on screen.
         let unavailable: Vec<UnavailableRow> = self
-            .unavailable
+            .repos
+            .missing()
             .iter()
             .map(|repo| UnavailableRow {
                 path: repo.path.clone(),
@@ -413,9 +414,7 @@ impl ClaudhubApp {
             .cursor_pointer()
             .hover(|s| s.bg(cx.theme().sidebar_accent.opacity(0.6)))
             .on_click(cx.listener(move |this, _, _, cx| {
-                if let Some(repo) = this.repos.get_mut(ix) {
-                    repo.collapsed = !repo.collapsed;
-                }
+                this.repos.toggle_collapse(ix);
                 cx.notify();
             }))
             .child(
@@ -586,14 +585,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         crate::ui::settings::Settings::update_global(cx, |s| s.forget_repository(&main));
-        self.unavailable.retain(|repo| repo.path != main);
-        let closed: Vec<PathBuf> = self
-            .repos
-            .iter()
-            .filter(|repo| repo.main == main)
-            .flat_map(|repo| repo.worktrees.iter().map(|w| w.path.clone()))
-            .collect();
-        self.repos.retain(|repo| repo.main != main);
+        let closed = self.repos.close(&main);
         // What we kept of its worktrees has no further purpose. The state store,
         // for its part, is not purged: notes and collapses wait for the day the
         // repository is reopened, and erasing them here would turn a tidy-up

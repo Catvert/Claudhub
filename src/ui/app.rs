@@ -99,34 +99,6 @@ fn save_layouts(layouts: &Layouts) {
     }
 }
 
-/// A repository open in the sidebar.
-pub struct RepoState {
-    pub main: PathBuf,
-    pub name: String,
-    pub worktrees: Vec<Worktree>,
-    pub branches: Vec<Branch>,
-    /// The integration branch, as git declares it. It is only known once the
-    /// worker has answered: until then the branch review has no base and its tab
-    /// stays inactive — offering an assumed `main` would produce an "unknown
-    /// revision" on any repository not called that.
-    pub default_base: Option<String>,
-    pub collapsed: bool,
-}
-
-/// A remembered repository we could not open.
-///
-/// It lives apart from the `RepoState`s and not among them with a flag:
-/// everything that walks `repos` — the agent sweep, the summaries, the `wt`
-/// reading, the automatic fetch — assumes a repository that exists, and the
-/// opposite would be paid for in guards scattered everywhere, one forgotten
-/// among them running git commands in a missing folder every two seconds.
-pub struct UnavailableRepo {
-    pub path: PathBuf,
-    /// What git answered, for the tooltip. The row itself only says "not found":
-    /// that is what one needs to know to decide to remove it.
-    pub message: String,
-}
-
 /// What the review shows for a given worktree.
 ///
 /// One state per worktree, and not a single global state: switching from one
@@ -284,32 +256,6 @@ impl Default for ReviewState {
     }
 }
 
-/// What is known about a worktree's agents.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentState {
-    pub count: usize,
-    /// The agents found, by program name and without duplicates.
-    ///
-    /// The sidebar says *which* agent is running: with two profiles, "an agent
-    /// works here" does not say which, and that is precisely what one looks at
-    /// while scanning the list.
-    pub programs: Vec<String>,
-    /// True when at least one agent has used CPU since the previous reading.
-    ///
-    /// It is an accepted approximation: nothing in a process says "I am
-    /// thinking" or "I am waiting for an answer". An agent at work redraws its
-    /// display several times a second and is seen; an agent waiting for the
-    /// user's answer costs nothing.
-    pub working: bool,
-}
-
-/// The usage below which an agent is deemed to be waiting.
-///
-/// One tick is ten milliseconds of CPU. Three ticks over a three-second
-/// interval is one percent of a core: above that, something is happening; below,
-/// it is a cursor blinking.
-const AGENT_BUSY_TICKS: u64 = 3;
-
 /// The period of the agent reading. A read of `/proc`, with no process
 /// launched: short enough for an agent starting work to be seen.
 const AGENT_PERIOD: std::time::Duration = std::time::Duration::from_secs(2);
@@ -329,7 +275,7 @@ pub struct Toast {
 
 pub struct ClaudhubApp {
     pub(super) git: runtime::Handle,
-    pub(super) repos: Vec<RepoState>,
+    pub(super) repos: crate::ui::repos::Repos,
 
     /// Where the server stands: nothing to say in local mode, a message while it
     /// starts, and what is needed to relaunch it if it goes down.
@@ -340,12 +286,6 @@ pub struct ClaudhubApp {
     /// path is a Windows mount" means something, and the view's machine cannot
     /// know it in its place.
     pub(super) server_wsl: bool,
-    /// The remembered repositories that do not open.
-    ///
-    /// They stay on screen — it is the only way to remove them, and a repository
-    /// disappearing from the list without a word reads as a Claudhub bug rather
-    /// than a moved folder.
-    pub(super) unavailable: Vec<UnavailableRepo>,
     /// The selected worktree: the key to almost everything else.
     pub(super) active: Option<PathBuf>,
     pub(super) review: HashMap<PathBuf, ReviewState>,
@@ -499,11 +439,10 @@ pub struct ClaudhubApp {
     /// What each worktree has in progress, including those not opened: it is the
     /// question one asks while scanning the list.
     pub(super) summaries: HashMap<PathBuf, crate::git::Summary>,
-    /// The agents found, by worktree, and whether they are working.
-    pub(super) agents: HashMap<PathBuf, AgentState>,
-    /// CPU time from the previous reading, by process. It is its variation that
-    /// tells an agent at work from an agent that waits.
-    agent_cpu: HashMap<u32, u64>,
+    /// The agents found, by worktree, and whether they are working. The tracker
+    /// holds the previous reading: "working" is a difference between two of
+    /// them, not something a single one says.
+    pub(super) agents: crate::agent::Tracker,
     /// True between the press and the release of the button in the diff view:
     /// it is what tells a selection drag from a plain hover, and what prevents a
     /// drag started elsewhere — in the sidebar, on a resize handle — from
@@ -564,22 +503,14 @@ pub struct ClaudhubApp {
     pub(super) branch_filter: Entity<InputState>,
     /// The split between the graph and the chosen commit's file list.
     pub(super) history_split: Entity<gpui_component::resizable::ResizableState>,
-    /// The write operations in flight, keyed by worktree and kind — that is what
-    /// the buttons carrying a spinner read.
+    /// The write operations in flight — what the buttons carrying a spinner
+    /// read, and what the status bar names.
     ///
     /// **The key is exactly what comes back.** Every write answers with an
     /// `Evt::Done` or an `Evt::Failed` carrying the same worktree and the same
     /// action, and both go through one place: an entry can therefore not be left
-    /// behind, which is the only failure mode of a spinner — a button that turns
-    /// for ever says less than one that never turned.
-    pub(super) running: std::collections::HashSet<(Option<PathBuf>, Action)>,
-    /// The worktree a `wt` start or stop is running on.
-    ///
-    /// `Evt::Done` names no worktree for those — `wt` works from the main
-    /// repository — so `running` alone would say "something is starting" without
-    /// saying where, and every badge in the list would turn. One at a time is all
-    /// this badge can show, and starting two projects at once is not a gesture.
-    pub(super) wt_pending: Option<PathBuf>,
+    /// behind, which is the only failure mode of a spinner.
+    pub(super) flight: crate::ui::inflight::InFlight,
     /// The settings page the screen must land on, and the identity of the form
     /// that shows it. See `settings_view::open_settings_at`.
     pub(super) settings_page: crate::ui::settings_view::Page,
@@ -746,11 +677,10 @@ impl ClaudhubApp {
 
         let mut app = Self {
             git,
-            repos: Vec::new(),
+            repos: crate::ui::repos::Repos::default(),
             server_state: super::server::ServerState::default(),
             wsl_prompt: None,
             server_wsl: false,
-            unavailable: Vec::new(),
             active: None,
             review: HashMap::new(),
             terminals: HashMap::new(),
@@ -794,8 +724,7 @@ impl ClaudhubApp {
             layout_save_scheduled: false,
             hidden_panels: Settings::global(cx).hidden_panels.iter().cloned().collect(),
             summaries: HashMap::new(),
-            agents: HashMap::new(),
-            agent_cpu: HashMap::new(),
+            agents: crate::agent::Tracker::default(),
             diff_dragging: false,
             diff_scroll: gpui::UniformListScrollHandle::new(),
             diff_width: gpui::px(0.),
@@ -814,8 +743,7 @@ impl ClaudhubApp {
             diff_search: crate::ui::find::DiffSearch::default(),
             branch_filter,
             history_split: cx.new(|_| gpui_component::resizable::ResizableState::default()),
-            running: std::collections::HashSet::new(),
-            wt_pending: None,
+            flight: crate::ui::inflight::InFlight::default(),
             settings_page: Default::default(),
             settings_epoch: 0,
             settings_env: None,
@@ -1462,22 +1390,15 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.repos.iter().any(|r| r.main == main) {
-            return; // already open: reopening must not duplicate
-        }
-        // The folder is back — remounted, recloned, reopened by hand.
-        self.unavailable.retain(|repo| repo.path != main);
         // Failing the checkout the opening came from, the first of the list,
         // which is the main repository.
         let first = opened_at.or_else(|| worktrees.first().map(|w| w.path.clone()));
-        self.repos.push(RepoState {
-            main: main.clone(),
-            name,
-            worktrees,
-            branches: Vec::new(),
-            default_base: None,
-            collapsed: false,
-        });
+        // `open` says no when the repository is already there: reopening must
+        // not duplicate its row. A folder that is back — remounted, recloned —
+        // stops being missing at the same time.
+        if !self.repos.open(main.clone(), name, worktrees) {
+            return;
+        }
         Settings::update_global(cx, |s| s.remember_repository(&main));
         self.forget_missing_worktrees(&main, cx);
         self.ensure_wt_project(&main);
@@ -1499,9 +1420,7 @@ impl ClaudhubApp {
             .iter()
             .any(|remembered| remembered == &path)
         {
-            if !self.unavailable.iter().any(|repo| repo.path == path) {
-                self.unavailable.push(UnavailableRepo { path, message });
-            }
+            self.repos.mark_missing(path, message);
         } else {
             self.toast = Some(Toast {
                 text: SharedString::from(message),
@@ -1517,9 +1436,7 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(repo) = self.repos.iter_mut().find(|r| r.main == main) {
-            repo.worktrees = worktrees;
-        }
+        self.repos.set_worktrees(&main, worktrees);
         // git has just enumerated: it is the only moment the list is certain, so
         // the only one where forgetting an entry is safe.
         self.forget_missing_worktrees(&main, cx);
@@ -1541,36 +1458,7 @@ impl ClaudhubApp {
 
     /// "Working" means **has burnt processor since the previous reading**.
     fn agents_scanned(&mut self, agents: crate::agent::Agents) {
-        let mut next = HashMap::new();
-        let mut cpu = HashMap::new();
-        for (worktree, processes) in agents {
-            let working = processes.iter().any(|process| {
-                let before = self.agent_cpu.get(&process.pid).copied();
-                // A process seen for the first time has no variation: we call it
-                // waiting, and the next reading will decide. The opposite would
-                // make the list flicker on every agent that starts.
-                before.is_some_and(|before| process.cpu.saturating_sub(before) >= AGENT_BUSY_TICKS)
-            });
-            for process in &processes {
-                cpu.insert(process.pid, process.cpu);
-            }
-            let mut programs: Vec<String> = processes
-                .iter()
-                .map(|process| process.program.clone())
-                .collect();
-            programs.sort();
-            programs.dedup();
-            next.insert(
-                worktree,
-                AgentState {
-                    count: processes.len(),
-                    programs,
-                    working,
-                },
-            );
-        }
-        self.agent_cpu = cpu;
-        self.agents = next;
+        self.agents.update(agents);
     }
 
     // — Review ————————————————————————————————————————————————————
@@ -1815,7 +1703,7 @@ impl ClaudhubApp {
         cmd: Cmd,
         cx: &mut Context<Self>,
     ) {
-        self.running.insert((worktree, action));
+        self.flight.start(worktree, action);
         self.git.send(cmd);
         cx.notify();
     }
@@ -1825,21 +1713,16 @@ impl ClaudhubApp {
     /// For the two moments when what was in flight will never answer: the server
     /// dying, and a new one taking its place.
     fn clear_running(&mut self) {
-        self.running.clear();
-        self.wt_pending = None;
+        self.flight.clear();
     }
 
     fn finish(&mut self, worktree: &Option<PathBuf>, action: Action) {
-        self.running.remove(&(worktree.clone(), action));
-        if matches!(action, Action::WtUp | Action::WtDown) {
-            self.wt_pending = None;
-        }
+        self.flight.finish(worktree, action);
     }
 
     /// Is this operation under way? What a button reads to turn.
     pub(super) fn is_running(&self, worktree: Option<&Path>, action: Action) -> bool {
-        self.running
-            .contains(&(worktree.map(Path::to_path_buf), action))
+        self.flight.is_running(worktree, action)
     }
 
     /// The same, for the worktree being looked at.
@@ -2411,10 +2294,10 @@ impl ClaudhubApp {
 
     /// Forgets what was kept of worktrees git no longer lists.
     fn forget_missing_worktrees(&mut self, main: &Path, cx: &mut App) {
-        let Some(repo) = self.repos.iter().find(|r| r.main == main) else {
+        let alive = self.repos.worktree_paths(main);
+        if alive.is_empty() {
             return;
-        };
-        let alive: Vec<PathBuf> = repo.worktrees.iter().map(|w| w.path.clone()).collect();
+        }
         let main = main.to_path_buf();
         Store::update_global(cx, |store| store.forget_missing(&main, &alive));
     }
@@ -2438,52 +2321,27 @@ impl ClaudhubApp {
     }
 
     pub(super) fn main_of(&self, worktree: &Path) -> Option<PathBuf> {
-        self.repos
-            .iter()
-            .find(|r| r.worktrees.iter().any(|w| w.path == worktree))
-            .map(|r| r.main.clone())
+        self.repos.main_of(worktree)
     }
 
-    pub(super) fn repo_of(&self, worktree: &Path) -> Option<&RepoState> {
-        self.repos
-            .iter()
-            .find(|r| r.worktrees.iter().any(|w| w.path == worktree))
+    pub(super) fn repo_of(&self, worktree: &Path) -> Option<&crate::ui::repos::RepoState> {
+        self.repos.repo_of(worktree)
     }
 
     pub(super) fn active_worktree(&self) -> Option<&Worktree> {
-        let path = self.active.as_deref()?;
-        self.repos
-            .iter()
-            .flat_map(|r| r.worktrees.iter())
-            .find(|w| w.path == path)
+        self.repos.worktree(self.active.as_deref()?)
     }
 
     fn worktree_exists(&self, path: &Path) -> bool {
-        self.repos
-            .iter()
-            .any(|r| r.worktrees.iter().any(|w| w.path == path))
+        self.repos.contains_worktree(path)
     }
 
     pub(super) fn first_worktree(&self) -> Option<PathBuf> {
-        self.repos
-            .iter()
-            .flat_map(|r| r.worktrees.iter())
-            .next()
-            .map(|w| w.path.clone())
+        self.repos.first_worktree()
     }
 
-    /// A worktree's comparison base: the repository's integration branch, except
-    /// when that is precisely the one checked out there — comparing a branch
-    /// against itself shows nothing.
     fn default_base_for(&self, worktree: &Path) -> Option<String> {
-        let repo = self.repo_of(worktree)?;
-        let base = repo.default_base.as_deref()?;
-        let current = repo
-            .worktrees
-            .iter()
-            .find(|w| w.path == worktree)
-            .and_then(|w| w.branch.as_deref());
-        (Some(base) != current).then(|| base.to_string())
+        self.repos.default_base_for(worktree)
     }
 
     // — Rendering ——————————————————————————————————————————————————
@@ -2611,16 +2469,15 @@ impl ClaudhubApp {
     /// Sorted, because a `HashSet` iterates in a different order every frame and
     /// the words would dance.
     fn render_running(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        if self.running.is_empty() {
+        if self.flight.is_empty() {
             return None;
         }
-        let mut names: Vec<SharedString> = self
-            .running
-            .iter()
-            .map(|(_, action)| tr!(action.running_key()))
+        let names: Vec<SharedString> = self
+            .flight
+            .announcements()
+            .into_iter()
+            .map(|key| tr!(key))
             .collect();
-        names.sort();
-        names.dedup();
         Some(
             h_flex()
                 .gap_1()
@@ -3012,10 +2869,7 @@ impl ClaudhubApp {
     /// whether its repository is collapsed or not, otherwise the shortcut would
     /// only be memorable in one state of the list.
     fn worktrees_in_order(&self) -> Vec<PathBuf> {
-        self.repos
-            .iter()
-            .flat_map(|repo| repo.worktrees.iter().map(|w| w.path.clone()))
-            .collect()
+        self.repos.worktrees_in_order()
     }
 
     pub(super) fn select_worktree_at(
