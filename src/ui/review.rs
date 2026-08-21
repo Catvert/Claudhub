@@ -20,58 +20,56 @@ use gpui_component::{
 };
 
 use crate::git::{DiffFile, DiffRange, Status, StatusCode};
-use crate::runtime::Cmd;
+use crate::runtime::{Action, Cmd};
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
 use crate::ui::theme::{status_color, DiffColors};
 
-/// Une entrée de la liste des modifications.
+/// One row of the changes list.
 ///
-/// Les fichiers sont groupés comme dans les clients qui masquent l'index :
-/// ce qui est suivi d'un côté, ce qui ne l'est pas encore de l'autre. Le
-/// groupe porte sa propre case, qui indexe ou dés-indexe tout d'un coup.
+/// The files are grouped as in the clients that hide the index: what is tracked
+/// on one side, what is not yet on the other. The group carries its own box,
+/// which stages or unstages everything at once.
 #[derive(Clone)]
 enum Row {
     Group(Group),
-    /// Un dossier de l'arborescence, repliable.
+    /// A folder of the tree, collapsible.
     Dir(DirRow),
     File(FileRow),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Group {
-    /// Fichiers que git suit déjà.
+    /// Files git already tracks.
     Tracked,
-    /// Fichiers jamais ajoutés. Les cocher, c'est les faire suivre.
+    /// Files never added. Ticking them is what starts tracking them.
     Untracked,
 }
 
-/// Un dossier dans la liste des modifications.
+/// A folder in the changes list.
 ///
-/// Les dossiers intermédiaires vides sont fusionnés avec leur unique enfant :
-/// `app/Http/Livewire/Forms` tient sur une ligne au lieu de quatre, et c'est
-/// ce qui rend l'arborescence lisible sur un projet Laravel ou Symfony, où
-/// l'on descend de six niveaux avant de trouver un fichier.
+/// Empty intermediate folders are merged with their only child:
+/// `app/Http/Livewire/Forms` fits on one line instead of four, and that is what
+/// makes the tree readable on a Laravel or Symfony project, where one goes down
+/// six levels before finding a file.
 #[derive(Clone)]
 struct DirRow {
-    /// Chemin complet, et clé du repli. C'est celui du dossier le plus profond
-    /// de la chaîne fusionnée : replier `app/Http` et replier
-    /// `app/Http/Livewire` sont deux gestes différents, mais une chaîne
-    /// fusionnée n'en offre qu'un.
+    /// Full path, and collapse key. It is the deepest folder of the merged
+    /// chain: collapsing `app/Http` and collapsing `app/Http/Livewire` are two
+    /// different gestures, but a merged chain only offers one.
     path: PathBuf,
-    /// Ce qui s'affiche : un segment, ou la chaîne fusionnée.
+    /// What is displayed: one segment, or the merged chain.
     label: String,
     depth: usize,
     collapsed: bool,
-    /// Tous les fichiers du sous-arbre, y compris ceux qu'un repli cache :
-    /// cocher un dossier fermé doit indexer ce qu'il contient, et non ce qu'on
-    /// en voit.
+    /// Every file of the subtree, including those a collapse hides: ticking a
+    /// closed folder must stage what it contains, and not what is visible of it.
     paths: Vec<PathBuf>,
-    /// Vrai quand tout le sous-arbre est déjà indexé.
+    /// True when the whole subtree is already staged.
     staged: bool,
-    /// Vrai quand tout le sous-arbre est déjà relu — c'est ce qui fait d'un
-    /// clic sur un dossier une relecture de tout ce qu'il contient.
+    /// True when the whole subtree has already been reviewed — that is what
+    /// makes a click on a folder a review of everything it contains.
     reviewed: bool,
     added: usize,
     removed: usize,
@@ -218,30 +216,35 @@ impl ClaudhubApp {
             .iter()
             .filter(|row| matches!(row, Row::File(file) if file.staged))
             .count();
-        // Pendant une recherche, les replis sont ignorés : un fichier trouvé
-        // dans un dossier fermé ne se verrait pas, et la recherche paraîtrait
-        // n'avoir rien trouvé.
+        // The two lists are behind an `Rc`: without the tree, the displayed list
+        // **is** the flat one, and copying several hundred rows on every frame
+        // to say so would be the cost of the whole panel.
+        let flat = std::rc::Rc::new(flat);
+        // During a search, collapses are ignored: a file found in a closed
+        // folder would not be visible, and the search would look as if it had
+        // found nothing.
         let rows = if crate::ui::settings::Settings::global(cx).review_tree {
-            if query.trim().is_empty() {
-                tree_rows(&flat, &collapsed)
+            let collapsed = if query.trim().is_empty() {
+                collapsed
             } else {
-                tree_rows(&flat, &HashSet::new())
-            }
+                HashSet::new()
+            };
+            std::rc::Rc::new(tree_rows(&flat, &collapsed))
         } else {
             flat.clone()
         };
         let can_commit = staged_count > 0;
         let commits = matches!(range, DiffRange::Working);
-        // Deux listes vivent côte à côte : elles ne peuvent pas porter le même
-        // identifiant, sans quoi elles partageraient leur défilement.
+        // Two lists live side by side: they cannot carry the same id, otherwise
+        // they would share their scrolling.
         let list_id = match &range {
             DiffRange::Working => "working".to_string(),
             DiffRange::Branch { base } => format!("branch-{base}"),
             DiffRange::Commit { id, .. } => format!("commit-{id}"),
         };
 
-        // Sans filet droit : c'était la couture avec le diff voisin, du temps
-        // où les panneaux se touchaient — la gouttière les sépare désormais.
+        // No right-hand rule: it was the seam with the neighbouring diff, from
+        // the days when the panels touched — the gutter separates them now.
         v_flex()
             .size_full()
             .when(!matches!(range, DiffRange::Working), |el| {
@@ -264,18 +267,16 @@ impl ClaudhubApp {
                                 .child(tr!("review-clean")),
                         )
                     })
-                    // Liste virtualisée : une revue de branche touche couramment
-                    // plusieurs centaines de fichiers, et reconstruire autant de
-                    // lignes — chacune avec ses deux boutons — à chaque frame suffit
-                    // à faire tomber l'interface à quelques images par seconde.
+                    // Virtualised list: a branch review routinely touches
+                    // several hundred files, and rebuilding that many rows —
+                    // each with its two buttons — on every frame is enough to
+                    // bring the interface down to a few frames per second.
                     .when(!rows.is_empty(), |el| {
-                        let rows = std::rc::Rc::new(rows);
-                        let flat = std::rc::Rc::new(flat);
                         let entity = cx.entity();
                         let colors = DiffColors::of(cx);
                         let count = rows.len();
-                        // Seules les modifications en cours se cochent : sur un
-                        // commit déjà écrit, il n'y a rien à indexer.
+                        // Only the changes in progress can be ticked: on a
+                        // commit already written, there is nothing to stage.
                         let checkable = matches!(range, DiffRange::Working);
                         let row_range = range.clone();
                         el.child(
@@ -412,21 +413,27 @@ impl ClaudhubApp {
         self.open_file(worktree, path, range, cx);
     }
 
-    /// La barre du panneau des modifications : ce qu'on fait au dépôt, puis la
-    /// bascule d'affichage.
+    /// The changes panel's bar: what one does to the repository, then the
+    /// display toggle.
     ///
-    /// `fetch`, `pull` et `push` vivent ici et non dans la barre d'outils de la
-    /// fenêtre : ce sont les gestes de ce panneau-là — on regarde ce qui a
-    /// changé, on coche, on valide, on pousse —, et les tenir à l'autre bout
-    /// de l'écran faisait traverser la fenêtre pour terminer une phrase
-    /// commencée en bas.
+    /// `fetch`, `pull` and `push` live here and not in the window's toolbar:
+    /// they are that panel's gestures — you look at what changed, you tick, you
+    /// commit, you push — and keeping them at the other end of the screen made
+    /// you cross the window to finish a sentence started at the bottom.
     fn render_changes_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let has_active = self.active.is_some();
-        // L'avance et le retard sur l'amont, tels que le statut les rapporte.
-        // Ils sont **sur les boutons** et pas seulement dans la barre d'état :
-        // ce sont eux qui disent lequel des deux gestes il y a à faire, et un
-        // bouton éteint dit qu'il n'y a rien à faire — ce qui est la moitié de
-        // l'information qu'on cherche en arrivant sur un worktree.
+        // A fetch, a pull and a push talk to a remote: seconds, sometimes tens
+        // of them, during which nothing on screen moved. The button turns while
+        // its own operation runs — its own, and on **this** worktree: an agent
+        // pushing next door is not this button's business.
+        let fetching = self.active_running(Action::Fetch);
+        let pulling = self.active_running(Action::Pull);
+        let pushing = self.active_running(Action::Push);
+        // The ahead and behind counts on the upstream, as the status reports
+        // them. They are **on the buttons** and not only in the status bar: they
+        // are what says which of the two gestures there is to make, and a
+        // disabled button says there is nothing to do — which is half the
+        // information one is after on arriving at a worktree.
         let (ahead, behind) = self
             .active_review()
             .map(|state| (state.status.ahead, state.status.behind))
@@ -438,12 +445,15 @@ impl ClaudhubApp {
                     .xsmall()
                     .icon(icon("refresh-cw"))
                     .tooltip(tr!("action-fetch"))
-                    .disabled(!has_active)
+                    .loading(fetching)
+                    .disabled(!has_active || fetching)
                     .on_click(cx.listener(|this, _, _, cx| {
                         if let Some(worktree) = this.active.clone() {
-                            this.git.send(Cmd::Fetch { worktree });
+                            let cmd = Cmd::Fetch {
+                                worktree: worktree.clone(),
+                            };
+                            this.start(Some(worktree), Action::Fetch, cmd, cx);
                         }
-                        cx.notify();
                     })),
             )
             .child(
@@ -457,12 +467,15 @@ impl ClaudhubApp {
                         tr!("action-pull")
                     })
                     .when(behind > 0, |el| el.primary().label(behind.to_string()))
-                    .disabled(!has_active)
+                    .loading(pulling)
+                    .disabled(!has_active || pulling)
                     .on_click(cx.listener(|this, _, _, cx| {
                         if let Some(worktree) = this.active.clone() {
-                            this.git.send(Cmd::Pull { worktree });
+                            let cmd = Cmd::Pull {
+                                worktree: worktree.clone(),
+                            };
+                            this.start(Some(worktree), Action::Pull, cmd, cx);
                         }
-                        cx.notify();
                     })),
             )
             .child(
@@ -476,26 +489,27 @@ impl ClaudhubApp {
                         tr!("action-push")
                     })
                     .when(ahead > 0, |el| el.primary().label(ahead.to_string()))
-                    .disabled(!has_active)
+                    .loading(pushing)
+                    .disabled(!has_active || pushing)
                     .on_click(cx.listener(|this, _, _, cx| {
                         if let Some(worktree) = this.active.clone() {
-                            this.git.send(Cmd::Push {
-                                worktree,
+                            let cmd = Cmd::Push {
+                                worktree: worktree.clone(),
                                 force_with_lease: false,
-                            });
+                            };
+                            this.start(Some(worktree), Action::Push, cmd, cx);
                         }
-                        cx.notify();
                     })),
             )
             .child(Divider::vertical().h(px(12.)))
             .child(self.tree_toggle(cx))
     }
 
-    /// La barre de la revue de branche : la bascule, et le choix de la base.
+    /// The branch review's bar: the toggle, and the choice of base.
     ///
-    /// La branche d'intégration devinée par git est un point de départ, pas une
-    /// fatalité — on compare aussi bien à `dev`, à une autre branche de travail
-    /// ou à une distante.
+    /// The integration branch git guesses is a starting point, not a fate — one
+    /// compares just as well against `dev`, against another working branch or
+    /// against a remote.
     fn render_base_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         self.bar(cx).child(self.tree_toggle(cx)).child(
             Select::new(&self.base_select)
@@ -557,24 +571,28 @@ impl ClaudhubApp {
                             .child(tr!("commit-staged-count", { count: staged })),
                     )
                     .children(self.suggest_button(can_commit, cx))
-                    .child(
+                    .child({
+                        // A commit runs the repository's hooks — a linter, a
+                        // test suite — and those take as long as they take.
+                        let committing = self.active_running(Action::Commit);
                         Button::new("commit")
                             .primary()
                             .xsmall()
                             .icon(icon("git-commit-horizontal"))
                             .label(tr!("action-commit"))
-                            .disabled(!can_commit)
-                            .on_click(cx.listener(|this, _, _, cx| this.commit(false, cx))),
-                    ),
+                            .loading(committing)
+                            .disabled(!can_commit || committing)
+                            .on_click(cx.listener(|this, _, _, cx| this.commit(false, cx)))
+                    }),
             )
     }
 
-    /// Le bouton qui demande un message à l'agent.
+    /// The button that asks the agent for a message.
     ///
-    /// Il n'existe pas quand le réglage est vide : proposer un geste qui
-    /// échouera faute de commande vaut moins que de ne rien proposer. Il
-    /// tourne pendant l'attente — l'agent met dix à trente secondes, et un
-    /// bouton qui ne dit rien pendant ce temps-là se clique trois fois.
+    /// It does not exist when the setting is empty: offering a gesture that will
+    /// fail for want of a command is worth less than offering nothing. It spins
+    /// while waiting — the agent takes ten to thirty seconds, and a button that
+    /// says nothing for that long gets clicked three times.
     fn suggest_button(&self, can_commit: bool, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let command = crate::ui::settings::Settings::global(cx)
             .commit_message_command
@@ -668,22 +686,22 @@ impl ClaudhubApp {
         if message.trim().is_empty() && !amend {
             return;
         }
-        self.git.send(Cmd::Commit {
-            worktree,
+        let cmd = Cmd::Commit {
+            worktree: worktree.clone(),
             message,
             amend,
             all: false,
-        });
-        cx.notify();
+        };
+        self.start(Some(worktree), Action::Commit, cmd, cx);
     }
 }
 
 impl ClaudhubApp {
-    /// Demande confirmation avant de jeter des modifications.
+    /// Asks for confirmation before discarding changes.
     ///
-    /// Seule action de Claudhub qui détruit du travail sans que git en garde une
-    /// copie : ni `reflog` ni `stash` ne rattrapent un `restore --worktree`.
-    /// D'où le dialogue, même si tout le reste de l'interface agit au clic.
+    /// The only Claudhub action that destroys work without git keeping a copy:
+    /// neither `reflog` nor `stash` catches a `restore --worktree`. Hence the
+    /// dialog, even though all the rest of the interface acts on a click.
     fn confirm_removal(
         &mut self,
         worktree: PathBuf,
@@ -863,24 +881,7 @@ fn render_dir(
                 .text_color(cx.theme().muted_foreground)
                 .child(count.to_string()),
         )
-        .when(row.added > 0, |el| {
-            el.child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .text_color(colors.added_fg)
-                    .child(format!("+{}", row.added)),
-            )
-        })
-        .when(row.removed > 0, |el| {
-            el.child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .text_color(colors.removed_fg)
-                    .child(format!("−{}", row.removed)),
-            )
-        })
+        .children(crate::ui::theme::volume(row.added, row.removed, colors))
         .child(render_reviewed(
             ("reviewed-dir", index),
             row.reviewed,
@@ -1067,27 +1068,10 @@ fn render_file(
                     .child(tr!("file-partially-staged")),
             )
         })
-        .when(row.added > 0, |el| {
-            el.child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .text_color(colors.added_fg)
-                    .child(format!("+{}", row.added)),
-            )
-        })
-        .when(row.removed > 0, |el| {
-            el.child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .text_color(colors.removed_fg)
-                    .child(format!("−{}", row.removed)),
-            )
-        })
-        // Un fichier suivi se rend à son état d'origine ; un fichier nouveau
-        // n'en a pas — il se supprime, ce qui n'est pas le même geste et ne
-        // porte donc ni la même icône ni le même avertissement.
+        .children(crate::ui::theme::volume(row.added, row.removed, colors))
+        // A tracked file goes back to its original state; a new file has none —
+        // it is deleted, which is not the same gesture and therefore carries
+        // neither the same icon nor the same warning.
         .when(checkable, |el| {
             let (entity, worktree, path) =
                 (entity.clone(), worktree.to_path_buf(), row.path.clone());
@@ -1605,7 +1589,7 @@ mod tests {
         let rows = rows_for(&DiffRange::Working, &status, &[], &[]);
         let file = files_of(&rows)[0];
         assert!(file.staged);
-        assert!(file.partial(), "l'indexation partielle doit être signalée");
+        assert!(file.partial(), "partial staging must be reported");
         assert_eq!(file.codes(), "MM");
     }
 
@@ -1666,11 +1650,14 @@ mod tests {
             &[diff_file("a.rs", 13, 3)],
             &[reviewed("a.rs", 12, 3)],
         );
-        assert!(!files_of(&rows)[0].reviewed, "le fichier a rechangé depuis");
+        assert!(
+            !files_of(&rows)[0].reviewed,
+            "the file has changed again since"
+        );
     }
 
-    /// Une relecture prise dans un domaine ne vaut pas dans l'autre : ce n'est
-    /// pas le même diff qu'on a lu.
+    /// A review taken in one range does not hold in the other: it is not the
+    /// same diff that was read.
     #[test]
     fn a_review_belongs_to_its_range() {
         let status = status(vec![file(
@@ -1776,8 +1763,16 @@ mod tests {
     #[test]
     fn arrows_walk_the_file_list_without_wrapping() {
         assert_eq!(step_index(Some(1), 1, 4), Some(2));
-        assert_eq!(step_index(Some(0), -1, 4), None, "avant le premier, rien");
-        assert_eq!(step_index(Some(3), 1, 4), None, "après le dernier non plus");
+        assert_eq!(
+            step_index(Some(0), -1, 4),
+            None,
+            "before the first, nothing"
+        );
+        assert_eq!(
+            step_index(Some(3), 1, 4),
+            None,
+            "after the last, nothing either"
+        );
         assert_eq!(step_index(None, 1, 4), Some(0));
         assert_eq!(step_index(None, -1, 4), Some(3));
         assert_eq!(step_index(None, 1, 0), None);

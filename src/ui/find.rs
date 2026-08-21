@@ -50,21 +50,24 @@ pub enum Pane {
     Sentry,
     Conflicts,
     Diff,
-    /// L'éditeur intégré. Il a la recherche d'`InputState`, pas la nôtre —
-    /// mais il lui faut sa clé comme aux autres, ne serait-ce que pour que
-    /// `Ctrl+F` ne parte pas au panneau touché avant lui.
+    /// The built-in editor. It has `InputState`'s search, not ours — but it
+    /// needs its key like the others, if only so `Ctrl+F` does not go to the
+    /// panel touched before it.
     Editor,
-    /// La console SQL. Même chose : c'est l'éditeur de requête qui cherche.
+    /// The SQL console. Same thing: the query editor is what searches.
     Console,
+    /// The settings. The form has a search of its own, in its sidebar; this key
+    /// exists so `Ctrl+F` there does not go to the panel touched before it.
+    Settings,
 }
 
 impl Pane {
-    /// Le panneau saute-t-il d'une occurrence à l'autre au lieu de filtrer.
+    /// Does the panel jump from one occurrence to the next instead of filtering.
     fn jumps(self) -> bool {
         matches!(self, Pane::Diff | Pane::History)
     }
 
-    /// Ce que la barre annonce quand elle est vide.
+    /// What the bar announces while it is empty.
     fn placeholder(self) -> SharedString {
         match self {
             Pane::Diff => tr!("find-in-diff"),
@@ -390,13 +393,13 @@ mod tests {
 
     #[test]
     fn an_empty_query_matches_everything() {
-        assert!(matches("", "n'importe quoi"));
-        assert!(matches("   ", "n'importe quoi"));
-        assert!(find_all("", "n'importe quoi").is_empty());
+        assert!(matches("", "anything at all"));
+        assert!(matches("   ", "anything at all"));
+        assert!(find_all("", "anything at all").is_empty());
     }
 
-    /// Les décalages sont en octets : une recherche insensible à la casse ne
-    /// doit pas les décaler d'un accent.
+    /// The offsets are byte offsets: a case-insensitive search must not shift
+    /// them by an accent.
     #[test]
     fn offsets_are_byte_offsets_even_past_an_accent() {
         let text = "été chaud";

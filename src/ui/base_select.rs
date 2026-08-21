@@ -134,15 +134,18 @@ mod tests {
     #[test]
     fn the_detail_line_joins_what_it_has() {
         assert_eq!(
-            choice("Corrige le rendu", "Zoé", "il y a 2 heures").detail(),
-            "Corrige le rendu · Zoé · il y a 2 heures"
+            choice("Fix the rendering", "Zoé", "2 hours ago").detail(),
+            "Fix the rendering · Zoé · 2 hours ago"
         );
     }
 
     #[test]
     fn an_empty_part_does_not_leave_its_punctuation_behind() {
-        // Une branche sans auteur lisible ne doit pas produire « sujet ·  · hier ».
-        assert_eq!(choice("Sujet", "", "hier").detail(), "Sujet · hier");
+        // A branch with no readable author must not produce "subject ·  · yesterday".
+        assert_eq!(
+            choice("Subject", "", "yesterday").detail(),
+            "Subject · yesterday"
+        );
         assert_eq!(choice("", "", "").detail(), "");
     }
 }

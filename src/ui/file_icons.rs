@@ -431,27 +431,25 @@ mod tests {
         look_of(&PathBuf::from(name)).icon
     }
 
-    /// Les deux tables sont interrogées par recherche binaire : un ordre
-    /// alphabétique cassé ne provoque aucune erreur, il fait simplement rater
-    /// des entrées — et une entrée ratée se voit comme une icône générique de
-    /// plus, ce que personne ne remarque.
+    /// Both tables are queried by binary search: a broken alphabetical order
+    /// raises no error, it simply makes entries be missed — and a missed entry
+    /// shows up as one more generic icon, which nobody notices.
     #[test]
     fn the_tables_are_sorted() {
         for (table, name) in [(BY_EXTENSION, "BY_EXTENSION"), (BY_NAME, "BY_NAME")] {
             let keys: Vec<&str> = table.iter().map(|(key, _)| *key).collect();
             let mut sorted = keys.clone();
             sorted.sort_unstable();
-            assert_eq!(keys, sorted, "{name} n'est pas trié");
+            assert_eq!(keys, sorted, "{name} is not sorted");
             let mut unique = sorted.clone();
             unique.dedup();
             assert_eq!(unique.len(), sorted.len(), "{name} a un doublon");
         }
     }
 
-    /// Une icône absente ne provoque aucune erreur : gpui rend un vide, et la
-    /// ligne perd son repère sans que rien ne le dise. C'est exactement la
-    /// faute qu'attire une table de deux cents entrées, et le seul endroit où
-    /// elle se voie.
+    /// A missing icon raises no error: gpui renders a blank, and the row loses
+    /// its cue without anything saying so. It is exactly the mistake a
+    /// two-hundred-entry table attracts, and the only place it shows.
     #[test]
     fn every_icon_named_in_the_tables_is_really_there() {
         let looks = BY_EXTENSION
@@ -465,32 +463,32 @@ mod tests {
             let name = format!("icons/{}.svg", look.icon);
             assert!(
                 std::path::Path::new(&format!("assets/{name}")).exists(),
-                "icône absente du dépôt : assets/{name}"
+                "icon missing from the repository: assets/{name}"
             );
-            // Et surtout : embarquée. Les marques vivent dans un
-            // sous-dossier, que le motif d'inclusion de `rust-embed` doit
-            // couvrir — un fichier présent sur le disque mais absent du
-            // binaire donnerait la même case vide, et seulement en release.
+            // And above all: embedded. The brand marks live in a subfolder,
+            // which `rust-embed`'s include pattern has to cover — a file present
+            // on disk but absent from the binary would give the same blank slot,
+            // and only in release.
             assert!(
                 <crate::ui::Assets as rust_embed::RustEmbed>::get(&name).is_some(),
-                "icône non embarquée : {name}"
+                "icon not embedded: {name}"
             );
         }
     }
 
     #[test]
     fn the_whole_name_wins_over_the_extension() {
-        // `package.json` est de npm avant d'être du JSON, et `Cargo.toml` de
-        // Rust avant d'être du TOML : c'est ce que l'œil cherche dans une
-        // liste.
+        // `package.json` belongs to npm before it belongs to JSON, and
+        // `Cargo.toml` to Rust before TOML: that is what the eye looks for in a
+        // list.
         assert_eq!(icon_of("package.json"), "lang/npm");
         assert_eq!(icon_of("data/fixtures.json"), "lang/json");
         assert_eq!(icon_of("Cargo.toml"), "lang/rust");
         assert_eq!(icon_of("wt.toml"), "lang/toml");
         assert_eq!(icon_of("Dockerfile"), "lang/docker");
         assert_eq!(icon_of(".gitignore"), "lang/git");
-        // La casse ne compte pas : `dockerfile` et `Dockerfile` existent tous
-        // les deux dans la nature.
+        // Case does not count: `dockerfile` and `Dockerfile` both exist in the
+        // wild.
         assert_eq!(icon_of("services/api/dockerfile"), "lang/docker");
     }
 
@@ -503,24 +501,24 @@ mod tests {
             assert_eq!(icon_of(name), "file-json", "{name}");
         }
         assert_eq!(icon_of("vite.config.ts"), "lang/vite");
-        // Un préfixe n'est pas un fragment : `environment.ts` n'est pas `.env`.
+        // A prefix is not a fragment: `environment.ts` is not `.env`.
         assert_eq!(icon_of("environment.ts"), "lang/typescript");
     }
 
     #[test]
     fn a_double_extension_wins_over_the_last_one() {
-        // Une vue Blade est du balisage avant d'être du PHP.
-        assert_eq!(icon_of("resources/views/devis.blade.php"), "lang/laravel");
+        // A Blade view is markup before it is PHP.
+        assert_eq!(icon_of("resources/views/quote.blade.php"), "lang/laravel");
         assert_eq!(icon_of("app/Http/Kernel.php"), "lang/php");
-        // `Path::extension` ne verrait que `bz2`, qui n'est pas dans la table
-        // des doubles mais l'est dans celle des simples : les deux mènent au
-        // même endroit, et c'est bien ce qu'on veut.
+        // `Path::extension` would only see `bz2`, which is not in the double
+        // table but is in the plain one: both lead to the same place, and that
+        // is exactly what we want.
         assert_eq!(icon_of("dist/app.tar.bz2"), "archive");
     }
 
     #[test]
     fn the_languages_of_a_php_project_are_all_told_apart() {
-        // Le cas qui a motivé tout ceci : une revue de branche Laravel.
+        // The case that motivated all this: a Laravel branch review.
         let names = [
             "app/Http/Kernel.php",
             "resources/views/devis.blade.php",
@@ -543,7 +541,7 @@ mod tests {
         assert_eq!(
             unique.len(),
             icons.len(),
-            "deux fichiers de cette liste partagent une icône : {icons:?}"
+            "two files in this list share an icon: {icons:?}"
         );
     }
 

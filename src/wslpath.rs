@@ -53,7 +53,7 @@ pub fn to_linux(path: &Path) -> Option<Translated> {
     if drive.is_ascii_alphabetic() && chars.next() == Some(':') {
         let rest = chars.as_str();
         if !rest.is_empty() && !rest.starts_with(['\\', '/']) {
-            return None; // `C:relatif` : relatif au dossier courant du lecteur
+            return None; // `C:relative`: relative to the drive's current directory
         }
         let mut linux = format!("/mnt/{}", drive.to_ascii_lowercase());
         for part in rest.split(['\\', '/']).filter(|p| !p.is_empty()) {
@@ -135,11 +135,11 @@ mod tests {
 
     #[test]
     fn a_wsl_share_becomes_a_linux_path() {
-        let t = to_linux(Path::new(r"\\wsl.localhost\Ubuntu\home\aurélie\projets")).unwrap();
+        let t = to_linux(Path::new(r"\\wsl.localhost\Ubuntu\home\zoé\projects")).unwrap();
         assert_eq!(t.distro.as_deref(), Some("Ubuntu"));
-        assert_eq!(t.path, PathBuf::from("/home/aurélie/projets"));
+        assert_eq!(t.path, PathBuf::from("/home/zoé/projects"));
 
-        // L'ancienne forme, et la casse de l'explorateur.
+        // The older form, and Explorer's casing.
         let t = to_linux(Path::new(r"\\WSL$\Debian\srv")).unwrap();
         assert_eq!(t.distro.as_deref(), Some("Debian"));
         assert_eq!(t.path, PathBuf::from("/srv"));
@@ -154,23 +154,23 @@ mod tests {
 
     #[test]
     fn what_has_no_linux_side_stays_none() {
-        assert_eq!(to_linux(Path::new(r"\\serveur\partage\doc")), None);
-        assert_eq!(to_linux(Path::new("/home/deja/linux")), None);
-        assert_eq!(to_linux(Path::new("C:relatif")), None);
+        assert_eq!(to_linux(Path::new(r"\\server\share\doc")), None);
+        assert_eq!(to_linux(Path::new("/home/already/linux")), None);
+        assert_eq!(to_linux(Path::new("C:relative")), None);
     }
 
     #[test]
     fn the_way_back_mirrors_the_way_in() {
         assert_eq!(
-            to_windows(Path::new("/home/aurélie/coffre"), "Ubuntu"),
-            PathBuf::from(r"\\wsl.localhost\Ubuntu\home\aurélie\coffre")
+            to_windows(Path::new("/home/zoé/vault"), "Ubuntu"),
+            PathBuf::from(r"\\wsl.localhost\Ubuntu\home\zoé\vault")
         );
         assert_eq!(
             to_windows(Path::new("/mnt/c/Users/Arno"), "Ubuntu"),
             PathBuf::from(r"C:\Users\Arno")
         );
-        // L'aller-retour d'un chemin de coffre : ce que le sélecteur rend
-        // doit redonner ce que le fil transporte.
+        // The round trip of a vault path: what the picker returns must give
+        // back what the wire carries.
         let round = to_linux(&to_windows(Path::new("/var/www"), "Ubuntu")).unwrap();
         assert_eq!(round.path, PathBuf::from("/var/www"));
         assert_eq!(round.distro.as_deref(), Some("Ubuntu"));

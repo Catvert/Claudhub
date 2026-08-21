@@ -164,10 +164,10 @@ fn as_u64(value: &serde_json::Value) -> u64 {
         .unwrap_or(0)
 }
 
-/// Lit la liste des issues d'un projet.
+/// Reads a project's issue list.
 pub fn parse_issues(json: &str) -> Result<Vec<Issue>> {
     let raw: Vec<RawIssue> =
-        serde_json::from_str(json).context("réponse Sentry illisible (issues)")?;
+        serde_json::from_str(json).context("unreadable Sentry response (issues)")?;
     Ok(raw
         .into_iter()
         .map(|issue| Issue {
@@ -182,14 +182,13 @@ pub fn parse_issues(json: &str) -> Result<Vec<Issue>> {
         .collect())
 }
 
-/// Lit l'événement le plus récent d'une issue.
+/// Reads an issue's most recent event.
 ///
-/// La pile vit dans l'entrée `exception` ou `stacktrace` de `entries` ; les
-/// deux formes existent selon le SDK qui a envoyé l'événement, et n'en gérer
-/// qu'une donne une trace vide sur la moitié des projets.
+/// The stack lives in the `exception` or `stacktrace` entry of `entries`; both
+/// shapes exist depending on the SDK that sent the event, and handling only one
+/// gives an empty trace on half the projects.
 pub fn parse_event(json: &str) -> Result<Event> {
-    let raw: RawEvent =
-        serde_json::from_str(json).context("réponse Sentry illisible (événement)")?;
+    let raw: RawEvent = serde_json::from_str(json).context("unreadable Sentry response (event)")?;
     let mut frames = Vec::new();
     for entry in &raw.entries {
         match entry.kind.as_str() {
@@ -327,21 +326,21 @@ fn get(url: &str, token: &str) -> Result<String> {
         .get(url)
         .header("Authorization", &format!("Bearer {token}"))
         .call()
-        .with_context(|| format!("Sentry : {url} injoignable"))?;
+        .with_context(|| format!("Sentry: {url} unreachable"))?;
     let status = response.status();
     if !status.is_success() {
-        bail!("Sentry a répondu {status}");
+        bail!("Sentry answered {status}");
     }
     response
         .body_mut()
         .read_to_string()
-        .context("réponse Sentry illisible")
+        .context("unreadable Sentry response")
 }
 
-/// Les issues non résolues d'un projet, les plus fréquentes d'abord.
+/// A project's unresolved issues, most frequent first.
 pub fn issues(org: &str, project: &str, query: &str, token: &str) -> Result<Vec<Issue>> {
     if org.trim().is_empty() || project.trim().is_empty() {
-        bail!("organisation ou projet Sentry non configuré");
+        bail!("Sentry organisation or project not configured");
     }
     let query = if query.trim().is_empty() {
         "is:unresolved".to_string()
@@ -395,7 +394,7 @@ mod tests {
       {
         "id": "4508",
         "title": "TypeError: Cannot read properties of undefined",
-        "culprit": "app/Http/Controllers/DevisController.php in store",
+        "culprit": "app/Http/Controllers/QuoteController.php in store",
         "level": "error",
         "count": "137",
         "lastSeen": "2026-08-19T10:12:00Z",
@@ -426,14 +425,14 @@ mod tests {
                       "inApp": false
                     },
                     {
-                      "filename": "app/Http/Controllers/DevisController.php",
+                      "filename": "app/Http/Controllers/QuoteController.php",
                       "function": "store",
                       "lineNo": 88,
                       "inApp": true,
                       "context": [
                         [86, "    public function store(Request $request)"],
                         [87, "    {"],
-                        [88, "        return $request->devis->total;"],
+                        [88, "        return $request->quote->total;"],
                         [89, "    }"]
                       ]
                     }
@@ -483,23 +482,23 @@ mod tests {
         let issue = parse_issues(ISSUES).unwrap().remove(0);
         let event = parse_event(EVENT).unwrap();
         let text = prompt(
-            "Voici une erreur Sentry.",
+            "Here is a Sentry error.",
             &issue,
             &event,
-            Path::new("/nulle-part"),
+            Path::new("/nowhere"),
         );
-        // Toute la pile, frames de framework comprises : c'est le chemin qui
-        // a mené là.
+        // The whole stack, framework frames included: it is the path that led
+        // there.
         assert!(text.contains("Kernel.php:141"), "{text}");
-        assert!(text.contains("DevisController.php:88"), "{text}");
-        // Mais le code seulement pour ce qui appartient à l'application : une
-        // pile de framework fait cent lignes, et le bug n'y est pas.
+        assert!(text.contains("QuoteController.php:88"), "{text}");
+        // But the code only for what belongs to the application: a framework
+        // stack is a hundred lines, and the bug is not in it.
         assert!(
-            text.contains("## app/Http/Controllers/DevisController.php:88"),
+            text.contains("## app/Http/Controllers/QuoteController.php:88"),
             "{text}"
         );
         assert!(!text.contains("## vendor/"), "{text}");
-        // La ligne fautive est marquée.
+        // The offending line is marked.
         assert!(text.contains(">    88 "), "{text}");
         assert!(!text.ends_with('\n'), "{text:?}");
     }

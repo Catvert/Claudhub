@@ -246,21 +246,21 @@ fn parse_header(rec: &str, status: &mut Status) {
     }
 }
 
-/// `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>` et la variante `2` du
-/// renommage, dont seuls les deux premiers champs nous intéressent.
+/// `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>` and the rename variant `2`,
+/// of which only the first two fields interest us.
 fn parse_ordinary(rec: &str) -> Option<FileStatus> {
     let mut fields = rec.splitn(9, ' ');
-    fields.next()?; // '1' ou '2'
+    fields.next()?; // '1' or '2'
     let xy = fields.next()?;
     let mut xy = xy.chars();
     let index = StatusCode::from_char(xy.next()?);
     let worktree = StatusCode::from_char(xy.next()?);
-    // sub, mH, mI, mW, hH, hI — sans intérêt pour l'affichage.
+    // sub, mH, mI, mW, hH, hI — of no interest to the display.
     for _ in 0..6 {
         fields.next()?;
     }
     let rest = fields.next()?;
-    // Pour un renommage, le champ de score (`R100`) précède le chemin.
+    // For a rename, the score field (`R100`) precedes the path.
     let path = if index == StatusCode::Renamed
         || index == StatusCode::Copied
         || worktree == StatusCode::Renamed
@@ -355,40 +355,40 @@ mod tests {
         assert_eq!(
             st.files.len(),
             2,
-            "l'ancien chemin ne doit pas devenir une entrée"
+            "the former path must not become an entry"
         );
         assert_eq!(st.files[0].path, PathBuf::from("ui/new name.rs"));
         assert_eq!(st.files[0].original, Some(PathBuf::from("ui/old name.rs")));
         assert_eq!(st.files[0].index, StatusCode::Renamed);
-        // L'entrée suivante est bien repartie du bon enregistrement.
+        // The next entry did start again from the right record.
         assert_eq!(st.files[1].path, PathBuf::from("src/lib.rs"));
     }
 
     #[test]
     fn reads_untracked_and_conflicts() {
         let out = rec(&[
-            "? nouveau fichier.txt",
-            "u UU N... 100644 100644 100644 100644 aaa bbb ccc src/conflit.rs",
+            "? new file.txt",
+            "u UU N... 100644 100644 100644 100644 aaa bbb ccc src/conflict.rs",
         ]);
         let st = parse(&out);
         assert!(st.files[0].is_untracked());
-        assert_eq!(st.files[0].path, PathBuf::from("nouveau fichier.txt"));
+        assert_eq!(st.files[0].path, PathBuf::from("new file.txt"));
         assert!(st.files[1].is_conflicted());
-        assert_eq!(st.files[1].path, PathBuf::from("src/conflit.rs"));
+        assert_eq!(st.files[1].path, PathBuf::from("src/conflict.rs"));
         assert_eq!(st.conflicted().count(), 1);
     }
 }
 
-/// Le résumé d'un checkout : de quoi le décrire d'une ligne dans la barre
-/// latérale, sans l'ouvrir.
+/// A checkout's summary: enough to describe it in one line in the sidebar,
+/// without opening it.
 ///
-/// Deux commandes plutôt qu'une parce que git n'en a aucune qui donne les
-/// deux : `--numstat` compte les lignes mais ignore ce qu'il ne suit pas, et
-/// `status` voit les fichiers nouveaux sans savoir ce qu'ils contiennent. Un
-/// worktree d'agent est justement plein de fichiers nouveaux.
+/// Two commands rather than one because git has none that gives both:
+/// `--numstat` counts lines but ignores what it does not track, and `status`
+/// sees new files without knowing what they contain. An agent worktree is
+/// precisely full of new files.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Summary {
-    /// Fichiers touchés, les nouveaux compris.
+    /// Files touched, new ones included.
     pub files: usize,
     pub added: usize,
     pub removed: usize,

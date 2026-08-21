@@ -22,62 +22,64 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 
-/// Au-delà, le diff est tronqué.
+/// Beyond this, the diff is truncated.
 ///
-/// Ce n'est pas la limite du modèle mais celle du bon sens : un message de
-/// commit se déduit de ce qui change, et les cent premiers kilo-octets d'un
-/// diff en disent déjà tout. Envoyer les cinq mégaoctets d'un `composer.lock`
-/// régénéré coûterait des jetons pour une ligne de résumé.
+/// This is not the model's limit but common sense: a commit message follows
+/// from what changes, and the first hundred kilobytes of a diff already say it
+/// all. Sending the five megabytes of a regenerated `composer.lock` would cost
+/// tokens for one line of summary.
 pub const MAX_DIFF: usize = 100_000;
 
-/// Combien de messages récents servent d'exemple.
+/// How many recent messages serve as examples.
 pub const RECENT: usize = 10;
 
-/// Un agent qui réfléchit met dix à trente secondes ; passé deux minutes, il
-/// est bloqué et le worker avec lui.
+/// An agent that thinks takes ten to thirty seconds; past two minutes it is
+/// stuck, and the worker with it.
 const TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Ce qu'on demande à l'agent.
+/// What we ask the agent for.
 ///
-/// Les messages récents y figurent parce que la convention d'un dépôt ne se
-/// devine pas : la langue d'abord, mais aussi la personne du verbe et les
-/// préfixes que l'équipe s'est donnés. Une consigne écrite ici les imposerait
-/// à tous les dépôts, ce qui est exactement ce qu'on ne veut pas.
+/// The recent messages are in there because a repository's convention cannot
+/// be guessed: the language first, but also the person of the verb and the
+/// prefixes the team has given itself. An instruction written here would
+/// impose them on every repository, which is exactly what we do not want.
 pub fn prompt(recent: &[String], diff: &str) -> String {
     let (diff, truncated) = truncate(diff, MAX_DIFF);
     let mut out = String::with_capacity(diff.len() + 1024);
     out.push_str(
-        "Tu écris le message du commit que ces modifications indexées vont produire.\n\n\
-         Réponds par le message seul : aucune phrase d'introduction, aucun bloc de code, \
-         aucun guillemet autour.\n\
-         Une ligne de résumé de moins de 72 caractères ; puis, si et seulement si le \
-         changement le demande, une ligne vide et un corps qui dit pourquoi plutôt que quoi.\n",
+        "You are writing the message of the commit these staged changes will produce.\n\n\
+         Answer with the message alone: no introductory sentence, no code block, \
+         no surrounding quotes.\n\
+         A summary line under 72 characters; then, if and only if the change \
+         calls for it, a blank line and a body saying why rather than what.\n",
     );
     if recent.is_empty() {
         out.push_str(
-            "\nCe dépôt n'a pas encore de commit : écris le message dans la langue du code.\n",
+            "\nThis repository has no commit yet: write the message in the language of the code.\n",
         );
     } else {
-        out.push_str("\nSuis la langue et les conventions des messages récents de ce dépôt :\n\n");
+        out.push_str(
+            "\nFollow the language and the conventions of this repository's recent messages:\n\n",
+        );
         for subject in recent {
             out.push_str("  ");
             out.push_str(subject);
             out.push('\n');
         }
     }
-    out.push_str("\nDiff indexé :\n\n");
+    out.push_str("\nStaged diff:\n\n");
     out.push_str(diff);
     if truncated {
-        out.push_str("\n\n[diff tronqué : seul le début est montré]");
+        out.push_str("\n\n[diff truncated: only the beginning is shown]");
     }
     out.push('\n');
     out
 }
 
-/// Coupe à `max` **octets, sur une frontière de caractère**.
+/// Cuts at `max` **bytes, on a character boundary**.
 ///
-/// En octets nus, un diff accentué se couperait au milieu d'un caractère et la
-/// tranche ne serait plus de l'UTF-8 valide.
+/// On raw bytes, an accented diff would be cut in the middle of a character
+/// and the slice would no longer be valid UTF-8.
 fn truncate(text: &str, max: usize) -> (&str, bool) {
     if text.len() <= max {
         return (text, false);
@@ -124,34 +126,34 @@ pub fn clean(output: &str) -> String {
     unquoted.trim().to_string()
 }
 
-/// Demande un message à l'agent configuré. **Jamais depuis le thread
-/// d'interface** : cet appel dure des secondes.
+/// Asks the configured agent for a message. **Never from the interface
+/// thread**: this call takes seconds.
 pub fn suggest(worktree: &Path, command_line: &str) -> Result<String> {
     let diff = crate::git::diff::staged_text(worktree)?;
     if diff.trim().is_empty() {
-        bail!("rien n'est indexé : cochez ce qui doit partir au commit");
+        bail!("nothing is staged: tick what should go into the commit");
     }
     let recent = crate::git::history::recent_subjects(worktree, RECENT);
     let answer = ask(worktree, command_line, &prompt(&recent, &diff))?;
     let message = clean(&answer);
     if message.is_empty() {
-        bail!("l'agent n'a rien répondu");
+        bail!("the agent answered nothing");
     }
     Ok(message)
 }
 
-/// Lance le programme configuré, lui donne le prompt sur l'entrée standard, et
-/// rend sa sortie standard.
+/// Runs the configured program, gives it the prompt on standard input, and
+/// returns its standard output.
 ///
-/// Les trois flux passent par des threads : un tube plein bloque celui qui
-/// écrit, et le prompt comme la réponse dépassent largement les soixante-quatre
-/// kilo-octets d'un tube. Écrire d'abord puis attendre donnerait l'interblocage
-/// classique — le processus attend qu'on lise, nous attendons qu'il finisse.
+/// All three streams go through threads: a full pipe blocks whoever writes,
+/// and both the prompt and the answer go well past a pipe's sixty-four
+/// kilobytes. Writing first and then waiting would give the classic deadlock —
+/// the process waits for us to read, we wait for it to finish.
 fn ask(worktree: &Path, command_line: &str, prompt: &str) -> Result<String> {
     let mut parts = crate::cmdline::split_command(command_line).into_iter();
     let program = parts
         .next()
-        .ok_or_else(|| anyhow!("aucune commande de génération de message dans les réglages"))?;
+        .ok_or_else(|| anyhow!("no message-generation command in the settings"))?;
     let args: Vec<String> = parts.collect();
 
     let mut child = Command::new(&program)
@@ -161,18 +163,18 @@ fn ask(worktree: &Path, command_line: &str, prompt: &str) -> Result<String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("{program} : programme introuvable"))?;
+        .with_context(|| format!("{program}: program not found"))?;
 
-    let mut stdin = child.stdin.take().expect("stdin demandé en piped");
+    let mut stdin = child.stdin.take().expect("stdin requested as piped");
     let text = prompt.to_string();
-    // L'écriture ignore son échec : un programme qui sort avant d'avoir tout
-    // lu ferme le tube, et c'est son code de retour qui doit être rapporté,
-    // pas un `EPIPE` qui n'explique rien.
+    // The write ignores its own failure: a program that exits before reading
+    // everything closes the pipe, and it is its exit code that has to be
+    // reported, not an `EPIPE` that explains nothing.
     let writer = std::thread::spawn(move || {
         let _ = stdin.write_all(text.as_bytes());
     });
-    let out = read_thread(child.stdout.take().expect("stdout demandé en piped"));
-    let err = read_thread(child.stderr.take().expect("stderr demandé en piped"));
+    let out = read_thread(child.stdout.take().expect("stdout requested as piped"));
+    let err = read_thread(child.stderr.take().expect("stderr requested as piped"));
 
     let deadline = Instant::now() + TIMEOUT;
     let status = loop {
@@ -181,7 +183,7 @@ fn ask(worktree: &Path, command_line: &str, prompt: &str) -> Result<String> {
             None if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                bail!("{program} n'a pas répondu en {TIMEOUT:?} et a été interrompu");
+                bail!("{program} did not answer within {TIMEOUT:?} and was interrupted");
             }
             None => std::thread::sleep(Duration::from_millis(20)),
         }
@@ -194,9 +196,9 @@ fn ask(worktree: &Path, command_line: &str, prompt: &str) -> Result<String> {
         let message = String::from_utf8_lossy(&stderr);
         let message = message.trim();
         bail!(
-            "{program} a échoué : {}",
+            "{program} failed: {}",
             if message.is_empty() {
-                "aucun message".into()
+                "no message".into()
             } else {
                 message.to_string()
             }
@@ -221,50 +223,50 @@ mod tests {
 
     #[test]
     fn the_prompt_shows_the_conventions_of_the_repository() {
-        let text = prompt(&["Retirer les coutures".into()], "diff --git a/x b/x\n");
-        assert!(text.contains("Retirer les coutures"), "{text}");
+        let text = prompt(&["Remove the seams".into()], "diff --git a/x b/x\n");
+        assert!(text.contains("Remove the seams"), "{text}");
         assert!(text.contains("diff --git a/x b/x"), "{text}");
-        assert!(!text.contains("tronqué"), "{text}");
+        assert!(!text.contains("truncated"), "{text}");
     }
 
     #[test]
     fn a_repository_without_commits_is_not_an_error() {
         let text = prompt(&[], "diff");
-        assert!(text.contains("pas encore de commit"), "{text}");
+        assert!(text.contains("no commit yet"), "{text}");
     }
 
-    /// La coupe se fait sur une frontière de caractère : en octets nus, un
-    /// diff accentué produirait une tranche qui n'est pas de l'UTF-8.
+    /// The cut happens on a character boundary: on raw bytes, an accented diff
+    /// would produce a slice that is not UTF-8.
     #[test]
     fn a_long_diff_is_cut_on_a_character_boundary() {
         let diff = "é".repeat(MAX_DIFF);
         let text = prompt(&[], &diff);
-        assert!(text.contains("[diff tronqué"), "la coupe n'est pas dite");
+        assert!(text.contains("[diff truncated"), "the cut is not announced");
     }
 
     #[test]
     fn a_code_fence_never_reaches_the_history() {
-        assert_eq!(clean("```\nAjouter le bouton\n```"), "Ajouter le bouton");
+        assert_eq!(clean("```\nAdd the button\n```"), "Add the button");
         assert_eq!(
-            clean("```text\nAjouter\n\nParce que.\n```"),
-            "Ajouter\n\nParce que."
+            clean("```text\nAdd it\n\nBecause.\n```"),
+            "Add it\n\nBecause."
         );
     }
 
     #[test]
     fn surrounding_quotes_are_dropped_but_not_the_others() {
-        assert_eq!(clean("\"Ajouter le bouton\""), "Ajouter le bouton");
+        assert_eq!(clean("\"Add the button\""), "Add the button");
         assert_eq!(
-            clean("Ajouter « le bouton » et \"la case\""),
-            "Ajouter « le bouton » et \"la case\""
+            clean("Add « the button » and \"the box\""),
+            "Add « the button » and \"the box\""
         );
     }
 
     #[test]
     fn a_plain_message_comes_out_untouched() {
         assert_eq!(
-            clean("  Ajouter le bouton\n\nParce que.\n"),
-            "Ajouter le bouton\n\nParce que."
+            clean("  Add the button\n\nBecause.\n"),
+            "Add the button\n\nBecause."
         );
     }
 }

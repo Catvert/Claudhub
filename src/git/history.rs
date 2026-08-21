@@ -288,8 +288,8 @@ mod tests {
             short: id.into(),
             parents: parents.iter().map(|p| p.to_string()).collect(),
             summary: format!("commit {id}"),
-            author: "Autrice".into(),
-            date: "hier".into(),
+            author: "An author".into(),
+            date: "yesterday".into(),
             refs: Vec::new(),
         }
     }
@@ -306,19 +306,19 @@ mod tests {
                 "abc123def",
                 "abc123d",
                 "parent1 parent2",
-                "Une autrice",
-                "il y a 2 heures",
+                "An author",
+                "2 hours ago",
                 "HEAD -> main, origin/main, tag: v1.0",
-                "Corrige le rendu du diff",
+                "Fix the diff rendering",
             ]),
             record(&[
                 "parent1",
                 "parent1",
                 "",
-                "Quelqu'un",
-                "hier",
+                "Someone",
+                "yesterday",
                 "",
-                "Le commit initial",
+                "The initial commit",
             ]),
         );
         let commits = parse(&out);
@@ -328,12 +328,12 @@ mod tests {
         assert_eq!(first.id, "abc123def");
         assert_eq!(first.parents, vec!["parent1", "parent2"]);
         assert!(first.is_merge());
-        assert_eq!(first.summary, "Corrige le rendu du diff");
-        assert_eq!(first.author, "Une autrice");
-        // La flèche de `HEAD -> main` est retirée, le reste est conservé.
+        assert_eq!(first.summary, "Fix the diff rendering");
+        assert_eq!(first.author, "An author");
+        // The arrow of `HEAD -> main` is removed, the rest is kept.
         assert_eq!(first.refs, vec!["main", "origin/main", "tag: v1.0"]);
 
-        // Un commit racine n'a pas de parent, et ce n'est pas une erreur.
+        // A root commit has no parent, and that is not an error.
         assert!(commits[1].parents.is_empty());
         assert!(commits[1].refs.is_empty());
     }
@@ -363,29 +363,29 @@ mod tests {
         ];
         let rows = layout(&commits);
 
-        // Le merge est sur la colonne principale et envoie un trait vers la
-        // colonne du second parent.
+        // The merge sits on the main column and sends a line towards the second
+        // parent's column.
         assert_eq!(rows[0].column, 0);
         assert_eq!(rows[0].outgoing, vec![1]);
 
-        // La branche vit sur la colonne ouverte pour elle.
+        // The branch lives on the column opened for it.
         assert_eq!(rows[2].column, 1);
-        // Pendant ce temps, la colonne principale continue.
+        // Meanwhile, the main column carries on.
         assert!(rows[2].through.contains(&0));
 
-        // La base commune referme la seconde colonne : les deux rails
-        // l'attendaient, seul le premier porte la puce.
+        // The common base closes the second column: both lanes were waiting for
+        // it, only the first carries the bullet.
         assert_eq!(rows[3].column, 0);
         assert_eq!(rows[3].incoming, vec![1]);
 
         assert_eq!(width(&rows), 2);
-        assert_eq!(rows.len(), commits.len(), "une ligne par commit");
+        assert_eq!(rows.len(), commits.len(), "one row per commit");
     }
 
     #[test]
     fn parallel_branches_reuse_freed_columns() {
-        // Deux pointes indépendantes puis leur base : la colonne libérée par
-        // la première doit resservir plutôt que d'en ouvrir une troisième.
+        // Two independent tips then their base: the column freed by the first
+        // must be reused rather than opening a third.
         let commits = vec![
             commit("x", &["base"]),
             commit("y", &["base"]),
@@ -396,9 +396,9 @@ mod tests {
         assert_eq!(rows[0].column, 0);
         assert_eq!(rows[1].column, 1);
         assert_eq!(rows[2].column, 0);
-        assert_eq!(rows[2].incoming, vec![1], "les deux rails convergent");
-        // `z` n'est attendu par personne : il reprend la colonne 0, libérée.
+        assert_eq!(rows[2].incoming, vec![1], "both lanes converge");
         assert_eq!(rows[3].column, 0);
+        // `z` is awaited by nobody: it takes column 0 back, now free.
         assert_eq!(width(&rows), 2);
     }
 
@@ -411,32 +411,32 @@ mod tests {
         assert_eq!(width(&rows), 3);
     }
 
-    /// Lit l'historique d'un vrai dépôt — celui-ci — et vérifie que chaque
-    /// champ arrive rempli. Le format et son séparateur sont exactement le
-    /// genre de chose qui marche sur un exemple écrit à la main et se décale
-    /// d'un champ sur la sortie réelle.
+    /// Reads a real repository's history — this one's — and checks that every
+    /// field arrives filled in. The format and its separator are exactly the
+    /// kind of thing that works on a hand-written example and slips by one
+    /// field on the real output.
     #[test]
     fn reads_this_repository() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let Ok(commits) = commits(dir, &LogRange::Head, 5) else {
-            return; // pas de dépôt git à la construction : rien à vérifier
+            return; // no git repository at build time: nothing to check
         };
-        assert!(!commits.is_empty(), "ce dépôt a des commits");
+        assert!(!commits.is_empty(), "this repository has commits");
 
         for commit in &commits {
-            assert_eq!(commit.id.len(), 40, "empreinte complète attendue");
+            assert_eq!(commit.id.len(), 40, "full digest expected");
             assert!(!commit.short.is_empty());
             assert!(
                 !commit.summary.is_empty(),
-                "le sujet du commit {} est vide — le format a glissé d'un champ",
+                "the subject of commit {} is empty — the format has slipped by one field",
                 commit.short
             );
-            assert!(!commit.author.is_empty(), "auteur manquant");
-            assert!(!commit.date.is_empty(), "date manquante");
-            // Le sujet ne doit pas avoir avalé les champs suivants.
+            assert!(!commit.author.is_empty(), "missing author");
+            assert!(!commit.date.is_empty(), "missing date");
+            // The subject must not have swallowed the following fields.
             assert!(
                 !commit.summary.contains('\u{1f}'),
-                "le séparateur a fuité dans le sujet : {}",
+                "the separator leaked into the subject: {}",
                 commit.summary
             );
         }

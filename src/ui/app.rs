@@ -95,169 +95,164 @@ fn save_layouts(layouts: &Layouts) {
     match serde_json::to_string_pretty(layouts) {
         Ok(json) => {
             if let Err(e) = std::fs::write(&path, json) {
-                log::warn!("écriture de la disposition : {e}");
+                log::warn!("writing the layout: {e}");
             }
         }
-        Err(e) => log::warn!("sérialisation de la disposition : {e}"),
+        Err(e) => log::warn!("serialising the layout: {e}"),
     }
 }
 
-/// Un dépôt ouvert dans la barre latérale.
+/// A repository open in the sidebar.
 pub struct RepoState {
     pub main: PathBuf,
     pub name: String,
     pub worktrees: Vec<Worktree>,
     pub branches: Vec<Branch>,
-    /// Branche d'intégration, telle que git la déclare. Elle n'est connue
-    /// qu'après la réponse du worker : jusque-là, la revue de branche n'a pas
-    /// de base et son onglet reste inactif — proposer un `main` supposé
-    /// produirait un « unknown revision » sur tout dépôt qui ne s'appelle pas
-    /// ainsi.
+    /// The integration branch, as git declares it. It is only known once the
+    /// worker has answered: until then the branch review has no base and its tab
+    /// stays inactive — offering an assumed `main` would produce an "unknown
+    /// revision" on any repository not called that.
     pub default_base: Option<String>,
     pub collapsed: bool,
 }
 
-/// Un dépôt mémorisé qu'on n'a pas pu ouvrir.
+/// A remembered repository we could not open.
 ///
-/// Il vit à part des `RepoState` et non parmi eux, avec un drapeau : tout ce
-/// qui parcourt `repos` — le balayage des agents, les résumés, le relevé de
-/// `wt`, le fetch automatique — suppose un dépôt qui existe, et le contraire
-/// se paierait en gardes semés partout, dont un oubli ferait lancer des
-/// commandes git dans un dossier absent, toutes les deux secondes.
+/// It lives apart from the `RepoState`s and not among them with a flag:
+/// everything that walks `repos` — the agent sweep, the summaries, the `wt`
+/// reading, the automatic fetch — assumes a repository that exists, and the
+/// opposite would be paid for in guards scattered everywhere, one forgotten
+/// among them running git commands in a missing folder every two seconds.
 pub struct UnavailableRepo {
     pub path: PathBuf,
-    /// Ce que git a répondu, pour l'infobulle. La ligne, elle, dit seulement
-    /// « introuvable » : c'est ce qu'on a besoin de savoir pour décider de le
-    /// retirer.
+    /// What git answered, for the tooltip. The row itself only says "not found":
+    /// that is what one needs to know to decide to remove it.
     pub message: String,
 }
 
-/// Ce que la revue montre pour un worktree donné.
+/// What the review shows for a given worktree.
 ///
-/// Un état par worktree, et non un seul état global : passer d'un worktree à
-/// l'autre pour comparer est le geste central de l'outil, et il ne doit pas
-/// coûter la perte du fichier qu'on était en train de lire.
+/// One state per worktree, and not a single global state: switching from one
+/// worktree to another to compare is the tool's central gesture, and it must not
+/// cost the loss of the file being read.
 pub struct ReviewState {
-    /// Domaine du diff affiché à droite. Ce n'est plus le domaine « courant »
-    /// de la revue — chaque panneau a le sien — mais celui du fichier sur
-    /// lequel on a cliqué en dernier, quel que soit le panneau d'où il vient.
+    /// The range of the diff shown on the right. It is no longer the review's
+    /// "current" range — each panel has its own — but that of the file last
+    /// clicked, whichever panel it came from.
     pub range: DiffRange,
     pub status: Status,
-    /// Les fichiers touchés, **par domaine**. Deux panneaux affichent deux
-    /// listes en même temps : une seule liste ferait clignoter l'une chaque
-    /// fois que l'autre se recharge.
+    /// The touched files, **by range**. Two panels show two lists at the same
+    /// time: a single list would make one flicker every time the other reloads.
     pub files: HashMap<DiffRange, Vec<DiffFile>>,
-    /// Domaines dont la liste est demandée et pas encore revenue. C'est le
-    /// panneau qui demande, et il demande au rendu : sans ce garde, chaque
-    /// frame relancerait la commande.
+    /// Ranges whose list has been asked for and has not come back. It is the
+    /// panel that asks, and it asks at render time: without this guard, every
+    /// frame would restart the command.
     pub pending_files: std::collections::HashSet<DiffRange>,
     pub selected: Option<PathBuf>,
-    /// Le diff affiché, avec tout ce qui s'en déduit. Un `Rc` parce que le
-    /// rendu doit le capturer dans la fermeture de la liste virtualisée, et
-    /// qu'en copier plusieurs milliers de lignes par frame reviendrait à
-    /// annuler le bénéfice de la virtualisation.
+    /// The displayed diff, with everything derived from it. An `Rc` because the
+    /// render has to capture it in the virtualised list's closure, and copying
+    /// several thousand of its lines per frame would cancel out the benefit of
+    /// virtualisation.
     pub diff: Option<std::rc::Rc<Rendered>>,
-    /// Lignes sélectionnées dans le diff : l'ancre et la tête, en indices de
-    /// la liste mise à plat. Deux indices et non une plage triée, parce que
-    /// c'est le sens du geste qui décide de laquelle bouge à la prochaine
+    /// The lines selected in the diff: the anchor and the head, as indices into
+    /// the flattened list. Two indices and not a sorted range, because it is the
+    /// direction of the gesture that decides which one moves on the next
     /// extension.
     pub diff_selection: Option<(usize, usize)>,
-    /// Dossiers repliés dans la liste des fichiers.
+    /// Folders collapsed in the file list.
     ///
-    /// Un seul jeu pour les deux groupes : replier `src/ui` veut dire replier
-    /// ce dossier, pas « ce dossier parmi les fichiers suivis ».
+    /// One set for both groups: collapsing `src/ui` means collapsing that
+    /// folder, not "that folder among the tracked files".
     pub collapsed: std::collections::HashSet<PathBuf>,
-    /// Base de comparaison de la revue de branche, devinée à l'ouverture.
+    /// The branch review's comparison base, guessed at opening.
     pub base: Option<String>,
-    /// L'historique et son graphe, chargés à la demande — ouvrir un worktree
-    /// ne doit pas payer un `git log` que personne ne regardera.
+    /// The history and its graph, loaded on demand — opening a worktree must not
+    /// pay for a `git log` nobody will look at.
     pub history: Option<std::rc::Rc<History>>,
     pub history_range: LogRange,
-    /// Une lecture de l'historique est partie et n'est pas revenue.
+    /// A history read has gone out and has not come back.
     ///
-    /// Sans ce garde, le panneau redemanderait un `git log` à chaque frame
-    /// pendant tout le temps de la commande : c'est lui qui demande, et il
-    /// demande au rendu.
+    /// Without this guard, the panel would ask for a `git log` on every frame
+    /// for the whole length of the command: it is what asks, and it asks at
+    /// render time.
     pub history_pending: bool,
-    /// Commit sélectionné dans l'historique, dont le diff est affiché.
+    /// The commit selected in the history, whose diff is shown.
     pub commit: Option<String>,
-    /// Les notes de relecture prises sur ce worktree, tous fichiers confondus.
+    /// The review notes taken on this worktree, all files together.
     ///
-    /// Elles vivent ici et non dans le diff : une note survit au rechargement
-    /// du fichier, au changement de domaine et à la fermeture de Claudhub, alors
-    /// qu'un `Rendered` ne survit pas à la prochaine écriture de fichier.
+    /// They live here and not in the diff: a note survives a reload of the file,
+    /// a change of range and Claudhub being closed, whereas a `Rendered` does
+    /// not survive the next file write.
     pub notes: Vec<crate::ui::notes::Note>,
-    /// Prochain identifiant. Il ne se déduit pas de `notes` : une note
-    /// supprimée libérerait son numéro, et deux notes le porteraient.
+    /// The next id. It cannot be derived from `notes`: a deleted note would free
+    /// its number, and two notes would carry it.
     pub next_note: u64,
-    /// Les fichiers qu'on a marqués relus, avec le volume qu'ils avaient
-    /// alors. Comme les notes, ils vivent dans le dossier de notes et non dans
-    /// le magasin d'état : c'est la même relecture, et elle se lit d'un coup.
+    /// The files marked reviewed, with the volume they had then. Like the notes,
+    /// they live in the notes folder and not in the state store: it is the same
+    /// review, and it reads in one go.
     pub reviewed: Vec<crate::ui::vault::Reviewed>,
-    /// La note libre du worktree : `NOTES.md`, tel qu'il est sur le disque.
+    /// The worktree's free note: `NOTES.md`, as it is on disk.
     ///
-    /// Une chaîne et non un `Option` : vide veut dire « pas de fichier », et
-    /// les deux ne s'affichent pas différemment — la zone de saisie est là de
-    /// toute façon, c'est justement ce qui la rend disponible sans geste.
+    /// A string and not an `Option`: empty means "no file", and the two do not
+    /// display differently — the input is there anyway, which is precisely what
+    /// makes it available with no gesture.
     pub journal: String,
-    /// La liste de tâches du worktree, si le coffre en porte une.
+    /// The worktree's task list, if the vault carries one.
     ///
-    /// `None` veut dire « pas de `TODO.md` », pas « aucune tâche » : les deux
-    /// ne s'affichent pas pareil, et Claudhub ne pose pas ce fichier tout seul
-    /// — c'est celui de l'agent, on ne sème pas une liste vide dans le coffre
-    /// de tout worktree qu'on ouvre.
+    /// `None` means "no `TODO.md`", not "no task": the two do not display alike,
+    /// and Claudhub does not lay that file down by itself — it is the agent's,
+    /// and one does not sow an empty list in the vault of every worktree opened.
     pub todo: Option<crate::ui::vault::Todo>,
-    /// Le dossier de notes a répondu. Tant qu'il n'a pas répondu, il n'y a
-    /// rien à écrire : le faire effacerait ce qu'on n'a pas encore lu.
+    /// The notes folder has answered. Until it has, there is nothing to write:
+    /// doing so would erase what has not been read yet.
     pub notes_loaded: bool,
-    /// Ce worktree a déjà un dossier de notes.
+    /// This worktree already has a notes folder.
     ///
-    /// Sans ce drapeau, ouvrir un worktree suffirait à créer son dossier et un
-    /// index vide : un coffre finirait avec une arborescence de dossiers vides
-    /// pour des worktrees que personne n'a annotés. Il reste vrai une fois la
-    /// dernière note supprimée, sans quoi l'effacement ne partirait jamais.
+    /// Without this flag, opening a worktree would be enough to create its
+    /// folder and an empty index: a vault would end up with a tree of empty
+    /// folders for worktrees nobody has annotated. It stays true once the last
+    /// note is deleted, otherwise the erasure would never go out.
     pub notes_on_disk: bool,
-    /// Les lignes annotées du diff affiché, une case par entrée de liste.
+    /// The annotated lines of the displayed diff, one slot per list entry.
     ///
-    /// Calculé **en amont**, à l'arrivée du diff et à chaque modification des
-    /// notes, jamais dans la fermeture de `uniform_list` : celle-ci tourne
-    /// pour chaque ligne visible à chaque frame, animation de molette
-    /// comprise.
+    /// Computed **upstream**, when the diff arrives and on every change to the
+    /// notes, never inside `uniform_list`'s closure: that one runs for every
+    /// visible line on every frame, wheel animation included.
     pub note_marks: std::rc::Rc<crate::ui::notes::Marks>,
-    /// Notes que le diff affiché ne sait plus placer.
+    /// Notes the displayed diff can no longer place.
     ///
-    /// Elles restent dans la liste, marquées comme telles : une note perdue en
-    /// silence est pire que pas de note du tout. L'ensemble ne vaut que pour
-    /// le fichier ouvert — c'est le seul dont on ait le diff sous la main.
+    /// They stay in the list, marked as such: a note lost in silence is worse
+    /// than no note at all. The set only holds for the open file — it is the
+    /// only one whose diff is to hand.
     pub drifted: std::collections::HashSet<u64>,
-    /// Où poser la sélection quand le diff demandé arrivera.
+    /// Where to set the selection when the requested diff arrives.
     ///
-    /// Une flèche qui déborde sur le fichier voisin ne peut pas le placer
-    /// elle-même : le diff n'arrive qu'après la commande git. Le geste est
-    /// donc noté, et consommé à l'arrivée — seulement pour la navigation au
-    /// clavier, un clic devant ouvrir un fichier sans rien y sélectionner.
+    /// An arrow overflowing onto the neighbouring file cannot set it itself: the
+    /// diff only arrives after the git command. The gesture is therefore
+    /// recorded, and consumed on arrival — only for keyboard navigation, a click
+    /// having to open a file without selecting anything in it.
     pub pending_jump: Option<Jump>,
-    /// Note dont il faudra sélectionner les lignes à l'arrivée du diff.
+    /// Note whose lines will have to be selected when the diff arrives.
     ///
-    /// Même raison que `pending_jump` : cliquer une note du panneau ouvre un
-    /// fichier, et son diff n'arrive qu'après la commande git.
+    /// Same reason as `pending_jump`: clicking a note in the panel opens a file,
+    /// and its diff only arrives after the git command.
     pub pending_note: Option<u64>,
 }
 
-/// De quel bout un fichier ouvert au clavier commence.
+/// Which end a file opened with the keyboard starts from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Jump {
-    /// Descendre : on entre par la première modification.
+    /// Going down: we enter by the first change.
     First,
-    /// Remonter : on entre par la dernière, là où la lecture s'arrête.
+    /// Going up: we enter by the last, where reading stops.
     Last,
 }
 
-/// L'historique tel que la vue l'affiche.
+/// The history as the view shows it.
 pub struct History {
     pub commits: Vec<Commit>,
     pub graph: Vec<GraphRow>,
-    /// Nombre de colonnes du graphe, pour dimensionner sa gouttière.
+    /// The graph's number of columns, to size its gutter.
     pub width: usize,
 }
 
@@ -341,267 +336,303 @@ pub struct ClaudhubApp {
     pub(super) git: runtime::Handle,
     pub(super) repos: Vec<RepoState>,
 
-    /// Où en est le serveur : rien à dire en mode local, un message tant
-    /// qu'il démarre, et de quoi le relancer s'il tombe.
+    /// Where the server stands: nothing to say in local mode, a message while it
+    /// starts, and what is needed to relaunch it if it goes down.
     pub(super) server_state: super::server::ServerState,
-    /// La question du premier démarrage sous Windows, tant qu'aucune
-    /// distribution n'est choisie.
+    /// The first-startup question on Windows, while no distribution is chosen.
     pub(super) wsl_prompt: Option<Entity<super::server::WslPrompt>>,
-    /// Le serveur tourne sous WSL (dit par sa poignée de main) : c'est là
-    /// que « ce chemin est un montage Windows » a un sens, et la machine de
-    /// la vue ne peut pas le savoir à sa place.
+    /// The server runs under WSL (as its handshake says): that is where "this
+    /// path is a Windows mount" means something, and the view's machine cannot
+    /// know it in its place.
     pub(super) server_wsl: bool,
-    /// Les dépôts mémorisés qui ne s'ouvrent pas.
+    /// The remembered repositories that do not open.
     ///
-    /// Ils restent affichés — c'est la seule façon de les retirer, et un dépôt
-    /// qui disparaît de la liste sans rien dire se lit comme un bug de
-    /// Claudhub plutôt que comme un dossier déplacé.
+    /// They stay on screen — it is the only way to remove them, and a repository
+    /// disappearing from the list without a word reads as a Claudhub bug rather
+    /// than a moved folder.
     pub(super) unavailable: Vec<UnavailableRepo>,
-    /// Worktree sélectionné : la clé de presque tout le reste.
+    /// The selected worktree: the key to almost everything else.
     pub(super) active: Option<PathBuf>,
     pub(super) review: HashMap<PathBuf, ReviewState>,
     pub(super) terminals: HashMap<PathBuf, Entity<TerminalGroup>>,
     pub(super) commit_input: Entity<TextareaState>,
-    /// Sélecteur de la base de comparaison. Il est searchable : un dépôt
-    /// vivant a des dizaines de branches, et faire défiler une liste de
-    /// soixante-dix entrées pour en trouver une dont on connaît le nom est
-    /// exactement ce qu'un champ de recherche évite.
+    /// The comparison base's selector. It is searchable: a living repository has
+    /// dozens of branches, and scrolling a list of seventy entries to find one
+    /// whose name you already know is exactly what a search field saves.
     pub(super) base_select: Entity<SelectState<SearchableVec<BaseChoice>>>,
-    /// Champ de saisie d'une note. Créé **une fois** : recréé dans un `render`
-    /// ou à l'ouverture du dialogue, il perdrait curseur, sélection et texte
-    /// dès la première frappe.
+    /// A note's input field. Created **once**: recreated in a `render` or when
+    /// the dialog opens, it would lose the cursor, the selection and the text on
+    /// the first keystroke.
     pub(super) note_input: Entity<TextareaState>,
-    /// Le prompt qui part à l'agent, avant qu'il parte.
+    /// The prompt going out to the agent, before it goes.
     pub(super) prompt_input: Entity<TextareaState>,
-    /// La saisie d'une tâche à ajouter à `TODO.md`, en bas de la liste.
+    /// The input for a task to add to `TODO.md`, at the bottom of the list.
     pub(super) task_input: Entity<InputState>,
-    /// La saisie d'une tâche qu'on retouche, à sa place dans la liste.
+    /// The input for a task being edited, in its place in the list.
     ///
-    /// Une seconde zone et non celle du bas : ce qu'on est en train de taper
-    /// pour une nouvelle tâche ne doit pas disparaître parce qu'on corrige une
-    /// faute deux lignes plus haut.
+    /// A second field and not the bottom one: what is being typed for a new task
+    /// must not disappear because a typo two lines above is being fixed.
     pub(super) task_edit_input: Entity<InputState>,
-    /// La ligne de la tâche en cours de retouche, s'il y en a une.
+    /// The line of the task being edited, if there is one.
     pub(super) task_editing: Option<usize>,
-    /// La zone de saisie de la note libre du worktree.
+    /// The input for the worktree's free note.
     ///
-    /// Une seule pour tous les worktrees, dont le contenu suit celui qui est
-    /// affiché : une par worktree ouvert garderait autant d'états d'édition
-    /// vivants, et il n'y en a jamais qu'un sous les yeux.
+    /// A single one for every worktree, whose content follows the displayed one:
+    /// one per open worktree would keep that many editing states alive, and there
+    /// is only ever one in front of you.
     pub(super) journal_input: Entity<TextareaState>,
-    /// Une écriture de la note libre est déjà programmée.
+    /// A write of the free note is already scheduled.
     pub(super) journal_save: bool,
-    /// La note en cours de rédaction : son ancrage, arrêté au moment du geste.
+    /// The note being written: its anchoring, settled at the moment of the gesture.
     ///
-    /// Il est arrêté là et non à la validation parce que le diff peut changer
-    /// pendant qu'on écrit — un agent travaille pendant qu'on le relit — et
-    /// que la note doit porter sur ce qu'on avait sous les yeux.
+    /// It is settled there and not on confirmation because the diff can change
+    /// while it is being written — an agent works while it is being reviewed —
+    /// and the note has to be about what was in front of you.
     pub(super) note_draft: Option<crate::ui::notes_view::NoteDraft>,
-    /// Les sections repliées du panneau « Notes », par clé.
+    /// The collapsed sections of the "Notes" panel, by key.
     ///
-    /// En mémoire et non dans le magasin : c'est une posture de lecture, qui
-    /// change plusieurs fois pendant une relecture, pas une préférence qu'on
-    /// s'attend à retrouver le lendemain.
+    /// In memory and not in the store: it is a reading posture, which changes
+    /// several times during a review, not a preference one expects back the next
+    /// day.
     pub(super) notes_collapsed: std::collections::HashSet<&'static str>,
-    /// Le panneau des notes ne montre-t-il que les non traitées.
+    /// Does the notes panel show only the unhandled ones.
     pub(super) notes_only_open: bool,
-    /// Le `wt.toml` de chaque dépôt ouvert, lu une fois. `None` : il n'en a
-    /// pas, et les gestes du projet disparaissent simplement du menu.
+    /// Each open repository's `wt.toml`, read once. `None`: it has none, and the
+    /// project's gestures simply disappear from the menu.
     pub(super) wt_projects: HashMap<PathBuf, Option<crate::wt::Snapshot>>,
-    /// Ce que `wt` sait de chaque worktree : démarré ou non, ses adresses.
+    /// What `wt` knows about each worktree: started or not, its addresses.
     pub(super) wt_states: HashMap<PathBuf, crate::runtime::protocol::WtWorktree>,
-    /// La création guidée en cours.
-    pub(super) creation: Option<crate::ui::worktree_ops::Creation>,
-    /// Le worktree dont l'intégration est partie, et sa branche : c'est à
-    /// l'arrivée du succès qu'on propose de faire le ménage.
+    /// The guided creation under way.
+    pub(super) creation: Option<crate::ui::worktree_ops::WtPrompt>,
+    /// The worktree whose integration has gone out, and its branch: it is on the
+    /// success arriving that the cleanup is offered.
     pub(super) integrated: Option<(PathBuf, String)>,
-    /// Les fichiers de chaque worktree et leur arborescence.
+    /// Each worktree's files and their tree.
     pub(super) explorers: HashMap<PathBuf, crate::ui::explorer::Explorer>,
-    /// Le fichier ouvert dans l'éditeur intégré, s'il y en a un.
+    /// The file open in the built-in editor, if there is one.
     pub(super) editing: Option<crate::ui::explorer::Editing>,
     pub(super) files_scroll: gpui::UniformListScrollHandle,
-    /// Le focus de l'arbre de l'explorateur, qui lui donne ses flèches.
+    /// The explorer tree's focus, which gives it its arrows.
     ///
-    /// Un handle à lui et non celui de la vue racine : c'est ce qui distingue
-    /// « les flèches parcourent l'arborescence » de « les flèches parcourent
-    /// le diff », et le prédicat des liaisons se lit sur le contexte du nœud
-    /// focalisé.
+    /// A handle of its own and not the root view's: it is what tells "the arrows
+    /// browse the tree" from "the arrows browse the diff", and the bindings'
+    /// predicate is read on the focused node's context.
     pub(super) explorer_focus: FocusHandle,
-    /// Les issues Sentry du dépôt courant, et celle qu'on regarde.
+    /// The current repository's Sentry issues, and the one being looked at.
     pub(super) sentry: crate::ui::sentry_view::SentryState,
-    /// L'arbre des bases de données : connexions, schémas, tables, colonnes.
+    /// The databases tree: connections, schemas, tables, columns.
     pub(super) db: crate::ui::db::DbState,
     pub(super) db_scroll: gpui::UniformListScrollHandle,
-    /// Le focus de l'arbre des bases, qui lui donne ses flèches.
+    /// The databases tree's focus, which gives it its arrows.
     ///
-    /// Un handle à lui, comme celui de l'explorateur de projet : c'est ce qui
-    /// distingue « les flèches parcourent le schéma » de « les flèches
-    /// parcourent le diff ».
+    /// A handle of its own, like the project explorer's: it is what tells "the
+    /// arrows browse the schema" from "the arrows browse the diff".
     pub(super) db_focus: FocusHandle,
-    /// La console SQL, quand il y en a une ouverte.
+    /// The SQL console, when one is open.
     pub(super) query: crate::ui::db_query::QueryState,
-    /// L'éditeur de la console. Créé **une fois** : recréé au rendu, il
-    /// perdrait curseur, sélection et texte dès la première frappe.
+    /// The console's editor. Created **once**: recreated at render time, it
+    /// would lose the cursor, the selection and the text on the first keystroke.
     pub(super) db_query_input: Entity<gpui_component::input::EditorState>,
-    /// Les noms que la console complète, partagés avec le fournisseur de
-    /// complétions que l'éditeur tient.
+    /// The names the console completes, shared with the completion provider the
+    /// editor holds.
     pub(super) db_schema: std::rc::Rc<std::cell::RefCell<crate::ui::db_query::SchemaIndex>>,
-    /// La table des résultats. Une entité créée une fois, elle aussi : la
-    /// reconstruire à chaque requête perdrait les largeurs de colonnes qu'on
-    /// vient de régler à la souris.
+    /// The result table. An entity created once as well: rebuilding it on every
+    /// query would lose the column widths just adjusted with the mouse.
     pub(super) db_table: Entity<gpui_component::table::TableState<crate::ui::db_query::Results>>,
-    /// Le partage de hauteur entre l'éditeur de la console et sa grille.
+    /// The height split between the console's editor and its grid.
     ///
-    /// Une entité, parce que c'est ce que `v_resizable` demande, et créée une
-    /// fois : recréée au rendu, la poignée reviendrait à sa place à chaque
-    /// frame et ne se laisserait pas glisser.
+    /// An entity, because that is what `v_resizable` asks for, and created once:
+    /// recreated at render time, the handle would go back to its place on every
+    /// frame and would not let itself be dragged.
     pub(super) db_split: Entity<gpui_component::resizable::ResizableState>,
-    /// Un worktree qu'on attend, et le prompt à y livrer une fois créé.
+    /// A worktree being waited for, and the prompt to deliver in it once created.
     ///
-    /// La création de `wt` lance des hooks qui durent des minutes ; rien
-    /// d'autre que l'arrivée de la liste des worktrees ne dit qu'elle a fini.
+    /// `wt`'s creation runs hooks that take minutes; nothing but the arrival of
+    /// the worktree list says it has finished.
     pub(super) awaiting_agent: Option<(PathBuf, String)>,
     pub(super) toast: Option<Toast>,
-    /// Worktrees dont une lecture de statut est déjà partie.
+    /// Worktrees whose status read has already gone out.
     ///
-    /// Le surveillant de fichiers peut produire plusieurs vagues avant qu'une
-    /// réponse revienne ; sans ce garde-fou, une compilation qui touche mille
-    /// fichiers empile mille `git status` identiques, et tout ce qui suit —
-    /// diffs compris — attend derrière eux.
+    /// The file watcher can produce several waves before an answer comes back;
+    /// without this guard rail, a build touching a thousand files piles up a
+    /// thousand identical `git status`es, and everything after — diffs included
+    /// — waits behind them.
     pending_status: std::collections::HashSet<PathBuf>,
-    /// Quand le dernier fetch automatique a été lancé.
+    /// When the last automatic fetch was started.
     last_auto_fetch: Option<std::time::Instant>,
-    /// Le worktree dont on attend un message de commit, s'il y en a un.
+    /// The worktree a commit message is being waited for, if there is one.
     ///
-    /// Un seul, et son chemin plutôt qu'un booléen : l'agent met plusieurs
-    /// secondes, on change de worktree entre-temps, et c'est ce qui permet à
-    /// la réponse de retrouver le champ auquel elle appartient — comme au
-    /// bouton de savoir lequel des deux panneaux tourne.
+    /// One only, and its path rather than a boolean: the agent takes several
+    /// seconds, one changes worktree in the meantime, and it is what lets the
+    /// answer find the field it belongs to again — as it lets the button know
+    /// which of the two panels is spinning.
     pub(super) suggesting_message: Option<PathBuf>,
-    /// La disposition. Elle appartient à gpui-component : c'est lui qui gère
-    /// le glissement d'un panneau d'une zone à l'autre, les onglets et les
-    /// zones d'accueil.
-    /// L'écran courant. Voir `ui::workspace`.
+    /// The current screen. See `ui::workspace`.
     pub(super) workspace: crate::ui::workspace::Workspace,
-    /// Le dock de l'écran courant — celui que la vue racine affiche.
+    /// The current screen's dock — the one the root view shows.
     ///
-    /// Une copie de l'entrée de `docks`, et non un indice : tout ce qui parle
-    /// au dock — le repli de la zone de gauche, le zoom, la largeur que lit la
-    /// barre de navigation — s'adresse à celui qu'on regarde, et le retrouver
-    /// par une clé à chaque fois n'ajouterait qu'une occasion de se tromper.
+    /// A copy of the `docks` entry, and not an index: everything that talks to
+    /// the dock — collapsing the left zone, the zoom, the width the navigation
+    /// bar reads — addresses the one being looked at, and finding it by a key
+    /// every time would only add one more chance to get it wrong.
     pub(super) dock: Entity<DockArea>,
-    /// Les quatre docks, un par écran.
+    /// The docks, one per screen.
     ///
-    /// Ils sont tous **construits au démarrage** plutôt qu'à la première
-    /// visite : un dock se bâtit avec `window`, et le faire au rendu
-    /// reviendrait à créer des entités au milieu d'une frame. Le coût est une
-    /// vingtaine de panneaux, qui ne portent aucun état.
+    /// They are all **built at startup** rather than on first visit: a dock is
+    /// built with `window`, and doing it at render time would amount to creating
+    /// entities in the middle of a frame. The cost is a score of panels, which
+    /// carry no state.
     pub(super) docks: HashMap<crate::ui::workspace::Workspace, Entity<DockArea>>,
-    /// La peau du dock, gardée en vie : c'est elle qui dessine les onglets, et
-    /// c'est par elle que passent les réglages de présentation.
+    /// The dock's skin, kept alive: it is what draws the tabs, and it is through
+    /// it that the presentation settings pass.
     #[allow(dead_code)]
     dock_skin: std::rc::Rc<DockSkin>,
-    /// Vrai quand une écriture différée de la disposition est déjà programmée.
+    /// True when a deferred write of the layout is already scheduled.
     layout_save_scheduled: bool,
-    /// Les vues que l'utilisateur a masquées, par nom de panneau.
+    /// The views the user has hidden, by panel name.
     ///
-    /// Un ensemble et non un drapeau par panneau : c'est `Panel::visible` qui
-    /// fait disparaître une vue — une zone d'accueil repliable interdirait de
-    /// déplacer le dernier panneau qui y reste —, et le mécanisme est le même
-    /// pour les terminaux que pour la revue.
+    /// A set and not a flag per panel: it is `Panel::visible` that makes a view
+    /// disappear — a collapsible dock zone would forbid moving the last panel
+    /// left in it — and the mechanism is the same for the terminals as for the
+    /// review.
     ///
-    /// Ici et non dans les réglages seuls : les panneaux l'observent, et
-    /// `Settings::update_global` ne notifie personne. Les réglages en gardent
-    /// la copie qui survit à la fermeture.
+    /// Here and not in the settings alone: the panels observe it, and
+    /// `Settings::update_global` notifies nobody. The settings keep the copy that
+    /// survives closing.
     pub(super) hidden_panels: std::collections::HashSet<String>,
 
-    /// Ce que chaque worktree a en chantier, y compris ceux qu'on n'a pas
-    /// ouverts : c'est la question qu'on se pose en parcourant la liste.
+    /// What each worktree has in progress, including those not opened: it is the
+    /// question one asks while scanning the list.
     pub(super) summaries: HashMap<PathBuf, crate::git::Summary>,
-    /// Les agents trouvés, par worktree, et s'ils travaillent.
+    /// The agents found, by worktree, and whether they are working.
     pub(super) agents: HashMap<PathBuf, AgentState>,
-    /// Temps processeur du relevé précédent, par processus. C'est sa variation
-    /// qui distingue un agent au travail d'un agent qui attend.
+    /// CPU time from the previous reading, by process. It is its variation that
+    /// tells an agent at work from an agent that waits.
     agent_cpu: HashMap<u32, u64>,
-    /// Vrai entre l'enfoncement et le relâchement du bouton dans la vue de
-    /// diff : c'est ce qui distingue un glissement de sélection d'un simple
-    /// survol, et ce qui empêche un glissement commencé ailleurs — dans la
-    /// barre latérale, sur une poignée de redimensionnement — d'étendre la
-    /// sélection en passant au-dessus du code.
+    /// True between the press and the release of the button in the diff view:
+    /// it is what tells a selection drag from a plain hover, and what prevents a
+    /// drag started elsewhere — in the sidebar, on a resize handle — from
+    /// extending the selection while passing over the code.
     pub(super) diff_dragging: bool,
 
-    /// Défilement de la liste virtualisée du diff. Il vit sur la vue et n'est
-    /// jamais reconstruit : le recréer par frame remettrait le diff en haut à
-    /// chaque image.
+    /// The diff's virtualised list scrolling. It lives on the view and is never
+    /// rebuilt: recreating it per frame would put the diff back at the top on
+    /// every frame.
     pub(super) diff_scroll: gpui::UniformListScrollHandle,
-    /// La largeur mesurée de la vue de diff à la frame précédente.
+    /// The measured width of the diff view on the previous frame.
     ///
-    /// Une vue qu'on vient d'ouvrir n'a pas de bornes : elles ne valent
-    /// quelque chose qu'une fois la première mise en page faite. Les prendre
-    /// pour la largeur réelle replie le fichier à huit colonnes — et comme
-    /// rien ne redessine tant qu'il ne se passe rien, l'affichage reste faux
-    /// jusqu'au prochain événement, soit le balayage de fond, deux secondes
-    /// plus tard. On garde donc la dernière largeur connue, qui vaut pour tous
-    /// les diffs suivants.
+    /// A view just opened has no bounds: they are only worth something once the
+    /// first layout has been done. Taking them for the real width wraps the file
+    /// at eight columns — and since nothing redraws while nothing happens, the
+    /// display stays wrong until the next event, that is, the background sweep
+    /// two seconds later. So we keep the last known width, which holds for every
+    /// following diff.
     pub(super) diff_width: gpui::Pixels,
-    /// Frames demandées en attendant cette première mesure.
+    /// Frames asked for while waiting for that first measurement.
     ///
-    /// Bornées : un panneau qu'on aurait rétréci à zéro ne serait jamais
-    /// mesuré, et redemander une frame à chaque frame ferait tourner
-    /// l'interface à plein régime pour une vue que personne ne voit.
+    /// Bounded: a panel shrunk to zero would never be measured, and asking for a
+    /// frame on every frame would run the interface flat out for a view nobody
+    /// sees.
     pub(super) diff_measures: u8,
-    /// La poignée de la vue en deux colonnes repliée.
+    /// The handle of the wrapped two-column view.
     ///
-    /// Une seconde poignée et non la même : les entrées n'y ont plus la même
-    /// hauteur, c'est `v_virtual_list` qui les peint, et il ne sait défiler
-    /// qu'avec la sienne. Les deux ne sont jamais affichées en même temps.
+    /// A second handle and not the same one: the entries there no longer have
+    /// the same height, `v_virtual_list` paints them, and it can only scroll with
+    /// its own. The two are never shown at the same time.
     pub(super) diff_wrap_scroll: gpui_component::VirtualListScrollHandle,
     pub(super) history_scroll: gpui::UniformListScrollHandle,
     pub(super) branch_scroll: gpui::UniformListScrollHandle,
-    /// Défilement des listes de fichiers, **une par domaine** : « Revue » et
-    /// « Modifications » sont affichés en même temps, et une seule poignée les
-    /// ferait défiler ensemble.
+    /// The file lists' scrolling, **one per range**: "Review" and "Changes" are
+    /// shown at the same time, and a single handle would scroll them together.
     file_scroll: HashMap<DiffRange, gpui::UniformListScrollHandle>,
-    /// La recherche de chaque panneau, créée à sa première ouverture.
+    /// Each panel's search, created on its first opening.
     pub(super) finders: HashMap<crate::ui::find::Pane, crate::ui::find::Finder>,
-    /// Le panneau où le dernier clic a eu lieu : c'est lui que `Ctrl+F` vise.
+    /// The panel the last click happened in: that is what `Ctrl+F` aims at.
     ///
-    /// Le clic et non le focus. Le dock de gpui-component pose le focus sur
-    /// l'onglet actif de chaque zone — il y en a trois affichées en même
-    /// temps — et rien ne dit laquelle l'utilisateur regarde ; le dernier
-    /// bouton enfoncé, si.
+    /// The click and not the focus. gpui-component's dock puts focus on the
+    /// active tab of each zone — three of them are shown at once — and nothing
+    /// says which one the user is looking at; the last button pressed does.
     pub(super) pane: crate::ui::find::Pane,
-    /// Les occurrences trouvées dans le diff affiché.
+    /// The hits found in the displayed diff.
     pub(super) diff_search: crate::ui::find::DiffSearch,
-    /// Poignées de défilement des panneaux qui ne sont **pas** virtualisés —
-    /// les notes, les conflits, Sentry, la barre latérale. Une table plutôt
-    /// qu'un champ par panneau : ce sont toutes la même chose, et elles ne
-    /// servent qu'à donner une position à la barre de défilement. Créées ici
-    /// et non au rendu, sans quoi la liste remonterait en haut à chaque frame.
+    /// Scroll handles for the panels that are **not** virtualised — the notes,
+    /// the conflicts, Sentry, the sidebar. A map rather than one field per
+    /// panel: they are all the same thing, and they only serve to give the
+    /// scrollbar a position. Created here and not at render time, otherwise the
+    /// list would go back to the top on every frame.
     scrolls: HashMap<&'static str, gpui::ScrollHandle>,
-    /// Le lissage de la molette, par panneau, créé à sa première utilisation.
-    /// La clé est celle de la barre de défilement — voir `ui::scroll`.
+    /// The wheel smoothing, per panel, created on its first use. The key is the
+    /// scrollbar's — see `ui::scroll`.
     pub(super) motions: HashMap<gpui::SharedString, crate::ui::motion::ScrollMotion>,
-    /// Filtre du panneau des branches. Une entité créée une fois : recréée par
-    /// frame, elle perdrait le curseur et le texte dès la première frappe.
+    /// The branches panel's filter. An entity created once: recreated per frame,
+    /// it would lose the cursor and the text on the first keystroke.
     pub(super) branch_filter: Entity<InputState>,
-    /// Partage entre le graphe et la liste des fichiers du commit choisi.
+    /// The split between the graph and the chosen commit's file list.
     pub(super) history_split: Entity<gpui_component::resizable::ResizableState>,
+    /// The write operations in flight, keyed by worktree and kind — that is what
+    /// the buttons carrying a spinner read.
+    ///
+    /// **The key is exactly what comes back.** Every write answers with an
+    /// `Evt::Done` or an `Evt::Failed` carrying the same worktree and the same
+    /// action, and both go through one place: an entry can therefore not be left
+    /// behind, which is the only failure mode of a spinner — a button that turns
+    /// for ever says less than one that never turned.
+    pub(super) running: std::collections::HashSet<(Option<PathBuf>, Action)>,
+    /// The worktree a `wt` start or stop is running on.
+    ///
+    /// `Evt::Done` names no worktree for those — `wt` works from the main
+    /// repository — so `running` alone would say "something is starting" without
+    /// saying where, and every badge in the list would turn. One at a time is all
+    /// this badge can show, and starting two projects at once is not a gesture.
+    pub(super) wt_pending: Option<PathBuf>,
+    /// The settings page the screen must land on, and the identity of the form
+    /// that shows it. See `settings_view::open_settings_at`.
+    pub(super) settings_page: crate::ui::settings_view::Page,
+    pub(super) settings_epoch: usize,
+    /// What the system told the settings form — installed fonts, `/etc/shells`.
+    /// Read once: the form's declaration is rebuilt on every frame.
+    pub(super) settings_env: Option<std::rc::Rc<crate::ui::settings_view::Environment>>,
+    /// The lowest level the logs page shows. A posture of reading, which changes
+    /// several times while chasing something down, not a preference one expects
+    /// to find again tomorrow — hence here and not in the settings file.
+    pub(super) logs_level: log::LevelFilter,
+    /// The log records, copied from the ring only when it has moved.
+    pub(super) logs: std::rc::Rc<Vec<crate::logging::Entry>>,
+    pub(super) logs_seen: u64,
     focus: FocusHandle,
 }
 
-/// Une ligne du menu des vues : la coche, le nom, et le geste qui bascule.
+/// The SQL console's entities, handed to the constructor in one piece.
+struct Console {
+    db_schema: std::rc::Rc<std::cell::RefCell<crate::ui::db_query::SchemaIndex>>,
+    db_query_input: Entity<gpui_component::input::EditorState>,
+    db_table: Entity<gpui_component::table::TableState<crate::ui::db_query::Results>>,
+    db_split: Entity<gpui_component::resizable::ResizableState>,
+}
+
+/// The screens' docks, and which of them was being looked at.
+struct Docks {
+    docks: HashMap<crate::ui::workspace::Workspace, Entity<DockArea>>,
+    dock: Entity<DockArea>,
+    dock_skin: std::rc::Rc<DockSkin>,
+    workspace: crate::ui::workspace::Workspace,
+    /// Whether a layout had to be built from scratch, and therefore has to be
+    /// written at once: without that, the file keeps an earlier version's until
+    /// the first move.
+    needs_save: bool,
+}
+
+/// One row of the views menu: the tick, the name, and the gesture that toggles it.
 ///
-/// Un `PopupMenuItem::element` et non une entrée ordinaire, pour deux raisons
-/// qui tiennent toutes deux à la même chose — **on en bascule plusieurs à la
-/// suite** :
+/// A `PopupMenuItem::element` and not an ordinary entry, for two reasons both of
+/// which come down to the same thing — **several of them get toggled in a row**:
 ///
-/// - `PopupMenu::confirm` **referme le menu** après avoir appelé le
-///   gestionnaire d'une entrée, sans qu'on puisse s'y opposer. La ligne
-///   consomme donc le clic elle-même (`stop_propagation`) : l'entrée qui la
-///   porte ne le voit jamais, et rien ne se referme.
-/// - Un `checked` est figé à la construction du menu, qui n'a lieu qu'une
-///   fois. La coche est donc peinte par la ligne, qui relit l'état à chaque
+/// - `PopupMenu::confirm` **closes the menu** after calling an entry's handler,
+///   with no way to prevent it. The row therefore consumes the click itself
+///   (`stop_propagation`): the entry carrying it never sees it, and nothing
+///   closes.
+/// - A `checked` is frozen at the menu's construction, which happens only once.
+///   The tick is therefore painted by the row, which re-reads the state on every
 ///   frame.
 fn view_toggle(app: Entity<ClaudhubApp>, name: &'static str, title: &'static str) -> PopupMenuItem {
     PopupMenuItem::element(move |_window, cx| {
@@ -655,64 +686,37 @@ impl ClaudhubApp {
         let branch_filter =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("branch-filter-placeholder")));
 
-        // `auto_grow` plutôt qu'une hauteur fixe : une remarque de relecture
-        // fait deux lignes ou dix, et une zone figée oblige à faire défiler ce
-        // qu'on est en train d'écrire.
+        // `auto_grow` rather than a fixed height: a review remark is two lines
+        // or ten, and a frozen area forces scrolling what is being written.
         let note_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(2, 8)
                 .placeholder(tr!("note-placeholder"))
         });
 
-        // Plus haut que celui d'une note : ce qu'on relit ici est un message
-        // entier, avec le code cité, et huit lignes de contexte sont le
-        // minimum pour juger de ce qui part.
+        // Taller than a note's: what is read back here is a whole message, with
+        // the quoted code, and eight lines of context are the minimum to judge
+        // what is going out.
         let prompt_input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(8, 20));
 
         let task_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("todo-add-placeholder")));
         let task_edit_input = cx.new(|cx| InputState::new(window, cx));
 
-        // La note libre : elle grandit avec ce qu'on y écrit, dans les limites
-        // que la section peut donner sans repousser le reste hors de vue.
+        // The free note: it grows with what is written in it, within the limits
+        // the section can give without pushing the rest out of sight.
         let journal_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(3, 14)
                 .placeholder(tr!("journal-placeholder"))
         });
 
-        // La console SQL : son éditeur, son index de complétions, sa table.
-        // Les trois vivent aussi longtemps que la fenêtre — c'est la règle des
-        // entités gpui — et la console ne fait que les remplir.
-        let db_schema: std::rc::Rc<std::cell::RefCell<crate::ui::db_query::SchemaIndex>> =
-            Default::default();
-        let db_query_input = cx.new(|cx| {
-            gpui_component::input::EditorState::new(window, cx)
-                .language("sql")
-                .line_number(true)
-                .placeholder("SELECT * FROM …")
-        });
-        db_query_input.update(cx, |state, cx| {
-            state.lsp_mut().completion_provider =
-                Some(std::rc::Rc::new(crate::ui::db_query::SqlCompletions {
-                    schema: db_schema.clone(),
-                }));
-            cx.notify();
-        });
-        let db_table = cx.new(|cx| {
-            gpui_component::table::TableState::new(
-                crate::ui::db_query::Results::default(),
-                window,
-                cx,
-            )
-            // Les en-têtes portent leur flèche de tri. La sélection de
-            // cellules de gpui-component, elle, reste éteinte : elle n'en
-            // connaît qu'une à la fois, et ce qu'on copie d'une grille de
-            // résultats est presque toujours un bloc — voir
-            // `db_query::Results::selection`.
-            .sortable(true)
-        });
-        let db_split = crate::ui::db_query::split_state(cx);
+        let Console {
+            db_schema,
+            db_query_input,
+            db_table,
+            db_split,
+        } = Self::build_console(window, cx);
 
         let base_select = cx.new(|cx| {
             SelectState::new(
@@ -733,70 +737,17 @@ impl ClaudhubApp {
         })
         .detach();
 
-        // Les docks et leurs panneaux. Les panneaux ne portent aucun état :
-        // ils délèguent à cette entité, dont ils ne gardent qu'une référence
-        // faible pour ne pas former de cycle.
-        let this = cx.entity();
-        crate::ui::panels::register(&this, cx);
-
-        // Une disposition enregistrée reprend la main sur celle par défaut.
-        // Le fichier entier est écarté si sa version diffère : les panneaux
-        // ont pu changer de nom, et reconstruire à partir de noms inconnus
-        // donnerait une fenêtre pleine de cadres vides.
-        let saved = load_layouts();
-        let mut app_needs_layout_save = false;
-        let mut docks = HashMap::new();
-        let mut dock_skin = None;
-        for workspace in crate::ui::workspace::Workspace::ALL {
-            // **Par `DockSkin` et non par `DockArea::new`.** Depuis que le
-            // moteur de disposition vit dans `gpui-base`, une aire construite
-            // sans peau dock, glisse et persiste très bien — mais ne dessine
-            // **aucun chrome** : ni barre d'onglets, ni titre, ni cadre. Les
-            // panneaux s'empilent alors nus, ce qui se lit comme une fenêtre
-            // cassée sans qu'une seule erreur soit signalée.
-            let (area, skin) =
-                DockSkin::dock_area(workspace.dock_id(), Some(LAYOUT_VERSION), window, cx);
-            // `Segmented` : la pastille arrondie dans un rail, à la place du
-            // rectangle bordé dont le rayon est un zéro codé en dur. C'est
-            // notre commit sur le fork qui expose ce réglage.
-            skin.set_tab_variant(gpui_component::tab::TabVariant::Segmented, cx);
-            // Barre d'onglets partout, y compris sur les groupes d'un seul
-            // panneau : le défaut (`Auto`) rend alors un titre plat, et
-            // « Branches » ou « Terminaux » n'auraient pas le même bandeau
-            // que leurs voisins — deux chromes pour une même fenêtre.
-            skin.set_panel_style(gpui_component::dock::PanelStyle::TabBar, cx);
-
-            let restored = saved
-                .workspaces
-                .get(workspace.key())
-                .cloned()
-                .and_then(|state| area.update(cx, |a, cx| a.load(state, window, cx)).ok())
-                .is_some();
-            if !restored {
-                area.update(cx, |a, cx| {
-                    crate::ui::workspace::install_default_layout(workspace, &this, a, window, cx);
-                });
-                // La disposition d'origine est écrite tout de suite : sans
-                // cela, le fichier garde celle d'une version antérieure
-                // jusqu'au premier déplacement, et c'est elle qu'on relirait
-                // au prochain démarrage.
-                app_needs_layout_save = true;
-            }
-            // Le dock notifie à chaque déplacement, redimensionnement ou
-            // changement d'onglet : c'est le signal d'enregistrement, différé
-            // pour qu'un glissement n'écrive pas un fichier par pixel.
-            cx.observe(&area, |this, _, cx| this.schedule_layout_save(cx))
-                .detach();
-            docks.insert(workspace, area);
-            dock_skin = Some(skin);
-        }
-        let workspace = saved
-            .current
-            .as_deref()
-            .and_then(crate::ui::workspace::Workspace::from_key)
-            .unwrap_or_default();
-        let dock = docks[&workspace].clone();
-        let dock_skin = dock_skin.expect("BUG: au moins un écran");
+        // The docks and their panels. The panels carry no state: they delegate
+        // to this entity, of which they only keep a weak reference so as not to
+        // form a cycle.
+        crate::ui::panels::register(&cx.entity(), cx);
+        let Docks {
+            docks,
+            dock,
+            dock_skin,
+            workspace,
+            needs_save: app_needs_layout_save,
+        } = Self::build_docks(window, cx);
 
         let mut app = Self {
             git,
@@ -862,12 +813,23 @@ impl ClaudhubApp {
             motions: HashMap::new(),
             explorer_focus: cx.focus_handle(),
             finders: HashMap::new(),
-            // Le diff par défaut : c'est le panneau qu'on regarde en arrivant,
-            // et le seul qui soit toujours là.
+            // The diff by default: it is the panel one looks at on arriving, and
+            // the only one that is always there.
             pane: crate::ui::find::Pane::Diff,
             diff_search: crate::ui::find::DiffSearch::default(),
             branch_filter,
             history_split: cx.new(|_| gpui_component::resizable::ResizableState::default()),
+            running: std::collections::HashSet::new(),
+            wt_pending: None,
+            settings_page: Default::default(),
+            settings_epoch: 0,
+            settings_env: None,
+            // Everything the console kept: the ring only holds what
+            // `CLAUDHUB_LOG` let through in the first place, and opening on a
+            // narrowed view would hide records nothing else says exist.
+            logs_level: log::LevelFilter::Trace,
+            logs: Default::default(),
+            logs_seen: 0,
             focus: cx.focus_handle(),
         };
 
@@ -878,24 +840,9 @@ impl ClaudhubApp {
         app.start_scanning(cx);
         app.watch_vault_inputs(window, cx);
 
-        // Les dépôts de la session précédente, puis le répertoire courant s'il
-        // en est un — c'est ce qu'attend quelqu'un qui lance `claudhub` depuis son
-        // projet. La vérification part au worker : `is_repo` coûte un
-        // sous-processus git, ce que ce constructeur n'a pas le droit de payer.
-        let remembered = Settings::global(cx).repositories.clone();
-        for path in remembered {
-            app.git.send(Cmd::OpenRepo(path));
-        }
-        // En distant, le répertoire qui compte est celui du **serveur** : il
-        // arrive avec `Evt::ServerHello`, et le nôtre ne désigne rien là-bas.
-        if !remote {
-            if let Ok(cwd) = std::env::current_dir() {
-                app.git.send(Cmd::OpenIfRepo(cwd));
-            }
-        }
-        // La mise en route du serveur attend que la fenêtre soit montée : un
-        // dialogue a besoin des couches de `Root`, qui ne sont posées qu'au
-        // premier rendu.
+        app.open_remembered_repositories(remote, cx);
+        // Starting the server waits for the window to be mounted: a dialog needs
+        // `Root`'s layers, which are only installed on the first render.
         cx.spawn_in(window, async move |this, cx| {
             this.update_in(cx, |app, window, cx| app.start_backend(window, cx))
                 .ok();
@@ -904,12 +851,143 @@ impl ClaudhubApp {
         app
     }
 
-    /// Interroge périodiquement l'état de tous les worktrees ouverts.
+    /// The previous session's repositories, then the current directory if it is
+    /// one — that is what somebody launching `claudhub` from their project
+    /// expects.
     ///
-    /// Le surveillant de fichiers ne couvre que le worktree affiché ; les
-    /// autres — ceux où un agent travaille pendant qu'on relit ailleurs — ne
-    /// signalent rien. Un balayage régulier est le seul moyen de les voir
-    /// bouger, et c'est justement là que se passe ce qu'on veut voir.
+    /// The check goes to the worker: `is_repo` costs a git subprocess, which the
+    /// constructor is not allowed to pay for.
+    fn open_remembered_repositories(&mut self, remote: bool, cx: &mut Context<Self>) {
+        let remembered = Settings::global(cx).repositories.clone();
+        for path in remembered {
+            self.git.send(Cmd::OpenRepo(path));
+        }
+        // Remotely, the directory that counts is the **server's**: it arrives
+        // with `Evt::ServerHello`, and ours names nothing over there.
+        if !remote {
+            if let Ok(cwd) = std::env::current_dir() {
+                self.git.send(Cmd::OpenIfRepo(cwd));
+            }
+        }
+    }
+
+    /// The SQL console's entities: its editor, its completion index, its table.
+    ///
+    /// All of them live as long as the window — that is the rule for gpui
+    /// entities — and the console only fills them.
+    fn build_console(window: &mut Window, cx: &mut Context<Self>) -> Console {
+        let db_schema: std::rc::Rc<std::cell::RefCell<crate::ui::db_query::SchemaIndex>> =
+            Default::default();
+        let db_query_input = cx.new(|cx| {
+            gpui_component::input::EditorState::new(window, cx)
+                .language("sql")
+                .line_number(true)
+                .placeholder("SELECT * FROM …")
+        });
+        db_query_input.update(cx, |state, cx| {
+            state.lsp_mut().completion_provider =
+                Some(std::rc::Rc::new(crate::ui::db_query::SqlCompletions {
+                    schema: db_schema.clone(),
+                }));
+            cx.notify();
+        });
+        let db_table = cx.new(|cx| {
+            gpui_component::table::TableState::new(
+                crate::ui::db_query::Results::default(),
+                window,
+                cx,
+            )
+            // The headers carry their sort arrow. gpui-component's cell
+            // selection, for its part, stays off: it knows only one at a time,
+            // and what one copies from a result grid is almost always a block —
+            // see `db_query::Results::selection`.
+            .sortable(true)
+        });
+        Console {
+            db_schema,
+            db_query_input,
+            db_table,
+            db_split: crate::ui::db_query::split_state(cx),
+        }
+    }
+
+    /// One dock per screen, restored or built, and the one that was being looked
+    /// at when the window was closed.
+    ///
+    /// The four are built at startup and not on first visit: a dock is built
+    /// with `window`, and doing it at render time would amount to creating
+    /// entities in the middle of a frame.
+    fn build_docks(window: &mut Window, cx: &mut Context<Self>) -> Docks {
+        let this = cx.entity();
+        // A saved layout takes precedence over the default one. The whole file
+        // is discarded if its version differs: the panels may have changed name,
+        // and rebuilding from unknown names would give a window full of empty
+        // frames.
+        let saved = load_layouts();
+        let mut needs_save = false;
+        let mut docks = HashMap::new();
+        let mut dock_skin = None;
+        for workspace in crate::ui::workspace::Workspace::ALL {
+            // **Through `DockSkin` and not through `DockArea::new`.** Since the
+            // layout engine moved into `gpui-base`, an area built without a skin
+            // docks, drags and persists perfectly well — but draws **no chrome**
+            // at all: no tab bar, no title, no frame. The panels then stack bare,
+            // which reads as a broken window without a single error being
+            // reported.
+            let (area, skin) =
+                DockSkin::dock_area(workspace.dock_id(), Some(LAYOUT_VERSION), window, cx);
+            // `Segmented`: the rounded pill in a rail, in place of the bordered
+            // rectangle whose radius is a hard-coded zero. It is our commit on
+            // the fork that exposes this setting.
+            skin.set_tab_variant(gpui_component::tab::TabVariant::Segmented, cx);
+            // A tab bar everywhere, including on groups with a single panel: the
+            // default (`Auto`) renders a flat title there, and "Branches" or
+            // "Terminals" would not have the same band as their neighbours — two
+            // chromes for one window.
+            skin.set_panel_style(gpui_component::dock::PanelStyle::TabBar, cx);
+
+            let restored = saved
+                .workspaces
+                .get(workspace.key())
+                .cloned()
+                .and_then(|state| area.update(cx, |a, cx| a.load(state, window, cx)).ok())
+                .is_some();
+            if !restored {
+                area.update(cx, |a, cx| {
+                    crate::ui::workspace::install_default_layout(workspace, &this, a, window, cx);
+                });
+                // The initial layout is written at once: without that, the file
+                // keeps an earlier version's until the first move, and that is
+                // what would be read back on the next startup.
+                needs_save = true;
+            }
+            // The dock notifies on every move, resize or tab change: it is the
+            // save signal, deferred so a drag does not write one file per pixel.
+            cx.observe(&area, |this, _, cx| this.schedule_layout_save(cx))
+                .detach();
+            docks.insert(workspace, area);
+            dock_skin = Some(skin);
+        }
+        let workspace = saved
+            .current
+            .as_deref()
+            .and_then(crate::ui::workspace::Workspace::from_key)
+            .unwrap_or_default();
+        Docks {
+            dock: docks[&workspace].clone(),
+            docks,
+            dock_skin: dock_skin.expect("BUG: at least one screen"),
+            workspace,
+            needs_save,
+        }
+    }
+
+    /// Periodically polls the state of every open worktree.
+    ///
+    /// The file watcher only covers the displayed worktree; the others — those
+    /// where an agent works while one reviews elsewhere — report nothing. A
+    /// regular sweep is the only way to see them move, and that is precisely
+    /// where what one wants to see happens.
     fn start_scanning(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let mut tick: u32 = 0;
@@ -1050,22 +1128,22 @@ impl ClaudhubApp {
                     })
                     .is_ok();
                 if !alive {
-                    break; // la fenêtre est fermée
+                    break; // the window is closed
                 }
             }
         })
         .detach();
     }
 
-    // — La note libre d'un worktree ————————————————————————————————
+    // — A worktree's free note ————————————————————————————————————
 
-    /// Programme l'écriture de la note libre à chaque frappe.
+    /// Schedules the write of the free note on every keystroke.
     ///
-    /// Différée d'une seconde, comme les réglages et pour la même raison : une
-    /// zone de saisie émet une valeur par frappe, et un coffre se synchronise —
-    /// écrire à chaque caractère ferait travailler la synchronisation en
-    /// permanence. Pas de bouton « enregistrer » : c'est un bloc-notes, et
-    /// devoir le valider serait le meilleur moyen d'y perdre trois phrases.
+    /// Deferred by a second, like the settings and for the same reason: an input
+    /// emits a value per keystroke, and a vault gets synced — writing on every
+    /// character would keep the sync busy permanently. No "save" button: it is a
+    /// scratchpad, and having to confirm it would be the best way to lose three
+    /// sentences in it.
     fn watch_vault_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use gpui_component::input::InputEvent;
         cx.subscribe(&self.journal_input.clone(), |this, _, event, cx| {
@@ -1209,221 +1287,69 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    /// **One `match` and one arm per variant**, each of the fat ones delegating
+    /// to a named method: the exhaustiveness check is what tells whoever adds an
+    /// `Evt` that they have a view to update, and grouping the arms behind
+    /// anything else would trade that guarantee for shorter functions.
     fn handle_event(&mut self, evt: Evt, window: &mut Window, cx: &mut Context<Self>) {
         match evt {
+            // — Repositories and worktrees ————————————————————————
             Evt::RepoOpened {
                 main,
                 name,
                 worktrees,
                 opened_at,
-            } => {
-                if self.repos.iter().any(|r| r.main == main) {
-                    return; // déjà ouvert : rouvrir ne doit pas dupliquer
-                }
-                // Le dossier est revenu — remonté, recloné, rouvert à la main.
-                self.unavailable.retain(|repo| repo.path != main);
-                // À défaut du checkout d'où l'ouverture vient, le premier de la
-                // liste, qui est le dépôt principal.
-                let first = opened_at.or_else(|| worktrees.first().map(|w| w.path.clone()));
-                self.repos.push(RepoState {
-                    main: main.clone(),
-                    name,
-                    worktrees,
-                    branches: Vec::new(),
-                    default_base: None,
-                    collapsed: false,
-                });
-                Settings::update_global(cx, |s| s.remember_repository(&main));
-                self.forget_missing_worktrees(&main, cx);
-                self.ensure_wt_project(&main);
-                self.git.send(Cmd::LoadBranches { main });
-                if self.active.is_none() {
-                    if let Some(path) = first {
-                        self.select_worktree(path, window, cx);
-                    }
-                }
-            }
-            Evt::RepoUnavailable { path, message } => {
-                log::warn!("{} ne s'ouvre pas : {message}", path.display());
-                // Mémorisé : il reste affiché, en erreur, avec de quoi le
-                // retirer. Désigné à l'instant dans un sélecteur de dossier :
-                // il n'y a rien à garder, seulement à dire pourquoi.
-                if Settings::global(cx)
-                    .repositories
-                    .iter()
-                    .any(|remembered| remembered == &path)
-                {
-                    if !self.unavailable.iter().any(|repo| repo.path == path) {
-                        self.unavailable.push(UnavailableRepo { path, message });
-                    }
-                } else {
-                    self.toast = Some(Toast {
-                        text: SharedString::from(message),
-                        error: true,
-                    });
-                }
-            }
+            } => self.repo_opened(main, name, worktrees, opened_at, window, cx),
+            Evt::RepoUnavailable { path, message } => self.repo_unavailable(path, message, cx),
             Evt::Worktrees { main, worktrees } => {
-                if let Some(repo) = self.repos.iter_mut().find(|r| r.main == main) {
-                    repo.worktrees = worktrees;
-                }
-                // git vient d'énumérer : c'est le seul moment où la liste est
-                // sûre, donc le seul où oublier une entrée est sans risque.
-                self.forget_missing_worktrees(&main, cx);
-                // Un worktree créé pour une issue attend son prompt : c'est le
-                // seul signal qui dise que `wt` a fini ses hooks.
-                self.deliver_awaited_agent(window, cx);
-                // Le worktree actif peut avoir été retiré sous nos pieds.
-                if let Some(active) = self.active.clone() {
-                    if !self.worktree_exists(&active) {
-                        self.active = None;
-                        self.review.remove(&active);
-                        self.terminals.remove(&active);
-                        if let Some(first) = self.first_worktree() {
-                            self.select_worktree(first, window, cx);
-                        }
-                    }
-                }
-            }
-            Evt::Status { worktree, status } => {
-                self.pending_status.remove(&worktree);
-                let base = self.default_base_for(&worktree);
-                self.ensure_review(&worktree, cx);
-                let state = self.review.entry(worktree.clone()).or_default();
-                state.status = status;
-                if state.base.is_none() {
-                    state.base = base;
-                }
-                // Les listes dépendent du statut : un fichier qu'on vient
-                // d'indexer ne doit pas rester affiché du mauvais côté. On les
-                // **redemande** sans les vider : effacer ce qui est à l'écran
-                // avant d'avoir de quoi le remplacer fait clignoter la liste à
-                // chaque rafraîchissement, et il en arrive un par écriture de
-                // fichier.
-                let stale: Vec<DiffRange> = state.files.keys().cloned().collect();
-                for range in stale {
-                    if state.pending_files.insert(range.clone()) {
-                        self.git.send(Cmd::LoadDiffFiles {
-                            worktree: worktree.clone(),
-                            range,
-                        });
-                    }
-                }
-            }
-            Evt::DiffFiles {
-                worktree,
-                range,
-                files,
-            } => {
-                let Some(state) = self.review.get_mut(&worktree) else {
-                    return;
-                };
-                state.pending_files.remove(&range);
-                // Le fichier affiché venait-il de ce domaine, et y est-il
-                // encore ? S'il a disparu — indexé, jeté, committé — laisser
-                // son diff à l'écran ferait relire un état qui n'existe plus.
-                let gone = state.range == range
-                    && state
-                        .selected
-                        .as_ref()
-                        .is_some_and(|path| !files.iter().any(|f| &f.path == path));
-                // Une relecture périmée s'en va avec la liste qui l'infirme :
-                // le fichier a disparu du domaine, ou il a rechangé depuis
-                // qu'on l'a coché. La garder ferait dire « relu » d'un contenu
-                // que personne n'a lu.
-                let before = state.reviewed.len();
-                state.reviewed.retain(|item| {
-                    item.range != range
-                        || files.iter().any(|file| {
-                            file.path == item.path
-                                && file.added == item.added
-                                && file.removed == item.removed
-                        })
-                });
-                let pruned = state.reviewed.len() != before;
-                state.files.insert(range, files);
-                if gone {
-                    state.selected = None;
-                    state.diff = None;
-                    state.diff_selection = None;
-                }
-                if pruned {
-                    self.persist_notes(&worktree, cx);
-                }
-            }
-            Evt::FileDiff {
-                worktree,
-                path,
-                diff,
-            } => {
-                // Le thème est lu avant l'emprunt mutable de l'état : la
-                // coloration en dépend, et `cx.theme()` emprunte `cx`.
-                let theme = cx.theme().highlight_theme.clone();
-                let split = Settings::global(cx).diff_split;
-                let mut jumped = None;
-                let mut note = None;
-                if let Some(state) = self.review.get_mut(&worktree) {
-                    if state.selected.as_deref() == Some(path.as_path()) {
-                        let rendered = std::rc::Rc::new(Rendered::new(&path, diff, &theme));
-                        // La flèche qui a ouvert ce fichier attend une
-                        // modification, pas le haut du fichier.
-                        if let Some(jump) = state.pending_jump.take() {
-                            let headers = rendered.headers(split);
-                            jumped = match jump {
-                                Jump::First => headers.first().copied(),
-                                Jump::Last => headers.last().copied(),
-                            };
-                            state.diff_selection = jumped.map(|row| (row, row));
-                        }
-                        note = state.pending_note.take();
-                        state.diff = Some(rendered);
-                        // Les occurrences portent des décalages dans un texte
-                        // qui vient d'être remplacé.
-                        self.diff_search.valid = false;
-                    }
-                }
-                // Les lignes annotées se déduisent du diff qui vient
-                // d'arriver : c'est le seul moment où le calcul a lieu, et
-                // certainement pas dans le rendu de la liste.
-                self.refresh_note_marks(&worktree);
-                if let Some(id) = note {
-                    self.select_note_rows(id, cx);
-                } else if let Some(row) = jumped {
-                    self.reveal_diff_row(row, gpui::ScrollStrategy::Top, cx);
-                }
+                self.worktrees_arrived(main, worktrees, window, cx)
             }
             Evt::Summaries { summaries } => {
                 self.summaries.extend(summaries);
             }
-            Evt::Fetched { main } => {
-                // Le fetch a bougé les références distantes : l'avance et le
-                // retard du worktree affiché ne valent plus, et ce sont eux que
-                // les boutons portent. Le statut du seul worktree affiché — le
-                // balayage de fond se charge des autres, et relire dix statuts
-                // toutes les dix minutes coûterait plus que ce que cela montre.
-                if let Some(worktree) = self.active.clone() {
-                    if self.main_of(&worktree).as_deref() == Some(main.as_path()) {
-                        self.request_status(worktree);
-                    }
-                }
-                self.git.send(Cmd::LoadBranches { main });
-            }
+            Evt::Agents { agents } => self.agents_scanned(agents),
+
+            // — Review ————————————————————————————————————————————
+            Evt::Status { worktree, status } => self.status_arrived(worktree, status, cx),
+            Evt::DiffFiles {
+                worktree,
+                range,
+                files,
+            } => self.diff_files_arrived(worktree, range, files, cx),
+            Evt::FileDiff {
+                worktree,
+                path,
+                diff,
+            } => self.file_diff_arrived(worktree, path, diff, cx),
+            Evt::History {
+                worktree,
+                range,
+                commits,
+                graph,
+            } => self.history_arrived(worktree, range, commits, graph),
+            Evt::Branches {
+                main,
+                branches,
+                default_base,
+            } => self.branches_arrived(main, branches, default_base, window, cx),
+
+            // — Writes ————————————————————————————————————————————
+            Evt::Done {
+                worktree,
+                action,
+                output,
+            } => self.action_done(worktree, action, output, window, cx),
+            Evt::Failed {
+                worktree,
+                action,
+                message,
+            } => self.action_failed(worktree, action, message),
+            Evt::Fetched { main } => self.fetched(main),
             Evt::CommitMessage { worktree, message } => {
-                // Le message arrive plusieurs secondes après la demande : il ne
-                // se pose que dans le champ du worktree qui l'a demandé. Le
-                // drapeau, lui, tombe quoi qu'il arrive — sans quoi le bouton
-                // resterait à tourner sur un worktree qu'on a quitté.
-                if self.suggesting_message.as_deref() == Some(worktree.as_path()) {
-                    self.suggesting_message = None;
-                }
-                if self.active.as_deref() == Some(worktree.as_path()) {
-                    self.commit_input.update(cx, |input, cx| {
-                        input.set_value(message, window, cx);
-                    });
-                } else {
-                    self.announce(tr!("commit-suggest-elsewhere"), cx);
-                }
+                self.commit_message_arrived(worktree, message, window, cx)
             }
+
+            // — `wt` ——————————————————————————————————————————————
             Evt::WtProject { main, project } => {
                 self.wt_projects.insert(main, project);
             }
@@ -1432,7 +1358,22 @@ impl ClaudhubApp {
                 slug,
                 answers,
                 questions,
-            } => self.wt_questions_arrived(main, slug, answers, questions, window, cx),
+                // The phase and the task came back so a transport could route
+                // them; the view knows them from the dialog it opened.
+                phase: _,
+                task: _,
+                round,
+            } => self.wt_questions_arrived(
+                crate::ui::worktree_ops::WtRound {
+                    main,
+                    slug,
+                    answers,
+                    questions,
+                    round,
+                },
+                window,
+                cx,
+            ),
             Evt::WtTask {
                 worktree,
                 task,
@@ -1441,149 +1382,37 @@ impl ClaudhubApp {
             Evt::WtStates { states } => {
                 self.wt_states.extend(states);
             }
+
+            // — Sentry ————————————————————————————————————————————
             Evt::Issues { issues } => self.issues_arrived(issues, cx),
             Evt::IssueEvent { issue, event } => self.issue_event_arrived(issue, event, cx),
+
+            // — Files and vault ———————————————————————————————————
             Evt::ProjectFiles { worktree, files } => self.project_files_arrived(worktree, files),
             Evt::FileContent {
                 worktree,
                 path,
                 content,
             } => self.file_content_arrived(worktree, path, content, window, cx),
-            // Le dossier de notes a répondu : c'est lui la source, et ce qu'on
-            // avait en mémoire n'était qu'une attente.
-            // Le coffre a été écrit : il existe, donc il se surveille. Le
-            // relire dans la foulée n'est pas un luxe — c'est le disque qui
-            // fait foi, et une écriture refusée (l'agent avait touché au
-            // fichier entre-temps) doit rendre la vue à ce qui est vraiment
-            // là plutôt qu'à ce qu'on croyait y avoir mis.
             Evt::FilesChanged { paths } => {
                 for path in paths {
                     self.file_changed(&path, cx);
                 }
             }
-            Evt::ServerHello {
-                build,
-                cwd,
-                running_under_wsl,
-                shells,
-            } => {
-                log::info!("serveur distant prêt (build {build})");
-                self.server_state = super::server::ServerState::Up;
-                self.server_wsl = running_under_wsl;
-                // C'est le serveur qui lancera les shells : ce sont les siens
-                // que le formulaire doit proposer, pas ceux de cette machine.
-                crate::ui::settings::set_server_shells(shells);
-                // Le « lancé depuis son projet » du mode distant : c'est le
-                // répertoire du serveur qui le dit, pas le nôtre.
-                self.git.send(Cmd::OpenIfRepo(cwd));
-                cx.notify();
-            }
-            Evt::ServerLost { message } => {
-                log::warn!("serveur distant perdu : {message}");
-                self.server_state = super::server::ServerState::Down(message);
-                cx.notify();
-            }
+            // The vault has been written: it exists, so it can be watched.
+            // Re-reading it straight away is not a luxury — the disk is the
+            // authority, and a refused write (the agent had touched the file
+            // meanwhile) has to give the view back what is really there rather
+            // than what we thought we had put in it.
             Evt::VaultWritten { worktree } => {
                 self.watch_vault(&worktree, cx);
                 if let Some(dir) = self.notes_dir(&worktree, cx) {
                     self.git.send(Cmd::ReadNotes { worktree, dir });
                 }
             }
-            Evt::NotesRead { worktree, files } => {
-                let mut notes = Vec::new();
-                let mut reviewed = Vec::new();
-                let mut todo = None;
-                let mut journal = String::new();
-                let on_disk = !files.is_empty();
-                for (name, text) in files {
-                    if name == crate::ui::vault::INDEX {
-                        reviewed = crate::ui::vault::parse_index(&text);
-                    } else if name == crate::ui::vault::TODO {
-                        todo = Some(crate::ui::vault::parse_todo(&text));
-                    } else if name == crate::ui::vault::NOTES {
-                        journal = text;
-                    } else if let Some(note) = crate::ui::vault::parse_note(&text) {
-                        notes.push(note);
-                    }
-                }
-                notes.sort_by_key(|note| note.id);
-                // La reprise de l'ancien magasin passe par le même chemin que
-                // l'installation neuve, comme `migrate_agents` : un fichier
-                // d'état antérieur porte ses notes, et elles n'ont personne
-                // d'autre pour les écrire dans le dossier. Une seule fois —
-                // le magasin est vidé dans la foulée.
-                let legacy = Store::global(cx)
-                    .worktree(&worktree)
-                    .map(|saved| saved.notes.clone())
-                    .unwrap_or_default();
-                let migrating = !legacy.is_empty();
-                if migrating {
-                    let known: std::collections::HashSet<u64> =
-                        notes.iter().map(|note| note.id).collect();
-                    notes.extend(legacy.into_iter().filter(|note| !known.contains(&note.id)));
-                    notes.sort_by_key(|note| note.id);
-                    if let Some(main) = self.main_of(&worktree) {
-                        Store::update_global(cx, |store| {
-                            store.worktree_mut(&worktree, &main).notes = Vec::new();
-                        });
-                    }
-                }
-                self.ensure_review(&worktree, cx);
-                if let Some(state) = self.review.get_mut(&worktree) {
-                    // Un identifiant déjà pris par une note du dossier ferait
-                    // deux notes du même numéro, et le prompt en désignerait
-                    // une pour l'autre.
-                    let highest = notes.iter().map(|note| note.id).max().unwrap_or(0);
-                    state.next_note = state.next_note.max(highest + 1);
-                    state.notes = notes;
-                    state.reviewed = reviewed;
-                    state.todo = todo;
-                    state.journal = journal;
-                    state.notes_loaded = true;
-                    state.notes_on_disk = on_disk;
-                }
-                self.refresh_note_marks(&worktree);
-                self.sync_journal_input(&worktree, window, cx);
-                if migrating {
-                    self.persist_notes(&worktree, cx);
-                }
-                cx.notify();
-            }
-            Evt::Agents { agents } => {
-                let mut next = HashMap::new();
-                let mut cpu = HashMap::new();
-                for (worktree, processes) in agents {
-                    let working = processes.iter().any(|process| {
-                        let before = self.agent_cpu.get(&process.pid).copied();
-                        // Un processus vu pour la première fois n'a pas de
-                        // variation : on le dit en attente, et le prochain
-                        // relevé tranchera. L'inverse ferait clignoter la
-                        // liste à chaque agent qui démarre.
-                        before.is_some_and(|before| {
-                            process.cpu.saturating_sub(before) >= AGENT_BUSY_TICKS
-                        })
-                    });
-                    for process in &processes {
-                        cpu.insert(process.pid, process.cpu);
-                    }
-                    let mut programs: Vec<String> = processes
-                        .iter()
-                        .map(|process| process.program.clone())
-                        .collect();
-                    programs.sort();
-                    programs.dedup();
-                    next.insert(
-                        worktree,
-                        AgentState {
-                            count: processes.len(),
-                            programs,
-                            working,
-                        },
-                    );
-                }
-                self.agent_cpu = cpu;
-                self.agents = next;
-            }
+            Evt::NotesRead { worktree, files } => self.notes_read(worktree, files, window, cx),
+
+            // — Databases —————————————————————————————————————————
             Evt::DbDatabases { key, databases } => self.db_databases_arrived(key, databases, cx),
             Evt::DbTables {
                 key,
@@ -1607,122 +1436,569 @@ impl ClaudhubApp {
                 elapsed_ms,
             } => self.db_rows_arrived(request, rows, elapsed_ms, cx),
             Evt::DbExported { path, rows } => self.db_exported(path, rows, cx),
-            Evt::History {
-                worktree,
-                range,
-                commits,
-                graph,
-            } => {
-                if let Some(state) = self.review.get_mut(&worktree) {
-                    state.history_pending = false;
-                    // Une réponse en retard, pour un domaine qu'on ne regarde
-                    // plus, remplacerait l'historique par le mauvais.
-                    if state.history_range == range {
-                        let width = crate::git::history::width(&graph);
-                        state.history = Some(std::rc::Rc::new(History {
-                            commits,
-                            graph,
-                            width,
-                        }));
-                    }
-                }
-            }
-            Evt::Branches {
-                main,
-                branches,
-                default_base,
-            } => {
-                if let Some(repo) = self.repos.iter_mut().find(|r| r.main == main) {
-                    repo.branches = branches;
-                    repo.default_base = default_base;
-                }
-                // Les revues déjà ouvertes attendaient peut-être cette base :
-                // le statut arrive avant les branches, et rien ne les
-                // rafraîchira une seconde fois.
-                let bases: Vec<(PathBuf, Option<String>)> = self
-                    .review
-                    .keys()
-                    .map(|worktree| (worktree.clone(), self.default_base_for(worktree)))
-                    .collect();
-                let reload: Vec<(PathBuf, DiffRange)> = Vec::new();
-                for (worktree, base) in bases {
-                    if let Some(state) = self.review.get_mut(&worktree) {
-                        if state.base.is_none() {
-                            state.base = base;
-                        }
-                    }
-                }
-                for (worktree, range) in reload {
-                    self.git.send(Cmd::LoadDiffFiles { worktree, range });
-                }
-                // Après la propagation, pas avant : le sélecteur doit montrer
-                // la base retenue, et elle vient d'être décidée.
-                self.refresh_base_choices(window, cx);
-            }
-            Evt::Done {
-                worktree,
-                action,
-                output,
-            } => {
-                if action == Action::Commit {
-                    self.commit_input.update(cx, |input, cx| {
-                        input.set_value("", window, cx);
-                    });
-                }
-                let text = if output.trim().is_empty() {
-                    tr!(action.success_key())
-                } else {
-                    SharedString::from(output.trim().to_string())
-                };
-                self.toast = Some(Toast { text, error: false });
-                // L'intégration a abouti : reste à décider du sort du worktree
-                // et de sa branche, que `wt` conserve délibérément.
-                if action == Action::Integrate {
-                    self.offer_cleanup(window, cx);
-                }
-                // Une opération qui a bougé HEAD change aussi les branches.
-                if matches!(
-                    action,
-                    Action::Commit | Action::Fetch | Action::Pull | Action::Push | Action::Checkout
-                ) {
-                    if let Some(main) = worktree.as_deref().and_then(|w| self.main_of(w)) {
-                        self.git.send(Cmd::LoadBranches { main });
-                    }
-                }
-            }
-            Evt::Failed {
-                worktree,
-                action,
-                message,
-            } => {
-                // Sans cela, un statut qui échoue une fois — dépôt momentanément
-                // verrouillé, disque occupé — bloquerait pour de bon tout
-                // rafraîchissement ultérieur de ce worktree.
-                if let Some(worktree) = worktree.as_ref() {
-                    self.pending_status.remove(worktree);
-                }
-                // Un drapeau d'intégration armé survivrait à l'échec et ferait
-                // proposer le ménage à la prochaine réussite, quelle qu'elle
-                // soit.
-                if action == Action::Integrate {
-                    self.integrated = None;
-                }
-                if action == Action::SuggestMessage {
-                    self.suggesting_message = None;
-                }
-                log::warn!("{action:?} a échoué : {message}");
-                self.toast = Some(Toast {
-                    text: SharedString::from(message),
-                    error: true,
-                });
+
+            // — Transport —————————————————————————————————————————
+            Evt::ServerHello {
+                build,
+                cwd,
+                running_under_wsl,
+                shells,
+            } => self.server_hello(build, cwd, running_under_wsl, shells),
+            Evt::ServerLost { message } => {
+                log::warn!("remote server lost: {message}");
+                self.server_state = super::server::ServerState::Down(message);
+                // Whatever was under way died with it, and nothing will ever
+                // answer for it. A spinner that turns for ever says less than
+                // one that never turned — the status bar carries the reason.
+                self.clear_running();
             }
         }
         cx.notify();
     }
 
-    // — Sélection ————————————————————————————————————————————————
+    // — Repositories and worktrees ————————————————————————————————
 
-    /// Demande un statut, sauf s'il y en a déjà un en vol pour ce worktree.
+    fn repo_opened(
+        &mut self,
+        main: PathBuf,
+        name: String,
+        worktrees: Vec<Worktree>,
+        opened_at: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.repos.iter().any(|r| r.main == main) {
+            return; // already open: reopening must not duplicate
+        }
+        // The folder is back — remounted, recloned, reopened by hand.
+        self.unavailable.retain(|repo| repo.path != main);
+        // Failing the checkout the opening came from, the first of the list,
+        // which is the main repository.
+        let first = opened_at.or_else(|| worktrees.first().map(|w| w.path.clone()));
+        self.repos.push(RepoState {
+            main: main.clone(),
+            name,
+            worktrees,
+            branches: Vec::new(),
+            default_base: None,
+            collapsed: false,
+        });
+        Settings::update_global(cx, |s| s.remember_repository(&main));
+        self.forget_missing_worktrees(&main, cx);
+        self.ensure_wt_project(&main);
+        self.git.send(Cmd::LoadBranches { main });
+        if self.active.is_none() {
+            if let Some(path) = first {
+                self.select_worktree(path, window, cx);
+            }
+        }
+    }
+
+    fn repo_unavailable(&mut self, path: PathBuf, message: String, cx: &mut Context<Self>) {
+        log::warn!("{} does not open: {message}", path.display());
+        // Remembered: it stays on screen, in error, with what is needed to
+        // remove it. Named just now in a folder picker: there is nothing to
+        // keep, only a reason to give.
+        if Settings::global(cx)
+            .repositories
+            .iter()
+            .any(|remembered| remembered == &path)
+        {
+            if !self.unavailable.iter().any(|repo| repo.path == path) {
+                self.unavailable.push(UnavailableRepo { path, message });
+            }
+        } else {
+            self.toast = Some(Toast {
+                text: SharedString::from(message),
+                error: true,
+            });
+        }
+    }
+
+    fn worktrees_arrived(
+        &mut self,
+        main: PathBuf,
+        worktrees: Vec<Worktree>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(repo) = self.repos.iter_mut().find(|r| r.main == main) {
+            repo.worktrees = worktrees;
+        }
+        // git has just enumerated: it is the only moment the list is certain, so
+        // the only one where forgetting an entry is safe.
+        self.forget_missing_worktrees(&main, cx);
+        // A worktree created for an issue is waiting for its prompt: it is the
+        // only signal that says `wt` has finished its hooks.
+        self.deliver_awaited_agent(window, cx);
+        // The active worktree may have been removed under our feet.
+        if let Some(active) = self.active.clone() {
+            if !self.worktree_exists(&active) {
+                self.active = None;
+                self.review.remove(&active);
+                self.terminals.remove(&active);
+                if let Some(first) = self.first_worktree() {
+                    self.select_worktree(first, window, cx);
+                }
+            }
+        }
+    }
+
+    /// "Working" means **has burnt processor since the previous reading**.
+    fn agents_scanned(&mut self, agents: crate::agent::Agents) {
+        let mut next = HashMap::new();
+        let mut cpu = HashMap::new();
+        for (worktree, processes) in agents {
+            let working = processes.iter().any(|process| {
+                let before = self.agent_cpu.get(&process.pid).copied();
+                // A process seen for the first time has no variation: we call it
+                // waiting, and the next reading will decide. The opposite would
+                // make the list flicker on every agent that starts.
+                before.is_some_and(|before| process.cpu.saturating_sub(before) >= AGENT_BUSY_TICKS)
+            });
+            for process in &processes {
+                cpu.insert(process.pid, process.cpu);
+            }
+            let mut programs: Vec<String> = processes
+                .iter()
+                .map(|process| process.program.clone())
+                .collect();
+            programs.sort();
+            programs.dedup();
+            next.insert(
+                worktree,
+                AgentState {
+                    count: processes.len(),
+                    programs,
+                    working,
+                },
+            );
+        }
+        self.agent_cpu = cpu;
+        self.agents = next;
+    }
+
+    // — Review ————————————————————————————————————————————————————
+
+    fn status_arrived(&mut self, worktree: PathBuf, status: Status, cx: &mut Context<Self>) {
+        self.pending_status.remove(&worktree);
+        let base = self.default_base_for(&worktree);
+        self.ensure_review(&worktree, cx);
+        let state = self.review.entry(worktree.clone()).or_default();
+        state.status = status;
+        if state.base.is_none() {
+            state.base = base;
+        }
+        // The lists depend on the status: a file just staged must not stay
+        // displayed on the wrong side. We **ask for them again** without
+        // emptying them: clearing what is on screen before having something to
+        // replace it makes the list flicker on every refresh, and one arrives
+        // per file write.
+        let stale: Vec<DiffRange> = state.files.keys().cloned().collect();
+        for range in stale {
+            if state.pending_files.insert(range.clone()) {
+                self.git.send(Cmd::LoadDiffFiles {
+                    worktree: worktree.clone(),
+                    range,
+                });
+            }
+        }
+    }
+
+    fn diff_files_arrived(
+        &mut self,
+        worktree: PathBuf,
+        range: DiffRange,
+        files: Vec<DiffFile>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.review.get_mut(&worktree) else {
+            return;
+        };
+        state.pending_files.remove(&range);
+        // Did the displayed file come from this range, and is it still there? If
+        // it has gone — staged, discarded, committed — leaving its diff on
+        // screen would mean reviewing a state that no longer exists.
+        let gone = state.range == range
+            && state
+                .selected
+                .as_ref()
+                .is_some_and(|path| !files.iter().any(|f| &f.path == path));
+        // A stale review goes away with the list that disproves it: the file has
+        // gone from the range, or it has changed again since it was ticked.
+        // Keeping it would say "reviewed" of content nobody has read.
+        let before = state.reviewed.len();
+        state.reviewed.retain(|item| {
+            item.range != range
+                || files.iter().any(|file| {
+                    file.path == item.path
+                        && file.added == item.added
+                        && file.removed == item.removed
+                })
+        });
+        let pruned = state.reviewed.len() != before;
+        state.files.insert(range, files);
+        if gone {
+            state.selected = None;
+            state.diff = None;
+            state.diff_selection = None;
+        }
+        if pruned {
+            self.persist_notes(&worktree, cx);
+        }
+    }
+
+    fn file_diff_arrived(
+        &mut self,
+        worktree: PathBuf,
+        path: PathBuf,
+        diff: crate::git::FileDiff,
+        cx: &mut Context<Self>,
+    ) {
+        // The theme is read before the mutable borrow of the state: the
+        // highlighting depends on it, and `cx.theme()` borrows `cx`.
+        let theme = cx.theme().highlight_theme.clone();
+        let split = Settings::global(cx).diff_split;
+        let mut jumped = None;
+        let mut note = None;
+        if let Some(state) = self.review.get_mut(&worktree) {
+            if state.selected.as_deref() == Some(path.as_path()) {
+                let rendered = std::rc::Rc::new(Rendered::new(&path, diff, &theme));
+                // The arrow that opened this file expects a change, not the top
+                // of the file.
+                if let Some(jump) = state.pending_jump.take() {
+                    let headers = rendered.headers(split);
+                    jumped = match jump {
+                        Jump::First => headers.first().copied(),
+                        Jump::Last => headers.last().copied(),
+                    };
+                    state.diff_selection = jumped.map(|row| (row, row));
+                }
+                note = state.pending_note.take();
+                state.diff = Some(rendered);
+                // The hits carry offsets into a text that has just been
+                // replaced.
+                self.diff_search.valid = false;
+            }
+        }
+        // The annotated lines follow from the diff that has just arrived: it is
+        // the only moment the computation happens, and certainly not in the
+        // list's render.
+        self.refresh_note_marks(&worktree);
+        if let Some(id) = note {
+            self.select_note_rows(id, cx);
+        } else if let Some(row) = jumped {
+            self.reveal_diff_row(row, gpui::ScrollStrategy::Top, cx);
+        }
+    }
+
+    fn history_arrived(
+        &mut self,
+        worktree: PathBuf,
+        range: LogRange,
+        commits: Vec<Commit>,
+        graph: Vec<GraphRow>,
+    ) {
+        let Some(state) = self.review.get_mut(&worktree) else {
+            return;
+        };
+        state.history_pending = false;
+        // A late answer, for a range no longer being looked at, would replace
+        // the history with the wrong one.
+        if state.history_range == range {
+            let width = crate::git::history::width(&graph);
+            state.history = Some(std::rc::Rc::new(History {
+                commits,
+                graph,
+                width,
+            }));
+        }
+    }
+
+    fn branches_arrived(
+        &mut self,
+        main: PathBuf,
+        branches: Vec<Branch>,
+        default_base: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(repo) = self.repos.iter_mut().find(|r| r.main == main) {
+            repo.branches = branches;
+            repo.default_base = default_base;
+        }
+        // The reviews already open may have been waiting for this base: the
+        // status arrives before the branches, and nothing will refresh them a
+        // second time.
+        let bases: Vec<(PathBuf, Option<String>)> = self
+            .review
+            .keys()
+            .map(|worktree| (worktree.clone(), self.default_base_for(worktree)))
+            .collect();
+        for (worktree, base) in bases {
+            if let Some(state) = self.review.get_mut(&worktree) {
+                if state.base.is_none() {
+                    state.base = base;
+                }
+            }
+        }
+        // After the propagation, not before: the selector has to show the base
+        // kept, and it has just been decided.
+        self.refresh_base_choices(window, cx);
+    }
+
+    // — Writes ————————————————————————————————————————————————————
+
+    fn action_done(
+        &mut self,
+        worktree: Option<PathBuf>,
+        action: Action,
+        output: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.finish(&worktree, action);
+        if action == Action::Commit {
+            self.commit_input.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+            });
+        }
+        let text = if output.trim().is_empty() {
+            tr!(action.success_key())
+        } else {
+            SharedString::from(output.trim().to_string())
+        };
+        self.toast = Some(Toast { text, error: false });
+        // The integration has succeeded: what is left is to decide the fate of
+        // the worktree and its branch, which `wt` deliberately keeps.
+        if action == Action::Integrate {
+            self.offer_cleanup(window, cx);
+        }
+        // An operation that moved HEAD also changes the branches.
+        if matches!(
+            action,
+            Action::Commit | Action::Fetch | Action::Pull | Action::Push | Action::Checkout
+        ) {
+            if let Some(main) = worktree.as_deref().and_then(|w| self.main_of(w)) {
+                self.git.send(Cmd::LoadBranches { main });
+            }
+        }
+    }
+
+    fn action_failed(&mut self, worktree: Option<PathBuf>, action: Action, message: String) {
+        self.finish(&worktree, action);
+        // Without this, a status that fails once — repository briefly locked,
+        // disk busy — would block every later refresh of that worktree for good.
+        if let Some(worktree) = worktree.as_ref() {
+            self.pending_status.remove(worktree);
+        }
+        // An armed integration flag would survive the failure and would offer
+        // the cleanup on the next success, whatever it was.
+        if action == Action::Integrate {
+            self.integrated = None;
+        }
+        if action == Action::SuggestMessage {
+            self.suggesting_message = None;
+        }
+        self.toast = Some(Toast {
+            text: SharedString::from(message),
+            error: true,
+        });
+    }
+
+    // — Operations in flight ——————————————————————————————————————
+
+    /// Sends a write, and remembers it is under way.
+    ///
+    /// The key is the pair the worker will answer with, and that is the whole
+    /// point: `write_then_refresh` echoes the worktree and the action it was
+    /// given, so what is put down here is exactly what `finish` will find.
+    pub(super) fn start(
+        &mut self,
+        worktree: Option<PathBuf>,
+        action: Action,
+        cmd: Cmd,
+        cx: &mut Context<Self>,
+    ) {
+        self.running.insert((worktree, action));
+        self.git.send(cmd);
+        cx.notify();
+    }
+
+    /// Forgets everything under way.
+    ///
+    /// For the two moments when what was in flight will never answer: the server
+    /// dying, and a new one taking its place.
+    fn clear_running(&mut self) {
+        self.running.clear();
+        self.wt_pending = None;
+    }
+
+    fn finish(&mut self, worktree: &Option<PathBuf>, action: Action) {
+        self.running.remove(&(worktree.clone(), action));
+        if matches!(action, Action::WtUp | Action::WtDown) {
+            self.wt_pending = None;
+        }
+    }
+
+    /// Is this operation under way? What a button reads to turn.
+    pub(super) fn is_running(&self, worktree: Option<&Path>, action: Action) -> bool {
+        self.running
+            .contains(&(worktree.map(Path::to_path_buf), action))
+    }
+
+    /// The same, for the worktree being looked at.
+    pub(super) fn active_running(&self, action: Action) -> bool {
+        self.is_running(self.active.as_deref(), action)
+    }
+
+    fn fetched(&mut self, main: PathBuf) {
+        // The fetch has moved the remote references: the displayed worktree's
+        // ahead and behind counts no longer hold, and they are what the buttons
+        // carry. The status of the displayed worktree only — the background
+        // sweep takes care of the others, and re-reading ten statuses every ten
+        // minutes would cost more than it shows.
+        if let Some(worktree) = self.active.clone() {
+            if self.main_of(&worktree).as_deref() == Some(main.as_path()) {
+                self.request_status(worktree);
+            }
+        }
+        self.git.send(Cmd::LoadBranches { main });
+    }
+
+    fn commit_message_arrived(
+        &mut self,
+        worktree: PathBuf,
+        message: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The message arrives several seconds after the request: it only lands
+        // in the field of the worktree that asked for it. The flag, for its
+        // part, falls whatever happens — otherwise the button would keep
+        // spinning on a worktree one has left.
+        if self.suggesting_message.as_deref() == Some(worktree.as_path()) {
+            self.suggesting_message = None;
+        }
+        if self.active.as_deref() == Some(worktree.as_path()) {
+            self.commit_input.update(cx, |input, cx| {
+                input.set_value(message, window, cx);
+            });
+        } else {
+            self.announce(tr!("commit-suggest-elsewhere"), cx);
+        }
+    }
+
+    // — Vault —————————————————————————————————————————————————————
+
+    /// The notes folder has answered: it is the source, and what was held in
+    /// memory was only a wait.
+    fn notes_read(
+        &mut self,
+        worktree: PathBuf,
+        files: Vec<(String, String)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut notes = Vec::new();
+        let mut reviewed = Vec::new();
+        let mut todo = None;
+        let mut journal = String::new();
+        let on_disk = !files.is_empty();
+        for (name, text) in files {
+            if name == crate::ui::vault::INDEX || name == crate::ui::vault::LEGACY_INDEX {
+                reviewed = crate::ui::vault::parse_index(&text);
+            } else if name == crate::ui::vault::TODO {
+                todo = Some(crate::ui::vault::parse_todo(&text));
+            } else if name == crate::ui::vault::NOTES {
+                journal = text;
+            } else if let Some(note) = crate::ui::vault::parse_note(&text) {
+                notes.push(note);
+            }
+        }
+        notes.sort_by_key(|note| note.id);
+        let migrating = self.migrate_legacy_notes(&worktree, &mut notes, cx);
+        self.ensure_review(&worktree, cx);
+        if let Some(state) = self.review.get_mut(&worktree) {
+            // An id already taken by a note from the folder would make two notes
+            // with the same number, and the prompt would name one for the other.
+            let highest = notes.iter().map(|note| note.id).max().unwrap_or(0);
+            state.next_note = state.next_note.max(highest + 1);
+            state.notes = notes;
+            state.reviewed = reviewed;
+            state.todo = todo;
+            state.journal = journal;
+            state.notes_loaded = true;
+            state.notes_on_disk = on_disk;
+        }
+        self.refresh_note_marks(&worktree);
+        self.sync_journal_input(&worktree, window, cx);
+        if migrating {
+            self.persist_notes(&worktree, cx);
+        }
+    }
+
+    /// Pours the notes of an earlier `state.json` into the folder's, and empties
+    /// the store. Answers whether there was anything to pour.
+    ///
+    /// Picking up the old store goes down the same path as a fresh install, like
+    /// `migrate_agents`: an earlier state file carries its notes, and they have
+    /// nobody else to write them into the folder. Once only — the store is
+    /// emptied straight after, and the ids already taken are respected.
+    fn migrate_legacy_notes(
+        &mut self,
+        worktree: &Path,
+        notes: &mut Vec<crate::ui::notes::Note>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let legacy = Store::global(cx)
+            .worktree(worktree)
+            .map(|saved| saved.notes.clone())
+            .unwrap_or_default();
+        if legacy.is_empty() {
+            return false;
+        }
+        let known: std::collections::HashSet<u64> = notes.iter().map(|note| note.id).collect();
+        notes.extend(legacy.into_iter().filter(|note| !known.contains(&note.id)));
+        notes.sort_by_key(|note| note.id);
+        if let Some(main) = self.main_of(worktree) {
+            Store::update_global(cx, |store| {
+                store.worktree_mut(worktree, &main).notes = Vec::new();
+            });
+        }
+        true
+    }
+
+    // — Transport —————————————————————————————————————————————————
+
+    fn server_hello(
+        &mut self,
+        build: String,
+        cwd: PathBuf,
+        running_under_wsl: bool,
+        shells: Vec<String>,
+    ) {
+        log::info!("remote server ready (build {build})");
+        self.server_state = super::server::ServerState::Up;
+        // The commands sent before the handle was live were dropped, and a
+        // fresh server has nothing of ours in flight: what is left in the set is
+        // waiting for an answer that will not come.
+        self.clear_running();
+        self.server_wsl = running_under_wsl;
+        // It is the server that will launch the shells: it is its own the form
+        // has to offer, not this machine's.
+        crate::ui::settings::set_server_shells(shells);
+        // The form's copy names this machine's shells, which are not the ones
+        // that will be launched.
+        self.forget_settings_environment();
+        // Remote mode's "launched from its project": it is the server's
+        // directory that says so, not ours.
+        self.git.send(Cmd::OpenIfRepo(cwd));
+    }
+
+    // — Selection ————————————————————————————————————————————————
+
+    /// Asks for a status, unless one is already in flight for this worktree.
     pub(super) fn request_status(&mut self, worktree: PathBuf) {
         if self.pending_status.insert(worktree.clone()) {
             self.git.send(Cmd::RefreshStatus { worktree });
@@ -2337,12 +2613,39 @@ impl ClaudhubApp {
             })
     }
 
-    /// La barre d'état : où l'on est, et ce qui vient de se passer.
+    /// The status bar: where one is, and what has just happened.
     ///
-    /// La branche et sa divergence y vivent parce qu'elles ne changent presque
-    /// jamais et n'ont pas à occuper la barre d'outils ; le message, lui, est
-    /// épisodique, et une barre qui ne porte que lui reste vide la plupart du
-    /// temps.
+    /// The branch and its divergence live there because they almost never change
+    /// and have no business taking up the toolbar; the message, for its part, is
+    /// occasional, and a bar carrying only it stays empty most of the time.
+    /// The operations under way, in the status bar.
+    ///
+    /// Named and not merely counted: "3 operations" says nothing, where
+    /// "Pushing…" says which of the gestures just made is the one still going.
+    /// Sorted, because a `HashSet` iterates in a different order every frame and
+    /// the words would dance.
+    fn render_running(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if self.running.is_empty() {
+            return None;
+        }
+        let mut names: Vec<SharedString> = self
+            .running
+            .iter()
+            .map(|(_, action)| tr!(action.running_key()))
+            .collect();
+        names.sort();
+        names.dedup();
+        Some(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .text_color(cx.theme().warning)
+                .child(icon("loader-circle").xsmall())
+                .child(names.join(" · "))
+                .child(Divider::vertical().h(px(12.))),
+        )
+    }
+
     fn render_status_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let (text, error) = match &self.toast {
             Some(t) => (t.text.clone(), t.error),
@@ -2384,26 +2687,31 @@ impl ClaudhubApp {
             .bg(cx.theme().title_bar)
             .text_xs()
             .text_color(muted)
-            // Le choix de l'écran ouvre la barre : c'est la plus large des
-            // trois façons de dire où l'on est, et les deux autres — la
-            // branche, l'avance sur l'amont — s'y rangent derrière.
+            // The screen picker opens the bar: it is the broadest of the three
+            // ways of saying where one is, and the other two — the branch, the
+            // lead over the upstream — line up behind it.
             .child(self.render_workspace_nav(cx))
             .child(Divider::vertical().h(px(12.)))
             .when(self.active.is_some(), |el| {
                 el.child(icon("git-branch").xsmall())
                     .child(div().max_w(px(220.)).truncate().child(branch))
-                    // Le retard avant l'avance : c'est ce qu'il faut intégrer
-                    // avant de pouvoir pousser.
+                    // Behind before ahead: that is what has to be integrated
+                    // before one can push.
                     .when(behind > 0, |el| el.child(format!("↓{behind}")))
                     .when(ahead > 0, |el| el.child(format!("↑{ahead}")))
                     .child(Divider::vertical().h(px(12.)))
             })
-            // Une opération à mi-chemin passe avant tout le reste : tant
-            // qu'elle dure, ce que la revue affiche n'est pas ce qu'on croit.
+            // What is running right now, before what has finished: a menu entry
+            // closes on the click, so an integration, a rebase or a `wt rm` has
+            // no button of its own to turn, and this line is the only thing
+            // between the gesture and the toast that comes minutes later.
+            .children(self.render_running(cx))
+            // A half-finished operation comes before everything else: while it
+            // lasts, what the review shows is not what one thinks.
             .children(self.render_pending_bar(cx))
-            // L'état du serveur passe avant les avertissements ordinaires :
-            // tant qu'il manque, plus rien de ce que la fenêtre montre ne
-            // bouge, et chaque geste part dans le vide.
+            // The server's state comes before the ordinary warnings: while it is
+            // missing, nothing the window shows moves any more, and every gesture
+            // goes into the void.
             .children(self.render_server_status(cx))
             .when(unwatched, |el| {
                 el.child(

@@ -22,27 +22,28 @@ fn next(events: &async_channel::Receiver<Evt>) -> Evt {
             Err(async_channel::TryRecvError::Empty) => {
                 std::thread::sleep(Duration::from_millis(20));
             }
-            Err(async_channel::TryRecvError::Closed) => panic!("le fil s'est fermé"),
+            Err(async_channel::TryRecvError::Closed) => panic!("the wire closed"),
         }
     }
-    panic!("aucun événement du serveur en trente secondes");
+    panic!("no event from the server in thirty seconds");
 }
 
 #[test]
 fn the_server_answers_over_the_wire() {
     let argv = vec![env!("CARGO_BIN_EXE_claudhub-server").to_string()];
-    let (handle, events) = connect(&argv).expect("lancement du serveur");
+    let (handle, events) = connect(&argv).expect("launching the server");
 
-    // La poignée de main d'abord, toujours : versions accordées, et ce que
-    // le serveur sait de sa machine.
+    // The handshake first, always: versions agreed, plus what the server knows
+    // about its own machine.
     match next(&events) {
         Evt::ServerHello { cwd, .. } => assert!(cwd.is_absolute(), "{cwd:?}"),
-        other => panic!("attendu ServerHello, reçu {other:?}"),
+        other => panic!("expected ServerHello, got {other:?}"),
     }
 
-    // Un ordre qui traverse tout : la trame, les files du serveur, le worker
-    // git, et la réponse — un dépôt qui n'existe pas répond proprement.
-    let nowhere = PathBuf::from("/claudhub-nulle-part");
+    // An order that crosses everything: the frame, the server's queues, the
+    // git worker, and the answer — a repository that does not exist answers
+    // cleanly.
+    let nowhere = PathBuf::from("/claudhub-nowhere");
     handle.send(Cmd::OpenRepo(nowhere.clone()));
     loop {
         match next(&events) {
@@ -51,25 +52,25 @@ fn the_server_answers_over_the_wire() {
                 assert!(!message.is_empty());
                 break;
             }
-            // Le surveillant du serveur peut parler entre-temps ; il ne
-            // s'agit pas de lui.
+            // The server's watcher may speak in the meantime; this is not
+            // about it.
             _ => continue,
         }
     }
-    // Lâcher le manche ferme l'entrée du serveur, qui s'éteint : c'est le
-    // cycle de vie nominal, et un serveur qui survivrait deviendrait un
-    // processus orphelin par test.
+    // Dropping the handle closes the server's input, and it shuts down: that
+    // is the nominal lifetime, and a server that survived would leave one
+    // orphan process per test.
     drop(handle);
 }
 
 #[test]
 fn a_dead_server_is_reported_not_swallowed() {
-    // Un « serveur » qui meurt avant de se présenter : c'est aussi ce que
-    // voit la vue quand on tue le vrai en plein vol, et la réponse doit être
-    // un événement qu'elle peut afficher, jamais un silence.
-    let (_handle, events) = connect(&["true".to_string()]).expect("lancement");
+    // A "server" that dies before introducing itself: this is also what the
+    // view sees when the real one is killed mid-flight, and the answer must be
+    // an event it can display, never silence.
+    let (_handle, events) = connect(&["true".to_string()]).expect("launch");
     match next(&events) {
         Evt::ServerLost { message } => assert!(!message.is_empty()),
-        other => panic!("attendu ServerLost, reçu {other:?}"),
+        other => panic!("expected ServerLost, got {other:?}"),
     }
 }

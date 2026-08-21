@@ -1,51 +1,51 @@
-//! `claudhub-server` — les workers de Claudhub, headless.
+//! `claudhub-server` — Claudhub's workers, headless.
 //!
-//! C'est le binaire qui tourne dans la distro WSL2 quand l'interface est un
-//! `.exe` Windows : mêmes files, même `runtime::handle`, mais les `Cmd`
-//! arrivent par l'entrée standard et les `Evt` repartent par la sortie —
-//! **stdout appartient au fil**, les traces vont sur stderr (voir
-//! `runtime::wire`). Il se construit sans la feature `ui`, ce qui est le
-//! portillon prouvant qu'aucun module du cœur ne tire gpui.
+//! This is the binary that runs inside the WSL2 distribution when the
+//! interface is a Windows `.exe`: same queues, same `runtime::handle`, but the
+//! `Cmd`s arrive on standard input and the `Evt`s leave on standard output —
+//! **stdout belongs to the wire**, traces go to stderr (see `runtime::wire`).
+//! It builds without the `ui` feature, which is the gate proving no core
+//! module pulls in gpui.
 //!
-//! Le cycle de vie est celui du parent : la fin de l'entrée standard est
-//! l'ordre de s'éteindre, et perdre la sortie standard (le parent est mort
-//! sans fermer proprement) l'est aussi.
+//! Its lifetime is the parent's: the end of standard input is the order to
+//! shut down, and losing standard output (the parent died without closing
+//! cleanly) is one too.
 
 use claudhub::runtime::{self, wire};
 
 fn main() {
-    // Avant tout le reste, et avant qu'un thread existe : c'est ce serveur
-    // qui lancera les agents (via wt et commit_msg), et les marqueurs de
-    // session de ce qui nous a lancés feraient de chacun une sous-session du
-    // sien.
+    // Before anything else, and before any thread exists: this server is what
+    // will launch the agents (through wt and commit_msg), and the session
+    // markers of whatever launched us would make each of them a sub-session of
+    // its own.
     claudhub::agent::disinherit_session();
     claudhub::logging::init();
 
     let mut stdout = std::io::stdout().lock();
-    // Le verrou de stdin n'est pas `Send` : on garde le poignet et on
-    // verrouille dans le thread qui lit.
+    // The stdin lock is not `Send`: we keep the handle and lock inside the
+    // thread that reads.
     let stdin = std::io::stdin();
 
-    // Notre poignée de main part d'abord ; celle du client suit. Les deux
-    // bouts écrivent avant de lire : deux petites trames tiennent dans les
-    // tampons des tubes, personne ne s'attend mutuellement.
+    // Our handshake goes first; the client's follows. Both ends write before
+    // reading: two small frames fit in the pipe buffers, so neither waits on
+    // the other.
     if let Err(e) = wire::write_frame(&mut stdout, &wire::Hello::current()) {
-        eprintln!("claudhub-server : poignée de main impossible : {e}");
+        eprintln!("claudhub-server: handshake failed: {e}");
         std::process::exit(1);
     }
     let client: wire::Hello = match wire::read_frame(&mut stdin.lock()) {
         Ok(Some(hello)) => hello,
-        Ok(None) => std::process::exit(0), // parti avant de se présenter
+        Ok(None) => std::process::exit(0), // gone before introducing itself
         Err(e) => {
-            eprintln!("claudhub-server : poignée de main illisible : {e}");
+            eprintln!("claudhub-server: unreadable handshake: {e}");
             std::process::exit(1);
         }
     };
-    // Le client fait la même vérification de son côté ; celle-ci attrape un
-    // client trop vieux pour savoir la faire.
+    // The client makes the same check on its side; this one catches a client
+    // too old to know how.
     if client.protocol != wire::PROTOCOL_VERSION {
         eprintln!(
-            "claudhub-server : versions désaccordées (client {}, serveur {})",
+            "claudhub-server: version mismatch (client {}, server {})",
             client.protocol,
             wire::PROTOCOL_VERSION
         );
@@ -54,28 +54,28 @@ fn main() {
 
     let (handle, evt_rx) = runtime::spawn();
 
-    // L'entrée : une trame, un `Cmd`, la même remise que celle de la vue —
-    // c'est `Handle::send` qui refait le tri entre les files.
+    // Input: one frame, one `Cmd`, the same delivery as the view's — it is
+    // `Handle::send` that sorts them back into the queues.
     std::thread::Builder::new()
         .name("claudhub-server-in".into())
         .spawn(move || loop {
             match wire::read_frame::<runtime::Cmd>(&mut stdin.lock()) {
                 Ok(Some(cmd)) => handle.send(cmd),
-                // Fin propre : le parent a fermé le fil, on le suit.
+                // Clean end: the parent closed the wire, we follow.
                 Ok(None) => std::process::exit(0),
                 Err(e) => {
-                    eprintln!("claudhub-server : flux d'entrée illisible : {e}");
+                    eprintln!("claudhub-server: unreadable input stream: {e}");
                     std::process::exit(1);
                 }
             }
         })
-        .expect("thread d'entrée");
+        .expect("input thread");
 
-    // La sortie, sur le thread principal : les événements de toutes les
-    // files, sérialisés dans l'ordre où ils sortent du canal partagé.
+    // Output, on the main thread: events from every queue, serialised in the
+    // order they leave the shared channel.
     while let Ok(evt) = evt_rx.recv_blocking() {
         if let Err(e) = wire::write_frame(&mut stdout, &evt) {
-            eprintln!("claudhub-server : le parent n'écoute plus : {e}");
+            eprintln!("claudhub-server: the parent stopped listening: {e}");
             std::process::exit(1);
         }
     }

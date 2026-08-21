@@ -360,41 +360,42 @@ macro_rules! table {
 }
 
 table!(STANDARD, standard_bindings, [
-    // ── La fenêtre ──────────────────────────────────────────────────────────
+    // ── The window ──────────────────────────────────────────────────────────
     Window "f1" => ShowShortcuts, PREDICATE, "shortcut-help";
     Window "f5" => Refresh, PREDICATE, "shortcut-refresh";
     Window "secondary-r" => Refresh, WINDOW_PREDICATE, "shortcut-refresh";
-    // La convention de tous les éditeurs, y compris sous Linux.
+    // Every editor's convention, including on Linux.
     Window "secondary-," => OpenSettings, PREDICATE, "shortcut-settings";
     Window "secondary-b" => ToggleSidebar, WINDOW_PREDICATE, "shortcut-sidebar";
-    // Le zoom vise la zone qui a le focus : le terminal quand il l'a, les
-    // diffs sinon. `secondary-=` autant que `secondary-+` parce que le signe
-    // plus demande Maj sur un clavier azerty comme sur un qwerty.
+    // Zoom aims at the area that has the focus: the terminal when it has it,
+    // the diffs otherwise. `secondary-=` as much as `secondary-+` because the
+    // plus sign needs Shift on an azerty keyboard as on a qwerty one.
     Window "secondary-=" => ZoomIn, PREDICATE, "shortcut-zoom-in";
     Window "secondary-+" => ZoomIn, PREDICATE, "shortcut-zoom-in";
     Window "secondary--" => ZoomOut, PREDICATE, "shortcut-zoom-out";
     Window "secondary-0" => ZoomReset, PREDICATE, "shortcut-zoom-reset";
 
-    // ── Les écrans ──────────────────────────────────────────────────────────
-    // Quatre liaisons et une seule ligne d'aide, comme les worktrees.
+    // ── The screens ─────────────────────────────────────────────────────────
+    // Four bindings and a single help line, like the worktrees.
     //
-    // **Alt et non `secondary-shift`.** gpui **retire** le Maj des modificateurs
-    // quand la touche est un caractère sans casse : `secondary-shift-1` arrive
-    // comme `ctrl-&` ou `ctrl-#` selon la disposition du clavier, et la liaison
-    // ne se déclenche jamais — en silence. Alt, lui, est conservé, et la touche
-    // reste le chiffre. C'est aussi la convention de qui change d'onglet.
+    // **Alt and not `secondary-shift`.** gpui **removes** Shift from the
+    // modifiers when the key is a caseless character: `secondary-shift-1`
+    // arrives as `ctrl-&` or `ctrl-#` depending on the keyboard layout, and the
+    // binding never fires — silently. Alt, for its part, is kept, and the key
+    // stays the digit. It is also the convention of whoever switches tabs.
     //
-    // Valables jusque dans le terminal : ce qu'on lui prend est le préfixe
-    // d'argument numérique de readline (`M-1`), et non un caractère de
-    // contrôle comme `Ctrl+R` — voir `WINDOW_PREDICATE`.
+    // Valid right into the terminal: what we take from it is readline's numeric
+    // argument prefix (`M-1`), and not a control character like `Ctrl+R` — see
+    // `WINDOW_PREDICATE`.
     Window "alt-1" => GoToWorkspace { index: 0 }, PREDICATE, "shortcut-workspace";
     Window "alt-2" => GoToWorkspace { index: 1 }, PREDICATE, "shortcut-workspace";
     Window "alt-3" => GoToWorkspace { index: 2 }, PREDICATE, "shortcut-workspace";
     Window "alt-4" => GoToWorkspace { index: 3 }, PREDICATE, "shortcut-workspace";
+    Window "alt-5" => GoToWorkspace { index: 4 }, PREDICATE, "shortcut-workspace";
 
-    // ── Les worktrees ───────────────────────────────────────────────────────
-    // Neuf liaisons et une seule ligne d'aide : `merge` reconnaît la suite de
-    // chiffres et l'affiche comme une plage.
+    // ── The worktrees ───────────────────────────────────────────────────────
+    // Nine bindings and a single help line: `merge` recognises the run of digits
+    // and shows it as a range.
     Worktrees "secondary-1" => SelectWorktree { index: 0 }, PREDICATE, "shortcut-worktree";
     Worktrees "secondary-2" => SelectWorktree { index: 1 }, PREDICATE, "shortcut-worktree";
     Worktrees "secondary-3" => SelectWorktree { index: 2 }, PREDICATE, "shortcut-worktree";
@@ -1307,10 +1308,10 @@ mod tests {
 
     fn labels() -> Labels {
         Labels {
-            shift: "Maj".into(),
-            escape: "Échap".into(),
-            enter: "Entrée".into(),
-            home: "Début".into(),
+            shift: "Shift".into(),
+            escape: "Esc".into(),
+            enter: "Enter".into(),
+            home: "Home".into(),
             end: "Fin".into(),
         }
     }
@@ -1321,18 +1322,18 @@ mod tests {
         assert_eq!(pretty("f5", &l), "F5");
         assert_eq!(
             pretty("secondary-shift-e", &l),
-            format!("{SECONDARY}+Maj+E")
+            format!("{SECONDARY}+Shift+E")
         );
-        assert_eq!(pretty("shift-up", &l), "Maj+↑");
-        assert_eq!(pretty("escape", &l), "Échap");
+        assert_eq!(pretty("shift-up", &l), "Shift+↑");
+        assert_eq!(pretty("escape", &l), "Esc");
         assert_eq!(pretty("pagedown", &l), "Page ↓");
-        // Le tiret est ici la touche, pas un séparateur de modificateur.
+        // The dash here is the key, not a modifier separator.
         assert_eq!(pretty("secondary--", &l), format!("{SECONDARY}+-"));
         assert_eq!(pretty("secondary-,", &l), format!("{SECONDARY}+,"));
     }
 
-    /// La notation de vim fait partie de ce que l'utilisateur sait déjà : la
-    /// traduire en « Maj+G » serait lui apprendre autre chose.
+    /// vim's notation is part of what the user already knows: translating it
+    /// into "Shift+G" would be teaching them something else.
     #[test]
     fn a_vim_binding_reads_the_way_vim_writes_it() {
         assert_eq!(vim_pretty("g g"), "gg");
@@ -1402,24 +1403,22 @@ mod tests {
             .map(|entry| entry.label)
             .chain(Group::ORDER.iter().map(|group| group.key()));
         for key in needed {
-            assert!(en.contains(key), "« {key} » manque à en.json");
-            assert!(fr.contains(key), "« {key} » manque à fr.json");
+            assert!(en.contains(key), "\"{key}\" is missing from en.json");
+            assert!(fr.contains(key), "\"{key}\" is missing from fr.json");
         }
     }
 
-    /// Deux liaisons différentes sur les mêmes touches et le même prédicat se
-    /// départageraient par l'ordre de déclaration, ce qui n'est jamais ce
-    /// qu'on voulait dire.
+    /// Two different bindings on the same keys and the same predicate would be
+    /// settled by declaration order, which is never what was meant.
     #[test]
     fn no_two_bindings_share_keys_within_a_table() {
         for table in [STANDARD, VIM] {
             let mut seen = std::collections::HashSet::new();
             for entry in table {
-                // Les chiffres des worktrees partagent leur libellé, jamais
-                // leurs touches.
+                // The worktrees' digits share their label, never their keys.
                 assert!(
                     seen.insert((entry.keys, entry.predicate)),
-                    "« {} » est déclaré deux fois sous le même prédicat",
+                    "\"{}\" is declared twice under the same predicate",
                     entry.keys
                 );
             }

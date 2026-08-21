@@ -245,23 +245,23 @@ fn parse_unified(out: &str) -> FileDiff {
             continue;
         }
         if diff.hunks.is_empty() {
-            // Toujours dans l'en-tête (`diff --git`, `index`, `---`, `+++`).
+            // Still in the header (`diff --git`, `index`, `---`, `+++`).
             if line.starts_with("Binary files") || line.starts_with("GIT binary patch") {
                 diff.binary = true;
                 diff.empty = false;
             }
             continue;
         }
-        let hunk = diff.hunks.last_mut().expect("un hunk est ouvert");
+        let hunk = diff.hunks.last_mut().expect("a hunk is open");
         let (kind, text) = match line.as_bytes().first() {
             Some(b'+') => (DiffLineKind::Added, &line[1..]),
             Some(b'-') => (DiffLineKind::Removed, &line[1..]),
             Some(b' ') => (DiffLineKind::Context, &line[1..]),
             Some(b'\\') => (DiffLineKind::NoNewline, line),
-            // Une ligne vide dans un diff unifié est une ligne de contexte
-            // dont git a élagué l'espace de tête.
+            // An empty line in a unified diff is a context line whose leading
+            // space git has trimmed.
             None => (DiffLineKind::Context, line),
-            // `diff --git` d'un fichier suivant : on ne lit qu'un fichier.
+            // The `diff --git` of a following file: we only read one file.
             _ => break,
         };
         let (l_old, l_new) = match kind {
@@ -368,16 +368,16 @@ mod tests {
             .current_dir(&dir)
             .status()
             .expect("git init");
-        std::fs::write(dir.join("nouveau.txt"), "une\ndeux\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "one\ntwo\n").unwrap();
 
-        let diff = untracked_file(&dir, Path::new("nouveau.txt")).expect("lecture");
+        let diff = untracked_file(&dir, Path::new("new.txt")).expect("read");
         let lines: Vec<&str> = diff
             .hunks
             .iter()
             .flat_map(|hunk| hunk.lines.iter())
             .map(|line| line.text.as_str())
             .collect();
-        assert_eq!(lines, vec!["une", "deux"]);
+        assert_eq!(lines, vec!["one", "two"]);
         assert!(diff
             .hunks
             .iter()
@@ -390,27 +390,27 @@ mod tests {
     fn tempdir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("claudhub-diff-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("répertoire de test");
+        std::fs::create_dir_all(&dir).expect("test directory");
         dir
     }
 
     #[test]
     fn reads_numstat_with_a_rename_and_a_binary() {
         let out = "3\t1\tsrc/main.rs\0\
-                   12\t0\t\0assets/vieux nom.svg\0assets/nouveau nom.svg\0\
+                   12\t0\t\0assets/old name.svg\0assets/new name.svg\0\
                    -\t-\tassets/logo.png\0";
         let files = parse_numstat(out);
         assert_eq!(files.len(), 3);
         assert_eq!(files[0].path, PathBuf::from("src/main.rs"));
         assert_eq!((files[0].added, files[0].removed), (3, 1));
 
-        assert_eq!(files[1].path, PathBuf::from("assets/nouveau nom.svg"));
+        assert_eq!(files[1].path, PathBuf::from("assets/new name.svg"));
         assert_eq!(
             files[1].original,
-            Some(PathBuf::from("assets/vieux nom.svg"))
+            Some(PathBuf::from("assets/old name.svg"))
         );
 
-        assert!(files[2].binary, "git écrit « - » pour un binaire");
+        assert!(files[2].binary, "git writes \"-\" for a binary");
         assert_eq!((files[2].added, files[2].removed), (0, 0));
     }
 
@@ -422,10 +422,10 @@ index 1234567..89abcde 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -10,4 +10,5 @@ impl Repo {
- fn inchangee() {
--    ancienne();
-+    nouvelle();
-+    ajoutee();
+ fn unchanged() {
+-    old_one();
++    new_one();
++    added();
  }
 ";
         let d = parse_unified(out);
@@ -437,15 +437,15 @@ index 1234567..89abcde 100644
         let l = &h.lines;
         assert_eq!(l[0].kind, DiffLineKind::Context);
         assert_eq!((l[0].old_no, l[0].new_no), (Some(10), Some(10)));
-        // Une suppression avance le compteur de l'ancien fichier seulement.
+        // A removal advances the old file's counter only.
         assert_eq!(l[1].kind, DiffLineKind::Removed);
         assert_eq!((l[1].old_no, l[1].new_no), (Some(11), None));
         assert_eq!(l[2].kind, DiffLineKind::Added);
         assert_eq!((l[2].old_no, l[2].new_no), (None, Some(11)));
         assert_eq!(l[3].new_no, Some(12));
-        // La ligne de contexte finale reprend après les deux côtés.
+        // The final context line resumes after both sides.
         assert_eq!((l[4].old_no, l[4].new_no), (Some(12), Some(13)));
-        assert_eq!(l[1].text, "    ancienne();");
+        assert_eq!(l[1].text, "    old_one();");
     }
 
     #[test]
@@ -466,18 +466,18 @@ index 1234567..89abcde 100644
     fn rebuilds_an_applicable_patch() {
         let out = "\
 @@ -5,3 +5,4 @@
- contexte
--vieux
-+neuf
-+encore
+ context
+-old
++new
++more
 ";
         let d = parse_unified(out);
         let patch = hunk_patch(Path::new("src/x.rs"), None, &d.hunks[0], false);
         assert!(patch.starts_with("diff --git a/src/x.rs b/src/x.rs\n"));
-        // Les comptes sont recalculés depuis les lignes retenues, pas copiés
-        // de l'en-tête d'origine : un hunk isolé peut être plus court.
+        // The counts are recomputed from the lines kept, not copied from the
+        // original header: an isolated hunk can be shorter.
         assert!(patch.contains("@@ -5,2 +5,3 @@\n"), "patch = {patch}");
-        assert!(patch.ends_with(" contexte\n-vieux\n+neuf\n+encore\n"));
+        assert!(patch.ends_with(" context\n-old\n+new\n+more\n"));
     }
 
     #[test]

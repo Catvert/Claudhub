@@ -242,14 +242,14 @@ impl Terminal {
             pty_options.drain_on_exit,
             false,
         )
-        .context("démarrage de la boucle d'entrées-sorties du terminal")?;
+        .context("starting the terminal's input/output loop")?;
         let sender = event_loop.channel();
-        // À installer avant que la boucle démarre : la première interrogation
-        // du terminal arrive dès la première invite.
+        // To be installed before the loop starts: the terminal's first query
+        // arrives as soon as the first prompt does.
         let _ = proxy.pty.set(sender.clone());
-        // Le JoinHandle est délibérément lâché : l'arrêt passe par
-        // `Msg::Shutdown` dans `Drop`, et attendre le thread au moment de
-        // fermer un onglet ferait attendre l'interface.
+        // The JoinHandle is deliberately dropped: shutdown goes through
+        // `Msg::Shutdown` in `Drop`, and waiting for the thread while closing a
+        // tab would make the interface wait.
         let _ = event_loop.spawn();
 
         Ok(Self {
@@ -498,31 +498,27 @@ impl Drop for Terminal {
 mod tests {
     use super::*;
 
-    /// Fait tourner un vrai programme dans un vrai pty et lit le résultat sur
-    /// la grille. C'est le seul test qui prouve la chaîne complète — pty,
-    /// boucle d'entrées-sorties, parseur, instantané ; tout le reste vérifie
-    /// des morceaux isolés.
+    /// Runs a real program in a real pty and reads the result off the grid. It
+    /// is the only test proving the whole chain — pty, input/output loop,
+    /// parser, snapshot; everything else checks isolated pieces.
     #[test]
     fn a_real_command_reaches_the_grid() {
         let terminal = Terminal::spawn(Spawn {
             working_directory: &std::env::temp_dir(),
-            // `printf` plutôt qu'un shell interactif : pas d'invite, pas de
-            // fichier de configuration de l'utilisateur, une sortie prévisible.
+            // `printf` rather than an interactive shell: no prompt, no user
+            // configuration file, a predictable output.
             command: Some((
                 "/bin/sh".into(),
-                vec![
-                    "-c".into(),
-                    "printf 'claudhub \\033[31mrouge\\033[0m'".into(),
-                ],
+                vec!["-c".into(), "printf 'claudhub \\033[31mred\\033[0m'".into()],
             )),
             env: HashMap::new(),
             size: TermSize::new(40, 5, 8, 16),
             scrollback: 100,
         })
-        .expect("le système doit pouvoir ouvrir un pty");
+        .expect("the system must be able to open a pty");
 
-        // La lecture est asynchrone : on attend que la première ligne se
-        // remplisse, avec une échéance qui fait échouer plutôt que pendre.
+        // Reading is asynchronous: we wait for the first line to fill, with a
+        // deadline that fails rather than hangs.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut snapshot = terminal.snapshot();
         while std::time::Instant::now() < deadline
@@ -533,19 +529,19 @@ mod tests {
         }
 
         assert_eq!(
-            snapshot.lines[0].text, "claudhub rouge",
-            "la sortie du programme n'est pas arrivée sur la grille"
+            snapshot.lines[0].text, "claudhub red",
+            "the program's output did not reach the grid"
         );
 
-        // Et la couleur émise par le programme est bien portée par le run.
+        // And the colour the program emitted is indeed carried by the run.
         let red = snapshot.lines[0]
             .segments
             .iter()
-            .find(|s| &snapshot.lines[0].text[s.start..s.end] == "rouge")
-            .expect("le mot coloré doit former son propre run");
+            .find(|s| &snapshot.lines[0].text[s.start..s.end] == "red")
+            .expect("the coloured word must form its own run");
         assert!(
             matches!(red.fg, Paint::Rgb(..)),
-            "le rouge du programme n'a pas été résolu : {:?}",
+            "the program's red was not resolved: {:?}",
             red.fg
         );
     }

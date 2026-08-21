@@ -86,12 +86,12 @@ pub fn key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
         "enter" => alt(vec![b'\r']),
         "tab" if m.shift => Some(b"\x1b[Z".to_vec()),
         "tab" => alt(vec![b'\t']),
-        // Retour arrière envoie DEL (0x7f), pas BS : c'est ce que décrit
-        // `xterm-256color`, et l'inverse casse l'édition de ligne du shell.
+        // Backspace sends DEL (0x7f), not BS: that is what `xterm-256color`
+        // describes, and the opposite breaks the shell's line editing.
         "backspace" if m.control => Some(vec![0x08]),
         "backspace" => alt(vec![0x7f]),
         "escape" => Some(vec![0x1b]),
-        "space" if m.control => Some(vec![0x00]), // Ctrl+Espace = NUL
+        "space" if m.control => Some(vec![0x00]), // Ctrl+Space = NUL
         "space" => alt(vec![b' ']),
 
         _ => {
@@ -153,26 +153,26 @@ mod tests {
     use super::*;
 
     fn stroke(key: &str) -> Keystroke {
-        Keystroke::parse(key).expect("raccourci valide")
+        Keystroke::parse(key).expect("valid keystroke")
     }
 
     fn bytes(key: &str, mode: TermMode) -> Vec<u8> {
-        key_bytes(&stroke(key), mode).expect("la touche doit produire des octets")
+        key_bytes(&stroke(key), mode).expect("the key must produce bytes")
     }
 
     #[test]
     fn arrows_follow_the_application_mode() {
         assert_eq!(bytes("up", TermMode::empty()), b"\x1b[A");
-        // Sous vim ou less, la même touche change de forme.
+        // Under vim or less, the same key changes form.
         assert_eq!(bytes("up", TermMode::APP_CURSOR), b"\x1bOA");
     }
 
     #[test]
     fn modified_arrows_use_the_long_form() {
-        // Ctrl+Droite : code 5 = 1 + ctrl(4).
+        // Ctrl+Right: code 5 = 1 + ctrl(4).
         assert_eq!(bytes("ctrl-right", TermMode::empty()), b"\x1b[1;5C");
         assert_eq!(bytes("shift-left", TermMode::empty()), b"\x1b[1;2D");
-        // Le mode applicatif ne s'applique pas à la forme longue.
+        // Application mode does not apply to the long form.
         assert_eq!(bytes("ctrl-right", TermMode::APP_CURSOR), b"\x1b[1;5C");
     }
 

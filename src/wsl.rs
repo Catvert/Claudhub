@@ -1,60 +1,59 @@
-//! Le serveur dans la distro : l'y trouver, l'y installer, l'y lancer.
+//! The server inside the distribution: finding it, installing it, launching it.
 //!
-//! C'est la moitié Windows de la découpe. L'interface est un `.exe` natif, les
-//! workers tournent dans WSL2, et entre les deux il faut que le binaire du
-//! serveur *soit* dans la distro — l'utilisateur n'ayant aucune raison de l'y
-//! mettre à la main. Il est donc livré à côté de l'exécutable et copié à la
-//! première ouverture, comme le fait VS Code.
+//! This is the Windows half of the split. The interface is a native `.exe`, the
+//! workers run in WSL2, and between the two the server binary has to *be* in
+//! the distribution — the user having no reason to put it there by hand. It is
+//! therefore shipped beside the executable and copied on first opening, the way
+//! VS Code does it.
 //!
-//! **L'installation est adressée par le contenu**, jamais par un numéro de
-//! version : l'empreinte du binaire livré nomme son dossier. Deux `.exe`
-//! différents installent donc deux serveurs différents sans se marcher dessus,
-//! une mise à jour s'installe d'elle-même, et une version de développement —
-//! qui n'a pas de numéro — se comporte comme les autres. C'est le motif de
-//! `tools/make_appimage.sh`, pour la même raison.
+//! **The installation is content-addressed**, never by version number: the
+//! digest of the shipped binary names its folder. Two different `.exe`s
+//! therefore install two different servers without treading on each other, an
+//! update installs itself, and a development build — which has no number —
+//! behaves like the rest. It is the same pattern as `tools/make_appimage.sh`,
+//! for the same reason.
 //!
-//! **Rien ici ne passe par un shell de connexion.** `wsl.exe --exec` lance le
-//! programme directement : ce qui s'y écrit doit donc être un chemin absolu,
-//! et non un `~` que personne ne développerait. D'où [`probe`], qui demande
-//! une fois pour toutes à la distro où est le foyer de l'utilisateur et quel
-//! shell lui appartient.
+//! **Nothing here goes through a login shell.** `wsl.exe --exec` launches the
+//! program directly: what is written there has to be an absolute path, not a
+//! `~` nobody would expand. Hence [`probe`], which asks the distribution once
+//! and for all where the user's home is and which shell belongs to them.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 
-/// Le nom du binaire, le même des deux côtés du fil.
+/// The binary's name, the same on both sides of the wire.
 pub const SERVER_BIN: &str = "claudhub-server";
 
-// `EMBEDDED` : le serveur embarqué dans l'exécutable, quand il y en a un.
-// Posé par `build.rs` d'après `CLAUDHUB_EMBED_SERVER` — présent dans ce que la
-// CI livre, absent d'un build de développement, qui n'a pas de binaire musl
-// sous la main. Voir `bundled_server` pour le repli.
+// `EMBEDDED`: the server embedded in the executable, when there is one.
+// Set by `build.rs` from `CLAUDHUB_EMBED_SERVER` — present in what CI ships,
+// absent from a development build, which has no musl binary to hand. See
+// `bundled_server` for the fallback.
 include!(concat!(env!("OUT_DIR"), "/server.rs"));
 
-/// Ce que la distro nous apprend d'elle-même, en un seul aller-retour.
+/// What the distribution tells us about itself, in a single round trip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Probe {
-    /// Le foyer de l'utilisateur, en absolu : `--exec` ne développe pas `~`.
+    /// The user's home, absolute: `--exec` does not expand `~`.
     pub home: String,
-    /// Son shell de connexion, tel que `/etc/passwd` le déclare.
+    /// Their login shell, as `/etc/passwd` declares it.
     ///
-    /// Il est demandé ici parce que c'est le seul endroit où on peut : un
-    /// terminal lancé par `--exec` n'a pas de shell pour interroger `$SHELL`,
-    /// et c'est précisément un shell qu'on veut lancer.
+    /// It is asked for here because this is the only place we can: a terminal
+    /// launched by `--exec` has no shell to query `$SHELL` from, and a shell is
+    /// precisely what we want to launch.
     pub shell: String,
 }
 
-/// Les distributions installées, dans l'ordre où `wsl.exe` les donne.
+/// The installed distributions, in the order `wsl.exe` gives them.
 ///
-/// La première est celle par défaut, ce qui en fait une proposition
-/// raisonnable quand il faut en choisir une.
+/// The first is the default one, which makes it a reasonable suggestion when
+/// one has to be chosen.
 pub fn distributions() -> Result<Vec<String>> {
     let out = wsl()
         .args(["--list", "--quiet"])
         .output()
-        .context("wsl.exe est introuvable : WSL est-il installé ?")?;
+        .context("wsl.exe not found: is WSL installed?")?;
     let text = decode(&out.stdout);
     let list: Vec<String> = text
         .lines()
@@ -62,15 +61,15 @@ pub fn distributions() -> Result<Vec<String>> {
         .filter(|line| !line.is_empty())
         .collect();
     if list.is_empty() {
-        bail!("aucune distribution WSL installée");
+        bail!("no WSL distribution installed");
     }
     Ok(list)
 }
 
-/// Demande à la distro où vit l'utilisateur et quel shell lui appartient.
+/// Asks the distribution where the user lives and which shell belongs to them.
 pub fn probe(distro: &str) -> Result<Probe> {
-    // `getent` plutôt que `$SHELL` : la variable n'est posée que par un shell
-    // de connexion, et il n'y en a pas ici. Le champ 7 de `passwd` fait foi.
+    // `getent` rather than `$SHELL`: the variable is only set by a login shell,
+    // and there is none here. Field 7 of `passwd` is authoritative.
     let out = run(
         distro,
         "printf %s\\\\n $HOME; getent passwd $(id -u) | cut -d: -f7",
@@ -79,11 +78,11 @@ pub fn probe(distro: &str) -> Result<Probe> {
     let home = lines.next().unwrap_or_default().trim().to_string();
     let shell = lines.next().unwrap_or_default().trim().to_string();
     if home.is_empty() {
-        bail!("la distribution « {distro} » n'a pas dit où est le foyer de l'utilisateur");
+        bail!("the distribution \"{distro}\" did not say where the user's home is");
     }
     Ok(Probe {
         home,
-        // Un foyer sans shell déclaré est improbable, mais `sh` existe partout.
+        // A home without a declared shell is unlikely, but `sh` exists everywhere.
         shell: if shell.is_empty() {
             "/bin/sh".into()
         } else {
@@ -92,45 +91,44 @@ pub fn probe(distro: &str) -> Result<Probe> {
     })
 }
 
-/// Le binaire serveur livré à côté de l'exécutable.
+/// The server binary shipped beside the executable.
 ///
-/// Le repli du build de développement : ce qui est livré porte son serveur
-/// dedans (voir `EMBEDDED`), mais une compilation locale n'a pas de binaire
-/// musl à embarquer, et poser le fichier à côté reste la façon de s'en donner
-/// un.
+/// The development build's fallback: what is shipped carries its server inside
+/// (see `EMBEDDED`), but a local build has no musl binary to embed, and putting
+/// the file next to it is still the way to give oneself one.
 pub fn bundled_server() -> Result<PathBuf> {
-    let exe = std::env::current_exe().context("chemin de l'exécutable introuvable")?;
+    let exe = std::env::current_exe().context("executable path not found")?;
     let path = exe
         .parent()
         .map(|dir| dir.join(SERVER_BIN))
         .unwrap_or_default();
     if !path.is_file() {
         bail!(
-            "cet exécutable ne porte pas de serveur embarqué et {SERVER_BIN} \
-             est absent d'à côté de lui ({}) : construire la cible musl et \
-             poser le binaire là, ou passer par CLAUDHUB_SERVER_CMD",
+            "this executable carries no embedded server and {SERVER_BIN} \
+             is missing from beside it ({}): build the musl target and put \
+             the binary there, or go through CLAUDHUB_SERVER_CMD",
             path.display()
         );
     }
     Ok(path)
 }
 
-/// Les octets du serveur à installer : ceux de l'exécutable s'il en porte,
-/// ceux du fichier voisin sinon.
+/// The bytes of the server to install: the executable's if it carries any, the
+/// neighbouring file's otherwise.
 fn server_bytes() -> Result<Vec<u8>> {
     if let Some(bytes) = EMBEDDED {
         return Ok(bytes.to_vec());
     }
     let source = bundled_server()?;
-    std::fs::read(&source).with_context(|| format!("lecture de {} impossible", source.display()))
+    std::fs::read(&source).with_context(|| format!("cannot read {}", source.display()))
 }
 
-/// Installe le serveur dans la distro s'il n'y est pas déjà, et rend son
-/// chemin absolu.
+/// Installs the server into the distribution if it is not already there, and
+/// returns its absolute path.
 ///
-/// L'octroi du bit d'exécution n'est pas une précaution : une archive zip ne
-/// le transporte pas, et c'est la panne que tout le monde rencontre en
-/// copiant le binaire à la main.
+/// Granting the execute bit is not a precaution: a zip archive does not carry
+/// it, and it is the failure everybody runs into when copying the binary by
+/// hand.
 pub fn ensure_installed(distro: &str, probe: &Probe) -> Result<String> {
     let bytes = server_bytes()?;
     let id = content_id(&bytes);
@@ -151,35 +149,33 @@ pub fn ensure_installed(distro: &str, probe: &Probe) -> Result<String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .context("wsl.exe n'a pas pu lancer l'installation")?;
+        .context("wsl.exe could not launch the installation")?;
     {
         use std::io::Write;
-        let mut stdin = child.stdin.take().expect("stdin demandé");
+        let mut stdin = child.stdin.take().expect("stdin requested");
         stdin
             .write_all(&bytes)
-            .context("envoi du serveur dans la distribution")?;
+            .context("sending the server into the distribution")?;
     }
-    let out = child
-        .wait_with_output()
-        .context("installation du serveur")?;
+    let out = child.wait_with_output().context("installing the server")?;
     if !out.status.success() {
         bail!(
-            "installation du serveur dans « {distro} » : {}",
+            "installing the server into \"{distro}\": {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
     Ok(target)
 }
 
-/// Le script d'installation, écrit sans le moindre guillemet.
+/// The install script, written without a single quote.
 ///
-/// C'est délibéré : la ligne traverse `CreateProcess`, puis `wsl.exe`, qui
-/// reconstruit l'`argv` à sa façon — chaque guillemet y est une occasion de
-/// se faire manger. Le prix est qu'un foyer contenant une espace ne marcherait
-/// pas ; on n'en a jamais vu sous Linux.
+/// This is deliberate: the line crosses `CreateProcess`, then `wsl.exe`, which
+/// rebuilds the `argv` its own way — every quote there is a chance to get
+/// eaten. The price is that a home containing a space would not work; none has
+/// ever been seen on Linux.
 ///
-/// La purge garde le dossier du build courant et jette les autres : sans elle,
-/// chaque mise à jour laisserait douze mégaoctets derrière elle.
+/// The purge keeps the current build's folder and throws the others away:
+/// without it, every update would leave twelve megabytes behind.
 fn install_script(dir: &str, target: &str, home: &str, id: &str) -> String {
     format!(
         "set -e; mkdir -p {dir}; cat > {target}.part; chmod +x {target}.part; \
@@ -263,15 +259,15 @@ pub fn content_id(bytes: &[u8]) -> String {
     format!("{hash:016x}")
 }
 
-/// Lance une commande shell dans la distro et rend sa sortie standard.
+/// Runs a shell command inside the distribution and returns its standard output.
 fn run(distro: &str, script: &str) -> Result<String> {
     let out = wsl()
         .args(["-d", distro, "--exec", "/bin/sh", "-c", script])
         .output()
-        .context("wsl.exe est introuvable : WSL est-il installé ?")?;
+        .context("wsl.exe not found: is WSL installed?")?;
     if !out.status.success() {
         bail!(
-            "« {distro} » a refusé : {}",
+            "\"{distro}\" refused: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
@@ -308,20 +304,16 @@ fn decode(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    /// Ce qu'on embarque doit être le binaire Linux, pas l'exécutable Windows
-    /// ni un fichier de trace ramassé au passage : une erreur de chemin dans
-    /// la CI ne se verrait qu'au premier démarrage sur la machine d'un
-    /// utilisateur, et se lirait comme une distribution cassée.
+    /// What we embed must be the Linux binary, not the Windows executable nor a
+    /// trace file picked up along the way: a path mistake in CI would only show
+    /// on the first startup on a user's machine, and would read as a broken
+    /// distribution.
     #[test]
     fn an_embedded_server_is_a_linux_binary() {
         let Some(bytes) = EMBEDDED else {
-            return; // build de développement : rien n'est embarqué
+            return; // development build: nothing is embedded
         };
-        assert_eq!(
-            &bytes[..4],
-            b"\x7fELF",
-            "le serveur embarqué n'est pas un ELF"
-        );
+        assert_eq!(&bytes[..4], b"\x7fELF", "the embedded server is not an ELF");
     }
 
     #[test]
@@ -336,26 +328,26 @@ mod tests {
             .collect();
         assert_eq!(decode(&utf16), "Ubuntu\nDebian\n");
         assert_eq!(decode(b"Ubuntu\nDebian\n"), "Ubuntu\nDebian\n");
-        // Un nom accentué ne doit pas se perdre dans la conversion.
-        let accented: Vec<u8> = "Ubuntu-Préféré\n"
+        // An accented name must not be lost in the conversion.
+        let accented: Vec<u8> = "Ubuntu-Café\n"
             .encode_utf16()
             .flat_map(|u| u.to_le_bytes())
             .collect();
-        assert_eq!(decode(&accented), "Ubuntu-Préféré\n");
+        assert_eq!(decode(&accented), "Ubuntu-Café\n");
     }
 
-    /// Un contenu identique donne la même empreinte, un contenu différent une
-    /// autre : c'est tout ce que l'adressage par contenu demande.
+    /// Identical content gives the same digest, different content another one:
+    /// that is all content addressing asks for.
     #[test]
     fn the_content_names_the_install() {
-        assert_eq!(content_id(b"un serveur"), content_id(b"un serveur"));
-        assert_ne!(content_id(b"un serveur"), content_id(b"un autre"));
+        assert_eq!(content_id(b"a server"), content_id(b"a server"));
+        assert_ne!(content_id(b"a server"), content_id(b"another"));
         assert_eq!(content_id(b"").len(), 16);
     }
 
-    /// Le script ne doit pas contenir de guillemets : ils ne survivent pas au
-    /// passage par `wsl.exe`, et c'est la panne qu'on ne comprend qu'après
-    /// l'avoir vécue.
+    /// The script must contain no quotes: they do not survive the trip through
+    /// `wsl.exe`, and it is the failure you only understand after living
+    /// through it.
     #[test]
     fn the_install_script_carries_no_quotes() {
         let script = install_script(
@@ -414,13 +406,13 @@ mod tests {
     #[test]
     fn the_launch_line_carries_the_working_directory_when_there_is_one() {
         assert_eq!(
-            launch_argv("Ubuntu", "/home/a/s", Some("/home/a/projet")),
+            launch_argv("Ubuntu", "/home/a/s", Some("/home/a/project")),
             vec![
                 "wsl.exe",
                 "-d",
                 "Ubuntu",
                 "--cd",
-                "/home/a/projet",
+                "/home/a/project",
                 "--exec",
                 "/home/a/s"
             ]

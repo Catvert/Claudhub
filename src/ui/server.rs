@@ -85,20 +85,20 @@ impl Render for WslPrompt {
 }
 
 impl ClaudhubApp {
-    /// Met le serveur en route, une fois la fenêtre construite.
+    /// Starts the server up, once the window is built.
     ///
-    /// Appelé depuis une tâche et non depuis le constructeur : ouvrir un
-    /// dialogue demande une fenêtre déjà montée, et les couches de `Root` ne
-    /// sont posées qu'au premier rendu.
+    /// Called from a task and not from the constructor: opening a dialog needs
+    /// a window already mounted, and `Root`'s layers are only installed on the
+    /// first render.
     pub(super) fn start_backend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // La ligne de commande explicite l'emporte sur tout : c'est le levier
-        // de test, et la sortie de secours quand la mise en route se trompe.
+        // An explicit command line wins over everything: it is the test lever,
+        // and the escape hatch when startup gets it wrong.
         if let Some(argv) = remote::command_from_env() {
             self.connect_argv(argv, window, cx);
             return;
         }
         if !cfg!(windows) {
-            return; // les workers de ce processus tournent déjà
+            return; // this process's workers are already running
         }
         let distro = Settings::global(cx).wsl_distro.clone();
         if distro.trim().is_empty() {
@@ -285,17 +285,15 @@ impl ClaudhubApp {
 
     pub(super) fn server_failed(&mut self, error: anyhow::Error, cx: &mut Context<Self>) {
         let message = format!("{error:#}");
-        log::warn!("serveur indisponible : {message}");
+        log::warn!("server unavailable: {message}");
         self.server_state = ServerState::Down(message);
         cx.notify();
     }
 
-    /// Ce que la barre d'état dit du serveur, quand elle a quelque chose à en
-    /// dire.
+    /// What the status bar says about the server, when it has anything to say.
     ///
-    /// Rien en mode local ni quand il répond : une ligne permanente pour
-    /// annoncer que tout va bien userait la place où s'affiche ce qui ne va
-    /// pas.
+    /// Nothing in local mode nor while it answers: a permanent line announcing
+    /// that all is well would use up the place where what is wrong shows.
     pub(super) fn render_server_status(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let (color, label, detail, relaunch) = match &self.server_state {
             ServerState::Local | ServerState::Up => return None,

@@ -1,23 +1,22 @@
-//! Thème.
+//! Theme.
 //!
-//! Claudhub reprend les palettes claire et sombre de gpui-component et n'y touche
-//! qu'à la marge : les couleurs des diffs et des états git, que la
-//! bibliothèque n'a pas de raison de connaître.
+//! Claudhub takes gpui-component's light and dark palettes and only touches
+//! them at the margins: the colours of diffs and git states, which the library
+//! has no reason to know about.
 
 use std::path::PathBuf;
 
-use gpui::{px, App, Hsla, Pixels, Rgba, Window};
+use gpui::{prelude::*, px, App, Hsla, Pixels, Rgba, Window};
 use gpui_component::{Theme, ThemeRegistry};
 
 use super::settings::{Settings, ThemeMode};
 
-/// Les thèmes livrés avec Claudhub.
+/// The themes shipped with Claudhub.
 ///
-/// Ils sont embarqués dans le binaire, puis **écrits sur le disque** au
-/// démarrage : le registre de gpui-component ne se charge que depuis un
-/// répertoire, qu'il surveille. L'effet de bord est heureux — le même
-/// répertoire accueille les thèmes que l'utilisateur ajoute, et un fichier
-/// modifié est rechargé sans relancer Claudhub.
+/// They are embedded in the binary, then **written to disk** at startup:
+/// gpui-component's registry only loads from a directory, which it watches.
+/// The side effect is a happy one — the same directory holds the themes the
+/// user adds, and a modified file is reloaded without restarting Claudhub.
 #[derive(rust_embed::RustEmbed)]
 #[folder = "assets/themes"]
 #[include = "*.json"]
@@ -27,27 +26,27 @@ pub fn themes_dir() -> Option<PathBuf> {
     super::settings::config_dir().map(|dir| dir.join("themes"))
 }
 
-/// Installe les thèmes livrés et met le registre à leur écoute.
+/// Installs the bundled themes and points the registry at them.
 ///
-/// Les fichiers `claudhub-*.json` sont réécrits à chaque démarrage : c'est ce qui
-/// fait qu'une mise à jour de Claudhub corrige un thème sans demander une
-/// manœuvre. Pour en modifier un, il faut donc le copier sous un autre nom —
-/// tout fichier `.json` du répertoire est chargé.
+/// The `claudhub-*.json` files are rewritten on every startup: that is what
+/// makes a Claudhub update fix a theme without asking for a manoeuvre. To
+/// modify one, it therefore has to be copied under another name — every
+/// `.json` file in the directory is loaded.
 pub fn install(cx: &mut App) {
     let Some(dir) = themes_dir() else {
         return;
     };
     if let Err(e) = write_bundled(&dir) {
-        log::warn!("thèmes non installés : {e}");
+        log::warn!("themes not installed: {e}");
     }
-    // Le chargement est asynchrone : le thème choisi n'existe pas encore dans
-    // le registre à cet instant, d'où la ré-application dans le rappel.
+    // Loading is asynchronous: the chosen theme does not exist in the registry
+    // yet at this point, hence the re-application in the callback.
     let result = ThemeRegistry::watch_dir(dir, cx, |cx| {
         let settings = Settings::global(cx).clone();
         apply(&settings, None, cx);
     });
     if let Err(e) = result {
-        log::warn!("répertoire de thèmes non surveillé : {e}");
+        log::warn!("theme directory not watched: {e}");
     }
 }
 
@@ -253,11 +252,40 @@ fn rgb(hex: u32) -> Hsla {
     .into()
 }
 
-/// Couleurs propres à la revue.
+/// Colours specific to the review.
 ///
-/// Le vert et le rouge sont ceux de GitHub, à dessein : ce sont les teintes
-/// qu'un relecteur a déjà dans l'œil, et les fonds sont assez pâles pour que
-/// le texte reste lisible dans les deux modes.
+/// The green and the red are GitHub's, deliberately: they are the hues a
+/// reviewer already has in their eye, and the backgrounds are pale enough for
+/// the text to stay readable in both modes.
+/// The `+n` and `−m` of a volume of work, in the diff's colours.
+///
+/// Two independent children rather than one wrapped element: the callers drop
+/// them straight into their row, which already sets the gap, and a wrapper of
+/// our own would give them a second one. A zero is left out — `+0` makes the eye
+/// read a number where there is none.
+pub fn volume(added: usize, removed: usize, colors: &DiffColors) -> Vec<gpui::Div> {
+    let mut parts = Vec::new();
+    if added > 0 {
+        parts.push(
+            gpui::div()
+                .flex_none()
+                .text_xs()
+                .text_color(colors.added_fg)
+                .child(format!("+{added}")),
+        );
+    }
+    if removed > 0 {
+        parts.push(
+            gpui::div()
+                .flex_none()
+                .text_xs()
+                .text_color(colors.removed_fg)
+                .child(format!("−{removed}")),
+        );
+    }
+    parts
+}
+
 pub struct DiffColors {
     pub added_bg: Hsla,
     pub added_fg: Hsla,
@@ -346,54 +374,57 @@ pub fn status_color(code: crate::git::StatusCode, cx: &App) -> Hsla {
 mod tests {
     use super::*;
 
-    /// Un thème que le registre n'arrive pas à lire est simplement ignoré :
-    /// aucune erreur ne remonte à l'écran, il manque juste de la liste. Ce
-    /// test est le seul endroit où une faute de frappe dans un JSON se voit.
+    /// A theme the registry fails to read is simply ignored: no error reaches
+    /// the screen, it is just missing from the list. This test is the only
+    /// place a typo in a JSON shows.
     #[test]
     fn every_bundled_theme_parses() {
         let mut count = 0;
         for name in BundledThemes::iter() {
-            let file = BundledThemes::get(&name).expect("fichier embarqué");
+            let file = BundledThemes::get(&name).expect("embedded file");
             let text = std::str::from_utf8(&file.data).expect("UTF-8");
             let set: gpui_component::ThemeSet =
-                serde_json::from_str(text).unwrap_or_else(|e| panic!("{name} illisible : {e}"));
-            assert!(!set.themes.is_empty(), "{name} ne déclare aucun thème");
+                serde_json::from_str(text).unwrap_or_else(|e| panic!("{name} unreadable: {e}"));
+            assert!(!set.themes.is_empty(), "{name} declares no theme");
             for theme in &set.themes {
-                assert!(!theme.name.is_empty(), "{name} : un thème sans nom");
+                assert!(!theme.name.is_empty(), "{name}: a theme with no name");
             }
             count += 1;
         }
-        assert!(count >= 10, "les thèmes livrés ont disparu du binaire");
+        assert!(
+            count >= 10,
+            "the bundled themes have vanished from the binary"
+        );
     }
 
-    /// Une clé absente ne provoque pas d'erreur : elle reprend la valeur par
-    /// défaut, qui est *claire*. Sur un thème sombre, cela fait une tache
-    /// blanche au milieu de la fenêtre, et rien ne le signale.
+    /// A missing key raises no error: it falls back to the default value, which
+    /// is *light*. On a dark theme that makes a white patch in the middle of
+    /// the window, and nothing points it out.
     #[test]
     fn no_bundled_theme_leaves_a_colour_unset() {
         let reference: std::collections::BTreeSet<String> = keys_of("claudhub-nord.json");
         for name in BundledThemes::iter() {
             let keys = keys_of(&name);
             let missing: Vec<_> = reference.difference(&keys).collect();
-            assert!(missing.is_empty(), "{name} : couleurs absentes {missing:?}");
+            assert!(missing.is_empty(), "{name}: missing colours {missing:?}");
         }
     }
 
-    /// Les couleurs de l'interface **et** celles de la coloration : un thème
-    /// à qui manque `keyword` ou `embedded` rend le code d'une seule teinte,
-    /// ce qui se remarque tout autant qu'une tache blanche.
+    /// The interface colours **and** the syntax ones: a theme missing `keyword`
+    /// or `embedded` renders code in a single hue, which is just as noticeable
+    /// as a white patch.
     fn keys_of(name: &str) -> std::collections::BTreeSet<String> {
-        let file = BundledThemes::get(name).expect("fichier embarqué");
+        let file = BundledThemes::get(name).expect("embedded file");
         let value: serde_json::Value = serde_json::from_slice(&file.data).expect("JSON");
         let theme = &value["themes"][0];
         let colors = theme["colors"]
             .as_object()
-            .expect("une table de couleurs")
+            .expect("a colour table")
             .keys()
             .cloned();
         let syntax = theme["highlight"]["syntax"]
             .as_object()
-            .expect("une table de styles")
+            .expect("a style table")
             .keys()
             .map(|k| format!("syntax.{k}"));
         colors.chain(syntax).collect()

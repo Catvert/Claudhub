@@ -399,22 +399,29 @@ pub enum Cmd {
         dir: PathBuf,
     },
 
-    // — `wt` : ce que le `wt.toml` du projet ajoute ————————————————
-    /// Lit le `wt.toml` d'un dépôt. Une lecture de fichier, mais elle a sa
-    /// commande : la vue n'a le droit de toucher au disque nulle part.
+    // — `wt`: what the project's `wt.toml` adds ————————————————————
+    /// Reads a repository's `wt.toml`. A file read, but it gets its own command:
+    /// the view is not allowed to touch the disk anywhere.
     WtLoad {
         main: PathBuf,
     },
-    /// Les questions du projet qui s'appliquent, compte tenu des réponses déjà
-    /// données. Un `[[prompt]]` avec `source` lance un shell : jamais depuis le
-    /// thread d'interface.
+    /// The project's questions that apply, given the answers already provided. A
+    /// `[[prompt]]` with `source` launches a shell: never from the interface
+    /// thread.
     WtQuestions {
         main: PathBuf,
         slug: String,
         answers: std::collections::BTreeMap<String, String>,
+        phase: crate::wt::Phase,
+        /// Set when the questions wanted are a task's own — `ask = "task"`
+        /// prompts are never asked by a phase.
+        task: Option<String>,
+        /// Round zero is the first: that is when the worker seeds the answers
+        /// from what the worktree remembers.
+        round: u64,
     },
-    /// Crée un worktree avec tout ce que le projet demande : branche selon son
-    /// modèle, dossiers, copies, ports, puis `post_new`.
+    /// Creates a worktree with everything the project asks for: branch following
+    /// its template, folders, copies, ports, then `post_new`.
     WtCreate {
         main: PathBuf,
         slug: String,
@@ -428,23 +435,29 @@ pub enum Cmd {
     WtUp {
         main: PathBuf,
         slug: String,
+        /// The answers to the `ask = "up"` questions, as `--set`s. Empty repeats
+        /// the previous start, which is what a project asking nothing does.
+        answers: std::collections::BTreeMap<String, String>,
     },
     WtDown {
         main: PathBuf,
         slug: String,
     },
-    /// Prépare une tâche du projet : les commandes sont rendues ici et lancées
-    /// par un onglet de terminal, parce qu'elles sont souvent interactives.
+    /// Prepares a project task: the commands are rendered here and launched by a
+    /// terminal tab, because they are often interactive.
     WtTask {
         main: PathBuf,
         worktree: WorktreeId,
         slug: String,
         task: String,
+        /// The answers to the prompts the task declares. The worker turns them
+        /// into its arguments — the order is the task's, and only it knows it.
+        answers: std::collections::BTreeMap<String, String>,
     },
-    /// Relève l'état et les adresses des worktrees d'un projet.
+    /// Reads the state and the addresses of a project's worktrees.
     ///
-    /// Ce sont des commandes shell, une par worktree et par relevé : file de
-    /// fond uniquement, et période longue.
+    /// These are shell commands, one per worktree and per reading: background
+    /// queue only, and a long period.
     WtScan {
         targets: Vec<(PathBuf, WorktreeId)>,
     },
@@ -462,12 +475,85 @@ pub enum Cmd {
     },
 }
 
-/// Ce qu'une lecture de base rend : le résultat, ou le message d'erreur déjà
-/// mis à plat.
+impl Cmd {
+    /// The variant's name, for the journal.
+    ///
+    /// A match and not `Debug`: the name is wanted **without** the payload — a
+    /// `WriteFile` carries a whole file, a `Commit` its message — and formatting
+    /// the whole thing to keep its first word would be paid on every command.
+    /// The exhaustiveness check is what keeps this list honest: a new variant
+    /// does not compile until it has been named here.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::OpenRepo(..) => "OpenRepo",
+            Self::OpenIfRepo(..) => "OpenIfRepo",
+            Self::RefreshRepo { .. } => "RefreshRepo",
+            Self::RefreshStatus { .. } => "RefreshStatus",
+            Self::LoadDiffFiles { .. } => "LoadDiffFiles",
+            Self::LoadFileDiff { .. } => "LoadFileDiff",
+            Self::LoadBranches { .. } => "LoadBranches",
+            Self::LoadSummaries { .. } => "LoadSummaries",
+            Self::ScanAgents { .. } => "ScanAgents",
+            Self::LoadHistory { .. } => "LoadHistory",
+            Self::Stage { .. } => "Stage",
+            Self::Unstage { .. } => "Unstage",
+            Self::Discard { .. } => "Discard",
+            Self::Delete { .. } => "Delete",
+            Self::ApplyHunk { .. } => "ApplyHunk",
+            Self::Commit { .. } => "Commit",
+            Self::SuggestMessage { .. } => "SuggestMessage",
+            Self::Fetch { .. } => "Fetch",
+            Self::AutoFetch { .. } => "AutoFetch",
+            Self::Pull { .. } => "Pull",
+            Self::Push { .. } => "Push",
+            Self::Checkout { .. } => "Checkout",
+            Self::CreateBranch { .. } => "CreateBranch",
+            Self::DeleteBranch { .. } => "DeleteBranch",
+            Self::Merge { .. } => "Merge",
+            Self::Integrate { .. } => "Integrate",
+            Self::Rebase { .. } => "Rebase",
+            Self::AbortPending { .. } => "AbortPending",
+            Self::ResumePending { .. } => "ResumePending",
+            Self::ResolveConflict { .. } => "ResolveConflict",
+            Self::LoadIssues { .. } => "LoadIssues",
+            Self::LoadIssueEvent { .. } => "LoadIssueEvent",
+            Self::DbDatabases { .. } => "DbDatabases",
+            Self::DbTables { .. } => "DbTables",
+            Self::DbColumns { .. } => "DbColumns",
+            Self::DbAllColumns { .. } => "DbAllColumns",
+            Self::DbQuery { .. } => "DbQuery",
+            Self::DbExport { .. } => "DbExport",
+            Self::ListFiles { .. } => "ListFiles",
+            Self::ReadFile { .. } => "ReadFile",
+            Self::WriteFile { .. } => "WriteFile",
+            Self::FileOp { .. } => "FileOp",
+            Self::ReadNotes { .. } => "ReadNotes",
+            Self::WriteNotes { .. } => "WriteNotes",
+            Self::WriteVaultFile { .. } => "WriteVaultFile",
+            Self::OpenExternal { .. } => "OpenExternal",
+            Self::Watch { .. } => "Watch",
+            Self::Unwatch { .. } => "Unwatch",
+            Self::WatchDir { .. } => "WatchDir",
+            Self::UnwatchDir { .. } => "UnwatchDir",
+            Self::WtLoad { .. } => "WtLoad",
+            Self::WtQuestions { .. } => "WtQuestions",
+            Self::WtCreate { .. } => "WtCreate",
+            Self::WtRemove { .. } => "WtRemove",
+            Self::WtUp { .. } => "WtUp",
+            Self::WtDown { .. } => "WtDown",
+            Self::WtTask { .. } => "WtTask",
+            Self::WtScan { .. } => "WtScan",
+            Self::AddWorktree { .. } => "AddWorktree",
+            Self::RemoveWorktree { .. } => "RemoveWorktree",
+        }
+    }
+}
+
+/// What a database read returns: the result, or the error message already
+/// flattened.
 ///
-/// Un `String` et non une `anyhow::Error` : `Evt` est `Clone`, ce qu'une
-/// erreur d'`anyhow` n'est pas, et la vue n'affiche de toute façon qu'une
-/// phrase.
+/// A `String` and not an `anyhow::Error`: `Evt` is `Clone`, which an `anyhow`
+/// error is not, and the view only shows one sentence anyway.
 pub type DbResult<T> = std::result::Result<T, String>;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -548,13 +634,22 @@ pub enum Evt {
     WtQuestions {
         main: PathBuf,
         slug: String,
-        /// Les réponses avec lesquelles la question a été posée : le dialogue
-        /// les repasse d'un tour à l'autre, et une réponse en retard ne doit
-        /// pas écraser un tour plus avancé.
+        /// The answers the round was computed with. They come **back** because
+        /// the worker may have seeded them: a `wt up` starts from what the
+        /// worktree remembers, which is what stops it asking twice, and the view
+        /// has no business knowing where `wt` files that.
         answers: std::collections::BTreeMap<String, String>,
         questions: Vec<crate::wt::Question>,
+        phase: crate::wt::Phase,
+        /// The task the questions belong to, when they are a task's own.
+        task: Option<String>,
+        /// The round this answers. A counter and not a comparison of the
+        /// answers: the worker seeds them, so what comes back is no longer what
+        /// went out, and a late round would replace the questions with the wrong
+        /// ones.
+        round: u64,
     },
-    /// Une tâche prête à partir dans un terminal.
+    /// A task ready to go into a terminal.
     WtTask {
         worktree: WorktreeId,
         task: String,
@@ -700,18 +795,18 @@ pub enum Evt {
     },
 }
 
-/// Ce que `wt` sait d'un worktree, et que git ignore.
+/// What `wt` knows about a worktree, and git does not.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WtWorktree {
-    /// `None` quand le projet ne déclare pas de `[status] up` : il n'y a alors
-    /// rien à démarrer, et afficher « arrêté » serait une information fausse.
+    /// `None` when the project declares no `[status] up`: there is then nothing
+    /// to start, and showing "stopped" would be false information.
     pub up: Option<bool>,
     pub endpoints: Vec<crate::wt::Endpoint>,
 }
 
-/// Ce que l'utilisateur a demandé, pour formuler le message de résultat et
-/// savoir quoi rafraîchir ensuite.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// What the user asked for, in order to phrase the result message and know what
+/// to refresh next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Action {
     Refresh,
     Stage,
@@ -745,7 +840,67 @@ pub enum Action {
 }
 
 impl Action {
-    /// Clé i18n du message affiché en cas de succès.
+    /// The i18n key of the message shown on success.
+    /// Every action, for the tests that check each has its messages.
+    pub const ALL: [Action; 29] = [
+        Action::Refresh,
+        Action::Stage,
+        Action::Unstage,
+        Action::Discard,
+        Action::Delete,
+        Action::Commit,
+        Action::SuggestMessage,
+        Action::Fetch,
+        Action::Pull,
+        Action::Push,
+        Action::Checkout,
+        Action::Branch,
+        Action::Worktree,
+        Action::Diff,
+        Action::History,
+        Action::Merge,
+        Action::Integrate,
+        Action::Rebase,
+        Action::Abort,
+        Action::Resume,
+        Action::WtUp,
+        Action::WtDown,
+        Action::Resolve,
+        Action::Read,
+        Action::Write,
+        Action::FileOp,
+        Action::OpenExternal,
+        Action::Sentry,
+        Action::Notes,
+    ];
+
+    /// What the status bar says **while** the operation runs.
+    ///
+    /// A gerund and not the button's tooltip: the bar says what is happening,
+    /// not what a click would do. The wildcard is deliberate and not an
+    /// oversight — only the operations that last long enough to be worth a line
+    /// are named, and a `Stage` finishing in ten milliseconds would show a
+    /// message nobody has time to read.
+    pub fn running_key(self) -> &'static str {
+        match self {
+            Self::Commit => "running-commit",
+            Self::SuggestMessage => "running-suggest-message",
+            Self::Fetch => "running-fetch",
+            Self::Pull => "running-pull",
+            Self::Push => "running-push",
+            Self::Checkout => "running-checkout",
+            Self::Merge => "running-merge",
+            Self::Integrate => "running-integrate",
+            Self::Rebase => "running-rebase",
+            Self::Abort => "running-abort",
+            Self::Resume => "running-resume",
+            Self::WtUp => "running-wt-up",
+            Self::WtDown => "running-wt-down",
+            Self::Worktree => "running-worktree",
+            _ => "running-generic",
+        }
+    }
+
     pub fn success_key(self) -> &'static str {
         match self {
             Self::Refresh => "action-refresh-ok",
@@ -778,5 +933,36 @@ impl Action {
             Self::Resolve => "action-resolve-ok",
             Self::Notes => "action-notes-ok",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The journal names every command, and the name comes from a match: a
+    /// variant added without one does not compile, where a name read off `Debug`
+    /// would have silently filed it under whatever its payload starts with.
+    #[test]
+    fn a_command_carries_its_name() {
+        assert_eq!(Cmd::OpenRepo(PathBuf::from("/p")).name(), "OpenRepo");
+        assert_eq!(
+            Cmd::Push {
+                worktree: PathBuf::from("/p"),
+                force_with_lease: false,
+            }
+            .name(),
+            "Push"
+        );
+    }
+
+    /// Two actions sharing a message would say "Pushing…" for a pull.
+    #[test]
+    fn no_two_actions_share_a_success_message() {
+        let mut keys: Vec<&str> = Action::ALL.iter().map(|a| a.success_key()).collect();
+        keys.sort_unstable();
+        let before = keys.len();
+        keys.dedup();
+        assert_eq!(before, keys.len(), "two actions share a success message");
     }
 }

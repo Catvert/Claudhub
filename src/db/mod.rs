@@ -34,43 +34,48 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-/// Port de MySQL et de MariaDB quand la connexion n'en dit pas.
+/// MySQL's and MariaDB's port when the connection does not name one.
 pub const DEFAULT_MYSQL_PORT: u16 = 3306;
 
-/// Au-delà, la connexion est réputée impossible.
+/// Past this, the connection is deemed impossible.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Au-delà, la requête est abandonnée.
+/// Past this, the query is abandoned.
 ///
-/// Vraiment abandonnée : `timeout` laisse tomber le futur, et le pilote
-/// ferme la connexion en cours de route. C'est ce qu'un pilote bloquant ne
-/// sait pas faire — il faut lui demander de s'interrompre par un moyen qui lui
-/// est propre, et ce qu'il n'a pas prévu ne s'interrompt pas du tout.
+/// Really abandoned: `timeout` drops the future, and the driver closes the
+/// connection mid-flight. That is what a blocking driver cannot do — it has to
+/// be asked to stop by some means of its own, and what it did not plan for does
+/// not get interrupted at all.
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Enveloppe une lecture du délai commun.
+/// Wraps a read in the common timeout.
 ///
-/// À l'entrée de chaque fonction publique et non autour de chaque requête :
-/// une introspection en fait plusieurs à la suite, et c'est le geste entier
-/// qu'on abandonne, pas la troisième de ses requêtes.
+/// At the entry of each public function and not around each query: an
+/// introspection makes several in a row, and it is the whole gesture that is
+/// abandoned, not its third query.
 async fn with_timeout<T>(future: impl std::future::Future<Output = Result<T>>) -> Result<T> {
     tokio::time::timeout(QUERY_TIMEOUT, future)
         .await
-        .map_err(|_| anyhow::anyhow!("la base n'a pas répondu en {} s", QUERY_TIMEOUT.as_secs()))?
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "the database did not answer in {} s",
+                QUERY_TIMEOUT.as_secs()
+            )
+        })?
 }
 
-/// Le moteur d'une connexion.
+/// A connection's engine.
 ///
-/// Deux, et le troisième se lit dans ce type : ajouter PostgreSQL, c'est une
-/// variante ici et un module à côté de `sqlite` et `mysql`, sans rien changer
-/// ni au protocole ni aux vues.
+/// Two, and the third can be read in this type: adding PostgreSQL means one
+/// variant here and one module beside `sqlite` and `mysql`, with nothing to
+/// change in the protocol or in the views.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Engine {
     #[default]
     Sqlite,
-    /// MySQL et MariaDB, qui parlent le même protocole et déclarent leur
-    /// schéma dans le même `information_schema`.
+    /// MySQL and MariaDB, which speak the same protocol and declare their
+    /// schema in the same `information_schema`.
     Mysql,
 }
 
@@ -490,52 +495,49 @@ pub fn sep_line<'a>(fields: impl IntoIterator<Item = Option<&'a str>>, separator
     line
 }
 
-/// Une ligne de CSV : ce qui part dans un **fichier**.
+/// One CSV row: what goes into a **file**.
 pub fn csv_line<'a>(fields: impl IntoIterator<Item = Option<&'a str>>) -> String {
     sep_line(fields, ',')
 }
 
-/// Une ligne de valeurs séparées par des tabulations : ce qui part dans le
-/// **presse-papiers**.
+/// A line of tab-separated values: what goes to the **clipboard**.
 ///
-/// Les deux formats ne se distinguent que par leur destination, et c'est ce
-/// qui les départage : **un presse-papiers se colle, un fichier s'ouvre.** Un
-/// collage tombe dans une grille de tableur ou dans un message, où la
-/// tabulation garde les colonnes et où la virgule ne fait qu'une seule
-/// cellule d'une ligne entière ; un fichier, lui, est lu par un programme qui
-/// sait analyser du CSV. C'est le partage que font DataGrip et PhpStorm.
+/// The two formats differ only by their destination, and that is what settles
+/// it: **a clipboard is pasted, a file is opened.** A paste lands in a
+/// spreadsheet grid or in a message, where the tab keeps the columns and the
+/// comma makes a whole row into a single cell; a file, for its part, is read by
+/// a program that knows how to parse CSV. It is the split DataGrip and PhpStorm
+/// make.
 pub fn tsv_line<'a>(fields: impl IntoIterator<Item = Option<&'a str>>) -> String {
     sep_line(fields, '\t')
 }
 
-/// Au-delà, l'export est abandonné.
+/// Past this, the export is abandoned.
 ///
-/// Dix fois le délai d'une requête : un export porte sur le résultat
-/// **entier** là où la console n'en lit qu'une page, et une table d'un million
-/// de lignes met plus de trente secondes à sortir sans que rien n'aille mal.
+/// Ten times a query's timeout: an export covers the **whole** result where the
+/// console only reads one page, and a table of a million rows takes more than
+/// thirty seconds to come out with nothing wrong.
 pub const EXPORT_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// Écrit le résultat entier de `sql` dans un fichier CSV, et rend son nombre
-/// de lignes.
+/// Writes `sql`'s whole result into a CSV file, and returns its row count.
 ///
-/// **La requête est rejouée, et le résultat n'est jamais tenu en mémoire.**
-/// Exporter ce qui est affiché n'exporterait qu'une page — ce n'est jamais ce
-/// qu'on veut d'un export — et tout charger pour l'écrire ensuite ferait
-/// tenir un million de lignes dans le tas pour les recopier aussitôt. Les
-/// lignes vont donc du moteur au fichier une par une.
+/// **The query is replayed, and the result is never held in memory.** Exporting
+/// what is displayed would export only one page — never what one wants from an
+/// export — and loading everything to write it afterwards would hold a million
+/// rows on the heap only to copy them straight out. The rows therefore go from
+/// the engine to the file one by one.
 ///
-/// L'écriture est **bloquante au milieu d'une tâche asynchrone**, ce qui est
-/// assumé : c'est un fichier local, l'exécuteur ne porte que du travail de
-/// base de données, et un worker qui écrit attend exactement comme il attend
-/// une socket.
+/// The write is **blocking in the middle of an async task**, which is accepted:
+/// it is a local file, the executor carries nothing but database work, and a
+/// worker that writes waits exactly as it waits on a socket.
 pub async fn export_csv(
     connection: &Connection,
     database: Option<&str>,
     sql: &str,
     path: &std::path::Path,
 ) -> Result<u64> {
-    let file = std::fs::File::create(path)
-        .with_context(|| format!("écriture de {} impossible", path.display()))?;
+    let file =
+        std::fs::File::create(path).with_context(|| format!("cannot write {}", path.display()))?;
     let mut out = std::io::BufWriter::new(file);
     let written = tokio::time::timeout(EXPORT_TIMEOUT, async {
         match connection.engine {
@@ -724,7 +726,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(shown(&first), [["1"]]);
-            assert!(first.more, "une page pleine annonce la suivante");
+            assert!(first.more, "a full page announces the next one");
 
             let second = query(&connection, None, "SELECT id FROM users ORDER BY id", 1, 1)
                 .await
@@ -768,15 +770,15 @@ mod tests {
                 .unwrap();
             sqlx::raw_sql(
                 "CREATE TABLE t (id INTEGER PRIMARY KEY, label TEXT);
-                 INSERT INTO t (label) VALUES ('a, virgule'), (NULL), ('gu\"illemet');",
+                 INSERT INTO t (label) VALUES ('a, comma'), (NULL), ('qu\"ote');",
             )
             .execute(&mut writable)
             .await
             .unwrap();
             drop(writable);
 
-            // Le tri est demandé au moteur autour de la requête, y compris
-            // quand elle porte son propre point-virgule.
+            // Sorting is asked of the engine around the query, including when it
+            // carries its own semicolon.
             let sorted = order_by("SELECT id, label FROM t;", 0, false).unwrap();
             let page = query(&connection, None, &sorted, 0, 10).await.unwrap();
             assert_eq!(
@@ -790,18 +792,18 @@ mod tests {
             assert_eq!(written, 3);
         });
 
-        // L'en-tête, le nul rendu par un champ vide, et les deux échappements.
+        // The header, the null rendered as an empty field, and both escapes.
         assert_eq!(
             std::fs::read_to_string(&csv).unwrap(),
-            "id,label\n1,\"a, virgule\"\n2,\n3,\"gu\"\"illemet\"\n"
+            "id,label\n1,\"a, comma\"\n2,\n3,\"qu\"\"ote\"\n"
         );
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&csv);
     }
 
-    /// La requête n'est pas réécrite : elle est mise dans une table dérivée,
-    /// et le rang de la colonne évite d'avoir à citer son nom.
+    /// The query is not rewritten: it is put into a derived table, and the
+    /// column's rank saves having to quote its name.
     #[test]
     fn a_query_is_wrapped_to_be_sorted() {
         let wrapped = order_by("SELECT a, b FROM t  ;\n", 1, true).unwrap();
@@ -810,52 +812,51 @@ mod tests {
             "SELECT * FROM (\nSELECT a, b FROM t\n) AS claudhub_result ORDER BY 2 ASC"
         );
         assert!(order_by("select 1", 0, false).unwrap().ends_with("1 DESC"));
-        // Une parenthèse ouvrante en tête, c'est une union parenthésée.
+        // An opening parenthesis at the head means a parenthesised union.
         assert!(order_by("(SELECT 1) UNION (SELECT 2)", 0, true).is_some());
-        // La parenthèse fermante est sur sa propre ligne, hors de portée d'un
-        // commentaire qui terminerait la requête.
-        let commented = order_by("SELECT a FROM t -- tout est là", 0, true).unwrap();
+        // The closing parenthesis is on its own line, out of reach of a comment
+        // ending the query.
+        let commented = order_by("SELECT a FROM t -- all of it is here", 0, true).unwrap();
         assert!(commented.contains("\n)"), "{commented}");
     }
 
-    /// Ce qu'on ne sait pas envelopper n'est pas trié — plutôt que trié faux.
+    /// What cannot be wrapped is not sorted — rather than sorted wrong.
     #[test]
     fn what_cannot_be_wrapped_is_not_sorted() {
         assert!(order_by("", 0, true).is_none());
         assert!(order_by("UPDATE t SET a = 1", 0, true).is_none());
-        // Deux instructions : la parenthèse tomberait entre les deux.
+        // Two statements: the parenthesis would fall between them.
         assert!(order_by("SELECT 1; SELECT 2", 0, true).is_none());
 
         let columns = ["id".to_string(), "name".to_string()];
         assert!(can_order("SELECT id, name FROM t", &columns));
         assert!(!can_order("SELECT id, name FROM t", &[]));
-        // MySQL refuse une table dérivée à deux colonnes de même nom, ce
-        // qu'une jointure écrite `SELECT *` produit tout le temps.
+        // MySQL refuses a derived table with two columns of the same name, which
+        // a join written `SELECT *` produces all the time.
         let doubled = ["id".to_string(), "ID".to_string()];
         assert!(!can_order("SELECT * FROM a JOIN b", &doubled));
     }
 
-    /// Un CSV se relit : c'est l'échappement qui le garantit, et le nul y est
-    /// un champ vide et non le mot « NULL ».
+    /// A CSV reads back: the escaping is what guarantees it, and a null is an
+    /// empty field there and not the word "NULL".
     #[test]
     fn csv_quotes_only_what_needs_it() {
         assert_eq!(csv_line([Some("a"), Some("b")]), "a,b\n");
         assert_eq!(csv_line([None, Some("")]), ",\n");
         assert_eq!(csv_line([Some("a,b")]), "\"a,b\"\n");
-        assert_eq!(csv_line([Some("dit \"oui\"")]), "\"dit \"\"oui\"\"\"\n");
-        assert_eq!(csv_line([Some("deux\nlignes")]), "\"deux\nlignes\"\n");
-        // La chaîne « NULL » n'est pas un nul, et elle ne doit pas en devenir
-        // un en passant par le CSV.
+        assert_eq!(csv_line([Some("says \"yes\"")]), "\"says \"\"yes\"\"\"\n");
+        assert_eq!(csv_line([Some("two\nlines")]), "\"two\nlines\"\n");
+        // The string "NULL" is not a null, and it must not become one on its way
+        // through the CSV.
         assert_eq!(csv_line([Some("NULL")]), "NULL\n");
         assert_eq!(csv_line([None]), "\n");
-        // Le presse-papiers prend des tabulations, et n'encadre donc pas une
-        // valeur qui porte une virgule — mais bien celle qui porte une
-        // tabulation.
+        // The clipboard takes tabs, and therefore does not quote a value
+        // carrying a comma — but does quote the one carrying a tab.
         assert_eq!(tsv_line([Some("a,b"), Some("c")]), "a,b\tc\n");
         assert_eq!(tsv_line([Some("a\tb")]), "\"a\tb\"\n");
     }
 
-    /// Prolonger la fenêtre garde ses colonnes et reprend la suite.
+    /// Growing the window keeps its columns and picks up where it left off.
     #[test]
     fn a_window_grows_by_its_end() {
         let mut first = Rows {
@@ -872,16 +873,16 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(shown(&first), [["1"], ["2"]]);
-        assert!(!first.more, "la suite dit s'il en reste");
+        assert!(!first.more, "the continuation says whether any is left");
     }
 
-    /// Une base qui n'existe pas est une erreur, pas une attente : le message
-    /// est ce que la ligne de l'arbre affichera.
+    /// A database that does not exist is an error, not a wait: the message is
+    /// what the tree's row will show.
     #[test]
     fn a_missing_file_says_so() {
-        let connection = sqlite_at(std::path::Path::new("/tmp/claudhub-aucune-base.sqlite"));
+        let connection = sqlite_at(std::path::Path::new("/tmp/claudhub-no-database.sqlite"));
         let error = block_on(databases(&connection)).unwrap_err();
-        assert!(error.to_string().contains("aucun fichier"), "{error}");
+        assert!(error.to_string().contains("no database file"), "{error}");
     }
 
     #[test]

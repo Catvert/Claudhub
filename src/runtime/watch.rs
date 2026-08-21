@@ -77,18 +77,15 @@ impl Watcher {
                             }
                             if on_windows_filesystem(&path) {
                                 log::warn!(
-                                    "{} est sur un disque Windows : inotify n'y \
-                                     remonte rien, la revue ne se rafraîchira pas \
-                                     toute seule",
+                                    "{} is on a Windows drive: inotify reports \
+                                     nothing there, the review will not refresh \
+                                     by itself",
                                     path.display()
                                 );
                             }
                             for (dir, mode) in watchable_directories(&path) {
                                 if let Err(e) = debouncer.watch(&dir, mode) {
-                                    log::warn!(
-                                        "surveillance de {} impossible : {e}",
-                                        dir.display()
-                                    );
+                                    log::warn!("cannot watch {}: {e}", dir.display());
                                 }
                             }
                         }
@@ -113,10 +110,7 @@ impl Watcher {
                                 Ok(()) => {
                                     watched.insert(path);
                                 }
-                                Err(e) => log::warn!(
-                                    "surveillance de {} impossible : {e}",
-                                    path.display()
-                                ),
+                                Err(e) => log::warn!("cannot watch {}: {e}", path.display()),
                             }
                         }
                         Order::UnwatchDir(path) => {
@@ -144,7 +138,7 @@ impl Watcher {
                         }
                     }
                     if !seen.is_empty() && tx.send_blocking(seen).is_err() {
-                        return; // la fenêtre est partie
+                        return; // the window is gone
                     }
                 }
             })?;
@@ -360,13 +354,13 @@ fn tracked_directories(worktree: &Path) -> Option<HashSet<PathBuf>> {
     let text = String::from_utf8_lossy(&out.stdout);
     let mut dirs = HashSet::new();
     for file in text.split('\0').filter(|s| !s.is_empty()) {
-        // Chaque ancêtre, pas seulement le parent : un dossier intermédiaire
-        // qui ne contient que des sous-dossiers doit être surveillé lui aussi,
-        // sans quoi la création d'un fichier à ce niveau passerait inaperçue.
+        // Every ancestor, not only the parent: an intermediate folder holding
+        // nothing but subfolders has to be watched too, otherwise creating a
+        // file at that level would go unnoticed.
         let mut current = Path::new(file).parent();
         while let Some(dir) = current.filter(|d| !d.as_os_str().is_empty()) {
             if !dirs.insert(worktree.join(dir)) {
-                break; // déjà vu : ses ancêtres le sont aussi
+                break; // already seen: so are its ancestors
             }
             current = dir.parent();
         }
@@ -421,22 +415,22 @@ mod tests {
         assert!(changes_content(&EventKind::Remove(
             notify::event::RemoveKind::File
         )));
-        // Le signal de débordement de la file : on a tout à relire.
+        // The queue-overflow signal: there is everything to re-read.
         assert!(changes_content(&EventKind::Any));
     }
 
     use super::*;
 
-    /// Un dépôt sur `/mnt/c` ne remonte aucun événement ; c'est ce test qui
-    /// tient la reconnaissance, la partie « suis-je sous WSL » n'étant pas
-    /// vérifiable ailleurs que sous WSL.
+    /// A repository on `/mnt/c` reports no event; this test is what holds the
+    /// recognition, the "am I under WSL" part not being checkable anywhere but
+    /// under WSL.
     #[test]
     fn windows_drives_are_recognised_by_their_mount_point() {
-        assert!(is_windows_mount(Path::new("/mnt/c/Users/ami/projet")));
+        assert!(is_windows_mount(Path::new("/mnt/c/Users/friend/project")));
         assert!(is_windows_mount(Path::new("/mnt/d")));
-        assert!(!is_windows_mount(Path::new("/home/ami/projet")));
-        // Un point de montage à nous qui commence pareil n'en est pas un.
-        assert!(!is_windows_mount(Path::new("/mnt/data/projet")));
+        assert!(!is_windows_mount(Path::new("/home/friend/project")));
+        // A mount point of ours starting the same way is not one.
+        assert!(!is_windows_mount(Path::new("/mnt/data/project")));
         assert!(!is_windows_mount(Path::new("/mnt")));
     }
 
@@ -464,17 +458,17 @@ mod tests {
     #[test]
     fn a_linked_worktree_points_at_its_own_git_directory() {
         let root = std::env::temp_dir().join(format!("claudhub-gitdir-{}", std::process::id()));
-        let main = root.join("depot/.git/worktrees/feature");
+        let main = root.join("repo/.git/worktrees/feature");
         let linked = root.join("feature");
         std::fs::create_dir_all(&main).unwrap();
         std::fs::create_dir_all(&linked).unwrap();
-        // Ce que git écrit dans un worktree lié.
+        // What git writes in a linked worktree.
         std::fs::write(linked.join(".git"), format!("gitdir: {}\n", main.display())).unwrap();
 
         assert_eq!(git_dir(&linked).as_deref(), Some(main.as_path()));
 
-        // Et le dépôt principal, dont le `.git` est un vrai répertoire.
-        let plain = root.join("depot");
+        // And the main repository, whose `.git` is a real directory.
+        let plain = root.join("repo");
         assert_eq!(git_dir(&plain), Some(plain.join(".git")));
 
         let _ = std::fs::remove_dir_all(&root);
@@ -482,13 +476,13 @@ mod tests {
 
     #[test]
     fn only_the_directories_git_knows_are_watched() {
-        // Un vrai petit dépôt : du code suivi, et un dossier ignoré qui pèse.
+        // A real little repository: tracked code, and a heavy ignored folder.
         let root = std::env::temp_dir().join(format!("claudhub-tracked-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("src/interne")).unwrap();
-        std::fs::create_dir_all(root.join("vendor/paquet/profond")).unwrap();
-        std::fs::write(root.join("src/interne/code.rs"), "fn main() {}").unwrap();
-        std::fs::write(root.join("vendor/paquet/profond/gros.php"), "<?php").unwrap();
+        std::fs::create_dir_all(root.join("src/inner")).unwrap();
+        std::fs::create_dir_all(root.join("vendor/package/deep")).unwrap();
+        std::fs::write(root.join("src/inner/code.rs"), "fn main() {}").unwrap();
+        std::fs::write(root.join("vendor/package/deep/big.php"), "<?php").unwrap();
         std::fs::write(root.join(".gitignore"), "vendor/\n").unwrap();
         for args in [
             vec!["init", "-q"],
@@ -508,52 +502,51 @@ mod tests {
         let watched: Vec<&Path> = dirs.iter().map(|(p, _)| p.as_path()).collect();
 
         assert!(
-            watched.contains(&root.join("src/interne").as_path()),
-            "un dossier de code doit être surveillé : {watched:?}"
+            watched.contains(&root.join("src/inner").as_path()),
+            "a code folder must be watched: {watched:?}"
         );
         assert!(
             watched.contains(&root.join("src").as_path()),
-            "les dossiers intermédiaires aussi"
+            "the intermediate folders too"
         );
         assert!(
             !watched.iter().any(|p| p.starts_with(root.join("vendor"))),
-            "rien d'ignoré ne doit être surveillé : {watched:?}"
+            "nothing ignored must be watched: {watched:?}"
         );
-        // Aucune surveillance récursive de l'arborescence de travail : c'est
-        // elle qui ramènerait les dossiers écartés.
+        // No recursive watch on the working tree: that is what would bring back
+        // the folders left out.
         assert!(
             dirs.iter()
                 .filter(|(p, _)| !p.starts_with(root.join(".git")))
                 .all(|(_, m)| matches!(m, RecursiveMode::NonRecursive)),
-            "aucune surveillance récursive hors de .git"
+            "no recursive watch outside .git"
         );
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Le seul test qui prouve que la chaîne complète marche : un vrai
-    /// observateur du système de fichiers, une vraie écriture, et le chemin
-    /// qui ressort à l'autre bout. Les deux tests précédents ne valident que
-    /// le filtre.
+    /// The only test proving the whole chain works: a real filesystem watcher,
+    /// a real write, and the path coming out at the other end. The two previous
+    /// tests only validate the filter.
     #[test]
     fn a_real_write_reaches_the_receiver() {
         let dir = std::env::temp_dir().join(format!("claudhub-watch-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("répertoire temporaire");
+        std::fs::create_dir_all(&dir).expect("temporary directory");
 
-        let (watcher, changes) = Watcher::new().expect("observateur disponible");
+        let (watcher, changes) = Watcher::new().expect("watcher available");
         watcher.watch(&dir);
 
-        let file = dir.join("écrit pendant la surveillance.txt");
+        let file = dir.join("written while watched.txt");
 
-        // `watch` rend la main avant que la surveillance soit posée — c'est
-        // tout l'intérêt, le thread d'interface ne doit pas attendre les
-        // milliers d'appels système que cela demande sur un vrai projet. Le
-        // test réécrit donc le fichier à chaque tour : dès que la surveillance
-        // est en place, l'écriture suivante est vue.
+        // `watch` returns before the watch is set up — that is the whole point,
+        // the interface thread must not wait for the thousands of system calls
+        // that takes on a real project. The test therefore rewrites the file on
+        // every round: as soon as the watch is in place, the next write is
+        // seen.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut received = None;
         while std::time::Instant::now() < deadline {
-            std::fs::write(&file, b"contenu").expect("écriture");
+            std::fs::write(&file, b"content").expect("write");
             std::thread::sleep(Duration::from_millis(100));
             if let Ok(batch) = changes.try_recv() {
                 received = batch.into_iter().next();
@@ -565,7 +558,7 @@ mod tests {
         assert_eq!(
             received.as_deref().and_then(Path::file_name),
             Some(file.file_name().unwrap()),
-            "l'écriture n'a pas été signalée"
+            "the write was not reported"
         );
     }
 }

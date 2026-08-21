@@ -60,23 +60,18 @@ fn timeout() -> Duration {
     TIMEOUT
 }
 
-/// Exécute `git -C <dir> <args…>` et rend sa sortie standard, sans le saut de
-/// ligne final.
+/// Runs `git -C <dir> <args…>` and returns its standard output, without the
+/// trailing newline.
 ///
-/// `stdin` est fermé : sans cela une commande qui décide de demander un mot de
-/// passe hérite du terminal depuis lequel Claudhub a été lancé — au mieux rien ne
-/// s'affiche, au pire le worker se bloque pour toujours sur une invite que
-/// personne ne voit. `GIT_TERMINAL_PROMPT=0` fait dire non à git plutôt que de
-/// le laisser essayer, et l'échec remonte comme un message d'erreur normal.
+/// `stdin` is closed: without that, a command deciding to ask for a password
+/// inherits the terminal Claudhub was launched from — at best nothing is
+/// displayed, at worst the worker blocks forever on a prompt nobody sees.
+/// `GIT_TERMINAL_PROMPT=0` makes git say no rather than letting it try, and
+/// the failure comes back as an ordinary error message.
 pub(crate) fn git<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<String> {
     let started = Instant::now();
     let out = run(dir, args)?;
-    let elapsed = started.elapsed();
-    // Une commande qui dépasse la demi-seconde mérite qu'on sache laquelle :
-    // c'est la première trace à regarder quand l'interface traîne.
-    if elapsed > Duration::from_millis(500) {
-        log::debug!("git {} : {elapsed:?}", describe(args));
-    }
+    report(dir, args, started.elapsed(), &out);
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         bail!("git {}: {}", describe(args), stderr.trim());
@@ -86,33 +81,77 @@ pub(crate) fn git<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<String> {
     ))
 }
 
-/// Lance la commande et attend sa fin, sans dépasser `TIMEOUT`.
+/// Files a command in the journal: what was run, where, how long it took, and
+/// what came back.
 ///
-/// Les deux sorties sont lues par des threads : un tube plein bloque
-/// l'écrivain, et `git diff` d'un gros fichier remplit les soixante-quatre
-/// kilo-octets du tube bien avant de se terminer. Les lire après l'attente
-/// donnerait un interblocage — le processus attend qu'on vide le tube, nous
-/// attendons qu'il se termine.
+/// **`debug` and not `warn`, failures included.** A failure here is not
+/// necessarily one for the user: `git_opt` exists precisely for the reads whose
+/// failure is the normal answer — a branch with no upstream, a file git does not
+/// know. Warning on each of them would fill the journal with false alarms and
+/// bury the real ones. What matters to the user is warned about one floor up,
+/// in `runtime::fail`, which knows the operation it belonged to.
+///
+/// The exception is a command that **drags**: past a second it explains an
+/// interface that seems stuck, which is worth saying without being asked. On a
+/// Windows disk mounted by WSL a `git status` reaches that on its own — and
+/// that is exactly the case one wants to be told about.
+fn report<S: AsRef<OsStr>>(dir: &Path, args: &[S], elapsed: Duration, out: &std::process::Output) {
+    let slow = elapsed >= Duration::from_secs(1);
+    if !out.status.success() {
+        // The code as well as the message: `git diff --no-index` says "there is
+        // a difference" with 1 and "I could not read the file" with 2, and the
+        // stderr of the first is empty.
+        log::debug!(
+            "git {} in {} — failed ({}) after {}: {}",
+            describe(args),
+            dir.display(),
+            out.status.code().unwrap_or(-1),
+            crate::logging::ms(elapsed),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    } else if slow {
+        log::info!(
+            "git {} in {} — {} (slow)",
+            describe(args),
+            dir.display(),
+            crate::logging::ms(elapsed)
+        );
+    } else {
+        log::debug!(
+            "git {} in {} — {}",
+            describe(args),
+            dir.display(),
+            crate::logging::ms(elapsed)
+        );
+    }
+}
+
+/// Launches the command and waits for it, without exceeding `TIMEOUT`.
+///
+/// Both outputs are read by threads: a full pipe blocks the writer, and `git
+/// diff` of a large file fills the pipe's sixty-four kilobytes well before it
+/// finishes. Reading them after the wait would deadlock — the process waits
+/// for us to drain the pipe, we wait for it to finish.
 fn run<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<std::process::Output> {
     let mut cmd = command(dir, args);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     wait_with_timeout(cmd, || format!("git {}", describe(args)))
 }
 
-/// Attend la fin d'un processus, ou l'interrompt passé le délai.
+/// Waits for a process to finish, or interrupts it once the timeout passes.
 ///
-/// Séparé de `run` pour être vérifiable : le tester avec `git` demanderait une
-/// commande git qui pend de façon reproductible, ce qui n'existe pas.
+/// Separated from `run` so it can be verified: testing it with `git` would
+/// need a git command that hangs reproducibly, and there is none.
 fn wait_with_timeout(
     mut cmd: Command,
     describe: impl Fn() -> String,
 ) -> Result<std::process::Output> {
     let mut child = cmd
         .spawn()
-        .with_context(|| format!("{} : programme introuvable", describe()))?;
+        .with_context(|| format!("{}: program not found", describe()))?;
 
-    let mut stdout = child.stdout.take().expect("stdout demandé en piped");
-    let mut stderr = child.stderr.take().expect("stderr demandé en piped");
+    let mut stdout = child.stdout.take().expect("stdout requested as piped");
+    let mut stderr = child.stderr.take().expect("stderr requested as piped");
     let out_reader = std::thread::spawn(move || {
         let mut buffer = Vec::new();
         let _ = stdout.read_to_end(&mut buffer);
@@ -133,13 +172,13 @@ fn wait_with_timeout(
                 let _ = child.kill();
                 let _ = child.wait();
                 bail!(
-                    "{} n'a pas répondu en {:?} et a été interrompue",
+                    "{} did not answer within {:?} and was interrupted",
                     describe(),
                     limit
                 );
             }
-            // Assez court pour qu'une commande de dix millisecondes n'en
-            // paraisse pas cinquante, assez long pour ne pas tourner à vide.
+            // Short enough that a ten-millisecond command does not look like
+            // fifty, long enough not to spin.
             None => std::thread::sleep(Duration::from_millis(5)),
         }
     };
@@ -151,27 +190,29 @@ fn wait_with_timeout(
     })
 }
 
-/// Idem, mais l'échec vaut `None` : pour les lectures facultatives (une
-/// branche amont qui n'existe pas n'est pas une erreur).
+/// The same, but failure counts as `None`: for optional reads (an upstream
+/// branch that does not exist is not an error).
 pub(crate) fn git_opt<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Option<String> {
     git(dir, args).ok()
 }
 
-/// Lance git et rend sa sortie **même si le code de retour n'est pas nul**.
+/// Runs git and returns its output **even when the exit code is not zero**.
 ///
-/// Pour la poignée de commandes dont un code non nul est le cas normal :
-/// `diff --no-index` sort avec 1 dès qu'il y a une différence, ce qui est
-/// exactement ce qu'on lui demande de trouver. Passer par `git` ferait jeter
-/// la sortie avec l'« erreur ».
+/// For the handful of commands where a non-zero code is the normal case:
+/// `diff --no-index` exits with 1 as soon as there is a difference, which is
+/// exactly what it was asked to find. Going through `git` would throw the
+/// output away along with the "error".
 ///
-/// Au-delà de `max_code`, c'est un vrai échec : `--no-index` sort avec 2 quand
-/// le fichier n'existe pas ou n'est pas lisible.
+/// Past `max_code` it is a real failure: `--no-index` exits with 2 when the
+/// file does not exist or cannot be read.
 pub(crate) fn git_tolerant<S: AsRef<OsStr>>(
     dir: &Path,
     args: &[S],
     max_code: i32,
 ) -> Result<String> {
+    let started = Instant::now();
     let out = run(dir, args)?;
+    report(dir, args, started.elapsed(), &out);
     let code = out.status.code().unwrap_or(-1);
     if code < 0 || code > max_code {
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -271,29 +312,29 @@ mod tests {
 
         TEST_TIMEOUT.with(|t| t.set(None));
 
-        let message = result.expect_err("la commande devait être interrompue");
+        let message = result.expect_err("the command should have been interrupted");
         assert!(
-            message.to_string().contains("interrompue"),
-            "message inattendu : {message}"
+            message.to_string().contains("interrupted"),
+            "unexpected message: {message}"
         );
         assert!(
             elapsed < Duration::from_secs(3),
-            "l'interruption a pris {elapsed:?}"
+            "the interruption took {elapsed:?}"
         );
     }
 
     #[test]
     fn a_large_output_is_read_while_waiting() {
-        // Bien plus que la taille d'un tube : si les sorties n'étaient pas
-        // lues pendant l'attente, le processus resterait bloqué à écrire et
-        // nous à l'attendre — l'interblocage classique de `spawn` + `wait`.
+        // Far more than a pipe's size: if the outputs were not read during the
+        // wait, the process would stay blocked writing and we blocked waiting
+        // for it — the classic `spawn` + `wait` deadlock.
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "head -c 2000000 /dev/zero | tr '\\0' 'x'"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let out = wait_with_timeout(cmd, || "sortie volumineuse".into())
-            .expect("la commande doit se terminer");
+        let out =
+            wait_with_timeout(cmd, || "large output".into()).expect("the command must finish");
         assert_eq!(out.stdout.len(), 2_000_000);
     }
 }

@@ -76,17 +76,17 @@ mod tests {
 
     #[test]
     fn a_command_line_survives_quotes_and_spaces() {
-        // Le défaut que ce découpage corrige : un chemin contenant une espace.
+        // The flaw this splitting fixes: a path containing a space.
         assert_eq!(
-            split_command(r#""/opt/mon agent/bin/agent" --model "gpt 5""#),
-            vec!["/opt/mon agent/bin/agent", "--model", "gpt 5"]
+            split_command(r#""/opt/my agent/bin/agent" --model "gpt 5""#),
+            vec!["/opt/my agent/bin/agent", "--model", "gpt 5"]
         );
-        // Guillemets simples, littéraux.
+        // Single quotes, literal.
         assert_eq!(
-            split_command("sh -c 'echo un deux'"),
-            vec!["sh", "-c", "echo un deux"]
+            split_command("sh -c 'echo one two'"),
+            vec!["sh", "-c", "echo one two"]
         );
-        // Un argument vide en est un.
+        // An empty argument counts as one.
         assert_eq!(split_command("agent --sep ''"), vec!["agent", "--sep", ""]);
         assert_eq!(split_command("   "), Vec::<String>::new());
     }
@@ -95,8 +95,8 @@ mod tests {
     fn a_command_line_round_trips() {
         for line in [
             "claude",
-            r#""/opt/mon agent/bin/agent" --model "gpt 5""#,
-            r#"agent --say "il dit \"non\"""#,
+            r#""/opt/my agent/bin/agent" --model "gpt 5""#,
+            r#"agent --say "it says \"no\"""#,
             r#""C:\Program Files\agent.exe""#,
         ] {
             let parts = split_command(line);

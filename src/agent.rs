@@ -227,27 +227,26 @@ mod tests {
     }
 }
 
-/// Ce qui parle le format de `/proc` ne se compile — et ne se teste — que là
-/// où `/proc` existe.
+/// What speaks the `/proc` format only compiles — and is only tested — where
+/// `/proc` exists.
 #[cfg(all(test, target_os = "linux"))]
 mod proc_tests {
     use super::*;
 
     #[test]
     fn the_command_line_is_matched_argument_by_argument() {
-        // Un agent lancé par node : c'est le second argument qui le nomme.
+        // An agent launched through node: the second argument is what names it.
         let cmdline = b"/nix/store/x/bin/node\0/home/a/.bun/bin/claude\0--resume\0";
         assert!(cmdline_matches(cmdline, "claude"));
         assert!(!cmdline_matches(cmdline, "aider"));
-        // Une correspondance partielle n'en est pas une : `claudia` n'est pas
-        // `claude`.
+        // A partial match is not a match: `claudia` is not `claude`.
         assert!(!cmdline_matches(b"/usr/bin/claudia\0", "claude"));
     }
 
     #[test]
     fn cpu_ticks_survive_a_program_name_full_of_parentheses() {
-        // Le cas que tout parseur naïf de /proc rate.
-        let stat = "42 (mon (drôle) d'agent) S 1 42 42 0 -1 4194304 100 0 0 0 \
+        // The case every naive /proc parser gets wrong.
+        let stat = "42 (my (funny) agent) S 1 42 42 0 -1 4194304 100 0 0 0 \
                     130 27 0 0 20 0 12 0 999";
         assert_eq!(parse_cpu_ticks(stat), Some(157));
     }
@@ -263,6 +262,6 @@ mod proc_tests {
             owning_worktree(&worktrees, Path::new("/p/repo/src")),
             Some(PathBuf::from("/p/repo"))
         );
-        assert_eq!(owning_worktree(&worktrees, Path::new("/ailleurs")), None);
+        assert_eq!(owning_worktree(&worktrees, Path::new("/elsewhere")), None);
     }
 }

@@ -91,20 +91,20 @@ fn install_fonts(cx: &mut App) {
         .text_system()
         .add_fonts(fonts.into_iter().map(std::borrow::Cow::Borrowed).collect())
     {
-        log::warn!("polices embarquées non chargées : {e:#}");
+        log::warn!("embedded fonts not loaded: {e:#}");
     }
 }
 
 pub fn run() {
-    // Avant toute lecture : ce que l'utilisateur avait réglé sous l'ancien nom
-    // du projet est repris ici, sans quoi il retrouverait une fenêtre neuve.
+    // Before any read: what the user configured under the project's former
+    // name is picked up here, otherwise they would find a brand-new window.
     settings::migrate_from_perch();
     let settings = Settings::load();
     set_language(settings.language);
 
-    // `gpui_platform::application()` a remplacé `Application::new()` : gpui a
-    // été coupé en deux, le cœur d'un côté et la plateforme (wayland, x11,
-    // font-kit) de l'autre, et c'est cette dernière qui monte la boucle.
+    // `gpui_platform::application()` replaced `Application::new()`: gpui was
+    // split in two, the core on one side and the platform (wayland, x11,
+    // font-kit) on the other, and the latter is what builds the loop.
     gpui_platform::application()
         .with_assets(Assets)
         .run(move |cx| {
@@ -149,26 +149,25 @@ pub fn run() {
                 },
             );
             if let Err(e) = opened {
-                log::error!("ouverture de la fenêtre : {e:#}");
+                log::error!("opening the window: {e:#}");
             }
         });
 }
 
 #[cfg(test)]
 mod i18n_tests {
-    //! Les deux catalogues doivent rester interchangeables : une clé présente
-    //! d'un côté et pas de l'autre se voit à l'exécution sous la forme du nom
-    //! de la clé affiché à la place du texte, ce qu'aucune relecture ne
-    //! rattrape de façon fiable.
+    //! The two catalogues must stay interchangeable: a key present on one side
+    //! and not the other shows up at run time as the key name displayed
+    //! instead of the text, which no review catches reliably.
 
     const EN: &str = include_str!("../../assets/i18n/en.json");
     const FR: &str = include_str!("../../assets/i18n/fr.json");
 
     fn keys(json: &str) -> std::collections::BTreeSet<String> {
-        let value: serde_json::Value = serde_json::from_str(json).expect("catalogue JSON valide");
+        let value: serde_json::Value = serde_json::from_str(json).expect("valid JSON catalogue");
         value
             .as_object()
-            .expect("catalogue plat clé → chaîne")
+            .expect("flat key → string catalogue")
             .keys()
             .cloned()
             .collect()
@@ -181,22 +180,36 @@ mod i18n_tests {
         let missing_en: Vec<_> = fr.difference(&en).collect();
         assert!(
             missing_fr.is_empty() && missing_en.is_empty(),
-            "absentes de fr.json : {missing_fr:?}\nabsentes de en.json : {missing_en:?}"
+            "missing from fr.json: {missing_fr:?}\nmissing from en.json: {missing_en:?}"
         );
     }
 
-    /// Le menu des vues rend la clé brute quand elle manque, et une entrée
-    /// nommée « panel-sentry » au milieu du menu est tout ce qu'on verrait.
+    /// The views menu renders the raw key when it is missing, and an entry
+    /// named "panel-sentry" in the middle of the menu is all you would see.
     #[test]
     fn every_view_has_a_title_in_both_catalogs() {
         let (en, fr) = (keys(EN), keys(FR));
         for workspace in crate::ui::workspace::Workspace::ALL {
             let label = workspace.label();
-            assert!(en.contains(label), "absente de en.json : {label}");
-            assert!(fr.contains(label), "absente de fr.json : {label}");
+            assert!(en.contains(label), "missing from en.json: {label}");
+            assert!(fr.contains(label), "missing from fr.json: {label}");
             for (_, title) in workspace.views() {
-                assert!(en.contains(*title), "absente de en.json : {title}");
-                assert!(fr.contains(*title), "absente de fr.json : {title}");
+                assert!(en.contains(*title), "missing from en.json: {title}");
+                assert!(fr.contains(*title), "missing from fr.json: {title}");
+            }
+        }
+    }
+
+    /// The status bar renders the raw key when it is missing: "running-push"
+    /// where "Pushing…" was meant, in the one place one looks to know whether
+    /// anything is happening.
+    #[test]
+    fn every_action_has_its_two_messages_in_both_catalogs() {
+        let (en, fr) = (keys(EN), keys(FR));
+        for action in crate::runtime::Action::ALL {
+            for key in [action.success_key(), action.running_key()] {
+                assert!(en.contains(key), "missing from en.json: {key}");
+                assert!(fr.contains(key), "missing from fr.json: {key}");
             }
         }
     }
@@ -227,7 +240,7 @@ mod i18n_tests {
             assert_eq!(
                 placeholders(en_value.as_str().unwrap_or_default()),
                 placeholders(fr_value.as_str().unwrap_or_default()),
-                "les substitutions de « {key} » diffèrent entre les deux langues"
+                "the placeholders of \"{key}\" differ between the two languages"
             );
         }
     }

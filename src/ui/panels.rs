@@ -105,21 +105,22 @@ pub fn register(app: &Entity<ClaudhubApp>, cx: &mut App) {
         DiffPanel => "ClaudhubDiff",
         EditorPanel => "ClaudhubEditor",
         ConsolePanel => "ClaudhubConsole",
+        SettingsPanel => "ClaudhubSettings",
         TerminalPanel => "ClaudhubTerminal",
     }
 }
 
-/// « Masquer cette vue », la seule entrée que le menu `…` du dock mérite.
+/// "Hide this view", the only entry the dock's `…` menu deserves.
 ///
-/// Tout le reste de ce qu'un panneau sait faire vit dans sa propre barre —
-/// l'arbre de la revue, les deux colonnes du diff, le repli de l'explorateur —
-/// et le dupliquer ici ferait deux chemins pour un même geste. Masquer, lui,
-/// ne concerne pas le contenu du panneau mais sa place dans la fenêtre : c'est
-/// le dock qui l'accueille, et le menu du dock est le seul endroit où le geste
-/// se trouve pour chacune des vues.
+/// Everything else a panel can do lives in its own bar — the review's tree, the
+/// diff's two columns, the explorer's collapse — and duplicating it here would
+/// make two paths for one gesture. Hiding, for its part, is not about the
+/// panel's content but about its place in the window: the dock is what holds
+/// it, and the dock's menu is the only place the gesture is found for every one
+/// of the views.
 ///
-/// On revient par le menu principal (`VIEWS`) : une vue masquée n'a plus
-/// d'onglet, donc plus rien à cliquer.
+/// You come back through the main menu (`VIEWS`): a hidden view has no tab left,
+/// so nothing left to click.
 fn hide_view(app: &WeakEntity<ClaudhubApp>, name: &'static str, menu: PopupMenu) -> PopupMenu {
     let app = app.clone();
     menu.item(
@@ -264,29 +265,30 @@ panels! {
     FilesPanel => ("ClaudhubFiles", "panel-files", render_files, Files),
     DbPanel => ("ClaudhubDb", "panel-databases", render_db, Db),
     SentryPanel => ("ClaudhubSentry", "panel-sentry", render_sentry, Sentry),
-    // Le centre de chaque écran. **Trois panneaux et non un seul dont le
-    // titre change** : ils appartenaient au même parce qu'ils se disputaient
-    // la place centrale, et un onglet qui annonçait « Diff », « Éditeur » ou
-    // « SQL » selon le dernier geste disait bien qu'il en portait trois. Les
-    // écrans leur donnent chacun sa place.
+    // The centre of each screen. **Three panels and not one whose title
+    // changes**: they belonged to the same one because they were fighting over
+    // the central slot, and a tab announcing "Diff", "Editor" or "SQL"
+    // depending on the last gesture was saying plainly that it carried three.
+    // The screens give each of them its own place.
     DiffPanel => ("ClaudhubDiff", "panel-diff", render_diff, Diff),
     EditorPanel => ("ClaudhubEditor", "panel-editor", render_editor_panel, Editor),
     ConsolePanel => ("ClaudhubConsole", "panel-sql", render_console_panel, Console),
+    SettingsPanel => ("ClaudhubSettings", "panel-settings", render_settings_panel, Settings),
 }
 
-/// Les conflits n'apparaissent que quand il y en a.
+/// The conflicts only appear when there are some.
 ///
-/// `Panel::visible`, comme les terminaux : un onglet « Conflits » présent en
-/// permanence décalerait les autres et ne servirait qu'une fois sur cent. Il
-/// reste visible tant qu'une opération est en cours, même sans fichier en
-/// conflit — c'est là qu'on trouve de quoi la continuer ou l'abandonner.
+/// `Panel::visible`, like the terminals: a permanently present "Conflicts" tab
+/// would shift the others aside and serve one time in a hundred. It stays
+/// visible while an operation is in progress, even with no conflicted file —
+/// that is where what is needed to continue or abort it is found.
 ///
-/// **La visibilité est mise en cache et non lue à la demande.** `visible` est
-/// appelé par `TabPanel::active_panel`, y compris depuis `add_panel` pendant
-/// la construction de la disposition — c'est-à-dire **à l'intérieur** de
-/// `ClaudhubApp::new`. Y lire l'entité racine la lirait pendant qu'elle est
-/// en cours de mise à jour, ce que gpui refuse par une panique. L'observation
-/// posée dans le constructeur, elle, se déclenche hors de tout emprunt.
+/// **Visibility is cached and not read on demand.** `visible` is called by
+/// `TabPanel::active_panel`, including from `add_panel` while the layout is
+/// being built — that is, **inside** `ClaudhubApp::new`. Reading the root
+/// entity there would read it while it is being updated, which gpui refuses
+/// with a panic. The observation set up in the constructor, on the other hand,
+/// fires outside any borrow.
 pub struct ConflictsPanel {
     app: WeakEntity<ClaudhubApp>,
     focus: FocusHandle,

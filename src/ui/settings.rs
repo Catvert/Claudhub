@@ -540,15 +540,15 @@ impl Settings {
         };
         match std::fs::read_to_string(&path) {
             Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-                // Écraser un fichier qu'on n'a pas su lire ferait perdre des
-                // réglages à cause d'une seule clé mal formée : on repart des
-                // valeurs par défaut sans rien effacer.
-                log::warn!("réglages illisibles ({}) : {e}", path.display());
+                // Overwriting a file we failed to read would lose settings over
+                // a single malformed key: we start again from the default values
+                // without erasing anything.
+                log::warn!("unreadable settings ({}): {e}", path.display());
                 Self::default()
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
             Err(e) => {
-                log::warn!("lecture des réglages : {e}");
+                log::warn!("reading the settings: {e}");
                 Self::default()
             }
         }
@@ -562,15 +562,15 @@ impl Settings {
         match serde_json::to_string_pretty(self) {
             Ok(json) => {
                 if let Err(e) = write_private(&path, &json) {
-                    log::warn!("écriture des réglages : {e}");
+                    log::warn!("writing the settings: {e}");
                 }
             }
-            Err(e) => log::warn!("sérialisation des réglages : {e}"),
+            Err(e) => log::warn!("serialising the settings: {e}"),
         }
     }
 
-    /// Ajoute un dépôt à la liste rouverte au démarrage, sans doublon et en
-    /// tête : le dernier ouvert est celui qu'on rouvrira en premier.
+    /// Adds a repository to the list reopened at startup, without duplicates and
+    /// at the head: the last opened is the first to be reopened.
     pub fn remember_repository(&mut self, main: &Path) {
         self.repositories.retain(|p| p != main);
         self.repositories.insert(0, main.to_path_buf());

@@ -1049,7 +1049,7 @@ impl ClaudhubApp {
         let path = cx.prompt_for_new_path(&directory, Some(&name));
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(path))) = path.await else {
-                return; // annulé
+                return; // cancelled
             };
             let _ = this.update(cx, |this, cx| this.send_db_export(path, cx));
         })
@@ -1541,14 +1541,14 @@ mod tests {
         }
     }
 
-    /// Le rectangle se lit dans les deux sens : on tire aussi bien vers le
-    /// haut et vers la gauche, et l'ancre reste celle du premier clic.
+    /// The rectangle reads both ways: one drags upwards and leftwards just as
+    /// well, and the anchor stays the first click's.
     #[test]
     fn a_selection_reads_the_same_from_either_corner() {
         let mut results = results();
         results.press(2, 2, false);
         assert!(results.drag_to(0, 1));
-        assert!(!results.drag_to(0, 1), "rien n'a bougé, rien à repeindre");
+        assert!(!results.drag_to(0, 1), "nothing moved, nothing to repaint");
 
         let selection = results.selection.unwrap();
         assert_eq!(selection.anchor, (2, 2), "l'ancre est le premier clic");

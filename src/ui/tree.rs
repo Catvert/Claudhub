@@ -115,15 +115,15 @@ fn emit(
     out: &mut Vec<Entry>,
 ) {
     for (name, child) in &node.dirs {
-        // Fusion des dossiers intermédiaires : tant qu'un dossier n'a qu'un
-        // sous-dossier et aucun fichier, il n'apporte qu'un niveau
-        // d'indentation. Sans cela, un projet Laravel coûte six niveaux avant
-        // le premier fichier.
+        // Merging intermediate directories: as long as a directory has one
+        // subdirectory and no files, all it adds is a level of indentation.
+        // Without this, a Laravel project costs six levels before the first
+        // file.
         let mut label = name.clone();
         let mut path = prefix.join(name);
         let mut deepest = child;
         while deepest.leaves.is_empty() && deepest.dirs.len() == 1 {
-            let (name, child) = deepest.dirs.iter().next().expect("un seul enfant");
+            let (name, child) = deepest.dirs.iter().next().expect("exactly one child");
             label.push('/');
             label.push_str(name);
             path = path.join(name);
@@ -179,11 +179,11 @@ mod tests {
 
     #[test]
     fn lonely_directories_are_merged_into_one_line() {
-        let paths = paths(&["app/Http/Livewire/Forms/Devis.php", "README.md"]);
+        let paths = paths(&["app/Http/Livewire/Forms/Quote.php", "README.md"]);
         let entries = build(&paths, &HashSet::new());
         assert_eq!(
             labels(&entries, &paths),
-            vec!["app/Http/Livewire/Forms/", "  Devis.php", "README.md"]
+            vec!["app/Http/Livewire/Forms/", "  Quote.php", "README.md"]
         );
     }
 
@@ -202,9 +202,9 @@ mod tests {
         let paths = paths(&["src/ui/a.rs", "src/ui/b.rs"]);
         let collapsed: HashSet<PathBuf> = [PathBuf::from("src/ui")].into_iter().collect();
         let entries = build(&paths, &collapsed);
-        assert_eq!(entries.len(), 1, "les fichiers sont cachés");
-        // Cocher un dossier fermé doit agir sur ce qu'il contient, pas sur ce
-        // qu'on en voit.
+        assert_eq!(entries.len(), 1, "the files are hidden");
+        // Ticking a closed directory must act on what it contains, not on what
+        // is visible of it.
         match &entries[0] {
             Entry::Dir {
                 leaves, collapsed, ..
@@ -212,12 +212,12 @@ mod tests {
                 assert!(collapsed);
                 assert_eq!(leaves, &vec![0, 1]);
             }
-            other => panic!("attendu un dossier : {other:?}"),
+            other => panic!("expected a directory: {other:?}"),
         }
     }
 
-    /// Les indices rendus désignent la liste entière, pas le sous-ensemble :
-    /// c'est ce qui permet de filtrer sans table de correspondance.
+    /// The indices returned refer to the whole list, not to the subset: that
+    /// is what makes filtering possible without a lookup table.
     #[test]
     fn a_subset_still_indexes_the_whole_list() {
         let paths = paths(&["a.rs", "src/b.rs", "src/c.rs"]);
@@ -225,7 +225,7 @@ mod tests {
         assert_eq!(labels(&entries, &paths), vec!["src/", "  c.rs"]);
         match entries[1] {
             Entry::Leaf { index, .. } => assert_eq!(index, 2),
-            _ => panic!("attendu une feuille"),
+            _ => panic!("expected a leaf"),
         }
     }
 

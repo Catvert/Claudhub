@@ -19,18 +19,18 @@ use gpui_component::{
 };
 
 use crate::git::Pending;
-use crate::runtime::Cmd;
+use crate::runtime::{Action, Cmd};
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
 
 impl ClaudhubApp {
-    /// L'opération en cours dans le worktree affiché, s'il y en a une.
+    /// The operation in progress in the displayed worktree, if there is one.
     pub(super) fn pending_operation(&self) -> Option<Pending> {
         self.active_review()?.status.pending
     }
 
-    /// Les fichiers que git déclare non fusionnés.
+    /// The files git reports as unmerged.
     pub(super) fn conflicted_files(&self) -> Vec<PathBuf> {
         self.active_review()
             .map(|state| {
@@ -67,19 +67,23 @@ impl ClaudhubApp {
         let Some(worktree) = self.active.clone() else {
             return;
         };
-        self.git.send(Cmd::AbortPending { worktree });
-        cx.notify();
+        let cmd = Cmd::AbortPending {
+            worktree: worktree.clone(),
+        };
+        self.start(Some(worktree), Action::Abort, cmd, cx);
     }
 
     pub(super) fn resume_pending(&mut self, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
         };
-        self.git.send(Cmd::ResumePending { worktree });
-        cx.notify();
+        let cmd = Cmd::ResumePending {
+            worktree: worktree.clone(),
+        };
+        self.start(Some(worktree), Action::Resume, cmd, cx);
     }
 
-    /// Le panneau des conflits.
+    /// The conflicts panel.
     pub(super) fn render_conflicts(
         &mut self,
         window: &mut Window,

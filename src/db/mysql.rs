@@ -43,15 +43,15 @@ async fn open(connection: &Connection, database: Option<&str>) -> Result<MySqlCo
         .await
         .with_context(|| {
             format!(
-                "la connexion à {}:{} a expiré",
+                "the connection to {}:{} timed out",
                 connection.host(),
                 connection.port()
             )
         })?
-        .with_context(|| format!("connexion à {}:{}", connection.host(), connection.port()))
+        .with_context(|| format!("connecting to {}:{}", connection.host(), connection.port()))
 }
 
-/// Les points d'interrogation d'une clause `IN (?, ?, …)`.
+/// The question marks of an `IN (?, ?, …)` clause.
 fn placeholders(count: usize) -> String {
     vec!["?"; count].join(", ")
 }

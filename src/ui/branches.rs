@@ -472,7 +472,7 @@ mod tests {
                     .find(|r| matches!(r, Row::Branch(b) if b.name == "origin/Feature-X"))
                 {
                     Some(row) => row,
-                    None => panic!("la branche distante devrait exister"),
+                    None => panic!("the remote branch should exist"),
                 }
             ]
         );

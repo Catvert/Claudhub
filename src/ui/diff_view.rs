@@ -995,105 +995,7 @@ impl ClaudhubApp {
         let font_size = px(crate::ui::settings::Settings::global(cx).diff_font_size);
         let line_height = line_height(font_size);
 
-        let header = h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_2()
-            .gap_2()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(icon("file-diff").xsmall())
-            .child(
-                div()
-                    .id("diff-path")
-                    .flex_1()
-                    .truncate()
-                    .text_sm()
-                    .cursor_pointer()
-                    .font_family(mono.clone())
-                    .tooltip(|window, cx| {
-                        gpui_component::tooltip::Tooltip::new(tr!("action-copy-path"))
-                            .build(window, cx)
-                    })
-                    .on_click(cx.listener(|this, _, _window, cx| this.copy_diff_path(cx)))
-                    .child(path.display().to_string()),
-            )
-            .child(
-                Button::new("diff-whole-file")
-                    .ghost()
-                    .xsmall()
-                    // L'icône dit l'état courant, comme la bascule de
-                    // l'arborescence : le fichier entier, ou ses seules
-                    // modifications.
-                    .icon(icon(if whole_file { "file-text" } else { "file-diff" }))
-                    .tooltip(if whole_file {
-                        tr!("diff-hunks-only")
-                    } else {
-                        tr!("diff-whole-file")
-                    })
-                    .on_click(cx.listener(|this, _, _window, cx| this.toggle_whole_file(cx))),
-            )
-            .child(
-                Button::new("diff-split")
-                    .ghost()
-                    .xsmall()
-                    .icon(icon(if split { "columns-2" } else { "list" }))
-                    .tooltip(if split {
-                        tr!("diff-unified")
-                    } else {
-                        tr!("diff-split")
-                    })
-                    .on_click(cx.listener(|this, _, _window, cx| this.toggle_diff_split(cx))),
-            )
-            // Le repli n'a de sens qu'en deux colonnes : en une seule, la
-            // ligne dispose de toute la largeur. Un bouton qui ne changerait
-            // rien vaut mieux caché qu'inerte.
-            .when(split, |el| {
-                el.child(
-                    Button::new("diff-wrap")
-                        .ghost()
-                        .xsmall()
-                        .selected(wrap)
-                        .icon(icon("wrap-text"))
-                        .tooltip(if wrap {
-                            tr!("diff-nowrap")
-                        } else {
-                            tr!("diff-wrap")
-                        })
-                        .on_click(cx.listener(|this, _, _window, cx| this.toggle_diff_wrap(cx))),
-                )
-            })
-            .child(
-                Button::new("copy-file")
-                    .ghost()
-                    .xsmall()
-                    .icon(icon("copy"))
-                    .tooltip(tr!("action-copy-file"))
-                    .on_click(cx.listener(|this, _, _window, cx| this.copy_diff(false, cx))),
-            )
-            // Les deux gestes de la relecture annotée, à côté de la copie : ce
-            // sont les trois choses qu'on fait d'une sélection de code.
-            .child(
-                Button::new("annotate")
-                    .ghost()
-                    .xsmall()
-                    .icon(icon("reply"))
-                    .tooltip(tr!("note-add"))
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.annotate_selection(window, cx)),
-                    ),
-            )
-            .child(
-                Button::new("ask-agent")
-                    .ghost()
-                    .xsmall()
-                    .icon(icon("bot"))
-                    .tooltip(tr!("note-ask-title"))
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.ask_about_selection(window, cx)),
-                    ),
-            );
+        let header = self.render_diff_header(&path, split, wrap, whole_file, mono.clone(), cx);
 
         let Some(diff) = diff else {
             return v_flex()
@@ -1117,83 +1019,14 @@ impl ClaudhubApp {
                 .into_any_element();
         }
 
-        // Largeur d'un caractère, mesurée sur la police réellement choisie :
-        // une chasse fixe ne veut pas dire une largeur connue d'avance, et un
-        // écart d'un pixel décale la gouttière de tout un caractère au bout
-        // d'une centaine de colonnes.
-        let font = gpui::Font {
-            family: mono.clone(),
-            features: Default::default(),
-            weight: Default::default(),
-            style: Default::default(),
-            fallbacks: None,
-        };
-        let font_id = window.text_system().resolve_font(&font);
-        let cell = window
-            .text_system()
-            .advance(font_id, font_size, 'M')
-            .map(|size| size.width)
-            .unwrap_or(px(7.));
-
-        let gutter = cell * diff.gutter_digits as f32 + px(6.);
-        // Le lissage avance d'une frame. L'ordre avec la construction de la
-        // liste est libre : le décalage n'est lu qu'à la mise en page.
-        let base = self.diff_base_handle(cx);
-        self.motion(DIFF_SCROLL.into(), crate::ui::motion::Axes::Both)
-            .advance(&base, window);
-        // La largeur du contenu tient compte du viewport mesuré à la frame
-        // précédente : sans ce plancher, le fond coloré d'une ligne modifiée
-        // s'arrêterait au bout de son texte au lieu de traverser la vue.
-        //
-        // Au tout premier diff, cette mesure n'existe pas encore. On redemande
-        // alors une frame : sans elle, la vue garde sa largeur de départ
-        // jusqu'au prochain événement — le balayage de fond, deux secondes
-        // plus tard —, ce qui se voit d'autant plus que le repli calcule ses
-        // colonnes dessus. Les diffs suivants partent de la largeur retenue.
-        let measured = base.bounds().size.width;
-        if measured > px(1.) {
-            self.diff_width = measured;
-            self.diff_measures = 0;
-        } else if self.diff_measures < 4 {
-            self.diff_measures += 1;
-            window.request_animation_frame();
-        }
-        let viewport = if measured > px(1.) {
-            measured
-        } else {
-            self.diff_width
-        };
-        let text_width = cell * diff.longest_chars as f32 + px(24.);
-        // En deux colonnes, chacune est taillée pour la plus longue ligne du
-        // fichier — et non pour la moitié de la vue. Les tailler à la vue
-        // couperait le code ou le renverrait à la ligne, alors que le tout
-        // reste atteignable par le défilement horizontal, qui emmène les deux
-        // colonnes ensemble et garde donc les versions en regard.
-        // Repliées, les colonnes font la moitié de la vue et rien d'autre :
-        // c'est tout l'objet du repli, ne plus avoir à défiler pour lire une
-        // ligne longue.
-        let column = if wrap {
-            // La marge de note (3 px) appartient à l'entrée, pas aux
-            // colonnes : l'oublier ferait déborder la ligne de trois pixels,
-            // qu'aucune barre ne révélerait puisque le repli en supprime une.
-            ((viewport - px(3.)) / 2.).max(px(80.))
-        } else {
-            ((text_width + gutter).max(viewport / 2.)).max(px(80.))
-        };
-        let content_width = if split {
-            column * 2.
-        } else {
-            (text_width + gutter * 2.).max(viewport)
-        };
-        // Les colonnes de texte d'une moitié : ce qui reste une fois la
-        // gouttière, le signe et la marge de note pris. Zéro quand rien ne se
-        // replie, ce que `half` lit comme « laisse la ligne courir ».
-        let cols = if wrap {
-            (f32::from((column - gutter - px(20.)).max(px(0.))) / f32::from(cell)) as usize
-        } else {
-            0
-        };
-        let cols = if wrap { cols.max(8) } else { 0 };
+        let cell = cell_width(&mono, font_size, window);
+        let layout = self.diff_layout(&diff, split, wrap, cell, window, cx);
+        let DiffLayout {
+            gutter,
+            column,
+            content_width,
+            cols,
+        } = layout;
 
         let colors = DiffColors::of(cx);
         let entity = cx.entity();
@@ -1321,73 +1154,341 @@ impl ClaudhubApp {
                         cx.listener(|this, _, _window, _cx| this.end_diff_drag()),
                     )
                     .child(list)
-                    // Le clic droit porte les gestes qui n'ont pas de bouton
-                    // sous la main : on vient de sélectionner des lignes, et
-                    // remonter à la barre d'en-tête pour agir dessus est un
-                    // aller-retour de trop.
+                    // The right click carries the gestures with no button to
+                    // hand: lines have just been selected, and going back up to
+                    // the header bar to act on them is one round trip too many.
                     .context_menu({
                         let entity = cx.entity();
-                        move |menu, _window, _cx| {
-                            let (note, ask) = (entity.clone(), entity.clone());
-                            let edit = entity.clone();
-                            let (copy, patch) = (entity.clone(), entity.clone());
-                            menu.item(
-                                gpui_component::menu::PopupMenuItem::new(tr!("note-add"))
-                                    .icon(icon("message-square-plus"))
-                                    .on_click(move |_, window, cx| {
-                                        note.update(cx, |this, cx| {
-                                            this.annotate_selection(window, cx)
-                                        });
-                                    }),
-                            )
-                            .item(
-                                gpui_component::menu::PopupMenuItem::new(tr!("note-ask-title"))
-                                    .icon(icon("bot"))
-                                    .on_click(move |_, window, cx| {
-                                        ask.update(cx, |this, cx| {
-                                            this.ask_about_selection(window, cx)
-                                        });
-                                    }),
-                            )
-                            .item(
-                                gpui_component::menu::PopupMenuItem::new(tr!("editor-external"))
-                                    .icon(icon("external-link"))
-                                    .on_click(move |_, _window, cx| {
-                                        edit.update(cx, |this, cx| this.open_diff_externally(cx));
-                                    }),
-                            )
-                            .separator()
-                            .item(
-                                gpui_component::menu::PopupMenuItem::new(tr!("action-copy-file"))
-                                    .icon(icon("copy"))
-                                    .on_click(move |_, _window, cx| {
-                                        copy.update(cx, |this, cx| this.copy_diff(false, cx));
-                                    }),
-                            )
-                            .item(
-                                gpui_component::menu::PopupMenuItem::new(tr!("action-copy-patch"))
-                                    .icon(icon("file-diff"))
-                                    .on_click(move |_, _window, cx| {
-                                        patch.update(cx, |this, cx| this.copy_diff(true, cx));
-                                    }),
-                            )
-                        }
+                        move |menu, _window, _cx| diff_menu(menu, &entity)
                     }),
             )
             .into_any_element()
     }
+
+    /// The diff's bar: the path, and the gestures that act on the file as a
+    /// whole.
+    fn render_diff_header(
+        &self,
+        path: &Path,
+        split: bool,
+        wrap: bool,
+        whole_file: bool,
+        mono: SharedString,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .h(crate::ui::theme::bar_height(cx))
+            .w_full()
+            .px_2()
+            .gap_2()
+            .items_center()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(icon("file-diff").xsmall())
+            // Going from one change to the next is the gesture of a review, and
+            // it had only the arrow keys — which belong to whoever has the
+            // focus, so to nobody after a click in a terminal. The buttons are
+            // the same two moves, always here, and their tooltips name the keys
+            // for whoever would rather keep their hands still.
+            .child(self.step_button("prev-hunk", "arrow-up", -1, false, cx))
+            .child(self.step_button("next-hunk", "arrow-down", 1, false, cx))
+            .child(self.step_button("prev-file", "arrow-left", -1, true, cx))
+            .child(self.step_button("next-file", "arrow-right", 1, true, cx))
+            .child(
+                div()
+                    .id("diff-path")
+                    .flex_1()
+                    .truncate()
+                    .text_sm()
+                    .cursor_pointer()
+                    .font_family(mono)
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new(tr!("action-copy-path"))
+                            .build(window, cx)
+                    })
+                    .on_click(cx.listener(|this, _, _window, cx| this.copy_diff_path(cx)))
+                    .child(path.display().to_string()),
+            )
+            .child(
+                Button::new("diff-whole-file")
+                    .ghost()
+                    .xsmall()
+                    // The icon says the current state, like the tree toggle: the
+                    // whole file, or its changes alone.
+                    .icon(icon(if whole_file { "file-text" } else { "file-diff" }))
+                    .tooltip(if whole_file {
+                        tr!("diff-hunks-only")
+                    } else {
+                        tr!("diff-whole-file")
+                    })
+                    .on_click(cx.listener(|this, _, _window, cx| this.toggle_whole_file(cx))),
+            )
+            .child(
+                Button::new("diff-split")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon(if split { "columns-2" } else { "list" }))
+                    .tooltip(if split {
+                        tr!("diff-unified")
+                    } else {
+                        tr!("diff-split")
+                    })
+                    .on_click(cx.listener(|this, _, _window, cx| this.toggle_diff_split(cx))),
+            )
+            // Wrapping only makes sense in two columns: in a single one the line
+            // has the whole width. A button that would change nothing is better
+            // hidden than inert.
+            .when(split, |el| {
+                el.child(
+                    Button::new("diff-wrap")
+                        .ghost()
+                        .xsmall()
+                        .selected(wrap)
+                        .icon(icon("wrap-text"))
+                        .tooltip(if wrap {
+                            tr!("diff-nowrap")
+                        } else {
+                            tr!("diff-wrap")
+                        })
+                        .on_click(cx.listener(|this, _, _window, cx| this.toggle_diff_wrap(cx))),
+                )
+            })
+            .child(
+                Button::new("copy-file")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("copy"))
+                    .tooltip(tr!("action-copy-file"))
+                    .on_click(cx.listener(|this, _, _window, cx| this.copy_diff(false, cx))),
+            )
+            // The two gestures of annotated review, beside copying: they are the
+            // three things one does with a selection of code.
+            .child(
+                Button::new("annotate")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("reply"))
+                    .tooltip(tr!("note-add"))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.annotate_selection(window, cx)),
+                    ),
+            )
+            .child(
+                Button::new("ask-agent")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("bot"))
+                    .tooltip(tr!("note-ask-title"))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.ask_about_selection(window, cx)),
+                    ),
+            )
+    }
+
+    /// One of the four navigation buttons of the diff's bar.
+    ///
+    /// Up and down go from one **change** to the next — the lines of context
+    /// between two hunks have nothing to show — and overflow into the
+    /// neighbouring file once the last one is passed; left and right change file
+    /// outright. That is exactly what the arrow keys do, and it is the same code
+    /// underneath: two ways of making one gesture that did not lead to the same
+    /// place would be one too many.
+    fn step_button(
+        &self,
+        id: &'static str,
+        glyph: &'static str,
+        delta: isize,
+        by_file: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let key = match (by_file, delta > 0) {
+            (false, false) => "shortcut-previous-hunk",
+            (false, true) => "shortcut-next-hunk",
+            (true, false) => "shortcut-previous-file",
+            (true, true) => "shortcut-next-file",
+        };
+        Button::new(id)
+            .ghost()
+            .xsmall()
+            .icon(icon(glyph))
+            .tooltip(tr!(key))
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                if by_file {
+                    this.step_file(delta, cx);
+                } else {
+                    this.step_diff_hunk(delta, cx);
+                }
+            }))
+    }
+
+    /// The widths the diff is painted at, and the frame's scrolling.
+    ///
+    /// Both at once because they come from the same reading: the width measured
+    /// on the previous frame, which is what the smoothing has just written and
+    /// what every column below is derived from.
+    fn diff_layout(
+        &mut self,
+        diff: &Rendered,
+        split: bool,
+        wrap: bool,
+        cell: Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> DiffLayout {
+        let gutter = cell * diff.gutter_digits as f32 + px(6.);
+        // The smoothing advances by one frame. Its order relative to building
+        // the list is free: the offset is only read at layout time.
+        let base = self.diff_base_handle(cx);
+        self.motion(DIFF_SCROLL.into(), crate::ui::motion::Axes::Both)
+            .advance(&base, window);
+        // The content's width takes the viewport measured on the previous frame
+        // into account: without that floor, the coloured background of a changed
+        // line would stop at the end of its text instead of crossing the view.
+        //
+        // On the very first diff, that measurement does not exist yet. We then
+        // ask for another frame: without it, the view keeps its initial width
+        // until the next event — the background sweep, two seconds later — which
+        // shows all the more since wrapping computes its columns on it. The
+        // following diffs start from the recorded width.
+        let measured = base.bounds().size.width;
+        if measured > px(1.) {
+            self.diff_width = measured;
+            self.diff_measures = 0;
+        } else if self.diff_measures < 4 {
+            self.diff_measures += 1;
+            window.request_animation_frame();
+        }
+        let viewport = if measured > px(1.) {
+            measured
+        } else {
+            self.diff_width
+        };
+        let text_width = cell * diff.longest_chars as f32 + px(24.);
+        // In two columns, each is cut for the file's longest line — and not for
+        // half the view. Cutting them to the view would either cut the code or
+        // wrap it, whereas all of it stays reachable through horizontal
+        // scrolling, which carries both columns together and therefore keeps the
+        // versions opposite each other.
+        // Wrapped, the columns are half the view and nothing else: that is the
+        // whole point of wrapping, no longer having to scroll to read a long
+        // line.
+        let column = if wrap {
+            // The note margin (3 px) belongs to the entry, not to the columns:
+            // forgetting it would make the row overflow by three pixels, which
+            // no bar would reveal since wrapping removes one.
+            ((viewport - px(3.)) / 2.).max(px(80.))
+        } else {
+            ((text_width + gutter).max(viewport / 2.)).max(px(80.))
+        };
+        let content_width = if split {
+            column * 2.
+        } else {
+            (text_width + gutter * 2.).max(viewport)
+        };
+        // A half's text columns: what is left once the gutter, the sign and the
+        // note margin are taken. Zero when nothing wraps, which `half` reads as
+        // "let the line run".
+        let cols = if wrap {
+            ((f32::from((column - gutter - px(20.)).max(px(0.))) / f32::from(cell)) as usize).max(8)
+        } else {
+            0
+        };
+        DiffLayout {
+            gutter,
+            column,
+            content_width,
+            cols,
+        }
+    }
 }
 
-/// Ce que la recherche pose sur les lignes du diff.
+/// The widths a diff is painted at, all derived from one character's width.
+struct DiffLayout {
+    gutter: Pixels,
+    /// One column's width, in two-column mode.
+    column: Pixels,
+    /// The width of an entry of the unified list.
+    content_width: Pixels,
+    /// The text columns a half holds when wrapping. Zero when nothing wraps,
+    /// which `half` reads as "let the line run".
+    cols: usize,
+}
+
+/// A character's width, measured on the font actually chosen: a fixed pitch does
+/// not mean a width known in advance, and a one-pixel discrepancy shifts the
+/// gutter by a whole character after a hundred columns.
+fn cell_width(mono: &SharedString, font_size: Pixels, window: &mut Window) -> Pixels {
+    let font = gpui::Font {
+        family: mono.clone(),
+        features: Default::default(),
+        weight: Default::default(),
+        style: Default::default(),
+        fallbacks: None,
+    };
+    let font_id = window.text_system().resolve_font(&font);
+    window
+        .text_system()
+        .advance(font_id, font_size, 'M')
+        .map(|size| size.width)
+        .unwrap_or(px(7.))
+}
+
+/// The right click on a diff line: the gestures that have no button to hand.
+fn diff_menu(
+    menu: gpui_component::menu::PopupMenu,
+    entity: &gpui::Entity<ClaudhubApp>,
+) -> gpui_component::menu::PopupMenu {
+    let (note, ask) = (entity.clone(), entity.clone());
+    let edit = entity.clone();
+    let (copy, patch) = (entity.clone(), entity.clone());
+    menu.item(
+        gpui_component::menu::PopupMenuItem::new(tr!("note-add"))
+            .icon(icon("message-square-plus"))
+            .on_click(move |_, window, cx| {
+                note.update(cx, |this, cx| this.annotate_selection(window, cx));
+            }),
+    )
+    .item(
+        gpui_component::menu::PopupMenuItem::new(tr!("note-ask-title"))
+            .icon(icon("bot"))
+            .on_click(move |_, window, cx| {
+                ask.update(cx, |this, cx| this.ask_about_selection(window, cx));
+            }),
+    )
+    .item(
+        gpui_component::menu::PopupMenuItem::new(tr!("editor-external"))
+            .icon(icon("external-link"))
+            .on_click(move |_, _window, cx| {
+                edit.update(cx, |this, cx| this.open_diff_externally(cx));
+            }),
+    )
+    .separator()
+    .item(
+        gpui_component::menu::PopupMenuItem::new(tr!("action-copy-file"))
+            .icon(icon("copy"))
+            .on_click(move |_, _window, cx| {
+                copy.update(cx, |this, cx| this.copy_diff(false, cx));
+            }),
+    )
+    .item(
+        gpui_component::menu::PopupMenuItem::new(tr!("action-copy-patch"))
+            .icon(icon("file-diff"))
+            .on_click(move |_, _window, cx| {
+                patch.update(cx, |this, cx| this.copy_diff(true, cx));
+            }),
+    )
+}
+
+/// What the search lays over the diff's lines.
 ///
-/// Vide la plupart du temps, et c'est ce qui compte : sans requête,
-/// `by_line` l'est aussi, `marks` rend une tranche vide sans rien allouer, et
-/// la coloration passe exactement par le chemin qu'elle prenait avant.
+/// Empty most of the time, and that is what counts: with no query, `by_line` is
+/// empty too, `marks` returns an empty slice without allocating anything, and
+/// the highlighting goes exactly down the path it took before.
 #[derive(Clone)]
 pub struct SearchPaint {
     pub by_line: crate::ui::find::MatchesByLine,
-    /// L'occurrence courante, peinte plus vivement que les autres : dans un
-    /// fichier qui en compte quarante, « où en suis-je » est la question.
+    /// The current hit, painted more brightly than the others: in a file with
+    /// forty of them, "where am I" is the question.
     pub current: Option<crate::ui::find::Hit>,
     pub color: gpui::Hsla,
     pub current_color: gpui::Hsla,
@@ -2084,23 +2185,23 @@ mod tests {
         assert_eq!(
             rendered.len(true),
             3,
-            "l'ajout et la suppression tiennent sur une entrée"
+            "the addition and the removal sit on one entry"
         );
     }
 
     #[test]
     fn arrows_stop_at_the_edges() {
         assert_eq!(step(Some(3), 1, 10), Some(4));
-        assert_eq!(step(Some(0), -1, 10), Some(0), "butée haute");
-        assert_eq!(step(Some(9), 1, 10), Some(9), "butée basse");
-        // Sans sélection, la flèche part de l'extrémité vers laquelle elle va.
+        assert_eq!(step(Some(0), -1, 10), Some(0), "stops at the top");
+        assert_eq!(step(Some(9), 1, 10), Some(9), "stops at the bottom");
+        // With no selection, the arrow starts from the end it goes towards.
         assert_eq!(step(None, 1, 10), Some(0));
         assert_eq!(step(None, -1, 10), Some(9));
-        assert_eq!(step(Some(0), 1, 0), None, "rien à parcourir");
+        assert_eq!(step(Some(0), 1, 0), None, "nothing to walk");
     }
 
-    /// `None` n'est pas un refus : c'est le signal qu'il n'y a plus de hunk
-    /// dans ce fichier, et donc qu'il faut passer au voisin.
+    /// `None` is not a refusal: it is the signal that there is no hunk left in
+    /// this file, and therefore that one has to move to the neighbour.
     #[test]
     fn hunk_jumps_never_stay_put() {
         let headers = [0usize, 12, 40];
@@ -2109,7 +2210,7 @@ mod tests {
         assert_eq!(
             next_header(&headers, Some(40), 1),
             None,
-            "après le dernier hunk, on change de fichier"
+            "after the last hunk, we change file"
         );
         assert_eq!(next_header(&headers, Some(13), -1), Some(12));
         assert_eq!(next_header(&headers, Some(12), -1), Some(0));
@@ -2135,7 +2236,7 @@ mod tests {
                 DiffLineKind::NoNewline,
             ],
         ));
-        for (ix, text) in ["garde", "avant", "après", "\\ No newline"]
+        for (ix, text) in ["keep", "before", "after", "\\ No newline"]
             .iter()
             .enumerate()
         {
@@ -2143,21 +2244,20 @@ mod tests {
         }
         let rendered = Rendered::new(Path::new("a.rs"), diff, &HighlightTheme::default_dark());
 
-        // Tout le fichier, en code : ni en-tête `@@`, ni signes, ni
-        // l'annotation de fin de fichier — c'est ce qu'on colle dans un
-        // éditeur.
+        // The whole file, as code: no `@@` header, no signs, and no end-of-file
+        // annotation — it is what one pastes into an editor.
         let all = rendered.copy_text(0, rendered.rows.len() - 1, false);
-        assert_eq!(all, "garde\navant\naprès\n");
+        assert_eq!(all, "keep\nbefore\nafter\n");
 
-        // La même plage en patch garde de quoi être appliquée.
+        // The same range as a patch keeps what is needed to apply it.
         let patch = rendered.copy_text(0, rendered.rows.len() - 1, true);
         assert_eq!(
             patch,
-            "@@ -1,3 +1,3 @@\n garde\n-avant\n+après\n\\ No newline\n"
+            "@@ -1,3 +1,3 @@\n keep\n-before\n+after\n\\ No newline\n"
         );
 
-        // Une plage prise à l'envers vaut la même chose : on sélectionne
-        // parfois de bas en haut.
+        // A range taken backwards is worth the same: one sometimes selects from
+        // the bottom up.
         assert_eq!(
             rendered.copy_text(3, 1, false),
             rendered.copy_text(1, 3, false)
@@ -2225,27 +2325,26 @@ mod tests {
         );
     }
 
-    /// Une tranche se compte en **caractères** : en octets, une ligne
-    /// accentuée se couperait une colonne trop tôt, et au milieu d'un
-    /// caractère — ce qui panique.
+    /// A slice counts **characters**: in bytes, an accented line would be cut
+    /// one column too early, and in the middle of a character — which panics.
     #[test]
     fn a_slice_counts_characters_and_not_bytes() {
         let text = "éàü1234";
         assert_eq!(char_span(text, 0, 3), 0..6);
         assert_eq!(&text[char_span(text, 0, 3)], "éàü");
         assert_eq!(&text[char_span(text, 3, 5)], "12");
-        // Au-delà de la fin, la tranche s'arrête au texte.
+        // Past the end, the slice stops at the text.
         assert_eq!(&text[char_span(text, 5, 99)], "34");
         assert_eq!(char_span(text, 99, 120), text.len()..text.len());
     }
 
-    /// Les plages d'une tranche restent triées et disjointes, et repartent de
-    /// zéro : c'est l'invariant que gpui ne vérifie pas.
+    /// A slice's ranges stay sorted and disjoint, and start again from zero: it
+    /// is the invariant gpui does not check.
     #[test]
     fn sliced_runs_are_moved_back_to_the_start() {
         let runs = vec![(0..4, 'a'), (6..10, 'b'), (12..20, 'c')];
         assert_eq!(slice_runs(&runs, &(5..14)), vec![(1..5, 'b'), (7..9, 'c')]);
-        assert!(slice_runs(&runs, &(4..6)).is_empty(), "rien à cheval");
+        assert!(slice_runs(&runs, &(4..6)).is_empty(), "nothing straddling");
         assert_eq!(slice_runs(&runs, &(0..2)), vec![(0..2, 'a')]);
     }
 
@@ -2283,7 +2382,7 @@ mod tests {
             empty: false,
         };
         diff.hunks[0].lines[0].text = "fn calcule(x: u32) -> u32 { x + 1 }".into();
-        diff.hunks[0].lines[1].text = "// un commentaire avec des accents : é à ù".into();
+        diff.hunks[0].lines[1].text = "// a comment with accents: é à ù".into();
         let rendered = Rendered::new(Path::new("src/x.rs"), diff, &Theme::default_dark());
 
         for line in 0..2 {
@@ -2292,13 +2391,13 @@ mod tests {
             for (range, _) in rendered.highlights.line(0, line) {
                 assert!(
                     range.start >= end,
-                    "plages non triées : {range:?} après {end}"
+                    "ranges not sorted: {range:?} after {end}"
                 );
-                assert!(range.start <= range.end, "plage inversée : {range:?}");
-                assert!(range.end <= text.len(), "plage hors du texte : {range:?}");
+                assert!(range.start <= range.end, "reversed range: {range:?}");
+                assert!(range.end <= text.len(), "range outside the text: {range:?}");
                 assert!(
                     text.is_char_boundary(range.start) && text.is_char_boundary(range.end),
-                    "plage {range:?} coupe un caractère de « {text} »"
+                    "range {range:?} cuts a character of \"{text}\""
                 );
                 end = range.end;
             }

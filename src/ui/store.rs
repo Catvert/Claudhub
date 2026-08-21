@@ -88,14 +88,14 @@ impl Store {
         };
         match std::fs::read_to_string(&path) {
             Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-                // Écraser un fichier qu'on n'a pas su lire ferait perdre les
-                // notes de tous les worktrees pour une seule clé mal formée.
-                log::warn!("état illisible ({}) : {e}", path.display());
+                // Overwriting a file we failed to read would lose the notes of
+                // every worktree over a single malformed key.
+                log::warn!("unreadable state ({}): {e}", path.display());
                 Self::default()
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
             Err(e) => {
-                log::warn!("lecture de l'état : {e}");
+                log::warn!("reading the state: {e}");
                 Self::default()
             }
         }
@@ -109,10 +109,10 @@ impl Store {
         match serde_json::to_string_pretty(self) {
             Ok(json) => {
                 if let Err(e) = crate::ui::settings::write_private(&path, &json) {
-                    log::warn!("écriture de l'état : {e}");
+                    log::warn!("writing the state: {e}");
                 }
             }
-            Err(e) => log::warn!("sérialisation de l'état : {e}"),
+            Err(e) => log::warn!("serialising the state: {e}"),
         }
     }
 

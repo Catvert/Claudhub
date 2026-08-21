@@ -47,28 +47,28 @@ fn runtime() -> &'static Runtime {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(WORKERS)
             .thread_name("claudhub-async")
-            // `enable_all` : le temps (les délais) et le réseau (les sockets).
-            // Sans lui, un `timeout` panique à l'exécution en annonçant qu'il
-            // n'y a pas de minuteur — et seulement quand on l'atteint.
+            // `enable_all`: time (timeouts) and network (sockets). Without it a
+            // `timeout` panics at run time announcing there is no timer — and
+            // only once it is reached.
             .enable_all()
             .build()
-            .expect("le système refuse de créer l'exécuteur asynchrone")
+            .expect("the system refuses to create the async executor")
     })
 }
 
-/// Attend un futur depuis un thread de worker.
+/// Awaits a future from a worker thread.
 ///
-/// L'exécuteur est démarré au premier appel : une fenêtre qui n'ouvre jamais
-/// de base ne paie pas ses threads.
+/// The executor starts on first call: a window that never opens a database
+/// does not pay for its threads.
 pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
     runtime().block_on(future)
 }
 
-/// De quoi lancer une tâche sur l'exécuteur partagé.
+/// A way to spawn a task on the shared executor.
 ///
-/// Rien ne s'en sert encore : c'est la porte d'entrée pour ce qui voudra
-/// travailler de front — plusieurs requêtes, un client HTTP — sans repasser
-/// par un worker qui attend.
+/// Nothing uses it yet: it is the entry point for whatever wants to work side
+/// by side — several queries, an HTTP client — without going back through a
+/// worker that waits.
 #[allow(dead_code)]
 pub fn handle() -> tokio::runtime::Handle {
     runtime().handle().clone()

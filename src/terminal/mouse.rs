@@ -215,8 +215,8 @@ mod tests {
             TermMode::MOUSE_REPORT_CLICK,
             at(Some(Button::Right), Action::Release, 2, 3),
         )
-        .expect("le clic est rapporté");
-        assert_eq!(legacy[3], 32 + 3, "le bouton relâché n'est pas nommé");
+        .expect("the click is reported");
+        assert_eq!(legacy[3], 32 + 3, "the released button is not named");
     }
 
     #[test]
@@ -230,12 +230,12 @@ mod tests {
         assert_eq!(
             report(sgr(), wheel).as_deref(),
             Some(&b"\x1b[<64;1;1M"[..]),
-            "Ctrl+molette appartient au terminal, pas au programme"
+            "Ctrl+wheel belongs to the terminal, not to the program"
         );
     }
 
-    /// Un déplacement ne part qu'à qui l'a demandé, et le glissement et le
-    /// survol ne se demandent pas de la même façon.
+    /// A move only goes to whoever asked for it, and dragging and hovering are
+    /// not asked for the same way.
     #[test]
     fn a_move_is_reported_only_to_who_asked_for_it() {
         let dragging = at(Some(Button::Left), Action::Move, 1, 1);
@@ -245,20 +245,19 @@ mod tests {
         assert!(report(TermMode::MOUSE_DRAG | TermMode::SGR_MOUSE, hovering).is_none());
 
         let drag = report(TermMode::MOUSE_DRAG | TermMode::SGR_MOUSE, dragging);
-        assert_eq!(drag.as_deref(), Some(&b"\x1b[<32;2;2M"[..]), "le bit 32");
+        assert_eq!(drag.as_deref(), Some(&b"\x1b[<32;2;2M"[..]), "bit 32");
         assert!(report(TermMode::MOUSE_MOTION | TermMode::SGR_MOUSE, hovering).is_some());
     }
 
-    /// Le format d'origine ne sait pas dire « colonne 300 ». On abandonne
-    /// l'événement : un clic rapporté sur la mauvaise cellule est pire que
-    /// pas de clic du tout.
+    /// The original format cannot say "column 300". We give the event up: a
+    /// click reported on the wrong cell is worse than no click at all.
     #[test]
     fn the_oldest_encoding_gives_up_past_its_last_column() {
         let far = at(Some(Button::Left), Action::Press, 300, 0);
         assert!(report(TermMode::MOUSE_REPORT_CLICK, far).is_none());
         assert!(
             report(sgr(), far).is_some(),
-            "SGR n'a pas cette limite, et c'est pour cela qu'il existe"
+            "SGR has no such limit, and that is why it exists"
         );
     }
 }

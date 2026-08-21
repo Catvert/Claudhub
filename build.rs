@@ -23,12 +23,12 @@ fn main() {
     let body = match std::env::var_os("CLAUDHUB_EMBED_SERVER") {
         Some(path) => {
             let path = PathBuf::from(path);
-            // Une erreur franche plutôt qu'un repli silencieux : la variable a
-            // été posée exprès, et un exécutable livré sans son serveur est
-            // exactement ce qu'on cherche à rendre impossible.
+            // A hard error rather than a silent fallback: the variable was set
+            // on purpose, and an executable shipped without its server is
+            // exactly what this is meant to make impossible.
             assert!(
                 path.is_file(),
-                "CLAUDHUB_EMBED_SERVER désigne {} qui n'est pas un fichier",
+                "CLAUDHUB_EMBED_SERVER names {}, which is not a file",
                 path.display()
             );
             println!("cargo:rerun-if-changed={}", path.display());
@@ -36,5 +36,5 @@ fn main() {
         }
         None => "pub const EMBEDDED: Option<&[u8]> = None;\n".to_string(),
     };
-    std::fs::write(&generated, body).expect("écriture du serveur embarqué");
+    std::fs::write(&generated, body).expect("writing the embedded server");
 }

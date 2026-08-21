@@ -1,23 +1,31 @@
-//! La fenêtre de réglages.
+//! The settings screen.
 //!
-//! Le formulaire vient de gpui-component : pages, groupes, recherche et bouton
-//! de remise à zéro sont fournis, et chaque champ se déclare par un couple
-//! lire/écrire. Ces fermetures ne reçoivent qu'un `App` — c'est ce qui impose
-//! que les réglages vivent dans un global plutôt que dans `ClaudhubApp`.
+//! The form comes from gpui-component: pages, groups, search and a reset button
+//! are provided, and each field is declared by a read/write pair. Those closures
+//! only receive an `App` — which is what forces the settings to live in a global
+//! rather than in `ClaudhubApp`.
 //!
-//! Il n'y a pas de bouton « Appliquer » : chaque changement prend effet à la
-//! frappe et l'écriture du fichier suit, différée. Un formulaire qui demande
-//! de valider pour voir le résultat rend le choix d'une police ou d'une taille
-//! impossible autrement qu'à l'aveugle.
+//! There is no "Apply" button: every change takes effect as it is typed and the
+//! file write follows, deferred. A form asking you to confirm before seeing the
+//! result makes choosing a font or a size impossible except blind.
+//!
+//! **A screen and not a dialog.** It was a modal window — what one reaches for
+//! when there is nowhere to put a form. It covered what was being adjusted, it
+//! could not be left open beside the effect it produced, and the two things one
+//! comes here for, trying a theme and reading why something failed, are exactly
+//! the two that want the rest of the window still in sight. The bar was already
+//! there and the dock already knew how to carry a panel; what the move costs is
+//! that the render closure now runs **on every frame** instead of once at
+//! opening — hence `Environment`, and the cached log records.
 
 use gpui::{div, prelude::*, px, Anchor, App, Context, Entity, SharedString, Subscription, Window};
-use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::button::{Button, ButtonGroup, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::setting::{
     NumberFieldOptions, SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage,
 };
-use gpui_component::{h_flex, v_flex, ActiveTheme, Selectable, Sizable, WindowExt};
+use gpui_component::{h_flex, v_flex, ActiveTheme, Disableable, Selectable, Sizable};
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
@@ -26,91 +34,162 @@ use crate::ui::settings::{
     self, LanguageChoice, Settings, ThemeMode, DEFAULT_MONO_FONT, DEFAULT_UI_FONT,
 };
 
-/// Sur quelle page la fenêtre de réglages s'ouvre.
+/// Which page the settings screen shows.
 ///
-/// Une énumération et non un indice : l'ordre des pages est décidé dans
-/// `open_settings_at`, et c'est le seul endroit qui doive le connaître.
+/// An enum and not an index: the page order is decided in `settings_pages`, and
+/// that is the only place that has to know it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum Page {
-    /// La première, celle qu'on veut quand on ouvre les réglages tout court.
+    /// Wherever you were — what is wanted when the settings are simply opened.
+    #[default]
     First,
     Databases,
 }
 
-/// Hauteur de la fenêtre. Le formulaire a sa propre barre latérale et son
-/// défilement : il lui faut une hauteur imposée, sinon il s'étire à celle de
-/// son contenu et la barre latérale se retrouve dans le vide.
-const HEIGHT: gpui::Pixels = px(560.);
-const WIDTH: gpui::Pixels = px(880.);
+/// What the screen asks the system for, and asks it **once**.
+///
+/// The dialog this screen replaces paid for it at opening; a screen has no
+/// opening, and its declaration is rebuilt on every frame. Enumerating the
+/// installed fonts and stat-ing every line of `/etc/shells` at that rate is
+/// filesystem work in the middle of a frame.
+pub(super) struct Environment {
+    ui_fonts: Vec<(SharedString, SharedString)>,
+    mono_fonts: Vec<(SharedString, SharedString)>,
+    shells: Vec<(SharedString, SharedString)>,
+}
+
+impl Environment {
+    fn read(cx: &App) -> Self {
+        let installed = cx.text_system().all_font_names();
+        Self {
+            ui_fonts: choices(settings::font_choices(&installed, false, DEFAULT_UI_FONT)),
+            mono_fonts: choices(settings::font_choices(&installed, true, DEFAULT_MONO_FONT)),
+            shells: shell_choices(),
+        }
+    }
+}
 
 impl ClaudhubApp {
     pub(super) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_settings_at(Page::First, window, cx);
     }
 
-    /// La même fenêtre, ouverte sur une page donnée.
+    /// The settings screen, shown on a given page.
     ///
-    /// « Ajouter une connexion » vient du panneau « Bases » : y répondre par
-    /// un formulaire ouvert sur l'apparence laisse chercher dans une barre
-    /// latérale de sept entrées ce qu'on venait de demander.
+    /// "Add a connection" comes from the "Databases" panel; answering it with a
+    /// form opened on appearance leaves you hunting through a seven-entry
+    /// sidebar for what you had just asked for.
+    ///
+    /// The page cannot simply be written into the form on every frame:
+    /// `default_selected_index` is read when the form's state is **created**,
+    /// and that state lives as long as its id. The id therefore carries a
+    /// counter that this gesture bumps — a named page is a request, honoured
+    /// every time, even twice in a row having wandered off in between, where
+    /// `First` means "wherever you were" and leaves the form alone.
     pub(super) fn open_settings_at(
         &mut self,
         page: Page,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Les polices installées sont demandées une fois, à l'ouverture :
-        // interroger le système à chaque frame du formulaire coûterait une
-        // énumération complète par image.
-        let installed = cx.text_system().all_font_names();
-        let ui_fonts = choices(settings::font_choices(&installed, false, DEFAULT_UI_FONT));
-        let mono_fonts = choices(settings::font_choices(&installed, true, DEFAULT_MONO_FONT));
-        let shells = shell_choices();
-        // Le registre est peuplé de façon asynchrone au démarrage ; à
-        // l'ouverture du formulaire il l'est depuis longtemps.
+        if !matches!(page, Page::First) {
+            self.settings_page = page;
+            self.settings_epoch += 1;
+        }
+        self.enter_workspace(crate::ui::workspace::Workspace::Settings, window, cx);
+        cx.notify();
+    }
+
+    pub(super) fn render_settings_panel(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let environment = self.settings_environment(cx);
+        // The registry is populated asynchronously at startup and re-read here
+        // rather than cached: it is watched, and a theme file dropped in the
+        // folder while Claudhub runs has to show up in the list.
         let light_themes = theme_choices(gpui_component::ThemeMode::Light, cx);
         let dark_themes = theme_choices(gpui_component::ThemeMode::Dark, cx);
+        let logs = LogView {
+            records: self.log_records(),
+            level: self.logs_level,
+            app: cx.entity(),
+        };
 
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let (ui_fonts, shells) = (ui_fonts.clone(), shells.clone());
-            let (light_themes, dark_themes) = (light_themes.clone(), dark_themes.clone());
-            let (mono_fonts, terminal_fonts) = (mono_fonts.clone(), mono_fonts.clone());
-            // Les pages sont assemblées en liste plutôt qu'enchaînées : c'est
-            // ce qui permet de retenir la place d'une page **au moment où on
-            // l'ajoute**. Un indice écrit en dur aurait désigné la voisine dès
-            // la première page insérée avant elle, et rien ne l'aurait dit.
-            let mut pages = vec![
-                appearance_page(ui_fonts, mono_fonts, light_themes, dark_themes),
-                terminal_page(shells, terminal_fonts),
-                review_page(),
-                keyboard_page(),
-                files_page(),
-            ];
-            let databases_ix = pages.len();
-            pages.push(databases_page());
-            pages.push(sentry_page());
-            let selected = match page {
-                Page::First => None,
-                Page::Databases => Some(databases_ix),
-            };
-            dialog
-                .title(tr!("settings-title"))
-                .w(WIDTH)
-                .max_w(WIDTH)
-                .child(
-                    v_flex().h(HEIGHT).child(
-                        gpui_component::setting::Settings::new("claudhub-settings")
-                            .sidebar_width(px(190.))
-                            .pages(pages)
-                            .map(|form| match selected {
-                                Some(page_ix) => form.default_selected_index(SelectIndex {
-                                    page_ix,
-                                    group_ix: None,
-                                }),
-                                None => form,
-                            }),
-                    ),
-                )
-        });
+        // The pages are assembled as a list rather than chained: that is what
+        // makes it possible to record a page's place **at the moment it is
+        // added**. A hard-coded index would have named the neighbour as soon as
+        // one page was inserted before it, and nothing would say so.
+        let mut pages = vec![
+            appearance_page(
+                environment.ui_fonts.clone(),
+                environment.mono_fonts.clone(),
+                light_themes,
+                dark_themes,
+            ),
+            terminal_page(environment.shells.clone(), environment.mono_fonts.clone()),
+            review_page(),
+            keyboard_page(),
+            files_page(),
+        ];
+        let databases_ix = pages.len();
+        pages.push(databases_page());
+        pages.push(sentry_page());
+        pages.push(logs_page(logs));
+        let selected = match self.settings_page {
+            Page::First => None,
+            Page::Databases => Some(databases_ix),
+        };
+
+        div().size_full().child(
+            gpui_component::setting::Settings::new(SharedString::from(format!(
+                "claudhub-settings-{}",
+                self.settings_epoch
+            )))
+            .sidebar_width(px(190.))
+            .pages(pages)
+            .map(|form| match selected {
+                Some(page_ix) => form.default_selected_index(SelectIndex {
+                    page_ix,
+                    group_ix: None,
+                }),
+                None => form,
+            }),
+        )
+    }
+
+    /// What the system told us, read once and kept.
+    ///
+    /// Emptied when the remote server answers: its `/etc/shells` is the one the
+    /// form must offer, and ours names nothing over there.
+    fn settings_environment(&mut self, cx: &App) -> std::rc::Rc<Environment> {
+        self.settings_env
+            .get_or_insert_with(|| std::rc::Rc::new(Environment::read(cx)))
+            .clone()
+    }
+
+    pub(super) fn forget_settings_environment(&mut self) {
+        self.settings_env = None;
+    }
+
+    /// The log records, copied only when there are new ones.
+    ///
+    /// `logging::records` copies the ring — two thousand entries — and this page
+    /// renders on every frame. The counter is what says the copy is out of date;
+    /// the buffer's own length would stop moving as soon as the ring is full.
+    ///
+    /// Nothing notifies the view when a record is written — a worker thread
+    /// logs, it does not touch gpui — so the page follows the frames the rest of
+    /// the application causes. The background sweep alone brings one every two
+    /// seconds, which is what makes a log written elsewhere appear on its own.
+    fn log_records(&mut self) -> std::rc::Rc<Vec<crate::logging::Entry>> {
+        let written = crate::logging::written();
+        if self.logs_seen != written {
+            self.logs_seen = written;
+            self.logs = std::rc::Rc::new(crate::logging::records());
+        }
+        self.logs.clone()
     }
 }
 
@@ -1247,7 +1326,233 @@ fn sentry_page() -> SettingPage {
     )
 }
 
-/// Bornes communes aux tailles de texte, les mêmes que celles de la molette.
+/// What the logs page needs: the records, what is being shown of them, and a
+/// way back to the application — the level is a posture of reading, not a
+/// preference, and it lives in `ClaudhubApp` rather than in the settings file.
+struct LogView {
+    records: std::rc::Rc<Vec<crate::logging::Entry>>,
+    level: log::LevelFilter,
+    app: Entity<ClaudhubApp>,
+}
+
+/// How many rows are painted.
+///
+/// The ring holds two thousand, and this list is **not** virtualised: it lives
+/// inside the form's page, which scrolls as one block. Painting two thousand
+/// styled lines per frame is what a virtualised list exists to avoid, and the
+/// tail is what a log is read from — hence a cap, and a line that says so
+/// rather than a list that silently stops.
+const LOG_ROWS: usize = 200;
+
+/// The levels the filter offers, from the widest to the narrowest.
+const LOG_LEVELS: [log::LevelFilter; 5] = [
+    log::LevelFilter::Trace,
+    log::LevelFilter::Debug,
+    log::LevelFilter::Info,
+    log::LevelFilter::Warn,
+    log::LevelFilter::Error,
+];
+
+/// The colour of a level. Warnings and errors are the two one is looking for;
+/// the rest is context, and painting it would make the page unreadable.
+fn level_color(level: log::Level, cx: &App) -> gpui::Hsla {
+    match level {
+        log::Level::Error => cx.theme().danger,
+        log::Level::Warn => cx.theme().warning,
+        _ => cx.theme().muted_foreground,
+    }
+}
+
+/// One record, as a line of text — what the copy button puts in the clipboard.
+///
+/// The same shape as what `env_logger` prints on stderr: a log pasted into a
+/// report has to look like the one whoever reads it would have got from a
+/// terminal.
+fn log_line(entry: &crate::logging::Entry) -> String {
+    format!(
+        "[{} {:<5} {}] {}",
+        entry.at.format("%Y-%m-%dT%H:%M:%S%.3f"),
+        entry.level,
+        entry.target,
+        entry.message
+    )
+}
+
+/// What Claudhub has written since it started.
+///
+/// **A page and not a file.** A graphical application has no console under its
+/// window: without this, finding out why a fetch failed or why the remote server
+/// died means relaunching from a terminal, which is asking the user to reproduce
+/// the problem before being allowed to look at it.
+fn logs_page(view: LogView) -> SettingPage {
+    SettingPage::new(tr!("settings-page-logs"))
+        // Nothing here is a setting, so nothing here resets.
+        .resettable(false)
+        .group(
+            SettingGroup::new().item(SettingItem::render(move |_, _window, cx| {
+                let LogView {
+                    records,
+                    level,
+                    app,
+                } = &view;
+                // Filtered before being cut: the last two hundred **warnings** are
+                // not the warnings among the last two hundred records, and the
+                // second reading is the one that makes a page look empty.
+                let shown: Vec<&crate::logging::Entry> = records
+                    .iter()
+                    .filter(|entry| entry.level <= *level)
+                    .collect();
+                let total = shown.len();
+                let mono = cx.theme().mono_font_family.clone();
+                let muted = cx.theme().muted_foreground;
+                let rows = shown
+                    .iter()
+                    .rev()
+                    .take(LOG_ROWS)
+                    .rev()
+                    .map(|entry| {
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .items_start()
+                            .text_xs()
+                            .font_family(mono.clone())
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(muted)
+                                    .child(entry.at.format("%H:%M:%S%.3f").to_string()),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .w(px(44.))
+                                    .text_color(level_color(entry.level, cx))
+                                    .child(entry.level.to_string()),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .max_w(px(160.))
+                                    .truncate()
+                                    .text_color(muted)
+                                    .child(entry.target.clone()),
+                            )
+                            // No `truncate` on the message: a log line one cannot
+                            // read to the end is a log line for nothing. It wraps.
+                            .child(div().flex_1().min_w_0().child(entry.message.clone()))
+                    })
+                    .collect::<Vec<_>>();
+
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child(tr!("settings-logs-help")),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                ButtonGroup::new("log-level")
+                                    .outline()
+                                    .compact()
+                                    .small()
+                                    .children(LOG_LEVELS.map(|choice| {
+                                        Button::new(("log-level", choice as usize))
+                                            .label(choice.to_string())
+                                            .selected(choice == *level)
+                                    }))
+                                    .on_click({
+                                        let app = app.clone();
+                                        move |selected: &Vec<usize>, _window, cx| {
+                                            let Some(choice) =
+                                                selected.first().and_then(|ix| LOG_LEVELS.get(*ix))
+                                            else {
+                                                return;
+                                            };
+                                            app.update(cx, |this, cx| {
+                                                this.logs_level = *choice;
+                                                cx.notify();
+                                            });
+                                        }
+                                    }),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .child(
+                                        Button::new("log-copy")
+                                            .outline()
+                                            .small()
+                                            .icon(icon("copy"))
+                                            .label(tr!("settings-logs-copy"))
+                                            .disabled(total == 0)
+                                            .on_click({
+                                                // Everything the filter kept, not
+                                                // the two hundred painted: what goes
+                                                // into a report is the log, not the
+                                                // end of it.
+                                                let text = shown
+                                                    .iter()
+                                                    .map(|entry| log_line(entry))
+                                                    .collect::<Vec<_>>()
+                                                    .join("\n");
+                                                move |_, _window, cx| {
+                                                    cx.write_to_clipboard(
+                                                        gpui::ClipboardItem::new_string(
+                                                            text.clone(),
+                                                        ),
+                                                    );
+                                                }
+                                            }),
+                                    )
+                                    .child(
+                                        Button::new("log-clear")
+                                            .outline()
+                                            .small()
+                                            .icon(icon("trash-2"))
+                                            .label(tr!("settings-logs-clear"))
+                                            .disabled(records.is_empty())
+                                            .on_click({
+                                                let app = app.clone();
+                                                move |_, _window, cx| {
+                                                    crate::logging::clear();
+                                                    app.update(cx, |_, cx| cx.notify());
+                                                }
+                                            }),
+                                    ),
+                            ),
+                    )
+                    .when(total == 0, |el| {
+                        el.child(
+                            div()
+                                .py_2()
+                                .text_sm()
+                                .text_color(muted)
+                                .child(tr!("settings-logs-empty")),
+                        )
+                    })
+                    // The cap is said rather than hidden: a list that stops without
+                    // a word reads as a list that has nothing more in it.
+                    .when(total > LOG_ROWS, |el| {
+                        el.child(div().text_xs().text_color(muted).child(tr!(
+                            "settings-logs-truncated",
+                            { shown: LOG_ROWS.to_string(), total: total.to_string() }
+                        )))
+                    })
+                    .children(rows)
+            })),
+        )
+}
+
+/// Bounds common to the text sizes, the same as the wheel's.
 fn size_range() -> NumberFieldOptions {
     NumberFieldOptions {
         min: settings::MIN_FONT_SIZE as f64,

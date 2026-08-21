@@ -19,38 +19,37 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-/// La version du protocole. À incrémenter à **chaque** changement de `Cmd`,
-/// d'`Evt` ou d'un type qu'ils transportent : les deux bouts sont deux
-/// binaires livrés ensemble mais installés séparément, et un désaccord doit
-/// se dire à la poignée de main plutôt qu'en trame illisible au premier diff.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// The protocol version. To be incremented on **every** change to `Cmd`, to
+/// `Evt` or to a type they carry: the two ends are two binaries shipped
+/// together but installed separately, and a disagreement should be told at the
+/// handshake rather than as an unreadable frame on the first diff.
+pub const PROTOCOL_VERSION: u32 = 2;
 
-/// La première trame de chaque bout, avant tout `Cmd` ou `Evt`.
+/// The first frame from each end, before any `Cmd` or `Evt`.
 ///
-/// Elle est **hors** des deux grandes énumérations, et ses champs ne se
-/// réordonnent jamais : c'est elle qui détecte un désaccord de version, elle
-/// doit donc se relire depuis n'importe quelle version — postcard est
-/// positionnel, et un enum qui a bougé décode du charabia sans le dire.
+/// It is **outside** the two big enums, and its fields are never reordered: it
+/// is what detects a version mismatch, so it has to be readable from any
+/// version — postcard is positional, and an enum that has moved decodes
+/// gibberish without saying so.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Hello {
     pub protocol: u32,
-    /// L'identifiant de build (`CLAUDHUB_BUILD_ID` en CI, `dev` ailleurs) :
-    /// pour les traces, la version qui fait foi est `protocol`.
+    /// The build id (`CLAUDHUB_BUILD_ID` in CI, `dev` elsewhere): for traces,
+    /// the authoritative version is `protocol`.
     pub build: String,
-    /// Le répertoire de lancement du serveur : c'est lui qui remplace le
-    /// `current_dir` de la vue quand les workers tournent ailleurs.
+    /// The server's launch directory: it replaces the view's `current_dir`
+    /// when the workers run elsewhere.
     pub cwd: PathBuf,
-    /// Vrai si le serveur tourne sous WSL — c'est là que « ce chemin est un
-    /// montage Windows » a un sens, et la vue ne peut pas le deviner.
+    /// True if the server runs under WSL — that is where "this path is a
+    /// Windows mount" means something, and the view cannot guess it.
     pub running_under_wsl: bool,
-    /// Les shells de connexion du serveur (`/etc/shells`) : la liste que le
-    /// formulaire des réglages propose, et qu'une vue Windows ne peut pas
-    /// lire elle-même.
+    /// The server's login shells (`/etc/shells`): the list the settings form
+    /// offers, and which a Windows view cannot read itself.
     pub shells: Vec<String>,
 }
 
 impl Hello {
-    /// La poignée de main de ce processus-ci.
+    /// This process's own handshake.
     pub fn current() -> Self {
         Self {
             protocol: PROTOCOL_VERSION,
@@ -75,33 +74,32 @@ fn login_shells() -> Vec<String> {
         .collect()
 }
 
-/// Garde-fou sur la longueur annoncée d'une trame. Un diff de relecture
-/// d'agent se compte en méga-octets, jamais en giga-octets : au-delà, c'est
-/// que le flux est désynchronisé et que ces quatre octets n'étaient pas une
-/// longueur.
+/// A guard on a frame's announced length. An agent-review diff is measured in
+/// megabytes, never gigabytes: beyond that, the stream is desynchronised and
+/// those four bytes were not a length.
 const MAX_FRAME: u32 = 256 * 1024 * 1024;
 
-/// Écrit une trame. Une valeur qui ne se sérialise pas — un chemin non-UTF-8,
-/// en pratique — est journalisée et écartée : perdre un événement vaut mieux
-/// que fermer le fil pour tout le monde.
+/// Writes a frame. A value that does not serialise — a non-UTF-8 path, in
+/// practice — is logged and dropped: losing one event is better than closing
+/// the wire for everybody.
 pub fn write_frame<T: Serialize>(out: &mut impl Write, value: &T) -> std::io::Result<()> {
     let body = match postcard::to_stdvec(value) {
         Ok(body) => body,
         Err(e) => {
-            log::warn!("valeur insérialisable écartée du fil : {e}");
+            log::warn!("unserialisable value dropped from the wire: {e}");
             return Ok(());
         }
     };
     out.write_all(&(body.len() as u32).to_le_bytes())?;
     out.write_all(&body)?;
-    // Une trame par événement, et un flush par trame : l'autre bout attend
-    // parfois cette réponse-là pour dessiner, et un tampon la retiendrait.
+    // One frame per event, and one flush per frame: the other end sometimes
+    // waits for that very answer to draw, and a buffer would hold it back.
     out.flush()
 }
 
-/// Lit la trame suivante. `Ok(None)` est la fin propre du flux — l'autre bout
-/// est parti ; une longueur aberrante ou un corps illisible sont des erreurs,
-/// le flux n'est plus un protocole.
+/// Reads the next frame. `Ok(None)` is the clean end of the stream — the other
+/// end is gone; an absurd length or an unreadable body are errors, the stream
+/// is no longer a protocol.
 pub fn read_frame<T: DeserializeOwned>(input: &mut impl Read) -> anyhow::Result<Option<T>> {
     let mut len = [0u8; 4];
     match input.read_exact(&mut len) {
@@ -111,7 +109,7 @@ pub fn read_frame<T: DeserializeOwned>(input: &mut impl Read) -> anyhow::Result<
     }
     let len = u32::from_le_bytes(len);
     if len > MAX_FRAME {
-        anyhow::bail!("trame de {len} octets annoncée : le flux est désynchronisé");
+        anyhow::bail!("a {len}-byte frame announced: the stream is desynchronised");
     }
     let mut body = vec![0u8; len as usize];
     input.read_exact(&mut body)?;
@@ -126,23 +124,23 @@ mod tests {
     use super::*;
     use crate::runtime::protocol::{Cmd, Evt, Secret};
 
-    /// Aller-retour par le fil, trame comprise.
+    /// A round trip over the wire, frame included.
     fn roundtrip<T: Serialize + DeserializeOwned>(value: &T) -> T {
         let mut buffer = Vec::new();
-        write_frame(&mut buffer, value).expect("écriture");
+        write_frame(&mut buffer, value).expect("write");
         read_frame(&mut buffer.as_slice())
-            .expect("lecture")
-            .expect("une trame")
+            .expect("read")
+            .expect("one frame")
     }
 
-    /// Les cas qui ont décidé du format : une table à clés `PathBuf` (que
-    /// JSON refuse), un diff imbriqué sur trois niveaux, un résultat, des
-    /// accents dans les chemins et les textes.
+    /// The cases that decided the format: a map keyed by `PathBuf` (which JSON
+    /// refuses), a diff nested three levels deep, a result set, accents in
+    /// paths and in text.
     #[test]
     fn the_hard_payloads_cross_the_wire_intact() {
         let mut agents = HashMap::new();
         agents.insert(
-            PathBuf::from("/home/aurélie/projets/devis"),
+            PathBuf::from("/home/zoé/projects/quotes"),
             vec![crate::agent::Process {
                 pid: 4242,
                 program: "claude".into(),
@@ -154,7 +152,7 @@ mod tests {
         };
         match roundtrip(&evt) {
             Evt::Agents { agents: back } => assert_eq!(back, agents),
-            other => panic!("mauvaise variante : {other:?}"),
+            other => panic!("wrong variant: {other:?}"),
         }
 
         let diff = crate::git::FileDiff {
@@ -164,7 +162,7 @@ mod tests {
                 new_start: 1,
                 lines: vec![crate::git::DiffLine {
                     kind: crate::git::DiffLineKind::Added,
-                    text: "réponse élaborée".into(),
+                    text: "élaborate answer".into(),
                     old_no: None,
                     new_no: Some(1),
                 }],
@@ -178,11 +176,11 @@ mod tests {
         };
         match roundtrip(&evt) {
             Evt::FileDiff { diff: back, .. } => assert_eq!(back, diff),
-            other => panic!("mauvaise variante : {other:?}"),
+            other => panic!("wrong variant: {other:?}"),
         }
 
         let rows = crate::db::Rows {
-            columns: vec!["id".into(), "nom".into()],
+            columns: vec!["id".into(), "name".into()],
             rows: vec![vec![Some("1".into()), None]],
             affected: None,
             offset: 0,
@@ -195,27 +193,27 @@ mod tests {
         };
         match roundtrip(&evt) {
             Evt::DbRows { rows: Ok(back), .. } => assert_eq!(back, rows),
-            other => panic!("mauvaise variante : {other:?}"),
+            other => panic!("wrong variant: {other:?}"),
         }
     }
 
-    /// Le secret traverse le fil mais pas les traces.
+    /// The secret crosses the wire but not the traces.
     #[test]
     fn a_secret_crosses_the_wire_but_not_the_logs() {
         let cmd = Cmd::LoadIssueEvent {
             issue: "42".into(),
-            token: Secret("sntrys_tout_un_jeton".into()),
+            token: Secret("sntrys_hunter2".into()),
         };
         let back = roundtrip(&cmd);
         match back {
-            Cmd::LoadIssueEvent { token, .. } => assert_eq!(token.0, "sntrys_tout_un_jeton"),
-            other => panic!("mauvaise variante : {other:?}"),
+            Cmd::LoadIssueEvent { token, .. } => assert_eq!(token.0, "sntrys_hunter2"),
+            other => panic!("wrong variant: {other:?}"),
         }
-        assert!(!format!("{cmd:?}").contains("jeton"), "{cmd:?}");
+        assert!(!format!("{cmd:?}").contains("hunter2"), "{cmd:?}");
     }
 
-    /// Deux trames à la suite se relisent dans l'ordre, et la fin du flux est
-    /// un `None` propre, pas une erreur.
+    /// Two frames in a row read back in order, and the end of the stream is a
+    /// clean `None`, not an error.
     #[test]
     fn frames_follow_each_other_and_eof_is_clean() {
         let mut buffer = Vec::new();

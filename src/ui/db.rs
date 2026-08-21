@@ -339,7 +339,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         let Some(index) = self.connection_by_key(&key) else {
-            return; // la connexion a été retirée pendant l'attente
+            return; // the connection was removed while waiting
         };
         let Some(state) = self.db.connections.get_mut(index) else {
             return;

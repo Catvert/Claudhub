@@ -1,9 +1,9 @@
-//! Barre latérale : les dépôts et leurs worktrees.
+//! Sidebar: the repositories and their worktrees.
 //!
-//! C'est le sélecteur principal de l'application. Tout le reste de la fenêtre
-//! — revue, terminaux, branches — parle du worktree choisi ici.
+//! It is the application's main picker. Everything else in the window — review,
+//! terminals, branches — talks about the worktree chosen here.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gpui::{div, prelude::*, px, App, Context, SharedString, Window};
 use gpui_component::{
@@ -34,31 +34,21 @@ struct WorktreeRow {
     agent: Option<crate::ui::app::AgentState>,
 }
 
-/// Le volume de travail en cours : lignes ajoutées et retirées.
+/// The volume of work in progress: lines added and removed.
 ///
-/// Le nombre de fichiers n'y figure que faute de mieux — un renommage ou un
-/// binaire ne fait bouger aucune ligne, et ne rien montrer laisserait croire
-/// qu'il n'y a rien.
+/// The file count is only there for want of better — a rename or a binary moves
+/// no line, and showing nothing would suggest there is nothing.
 fn volume(summary: crate::git::Summary, cx: &gpui::App) -> impl IntoElement {
     let colors = crate::ui::theme::DiffColors::of(cx);
     h_flex()
         .flex_none()
         .gap_1()
         .text_xs()
-        .when(summary.added > 0, |el| {
-            el.child(
-                div()
-                    .text_color(colors.added_fg)
-                    .child(format!("+{}", summary.added)),
-            )
-        })
-        .when(summary.removed > 0, |el| {
-            el.child(
-                div()
-                    .text_color(colors.removed_fg)
-                    .child(format!("−{}", summary.removed)),
-            )
-        })
+        .children(crate::ui::theme::volume(
+            summary.added,
+            summary.removed,
+            &colors,
+        ))
         .when(summary.added == 0 && summary.removed == 0, |el| {
             el.child(
                 div()
@@ -111,15 +101,92 @@ fn agent_badge(agent: &crate::ui::app::AgentState, cx: &gpui::App) -> impl IntoE
         )
 }
 
-/// Le nom d'un dépôt qu'on n'a pas pu ouvrir.
+/// The name of a repository we could not open.
 ///
-/// Déduit du chemin et non demandé à git, qui ne peut justement pas répondre :
-/// c'est le dernier segment, celui qu'on reconnaît, et le chemin entier reste
-/// sur la ligne d'en dessous.
+/// Derived from the path and not asked of git, which is precisely what cannot
+/// answer: it is the last segment, the one that is recognised, and the whole
+/// path stays on the line below.
 fn repo_name(path: &std::path::Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+/// A repository as the sidebar shows it, with the worktrees the search kept.
+struct RepoRow {
+    ix: usize,
+    main: PathBuf,
+    name: String,
+    collapsed: bool,
+    worktrees: Vec<WorktreeRow>,
+}
+
+/// A repository that no longer opens.
+struct UnavailableRow {
+    path: PathBuf,
+    name: SharedString,
+    message: SharedString,
+}
+
+/// A repository that could not be opened: what it was called, and a button to
+/// forget it.
+///
+/// A button and not a menu entry: it is the only thing that can be done with
+/// such a row, and hiding it behind a right click would amount to not offering
+/// it.
+fn render_unavailable(
+    ix: usize,
+    repo: UnavailableRow,
+    cx: &mut Context<ClaudhubApp>,
+) -> impl IntoElement {
+    let UnavailableRow {
+        path,
+        name,
+        message,
+    } = repo;
+    h_flex()
+        .id(("unavailable", ix))
+        .py_1()
+        .px_2()
+        .gap_1()
+        .items_center()
+        .tooltip(move |window, cx| {
+            gpui_component::tooltip::Tooltip::new(message.clone()).build(window, cx)
+        })
+        .child(
+            icon("triangle-alert")
+                .xsmall()
+                .text_color(cx.theme().warning),
+        )
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .truncate()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(name),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(cx.theme().warning)
+                        .child(tr!("sidebar-repo-unavailable")),
+                ),
+        )
+        .child(
+            Button::new(("forget-repo", ix))
+                .ghost()
+                .xsmall()
+                .icon(icon("x"))
+                .tooltip(tr!("sidebar-forget-repository"))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.forget_repository(path.clone(), window, cx);
+                })),
+        )
 }
 
 impl ClaudhubApp {
@@ -130,101 +197,35 @@ impl ClaudhubApp {
     ) -> impl IntoElement {
         let sidebar_scroll = self.scroll_of("sidebar");
         let find = self.render_find(crate::ui::find::Pane::Sidebar, cx);
-        let query = self.query(crate::ui::find::Pane::Sidebar, cx);
-        // Le `wt.toml` de chaque dépôt, demandé une fois : c'est lui qui
-        // décide de ce que le menu d'un worktree propose.
-        let mains: Vec<PathBuf> = self.repos.iter().map(|repo| repo.main.clone()).collect();
-        for main in &mains {
-            self.ensure_wt_project(main);
-        }
-        let repos: Vec<_> =
-            self.repos
-                .iter()
-                .enumerate()
-                .map(|(ix, repo)| {
-                    (
-                        ix,
-                        repo.main.clone(),
-                        repo.name.clone(),
-                        repo.collapsed,
-                        repo.worktrees
-                            .iter()
-                            .map(|w| WorktreeRow {
-                                path: w.path.clone(),
-                                label: w.label(),
-                                branch: w.branch.clone(),
-                                is_main: w.is_main,
-                                prunable: w.prunable,
-                                summary: self.summaries.get(&w.path).copied(),
-                                agent: self.agents.get(&w.path).cloned(),
-                            })
-                            .filter(|row| {
-                                crate::ui::find::matches(&query, &row.label)
-                                    || row.branch.as_deref().is_some_and(|branch| {
-                                        crate::ui::find::matches(&query, branch)
-                                    })
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                })
-                // Un dépôt dont le nom correspond reste entier — c'est le geste
-                // « montre-moi ce dépôt ». Sinon il ne reste que s'il porte un
-                // worktree trouvé : un dépôt réduit à son titre se lirait comme un
-                // dépôt vide.
-                .filter(|(_, _, name, _, worktrees)| {
-                    crate::ui::find::matches(&query, name) || !worktrees.is_empty()
-                })
-                .collect();
-        // Les dépôts qui ne s'ouvrent pas, filtrés comme les autres : la
-        // recherche porte sur ce qu'on voit.
-        let unavailable: Vec<(PathBuf, SharedString, SharedString)> = self
-            .unavailable
-            .iter()
-            .map(|repo| {
-                (
-                    repo.path.clone(),
-                    SharedString::from(repo_name(&repo.path)),
-                    SharedString::from(repo.message.clone()),
-                )
-            })
-            .filter(|(_, name, _)| crate::ui::find::matches(&query, name))
-            .collect();
+        let (repos, unavailable) = self.sidebar_rows(cx);
         let active = self.active.clone();
         let empty = repos.is_empty() && unavailable.is_empty();
 
-        // Ni fond `sidebar`, ni filet droit : des reliques de l'époque des
-        // panneaux cousus bord à bord. Le fond vient de la carte — un jeton
-        // proche-mais-pas-égal repeindrait par-dessus ses coins arrondis, et
-        // c'est ce qui faisait de « Dépôts » la seule carte d'une autre
-        // couleur, carrée en bas.
+        // The rows are built before the scrolling frame rather than inside it:
+        // `scrolled` takes the application, and its content reads it.
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        for repo in repos {
+            rows.push(
+                self.render_repo(repo, active.as_deref(), cx)
+                    .into_any_element(),
+            );
+        }
+        // The unreachable repositories last: they are relics, not working
+        // repositories, and leaving them in their original rank would make a
+        // hole in the middle of the list.
+        for (ix, repo) in unavailable.into_iter().enumerate() {
+            rows.push(render_unavailable(ix, repo, cx).into_any_element());
+        }
+
+        // Neither a `sidebar` background nor a right-hand rule: relics of the
+        // days of panels stitched edge to edge. The background comes from the
+        // card — a close-but-not-equal token would paint over its rounded
+        // corners, and that is what made "Repositories" the one card of another
+        // colour, square at the bottom.
         v_flex()
             .size_full()
             .min_w(px(160.))
-            .child(
-                h_flex()
-                    .py_1()
-                    .px_2()
-                    .gap_1()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_semibold()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(tr!("sidebar-repositories")),
-                    )
-                    .child(
-                        Button::new("add-repo")
-                            .ghost()
-                            .xsmall()
-                            .icon(icon("plus"))
-                            .tooltip(tr!("sidebar-open-repository"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.prompt_open_repository(window, cx);
-                            })),
-                    ),
-            )
+            .child(self.render_sidebar_header(cx))
             .children(find)
             .child(
                 div().flex_1().min_h_0().child(
@@ -238,370 +239,346 @@ impl ClaudhubApp {
                             .size_full()
                             .overflow_y_scroll()
                             .track_scroll(&sidebar_scroll)
-                            // Au premier lancement, c'est tout ce qu'on voit : un
-                            // texte gris ne dit pas quoi faire, un bouton si.
-                            .when(empty, |el| {
-                                el.child(
-                                    v_flex()
-                                        .p_4()
-                                        .gap_2()
-                                        .items_center()
-                                        .child(
-                                            icon("folder").large().text_color(
-                                                cx.theme().muted_foreground.opacity(0.4),
-                                            ),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_center()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(tr!("sidebar-empty")),
-                                        )
-                                        .child(
-                                            Button::new("open-first-repo")
-                                                .outline()
-                                                .small()
-                                                .label(tr!("sidebar-open-repository"))
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.prompt_open_repository(window, cx);
-                                                })),
-                                        ),
-                                )
-                            })
-                            .children(repos.into_iter().map(
-                                |(ix, main, name, collapsed, worktrees)| {
-                                    let main_for_add = main.clone();
-                                    let main_for_menu = main.clone();
-                                    v_flex()
-                                        .child(
-                                            h_flex()
-                                                .id(("repo", ix))
-                                                .py_1()
-                                                .px_2()
-                                                .gap_1()
-                                                .items_center()
-                                                .cursor_pointer()
-                                                .hover(|s| {
-                                                    s.bg(cx.theme().sidebar_accent.opacity(0.6))
-                                                })
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    if let Some(repo) = this.repos.get_mut(ix) {
-                                                        repo.collapsed = !repo.collapsed;
-                                                    }
-                                                    cx.notify();
-                                                }))
-                                                .child(
-                                                    icon(if collapsed {
-                                                        "chevron-right"
-                                                    } else {
-                                                        "chevron-down"
-                                                    })
-                                                    .xsmall(),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .truncate()
-                                                        .text_sm()
-                                                        .font_semibold()
-                                                        .child(name),
-                                                )
-                                                .child(
-                                                    Button::new(("add-worktree", ix))
-                                                        .ghost()
-                                                        .xsmall()
-                                                        .icon(icon("plus"))
-                                                        .tooltip(tr!("sidebar-new-worktree"))
-                                                        .on_click(cx.listener(
-                                                            move |this, _, window, cx| {
-                                                                this.prompt_new_worktree(
-                                                                    main_for_add.clone(),
-                                                                    window,
-                                                                    cx,
-                                                                );
-                                                            },
-                                                        )),
-                                                )
-                                                // Retirer un dépôt de la liste
-                                                // ne touche à rien sur le
-                                                // disque, mais cela ferme tout
-                                                // ce qu'on y avait ouvert : au
-                                                // clic droit, comme les gestes
-                                                // qu'on ne fait pas deux fois
-                                                // par jour.
-                                                .context_menu({
-                                                    let entity = cx.entity();
-                                                    let main = main_for_menu.clone();
-                                                    move |menu, _window, _cx| {
-                                                        let (entity, main) =
-                                                            (entity.clone(), main.clone());
-                                                        menu.item(
-                                                            PopupMenuItem::new(tr!(
-                                                                "sidebar-forget-repository"
-                                                            ))
-                                                            .icon(icon("x"))
-                                                            .on_click(move |_, window, cx| {
-                                                                entity.update(cx, |this, cx| {
-                                                                    this.forget_repository(
-                                                                        main.clone(),
-                                                                        window,
-                                                                        cx,
-                                                                    );
-                                                                });
-                                                            }),
-                                                        )
-                                                    }
-                                                }),
-                                        )
-                                        .when(!collapsed, |el| {
-                                            el.children(worktrees.into_iter().enumerate().map(
-                                                |(wix, worktree)| {
-                                                    let WorktreeRow {
-                                                        path,
-                                                        label,
-                                                        branch,
-                                                        is_main,
-                                                        prunable,
-                                                        summary,
-                                                        agent,
-                                                    } = worktree;
-                                                    let selected =
-                                                        active.as_deref() == Some(path.as_path());
-                                                    let for_click = path.clone();
-                                                    let for_remove = path.clone();
-                                                    let for_menu = path.clone();
-                                                    let repo_main = main.clone();
-                                                    let for_menu_main = main.clone();
-                                                    h_flex()
-                                                        .id(("worktree", ix * 1000 + wix))
-                                                        // Pas de hauteur fixe : la
-                                                        // ligne porte deux lignes de
-                                                        // texte, et une hauteur figée
-                                                        // les faisait déborder sur la
-                                                        // ligne suivante dès qu'on
-                                                        // grossissait la police.
-                                                        .py_1()
-                                                        .pl_5()
-                                                        .pr_1()
-                                                        .mx_1()
-                                                        .rounded(cx.theme().radius)
-                                                        .gap_1()
-                                                        .items_center()
-                                                        .cursor_pointer()
-                                                        .border_l_2()
-                                                        .border_color(gpui::transparent_black())
-                                                        .when(selected, |el| {
-                                                            el.bg(cx.theme().sidebar_accent)
-                                                                .border_color(cx.theme().primary)
-                                                                .text_color(
-                                                                    cx.theme()
-                                                                        .sidebar_accent_foreground,
-                                                                )
-                                                        })
-                                                        .hover(|s| {
-                                                            s.bg(cx
-                                                                .theme()
-                                                                .sidebar_accent
-                                                                .opacity(0.5))
-                                                        })
-                                                        .on_click(cx.listener(
-                                                            move |this, _, window, cx| {
-                                                                this.select_worktree(
-                                                                    for_click.clone(),
-                                                                    window,
-                                                                    cx,
-                                                                );
-                                                            },
-                                                        ))
-                                                        .child(
-                                                            icon(if is_main {
-                                                                "folder"
-                                                            } else {
-                                                                "git-branch"
-                                                            })
-                                                            .xsmall(),
-                                                        )
-                                                        .child(
-                                                            v_flex()
-                                                                .flex_1()
-                                                                .min_w_0()
-                                                                .child(
-                                                                    div()
-                                                                        .truncate()
-                                                                        .text_sm()
-                                                                        .when(selected, |el| {
-                                                                            el.font_semibold()
-                                                                        })
-                                                                        .child(label),
-                                                                )
-                                                                .when_some(branch, |el, branch| {
-                                                                    el.child(
-                                                                    div()
-                                                                        .truncate()
-                                                                        .text_xs()
-                                                                        .text_color(
-                                                                            cx.theme()
-                                                                                .muted_foreground,
-                                                                        )
-                                                                        .child(branch),
-                                                                )
-                                                                }),
-                                                        )
-                                                        // Ce que ce worktree a en
-                                                        // chantier, et qui y
-                                                        // travaille : les deux
-                                                        // questions qu'on se pose
-                                                        // en parcourant la liste.
-                                                        .when_some(agent, |el, agent| {
-                                                            el.child(agent_badge(&agent, cx))
-                                                        })
-                                                        .when_some(
-                                                            summary.filter(|s| !s.is_empty()),
-                                                            |el, summary| {
-                                                                el.child(volume(summary, cx))
-                                                            },
-                                                        )
-                                                        // Ce que `wt` sait de lui :
-                                                        // démarré ou non, et
-                                                        // l'adresse qu'il expose.
-                                                        .children(self.render_wt_state(&path, cx))
-                                                        .children(self.render_wt_links(&path, cx))
-                                                        .when(prunable, |el| {
-                                                            el.child(
-                                                                icon("alert-circle")
-                                                                    .xsmall()
-                                                                    .text_color(cx.theme().warning),
-                                                            )
-                                                        })
-                                                        // Le worktree principal ne se
-                                                        // retire pas : git refuse, et
-                                                        // proposer le bouton reviendrait
-                                                        // à promettre une erreur.
-                                                        .when(!is_main, |el| {
-                                                            el.child(
-                                                            Button::new((
-                                                                "rm-worktree",
-                                                                ix * 1000 + wix,
-                                                            ))
-                                                            .ghost()
-                                                            .xsmall()
-                                                            .icon(icon("trash-2"))
-                                                            .tooltip(tr!("sidebar-remove-worktree"))
-                                                            .on_click(cx.listener(
-                                                                move |this, _, window, cx| {
-                                                                    this.confirm_remove_worktree(
-                                                                        repo_main.clone(),
-                                                                        for_remove.clone(),
-                                                                        window,
-                                                                        cx,
-                                                                    );
-                                                                },
-                                                            )),
-                                                        )
-                                                        })
-                                                        // Le clic droit porte tout
-                                                        // ce que le projet ajoute :
-                                                        // Claudhub ne connaît ni
-                                                        // ses tâches ni ses hooks,
-                                                        // il les affiche.
-                                                        .context_menu({
-                                                            let entity = cx.entity();
-                                                            let (main, path) = (
-                                                                for_menu_main.clone(),
-                                                                for_menu.clone(),
-                                                            );
-                                                            move |menu, _window, cx| {
-                                                                let (main, path) =
-                                                                    (main.clone(), path.clone());
-                                                                entity.update(cx, |this, cx| {
-                                                                    this.worktree_menu(
-                                                                        menu, main, path, cx,
-                                                                    )
-                                                                })
-                                                            }
-                                                        })
-                                                },
-                                            ))
-                                        })
-                                },
-                            ))
-                            // Les dépôts introuvables en dernier : ce sont des
-                            // reliques, pas des dépôts de travail, et les
-                            // laisser à leur rang d'origine ferait un trou au
-                            // milieu de la liste.
-                            .children(unavailable.into_iter().enumerate().map(
-                                |(ix, (path, name, message))| {
-                                    let for_forget = path.clone();
-                                    h_flex()
-                                        .id(("unavailable", ix))
-                                        .py_1()
-                                        .px_2()
-                                        .gap_1()
-                                        .items_center()
-                                        .tooltip(move |window, cx| {
-                                            gpui_component::tooltip::Tooltip::new(message.clone())
-                                                .build(window, cx)
-                                        })
-                                        .child(
-                                            icon("triangle-alert")
-                                                .xsmall()
-                                                .text_color(cx.theme().warning),
-                                        )
-                                        .child(
-                                            v_flex()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .child(
-                                                    div()
-                                                        .truncate()
-                                                        .text_sm()
-                                                        .text_color(cx.theme().muted_foreground)
-                                                        .child(name),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .truncate()
-                                                        .text_xs()
-                                                        .text_color(cx.theme().warning)
-                                                        .child(tr!("sidebar-repo-unavailable")),
-                                                ),
-                                        )
-                                        // Un bouton et non une entrée de menu :
-                                        // c'est la seule chose qu'on puisse
-                                        // faire d'une ligne pareille, et la
-                                        // cacher derrière un clic droit
-                                        // reviendrait à ne pas la proposer.
-                                        .child(
-                                            Button::new(("forget-repo", ix))
-                                                .ghost()
-                                                .xsmall()
-                                                .icon(icon("x"))
-                                                .tooltip(tr!("sidebar-forget-repository"))
-                                                .on_click(cx.listener(
-                                                    move |this, _, window, cx| {
-                                                        this.forget_repository(
-                                                            for_forget.clone(),
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    },
-                                                )),
-                                        )
-                                },
-                            )),
+                            // On first launch this is all one sees: grey text
+                            // does not say what to do, a button does.
+                            .when(empty, |el| el.child(self.render_sidebar_empty(cx)))
+                            .children(rows),
                         cx,
                     ),
                 ),
             )
     }
 
-    /// Retire un dépôt de la liste. Rien n'est touché sur le disque.
+    /// What the sidebar shows, filtered by the search, in the order it shows it.
+    fn sidebar_rows(&mut self, cx: &mut Context<Self>) -> (Vec<RepoRow>, Vec<UnavailableRow>) {
+        let query = self.query(crate::ui::find::Pane::Sidebar, cx);
+        // Each repository's `wt.toml`, asked for once: it is what decides what a
+        // worktree's menu offers.
+        let mains: Vec<PathBuf> = self.repos.iter().map(|repo| repo.main.clone()).collect();
+        for main in &mains {
+            self.ensure_wt_project(main);
+        }
+        let repos: Vec<RepoRow> = self
+            .repos
+            .iter()
+            .enumerate()
+            .map(|(ix, repo)| RepoRow {
+                ix,
+                main: repo.main.clone(),
+                name: repo.name.clone(),
+                collapsed: repo.collapsed,
+                worktrees: repo
+                    .worktrees
+                    .iter()
+                    .map(|w| WorktreeRow {
+                        path: w.path.clone(),
+                        label: w.label(),
+                        branch: w.branch.clone(),
+                        is_main: w.is_main,
+                        prunable: w.prunable,
+                        summary: self.summaries.get(&w.path).copied(),
+                        agent: self.agents.get(&w.path).cloned(),
+                    })
+                    .filter(|row| {
+                        crate::ui::find::matches(&query, &row.label)
+                            || row
+                                .branch
+                                .as_deref()
+                                .is_some_and(|branch| crate::ui::find::matches(&query, branch))
+                    })
+                    .collect(),
+            })
+            // A repository whose name matches stays whole — that is the "show me
+            // this repository" gesture. Otherwise it only stays if it carries a
+            // matching worktree: a repository reduced to its title would read as
+            // an empty repository.
+            .filter(|repo| {
+                crate::ui::find::matches(&query, &repo.name) || !repo.worktrees.is_empty()
+            })
+            .collect();
+        // The repositories that do not open, filtered like the rest: the search
+        // applies to what is on screen.
+        let unavailable: Vec<UnavailableRow> = self
+            .unavailable
+            .iter()
+            .map(|repo| UnavailableRow {
+                path: repo.path.clone(),
+                name: SharedString::from(repo_name(&repo.path)),
+                message: SharedString::from(repo.message.clone()),
+            })
+            .filter(|repo| crate::ui::find::matches(&query, &repo.name))
+            .collect();
+        (repos, unavailable)
+    }
+
+    fn render_sidebar_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .py_1()
+            .px_2()
+            .gap_1()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_xs()
+                    .font_semibold()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tr!("sidebar-repositories")),
+            )
+            .child(
+                Button::new("add-repo")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("plus"))
+                    .tooltip(tr!("sidebar-open-repository"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.prompt_open_repository(window, cx);
+                    })),
+            )
+    }
+
+    fn render_sidebar_empty(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .p_4()
+            .gap_2()
+            .items_center()
+            .child(
+                icon("folder")
+                    .large()
+                    .text_color(cx.theme().muted_foreground.opacity(0.4)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_center()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tr!("sidebar-empty")),
+            )
+            .child(
+                Button::new("open-first-repo")
+                    .outline()
+                    .small()
+                    .label(tr!("sidebar-open-repository"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.prompt_open_repository(window, cx);
+                    })),
+            )
+    }
+
+    /// A repository and, unless it is collapsed, its worktrees.
+    fn render_repo(
+        &self,
+        repo: RepoRow,
+        active: Option<&Path>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let RepoRow {
+            ix,
+            main,
+            name,
+            collapsed,
+            worktrees,
+        } = repo;
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        if !collapsed {
+            for (wix, worktree) in worktrees.into_iter().enumerate() {
+                let selected = active == Some(worktree.path.as_path());
+                rows.push(
+                    self.render_worktree(ix * 1000 + wix, &main, worktree, selected, cx)
+                        .into_any_element(),
+                );
+            }
+        }
+        v_flex()
+            .child(self.render_repo_header(ix, &main, name, collapsed, cx))
+            .children(rows)
+    }
+
+    fn render_repo_header(
+        &self,
+        ix: usize,
+        main: &Path,
+        name: String,
+        collapsed: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let for_add = main.to_path_buf();
+        let for_menu = main.to_path_buf();
+        h_flex()
+            .id(("repo", ix))
+            .py_1()
+            .px_2()
+            .gap_1()
+            .items_center()
+            .cursor_pointer()
+            .hover(|s| s.bg(cx.theme().sidebar_accent.opacity(0.6)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(repo) = this.repos.get_mut(ix) {
+                    repo.collapsed = !repo.collapsed;
+                }
+                cx.notify();
+            }))
+            .child(
+                icon(if collapsed {
+                    "chevron-right"
+                } else {
+                    "chevron-down"
+                })
+                .xsmall(),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .truncate()
+                    .text_sm()
+                    .font_semibold()
+                    .child(name),
+            )
+            .child(
+                Button::new(("add-worktree", ix))
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("plus"))
+                    .tooltip(tr!("sidebar-new-worktree"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.prompt_new_worktree(for_add.clone(), window, cx);
+                    })),
+            )
+            // Removing a repository from the list touches nothing on disk, but
+            // it does close everything that was open in it: on right click, like
+            // the gestures one does not make twice a day.
+            .context_menu({
+                let entity = cx.entity();
+                move |menu, _window, _cx| {
+                    let (entity, main) = (entity.clone(), for_menu.clone());
+                    menu.item(
+                        PopupMenuItem::new(tr!("sidebar-forget-repository"))
+                            .icon(icon("x"))
+                            .on_click(move |_, window, cx| {
+                                entity.update(cx, |this, cx| {
+                                    this.forget_repository(main.clone(), window, cx);
+                                });
+                            }),
+                    )
+                }
+            })
+    }
+
+    fn render_worktree(
+        &self,
+        key: usize,
+        main: &Path,
+        worktree: WorktreeRow,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let WorktreeRow {
+            path,
+            label,
+            branch,
+            is_main,
+            prunable,
+            summary,
+            agent,
+        } = worktree;
+        let for_click = path.clone();
+        let for_remove = path.clone();
+        let for_menu = path.clone();
+        let repo_main = main.to_path_buf();
+        let for_menu_main = main.to_path_buf();
+        h_flex()
+            .id(("worktree", key))
+            // No fixed height: the row carries two lines of text, and a frozen
+            // height made them spill onto the next row as soon as the font grew.
+            .py_1()
+            .pl_5()
+            .pr_1()
+            .mx_1()
+            .rounded(cx.theme().radius)
+            .gap_1()
+            .items_center()
+            .cursor_pointer()
+            .border_l_2()
+            .border_color(gpui::transparent_black())
+            .when(selected, |el| {
+                el.bg(cx.theme().sidebar_accent)
+                    .border_color(cx.theme().primary)
+                    .text_color(cx.theme().sidebar_accent_foreground)
+            })
+            .hover(|s| s.bg(cx.theme().sidebar_accent.opacity(0.5)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.select_worktree(for_click.clone(), window, cx);
+            }))
+            .child(icon(if is_main { "folder" } else { "git-branch" }).xsmall())
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_sm()
+                            .when(selected, |el| el.font_semibold())
+                            .child(label),
+                    )
+                    .when_some(branch, |el, branch| {
+                        el.child(
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(branch),
+                        )
+                    }),
+            )
+            // What this worktree has in progress, and who is working on it: the
+            // two questions one asks while scanning the list.
+            .when_some(agent, |el, agent| el.child(agent_badge(&agent, cx)))
+            .when_some(summary.filter(|s| !s.is_empty()), |el, summary| {
+                el.child(volume(summary, cx))
+            })
+            // What `wt` knows about it: started or not, and the address it
+            // exposes.
+            .children(self.render_wt_state(&path, cx))
+            .children(self.render_wt_links(&path, cx))
+            .when(prunable, |el| {
+                el.child(icon("alert-circle").xsmall().text_color(cx.theme().warning))
+            })
+            // The main worktree is not removable: git refuses, and offering the
+            // button would promise an error.
+            .when(!is_main, |el| {
+                el.child(
+                    Button::new(("rm-worktree", key))
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("trash-2"))
+                        .tooltip(tr!("sidebar-remove-worktree"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.confirm_remove_worktree(
+                                repo_main.clone(),
+                                for_remove.clone(),
+                                window,
+                                cx,
+                            );
+                        })),
+                )
+            })
+            // The right click carries everything the project adds: Claudhub
+            // knows neither its tasks nor its hooks, it shows them.
+            .context_menu({
+                let entity = cx.entity();
+                move |menu, _window, cx| {
+                    let (main, path) = (for_menu_main.clone(), for_menu.clone());
+                    entity.update(cx, |this, cx| this.worktree_menu(menu, main, path, cx))
+                }
+            })
+    }
+    /// Removes a repository from the list. Nothing on disk is touched.
     ///
-    /// Le même geste pour un dépôt ouvert et pour un dépôt introuvable : dans
-    /// les deux cas, ce qu'on retire est une entrée de la liste des dépôts
-    /// rouverts au démarrage, et le second cas est le seul où l'on ne pouvait
-    /// pas le faire — d'où le signalement.
+    /// The same gesture for an open repository and for an unreachable one: in
+    /// both cases what is removed is an entry from the list of repositories
+    /// reopened at startup, and the second case is the only one where it could
+    /// not be done — hence the report.
     pub(super) fn forget_repository(
         &mut self,
         main: PathBuf,
@@ -650,7 +627,7 @@ impl ClaudhubApp {
         });
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else {
-                return; // annulé
+                return; // cancelled
             };
             let _ = this.update(cx, |this, cx| {
                 for path in paths {

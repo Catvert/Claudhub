@@ -87,6 +87,8 @@ src/
     mod.rs      connexions, schémas, résultats ; le choix du moteur
     sqlite.rs   en lecture seule, schéma lu par les pragmas
     mysql.rs    MySQL et MariaDB, par `information_schema`
+  logging.rs    `env_logger` sur stderr, et un anneau de deux mille lignes
+                en mémoire, que la page « Journal » lit
   sentry.rs     issues et traces Sentry, testées sur fixture
   wt.rs         le `wt.toml` d'un projet : questions, tâches, statut, URLs
   git/          couche git — sous-processus `git`, testable sans gpui
@@ -115,7 +117,7 @@ src/
   ui/           tout gpui
     mod.rs      `run()`, `AssetSource`, polices, i18n
     app.rs      `ClaudhubApp` : l'état, la pompe d'événements, le chrome
-    workspace.rs   les quatre écrans, leur dock et la barre qui les choisit
+    workspace.rs   les cinq écrans, leur dock et la barre qui les choisit
     diff_view.rs   la vue de diff, virtualisée
     history_view.rs  l'historique et son graphe peint
     highlight.rs   coloration tree-sitter d'un diff
@@ -123,7 +125,8 @@ src/
     server.rs       la mise en route du serveur WSL : la distro qu'on
                     demande, l'installation, l'état qu'en dit la barre
     settings.rs     les réglages et leur global
-    settings_view.rs  le formulaire, bâti sur `gpui_component::setting`
+    settings_view.rs  le formulaire, bâti sur `gpui_component::setting`,
+                    et la page « Journal »
     tree.rs         chemins → arborescence repliable, en indices
     file_icons.rs   l'icône et la teinte d'un fichier, d'après son nom
                     (marques dans assets/icons/lang/, CC0)
@@ -469,6 +472,14 @@ que n'importe quel fichier (`WHOLE_FILE_CONTEXT`), que git ramène de lui-même 
 ce qui existe. Basculer relit donc le fichier — les lignes élidées ne sont
 nulle part en mémoire.
 
+**La barre du diff porte les quatre mêmes déplacements en boutons** : bloc
+précédent et suivant, fichier précédent et suivant. Les flèches appartiennent à
+qui a le focus, donc à personne après un clic dans un terminal ; les boutons
+sont toujours là, et leurs infobulles nomment les touches pour qui préfère ne
+pas lâcher le clavier. C'est le **même code** dessous (`step_diff_hunk`,
+`step_file`) : deux façons de faire un geste qui n'aboutiraient pas au même
+endroit seraient une de trop.
+
 **Les flèches sont les seules touches qui ne passent pas par la touche
 système**, et c'est ce qui les rend délicates : elles appartiennent d'abord à
 qui a le focus. `NAVIGATION_PREDICATE` exclut donc les champs de saisie, les
@@ -773,6 +784,116 @@ par encoche.
 Le formulaire n'a pas de bouton « Appliquer » : choisir une police ou une
 taille sans en voir l'effet reviendrait à choisir à l'aveugle.
 
+**Un écran et non un dialogue.** Le formulaire était une fenêtre modale — ce
+qu'on prend quand on n'a nulle part où mettre un formulaire. Elle couvrait ce
+qu'on réglait, elle ne pouvait pas rester ouverte à côté de l'effet qu'elle
+produisait, et les deux choses pour lesquelles on vient ici — essayer un thème,
+lire pourquoi quelque chose a échoué — sont justement les deux qui veulent
+garder le reste de la fenêtre en vue. La barre était déjà là, le dock savait
+déjà porter un panneau : voir « Les sous-applications ».
+
+Trois conséquences du déménagement :
+
+- **La fermeture de rendu tourne à chaque frame** et non plus une fois à
+  l'ouverture. Ce que le formulaire demandait au système à ce moment-là est
+  donc lu **une fois et retenu** (`settings_view::Environment`) : énumérer les
+  polices installées et faire un `stat` sur chaque ligne d'`/etc/shells` au
+  rythme des images est une entrée-sortie au milieu d'une frame. Le registre
+  des thèmes, lui, se relit à chaque fois — il est surveillé, et un fichier
+  déposé pendant que Claudhub tourne doit apparaître dans la liste. Le cache
+  est vidé à l'arrivée du serveur distant, dont les shells sont ceux qui
+  comptent.
+- **La page demandée passe par l'identifiant du formulaire.**
+  `default_selected_index` n'est lu qu'à la **création** de l'état, lequel vit
+  aussi longtemps que l'`id`. `open_settings_at` incrémente donc un compteur
+  qui entre dans l'`id` : une page nommée est une demande, honorée à chaque
+  fois — même deux fois de suite, en s'étant promené entre les deux — là où
+  `Page::First` veut dire « là où vous en étiez » et laisse le formulaire
+  tranquille.
+- **L'écran des réglages n'a pas de colonne de gauche** : voir « Les
+  sous-applications ».
+
+### Le journal
+
+La page « Journal » des réglages montre ce que Claudhub a écrit depuis son
+démarrage. Une application graphique n'a pas de console sous sa fenêtre :
+sans elle, savoir pourquoi un `fetch` a échoué ou pourquoi le serveur distant
+est mort demande de relancer depuis un terminal, c'est-à-dire de reproduire le
+problème avant d'avoir le droit de le regarder.
+
+`logging::init` installe donc **notre** `log::Log` par-dessus celui
+d'`env_logger` : il lui passe l'enregistrement puis en garde une copie. Un
+`format` d'`env_logger` n'aurait pas suffi — il reçoit un puits d'octets et ce
+qui va être **imprimé**, quand la page veut le niveau et la cible tels quels,
+l'un pour colorer la ligne, l'autre pour dire d'où elle vient.
+
+**Trois étages, trois niveaux**, et c'est le partage qui rend le journal
+lisible :
+
+- `git::report` file **chaque** commande à `debug` — la commande, son
+  répertoire, sa durée —, y compris les échecs, avec le code de sortie et
+  stderr. `debug` et non `warn` pour l'échec : `git_opt` existe justement pour
+  les lectures dont l'échec est la réponse normale — une branche sans amont, un
+  fichier que git ne connaît pas — et avertir sur chacune enterrerait les
+  vraies. L'exception est une commande qui **traîne** : passé la seconde, elle
+  explique une interface qui semble bloquée, et elle passe à `info`. Sur un
+  disque Windows monté par WSL, un `git status` y arrive tout seul — et c'est
+  exactement le cas dont on veut être averti.
+- `runtime::handle` nomme **chaque commande** et la chronomètre. Le nom vient
+  de `Cmd::name`, un match exhaustif : ajouter une variante sans la nommer ne
+  compile pas, là où un nom tiré de `Debug` aurait coûté le formatage de la
+  charge utile — un `WriteFile` porte un fichier entier — à chaque commande.
+  Une commande qui a produit un `Done` ou un `Failed` est une **écriture** :
+  c'est ce que ces deux événements veulent dire, cela évite de classer soixante
+  variantes une seconde fois, et elle passe à `info` avec sa durée.
+- `done` et `fail` disent **ce qui a été fait**, où, et ce que git en a dit —
+  la première ligne seulement, un `git push` écrivant un paragraphe. `fail` est
+  le seul `warn` de la couche, et c'est ce qui lui donne sa valeur : ici
+  l'opération est connue, donc on sait que quelqu'un l'attendait.
+
+Côté `wt`, `capturing` **journalise toutes les lignes** et n'en rend qu'une.
+Un `wt new` raconte toute sa séquence — la branche, les dossiers, les copies,
+les ports, puis ce que `post_new` imprime — et cette narration est le seul
+compte rendu qui existe de ce que les hooks d'un projet ont fait. Garder la
+dernière ligne pour la barre d'état et jeter le reste laissait une phrase
+derrière un `composer install` de trois minutes ; un échec à mi-parcours ne
+laissait rien du tout, l'erreur étant portée par le `Result` et les étapes qui
+y ont mené par personne.
+
+Cinq points sur l'anneau :
+
+- **Un anneau de deux mille lignes**, pas une liste qui croît : une session
+  dure une journée, une cible bavarde écrit une ligne par frame, et un journal
+  que personne n'a demandé ne doit pas pouvoir prendre la mémoire de la
+  relecture qu'il est là pour expliquer.
+- **Le filtre d'`env_logger` s'applique aussi à la copie.** `log::set_max_level`
+  ne borne que par niveau ; c'est `enabled` qui applique les directives par
+  cible de `CLAUDHUB_LOG`. L'oublier garderait en mémoire ce qu'on a dit à la
+  console de ne pas imprimer.
+- **Un compteur, pas la longueur de l'anneau.** `logging::written` est ce qui
+  dit à la vue que sa copie est périmée ; la longueur cesse de bouger dès que
+  l'anneau est plein. La vue ne recopie donc les deux mille entrées que quand
+  il y a du neuf — la page se rend à chaque frame.
+- **Rien ne réveille la vue quand une ligne est écrite** : un worker journalise,
+  il ne touche pas à gpui. La page suit donc les frames que le reste de
+  l'application provoque, et le balayage de fond en amène une toutes les deux
+  secondes — c'est ce qui fait qu'une ligne écrite ailleurs finit par
+  apparaître seule.
+- **Deux cents lignes peintes au plus**, et c'est dit. La liste vit dans une
+  page du formulaire, qui défile d'un bloc : elle n'est pas virtualisée, et
+  peindre deux mille lignes stylées par frame est précisément ce qu'une liste
+  virtualisée existe pour éviter. Le filtre s'applique **avant** la coupe — les
+  deux cents derniers avertissements ne sont pas les avertissements des deux
+  cents dernières lignes. Le bouton « Copier », lui, prend tout ce que le
+  filtre a gardé : ce qui part dans un rapport est le journal, pas sa fin.
+
+Le niveau affiché vit dans `ClaudhubApp` et non dans les réglages : c'est une
+posture de lecture, qui change plusieurs fois pendant qu'on cherche, pas une
+préférence qu'on s'attend à retrouver le lendemain. Il s'ouvre sur `Trace`,
+c'est-à-dire sur tout ce que la console a gardé — l'anneau ne contient de toute
+façon que ce que `CLAUDHUB_LOG` a laissé passer, et s'ouvrir sur une vue
+rétrécie cacherait des lignes dont rien d'autre ne dit qu'elles existent.
+
 Corollaire pour les vues : ce qui dépend d'un réglage se **relit à chaque
 rendu**, jamais au moment de la construction. `TerminalView::sync_font` en est
 l'exemple : changer la police invalide la géométrie mesurée, et il faut effacer
@@ -783,6 +904,39 @@ Les familles proposées viennent de `cx.text_system().all_font_names()`, filtré
 par convention de nommage pour les champs à chasse fixe : gpui n'expose pas
 cette propriété de façon portable. La liste rate donc des familles, et le
 fichier de réglages reste modifiable à la main pour ces cas-là.
+
+### Ce qui tourne en ce moment
+
+Un `fetch`, un `push`, un `wt up` prennent des secondes, parfois des minutes,
+pendant lesquelles rien ne bougeait à l'écran. `ClaudhubApp::running` est
+l'ensemble des écritures en vol, et `start` remplace `git.send` partout où le
+geste en est une.
+
+- **La clé est exactement la paire que le worker renverra.**
+  `write_then_refresh` réémet le worktree et l'action qu'on lui a donnés, si
+  bien que ce qu'on pose est exactement ce que `finish` retrouvera. C'est ce
+  qui empêche l'unique panne d'un indicateur d'attente : un bouton qui tourne
+  pour toujours en dit moins qu'un bouton qui n'a jamais tourné.
+- **Deux moments vident tout** (`clear_running`) : la mort du serveur distant
+  et l'arrivée d'un neuf. Ce qui était en vol est mort avec lui, et les
+  commandes émises avant que le manche soit vivant ont été jetées — rien ne
+  répondra jamais pour elles.
+- **`wt up` et `wt down` ne nomment pas de worktree** dans leur réponse : `wt`
+  travaille depuis le dépôt principal. `running` seul dirait « quelque chose
+  démarre » sans dire où, et toutes les pastilles de la liste tourneraient ;
+  d'où `wt_pending`, un seul worktree à la fois — démarrer deux projets d'un
+  coup n'est pas un geste.
+- **Ce qui part d'un menu n'a pas de bouton à faire tourner** : un menu se
+  ferme au clic. L'intégration, le rebase, un `wt rm` s'annoncent donc dans la
+  **barre d'état**, nommés et non comptés — « 3 opérations » ne dit rien, là où
+  « Publication… » dit lequel des gestes qu'on vient de faire n'est pas fini.
+  La liste est triée : un `HashSet` s'itère dans un ordre différent à chaque
+  frame, et les mots danseraient.
+- **`Action::running_key` a un joker assumé.** Seules les opérations assez
+  longues pour valoir une ligne sont nommées ; un `Stage` qui finit en dix
+  millisecondes afficherait un message que personne n'a le temps de lire. Un
+  test vérifie que chaque action a ses deux messages dans les deux catalogues —
+  une clé manquante s'affiche telle quelle dans la barre d'état.
 
 ### Le magasin d'état
 
@@ -1580,22 +1734,29 @@ qu'ils partageaient une seule fenêtre, chacun payait la place des trois
 autres — huit onglets au centre dont on n'en regarde jamais que deux, et un
 panneau central qui changeait de nature selon le dernier geste.
 
-Il y a donc quatre **écrans** (`ui::workspace::Workspace`) : Revue, Édition,
-Bases, Sentry. On passe de l'un à l'autre par la barre d'état, ou par `Alt+1`
-à `Alt+4`.
+Il y a donc cinq **écrans** (`ui::workspace::Workspace`) : Revue, Édition,
+Bases, Sentry, Réglages. On passe de l'un à l'autre par la barre d'état, ou
+par `Alt+1` à `Alt+5`. Les Réglages viennent en dernier, étant le seul qui ne
+soit pas du travail — voir « Les réglages ».
 
 **Un dock par écran, et non un dock dont le centre change.** Chacun a ses
 panneaux, ses onglets et ses tailles, mémorisés séparément : régler la revue
-ne déplace plus rien sur l'écran des bases. Les quatre sont **construits au
+ne déplace plus rien sur l'écran des bases. Les cinq sont **construits au
 démarrage** et non à la première visite — un dock se bâtit avec `window`, et le
 faire au rendu reviendrait à créer des entités au milieu d'une frame ; le coût
 est une vingtaine de panneaux, qui ne portent aucun état.
 
 **Deux vues sont partout : les dépôts et les terminaux.** La première dit *où*
-l'on travaille — le choix vaut pour les quatre écrans —, la seconde est ce à
+l'on travaille — le choix vaut pour tous les écrans —, la seconde est ce à
 quoi on parle pendant qu'on regarde n'importe lequel d'entre eux. Ce sont les
 deux seuls panneaux instanciés une fois **par dock** : un panneau n'appartient
-qu'à une aire à la fois, et un seul dock est affiché.
+qu'à une aire à la fois, et un seul dock est affiché. Une exception, et c'est
+la seule : l'écran des réglages n'a **pas** de colonne de gauche. Le formulaire
+a déjà sa propre barre latérale de pages, deux côte à côte feraient deux listes
+à lire avant d'atteindre un champ, et un sélecteur de worktree n'y déciderait
+de rien. Les terminaux, eux, y restent : on règle puis on vérifie, et ce qui
+vérifie est un shell. La moitié gauche de `install_default_layout` est donc une
+`Option`.
 
 **Le panneau central cesse d'être partagé** : le diff appartient à la revue,
 l'éditeur à l'édition, la console SQL aux bases. C'est ce que la découpe achète
@@ -1605,12 +1766,13 @@ Cinq points qui ne se devinent pas :
 
 - **Rien à faire en changeant d'écran que de changer de dock.** L'état — le
   worktree choisi, le fichier ouvert, la requête en cours — vit dans
-  `ClaudhubApp` et non dans les panneaux : il est donc le même des quatre
+  `ClaudhubApp` et non dans les panneaux : il est donc le même de tous les
   côtés, et c'est ce qui rend la bascule instantanée.
 - **Un geste qui ouvre quelque chose emmène sur son écran.** Ouvrir un fichier
-  bascule sur « Édition », ouvrir une console sur « Bases ». Le geste vient
-  parfois d'ailleurs — une ligne de diff, le menu d'une table —, et y répondre
-  en silence sur l'écran d'à côté serait un travail fait que personne ne voit.
+  bascule sur « Édition », ouvrir une console sur « Bases », « ajouter une
+  connexion » sur « Réglages ». Le geste vient parfois d'ailleurs — une ligne
+  de diff, le menu d'une table —, et y répondre en silence sur l'écran d'à côté
+  serait un travail fait que personne ne voit.
 - **Les tailles d'une division se donnent toutes, et ici ça se paie
   vraiment.** Un `None` vaut cent pixels dans l'état enregistré, et la pile
   répartit **au prorata** de ce qu'elle y lit : un centre décrit
@@ -1875,7 +2037,7 @@ Trois règles à respecter :
   `Cmd::WtQuestions`). Un `[[prompt]]` a un `when` qui peut dépendre d'une
   réponse précédente : les poser toutes d'un coup ferait sauter celles qu'une
   autre débloque. La boucle converge, et l'absence de nouvelle question est ce
-  qui déclenche la création.
+  qui déclenche l'opération.
 - **Les tâches partent dans un onglet de terminal, pas dans un panneau de
   sortie.** Elles sont interactives, colorées, parfois longues.
   `wt::task` rend les commandes — modèles résolus, environnement calculé — et
@@ -1883,6 +2045,63 @@ Trois règles à respecter :
   bibliothèque : ce qui tient une comptabilité (création, suppression, `up`,
   `down`) passe par elle, qui alloue les ports et écrit l'état ; le reste passe
   par le shell.
+
+### Les trois moments où le projet pose ses questions
+
+`wt.Phase` — `New`, `Up`, `Task` — décide quels `[[prompt]]` s'appliquent, et
+c'est la même distinction que fait `wt` lui-même (`ask = "new"`, `"up"`,
+`"both"`, `"task"`). Longtemps Claudhub n'en connaissait qu'une : la création.
+Ce qui manquait se voyait sur Acetics, où les tenants dont le storage est monté
+et les services du conteneur se choisissent à **chaque** démarrage tant qu'ils
+n'ont pas été choisis une fois — démarrer sans eux ne monte rien, en silence.
+
+`WtTarget` porte ce que les questions préparent, et il n'y a pas de quatrième
+cas : un geste qui ne demande rien ne passe pas par le dialogue du tout. Le
+même dialogue sert les trois, son titre le dit — « Nouveau worktree » au-dessus
+des tenants d'un `wt up` serait un mensonge.
+
+Quatre points qui ne se devinent pas :
+
+- **C'est le worker qui amorce les réponses**, et seulement au premier tour.
+  Un `wt up` part de ce que le worktree a retenu (`wt::saved_answers`,
+  c'est-à-dire l'état que `wt` écrit) : c'est ce qui l'empêche de reposer ses
+  questions au deuxième démarrage. Où `wt` range cet état ne regarde pas la
+  vue, donc les réponses **reviennent** avec les questions et la vue adopte ce
+  qui arrive.
+- **Un compteur de tour, pas une comparaison des réponses.** Le tri des
+  événements en retard se faisait en comparant les réponses envoyées à celles
+  reçues ; l'amorçage les rend différentes par construction. `round` ne recule
+  jamais, comme l'identifiant d'envoi de la console SQL.
+- **Les questions d'une tâche sont celles qu'elle nomme**, et le filtre
+  « déjà répondu » leur est appliqué comme aux autres — sans lui la boucle
+  reposerait la même question indéfiniment. Leurs réponses deviennent les
+  **arguments** de la tâche, découpés sur le séparateur du prompt, dans l'ordre
+  de la tâche et non des réponses : un hook qui reçoit ses arguments dans le
+  mauvais ordre agit sur autre chose sans jamais le dire. Rien de choisi ne
+  donne aucun argument — et une tâche déclarée `interactive` montre alors son
+  propre sélecteur dans l'onglet de terminal, ce qui est exactement là où il
+  doit être.
+- **Deux drapeaux et non un** (`has_new_prompts`, `has_up_prompts`) : un projet
+  peut ne rien demander à la création et tout demander au démarrage, et ouvrir
+  un dialogue vide pour s'en apercevoir serait un clic pour rien.
+
+Le dialogue rend enfin ce que le `detail` d'une option dit. C'est la phrase sur
+laquelle le choix se fait — « obligatoire si la branche contient une
+migration » — et elle n'apparaissait nulle part. D'où :
+
+- **Un choix simple s'affiche en lignes tant qu'il est court** (six options),
+  libellé et détail sur la même ligne. Un menu déroulant cache le détail
+  derrière un clic qui valide déjà la réponse. Au-delà, les lignes prendraient
+  la hauteur du dialogue et le menu revient.
+- **Un choix multiple gagne un champ de recherche** passé huit options, et une
+  hauteur bornée qui défile. Les options viennent souvent d'une commande shell
+  — sur Acetics les tenants sont une requête MariaDB, et il y en a
+  quatre-vingts —, et quatre-vingts cases sans moyen de les réduire est une
+  liste qu'on fait défiler au lieu de la lire. C'est ce que `wt` fait avec
+  skim, et c'est la raison d'être de la question.
+- **Le filtre masque des lignes, il ne touche jamais à la réponse.** Un tenant
+  coché puis filtré reste coché — le compte le dit — parce qu'une recherche qui
+  décoche en silence est la façon la plus sûre de cloner les mauvaises bases.
 
 Le relevé de `[status] up` et de `[open]` est une commande shell par worktree :
 **file de fond uniquement**, à la période des résumés, jamais devant un diff
@@ -2483,7 +2702,7 @@ n'en tient lieu. `Ctrl+1` à `Ctrl+9` désignent donc des **worktrees**, ce qui
 est de toute façon le geste central — et leur ordre est celui de la barre
 latérale, replis compris, sans quoi le même chiffre ne désignerait pas le même
 worktree d'un pliage à l'autre. Les **écrans**, eux, s'atteignent par
-`Alt+1` à `Alt+4`, et **pas** par `Ctrl+Maj+1` : gpui *retire* le Maj des
+`Alt+1` à `Alt+5`, et **pas** par `Ctrl+Maj+1` : gpui *retire* le Maj des
 modificateurs quand la touche est un caractère sans casse — « on ne garde Maj
 que pour les majuscules » —, si bien qu'un `secondary-shift-1` arrive comme
 `ctrl-&` ou `ctrl-#` selon la disposition du clavier et ne se déclenche jamais,
@@ -2586,6 +2805,19 @@ Toute chaîne visible passe par `tr!` (défini dans `main.rs`), qui rend un
 `assets/i18n/{fr,en}.json`, objets plats, clés en kebab-case préfixées par
 domaine (`review-`, `branch-`, `action-`). Les deux catalogues doivent avoir
 les mêmes clés et les mêmes substitutions `%{…}` : `ui::i18n_tests` le vérifie.
+
+**Le code est en anglais, la documentation en français.** Commentaires, doc
+comments, noms et messages d'erreur des couches du cœur sont en anglais — c'est
+la langue de gpui, de git et des dépendances qu'on lit à côté ; ce fichier, le
+README et le `justfile` restent en français, ils s'adressent à qui tient le
+dépôt. Un message d'erreur d'un worker remonte donc en anglais dans la barre
+d'état, là où tout ce qui passe par `tr!` suit la langue choisie.
+
+Corollaire d'un renommage : l'index du coffre s'appelle `Review.md`
+(`vault::INDEX`) et non plus `Relecture.md`, que `vault::LEGACY_INDEX` **relit
+sans jamais l'écrire** — un coffre contient des fichiers auxquels quelqu'un a
+pu faire un lien, et perdre en silence les coches d'une relecture existante
+coûterait plus cher que de porter une constante.
 
 ## Tests
 

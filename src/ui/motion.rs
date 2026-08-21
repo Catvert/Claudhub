@@ -321,18 +321,18 @@ mod tests {
 
     const MAX: f32 = 1000.;
 
-    /// Le cœur du procédé : le saut de gpui est rendu, et la position visée
-    /// est celle où il avait atterri.
+    /// The heart of the trick: gpui's jump is given back, and the position
+    /// aimed at is where it had landed.
     #[test]
     fn a_notch_gives_back_the_jump_and_aims_at_it() {
         let now = Instant::now();
         let mut axis = Axis::default();
-        // gpui est passé de 0 à -60 avant que nous soyons appelés.
+        // gpui went from 0 to -60 before we were called.
         let written = axis.on_wheel(-60., -60., MAX, now);
-        assert_eq!(written, 0., "la vue reste où l'œil l'a laissée");
+        assert_eq!(written, 0., "the view stays where the eye left it");
 
         let (middle, moving) = axis.advance(0., MAX, now + Duration::from_millis(80));
-        assert!(moving, "la transition demande une frame de plus");
+        assert!(moving, "the transition asks for one more frame");
         assert!(middle < 0. && middle > -60.);
 
         let (end, moving) = axis.advance(middle, MAX, now + DURATION);
@@ -347,33 +347,32 @@ mod tests {
         axis.on_wheel(-60., -60., MAX, now);
         let middle = now + Duration::from_millis(80);
         let (position, _) = axis.advance(0., MAX, middle);
-        // gpui saute de nouveau, depuis la position que nous venons d'écrire.
+        // gpui jumps again, from the position we have just written.
         axis.on_wheel(position - 60., -60., MAX, middle);
         let (end, _) = axis.advance(position, MAX, middle + DURATION);
-        assert_eq!(end, -120., "les deux crans s'additionnent");
+        assert_eq!(end, -120., "the two notches add up");
     }
 
-    /// `scroll_to_item` écrit le décalage sans rien nous dire ; le ramener à
-    /// la position de la transition annulerait la flèche qu'on vient de
-    /// presser.
+    /// `scroll_to_item` writes the offset without telling us; pulling it back
+    /// to the transition's position would undo the arrow key just pressed.
     #[test]
     fn a_programmatic_jump_wins_over_a_running_transition() {
         let now = Instant::now();
         let mut axis = Axis::default();
         axis.on_wheel(-60., -60., MAX, now);
         let (position, moving) = axis.advance(-900., MAX, now + Duration::from_millis(40));
-        assert_eq!(position, -900., "la position demandée est gardée");
+        assert_eq!(position, -900., "the requested position is kept");
         assert!(!moving);
         assert!(axis.motion.is_none());
     }
 
-    /// Près d'un bord, gpui ne rogne rien : il ajoute son saut au décalage et
-    /// c'est la mise en page qui le ramènera dans les bornes. La destination
-    /// est donc rognée, la provenance non.
+    /// Near an edge, gpui clamps nothing: it adds its jump to the offset and
+    /// layout is what will bring it back inside the bounds. The destination is
+    /// therefore clamped, the origin is not.
     #[test]
     fn a_jump_past_the_edge_stops_at_it_without_starting_from_it() {
         let now = Instant::now();
-        // On est à dix pixels du bas, un cran en demande soixante.
+        // We are ten pixels from the bottom, one notch asks for sixty.
         let mut axis = Axis {
             last: Some(-990.),
             ..Default::default()
@@ -381,15 +380,15 @@ mod tests {
         let written = axis.on_wheel(-1050., -60., MAX, now);
         assert_eq!(written, -990.);
         let (end, _) = axis.advance(written, MAX, now + DURATION);
-        assert_eq!(end, -MAX, "la destination est rognée, pas la provenance");
+        assert_eq!(end, -MAX, "the destination is clamped, not the origin");
     }
 
-    /// Le bord, et le cran de trop.
+    /// The edge, and the notch too many.
     ///
-    /// La hauteur de ligne que nous lisons n'est pas celle que gpui a
-    /// utilisée : trois lignes d'écart font deux ou trois pixels. Ils sont
-    /// invisibles au milieu d'un saut de soixante, mais ici ils *sont* le
-    /// mouvement — la vue reculait d'autant avant d'y revenir, à chaque cran.
+    /// The line height we read is not the one gpui used: three lines apart make
+    /// two or three pixels. They are invisible in the middle of a sixty-pixel
+    /// jump, but here they *are* the movement — the view stepped back that much
+    /// before returning, on every notch.
     #[test]
     fn a_notch_against_the_edge_leaves_the_view_where_it_is() {
         let now = Instant::now();
@@ -397,15 +396,14 @@ mod tests {
             last: Some(-MAX),
             ..Default::default()
         };
-        // gpui a sauté de soixante pixels ; notre hauteur de ligne en compte
-        // soixante-trois.
+        // gpui jumped sixty pixels; our line height counts sixty-three.
         let written = axis.on_wheel(-MAX - 60., -63., MAX, now);
-        assert_eq!(written, -MAX, "la vue ne bouge pas d'un pixel");
-        assert!(axis.motion.is_none(), "il n'y a rien à animer");
+        assert_eq!(written, -MAX, "the view does not move by a pixel");
+        assert!(axis.motion.is_none(), "there is nothing to animate");
     }
 
-    /// Le pavé tactile est déjà continu, et un panneau à un seul axe reçoit
-    /// une molette horizontale comme une molette verticale.
+    /// The trackpad is already continuous, and a single-axis panel receives a
+    /// horizontal wheel as a vertical one.
     #[test]
     fn a_wheel_is_split_the_way_gpui_splits_it() {
         let vertical = ScrollMotion::new(Axes::Vertical);
@@ -417,7 +415,7 @@ mod tests {
         assert_eq!(
             both.split(point(px(-30.), px(-60.))),
             (0., -60.),
-            "seule la composante dominante passe"
+            "only the dominant component gets through"
         );
     }
 }

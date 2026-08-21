@@ -284,17 +284,17 @@ fn resolve(
     Paint::Rgb(r, g, b)
 }
 
-/// Palette xterm par défaut : 16 couleurs nommées, un cube 6×6×6, puis 24 gris.
+/// Default xterm palette: 16 named colours, a 6×6×6 cube, then 24 greys.
 fn default_palette(index: usize) -> (u8, u8, u8) {
     const BASE: [(u8, u8, u8); 16] = [
-        (0x00, 0x00, 0x00), // noir
-        (0xcd, 0x31, 0x31), // rouge
-        (0x0d, 0xbc, 0x79), // vert
-        (0xe5, 0xe5, 0x10), // jaune
-        (0x24, 0x72, 0xc8), // bleu
+        (0x00, 0x00, 0x00), // black
+        (0xcd, 0x31, 0x31), // red
+        (0x0d, 0xbc, 0x79), // green
+        (0xe5, 0xe5, 0x10), // yellow
+        (0x24, 0x72, 0xc8), // blue
         (0xbc, 0x3f, 0xbc), // magenta
         (0x11, 0xa8, 0xcd), // cyan
-        (0xe5, 0xe5, 0xe5), // blanc
+        (0xe5, 0xe5, 0xe5), // white
         (0x66, 0x66, 0x66),
         (0xf1, 0x4c, 0x4c),
         (0x23, 0xd1, 0x8b),
@@ -344,28 +344,28 @@ mod tests {
 
     #[test]
     fn plain_text_becomes_one_run() {
-        let snap = render("bonjour");
-        assert_eq!(snap.lines[0].text, "bonjour");
+        let snap = render("hello");
+        assert_eq!(snap.lines[0].text, "hello");
         assert_eq!(
             snap.lines[0].segments.len(),
             1,
-            "un texte sans attribut ne doit pas être découpé"
+            "text with no attribute must not be split"
         );
-        // Les lignes vides du bas existent mais sont vides.
+        // The empty lines at the bottom exist but are empty.
         assert_eq!(snap.lines[1].text, "");
     }
 
     #[test]
     fn colors_split_runs_and_survive_reset() {
-        // rouge, puis retour au style par défaut.
-        let snap = render("\x1b[31mrouge\x1b[0mnormal");
+        // red, then back to the default style.
+        let snap = render("\x1b[31mred\x1b[0mnormal");
         let line = &snap.lines[0];
-        assert_eq!(line.text, "rougenormal");
+        assert_eq!(line.text, "rednormal");
         assert_eq!(line.segments.len(), 2);
         assert_eq!(line.segments[0].fg, Paint::Rgb(0xcd, 0x31, 0x31));
         assert_eq!(
             &line.text[line.segments[0].start..line.segments[0].end],
-            "rouge"
+            "red"
         );
         assert_eq!(line.segments[1].fg, Paint::Default);
     }
@@ -375,24 +375,24 @@ mod tests {
         let snap = render("\x1b[7minverse");
         let seg = &snap.lines[0].segments[0];
         assert!(seg.inverse);
-        // Le fond par défaut est passé au premier plan et réciproquement.
+        // The default background has moved to the foreground and vice versa.
         assert_eq!(seg.fg, Paint::Default);
         assert_eq!(seg.bg, Paint::Default);
     }
 
     #[test]
     fn bold_brightens_the_basic_palette() {
-        let snap = render("\x1b[1;31mgras");
-        // Rouge gras = rouge clair, comme dans tout terminal.
+        let snap = render("\x1b[1;31mbold");
+        // Bold red = bright red, as in every terminal.
         assert_eq!(snap.lines[0].segments[0].fg, Paint::Rgb(0xf1, 0x4c, 0x4c));
         assert!(snap.lines[0].segments[0].bold);
     }
 
-    /// Le geste signalé : remonter la molette « effaçait » l'écran.
+    /// The reported gesture: scrolling the wheel up "erased" the screen.
     ///
-    /// Les lignes venues de l'historique sont numérotées négativement ; sans
-    /// le décalage du viewport elles s'écrasaient toutes sur l'indice 0, et
-    /// l'instantané ne rendait plus qu'une ligne au lieu de quatre.
+    /// Lines coming from the scrollback are numbered negatively; without the
+    /// viewport offset they were all crushed onto index 0, and the snapshot
+    /// returned a single line instead of four.
     #[test]
     fn scrolling_back_shows_the_history_instead_of_collapsing_it() {
         use alacritty_terminal::grid::Scroll;
@@ -408,13 +408,13 @@ mod tests {
         );
         let mut parser: Processor<StdSyncHandler> = Processor::new();
         for n in 1..=8 {
-            parser.advance(&mut term, format!("ligne{n}\r\n").as_bytes());
+            parser.advance(&mut term, format!("line{n}\r\n").as_bytes());
         }
 
-        // En bas : les dernières lignes écrites.
+        // At the bottom: the last lines written.
         let bottom = capture(&term);
         assert_eq!(bottom.lines.len(), 4);
-        assert_eq!(bottom.lines[0].text, "ligne6");
+        assert_eq!(bottom.lines[0].text, "line6");
         assert_eq!(bottom.display_offset, 0);
 
         term.scroll_display(Scroll::Delta(3));
@@ -423,12 +423,12 @@ mod tests {
         assert_eq!(
             scrolled.lines.len(),
             4,
-            "l'écran garde sa hauteur quand on remonte"
+            "the screen keeps its height when scrolled up"
         );
         let texts: Vec<&str> = scrolled.lines.iter().map(|l| l.text.as_str()).collect();
-        assert_eq!(texts, ["ligne3", "ligne4", "ligne5", "ligne6"]);
+        assert_eq!(texts, ["line3", "line4", "line5", "line6"]);
 
-        // Le curseur est trois lignes plus bas que la vue : hors champ.
+        // The cursor is three lines below the view: out of frame.
         assert_eq!(scrolled.cursor.unwrap().line, None);
     }
 

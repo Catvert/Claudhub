@@ -128,52 +128,59 @@ pub fn toggle_task(text: &str, line: usize, done: bool) -> Option<String> {
     Some(replace_line(text, line, &replaced))
 }
 
-/// Le `TODO.md` qu'on pose quand il n'y en a pas.
+/// The `TODO.md` we lay down when there is none.
 ///
-/// Il explique son propre format : le fichier finit dans un coffre, ouvert par
-/// quelqu'un — ou par un agent — qui n'a pas lu notre documentation.
+/// It explains its own format: the file ends up in a vault, opened by somebody —
+/// or by an agent — who has not read our documentation.
 pub fn seed_todo(worktree: &Path) -> String {
     format!(
-        "---\nclaudhub: todo\nworktree: {}\n---\n\n# À faire\n\n\
-         Une tâche est une case à cocher Markdown — `- [ ] …` — et rien d'autre \
-         n'est interprété : le texte autour est à qui l'écrit. Claudhub affiche \
-         ces cases dans son panneau de notes, et l'agent de ce worktree tient la \
-         liste à jour ; le fichier lui est donné par `$CLAUDHUB_TODO`.\n\n",
+        "---\nclaudhub: todo\nworktree: {}\n---\n\n# To do\n\n\
+         A task is a Markdown checkbox — `- [ ] …` — and nothing else is \
+         interpreted: the text around it belongs to whoever writes it. Claudhub \
+         shows these boxes in its notes panel, and this worktree's agent keeps \
+         the list up to date; the file is given to it through `$CLAUDHUB_TODO`.\n\n",
         scalar(&worktree.display().to_string())
     )
 }
 
-/// Le nom du fichier d'index, dans le dossier d'un worktree.
-pub const INDEX: &str = "Relecture.md";
+/// The index file's name, in a worktree's folder.
+pub const INDEX: &str = "Review.md";
 
-/// La liste de tâches d'un worktree, dans le même dossier.
+/// The name the index carried before the interface was written in English.
 ///
-/// Elle n'est **pas** écrite par Claudhub au fil de l'eau, contrairement aux
-/// notes et à l'index : elle appartient à qui la tient — l'agent qui coche ce
-/// qu'il vient de faire, ou soi-même dans Obsidian. Claudhub la lit, l'affiche,
-/// et ne touche qu'à la case qu'on clique. C'est ce qui permet à un agent d'y
-/// écrire ce qu'il veut — des sous-listes, des liens, du texte entre les
-/// tâches — sans que la prochaine écriture de note l'efface.
+/// Read but never written: a vault holds files somebody may have linked to, and
+/// silently dropping the ticks of an existing review to rename a file would cost
+/// more than carrying one constant. `sync_notes` erases it once the new one has
+/// been written, the list it aligns the folder on no longer containing it.
+pub const LEGACY_INDEX: &str = "Relecture.md";
+
+/// A worktree's task list, in the same folder.
+///
+/// It is **not** written by Claudhub as it goes, unlike the notes and the index:
+/// it belongs to whoever keeps it — the agent ticking off what it has just done,
+/// or yourself in Obsidian. Claudhub reads it, shows it, and touches only the
+/// box you click. That is what lets an agent write whatever it likes in it —
+/// sub-lists, links, text between tasks — without the next note write erasing it.
 pub const TODO: &str = "TODO.md";
 
-/// La note libre d'un worktree : ce qu'on écrit *à côté* du code, et qui ne
-/// porte sur aucune ligne en particulier.
+/// A worktree's free note: what you write *beside* the code, and which is about
+/// no particular line.
 ///
-/// Elle n'a **pas de frontmatter** : c'est du Markdown ordinaire, celui qu'on
-/// tiendrait de toute façon dans son coffre, et une note de coffre n'a pas à
-/// porter nos clés pour être lisible. Le nom suffit à la retrouver, et son
-/// absence de marque la met du même coup hors de portée de la purge.
+/// It has **no frontmatter**: it is ordinary Markdown, the kind you would keep
+/// in your vault anyway, and a vault note does not have to carry our keys to be
+/// readable. The name is enough to find it, and its lack of a mark also puts it
+/// out of the purge's reach.
 ///
-/// Vide, elle **n'existe pas** : un fichier vide et un fichier absent ne se
-/// distinguent pas dans un coffre, et laisser une coquille par worktree ouvert
-/// est exactement ce que `notes_on_disk` évite ailleurs.
+/// Empty, it **does not exist**: an empty file and an absent file cannot be told
+/// apart in a vault, and leaving a shell per opened worktree is exactly what
+/// `notes_on_disk` avoids elsewhere.
 pub const NOTES: &str = "NOTES.md";
 
-/// Ajoute une tâche à un `TODO.md`, après la dernière qu'il porte.
+/// Appends a task to a `TODO.md`, after the last one it carries.
 ///
-/// Après la dernière tâche et non à la fin du fichier : un agent écrit sous sa
-/// liste — ce qu'il a compris, ce qui reste à décider —, et une tâche ajoutée
-/// après cette prose ne se lirait plus comme faisant partie de la liste.
+/// After the last task and not at the end of the file: an agent writes under its
+/// list — what it has understood, what is left to decide — and a task added
+/// after that prose would no longer read as part of the list.
 pub fn append_task(text: &str, label: &str) -> String {
     let label = label.trim();
     let entry = format!("- [ ] {label}");
@@ -400,25 +407,24 @@ pub fn parse_note(text: &str) -> Option<Note> {
     })
 }
 
-/// L'index de relecture : les fichiers cochés, en cases à cocher Markdown.
+/// The review index: the ticked files, as Markdown checkboxes.
 ///
-/// Des cases et non une liste : Obsidian les rend cliquables, et décocher là
-/// rend le fichier à relire ici. Seuls les fichiers **cochés** y figurent —
-/// l'autre liste n'a pas de bord, une revue de branche touchant couramment
-/// plusieurs centaines de fichiers.
+/// Checkboxes and not a list: Obsidian makes them clickable, and unticking there
+/// hands the file back to be reviewed here. Only the **ticked** files appear —
+/// the other list has no edge, a branch review routinely touching several
+/// hundred files.
 ///
-/// Le titre d'une section est la clé du domaine, pas son libellé traduit :
-/// changer la langue de l'interface ne doit pas rendre illisible ce qu'on a
-/// déjà écrit.
+/// A section's title is the range's key, not its translated label: changing the
+/// interface language must not make what has already been written unreadable.
 pub fn render_index(worktree: &Path, reviewed: &[Reviewed]) -> String {
     let mut out = String::from("---\nclaudhub: review\n");
     out.push_str(&format!(
         "worktree: {}\n",
         scalar(&worktree.display().to_string())
     ));
-    out.push_str("---\n\n# Relecture\n\n");
+    out.push_str("---\n\n# Review\n\n");
     out.push_str(
-        "Les fichiers relus, cochés depuis Claudhub. Décocher une case ici les rend à relire.\n",
+        "The files reviewed, ticked from Claudhub. Unticking a box here hands them back to be reviewed.\n",
     );
 
     let mut sorted: Vec<&Reviewed> = reviewed.iter().collect();
@@ -635,7 +641,7 @@ mod tests {
             start: 42,
             end: 44,
             excerpt: "public function handle()\n{\n    return null;\n}".into(),
-            body: "Le retour nul remonte jusqu'au contrôleur.".into(),
+            body: "The null return travels all the way to the controller.".into(),
             sent: true,
             done: false,
         }
@@ -661,15 +667,15 @@ mod tests {
         assert_eq!(before, "0003 Kernel.php.md");
     }
 
-    /// Ce que nous n'avons pas écrit ne nous appartient pas.
+    /// What we did not write does not belong to us.
     #[test]
     fn a_foreign_note_is_not_ours() {
-        assert!(parse_note("---\ntags: [idée]\n---\n\nUne note à moi.").is_none());
-        assert!(parse_note("Pas de frontmatter du tout.").is_none());
+        assert!(parse_note("---\ntags: [idea]\n---\n\nA note of my own.").is_none());
+        assert!(parse_note("No frontmatter at all.").is_none());
     }
 
-    /// Un extrait de Markdown contient des accents graves, et une clôture à
-    /// trois refermerait le bloc au milieu.
+    /// A Markdown excerpt contains backticks, and a fence of three would close
+    /// the block in the middle.
     #[test]
     fn an_excerpt_full_of_backticks_stays_whole() {
         let mut note = note();
@@ -682,14 +688,11 @@ mod tests {
     fn a_remark_written_in_obsidian_comes_back() {
         let text = render_note(&note());
         let edited = text.replace(
-            "Le retour nul remonte jusqu'au contrôleur.",
-            "Corrigé dans le coffre.\n\n- et sur deux lignes",
+            "The null return travels all the way to the controller.",
+            "Fixed in the vault.\n\n- and on two lines",
         );
         let parsed = parse_note(&edited).unwrap();
-        assert_eq!(
-            parsed.body,
-            "Corrigé dans le coffre.\n\n- et sur deux lignes"
-        );
+        assert_eq!(parsed.body, "Fixed in the vault.\n\n- and on two lines");
         assert_eq!(parsed.excerpt, note().excerpt);
     }
 
@@ -728,80 +731,79 @@ mod tests {
         assert_eq!(back[0].path, PathBuf::from("b.rs"));
     }
 
-    /// Sans section, une ligne cochée ne désigne aucun domaine : la prendre
-    /// pour des modifications en cours ferait apparaître une coche là où
-    /// personne ne l'a mise.
+    /// With no section, a ticked line names no range: taking it for changes in
+    /// progress would show a tick where nobody put one.
     #[test]
     fn a_line_without_a_section_is_ignored() {
         assert!(parse_index("- [x] a.rs +1 −0\n").is_empty());
     }
 
-    /// Ce qui entoure les cases appartient à qui l'écrit, et le rendu ne
-    /// passe pas par nos structures : cocher retourne un caractère, tout le
-    /// reste du fichier est recopié tel quel.
+    /// What surrounds the boxes belongs to whoever writes it, and the rendering
+    /// does not go through our structures: ticking flips one character, all the
+    /// rest of the file is copied as it is.
     #[test]
     fn checking_a_box_leaves_the_rest_of_the_file_alone() {
-        let text = "# À faire\n\nUn paragraphe d'agent.\n\n- [ ] lire le diff\n  - [x] sous-tâche\n- [ ] écrire le test\n";
+        let text = "# To do\n\nAn agent's paragraph.\n\n- [ ] read the diff\n  - [x] subtask\n- [ ] write the test\n";
         let todo = parse_todo(text);
         assert_eq!(todo.tasks.len(), 3);
         assert_eq!(todo.done(), 1);
-        assert_eq!(todo.tasks[0].label, "lire le diff");
+        assert_eq!(todo.tasks[0].label, "read the diff");
         assert_eq!(todo.tasks[1].depth, 1);
 
-        let after = toggle_task(text, todo.tasks[0].line, true).expect("la case existe");
+        let after = toggle_task(text, todo.tasks[0].line, true).expect("the box exists");
         assert_eq!(
             after,
-            text.replace("- [ ] lire le diff", "- [x] lire le diff")
+            text.replace("- [ ] read the diff", "- [x] read the diff")
         );
         assert_eq!(parse_todo(&after).done(), 2);
     }
 
-    /// Une ligne qui n'est plus une case veut dire que le fichier a changé
-    /// sous nos pieds : mieux vaut ne rien écrire que retourner la mauvaise.
+    /// A line that is no longer a box means the file has changed under our feet:
+    /// better to write nothing than to flip the wrong one.
     #[test]
     fn a_line_that_is_no_longer_a_box_refuses_the_toggle() {
-        assert!(toggle_task("- [ ] une tâche\ndu texte\n", 1, true).is_none());
-        assert!(toggle_task("- [ ] une tâche\n", 9, true).is_none());
+        assert!(toggle_task("- [ ] a task\nsome text\n", 1, true).is_none());
+        assert!(toggle_task("- [ ] a task\n", 9, true).is_none());
     }
 
-    /// Une tâche s'ajoute à la liste, pas sous ce que l'agent a écrit après.
+    /// A task joins the list, not what the agent wrote after it.
     #[test]
     fn a_task_lands_after_the_last_one() {
-        let text = "# À faire\n\n- [x] lire\n- [ ] écrire\n\nCe qui reste à décider.\n";
-        let after = append_task(text, "  relire  ");
+        let text = "# To do\n\n- [x] read\n- [ ] write\n\nWhat is left to decide.\n";
+        let after = append_task(text, "  re-read  ");
         assert_eq!(
             after,
-            "# À faire\n\n- [x] lire\n- [ ] écrire\n- [ ] relire\n\nCe qui reste à décider.\n"
+            "# To do\n\n- [x] read\n- [ ] write\n- [ ] re-read\n\nWhat is left to decide.\n"
         );
         assert_eq!(parse_todo(&after).tasks.len(), 3);
     }
 
-    /// Sans tâche, la liste commence — mais pas collée au paragraphe qui la
-    /// précède, que Markdown ne lirait pas comme une liste.
+    /// With no task, the list begins — but not glued to the paragraph before it,
+    /// which Markdown would not read as a list.
     #[test]
     fn the_first_task_opens_the_list() {
-        let after = append_task(&seed_todo(Path::new("/tmp/wt")), "lire le diff");
+        let after = append_task(&seed_todo(Path::new("/tmp/wt")), "read the diff");
         assert_eq!(parse_todo(&after).tasks.len(), 1);
-        assert!(after.ends_with("\n- [ ] lire le diff\n"));
+        assert!(after.ends_with("\n- [ ] read the diff\n"));
     }
 
-    /// Retoucher un libellé laisse la case, l'indentation et le reste du
-    /// fichier là où ils sont.
+    /// Editing a label leaves the box, the indentation and the rest of the file
+    /// where they are.
     #[test]
     fn a_label_is_rewritten_in_place() {
-        let text = "- [x] lire\n  - [ ] sous-tâche\nDu texte.\n";
-        let after = set_task_label(text, 1, "  relire le diff  ").expect("une case");
-        assert_eq!(after, "- [x] lire\n  - [ ] relire le diff\nDu texte.\n");
+        let text = "- [x] read\n  - [ ] subtask\nSome text.\n";
+        let after = set_task_label(text, 1, "  re-read the diff  ").expect("a box");
+        assert_eq!(after, "- [x] read\n  - [ ] re-read the diff\nSome text.\n");
 
-        let after = remove_task(text, 0).expect("une case");
-        assert_eq!(after, "  - [ ] sous-tâche\nDu texte.\n");
+        let after = remove_task(text, 0).expect("a box");
+        assert_eq!(after, "  - [ ] subtask\nSome text.\n");
 
         assert!(set_task_label(text, 2, "x").is_none());
         assert!(remove_task(text, 2).is_none());
     }
 
-    /// Le fichier qu'on pose doit se relire : c'est le même contrat que les
-    /// notes, et il n'y a personne pour le vérifier à notre place.
+    /// The file we lay down has to read back: it is the same contract as the
+    /// notes', and there is nobody to check it for us.
     #[test]
     fn the_seeded_list_reads_back_as_an_empty_one() {
         let todo = parse_todo(&seed_todo(Path::new("/tmp/wt")));

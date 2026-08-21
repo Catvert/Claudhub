@@ -248,12 +248,12 @@ mod tests {
     fn reads_a_local_branch_with_its_upstream() {
         let locals = vec!["main".to_string()];
         let line =
-            "main\0*\0il y a 2 heures\0Corrige le rendu\0origin/main\0[ahead 1, behind 4]\0Zoé";
+            "main\0*\x002 hours ago\0Fix the rendering\0origin/main\0[ahead 1, behind 4]\0Zoé";
         let b = parse_ref(line, &locals).unwrap();
         assert_eq!(b.name, "main");
         assert_eq!(b.kind, BranchKind::Local);
         assert!(b.is_head);
-        assert_eq!(b.subject, "Corrige le rendu");
+        assert_eq!(b.subject, "Fix the rendering");
         assert_eq!(b.author, "Zoé");
         let up = b.upstream.unwrap();
         assert_eq!(up.name, "origin/main");
@@ -262,22 +262,22 @@ mod tests {
 
     #[test]
     fn a_branch_without_upstream_has_none() {
-        let line = "wt/essai\0 \0hier\0Brouillon\0\0";
-        let b = parse_ref(line, &["wt/essai".to_string()]).unwrap();
-        assert_eq!(b.kind, BranchKind::Local, "une locale peut contenir un /");
+        let line = "wt/try\0 \0yesterday\0Draft\0\0";
+        let b = parse_ref(line, &["wt/try".to_string()]).unwrap();
+        assert_eq!(b.kind, BranchKind::Local, "a local name may contain a /");
         assert!(!b.is_head);
         assert_eq!(b.upstream, None);
-        // Un champ absent — une sortie d'avant l'ajout de l'auteur — ne fait
-        // pas échouer la lecture.
+        // A missing field — output from before the author was added — does not
+        // make the read fail.
         assert_eq!(b.author, "");
     }
 
     #[test]
     fn hides_remote_duplicates_and_head_alias() {
         let locals = vec!["main".to_string()];
-        assert!(parse_ref("origin/main\0 \0hier\0x\0\0", &locals).is_none());
-        assert!(parse_ref("origin/HEAD\0 \0hier\0x\0\0", &locals).is_none());
-        let b = parse_ref("origin/feature\0 \0hier\0x\0\0", &locals).unwrap();
+        assert!(parse_ref("origin/main\0 \0yesterday\0x\0\0", &locals).is_none());
+        assert!(parse_ref("origin/HEAD\0 \0yesterday\0x\0\0", &locals).is_none());
+        let b = parse_ref("origin/feature\0 \0yesterday\0x\0\0", &locals).unwrap();
         assert_eq!(b.kind, BranchKind::Remote);
     }
 

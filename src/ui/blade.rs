@@ -346,12 +346,12 @@ mod tests {
 
     #[test]
     fn a_directive_and_its_argument_are_recognized() {
-        let line = "    @foreach ($factures as $facture)";
+        let line = "    @foreach ($invoices as $invoice)";
         assert_eq!(
             covered(line, &scan_line(line)),
             [
                 ("@foreach", Scope::Directive),
-                ("$factures as $facture", Scope::Expression),
+                ("$invoices as $invoice", Scope::Expression),
             ]
         );
     }
@@ -367,12 +367,12 @@ mod tests {
 
     #[test]
     fn an_echo_separates_its_delimiters_from_its_expression() {
-        let line = "<td>{{ $facture->total }}</td>";
+        let line = "<td>{{ $invoice->total }}</td>";
         assert_eq!(
             covered(line, &scan_line(line)),
             [
                 ("{{", Scope::Delimiter),
-                (" $facture->total ", Scope::Expression),
+                (" $invoice->total ", Scope::Expression),
                 ("}}", Scope::Delimiter),
             ]
         );
@@ -389,59 +389,59 @@ mod tests {
                 (" $html ", Scope::Expression),
                 ("!!}", Scope::Delimiter),
             ],
-            "sans quoi l'écho simple mordrait sur l'écho non échappé, et \
-             décalerait tout le reste de la ligne"
+            "otherwise the simple echo would bite into the unescaped one, and \
+             shift the rest of the line"
         );
     }
 
     #[test]
     fn a_comment_spans_the_lines_it_needs() {
         let mut open = false;
-        let first = "{{-- une explication";
+        let first = "{{-- an explanation";
         assert_eq!(
             covered(first, &scan(first, &mut open)),
             [(first, Scope::Comment)]
         );
-        assert!(open, "le commentaire reste ouvert");
+        assert!(open, "the comment stays open");
 
-        let middle = "   qui continue";
+        let middle = "   that carries on";
         assert_eq!(scan(middle, &mut open).len(), 1);
         assert!(open);
 
-        let last = "  --}} <p>suite</p>";
+        let last = "  --}} <p>rest</p>";
         let found = scan(last, &mut open);
         assert_eq!(&last[found[0].0.clone()], "  --}}");
-        assert!(!open, "et se referme");
+        assert!(!open, "and closes again");
     }
 
     #[test]
     fn a_comment_that_closes_on_its_line_leaves_the_rest_alone() {
-        let line = "{{-- caché --}} @if ($x)";
+        let line = "{{-- hidden --}} @if ($x)";
         let found = scan_line(line);
         assert_eq!(
             covered(line, &found),
             [
-                ("{{-- caché --}}", Scope::Comment),
+                ("{{-- hidden --}}", Scope::Comment),
                 ("@if", Scope::Directive),
                 ("$x", Scope::Expression),
             ]
         );
     }
 
-    /// Le piège du scanner naïf : tout ce qui ressemble à `@mot` n'est pas une
+    /// The naive scanner's trap: not everything that looks like `@word` is a
     /// directive.
     #[test]
     fn what_looks_like_a_directive_but_is_not() {
-        let line = "<a href=\"mailto:contact@exemple.fr\">contact@exemple.fr</a>";
+        let line = "<a href=\"mailto:contact@example.com\">contact@example.com</a>";
         assert!(
             scan_line(line).is_empty(),
-            "une adresse électronique n'est pas une directive"
+            "an e-mail address is not a directive"
         );
 
-        let escaped = "@@if n'est pas une directive";
+        let escaped = "@@if is not a directive";
         assert!(scan_line(escaped).is_empty());
 
-        let alone = "@ tout seul";
+        let alone = "@ on its own";
         assert!(scan_line(alone).is_empty());
     }
 
@@ -460,23 +460,23 @@ mod tests {
 
     #[test]
     fn ranges_stay_sorted_disjoint_and_on_character_boundaries() {
-        let line = "<p>Été {{ $n }} — @if ($ok) oui @endif</p>";
+        let line = "<p>Größe {{ $n }} — @if ($ok) yes @endif</p>";
         let found = scan_line(line);
         let mut last = 0;
         for (range, _) in &found {
-            assert!(range.start >= last, "plages non triées : {found:?}");
+            assert!(range.start >= last, "ranges not sorted: {found:?}");
             assert!(range.start < range.end);
             assert!(
                 line.is_char_boundary(range.start) && line.is_char_boundary(range.end),
-                "plage {range:?} au milieu d'un caractère"
+                "range {range:?} in the middle of a character"
             );
             last = range.end;
         }
         assert!(found.len() >= 5);
     }
 
-    /// Une plage sans style est une plage invisible : le rôle rendrait la
-    /// bonne couleur, mais le thème ne connaîtrait pas le nom demandé.
+    /// A range with no style is an invisible range: the role would give the
+    /// right colour, but the theme would not know the name asked for.
     #[test]
     fn every_scope_resolves_to_a_colour() {
         for theme in [
@@ -492,7 +492,7 @@ mod tests {
             ] {
                 assert!(
                     scope.style(&theme).is_some(),
-                    "{scope:?} sans couleur dans « {} » : essayés {:?}",
+                    "{scope:?} with no colour in \"{}\": tried {:?}",
                     theme.name,
                     scope.candidates()
                 );
@@ -500,12 +500,12 @@ mod tests {
         }
     }
 
-    /// Le cas que la grammaire HTML ne sait pas lire : un nom de composant
-    /// pointé, qu'elle coupe en une balise et un attribut.
+    /// The case the HTML grammar cannot read: a dotted component name, which it
+    /// cuts into a tag and an attribute.
     #[test]
     fn a_dotted_component_name_is_one_range() {
         let mut open = false;
-        let line = "<x-layout.app title=\"Devis\">";
+        let line = "<x-layout.app title=\"Quote\">";
         let found = scan(line, &mut open);
         let component: Vec<_> = found
             .iter()
@@ -513,25 +513,25 @@ mod tests {
             .collect();
         assert_eq!(component.len(), 1, "{found:?}");
         assert_eq!(&line[component[0].0.clone()], "x-layout.app");
-        // L'attribut qui suit n'est pas à nous : la grammaire le colore bien.
+        // The attribute that follows is not ours: the grammar colours it well.
         assert!(!line[component[0].0.clone()].contains("title"));
     }
 
     #[test]
     fn a_closing_component_and_livewire_count_too() {
         let mut open = false;
-        let line = "</x-forms.input><livewire:compteur :n=\"$n\" />";
+        let line = "</x-forms.input><livewire:counter :n=\"$n\" />";
         let found: Vec<_> = scan(line, &mut open)
             .into_iter()
             .filter(|(_, scope)| *scope == Scope::Component)
             .map(|(range, _)| line[range].to_string())
             .collect();
-        assert_eq!(found, vec!["x-forms.input", "livewire:compteur"]);
+        assert_eq!(found, vec!["x-forms.input", "livewire:counter"]);
     }
 
-    /// Une balise ordinaire appartient à la grammaire, qui la lit très bien :
-    /// la surcouche n'a pas à y toucher, sous peine de recouvrir des styles
-    /// plus fins que les siens.
+    /// An ordinary tag belongs to the grammar, which reads it perfectly well:
+    /// the overlay has no business touching it, at the risk of covering styles
+    /// finer than its own.
     #[test]
     fn an_ordinary_tag_is_left_to_the_grammar() {
         let mut open = false;
@@ -539,16 +539,16 @@ mod tests {
             let found = scan(line, &mut open);
             assert!(
                 !found.iter().any(|(_, scope)| *scope == Scope::Component),
-                "{line} : {found:?}"
+                "{line}: {found:?}"
             );
         }
     }
 
     #[test]
     fn recognizes_a_view_by_its_full_name() {
-        assert!(is_blade(Path::new("resources/views/facture.blade.php")));
+        assert!(is_blade(Path::new("resources/views/invoice.blade.php")));
         assert!(is_blade(Path::new("layout.Blade.PHP")));
-        assert!(!is_blade(Path::new("app/Models/Facture.php")));
+        assert!(!is_blade(Path::new("app/Models/Invoice.php")));
         assert!(!is_blade(Path::new("blade.php")));
     }
 }

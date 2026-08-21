@@ -23,32 +23,32 @@ pub mod wire;
 
 pub use protocol::{Action, Cmd, Evt, Secret, WorktreeId};
 
-use crate::git::{branch, diff, history, repo, status};
+use crate::git::{branch, diff, history, repo, status, DiffRange, LogRange};
 
-/// Workers dédiés aux lectures : statut, diffs, branches, et les écritures
-/// locales, qui se comptent toutes en millisecondes.
+/// Workers dedicated to reads: status, diffs, branches, and the local writes,
+/// all of which are measured in milliseconds.
 const READERS: usize = 3;
 
-/// Workers dédiés aux bases de données. Voir `is_db`.
+/// Workers dedicated to databases. See `is_db`.
 const DB_WORKERS: usize = 2;
 
-/// Les opérations qui parlent au réseau ont leur propre file.
+/// The operations that talk to the network have their own queue.
 ///
-/// Un `fetch` sur un dépôt distant lent, une authentification qui attend, une
-/// connexion qui expire : ces commandes-là se comptent en secondes, parfois en
-/// dizaines de secondes. Partager la file avec les lectures faisait qu'un
-/// `pull` malheureux emportait un worker sur trois, et trois de suite figeaient
-/// l'interface entière — plus de statut, plus de diff, plus rien, sans que
-/// personne puisse relier cela au bouton qui l'a déclenché.
+/// A `fetch` on a slow remote, an authentication that waits, a connection that
+/// times out: those commands are measured in seconds, sometimes in tens of
+/// seconds. Sharing the queue with the reads meant an unlucky `pull` took one
+/// worker in three, and three in a row froze the whole interface — no status, no
+/// diff, nothing, with nobody able to connect that to the button that triggered
+/// it.
 fn is_network(cmd: &Cmd) -> bool {
     matches!(
         cmd,
         Cmd::Fetch { .. }
             | Cmd::Pull { .. }
             | Cmd::AutoFetch { .. }
-            // Un agent qui rédige un message met dix à trente secondes : c'est
-            // exactement le profil des commandes qui ont fait sortir le réseau
-            // de la file des lectures.
+            // An agent writing a message takes ten to thirty seconds: exactly
+            // the profile of the commands that made the network move out of the
+            // read queue.
             | Cmd::SuggestMessage { .. }
             | Cmd::Push { .. }
             | Cmd::LoadIssues { .. }
@@ -190,18 +190,18 @@ impl Handle {
                 send_to(queue, cmd);
             }
             HandleInner::Remote(wire) => send_to(wire, cmd),
-            HandleInner::Pending => log::debug!("commande émise avant le serveur, jetée"),
+            HandleInner::Pending => log::debug!("command issued before the server, dropped"),
         }
     }
 }
 
 fn send_to(queue: &async_channel::Sender<Cmd>, cmd: Cmd) {
     if let Err(err) = queue.try_send(cmd) {
-        log::debug!("commande abandonnée : {err}");
+        log::debug!("command dropped: {err}");
     }
 }
 
-/// Remet les ordres de surveillance au surveillant et rend les autres.
+/// Hands the watch orders to the watcher and returns the others.
 fn route_watch(watcher: Option<&watch::Watcher>, cmd: Cmd) -> Option<Cmd> {
     match cmd {
         Cmd::Watch { worktree } => watcher?.watch(&worktree),
@@ -284,44 +284,74 @@ fn worker(
             while let Ok(cmd) = commands.recv_blocking() {
                 for evt in handle(cmd) {
                     if events.send_blocking(evt).is_err() {
-                        return; // la fenêtre est partie
+                        return; // the window is gone
                     }
                 }
             }
         })
-        .expect("le système refuse de créer un thread");
+        .expect("the system refuses to create a thread");
 }
 
-/// Exécute une commande et rend les événements à publier.
+/// Runs a command and returns the events to publish, and says so in the journal.
 ///
-/// Rendre un `Vec` plutôt que d'émettre au fil de l'eau garde cette fonction
-/// pure et testable : elle ne connaît pas le canal.
+/// Every command, at `debug`: with several workers on four queues, the order
+/// things really happen in is not the order they were asked for, and a journal
+/// that only carried the results would not say what was waiting behind what.
+/// Writes are louder — `info`, with their duration — and say what they did one
+/// floor down, in `done` and `fail`.
 fn handle(cmd: Cmd) -> Vec<Evt> {
+    let name = cmd.name();
+    let started = std::time::Instant::now();
+    let evts = dispatch(cmd);
+    let elapsed = crate::logging::ms(started.elapsed());
+    // A command that produced a `Done` or a `Failed` is a **write**: that is
+    // what those two events mean, and it saves classifying sixty variants a
+    // second time. It is said at `info`, with how long it took — "why did that
+    // push take forty seconds" is a question the journal has to answer without
+    // being reconfigured first.
+    if evts
+        .iter()
+        .any(|evt| matches!(evt, Evt::Done { .. } | Evt::Failed { .. }))
+    {
+        log::info!("{name} — {elapsed}");
+    } else {
+        log::debug!("{name} — {elapsed} ({} event(s))", evts.len());
+    }
+    evts
+}
+
+/// Where the events come from.
+///
+/// **One `match` and one arm per variant**, each delegating to a named
+/// function: the exhaustiveness check is what tells whoever adds a `Cmd` that
+/// they have a worker to write, and grouping the arms behind fallible
+/// dispatchers — "not mine, here it is back" — would trade that guarantee for
+/// shorter functions. What the arms delegate to lives below, so this stays a
+/// dispatch table one can read end to end.
+///
+/// Returning a `Vec` rather than emitting as it goes keeps this function pure
+/// and testable: it does not know the channel.
+fn dispatch(cmd: Cmd) -> Vec<Evt> {
     match cmd {
-        Cmd::OpenRepo(path) => match open_repo(&path) {
-            Ok(evt) => vec![evt],
-            Err(e) => vec![Evt::RepoUnavailable {
-                path,
-                message: describe_error(e),
-            }],
-        },
-        // Le répertoire de lancement : ouvert s'il est un dépôt, silence
-        // sinon — un message d'erreur pour un `claudhub` lancé depuis `~`
-        // serait du bruit.
+        Cmd::OpenRepo(path) => open(path),
+        // The launch directory: opened if it is a repository, silence otherwise
+        // — an error message for a `claudhub` launched from `~` would be noise.
         Cmd::OpenIfRepo(path) => {
             if repo::is_repo(&path) {
-                handle(Cmd::OpenRepo(path))
+                open(path)
             } else {
                 Vec::new()
             }
         }
-        // Remises au surveillant par `Handle::send` avant toute file : si
-        // l'une arrive ici, c'est qu'un transport les a fait passer par un
-        // chemin qui ne les route pas encore.
+        // Handed to the watcher by `Handle::send` before any queue: if one
+        // arrives here, a transport has sent them down a path that does not
+        // route them yet.
         Cmd::Watch { .. } | Cmd::Unwatch { .. } | Cmd::WatchDir { .. } | Cmd::UnwatchDir { .. } => {
-            log::debug!("ordre de surveillance arrivé dans un worker");
+            log::debug!("watch order arrived in a worker");
             Vec::new()
         }
+
+        // — Reads ——————————————————————————————————————————————————————
         Cmd::RefreshRepo { main } => match (repo::Repo { main: main.clone() }).worktrees() {
             Ok(worktrees) => vec![Evt::Worktrees { main, worktrees }],
             Err(e) => vec![fail(None, Action::Refresh, e)],
@@ -344,51 +374,13 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
             path,
             context,
             untracked,
-        } => {
-            let result = if untracked {
-                diff::untracked_file(&worktree, &path)
-            } else {
-                diff::file(&worktree, &range, &path, context)
-            };
-            match result {
-                Ok(diff) => vec![Evt::FileDiff {
-                    worktree,
-                    path,
-                    diff,
-                }],
-                Err(e) => vec![fail(Some(worktree), Action::Diff, e)],
-            }
-        }
+        } => file_diff(worktree, range, path, context, untracked),
         Cmd::LoadHistory {
             worktree,
             range,
             limit,
-        } => match history::commits(&worktree, &range, limit) {
-            Ok(commits) => {
-                let graph = history::layout(&commits);
-                vec![Evt::History {
-                    worktree,
-                    range,
-                    commits,
-                    graph,
-                }]
-            }
-            Err(e) => vec![fail(Some(worktree), Action::History, e)],
-        },
-        Cmd::LoadSummaries { worktrees } => {
-            let summaries = worktrees
-                .into_iter()
-                .filter_map(|worktree| {
-                    // Un worktree effacé sous nos pieds n'est pas une erreur à
-                    // afficher : il disparaîtra de la liste au prochain
-                    // `git worktree list`.
-                    status::summary(&worktree)
-                        .ok()
-                        .map(|summary| (worktree, summary))
-                })
-                .collect();
-            vec![Evt::Summaries { summaries }]
-        }
+        } => history(worktree, range, limit),
+        Cmd::LoadSummaries { worktrees } => summaries(worktrees),
         Cmd::ScanAgents {
             worktrees,
             programs,
@@ -396,17 +388,11 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
             agents: crate::agent::scan(&worktrees, &programs),
         }],
         Cmd::LoadBranches { main } => match branch::list(&main) {
-            Ok(branches) => {
-                let default_base = branch::default_base(&main);
-                vec![Evt::Branches {
-                    main,
-                    branches,
-                    default_base,
-                }]
-            }
+            Ok(branches) => vec![branches_evt(main, branches)],
             Err(e) => vec![fail(None, Action::Branch, e)],
         },
 
+        // — Writes ——————————————————————————————————————————————————————
         Cmd::Stage { worktree, paths } => write_then_refresh(worktree, Action::Stage, |dir| {
             repo::stage(dir, &paths).map(|_| String::new())
         }),
@@ -454,18 +440,7 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
                 Err(e) => vec![fail(Some(worktree), Action::SuggestMessage, e)],
             }
         }
-        Cmd::AutoFetch { main } => match repo::fetch(&main, true) {
-            Ok(_) => vec![Evt::Fetched { main }],
-            // Silence, et une trace. Un dépôt sans distant, une machine hors
-            // ligne, une authentification qui manque : rien de tout cela n'est
-            // arrivé au moment où l'utilisateur regardait, et le lui dire
-            // reviendrait à l'interrompre pour une commande qu'il n'a pas
-            // lancée.
-            Err(e) => {
-                log::debug!("fetch automatique de {} : {e}", main.display());
-                Vec::new()
-            }
-        },
+        Cmd::AutoFetch { main } => auto_fetch(main),
         Cmd::Fetch { worktree } => {
             write_then_refresh(worktree, Action::Fetch, |dir| repo::fetch(dir, true))
         }
@@ -488,19 +463,7 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
         } => write_then_refresh(worktree, Action::Branch, |dir| {
             repo::create_branch(dir, &name, from.as_deref()).map(|_| String::new())
         }),
-        Cmd::DeleteBranch { main, name, force } => match repo::delete_branch(&main, &name, force) {
-            Ok(()) => {
-                let mut evts = vec![done(None, Action::Branch, String::new())];
-                let default_base = branch::default_base(&main);
-                evts.extend(branch::list(&main).ok().map(|branches| Evt::Branches {
-                    main,
-                    branches,
-                    default_base,
-                }));
-                evts
-            }
-            Err(e) => vec![fail(None, Action::Branch, e)],
-        },
+        Cmd::DeleteBranch { main, name, force } => delete_branch(main, name, force),
         Cmd::Merge {
             worktree,
             from,
@@ -531,88 +494,66 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
             repo::resolve(dir, &path, ours).map(|_| String::new())
         }),
 
+        // — Sentry ——————————————————————————————————————————————————————
         Cmd::LoadIssues {
             org,
             project,
             query,
             token,
-        } => match crate::sentry::token(&token.0) {
-            Some(token) => match crate::sentry::issues(&org, &project, &query, &token) {
+        } => with_sentry_token(token, |token| {
+            match crate::sentry::issues(&org, &project, &query, token) {
                 Ok(issues) => vec![Evt::Issues { issues }],
                 Err(e) => vec![fail(None, Action::Sentry, e)],
-            },
-            None => vec![fail(
-                None,
-                Action::Sentry,
-                anyhow::anyhow!("aucun jeton Sentry : SENTRY_TOKEN ou les réglages"),
-            )],
-        },
-        Cmd::LoadIssueEvent { issue, token } => match crate::sentry::token(&token.0) {
-            Some(token) => match crate::sentry::latest_event(&issue, &token) {
+            }
+        }),
+        Cmd::LoadIssueEvent { issue, token } => with_sentry_token(token, |token| {
+            match crate::sentry::latest_event(&issue, token) {
                 Ok(event) => vec![Evt::IssueEvent { issue, event }],
                 Err(e) => vec![fail(None, Action::Sentry, e)],
-            },
-            None => vec![fail(
-                None,
-                Action::Sentry,
-                anyhow::anyhow!("aucun jeton Sentry : SENTRY_TOKEN ou les réglages"),
-            )],
-        },
-        Cmd::DbDatabases { connection } => {
-            let key = connection.key();
-            vec![Evt::DbDatabases {
-                key,
-                databases: db_result(executor::block_on(crate::db::databases(&connection))),
-            }]
-        }
+            }
+        }),
+
+        // — Databases ———————————————————————————————————————————————————
+        Cmd::DbDatabases { connection } => vec![Evt::DbDatabases {
+            key: connection.key(),
+            databases: db_result(executor::block_on(crate::db::databases(&connection))),
+        }],
         Cmd::DbTables {
             connection,
             database,
-        } => {
-            let key = connection.key();
-            let tables = db_result(executor::block_on(crate::db::tables(
+        } => vec![Evt::DbTables {
+            key: connection.key(),
+            tables: db_result(executor::block_on(crate::db::tables(
                 &connection,
                 &database,
-            )));
-            vec![Evt::DbTables {
-                key,
-                database,
-                tables,
-            }]
-        }
+            ))),
+            database,
+        }],
         Cmd::DbColumns {
             connection,
             database,
             table,
-        } => {
-            let key = connection.key();
-            let columns = db_result(executor::block_on(crate::db::columns(
+        } => vec![Evt::DbColumns {
+            key: connection.key(),
+            columns: db_result(executor::block_on(crate::db::columns(
                 &connection,
                 &database,
                 &table,
-            )));
-            vec![Evt::DbColumns {
-                key,
-                database,
-                table,
-                columns,
-            }]
-        }
+            ))),
+            database,
+            table,
+        }],
         Cmd::DbAllColumns {
             connection,
             database,
-        } => {
-            let key = connection.key();
-            let columns = db_result(executor::block_on(crate::db::all_columns(
+        } => vec![Evt::DbAllColumns {
+            key: connection.key(),
+            columns: db_result(executor::block_on(crate::db::all_columns(
                 &connection,
                 &database,
-            )));
-            vec![Evt::DbAllColumns {
-                key,
-                database,
-                columns,
-            }]
-        }
+            ))),
+            database,
+        }],
         Cmd::DbQuery {
             connection,
             database,
@@ -620,23 +561,7 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
             offset,
             limit,
             request,
-        } => {
-            // Mesuré ici : depuis la vue, la durée comprendrait l'attente dans
-            // la file et le prochain tour de la pompe d'événements.
-            let started = std::time::Instant::now();
-            let rows = db_result(executor::block_on(crate::db::query(
-                &connection,
-                database.as_deref(),
-                &sql,
-                offset,
-                limit,
-            )));
-            vec![Evt::DbRows {
-                request,
-                rows,
-                elapsed_ms: started.elapsed().as_millis() as u64,
-            }]
-        }
+        } => db_query(connection, database, sql, offset, limit, request),
         Cmd::DbExport {
             connection,
             database,
@@ -678,27 +603,24 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
             Ok(files) => vec![Evt::NotesRead { worktree, files }],
             Err(e) => vec![fail(Some(worktree), Action::Notes, e)],
         },
-        // La réponse ne porte pas le contenu — la vue tient déjà ce qu'elle
-        // vient d'écrire — mais le fait que le dossier existe : il peut venir
-        // de naître avec ce fichier, et jusque-là il n'y avait rien à
-        // surveiller.
+        // The answer does not carry the content — the view already holds what it
+        // has just written — but the fact that the folder exists: it may have
+        // just been born with this file, and until then there was nothing to
+        // watch.
         Cmd::WriteNotes {
             worktree,
             dir,
             files,
-        } => match crate::files::sync_notes(&dir, &files) {
-            Ok(()) => vec![Evt::VaultWritten { worktree }],
-            Err(e) => vec![fail(None, Action::Notes, e)],
-        },
+        } => vault_written(worktree, crate::files::sync_notes(&dir, &files)),
         Cmd::WriteVaultFile {
             worktree,
             path,
             text,
             expect,
-        } => match crate::files::write_vault_file(&path, &text, expect) {
-            Ok(()) => vec![Evt::VaultWritten { worktree }],
-            Err(e) => vec![fail(None, Action::Notes, e)],
-        },
+        } => vault_written(
+            worktree,
+            crate::files::write_vault_file(&path, &text, expect),
+        ),
         Cmd::OpenExternal {
             worktree,
             path,
@@ -716,35 +638,28 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
             main,
             slug,
             answers,
-        } => match crate::wt::questions(&main, &slug, &answers) {
-            Ok(questions) => vec![Evt::WtQuestions {
-                main,
-                slug,
-                answers,
-                questions,
-            }],
-            Err(e) => vec![fail(None, Action::Worktree, e)],
-        },
+            phase,
+            task,
+            round,
+        } => wt_questions(main, slug, answers, phase, task, round),
         Cmd::WtCreate {
             main,
             slug,
             from,
             answers,
         } => {
-            let r = repo::Repo { main: main.clone() };
-            match crate::wt::create(&main, &slug, from.as_deref(), &answers) {
-                Ok((_, output)) => worktree_changed(&r, output),
-                Err(e) => vec![fail(None, Action::Worktree, e)],
-            }
+            let created = crate::wt::create(&main, &slug, from.as_deref(), &answers);
+            worktrees_changed(main, created.map(|(_, output)| output))
         }
         Cmd::WtRemove { main, slug } => {
-            let r = repo::Repo { main: main.clone() };
-            match crate::wt::remove(&main, &slug) {
-                Ok(output) => worktree_changed(&r, output),
-                Err(e) => vec![fail(None, Action::Worktree, e)],
-            }
+            let removed = crate::wt::remove(&main, &slug);
+            worktrees_changed(main, removed)
         }
-        Cmd::WtUp { main, slug } => match crate::wt::up(&main, &slug) {
+        Cmd::WtUp {
+            main,
+            slug,
+            answers,
+        } => match crate::wt::up(&main, &slug, &answers) {
             Ok(output) => vec![done(None, Action::WtUp, output)],
             Err(e) => vec![fail(None, Action::WtUp, e)],
         },
@@ -757,7 +672,8 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
             worktree,
             slug,
             task,
-        } => match crate::wt::task(&main, &slug, &task) {
+            answers,
+        } => match crate::wt::task(&main, &slug, &task, &answers) {
             Ok(launch) => vec![Evt::WtTask {
                 worktree,
                 task,
@@ -765,23 +681,7 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
             }],
             Err(e) => vec![fail(Some(worktree), Action::Worktree, e)],
         },
-        Cmd::WtScan { targets } => {
-            let states = targets
-                .into_iter()
-                .filter_map(|(main, worktree)| {
-                    let slug = crate::wt::slug_of(&main, &worktree)?;
-                    Some((
-                        worktree,
-                        protocol::WtWorktree {
-                            up: crate::wt::is_up(&main, &slug),
-                            endpoints: crate::wt::endpoints(&main, &slug),
-                        },
-                    ))
-                })
-                .collect();
-            vec![Evt::WtStates { states }]
-        }
-
+        Cmd::WtScan { targets } => wt_scan(targets),
         Cmd::AddWorktree {
             main,
             path,
@@ -789,36 +689,260 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
             from,
         } => {
             let r = repo::Repo { main: main.clone() };
-            match r.add_worktree(&path, &branch, from.as_deref()) {
-                Ok(()) => worktree_changed(&r, path.display().to_string()),
-                Err(e) => vec![fail(None, Action::Worktree, e)],
-            }
+            let added = r
+                .add_worktree(&path, &branch, from.as_deref())
+                .map(|()| path.display().to_string());
+            worktrees_changed(main, added)
         }
         Cmd::RemoveWorktree { main, path, force } => {
             let r = repo::Repo { main: main.clone() };
-            match r.remove_worktree(&path, force) {
-                Ok(()) => worktree_changed(&r, path.display().to_string()),
-                Err(e) => vec![fail(None, Action::Worktree, e)],
-            }
+            let removed = r
+                .remove_worktree(&path, force)
+                .map(|()| path.display().to_string());
+            worktrees_changed(main, removed)
         }
     }
 }
 
-/// Intègre une branche dans la base, depuis le dépôt principal.
+/// Opens a repository, or says why it could not be opened.
+fn open(path: PathBuf) -> Vec<Evt> {
+    match open_repo(&path) {
+        Ok(evt) => vec![evt],
+        Err(e) => vec![Evt::RepoUnavailable {
+            path,
+            message: describe_error(e),
+        }],
+    }
+}
+
+/// A file's diff. `untracked` switches to `--no-index`: git does not know the
+/// file yet, and `diff` alone would return nothing.
+fn file_diff(
+    worktree: PathBuf,
+    range: DiffRange,
+    path: PathBuf,
+    context: usize,
+    untracked: bool,
+) -> Vec<Evt> {
+    let result = if untracked {
+        diff::untracked_file(&worktree, &path)
+    } else {
+        diff::file(&worktree, &range, &path, context)
+    };
+    match result {
+        Ok(diff) => vec![Evt::FileDiff {
+            worktree,
+            path,
+            diff,
+        }],
+        Err(e) => vec![fail(Some(worktree), Action::Diff, e)],
+    }
+}
+
+/// The history, and the graph layout that goes with it: the view shows them
+/// side by side, so they are computed together and travel together.
+fn history(worktree: PathBuf, range: LogRange, limit: usize) -> Vec<Evt> {
+    match history::commits(&worktree, &range, limit) {
+        Ok(commits) => {
+            let graph = history::layout(&commits);
+            vec![Evt::History {
+                worktree,
+                range,
+                commits,
+                graph,
+            }]
+        }
+        Err(e) => vec![fail(Some(worktree), Action::History, e)],
+    }
+}
+
+/// A summary per worktree, for the sidebar.
+fn summaries(worktrees: Vec<PathBuf>) -> Vec<Evt> {
+    let summaries = worktrees
+        .into_iter()
+        .filter_map(|worktree| {
+            // A worktree deleted under our feet is not an error to display: it
+            // will disappear from the list at the next `git worktree list`.
+            status::summary(&worktree)
+                .ok()
+                .map(|summary| (worktree, summary))
+        })
+        .collect();
+    vec![Evt::Summaries { summaries }]
+}
+
+/// The branch list, with the base git suggests for it.
+fn branches_evt(main: PathBuf, branches: Vec<crate::git::Branch>) -> Evt {
+    let default_base = branch::default_base(&main);
+    Evt::Branches {
+        main,
+        branches,
+        default_base,
+    }
+}
+
+/// Deletes a branch and re-reads the list: the panel shows it, and nothing else
+/// would tell it the branch has gone.
+fn delete_branch(main: PathBuf, name: String, force: bool) -> Vec<Evt> {
+    match repo::delete_branch(&main, &name, force) {
+        Ok(()) => {
+            let mut evts = vec![done(None, Action::Branch, String::new())];
+            evts.extend(
+                branch::list(&main)
+                    .ok()
+                    .map(|list| branches_evt(main, list)),
+            );
+            evts
+        }
+        Err(e) => vec![fail(None, Action::Branch, e)],
+    }
+}
+
+/// The periodic fetch. Silence when it succeeds, and a trace when it does not.
 ///
-/// Les deux vérifications préalables ne sont pas de la prudence de principe :
-/// fusionner dans un checkout sale mêle les modifications en cours au travail
-/// intégré, et fusionner alors qu'on est sur une autre branche écrit dans
-/// celle-là — deux dégâts qu'on découvre après coup, et qu'un message évite.
+/// A repository with no remote, an offline machine, a missing authentication:
+/// none of that happened at the moment the user was looking, and telling them
+/// would amount to interrupting them over a command they did not run.
+fn auto_fetch(main: PathBuf) -> Vec<Evt> {
+    match repo::fetch(&main, true) {
+        Ok(_) => vec![Evt::Fetched { main }],
+        Err(e) => {
+            log::debug!("automatic fetch of {}: {e}", main.display());
+            Vec::new()
+        }
+    }
+}
+
+/// Runs `f` with the Sentry token, or reports that there is none.
+///
+/// `SENTRY_TOKEN` wins over what the command carries: the worker sometimes runs
+/// in another process, and that process's environment is the authority.
+fn with_sentry_token(token: protocol::Secret, f: impl FnOnce(&str) -> Vec<Evt>) -> Vec<Evt> {
+    match crate::sentry::token(&token.0) {
+        Some(token) => f(&token),
+        None => vec![fail(
+            None,
+            Action::Sentry,
+            anyhow::anyhow!("no Sentry token: SENTRY_TOKEN or the settings"),
+        )],
+    }
+}
+
+/// One page of a query's result, and how long it took.
+fn db_query(
+    connection: crate::db::Connection,
+    database: Option<String>,
+    sql: String,
+    offset: usize,
+    limit: usize,
+    request: u64,
+) -> Vec<Evt> {
+    // Measured here: from the view, the duration would include the wait in the
+    // queue and the next turn of the event pump.
+    let started = std::time::Instant::now();
+    let rows = db_result(executor::block_on(crate::db::query(
+        &connection,
+        database.as_deref(),
+        &sql,
+        offset,
+        limit,
+    )));
+    vec![Evt::DbRows {
+        request,
+        rows,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    }]
+}
+
+/// A vault write. The answer carries the worktree and nothing else — see
+/// [`Evt::VaultWritten`].
+fn vault_written(worktree: PathBuf, result: Result<()>) -> Vec<Evt> {
+    match result {
+        Ok(()) => vec![Evt::VaultWritten { worktree }],
+        Err(e) => vec![fail(None, Action::Notes, e)],
+    }
+}
+
+/// What `wt` knows about each worktree of a project.
+fn wt_scan(targets: Vec<(PathBuf, PathBuf)>) -> Vec<Evt> {
+    let states = targets
+        .into_iter()
+        .filter_map(|(main, worktree)| {
+            let slug = crate::wt::slug_of(&main, &worktree)?;
+            Some((
+                worktree,
+                protocol::WtWorktree {
+                    up: crate::wt::is_up(&main, &slug),
+                    endpoints: crate::wt::endpoints(&main, &slug),
+                },
+            ))
+        })
+        .collect();
+    vec![Evt::WtStates { states }]
+}
+
+/// An operation that added or removed a worktree: the list has to be re-read,
+/// and it is the only thing that says the operation really landed.
+/// One round of a project's questions.
+///
+/// **The seeding happens here and only on the first round.** A `wt up` starts
+/// from what the worktree remembers — that is what stops it asking for its
+/// tenants a second time — and where `wt` files that is not the view's
+/// business. The answers therefore go back with the questions, and the view
+/// adopts them.
+fn wt_questions(
+    main: PathBuf,
+    slug: String,
+    answers: std::collections::BTreeMap<String, String>,
+    phase: crate::wt::Phase,
+    task: Option<String>,
+    round: u64,
+) -> Vec<Evt> {
+    let answers = if round == 0 && phase == crate::wt::Phase::Up {
+        let mut seeded = crate::wt::saved_answers(&main, &slug);
+        seeded.extend(answers);
+        seeded
+    } else {
+        answers
+    };
+    match crate::wt::questions(&main, &slug, &answers, phase, task.as_deref()) {
+        Ok(questions) => vec![Evt::WtQuestions {
+            main,
+            slug,
+            answers,
+            questions,
+            phase,
+            task,
+            round,
+        }],
+        Err(e) => vec![fail(None, Action::Worktree, e)],
+    }
+}
+
+fn worktrees_changed(main: PathBuf, result: Result<String>) -> Vec<Evt> {
+    match result {
+        Ok(output) => worktree_changed(&repo::Repo { main }, output),
+        Err(e) => vec![fail(None, Action::Worktree, e)],
+    }
+}
+
+/// Integrates a branch into the base, from the main repository.
+///
+/// The two preliminary checks are not caution on principle: merging into a
+/// dirty checkout mixes the changes in progress with the integrated work, and
+/// merging while sitting on another branch writes into that one — two kinds of
+/// damage discovered after the fact, and a message avoids both.
 fn integrate(main: &Path, branch: &str, base: &str, no_ff: bool) -> Result<String> {
     if repo::is_dirty(main) {
-        anyhow::bail!("le dépôt principal a des modifications en cours : validez-les ou rangez-les avant d'intégrer");
+        anyhow::bail!(
+            "the main repository has changes in progress: commit or stash them before integrating"
+        );
     }
     let current = branch::current(main);
     if current.as_deref() != Some(base) {
         anyhow::bail!(
-            "le dépôt principal est sur « {} » et non sur « {base} »",
-            current.as_deref().unwrap_or("HEAD détachée")
+            "the main repository is on \"{}\" and not on \"{base}\"",
+            current.as_deref().unwrap_or("detached HEAD")
         );
     }
     repo::merge(main, branch, no_ff)
@@ -876,6 +1000,11 @@ fn worktree_changed(r: &repo::Repo, output: String) -> Vec<Evt> {
 }
 
 fn done(worktree: Option<PathBuf>, action: Action, output: String) -> Evt {
+    // A write is an event of the session — a commit, a push, a worktree
+    // created — and `info` is the level the journal shows without being asked.
+    // Reads say nothing here: there are hundreds a minute and none of them is
+    // an event.
+    log::info!("{action:?}{} — done{}", at(&worktree), first_line(&output));
     Evt::Done {
         worktree,
         action,
@@ -883,10 +1012,32 @@ fn done(worktree: Option<PathBuf>, action: Action, output: String) -> Evt {
     }
 }
 
-/// Aplatit la chaîne de causes d'`anyhow` en une phrase : la vue affiche un
-/// message, pas une trace.
-/// La chaîne des causes, mise bout à bout : celle de git dit *ce qui* a
-/// échoué, la nôtre *ce qu'on essayait de faire*.
+/// ` on <worktree>`, or nothing when the operation belongs to a repository
+/// rather than to one of its checkouts.
+fn at(worktree: &Option<PathBuf>) -> String {
+    match worktree {
+        Some(path) => format!(" on {}", path.display()),
+        None => String::new(),
+    }
+}
+
+/// git's first line, when it said something.
+///
+/// The first only: `git push` writes a paragraph, and a journal line that wraps
+/// four times hides the ones around it. The whole of it reaches the user
+/// anyway — it is what `Evt::Done` carries to the status bar.
+fn first_line(output: &str) -> String {
+    match output.lines().find(|line| !line.trim().is_empty()) {
+        Some(line) => format!(": {}", line.trim()),
+        None => String::new(),
+    }
+}
+
+/// Flattens `anyhow`'s chain of causes into one sentence: the view shows a
+/// message, not a trace.
+///
+/// The chain of causes, end to end: git's says *what* failed, ours says *what we
+/// were trying to do*.
 fn describe_error(err: anyhow::Error) -> String {
     err.chain()
         .map(|c| c.to_string())
@@ -894,22 +1045,26 @@ fn describe_error(err: anyhow::Error) -> String {
         .join(" : ")
 }
 
-/// Met un résultat de base au format que porte l'événement.
+/// Puts a database result into the shape the event carries.
 ///
-/// L'erreur est mise à plat ici plutôt que dans la vue : c'est le seul endroit
-/// qui ait encore la chaîne des causes, et c'est elle qui dit à la fois ce que
-/// le moteur a refusé et ce qu'on essayait de faire.
+/// The error is flattened here rather than in the view: it is the only place
+/// that still has the chain of causes, and that chain says both what the engine
+/// refused and what we were trying to do.
 fn db_result<T>(result: Result<T>) -> protocol::DbResult<T> {
     result.map_err(|e| {
         let message = describe_error(e);
-        log::warn!("base de données : {message}");
+        log::warn!("database: {message}");
         message
     })
 }
 
 fn fail(worktree: Option<PathBuf>, action: Action, err: anyhow::Error) -> Evt {
     let message = describe_error(err);
-    log::warn!("{action:?} : {message}");
+    // The only `warn` of this layer, and that is what makes it worth something:
+    // git's own failures are filed at `debug`, because half of them are the
+    // normal answer to an optional read. Here the operation is known, so it is
+    // known that somebody was waiting for it.
+    log::warn!("{action:?}{} — {message}", at(&worktree));
     Evt::Failed {
         worktree,
         action,

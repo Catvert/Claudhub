@@ -24,22 +24,21 @@ use super::{bytes_to_string, Cell, Column, Connection, Database, Rows, Table};
 
 async fn open(connection: &Connection) -> Result<SqliteConnection> {
     let path = super::expand(&connection.path);
-    anyhow::ensure!(path.is_file(), "aucun fichier de base à {}", path.display());
+    anyhow::ensure!(path.is_file(), "no database file at {}", path.display());
     let options = SqliteConnectOptions::new()
         .filename(&path)
         .read_only(true)
-        // Une base qu'un serveur de développement est en train d'écrire est
-        // verrouillée quelques millisecondes : attendre vaut mieux qu'un
-        // « database is locked » à chaque clic.
+        // A database a development server is busy writing is locked for a few
+        // milliseconds: waiting beats a "database is locked" on every click.
         .busy_timeout(super::CONNECT_TIMEOUT);
     tokio::time::timeout(super::CONNECT_TIMEOUT, options.connect())
         .await
-        .with_context(|| format!("l'ouverture de {} a expiré", path.display()))?
-        .with_context(|| format!("ouverture de {}", path.display()))
+        .with_context(|| format!("opening {} timed out", path.display()))?
+        .with_context(|| format!("opening {}", path.display()))
 }
 
-/// Un identifiant entre guillemets, pour les endroits où SQL n'accepte pas de
-/// paramètre — un nom de schéma dans `schema.table`.
+/// A quoted identifier, for the places where SQL takes no parameter — a schema
+/// name in `schema.table`.
 fn quote(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }

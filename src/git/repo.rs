@@ -44,10 +44,10 @@ impl Worktree {
 }
 
 impl Repo {
-    /// Remonte de `start` au dépôt principal.
+    /// Walks up from `start` to the main repository.
     pub fn discover(start: &Path) -> Result<Self> {
         let common = git(start, &["rev-parse", "--git-common-dir"])
-            .with_context(|| format!("{} n'est pas dans un dépôt git", start.display()))?;
+            .with_context(|| format!("{} is not inside a git repository", start.display()))?;
         let common = PathBuf::from(&common);
         let common = if common.is_absolute() {
             common
@@ -55,16 +55,16 @@ impl Repo {
             start.join(common)
         };
         let common = common.canonicalize().unwrap_or(common);
-        // `.git/` → le dépôt ; un dépôt nu n'a pas de checkout et n'a rien à
-        // faire ici, mais son parent reste un point de départ utilisable.
+        // `.git/` → the repository; a bare repository has no checkout and has no
+        // business here, but its parent is still a usable starting point.
         let main = common
             .parent()
-            .ok_or_else(|| anyhow!("dépôt sans répertoire de travail : {}", common.display()))?
+            .ok_or_else(|| anyhow!("repository with no working tree: {}", common.display()))?
             .to_path_buf();
         Ok(Self { main })
     }
 
-    /// Nom du dépôt, tel qu'affiché en tête de la barre latérale.
+    /// The repository's name, as shown at the top of the sidebar.
     pub fn name(&self) -> String {
         self.main
             .file_name()
@@ -84,14 +84,14 @@ impl Repo {
         if super::branch::local_exists(&self.main, branch) {
             if let Some(holder) = super::branch::checked_out_at(&self.main, branch) {
                 bail!(
-                    "la branche « {branch} » est déjà déployée dans {}",
+                    "the branch \"{branch}\" is already checked out in {}",
                     holder.display()
                 );
             }
             if let Some(from) = from {
-                // git accepterait la commande en ignorant le point de départ ;
-                // créer autre chose que ce qui est demandé vaut un refus.
-                bail!("« {branch} » existe déjà : elle ne peut pas repartir de « {from} »");
+                // git would accept the command while ignoring the start point;
+                // creating something other than what was asked deserves a refusal.
+                bail!("\"{branch}\" already exists: it cannot start again from \"{from}\"");
             }
             args.push(path.into());
             args.push(branch.into());
@@ -199,34 +199,31 @@ pub fn apply_patch(dir: &Path, patch: &str, reverse: bool) -> Result<()> {
         .stderr(Stdio::piped())
         .env("LC_ALL", "C")
         .spawn()
-        .context("`git apply` n'a pas pu démarrer")?;
+        .context("`git apply` could not start")?;
     child
         .stdin
         .take()
-        .expect("stdin demandé en piped")
+        .expect("stdin requested as piped")
         .write_all(patch.as_bytes())
-        .context("écriture du patch dans `git apply`")?;
+        .context("writing the patch into `git apply`")?;
     let out = child.wait_with_output()?;
     if !out.status.success() {
-        bail!(
-            "git apply : {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        bail!("git apply: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(())
 }
 
 pub struct CommitOptions<'a> {
     pub message: &'a str,
-    /// Reprend le commit précédent au lieu d'en créer un.
+    /// Reuses the previous commit instead of creating one.
     pub amend: bool,
-    /// Indexe tout le suivi avant de valider (`git commit -a`).
+    /// Stages everything tracked before committing (`git commit -a`).
     pub all: bool,
 }
 
 pub fn commit(dir: &Path, opts: CommitOptions<'_>) -> Result<String> {
     if opts.message.trim().is_empty() && !opts.amend {
-        bail!("le message de commit est vide");
+        bail!("the commit message is empty");
     }
     let mut args: Vec<OsString> = vec!["commit".into()];
     if opts.all {
@@ -249,23 +246,23 @@ pub fn fetch(dir: &Path, prune: bool) -> Result<String> {
     git(dir, &args)
 }
 
-/// `pull --ff-only` : un merge automatique déclenché par un clic est la
-/// meilleure façon de se retrouver avec un conflit qu'on n'a pas demandé. En
-/// cas de divergence, git refuse et l'utilisateur choisit lui-même.
+/// `pull --ff-only`: an automatic merge triggered by a click is the best way to
+/// end up with a conflict nobody asked for. On divergence, git refuses and the
+/// user chooses for themselves.
 pub fn pull(dir: &Path) -> Result<String> {
     git(dir, &["pull", "--ff-only"])
 }
 
-/// Pousse la branche courante. `--set-upstream` couvre le premier envoi d'une
-/// branche créée par Claudhub, dont la remote n'existe pas encore.
+/// Pushes the current branch. `--set-upstream` covers the first push of a
+/// branch created by Claudhub, whose remote does not exist yet.
 pub fn push(dir: &Path, force_with_lease: bool) -> Result<String> {
-    let branch = super::branch::current(dir).ok_or_else(|| anyhow!("HEAD est détachée"))?;
+    let branch = super::branch::current(dir).ok_or_else(|| anyhow!("HEAD is detached"))?;
     let mut args: Vec<OsString> = vec!["push".into(), "--set-upstream".into(), "origin".into()];
     args.push(branch.into());
     if force_with_lease {
-        // Jamais `--force` nu : `--force-with-lease` refuse d'écraser un
-        // commit qu'on n'a pas vu, ce qui est exactement la protection qu'on
-        // veut derrière un bouton.
+        // Never a bare `--force`: `--force-with-lease` refuses to overwrite a
+        // commit we have not seen, which is exactly the protection wanted
+        // behind a button.
         args.push("--force-with-lease".into());
     }
     git(dir, &args)
@@ -373,30 +370,30 @@ pub fn merge(dir: &Path, from: &str, no_ff: bool) -> Result<String> {
     git(dir, &args)
 }
 
-/// Rejoue la branche courante sur `onto`.
+/// Replays the current branch onto `onto`.
 pub fn rebase(dir: &Path, onto: &str) -> Result<String> {
     git(dir, &["rebase", onto])
 }
 
-/// Abandonne l'opération en cours et rend le checkout à son état d'avant.
+/// Aborts the operation in progress and returns the checkout to its earlier state.
 pub fn abort(dir: &Path) -> Result<String> {
-    let kind = pending(dir).ok_or_else(|| anyhow!("aucune opération en cours"))?;
+    let kind = pending(dir).ok_or_else(|| anyhow!("no operation in progress"))?;
     git(dir, &[kind.command(), "--abort"])
 }
 
-/// Reprend l'opération en cours, une fois les conflits résolus.
+/// Resumes the operation in progress, once the conflicts are resolved.
 pub fn resume(dir: &Path) -> Result<String> {
-    let kind = pending(dir).ok_or_else(|| anyhow!("aucune opération en cours"))?;
+    let kind = pending(dir).ok_or_else(|| anyhow!("no operation in progress"))?;
     git(dir, &[kind.command(), "--continue"])
 }
 
-/// Résout un conflit en gardant une des deux versions.
+/// Resolves a conflict by keeping one of the two versions.
 ///
-/// `--ours` et `--theirs` de `git checkout` désignent, pendant un merge, la
-/// branche courante et celle qu'on intègre — et **s'inversent pendant un
-/// rebase**, où git rejoue nos commits par-dessus les leurs. Le drapeau est
-/// donc traduit ici plutôt qu'à l'appel : la vue parle de « la nôtre » et de
-/// « la leur » au sens de l'utilisateur, pas au sens de git.
+/// `git checkout`'s `--ours` and `--theirs` name, during a merge, the current
+/// branch and the one being integrated — and **swap over during a rebase**,
+/// where git replays our commits on top of theirs. The flag is therefore
+/// translated here rather than at the call site: the view speaks of "ours" and
+/// "theirs" in the user's sense, not in git's.
 pub fn resolve(dir: &Path, path: &Path, ours: bool) -> Result<()> {
     let swapped = matches!(pending(dir), Some(Pending::Rebase));
     let flag = if ours != swapped {

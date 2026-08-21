@@ -46,15 +46,15 @@ pub fn connect_wsl(
     Ok((handle, events, probe))
 }
 
-/// Lance le serveur et rend de quoi lui parler et l'écouter.
+/// Launches the server and returns what is needed to talk and listen to it.
 ///
-/// L'échec ici est celui du **lancement** (programme introuvable) ; tout ce
-/// qui arrive après — poignée de main, mort du serveur — remonte par le canal
-/// d'événements, la fenêtre étant déjà ouverte à ce moment-là.
+/// Failure here is a **launch** failure (program not found); everything after
+/// — handshake, death of the server — comes back through the event channel,
+/// the window being open by then.
 pub fn connect(argv: &[String]) -> anyhow::Result<(Handle, async_channel::Receiver<Evt>)> {
     let (program, args) = argv
         .split_first()
-        .ok_or_else(|| anyhow::anyhow!("cible de serveur vide"))?;
+        .ok_or_else(|| anyhow::anyhow!("empty server target"))?;
 
     let mut child = Command::new(program)
         .args(args)
@@ -62,14 +62,14 @@ pub fn connect(argv: &[String]) -> anyhow::Result<(Handle, async_channel::Receiv
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| anyhow::anyhow!("{program} n'a pas pu être lancé : {e}"))?;
+        .map_err(|e| anyhow::anyhow!("{program} could not be launched: {e}"))?;
 
-    let mut stdin = child.stdin.take().expect("stdin demandé");
-    let mut stdout = child.stdout.take().expect("stdout demandé");
-    let stderr = child.stderr.take().expect("stderr demandé");
+    let mut stdin = child.stdin.take().expect("stdin requested");
+    let mut stdout = child.stdout.take().expect("stdout requested");
+    let stderr = child.stderr.take().expect("stderr requested");
 
-    // L'écrivain. Notre poignée de main part d'abord, hors de la file : elle
-    // doit précéder tout `Cmd`, et le serveur l'attend avant de servir.
+    // The writer. Our handshake goes first, outside the queue: it must precede
+    // any `Cmd`, and the server waits for it before serving.
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<Cmd>();
     std::thread::Builder::new()
         .name("claudhub-remote-out".into())
@@ -79,14 +79,14 @@ pub fn connect(argv: &[String]) -> anyhow::Result<(Handle, async_channel::Receiv
             }
             while let Ok(cmd) = cmd_rx.recv_blocking() {
                 if wire::write_frame(&mut stdin, &cmd).is_err() {
-                    return; // le lecteur dira la mort du serveur
+                    return; // the reader will report the server's death
                 }
             }
-            // Plus de manche : stdin se ferme en sortant, et le serveur lit
-            // cette fin de flux comme l'ordre de s'éteindre.
+            // No handle left: stdin closes on the way out, and the server
+            // reads that end of stream as the order to shut down.
         })?;
 
-    // Le lecteur : la poignée de main, puis les événements.
+    // The reader: the handshake, then the events.
     let (evt_tx, evt_rx) = async_channel::unbounded::<Evt>();
     std::thread::Builder::new()
         .name("claudhub-remote-in".into())
@@ -96,12 +96,12 @@ pub fn connect(argv: &[String]) -> anyhow::Result<(Handle, async_channel::Receiv
             };
             let hello: Hello = match wire::read_frame(&mut stdout) {
                 Ok(Some(hello)) => hello,
-                Ok(None) => return lost("le serveur s'est éteint avant la poignée de main".into()),
-                Err(e) => return lost(format!("poignée de main illisible : {e}")),
+                Ok(None) => return lost("the server died before the handshake".into()),
+                Err(e) => return lost(format!("unreadable handshake: {e}")),
             };
             if hello.protocol != wire::PROTOCOL_VERSION {
                 return lost(format!(
-                    "versions désaccordées : serveur {} ({}), interface {}",
+                    "version mismatch: server {} ({}), interface {}",
                     hello.protocol,
                     hello.build,
                     wire::PROTOCOL_VERSION
@@ -120,17 +120,17 @@ pub fn connect(argv: &[String]) -> anyhow::Result<(Handle, async_channel::Receiv
                 match wire::read_frame::<Evt>(&mut stdout) {
                     Ok(Some(evt)) => {
                         if evt_tx.send_blocking(evt).is_err() {
-                            return; // la fenêtre est partie
+                            return; // the window is gone
                         }
                     }
-                    Ok(None) => return lost("le serveur s'est éteint".into()),
-                    Err(e) => return lost(format!("flux du serveur illisible : {e}")),
+                    Ok(None) => return lost("the server died".into()),
+                    Err(e) => return lost(format!("unreadable server stream: {e}")),
                 }
             }
         })?;
 
-    // Le pompier : stderr de l'enfant dans nos traces, et le `wait` qui évite
-    // le zombie — stderr ne se ferme qu'à la mort du processus.
+    // The pump: the child's stderr into our traces, plus the `wait` that
+    // avoids a zombie — stderr only closes when the process dies.
     std::thread::Builder::new()
         .name("claudhub-remote-err".into())
         .spawn(move || {
@@ -139,8 +139,8 @@ pub fn connect(argv: &[String]) -> anyhow::Result<(Handle, async_channel::Receiv
                 log::info!(target: "claudhub_server", "{line}");
             }
             match child.wait() {
-                Ok(status) => log::info!(target: "claudhub_server", "serveur terminé : {status}"),
-                Err(e) => log::warn!("attente du serveur : {e}"),
+                Ok(status) => log::info!(target: "claudhub_server", "server exited: {status}"),
+                Err(e) => log::warn!("waiting for the server: {e}"),
             }
         })?;
 

@@ -1,67 +1,97 @@
-//! Ce que le `wt.toml` d'un projet ajoute à Claudhub.
+//! What a project's `wt.toml` adds to Claudhub.
 //!
-//! C'est le système d'extension, et il ne coûte rien : un projet déclare ses
-//! dossiers à créer, ses fichiers à hériter, ses ports, ses hooks et ses
-//! tâches, et Claudhub les affiche **sans les connaître**. Une commande de
-//! démarrage Laravel et un `cargo watch` passent par le même code.
+//! This is the extension system, and it costs nothing: a project declares the
+//! folders to create, the files to inherit, its ports, its hooks and its
+//! tasks, and Claudhub shows them **without knowing about them**. A Laravel
+//! start command and a `cargo watch` go through the same code.
 //!
-//! `wt` est une dépendance, pas un sous-processus : le dépôt est le nôtre, et
-//! parser la sortie de sa CLI — alignée, colorée et traduite — reviendrait à
-//! lire ce qui est fait pour un humain.
+//! `wt` is a dependency, not a subprocess: the repository is ours, and parsing
+//! its CLI's output — aligned, coloured and translated — would amount to
+//! reading what is made for a human.
 //!
-//! **Rien ici ne doit être appelé depuis le thread d'interface.** Un
-//! `[[prompt]]` avec `source` lance un shell, un `post_new` peut durer des
-//! minutes, et `up` démarre des conteneurs. Tout passe par un worker.
+//! **Nothing here may be called from the interface thread.** A `[[prompt]]`
+//! with `source` launches a shell, a `post_new` can take minutes, and `up`
+//! starts containers. Everything goes through a worker.
 //!
-//! Le partage des rôles avec le terminal, qui n'est pas évident : ce qui tient
-//! une comptabilité — création, suppression, `up`, `down` — passe par la
-//! bibliothèque, qui alloue les ports et écrit l'état ; les `[tasks.*]`, elles,
-//! sont des commandes du projet, souvent interactives, et partent dans un
-//! onglet de terminal, qui sait déjà transmettre les frappes et rendre les
-//! couleurs.
+//! The split with the terminal, which is not obvious: what keeps books —
+//! creation, removal, `up`, `down` — goes through the library, which allocates
+//! the ports and writes the state; the `[tasks.*]`, for their part, are the
+//! project's commands, often interactive, and go into a terminal tab, which
+//! already knows how to forward keystrokes and render colours.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-// `::wt` désigne la bibliothèque, non ce module-ci : les deux portent le même
-// nom, et le préfixe lève l'ambiguïté pour qui lit autant que pour le
-// compilateur.
+// `::wt` names the library, not this module: both carry the same name, and the
+// prefix removes the ambiguity for the reader as much as for the compiler.
 use ::wt::config::{Ask, Project, PromptKind};
 use ::wt::ops::App;
 use ::wt::{ops, state, tmpl, util};
 
-/// Ce qu'un projet déclare, réduit à ce que la vue affiche.
+/// When the questions are asked.
 ///
-/// Un instantané de données nues plutôt que l'`App` de `wt` : la vue n'a pas à
-/// tenir un objet qui sait lancer des shells, et le reconstruire à chaque
-/// opération ne coûte qu'une lecture de fichier.
+/// The three moments `wt` itself knows, and it is what decides which
+/// `[[prompt]]`s apply: `ask = "new"`, `"up"`, `"both"`, and `"task"` — the
+/// last never asked by a phase, only by a task that names it. It also reaches
+/// the project's `when` and `source` scripts as `WT_PHASE`, which the Acetics
+/// configuration reads to decide whether to ask for its tenants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum Phase {
+    #[default]
+    New,
+    Up,
+    Task,
+}
+
+impl Phase {
+    fn ask(self) -> Ask {
+        match self {
+            Self::New => Ask::New,
+            Self::Up => Ask::Up,
+            Self::Task => Ask::Task,
+        }
+    }
+}
+
+/// What a project declares, cut down to what the view shows.
+///
+/// A snapshot of plain data rather than `wt`'s `App`: the view has no business
+/// holding an object that knows how to launch shells, and rebuilding it on
+/// every operation costs only one file read.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Snapshot {
     pub name: String,
-    /// Répertoire qui accueille les worktrees du projet.
+    /// Directory that holds the project's worktrees.
     pub root: PathBuf,
-    /// Modèle de nom de branche, `wt/{{slug}}` par défaut.
+    /// Branch name template, `wt/{{slug}}` by default.
     pub branch_template: String,
     pub tasks: Vec<TaskInfo>,
     pub has_up: bool,
     pub has_down: bool,
     pub has_open: bool,
-    /// Le projet pose-t-il des questions avant de créer un worktree.
-    pub has_prompts: bool,
+    /// Does the project ask questions before creating a worktree, and before
+    /// starting one. Two flags and not one: a project may ask nothing at `new`
+    /// and everything at `up`, and opening an empty dialog to find that out
+    /// would be a click for nothing.
+    pub has_new_prompts: bool,
+    pub has_up_prompts: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TaskInfo {
     pub name: String,
     pub description: String,
+    /// The task names `[[prompt]]`s of its own, which are asked before it runs
+    /// and whose answers become its arguments.
+    pub prompts: bool,
 }
 
-/// Une question déclarée par le projet, avec ses choix déjà résolus.
+/// A question declared by the project, with its choices already resolved.
 ///
-/// Les choix peuvent venir d'une commande shell (`source`) : ils sont donc
-/// calculés dans le worker, jamais au moment de dessiner le dialogue.
+/// The choices may come from a shell command (`source`): they are therefore
+/// computed in the worker, never while drawing the dialog.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Question {
     pub name: String,
@@ -140,20 +170,22 @@ pub fn snapshot(main: &Path) -> Option<Snapshot> {
             .map(|(name, task)| TaskInfo {
                 name: name.clone(),
                 description: task.description.clone(),
+                prompts: !task.prompt.is_empty(),
             })
             .collect(),
         has_up: app.has_up(),
         has_down: app.has_down(),
         has_open: app.has_open(),
-        has_prompts: !config.prompts.is_empty(),
+        has_new_prompts: config.prompts.iter().any(|p| p.ask.covers(Ask::New)),
+        has_up_prompts: config.prompts.iter().any(|p| p.ask.covers(Ask::Up)),
     })
 }
 
-/// Le slug d'un checkout : le nom de son dossier sous la racine du projet.
+/// A checkout's slug: the name of its folder under the project root.
 ///
-/// `None` pour le dépôt principal et pour tout worktree posé ailleurs : `wt`
-/// ne connaît que ce qu'il a créé, et lui demander d'agir sur le reste
-/// produirait des chemins qui n'existent pas.
+/// `None` for the main repository and for any worktree placed elsewhere: `wt`
+/// only knows what it created, and asking it to act on the rest would produce
+/// paths that do not exist.
 pub fn slug_of(main: &Path, worktree: &Path) -> Option<String> {
     let root = app(main)?.root;
     let rest = worktree.strip_prefix(&root).ok()?;
@@ -162,27 +194,55 @@ pub fn slug_of(main: &Path, worktree: &Path) -> Option<String> {
     parts.next().is_none().then_some(slug)
 }
 
-/// Les questions qui s'appliquent, compte tenu des réponses déjà données.
+/// The options remembered for a worktree.
 ///
-/// Appelée en boucle par le dialogue : un `when` peut dépendre d'une réponse
-/// précédente, et poser toutes les questions d'un coup ferait sauter celles
-/// qu'une autre débloque. La boucle converge — chaque tour ne peut qu'ajouter
-/// des questions déjà répondues à la liste des connues.
+/// That is what makes a second `wt up` stop asking: a prompt whose name is
+/// already here is filtered out, and the previous start is repeated as it was.
+/// It is read in the worker and sent back with the questions — the view has no
+/// business knowing where `wt` files its state.
+pub fn saved_answers(main: &Path, slug: &str) -> BTreeMap<String, String> {
+    app(main)
+        .map(|app| state::load(&app.root, slug).opts)
+        .unwrap_or_default()
+}
+
+/// The questions that apply, given the answers already provided.
+///
+/// Called in a loop by the dialog: a `when` may depend on an earlier answer,
+/// and asking every question at once would skip those another unlocks. The
+/// loop converges — each round can only add already-answered questions to the
+/// list of known ones.
+///
+/// `task` names the task whose own prompts are wanted, and it is the only case
+/// where the list does not come from the phase: `ask = "task"` means "never
+/// asked by a phase", so a task's questions are exactly the ones it names.
 pub fn questions(
     main: &Path,
     slug: &str,
     answers: &BTreeMap<String, String>,
+    phase: Phase,
+    task: Option<&str>,
 ) -> Result<Vec<Question>> {
     let Some(app) = app(main) else {
         return Ok(Vec::new());
     };
-    Ok(app
-        .prompts_for(Ask::New, answers)
+    let ask = phase.ask();
+    let prompts = match task {
+        Some(task) => app
+            .task_prompts(task)
+            .into_iter()
+            // The same filter `prompts_for` applies, and for the same reason:
+            // without it the loop would ask the same question for ever.
+            .filter(|prompt| prompt.always || !answers.contains_key(&prompt.name))
+            .collect(),
+        None => app.prompts_for(ask, answers),
+    };
+    Ok(prompts
         .into_iter()
-        .filter(|prompt| app.prompt_applies(prompt, slug, answers, Ask::New))
+        .filter(|prompt| app.prompt_applies(prompt, slug, answers, ask))
         .map(|prompt| {
             let choices = app
-                .prompt_choices(&prompt, slug, answers, Ask::New)
+                .prompt_choices(&prompt, slug, answers, ask)
                 .into_iter()
                 .map(|option| Choice {
                     label: if option.label.is_empty() {
@@ -211,60 +271,84 @@ pub fn questions(
         .collect())
 }
 
-/// Crée un worktree avec tout ce que le projet demande : la branche selon son
-/// modèle, les dossiers, les copies, les ports, puis `post_new`.
+/// Creates a worktree with everything the project asks for: the branch
+/// following its template, the folders, the copies, the ports, then `post_new`.
 pub fn create(
     main: &Path,
     slug: &str,
     from: Option<&str>,
     answers: &BTreeMap<String, String>,
 ) -> Result<(PathBuf, String)> {
-    let app = app(main).ok_or_else(|| anyhow::anyhow!("ce dépôt n'a pas de wt.toml"))?;
+    let app = app(main).ok_or_else(|| anyhow::anyhow!("this repository has no wt.toml"))?;
     let sets = sets(answers);
-    let (output, result) = capturing(&app, |app| app.cmd_new(slug, None, from, &sets));
+    let (output, result) = capturing(&app, &format!("new {slug}"), |app| {
+        app.cmd_new(slug, None, from, &sets)
+    });
     result?;
     Ok((app.dir(slug), output))
 }
 
 pub fn remove(main: &Path, slug: &str) -> Result<String> {
-    let app = app(main).ok_or_else(|| anyhow::anyhow!("ce dépôt n'a pas de wt.toml"))?;
-    // `yes` : la confirmation est du ressort de la vue, qui l'a déjà demandée.
-    let (output, result) = capturing(&app, |app| app.cmd_rm(slug, true));
+    let app = app(main).ok_or_else(|| anyhow::anyhow!("this repository has no wt.toml"))?;
+    // `yes`: confirmation is the view's business, and it has already asked.
+    let (output, result) = capturing(&app, &format!("rm {slug}"), |app| app.cmd_rm(slug, true));
     result?;
     Ok(output)
 }
 
-pub fn up(main: &Path, slug: &str) -> Result<String> {
-    let app = app(main).ok_or_else(|| anyhow::anyhow!("ce dépôt n'a pas de wt.toml"))?;
-    let (output, result) = capturing(&app, |app| app.cmd_up(slug, &[]));
+/// Starts a worktree, with the answers to the `ask = "up"` questions.
+///
+/// They are `--set`s, and `wt` merges them into what it had remembered: a start
+/// with no answers repeats the previous one, which is exactly what happens when
+/// the project asks nothing.
+pub fn up(main: &Path, slug: &str, answers: &BTreeMap<String, String>) -> Result<String> {
+    let app = app(main).ok_or_else(|| anyhow::anyhow!("this repository has no wt.toml"))?;
+    let sets = sets(answers);
+    let (output, result) = capturing(&app, &format!("up {slug}"), |app| app.cmd_up(slug, &sets));
     result?;
     Ok(output)
 }
 
 pub fn down(main: &Path, slug: &str) -> Result<String> {
-    let app = app(main).ok_or_else(|| anyhow::anyhow!("ce dépôt n'a pas de wt.toml"))?;
-    let (output, result) = capturing(&app, |app| app.cmd_down(slug));
+    let app = app(main).ok_or_else(|| anyhow::anyhow!("this repository has no wt.toml"))?;
+    let (output, result) = capturing(&app, &format!("down {slug}"), |app| app.cmd_down(slug));
     result?;
     Ok(output)
 }
 
-/// Ce qu'il faut pour lancer une tâche dans un terminal.
+/// What is needed to launch a task in a terminal.
 ///
-/// Les commandes sont rendues ici — modèles résolus, environnement calculé —
-/// et non exécutées : c'est l'onglet de terminal qui les lance, parce qu'une
-/// tâche est souvent interactive et qu'un panneau de sortie ne transmet ni les
-/// frappes ni les couleurs.
-pub fn task(main: &Path, slug: &str, name: &str) -> Result<Launch> {
-    let app = app(main).ok_or_else(|| anyhow::anyhow!("ce dépôt n'a pas de wt.toml"))?;
+/// The commands are rendered here — templates resolved, environment computed —
+/// and not run: the terminal tab launches them, because a task is often
+/// interactive and an output pane forwards neither keystrokes nor colours.
+pub fn task(
+    main: &Path,
+    slug: &str,
+    name: &str,
+    answers: &BTreeMap<String, String>,
+) -> Result<Launch> {
+    let app = app(main).ok_or_else(|| anyhow::anyhow!("this repository has no wt.toml"))?;
     let task = app
         .project
         .config
         .tasks
         .get(name)
-        .ok_or_else(|| anyhow::anyhow!("tâche inconnue : {name}"))?;
+        .ok_or_else(|| anyhow::anyhow!("unknown task: {name}"))?;
+    // The answers to the task's own questions become its arguments, split on
+    // each prompt's separator: a multiple choice is several arguments, which is
+    // what `{{args}}` is interpolated into. Nothing chosen means no argument at
+    // all — and a task declared `interactive` then shows its own picker in the
+    // terminal tab, which is where it belongs.
+    let declared = app.task_prompts(name);
+    let args = task_args(
+        declared
+            .iter()
+            .map(|prompt| (prompt.name.as_str(), prompt.separator.as_str())),
+        answers,
+    );
     let saved = state::load(&app.root, slug);
     let mut vars = app.vars(slug, &saved);
-    vars.insert("args".into(), String::new());
+    vars.insert("args".into(), args.join(" "));
     let cwd = match task.cwd {
         ::wt::config::Cwd::Main => app.project.main.clone(),
         ::wt::config::Cwd::Worktree => app.dir(slug),
@@ -312,7 +396,26 @@ pub fn endpoints(main: &Path, slug: &str) -> Vec<Endpoint> {
         .collect()
 }
 
-/// Les réponses, sous la forme `clé=valeur` qu'attend `wt`.
+/// A task's arguments, from the answers to the prompts it declares.
+///
+/// The order is the task's own — the order the values are read in — and not the
+/// answers': a hook receiving its arguments in the wrong order would act on the
+/// wrong thing without ever saying so.
+fn task_args<'a>(
+    prompts: impl IntoIterator<Item = (&'a str, &'a str)>,
+    answers: &BTreeMap<String, String>,
+) -> Vec<String> {
+    prompts
+        .into_iter()
+        .filter_map(|(name, separator)| answers.get(name).map(|value| (separator, value.as_str())))
+        .flat_map(|(separator, value)| value.split(separator))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The answers, in the `key=value` form `wt` expects.
 fn sets(answers: &BTreeMap<String, String>) -> Vec<String> {
     answers
         .iter()
@@ -320,42 +423,87 @@ fn sets(answers: &BTreeMap<String, String>) -> Vec<String> {
         .collect()
 }
 
-/// Exécute une opération en récoltant ce qu'elle raconte.
+/// Runs an operation while collecting what it says, and files all of it in the
+/// journal.
 ///
-/// `set_sink` est prévu pour cela : sans lui, les messages partiraient sur la
-/// sortie standard d'une application graphique, c'est-à-dire nulle part. Ce
-/// qui en revient devient le texte de la notification — celui que `wt` a
-/// écrit, et non une reformulation qui n'apporterait que des approximations.
-fn capturing<T>(app: &App, run: impl FnOnce(&App) -> Result<T>) -> (String, Result<T>) {
+/// `set_sink` exists for that: without it the messages would go to a graphical
+/// application's standard output, that is, nowhere. What comes back becomes the
+/// notification text — the one `wt` wrote, and not a rewording that would only
+/// add approximations.
+///
+/// **Only the last line is returned, but every one is logged.** A `wt new`
+/// narrates its whole sequence — the branch, the folders, the copies, the ports,
+/// then whatever `post_new` prints — and that narration is the only account
+/// there is of what a project's hooks did. Keeping the last line for the status
+/// bar and dropping the rest meant a three-minute `composer install` left one
+/// sentence behind it; a failure halfway through left nothing at all, the error
+/// being carried by the `Result` and the steps that led to it by nobody.
+fn capturing<T>(app: &App, what: &str, run: impl FnOnce(&App) -> Result<T>) -> (String, Result<T>) {
+    let started = std::time::Instant::now();
+    log::info!("wt {what}…");
     let (tx, rx) = std::sync::mpsc::channel();
     app.set_sink(Some(tx));
     let result = run(app);
-    // Le sink est relâché avant de vider le canal : tant qu'il tient
-    // l'émetteur, `try_iter` ne verrait jamais la fin.
+    // The sink is released before draining the channel: while it holds the
+    // sender, `try_iter` would never see the end.
     app.set_sink(None);
-    let lines: Vec<String> = rx
-        .try_iter()
-        .filter_map(|msg| match msg {
-            util::Msg::Info(m) | util::Msg::Ok(m) | util::Msg::Warn(m) | util::Msg::Out(m) => {
-                Some(m)
-            }
-            util::Msg::Done(_) => None,
-        })
-        .collect();
-    // La dernière ligne seulement : la barre d'état n'en montre qu'une, et
-    // c'est le résultat qu'on veut y lire, pas la première étape.
-    (lines.last().cloned().unwrap_or_default(), result)
+    let mut last = String::new();
+    for msg in rx.try_iter() {
+        let (line, warning) = match msg {
+            util::Msg::Warn(m) => (m, true),
+            util::Msg::Info(m) | util::Msg::Ok(m) | util::Msg::Out(m) => (m, false),
+            // `Done` carries no text of its own: it marks the end of a step.
+            util::Msg::Done(_) => continue,
+        };
+        if warning {
+            log::warn!("wt {what}: {line}");
+        } else {
+            log::info!("wt {what}: {line}");
+        }
+        last = line;
+    }
+    let elapsed = crate::logging::ms(started.elapsed());
+    match &result {
+        Ok(_) => log::info!("wt {what} — done in {elapsed}"),
+        Err(e) => log::warn!("wt {what} — failed after {elapsed}: {e:#}"),
+    }
+    // The last line only for the caller: the status bar shows just one, and it
+    // is the result one wants to read there, not the first step.
+    (last, result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The answers to a task's questions become its arguments — that is how
+    /// `db-add` learns which tenants to clone.
+    #[test]
+    fn a_tasks_answers_become_its_arguments() {
+        let answers = BTreeMap::from([
+            ("add_tenants".to_string(), "itcs, acme ,".to_string()),
+            ("unrelated".to_string(), "ignored".to_string()),
+        ]);
+        // The order is the **task's**, not the answers': a hook receiving its
+        // arguments in the wrong order acts on the wrong thing in silence.
+        let args = task_args([("add_tenants", ","), ("mode", ",")], &answers);
+        assert_eq!(args, ["itcs", "acme"]);
+    }
+
+    /// Nothing chosen means no argument at all, and never an empty one: a task
+    /// declared `interactive` then shows its own picker in the terminal, where
+    /// an empty string would have been taken for a name.
+    #[test]
+    fn an_empty_answer_produces_no_argument() {
+        let answers = BTreeMap::from([("add_tenants".to_string(), String::new())]);
+        assert!(task_args([("add_tenants", ",")], &answers).is_empty());
+    }
+
     #[test]
     fn a_slug_is_the_directory_right_under_the_root() {
         let root = Path::new("/p/repo-wt");
-        // Ce que `slug_of` fait une fois la racine connue. La fonction elle-même
-        // demande un `wt.toml` ; c'est la règle qu'elle applique qui compte.
+        // What `slug_of` does once the root is known. The function itself needs
+        // a `wt.toml`; it is the rule it applies that matters.
         let check = |path: &str| -> Option<String> {
             let rest = Path::new(path).strip_prefix(root).ok()?;
             let mut parts = rest.components();

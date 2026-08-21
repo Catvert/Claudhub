@@ -455,17 +455,17 @@ mod tests {
         let out = overlay(&base, &[(2..10, gpui::yellow())]);
         let mut previous = 0;
         for (range, _) in &out {
-            assert!(range.start >= previous, "plages désordonnées : {out:?}");
-            assert!(range.start < range.end, "plage vide : {out:?}");
+            assert!(range.start >= previous, "out-of-order ranges: {out:?}");
+            assert!(range.start < range.end, "empty range: {out:?}");
             previous = range.end;
         }
-        // Le trou entre les deux plages colorées est couvert par l'occurrence,
-        // et n'est donc pas perdu.
+        // The gap between the two coloured ranges is covered by the hit, and is
+        // therefore not lost.
         assert!(out.iter().any(|(range, _)| range == &(4..8)));
     }
 
-    /// Sans occurrence, rien ne change : c'est le cas de presque toutes les
-    /// lignes de presque toutes les frames.
+    /// With no hit, nothing changes: that is the case for almost every line of
+    /// almost every frame.
     #[test]
     fn no_mark_returns_the_colouring_untouched() {
         let base = vec![(
@@ -527,11 +527,11 @@ mod tests {
         let (old_text, old_spans) = build_side(&d, Side::Old);
         assert_eq!(old_text, "fn a() {}\nlet x = 1;\n");
         assert_eq!(old_spans.len(), 2);
-        assert_eq!(old_spans[1].line, 1, "la ligne supprimée garde son indice");
+        assert_eq!(old_spans[1].line, 1, "the removed line keeps its index");
 
         let (new_text, new_spans) = build_side(&d, Side::New);
         assert_eq!(new_text, "fn a() {}\nlet y = 2;\n");
-        assert_eq!(new_spans[1].line, 2, "la ligne ajoutée garde le sien");
+        assert_eq!(new_spans[1].line, 2, "the added line keeps its own");
     }
 
     #[test]
@@ -543,16 +543,13 @@ mod tests {
         let highlights =
             DiffHighlights::compute(Path::new("src/x.rs"), &d, &HighlightTheme::default_dark());
 
-        // Les deux lignes doivent être colorées, chacune depuis sa version :
-        // c'est tout l'intérêt des deux passes.
+        // Both lines must be coloured, each from its own version: that is the
+        // whole point of the two passes.
         assert!(
             !highlights.line(0, 0).is_empty(),
-            "ligne supprimée non colorée"
+            "removed line not coloured"
         );
-        assert!(
-            !highlights.line(0, 1).is_empty(),
-            "ligne ajoutée non colorée"
-        );
+        assert!(!highlights.line(0, 1).is_empty(), "added line not coloured");
     }
 
     #[test]
@@ -638,12 +635,12 @@ mod php_tests {
         );
         assert!(
             coloured_lines(&diff) > 0,
-            "un fragment sans balise d'ouverture doit être coloré"
+            "a fragment with no opening tag must be coloured"
         );
     }
 
-    /// Bout à bout : une vue Blade traverse la grammaire PHP *et* la
-    /// surcouche, et ses deux vocabulaires ressortent colorés.
+    /// End to end: a Blade view crosses the PHP grammar *and* the overlay, and
+    /// both its vocabularies come out coloured.
     #[test]
     fn a_blade_view_is_coloured_by_both_passes() {
         register_languages();
@@ -664,37 +661,37 @@ mod php_tests {
         );
         assert!(!styles.line(0, 3).is_empty(), "la directive fermante aussi");
 
-        // La ligne d'écho porte à la fois la balise HTML, vue par la
-        // grammaire, et les délimitateurs, vus par la surcouche. Le `<td>`
-        // est ce qui a longtemps manqué sans que rien ne le dise : voir
+        // The echo line carries both the HTML tag, seen by the grammar, and the
+        // delimiters, seen by the overlay. The `<td>` is what was missing for a
+        // long time without anything saying so: see
         // `html_tags_are_coloured_in_a_view`.
         let echo = styles.line(0, 2);
         let text = &diff.hunks[0].lines[2].text;
         let td = text.find("td").expect("la balise du test");
         assert!(
             echo.iter().any(|(range, _)| range.contains(&td)),
-            "la balise HTML n'est pas colorée : {echo:?}"
+            "the HTML tag is not coloured: {echo:?}"
         );
-        assert!(echo.len() >= 3, "styles de l'écho : {echo:?}");
+        assert!(echo.len() >= 3, "styles of the echo: {echo:?}");
         let mut last = 0;
         for (range, _) in echo {
-            assert!(range.start >= last, "plages non triées : {echo:?}");
+            assert!(range.start >= last, "ranges not sorted: {echo:?}");
             last = range.end;
         }
         assert!(
             last <= text.len(),
-            "un style déborde de sa ligne : {last} > {}",
+            "a style spills out of its line: {last} > {}",
             text.len()
         );
     }
 
-    /// Le HTML d'une vue est coloré par la grammaire, pas par la surcouche.
+    /// A view's HTML is coloured by the grammar, not by the overlay.
     ///
-    /// Ce test manquait, et son absence a coûté : les liaisons Rust de la
-    /// caisse PHP n'exposent que `injections.scm` — phpdoc et heredocs —, si
-    /// bien que l'injection HTML n'était jamais chargée et qu'une vue entière
-    /// arrivait grise, balises comprises. Une injection qui ne trouve pas sa
-    /// grammaire ne produit aucune erreur : seul un test peut le dire.
+    /// This test was missing, and its absence cost: the PHP crate's Rust
+    /// bindings only expose `injections.scm` — phpdoc and heredocs — so the HTML
+    /// injection was never loaded and a whole view arrived grey, tags included.
+    /// An injection that does not find its grammar raises no error: only a test
+    /// can say so.
     #[test]
     fn html_tags_are_coloured_in_a_view() {
         register_languages();
@@ -733,13 +730,13 @@ mod php_tests {
             let name = text.find("x-layout").expect("le nom");
             assert!(
                 holding[0].0.contains(&name),
-                "le nom du composant est coupé : {styled:?}"
+                "the component's name is cut: {styled:?}"
             );
         }
     }
 
-    /// Le même bénéfice hors Blade : un fichier PHP ordinaire mêle du HTML à
-    /// son code, et c'est la même injection qui le colore.
+    /// The same benefit outside Blade: an ordinary PHP file mixes HTML into its
+    /// code, and it is the same injection that colours it.
     #[test]
     fn html_outside_php_tags_is_coloured_too() {
         register_languages();

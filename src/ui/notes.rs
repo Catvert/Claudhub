@@ -407,7 +407,7 @@ mod tests {
     }
 
     fn note_of(rendered: &Rendered, from: usize, to: usize) -> Note {
-        let (side, start, end) = anchor_selection(rendered, from, to).expect("une ancre");
+        let (side, start, end) = anchor_selection(rendered, from, to).expect("an anchor");
         Note {
             id: 1,
             path: "src/main.rs".into(),
@@ -415,7 +415,7 @@ mod tests {
             start,
             end,
             excerpt: rendered.copy_text(from, to, false),
-            body: "à revoir".into(),
+            body: "needs another look".into(),
             ..Default::default()
         }
     }
@@ -476,11 +476,11 @@ mod tests {
     fn a_note_whose_code_is_gone_stays_and_says_so() {
         let rendered = sample();
         let mut note = note_of(&rendered, 3, 3);
-        note.excerpt = "    disparu();\n".into();
+        note.excerpt = "    gone();\n".into();
         note.start = 99;
         note.end = 99;
-        // Décalée, et non supprimée : une note perdue en silence est pire que
-        // pas de note du tout.
+        // Drifted, and not deleted: a note lost in silence is worse than no note
+        // at all.
         assert_eq!(relocate(&rendered, &note), Anchor::Drifted);
     }
 
@@ -488,17 +488,17 @@ mod tests {
     fn the_marks_of_the_two_layouts_agree() {
         let rendered = sample();
         let note = note_of(&rendered, 2, 3);
-        let span = relocate(&rendered, &note).rows().expect("replacée");
+        let span = relocate(&rendered, &note).rows().expect("relocated");
         let marks = marks(&rendered, &[span]);
-        // Une case par entrée de chaque liste : la fermeture de rendu indexe
-        // sans vérifier, et une longueur trop courte ferait disparaître les
-        // marqueurs du bas du fichier.
+        // One slot per entry of each list: the render closure indexes without
+        // checking, and a length that is too short would make the markers at
+        // the bottom of the file disappear.
         assert_eq!(marks.unified.len(), rendered.rows.len());
         assert_eq!(marks.split.len(), rendered.split.len());
         assert!(marks.at(2, false) && marks.at(3, false));
         assert!(!marks.at(1, false));
-        // Appariées, la suppression et l'ajout tiennent sur une seule entrée
-        // de la vue en colonnes : elle est annotée elle aussi.
+        // Paired, the removal and the addition sit on a single entry of the
+        // column view: it is annotated too.
         let annotated_pairs = marks.split.iter().filter(|mark| **mark).count();
         assert_eq!(annotated_pairs, 1);
     }
@@ -512,7 +512,7 @@ mod tests {
             start: 120,
             end: 121,
             excerpt: "let x = 1;\nlet y = 2;\n".into(),
-            body: "deux lignes\npour rien".into(),
+            body: "two lines\nfor nothing".into(),
             ..Default::default()
         }];
         let text = prompt("agent/fix", &notes);
@@ -522,18 +522,19 @@ mod tests {
             text.contains("```rust\nlet x = 1;\nlet y = 2;\n```"),
             "{text}"
         );
-        assert!(text.contains("> deux lignes\n> pour rien"), "{text}");
-        // Le prompt part dans une invite d'agent, qui affiche les blancs de
-        // fin tels quels.
+        assert!(text.contains("> two lines\n> for nothing"), "{text}");
+        // The prompt goes into an agent's prompt, which shows trailing
+        // whitespace as it is.
         assert!(!text.ends_with('\n'), "{text:?}");
     }
 
     #[test]
     fn a_fence_survives_an_excerpt_that_contains_one() {
-        // Un extrait de Markdown — ou de ce dépôt-ci — contient des accents
-        // graves ; une clôture de trois refermerait le bloc au milieu du code.
+        // A Markdown excerpt — or one from this very repository — contains
+        // backticks; a fence of three would close the block in the middle of
+        // the code.
         let notes = vec![Note {
-            excerpt: "voir ```rust``` plus haut\n".into(),
+            excerpt: "see ```rust``` above\n".into(),
             body: "hm".into(),
             path: "README.md".into(),
             ..Default::default()
