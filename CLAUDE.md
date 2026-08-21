@@ -205,6 +205,17 @@ Quatre points qui ne se devinent pas :
   le lecteur), jamais un silence : la barre d'état le dit et porte le bouton
   de relance. La relance est **manuelle** — un serveur qui meurt en boucle se
   relancerait en boucle — et repasse les dépôts ouverts au serveur neuf.
+- **Le plafond de trame vaut aux deux bouts.** Le lecteur refuse au-delà de
+  256 Mo — passé cette taille, les quatre octets de longueur n'en étaient pas
+  une —, et l'écrivain honore le même plafond. Sans cela il envoyait ce qu'on
+  lui donnait, si bien qu'une trame que le lecteur refuse était une trame que
+  l'écrivain avait produite : le fil mourait pour une charge seulement trop
+  grosse, ce qui se lit « serveur perdu » et non « ce diff est énorme ». La
+  charge est **jetée et journalisée**, comme un chemin non-UTF-8, plutôt que
+  remontée en erreur : perdre un événement vaut mieux que fermer le fil pour
+  tout le monde, et la vue repose d'elle-même ce qu'elle attend. C'est aussi ce
+  qui rend sûre la longueur sur quatre octets, qui tronquerait au-delà de
+  quatre gigaoctets.
 - **stdout du serveur appartient au fil.** Un `println!` dans du code worker
   corromprait le flux ; les traces vont sur stderr, que le client pompe dans
   les nôtres (`target: "claudhub_server"`).

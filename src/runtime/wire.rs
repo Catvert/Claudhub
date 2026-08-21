@@ -74,15 +74,38 @@ fn login_shells() -> Vec<String> {
         .collect()
 }
 
-/// A guard on a frame's announced length. An agent-review diff is measured in
-/// megabytes, never gigabytes: beyond that, the stream is desynchronised and
-/// those four bytes were not a length.
+/// A guard on a frame's length, applied at **both** ends. An agent-review diff
+/// is measured in megabytes, never gigabytes: beyond that, on reading, the
+/// stream is desynchronised and those four bytes were not a length.
+///
+/// The writer honours the same ceiling, and that is the point: it used to send
+/// whatever it was given, so a frame the reader refuses was a frame the writer
+/// had happily produced — and the wire died on a payload that was merely too
+/// big, which the user reads as "server lost" rather than "that diff is
+/// enormous". Checking here is also what makes the four-byte length safe to
+/// write: past four gigabytes the cast would truncate, and the frame would
+/// announce a length that is not its own.
 const MAX_FRAME: u32 = 256 * 1024 * 1024;
 
-/// Writes a frame. A value that does not serialise — a non-UTF-8 path, in
-/// practice — is logged and dropped: losing one event is better than closing
-/// the wire for everybody.
+/// Writes a frame.
+///
+/// Two payloads never go out: one that does not serialise — a non-UTF-8 path,
+/// in practice — and one too big for the other end to read back. Both are
+/// logged and dropped rather than returned as an error: losing one event is
+/// better than closing the wire for everybody, and the view asks again by
+/// itself for everything it is still waiting for.
 pub fn write_frame<T: Serialize>(out: &mut impl Write, value: &T) -> std::io::Result<()> {
+    write_within(out, value, MAX_FRAME)
+}
+
+/// The same, against an arbitrary ceiling. Only the tests pass another one:
+/// proving the guard by really building a 256 MB payload would cost more
+/// memory than the whole test run.
+fn write_within<T: Serialize>(
+    out: &mut impl Write,
+    value: &T,
+    ceiling: u32,
+) -> std::io::Result<()> {
     let body = match postcard::to_stdvec(value) {
         Ok(body) => body,
         Err(e) => {
@@ -90,7 +113,15 @@ pub fn write_frame<T: Serialize>(out: &mut impl Write, value: &T) -> std::io::Re
             return Ok(());
         }
     };
-    out.write_all(&(body.len() as u32).to_le_bytes())?;
+    let Ok(len) = u32::try_from(body.len()) else {
+        log::warn!("{}-byte value dropped from the wire", body.len());
+        return Ok(());
+    };
+    if len > ceiling {
+        log::warn!("{len}-byte value dropped from the wire: over the {ceiling}-byte ceiling");
+        return Ok(());
+    }
+    out.write_all(&len.to_le_bytes())?;
     out.write_all(&body)?;
     // One frame per event, and one flush per frame: the other end sometimes
     // waits for that very answer to draw, and a buffer would hold it back.
@@ -131,6 +162,51 @@ mod tests {
         read_frame(&mut buffer.as_slice())
             .expect("read")
             .expect("one frame")
+    }
+
+    #[test]
+    fn a_payload_over_the_ceiling_is_dropped_and_not_written() {
+        // The wire's own guard, seen from the writing end. It used to send
+        // whatever it was given, and the reader refuses past the ceiling: the
+        // pair therefore killed the wire over a payload that was merely too
+        // big, which the window reads as "server lost".
+        let mut buffer = Vec::new();
+        let evt = Evt::Failed {
+            worktree: None,
+            action: crate::runtime::Action::Refresh,
+            message: "x".repeat(64),
+        };
+        write_within(&mut buffer, &evt, 16).expect("write");
+        assert!(buffer.is_empty(), "nothing must reach the wire");
+
+        // And what fits still goes through, frame and body.
+        write_within(&mut buffer, &evt, MAX_FRAME).expect("write");
+        assert!(!buffer.is_empty());
+        let back: Evt = read_frame(&mut buffer.as_slice())
+            .expect("read")
+            .expect("one frame");
+        assert!(matches!(back, Evt::Failed { .. }));
+    }
+
+    #[test]
+    fn a_dropped_frame_does_not_desynchronise_what_follows() {
+        // The frame is dropped whole — not half-written — so the next event
+        // reads back as itself and not as gibberish.
+        let mut buffer = Vec::new();
+        let big = Evt::Failed {
+            worktree: None,
+            action: crate::runtime::Action::Refresh,
+            message: "x".repeat(64),
+        };
+        let small = Evt::ServerLost {
+            message: String::new(),
+        };
+        write_within(&mut buffer, &big, 16).expect("write");
+        write_within(&mut buffer, &small, 16).expect("write");
+        let mut input = buffer.as_slice();
+        let back: Evt = read_frame(&mut input).expect("read").expect("one frame");
+        assert!(matches!(back, Evt::ServerLost { .. }));
+        assert!(read_frame::<Evt>(&mut input).expect("read").is_none());
     }
 
     /// The cases that decided the format: a map keyed by `PathBuf` (which JSON
