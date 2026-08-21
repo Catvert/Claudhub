@@ -1649,8 +1649,22 @@ l'emporterait sur le leur.
 la fenêtre : on y regarde ce qui a changé, on coche, on valide, et pousser est
 le mot suivant de la même phrase — la tenir à l'autre bout de l'écran faisait
 traverser la fenêtre pour la terminer. Ce qui reste en haut ne parle pas du
-dépôt regardé : le menu de l'application, le nom du worktree, la bascule des
-terminaux.
+dépôt regardé : le menu de l'application et le nom du worktree. Les terminaux,
+eux, se basculent depuis le **coin en bas à droite** de la barre d'état, à
+l'angle de la fenêtre sur lequel ils s'ouvrent — en haut, ils étaient à l'autre
+bout de l'écran du panneau qu'ils montrent.
+
+**La barre du diff est en trois groupes**, et ce n'est pas de la mise en forme :
+la taille minimale d'un élément flex vaut celle de son contenu, si bien qu'un
+chemin long poussait les boutons de droite hors de la barre, sans que rien ne
+les montre ni ne le dise. Le chemin porte donc `min_w_0` — il est le seul à
+céder — et les deux groupes de boutons refusent de rétrécir. C'est le même
+piège que celui des barres de défilement et celui des champs du formulaire des
+bases.
+
+**Un seul bouton de cette barre porte son mot** : « Éditer ». On relit un diff,
+quelque chose cloche, on ouvre le fichier là où c'est — parmi six icônes qui
+parlent toutes de lecture, celle qui écrit vaut d'être lue plutôt que devinée.
 
 **`pull` et `push` portent leur compte et s'allument** quand il y a quelque
 chose à faire — l'avance et le retard sur l'amont, tels que le statut les

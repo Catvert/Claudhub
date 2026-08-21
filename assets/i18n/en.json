@@ -114,6 +114,8 @@
   "db-view": "view",
   "delete-title": "Delete this file?",
   "delete-warning": "This file is not tracked: deleting it is final, git keeps no copy.",
+  "diff-edit": "Edit",
+  "diff-edit-tooltip": "Open the file in the editor",
   "diff-hunks-only": "Show only the changes",
   "diff-nowrap": "Let lines run",
   "diff-split": "Show side by side",

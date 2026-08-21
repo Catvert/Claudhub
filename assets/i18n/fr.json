@@ -114,6 +114,8 @@
   "db-view": "vue",
   "delete-title": "Supprimer ce fichier ?",
   "delete-warning": "Ce fichier n'est pas versionné : sa suppression est définitive, git n'en garde aucune copie.",
+  "diff-edit": "Éditer",
+  "diff-edit-tooltip": "Ouvrir le fichier dans l'éditeur",
   "diff-hunks-only": "N'afficher que les modifications",
   "diff-nowrap": "Laisser les lignes courir",
   "diff-split": "Afficher en deux colonnes",

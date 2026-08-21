@@ -2392,23 +2392,14 @@ impl ClaudhubApp {
                     // carried only an occasional message while this one
                     // overflowed.
                     .child(div().font_semibold().text_sm().child(label))
-                    .child(div().flex_1())
-                    // Neither `fetch`, nor `pull`, nor `push`: they have moved
-                    // down into the "Changes" panel's bar, where the rest of the
-                    // gesture happens — tick, commit, push. The history and the
-                    // branches, for their part, are dock tabs: one more button
-                    // here would make two paths for the same gesture.
-                    .child(
-                        Button::new("terminal")
-                            .ghost()
-                            .small()
-                            .icon(icon("square-terminal"))
-                            .tooltip(tr!("panel-terminal"))
-                            .selected(self.terminal_visible(cx))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_terminal_panel(window, cx);
-                            })),
-                    ),
+                    // Nothing on the right any more, and the space is not lost:
+                    // it is the window's drag region. Neither `fetch`, nor
+                    // `pull`, nor `push` — they have moved down into the
+                    // "Changes" panel's bar, where the rest of the gesture
+                    // happens: tick, commit, push. The history and the branches
+                    // are dock tabs. And the terminals have gone down to the
+                    // status bar, at the corner of the window they open on.
+                    .child(div().flex_1()),
             )
     }
 
@@ -2577,9 +2568,26 @@ impl ClaudhubApp {
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .truncate()
                     .when(error, |el| el.text_color(cx.theme().danger))
                     .child(text),
+            )
+            // The terminals close the bar, at the bottom right — the corner of
+            // the window they open on. They were at the top, at the other end of
+            // the screen from the panel they show and beside a menu that speaks
+            // of the application rather than of the work.
+            .child(
+                Button::new("terminal")
+                    .ghost()
+                    .xsmall()
+                    .flex_shrink_0()
+                    .icon(icon("square-terminal"))
+                    .tooltip(tr!("panel-terminal"))
+                    .selected(self.terminal_visible(cx))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_terminal_panel(window, cx);
+                    })),
             )
     }
 }

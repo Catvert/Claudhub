@@ -1167,28 +1167,44 @@ impl ClaudhubApp {
         mono: SharedString,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // Three groups and not one long row of children, because the middle one
+        // is the only one that may shrink. A flex item's minimum size is that of
+        // its content: without `min_w_0` on the path — and without the two
+        // groups refusing to shrink — a long path pushed the buttons on the
+        // right out of the bar, where nothing showed them and nothing said so.
         h_flex()
             .h(crate::ui::theme::bar_height(cx))
             .w_full()
             .px_2()
             .gap_2()
             .items_center()
+            .overflow_hidden()
             .border_b_1()
             .border_color(cx.theme().border)
-            .child(icon("file-diff").xsmall())
-            // Going from one change to the next is the gesture of a review, and
-            // it had only the arrow keys — which belong to whoever has the
-            // focus, so to nobody after a click in a terminal. The buttons are
-            // the same two moves, always here, and their tooltips name the keys
-            // for whoever would rather keep their hands still.
-            .child(self.step_button("prev-hunk", "arrow-up", -1, false, cx))
-            .child(self.step_button("next-hunk", "arrow-down", 1, false, cx))
-            .child(self.step_button("prev-file", "arrow-left", -1, true, cx))
-            .child(self.step_button("next-file", "arrow-right", 1, true, cx))
+            .child(
+                h_flex()
+                    .flex_shrink_0()
+                    .gap_1()
+                    .items_center()
+                    .child(icon("file-diff").xsmall())
+                    // Going from one change to the next is the gesture of a
+                    // review, and it had only the arrow keys — which belong to
+                    // whoever has the focus, so to nobody after a click in a
+                    // terminal. The buttons are the same two moves, always here,
+                    // and their tooltips name the keys for whoever would rather
+                    // keep their hands still.
+                    .child(self.step_button("prev-hunk", "arrow-up", -1, false, cx))
+                    .child(self.step_button("next-hunk", "arrow-down", 1, false, cx))
+                    .child(self.step_button("prev-file", "arrow-left", -1, true, cx))
+                    .child(self.step_button("next-file", "arrow-right", 1, true, cx)),
+            )
             .child(
                 div()
                     .id("diff-path")
                     .flex_1()
+                    // The one that gives way. Without it the bar is as wide as
+                    // the longest path a review contains.
+                    .min_w_0()
                     .truncate()
                     .text_sm()
                     .cursor_pointer()
@@ -1201,79 +1217,120 @@ impl ClaudhubApp {
                     .child(path.display().to_string()),
             )
             .child(
-                Button::new("diff-whole-file")
-                    .ghost()
-                    .xsmall()
-                    // The icon says the current state, like the tree toggle: the
-                    // whole file, or its changes alone.
-                    .icon(icon(if whole_file { "file-text" } else { "file-diff" }))
-                    .tooltip(if whole_file {
-                        tr!("diff-hunks-only")
-                    } else {
-                        tr!("diff-whole-file")
+                h_flex()
+                    .flex_shrink_0()
+                    .gap_1()
+                    .items_center()
+                    .child(
+                        Button::new("diff-whole-file")
+                            .ghost()
+                            .xsmall()
+                            // The icon says the current state, like the tree toggle: the
+                            // whole file, or its changes alone.
+                            .icon(icon(if whole_file { "file-text" } else { "file-diff" }))
+                            .tooltip(if whole_file {
+                                tr!("diff-hunks-only")
+                            } else {
+                                tr!("diff-whole-file")
+                            })
+                            .on_click(
+                                cx.listener(|this, _, _window, cx| this.toggle_whole_file(cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("diff-split")
+                            .ghost()
+                            .xsmall()
+                            .icon(icon(if split { "columns-2" } else { "list" }))
+                            .tooltip(if split {
+                                tr!("diff-unified")
+                            } else {
+                                tr!("diff-split")
+                            })
+                            .on_click(
+                                cx.listener(|this, _, _window, cx| this.toggle_diff_split(cx)),
+                            ),
+                    )
+                    // Wrapping only makes sense in two columns: in a single one the line
+                    // has the whole width. A button that would change nothing is better
+                    // hidden than inert.
+                    .when(split, |el| {
+                        el.child(
+                            Button::new("diff-wrap")
+                                .ghost()
+                                .xsmall()
+                                .selected(wrap)
+                                .icon(icon("wrap-text"))
+                                .tooltip(if wrap {
+                                    tr!("diff-nowrap")
+                                } else {
+                                    tr!("diff-wrap")
+                                })
+                                .on_click(
+                                    cx.listener(|this, _, _window, cx| this.toggle_diff_wrap(cx)),
+                                ),
+                        )
                     })
-                    .on_click(cx.listener(|this, _, _window, cx| this.toggle_whole_file(cx))),
-            )
-            .child(
-                Button::new("diff-split")
-                    .ghost()
-                    .xsmall()
-                    .icon(icon(if split { "columns-2" } else { "list" }))
-                    .tooltip(if split {
-                        tr!("diff-unified")
-                    } else {
-                        tr!("diff-split")
-                    })
-                    .on_click(cx.listener(|this, _, _window, cx| this.toggle_diff_split(cx))),
-            )
-            // Wrapping only makes sense in two columns: in a single one the line
-            // has the whole width. A button that would change nothing is better
-            // hidden than inert.
-            .when(split, |el| {
-                el.child(
-                    Button::new("diff-wrap")
-                        .ghost()
-                        .xsmall()
-                        .selected(wrap)
-                        .icon(icon("wrap-text"))
-                        .tooltip(if wrap {
-                            tr!("diff-nowrap")
-                        } else {
-                            tr!("diff-wrap")
-                        })
-                        .on_click(cx.listener(|this, _, _window, cx| this.toggle_diff_wrap(cx))),
-                )
-            })
-            .child(
-                Button::new("copy-file")
-                    .ghost()
-                    .xsmall()
-                    .icon(icon("copy"))
-                    .tooltip(tr!("action-copy-file"))
-                    .on_click(cx.listener(|this, _, _window, cx| this.copy_diff(false, cx))),
-            )
-            // The two gestures of annotated review, beside copying: they are the
-            // three things one does with a selection of code.
-            .child(
-                Button::new("annotate")
-                    .ghost()
-                    .xsmall()
-                    .icon(icon("reply"))
-                    .tooltip(tr!("note-add"))
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.annotate_selection(window, cx)),
+                    .child(
+                        Button::new("copy-file")
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("copy"))
+                            .tooltip(tr!("action-copy-file"))
+                            .on_click(
+                                cx.listener(|this, _, _window, cx| this.copy_diff(false, cx)),
+                            ),
+                    )
+                    // The two gestures of annotated review, beside copying: they are the
+                    // three things one does with a selection of code.
+                    .child(
+                        Button::new("annotate")
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("reply"))
+                            .tooltip(tr!("note-add"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.annotate_selection(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("ask-agent")
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("bot"))
+                            .tooltip(tr!("note-ask-title"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.ask_about_selection(window, cx)
+                            })),
+                    )
+                    // The one gesture of the bar that carries its word. One relights a
+                    // diff, something is wrong, and one opens the file where it is:
+                    // among six icons that all speak of reading, the one that writes is
+                    // worth being read rather than guessed.
+                    .child(
+                        Button::new("diff-edit")
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("pencil"))
+                            .label(tr!("diff-edit"))
+                            .tooltip(tr!("diff-edit-tooltip"))
+                            .on_click(cx.listener(|this, _, _window, cx| this.edit_diff_file(cx))),
                     ),
             )
-            .child(
-                Button::new("ask-agent")
-                    .ghost()
-                    .xsmall()
-                    .icon(icon("bot"))
-                    .tooltip(tr!("note-ask-title"))
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.ask_about_selection(window, cx)),
-                    ),
-            )
+    }
+
+    /// Opens the file being reviewed in the built-in editor.
+    ///
+    /// The same path as the explorer's: the file is read by a worker, and it is
+    /// its arrival that installs the editor and calls up its screen.
+    pub(super) fn edit_diff_file(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self
+            .active_review()
+            .and_then(|state| state.selected.clone())
+        else {
+            return;
+        };
+        self.open_in_editor(path, cx);
     }
 
     /// One of the four navigation buttons of the diff's bar.
