@@ -227,12 +227,15 @@ Cinq points qui ne se devinent pas :
   avant sont jetées — la vue les repose d'elle-même.
 
 **Le fil ne transporte que des chemins Linux**, et la traduction n'existe
-qu'aux trois endroits où un chemin change de monde : le sélecteur de dossier
+qu'aux quatre endroits où un chemin change de monde : le sélecteur de dossier
 (`\\wsl.localhost\…` ou `C:\…` → `/…`, en refusant le dépôt d'une *autre*
-distribution, qui s'ouvrirait vide), le coffre de notes (`notes_dir` rend un
-chemin du serveur, un coffre déjà pointé sur `/home/…` passant tel quel), et
-l'ouverture de ce coffre dans l'explorateur, qui refait le chemin inverse.
-`wslpath` est pur et testé sous Linux.
+distribution, qui s'ouvrirait vide) ; le coffre de notes (`notes_dir` rend un
+chemin du serveur, un coffre déjà pointé sur `/home/…` passant tel quel) ; la
+cible d'un export CSV, choisie ici et écrite là-bas ; et les deux retours —
+l'ouverture du coffre dans l'explorateur, le chemin d'un export qu'on
+annonce — qui refont le chemin inverse, sans quoi l'utilisateur lirait
+`/mnt/c/…` d'un fichier qu'il ira chercher dans son explorateur. `wslpath`
+est pur et testé sous Linux.
 
 **Les mêmes réglages, deux mondes.** `settings.json` et `state.json` restent
 côté Windows — c'est l'état de cette fenêtre-là — mais contiennent des chemins

@@ -1061,6 +1061,22 @@ impl ClaudhubApp {
         else {
             return;
         };
+        // Le fichier est choisi ici et écrit par le worker : sous Windows,
+        // c'est donc l'un des rares endroits où un chemin entre par ce
+        // monde-ci et doit ressortir dans celui du serveur. Un dossier que la
+        // distribution n'atteint pas — un partage réseau — est refusé plutôt
+        // qu'exporté nulle part.
+        let path = if cfg!(windows) {
+            match crate::wslpath::for_server(&path) {
+                Some(path) => path,
+                None => {
+                    self.announce(tr!("db-export-unreachable"), cx);
+                    return;
+                }
+            }
+        } else {
+            path
+        };
         self.query.exporting = true;
         self.git.send(Cmd::DbExport {
             connection,
@@ -1082,6 +1098,16 @@ impl ClaudhubApp {
         self.query.exporting = false;
         match rows {
             Ok(count) => {
+                // Le serveur rend le chemin qu'il a écrit, donc un chemin
+                // Linux : on le rend à l'utilisateur dans le monde où il l'a
+                // choisi, sans quoi il lirait `/mnt/c/…` d'un fichier qu'il
+                // ira chercher dans son explorateur.
+                let path = if cfg!(windows) {
+                    let distro = crate::ui::settings::Settings::global(cx).wsl_distro.clone();
+                    crate::wslpath::to_windows(&path, &distro)
+                } else {
+                    path
+                };
                 let file = SharedString::from(path.display().to_string());
                 self.announce(tr!("db-exported", { n: count, path: file }), cx);
             }

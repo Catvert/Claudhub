@@ -84,6 +84,7 @@
   "db-default": "default:",
   "db-empty": "No database connection.",
   "db-export": "Export the result as CSV",
+  "db-export-unreachable": "That folder is not reachable from WSL",
   "db-exported": "%{n} row(s) written to %{path}",
   "db-failed": "Query failed",
   "db-first-page": "First page",
