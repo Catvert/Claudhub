@@ -41,12 +41,12 @@ déclenché par un tag `v*` ou à la main). Pas à chaque commit : chacune de ce
 jambes recompile l'arbre gpui entier, et ce que la CI vérifierait, `just
 check`, `just clippy`, `just test` et `just check-server` le disent déjà sur
 la machine de développement — le workflow lance d'ailleurs les mêmes portes
-avant d'empaqueter. Elle produit deux livraisons : l'AppImage et le `.run`
-ci-dessus pour Linux, et pour Windows une archive contenant `claudhub.exe`
-**et** `claudhub-server` — les deux se livrent ensemble et jamais séparément,
-puisque l'exécutable installe dans la distribution celui qu'il trouve à côté
-de lui, et qu'un utilisateur qui n'en aurait qu'un ne saurait pas ce qui lui
-manque. Le serveur est lié en statique (musl) pour la même raison : il est
+avant d'empaqueter. Elle produit deux livraisons, et **chacune est un fichier
+unique** : l'AppImage et le `.run` ci-dessus pour Linux, et pour Windows un
+`.exe` qui **porte le serveur en lui** (voir « La cible Windows »). D'où
+l'ordre des jambes : celle du serveur musl doit finir avant que celle de
+Windows ne compile, puisqu'elle lui passe le binaire par
+`CLAUDHUB_EMBED_SERVER`. Le serveur est lié en statique (musl) parce qu'il est
 copié dans une distribution dont on ne sait rien.
 
 La jambe Linux passe par Nix et pousse ce qu'elle construit dans Cachix
@@ -70,6 +70,8 @@ sous `ui` — casse ce build. C'est la règle des trois couches, vérifiée par 
 compilateur.
 
 ```
+build.rs        embarque le serveur musl dans l'exécutable, s'il y en a un
+                à embarquer (`CLAUDHUB_EMBED_SERVER`)
 src/
   lib.rs        les modules, l'i18n et `tr!` (feature `ui`)
   main.rs       le binaire de l'interface — trois lignes
@@ -211,14 +213,31 @@ distribution WSL2, et **seuls les terminaux n'y passent pas** : leur pty reste
 local — ConPTY — et c'est ce qui tourne dedans qui traverse. WSLg a été
 essayé d'abord et rendait mal ; c'est ce qui a décidé de la découpe.
 
-**Le binaire du serveur est livré à côté de l'exécutable**, et installé dans
-la distro à la première ouverture (`wsl::ensure_installed`). L'utilisateur n'a
-rien à faire : le `.exe` et `claudhub-server` sortent de la même archive, la
-CI les assemble, et l'installation se fait en écrivant le binaire **dans
-l'entrée standard** d'un `cat` lancé là-bas — ni partage réseau, ni chemin à
-traduire, ni bit d'exécution perdu par un zip.
+**Le binaire du serveur est embarqué dans l'exécutable**, et installé dans la
+distro à la première ouverture (`wsl::ensure_installed`). L'utilisateur n'a
+rien à faire et n'a qu'un fichier : `build.rs` compile le binaire musl dans le
+`.exe` d'après `CLAUDHUB_EMBED_SERVER`, et l'installation se fait en écrivant
+ces octets **dans l'entrée standard** d'un `cat` lancé là-bas — ni partage
+réseau, ni chemin à traduire, ni bit d'exécution perdu par un zip.
 
-Cinq points qui ne se devinent pas :
+Il a d'abord été *livré à côté* de l'exécutable, ce qui marchait et laissait
+deux fichiers dans une archive dont un que personne ne savait quoi faire ;
+surtout, rien n'empêchait de garder un vieux serveur à côté d'une interface
+neuve — la poignée de main l'aurait refusé, mais c'est une panne qu'on peut
+supprimer au lieu de la diagnostiquer. Le chemin voisin reste en **repli**
+(`wsl::bundled_server`), pour le build de développement, qui n'a pas de
+binaire musl à embarquer.
+
+Six points qui ne se devinent pas :
+
+- **`build.rs` écrit une constante, il ne lit rien à l'exécution.** Sans la
+  variable, `EMBEDDED` vaut `None` et tout se passe comme avant ; avec, elle
+  vaut les octets. Une variable posée sur un chemin qui n'existe pas est une
+  **erreur de compilation** et non un repli silencieux : elle a été posée
+  exprès, et un exécutable livré sans son serveur est précisément ce qu'on
+  cherche à rendre impossible. Le chemin est écrit par `{:?}`, qui rend un
+  littéral échappé — sous Windows il est plein d'antislashs, et les recopier
+  tels quels donnerait des séquences d'échappement au milieu du chemin.
 
 - **L'installation est adressée par le contenu**, jamais par un numéro de
   version : l'empreinte du binaire nomme son dossier

@@ -94,13 +94,13 @@ jamais la frontière autrement que par des messages.
 WSLg a été essayé d'abord, et écarté : le rendu y passe par un Vulkan émulé
 sur D3D12 qui n'est pas à la hauteur.
 
-**L'installation tient en trois gestes.** Téléchargez l'archive Windows de la
-dernière [version](../../releases), dézippez-la — `claudhub.exe` et
-`claudhub-server` doivent rester **côte à côte** —, et lancez l'exécutable. Au
-premier démarrage il demande dans quelle distribution travailler, y installe
-le serveur tout seul, et s'y connecte. Rien à compiler, rien à copier à la
-main, et les mises à jour s'installent d'elles-mêmes : le serveur est adressé
-par l'empreinte de son contenu.
+**L'installation tient en deux gestes.** Téléchargez `Claudhub-x86_64.exe` de
+la dernière [version](../../releases) et lancez-le. Un seul fichier : le
+serveur est **dans** l'exécutable, qui le pose dans la distribution au premier
+démarrage — après avoir demandé laquelle — puis s'y connecte. Rien à
+compiler, rien à copier à la main, rien à garder à côté, et les mises à jour
+s'installent d'elles-mêmes : le serveur est adressé par l'empreinte de son
+contenu.
 
 Ce qu'il faut avoir : **WSL2** avec une distribution, et dedans **git** ainsi
 que l'agent que vous pilotez (`claude`, ou un autre). Il n'y a plus rien à

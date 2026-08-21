@@ -27,6 +27,12 @@ use anyhow::{bail, Context, Result};
 /// Le nom du binaire, le même des deux côtés du fil.
 pub const SERVER_BIN: &str = "claudhub-server";
 
+// `EMBEDDED` : le serveur embarqué dans l'exécutable, quand il y en a un.
+// Posé par `build.rs` d'après `CLAUDHUB_EMBED_SERVER` — présent dans ce que la
+// CI livre, absent d'un build de développement, qui n'a pas de binaire musl
+// sous la main. Voir `bundled_server` pour le repli.
+include!(concat!(env!("OUT_DIR"), "/server.rs"));
+
 /// Ce que la distro nous apprend d'elle-même, en un seul aller-retour.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Probe {
@@ -87,6 +93,11 @@ pub fn probe(distro: &str) -> Result<Probe> {
 }
 
 /// Le binaire serveur livré à côté de l'exécutable.
+///
+/// Le repli du build de développement : ce qui est livré porte son serveur
+/// dedans (voir `EMBEDDED`), mais une compilation locale n'a pas de binaire
+/// musl à embarquer, et poser le fichier à côté reste la façon de s'en donner
+/// un.
 pub fn bundled_server() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("chemin de l'exécutable introuvable")?;
     let path = exe
@@ -95,12 +106,23 @@ pub fn bundled_server() -> Result<PathBuf> {
         .unwrap_or_default();
     if !path.is_file() {
         bail!(
-            "{SERVER_BIN} est absent d'à côté de l'exécutable ({}) : \
-             les deux fichiers se livrent ensemble",
+            "cet exécutable ne porte pas de serveur embarqué et {SERVER_BIN} \
+             est absent d'à côté de lui ({}) : construire la cible musl et \
+             poser le binaire là, ou passer par CLAUDHUB_SERVER_CMD",
             path.display()
         );
     }
     Ok(path)
+}
+
+/// Les octets du serveur à installer : ceux de l'exécutable s'il en porte,
+/// ceux du fichier voisin sinon.
+fn server_bytes() -> Result<Vec<u8>> {
+    if let Some(bytes) = EMBEDDED {
+        return Ok(bytes.to_vec());
+    }
+    let source = bundled_server()?;
+    std::fs::read(&source).with_context(|| format!("lecture de {} impossible", source.display()))
 }
 
 /// Installe le serveur dans la distro s'il n'y est pas déjà, et rend son
@@ -110,9 +132,7 @@ pub fn bundled_server() -> Result<PathBuf> {
 /// le transporte pas, et c'est la panne que tout le monde rencontre en
 /// copiant le binaire à la main.
 pub fn ensure_installed(distro: &str, probe: &Probe) -> Result<String> {
-    let source = bundled_server()?;
-    let bytes = std::fs::read(&source)
-        .with_context(|| format!("lecture de {} impossible", source.display()))?;
+    let bytes = server_bytes()?;
     let id = content_id(&bytes);
     let dir = format!("{}/.claudhub/bin/{id}", probe.home);
     let target = format!("{dir}/{SERVER_BIN}");
@@ -287,6 +307,22 @@ fn decode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ce qu'on embarque doit être le binaire Linux, pas l'exécutable Windows
+    /// ni un fichier de trace ramassé au passage : une erreur de chemin dans
+    /// la CI ne se verrait qu'au premier démarrage sur la machine d'un
+    /// utilisateur, et se lirait comme une distribution cassée.
+    #[test]
+    fn an_embedded_server_is_a_linux_binary() {
+        let Some(bytes) = EMBEDDED else {
+            return; // build de développement : rien n'est embarqué
+        };
+        assert_eq!(
+            &bytes[..4],
+            b"\x7fELF",
+            "le serveur embarqué n'est pas un ELF"
+        );
+    }
 
     #[test]
     fn utf16_output_is_read_like_utf8_output() {

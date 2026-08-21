@@ -5,11 +5,11 @@
 # `just clippy`, `just test` and `just check-server` on the developer's
 # machine — the same gates this workflow runs, minus the packaging.
 #
-# Two deliverables, one per platform:
-#   - Windows: claudhub.exe with the Linux server binary beside it. They ship
-#     together and never apart — the .exe installs the server it finds next to
-#     itself into the WSL distribution, and a user holding only one of the two
-#     would have no way of knowing what is missing.
+# Two deliverables, one per platform, and each is a single self-contained
+# file — nothing to unzip, nothing to place beside anything:
+#   - Windows: one .exe carrying the musl server inside it (build.rs), which it
+#     installs into the WSL distribution on first launch. Hence the ordering
+#     here: the server leg must finish before the Windows leg compiles.
 #   - Linux: an AppImage and a self-extracting .run, both carrying the whole
 #     nix closure (see tools/make_appimage.sh).
 
@@ -82,22 +82,26 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build the application
-        run: cargo build --release --bin claudhub
+      # Downloaded before the build, not after: the server is compiled *into*
+      # the executable (see build.rs), so a single file ships and no user can
+      # end up holding one half of a pair.
       - uses: actions/download-artifact@v4
         with:
           name: server-musl
           path: server
-      - name: Assemble the bundle
+      - name: Build the application
+        env:
+          CLAUDHUB_EMBED_SERVER: ${{ github.workspace }}\server\claudhub-server
+        run: cargo build --release --bin claudhub
+      - name: Name the executable for the release page
         shell: bash
         run: |
           mkdir -p bundle
-          cp target/release/claudhub.exe bundle/
-          cp server/claudhub-server bundle/
+          cp target/release/claudhub.exe bundle/Claudhub-x86_64.exe
       - uses: actions/upload-artifact@v4
         with:
           name: claudhub-windows-x86_64
-          path: bundle/
+          path: bundle/Claudhub-x86_64.exe
           if-no-files-found: error
 
   linux:
@@ -145,17 +149,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      # Zipped rather than loose: the two Windows files must land in the same
-      # folder, and a release page offering them separately invites downloading
-      # only one.
-      - name: Zip the Windows bundle
-        run: |
-          cd artifacts/claudhub-windows-x86_64
-          zip -r "$GITHUB_WORKSPACE/Claudhub-windows-x86_64.zip" .
       # Prepended to the generated notes. Which file to take, and what to do
-      # with it, is the first question a release page has to answer — and the
-      # Windows archive holding two files is the one place where guessing
-      # wrong is easy.
+      # with it, is the first question a release page has to answer.
       - uses: softprops/action-gh-release@v2
         with:
           draft: true
@@ -163,12 +158,11 @@ jobs:
           body: |
             ## Installation
 
-            **Windows** — `Claudhub-windows-x86_64.zip`. Dézippez les deux
-            fichiers **dans le même dossier** et lancez `claudhub.exe` :
-            `claudhub-server` n'est pas à installer, c'est l'application qui
-            s'en charge. Elle demande au premier démarrage dans quelle
-            distribution WSL2 travailler, y pose ce binaire, et s'y connecte.
-            La machine doit avoir WSL2 avec une distribution, et `git` dedans.
+            **Windows** — `Claudhub-x86_64.exe`, un seul fichier, rien à
+            installer. Au premier démarrage il demande dans quelle distribution
+            WSL2 travailler, y pose le serveur qu'il porte en lui, et s'y
+            connecte. La machine doit avoir WSL2 avec une distribution, et
+            `git` dedans.
 
             **Linux** — `Claudhub-x86_64.run` de préférence : il ne demande que
             `sh`, `tar` et `gzip`, et se déballe une fois dans `~/.cache`.
@@ -179,6 +173,6 @@ jobs:
 
             ---
           files: |
-            Claudhub-windows-x86_64.zip
+            artifacts/claudhub-windows-x86_64/Claudhub-x86_64.exe
             artifacts/claudhub-linux-x86_64/Claudhub-x86_64.AppImage
             artifacts/claudhub-linux-x86_64/Claudhub-x86_64.run
