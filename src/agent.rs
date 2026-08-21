@@ -11,7 +11,11 @@
 //! ce soit.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+// `Path` ne sert qu'à ce qui lit `/proc`, donc qu'à Linux : ailleurs, l'import
+// serait un avertissement, et le projet compile en `-D warnings`.
+#[cfg(target_os = "linux")]
+use std::path::Path;
+use std::path::PathBuf;
 
 /// Les marqueurs qu'une session d'agent laisse dans l'environnement.
 ///

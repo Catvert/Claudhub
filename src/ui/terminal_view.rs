@@ -455,12 +455,19 @@ impl TerminalView {
 
     /// Bouton du milieu : colle la sélection primaire d'X11/Wayland, comme
     /// tout terminal Unix.
+    ///
+    /// Elle n'existe **que** là : Windows n'a qu'un presse-papiers, et gpui
+    /// n'y expose donc rien à lire — le bouton du milieu n'a alors rien à
+    /// coller. Coller le presse-papiers à la place serait pire que de ne rien
+    /// faire : le geste ne veut pas dire ça, et un clic malheureux déverserait
+    /// dans le terminal ce qu'on avait copié pour ailleurs.
     fn on_middle_click(
         &mut self,
         _event: &MouseDownEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if let Some(text) = cx
             .read_from_primary()
             .and_then(|item| item.text())
@@ -471,6 +478,8 @@ impl TerminalView {
             self.snapshot = self.terminal.snapshot();
             cx.notify();
         }
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        let _ = cx;
     }
 
     /// Vide l'historique et l'écran.
