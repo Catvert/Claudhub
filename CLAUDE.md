@@ -1987,6 +1987,13 @@ Sept points, et aucun ne se devine :
   le panneau permanent ; les suivants rejoignent son groupe d'onglets
   (`InsertTarget::Tabs`, `activate: true` — l'onglet qu'on vient d'ouvrir est
   celui qu'on regarde).
+- **La croix est peinte par `Panel::title`**, et non par la peau du dock, qui
+  ne dessine aucun bouton de fermeture par onglet — son menu ferme un *groupe*,
+  ce qui n'est pas le même geste. `title` rend un élément, et un élément porte
+  un bouton : c'est ce qui évite un sixième commit sur le fork pour une chose
+  que seuls les terminaux veulent. Le clic est **consommé**
+  (`stop_propagation`), sans quoi la croix commencerait par amener au premier
+  plan le terminal qu'elle s'apprête à fermer.
 - **Fermer un onglet tue le pty et ses quatre autres faces.** `on_removed` ne
   concerne que le panneau que l'utilisateur a fermé, celui d'un écran ; les
   quatre autres resteraient des onglets montrant un shell mort.

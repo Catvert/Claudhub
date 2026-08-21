@@ -17,9 +17,11 @@ use gpui::{
     div, prelude::*, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
     IntoElement, Render, WeakEntity, Window,
 };
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::dock::{BasePanel, Panel, PanelControl, PanelEvent};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::ActiveTheme;
+use gpui_component::Sizable as _;
 
 use gpui_component::dock::{panel_handle, register_panel};
 
@@ -528,10 +530,47 @@ impl BasePanel for TerminalPanel {
 }
 
 impl Panel for TerminalPanel {
-    /// The running program, which is what one looks for among five tabs — not
-    /// the word "Terminal" five times over.
+    /// The running program and a cross to end it.
+    ///
+    /// The program, because that is what one looks for among five tabs — not
+    /// the word "Terminal" five times over. And the cross **in the tab**,
+    /// because that is where one closes a terminal: the dock offers closing a
+    /// whole group from its menu, which is not the same gesture, and the strip
+    /// this panel replaced had one on every tab.
+    ///
+    /// It is painted here and not by the dock's skin, which draws no per-tab
+    /// close button: `Panel::title` renders an element, and an element can
+    /// carry a button. That saves a sixth commit on the fork for something only
+    /// the terminals want.
     fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.view.read(cx).label()
+        let label = self.view.read(cx).label();
+        let id = self.view.entity_id();
+        let app = self.app.clone();
+        gpui_component::h_flex()
+            .gap_1()
+            .items_center()
+            .child(label)
+            .child(
+                Button::new("close-terminal")
+                    .ghost()
+                    .xsmall()
+                    .icon(crate::ui::icons::icon("x"))
+                    .on_click(move |_, window, cx| {
+                        // The tab under it selects on click: without this, the
+                        // cross would first bring forward the terminal it is
+                        // about to close.
+                        cx.stop_propagation();
+                        let Some(app) = app.upgrade() else {
+                            return;
+                        };
+                        // Deferred for the reason `on_removed` is: closing goes
+                        // through `DockArea::remove_panel`, and we are inside
+                        // the dock's own event dispatch.
+                        window.defer(cx, move |window, cx| {
+                            app.update(cx, |app, cx| app.close_terminal(id, window, cx));
+                        });
+                    }),
+            )
     }
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {
