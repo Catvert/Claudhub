@@ -92,15 +92,52 @@ fn is_background(cmd: &Cmd) -> bool {
 
 /// The `wt` operations that run the project's hooks.
 ///
-/// They get the network queue, and for the same reason: a `post_new` installing
-/// dependencies, an `up` starting containers, that takes minutes. Putting them
-/// with the reads would amount to freezing the review for the length of a
-/// `composer install`.
+/// **Their own queue**, and not the network's. They were there first, for the
+/// right reason — a `post_new` installing dependencies, an `up` starting
+/// containers, that takes minutes, and putting them with the reads would freeze
+/// the review for the length of a `composer install`. But the network queue has
+/// a single worker, so a `wt up` held back everything measured in seconds
+/// behind something measured in minutes: the automatic fetch, `push`, `pull`,
+/// the commit message an agent writes, the two Sentry calls. That is exactly
+/// the symptom that moved the network out of the read queue, one floor down.
+///
+/// The reason for the network's single worker — two `fetch`es on the same
+/// repository fighting over the reference lock — has never covered a project's
+/// hooks, which touch nothing of git's.
 fn is_long(cmd: &Cmd) -> bool {
     matches!(
         cmd,
         Cmd::WtCreate { .. } | Cmd::WtRemove { .. } | Cmd::WtUp { .. } | Cmd::WtDown { .. }
     )
+}
+
+/// Which queue a command belongs to.
+///
+/// A function of the command alone, so the routing is one readable table and
+/// not a chain of conditions buried in `send` — and so a test can check that
+/// no command lands in a queue that would make it wait behind something a
+/// hundred times slower.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Queue {
+    Reads,
+    Network,
+    Long,
+    Background,
+    Databases,
+}
+
+fn queue_of(cmd: &Cmd) -> Queue {
+    if is_network(cmd) {
+        Queue::Network
+    } else if is_long(cmd) {
+        Queue::Long
+    } else if is_background(cmd) {
+        Queue::Background
+    } else if is_db(cmd) {
+        Queue::Databases
+    } else {
+        Queue::Reads
+    }
 }
 
 /// What is needed to talk to the workers, wherever they run.
@@ -117,6 +154,7 @@ enum HandleInner {
     Local {
         reads: async_channel::Sender<Cmd>,
         network: async_channel::Sender<Cmd>,
+        long: async_channel::Sender<Cmd>,
         background: async_channel::Sender<Cmd>,
         databases: async_channel::Sender<Cmd>,
         /// The fifth channel: watch orders go through no queue — setting up a
@@ -167,6 +205,7 @@ impl Handle {
             HandleInner::Local {
                 reads,
                 network,
+                long,
                 background,
                 databases,
                 watcher,
@@ -174,14 +213,12 @@ impl Handle {
                 let Some(cmd) = route_watch(watcher.as_ref(), cmd) else {
                     return;
                 };
-                let queue = if is_network(&cmd) || is_long(&cmd) {
-                    network
-                } else if is_background(&cmd) {
-                    background
-                } else if is_db(&cmd) {
-                    databases
-                } else {
-                    reads
+                let queue = match queue_of(&cmd) {
+                    Queue::Network => network,
+                    Queue::Long => long,
+                    Queue::Background => background,
+                    Queue::Databases => databases,
+                    Queue::Reads => reads,
                 };
                 send_to(queue, cmd);
             }
@@ -213,6 +250,7 @@ fn route_watch(watcher: Option<&watch::Watcher>, cmd: Cmd) -> Option<Cmd> {
 pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
     let (read_tx, read_rx) = async_channel::unbounded::<Cmd>();
     let (net_tx, net_rx) = async_channel::unbounded::<Cmd>();
+    let (long_tx, long_rx) = async_channel::unbounded::<Cmd>();
     let (bg_tx, bg_rx) = async_channel::unbounded::<Cmd>();
     let (db_tx, db_rx) = async_channel::unbounded::<Cmd>();
     let (evt_tx, evt_rx) = async_channel::unbounded::<Evt>();
@@ -223,6 +261,9 @@ pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
     // Only one for the network: two simultaneous `fetch`es on the same
     // repository would fight over the reference lock without speeding anything up.
     worker("claudhub-git-net".into(), net_rx, evt_tx.clone());
+    // And one for the project's hooks, which are measured in minutes and have
+    // no business making a `push` wait.
+    worker("claudhub-wt".into(), long_rx, evt_tx.clone());
     worker("claudhub-scan".into(), bg_rx, evt_tx.clone());
     for n in 0..DB_WORKERS {
         worker(format!("claudhub-db-{n}"), db_rx.clone(), evt_tx.clone());
@@ -260,6 +301,7 @@ pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
             inner: HandleInner::Local {
                 reads: read_tx,
                 network: net_tx,
+                long: long_tx,
                 background: bg_tx,
                 databases: db_tx,
                 watcher,
@@ -1069,5 +1111,91 @@ fn fail(worktree: Option<PathBuf>, action: Action, err: anyhow::Error) -> Evt {
         worktree,
         action,
         message,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn worktree() -> PathBuf {
+        PathBuf::from("/p/site")
+    }
+
+    #[test]
+    fn a_projects_hooks_never_hold_back_a_push() {
+        // `wt` used to share the network's single worker. A `wt up` starting
+        // containers therefore held everything measured in seconds behind
+        // something measured in minutes — which is the very symptom that moved
+        // the network out of the read queue in the first place.
+        assert_eq!(
+            queue_of(&Cmd::WtUp {
+                main: worktree(),
+                slug: "fix".into(),
+                answers: Default::default(),
+            }),
+            Queue::Long
+        );
+        assert_eq!(
+            queue_of(&Cmd::Push {
+                worktree: worktree(),
+                force_with_lease: false,
+            }),
+            Queue::Network
+        );
+    }
+
+    #[test]
+    fn the_slow_queues_are_the_only_slow_queues() {
+        // A read is what a frame waits for: nothing that takes seconds may
+        // land in that queue, and nothing that answers in milliseconds should
+        // wait in the slow ones.
+        assert_eq!(
+            queue_of(&Cmd::LoadDiffFiles {
+                worktree: worktree(),
+                range: crate::git::DiffRange::Working,
+            }),
+            Queue::Reads
+        );
+        assert_eq!(
+            queue_of(&Cmd::LoadSummaries {
+                worktrees: vec![worktree()],
+            }),
+            Queue::Background
+        );
+        assert_eq!(
+            queue_of(&Cmd::ScanAgents {
+                worktrees: vec![worktree()],
+                programs: vec!["claude".into()],
+            }),
+            Queue::Background
+        );
+        assert_eq!(
+            queue_of(&Cmd::AutoFetch { main: worktree() }),
+            Queue::Network
+        );
+    }
+
+    #[test]
+    fn a_watch_order_goes_to_no_queue_at_all() {
+        // The fifth path: setting up a watch is already deferred into the
+        // watcher's thread, and making it wait behind a diff would make no
+        // sense. With no watcher there is nothing to hand it to, and the order
+        // is dropped rather than queued for a thread that does not exist.
+        assert!(route_watch(
+            None,
+            Cmd::Watch {
+                worktree: worktree()
+            }
+        )
+        .is_none());
+        // Anything else comes straight back.
+        assert!(route_watch(
+            None,
+            Cmd::Fetch {
+                worktree: worktree()
+            }
+        )
+        .is_some());
     }
 }

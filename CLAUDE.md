@@ -102,8 +102,8 @@ src/
                 travaillent
   runtime/      les workers
     protocol.rs `Cmd` / `Evt` — des données, aucune logique, sérialisables
-    mod.rs      quatre files, des threads consommant les mêmes canaux,
-                et le surveillant de fichiers en cinquième voie
+    mod.rs      cinq files (`queue_of`), des threads consommant les mêmes
+                canaux, et le surveillant de fichiers en sixième voie
     executor.rs l'exécuteur tokio partagé, et le pont `block_on`
     watch.rs    surveillance de fichiers (notify), debounce 250 ms,
                 limitée aux dossiers que git connaît
@@ -171,6 +171,37 @@ gestionnaire de clic — la plus rapide des commandes coûte déjà une frame.
 message change : les deux bouts du fil sont installés séparément, et postcard
 est positionnel — un désaccord doit se dire à la poignée de main, pas en
 charabia au premier diff.
+
+### Les cinq files
+
+`queue_of` dit, du seul examen d'une commande, dans quelle file elle part.
+C'est une table qu'on lit d'un bout à l'autre, et un test la verrouille — une
+commande rangée dans la mauvaise file n'échoue jamais, elle attend, et c'est
+la panne qu'on ne diagnostique pas.
+
+- **Les lectures** (trois workers) : statut, diff, branches, et les écritures
+  locales, toutes en millisecondes. C'est ce qu'une frame attend.
+- **Le réseau** (un worker) : `fetch`, `pull`, `push`, Sentry, et le message
+  de commit qu'un agent rédige — dix à trente secondes. Un seul worker parce
+  que deux `fetch` sur le même dépôt se disputeraient le verrou des références
+  sans rien accélérer.
+- **Les hooks du projet** (un worker) : `wt new`, `wt rm`, `wt up`, `wt down`.
+  Ils ont eu la file du réseau, pour la bonne raison — un `post_new` installe
+  des dépendances, un `up` démarre des conteneurs, et les mettre avec les
+  lectures figerait la revue le temps d'un `composer install`. Mais le réseau
+  n'a qu'un worker : un `wt up` retenait derrière lui tout ce qui se compte en
+  secondes, c'est-à-dire exactement le symptôme qui avait fait sortir le réseau
+  de la file des lectures. Le verrou des références, lui, ne dit rien des hooks
+  d'un projet, qui ne touchent à rien de git.
+- **Le fond** (un worker) : les résumés, les agents, le relevé de `wt`. Il ne
+  doit jamais passer devant un diff qu'on vient de demander.
+- **Les bases** (deux workers) : ni celle des lectures — un `SELECT`
+  malheureux y emporterait un worker sur trois et le diff attendrait derrière
+  —, ni celle du réseau. Deux, parce que déplier un schéma en demande plusieurs
+  à la fois et qu'ils attendent une socket, pas un cœur.
+
+Et hors des files, la surveillance de fichiers, remise directement au thread du
+surveillant.
 
 ### Le mode distant
 
@@ -349,7 +380,7 @@ garde dans `.git/index`, qui est justement l'un des fichiers surveillés.
 **Poser les surveillances ne se fait jamais dans le thread d'interface** :
 c'était une demi-seconde de fenêtre figée à chaque changement de worktree.
 La vue envoie `Cmd::Watch`/`Cmd::WatchDir`, que `Handle::send` remet
-directement au thread du surveillant — la cinquième voie, hors des files : la
+directement au thread du surveillant — la sixième voie, hors des files : la
 pose est déjà différée, la faire attendre derrière un diff n'aurait pas de
 sens. Ce qui en revient est un `Evt::FilesChanged`, un **lot** de chemins par
 fenêtre de regroupement, sur le même canal que tout le reste — un seul flux à
