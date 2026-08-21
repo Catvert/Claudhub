@@ -14,7 +14,7 @@ use anyhow::Result;
 use super::{git, split_nul};
 
 /// Le code d'un côté (index ou répertoire de travail) pour un fichier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StatusCode {
     Unmodified,
     Modified,
@@ -67,7 +67,7 @@ impl StatusCode {
 /// `index` et `worktree` sont indépendants : un fichier indexé puis remodifié
 /// est `index: Modified, worktree: Modified` et apparaît des deux côtés de la
 /// liste. C'est précisément ce que la v1 rendait pénible à lire.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileStatus {
     pub path: PathBuf,
     /// Ancien chemin d'un fichier renommé ou copié.
@@ -114,7 +114,7 @@ impl FileStatus {
 }
 
 /// L'état complet d'un checkout à un instant donné.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Status {
     /// Branche courante, `None` en HEAD détachée.
     pub branch: Option<String>,
@@ -386,7 +386,7 @@ mod tests {
 /// deux : `--numstat` compte les lignes mais ignore ce qu'il ne suit pas, et
 /// `status` voit les fichiers nouveaux sans savoir ce qu'ils contiennent. Un
 /// worktree d'agent est justement plein de fichiers nouveaux.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Summary {
     /// Fichiers touchés, les nouveaux compris.
     pub files: usize,

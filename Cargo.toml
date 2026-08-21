@@ -8,6 +8,34 @@ readme = "README.md"
 rust-version = "1.90"
 publish = false
 
+# Une bibliothèque et deux binaires : l'interface, et le serveur headless qui
+# fait tourner les mêmes workers dans WSL2 quand l'interface est un `.exe`
+# Windows. La feature `ui` (par défaut) porte tout ce qui touche gpui ; le
+# serveur se construit avec `--no-default-features`, ce qui garantit qu'aucun
+# module du cœur n'en dépend — c'est le portillon, pas une optimisation.
+[[bin]]
+name = "claudhub"
+path = "src/main.rs"
+required-features = ["ui"]
+
+[[bin]]
+name = "claudhub-server"
+path = "src/bin/server.rs"
+
+[features]
+default = ["ui"]
+ui = [
+    "dep:gpui",
+    "dep:gpui_platform",
+    "dep:gpui-component",
+    "dep:gpui-base",
+    "dep:rust-embed",
+    "dep:tree-sitter-php",
+    "dep:alacritty_terminal",
+    "dep:lsp-types",
+    "dep:rust-i18n",
+]
+
 [dependencies]
 # UI : gpui (le framework de Zed) et gpui-component (dock, listes virtualisées,
 # sidebar, inputs, thèmes, coloration syntaxique tree-sitter).
@@ -21,8 +49,8 @@ publish = false
 # sans révision, et un `rev` de notre côté suffirait à en faire deux sources
 # différentes — neuf cents erreurs de types identiques mais étrangers.
 # `Cargo.lock` fige le commit ; c'est lui qui rend la construction reproductible.
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
+gpui = { git = "https://github.com/zed-industries/zed", optional = true }
+gpui_platform = { git = "https://github.com/zed-industries/zed", optional = true, features = [
     "font-kit",
     "x11",
     "wayland",
@@ -34,25 +62,25 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
 # laisse la peau du dock choisir le variant des onglets (`set_tab_variant`) —
 # le rayon du variant par défaut est un zéro codé en dur. Le commit a vocation
 # à partir en PR ; le fork disparaîtra avec elle.
-gpui-component = { git = "https://github.com/Catvert/gpui-component", branch = "claudhub", features = [
+gpui-component = { git = "https://github.com/Catvert/gpui-component", branch = "claudhub", optional = true, features = [
     "tree-sitter-languages",
 ] }
 # La couche de base tient sa propre copie du thème (poignées, barres de
 # défilement) : éteindre la ligne d'une poignée de redimensionnement s'écrit
 # dans son global à elle, que gpui-component ne réexporte pas.
-gpui-base = { git = "https://github.com/Catvert/gpui-component", branch = "claudhub" }
+gpui-base = { git = "https://github.com/Catvert/gpui-component", branch = "claudhub", optional = true }
 # Assets embarqués (icônes Lucide, polices) servis à gpui via AssetSource.
-rust-embed = "8"
+rust-embed = { version = "8", optional = true }
 
 # PHP n'est pas dans les grammaires que gpui-component embarque, et c'est le
 # langage de la moitié des dépôts que Claudhub sert à relire. La grammaire est
 # donc enregistrée à la main dans son registre (voir ui::highlight).
-tree-sitter-php = "0.24"
+tree-sitter-php = { version = "0.24", optional = true }
 
 # Émulateur de terminal : le même que Zed et Alacritty. Il fournit le parseur
 # VTE, la grille de cellules, le scrollback et l'ouverture du pty ; le rendu
 # gpui des cellules est à nous (src/ui/terminal_view.rs).
-alacritty_terminal = "0.26"
+alacritty_terminal = { version = "0.26", optional = true }
 
 # Rafraîchit l'état d'un worktree quand les fichiers changent sous lui, plutôt
 # que de lancer `git status` sur un minuteur.
@@ -70,14 +98,57 @@ notify-debouncer-full = "0.5"
 # faut un `cargo update -p wt`.
 wt = { git = "https://github.com/Catvert/wt.git", branch = "main", default-features = false }
 
+# Bases de données : `sqlx`, un seul pilote pour SQLite comme pour MySQL et
+# MariaDB, et le même modèle de connexion pour le troisième moteur qu'on
+# ajouterait. Il est asynchrone de bout en bout — d'où tokio ci-dessous — et
+# c'est ce qui donne un vrai délai de requête : `timeout` laisse tomber le
+# futur, là où un pilote bloquant doit être convaincu de s'arrêter tout seul.
+# `runtime-tokio-rustls` reprend le rustls que `ureq` amène déjà, plutôt
+# qu'OpenSSL. `default-features = false` écarte les macros de vérification à
+# la compilation : nos requêtes sont écrites à l'exécution, il n'y a pas de
+# schéma connu d'avance.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "sqlite",
+    "mysql",
+    "chrono",
+    "json",
+] }
+
+# `TryStreamExt::try_next` : `sqlx` rend les résultats en flux, une
+# instruction et une ligne à la fois, et c'est ce qui permet de s'arrêter à la
+# fin d'une page sans lire ce qui suit.
+futures = { version = "0.3", default-features = false, features = ["std"] }
+
+# L'exécuteur asynchrone partagé (`runtime::executor`). Il est là pour `sqlx`
+# aujourd'hui, et pour ce qui n'a pas d'interface bloquante demain — un client
+# HTTP, des sous-processus lancés de front. Claudhub reste un programme à
+# threads : le pont est un `block_on` dans le worker, à un seul endroit.
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net"] }
+# Les dates de MySQL arrivent typées ; sans quoi un `DATETIME` s'afficherait
+# en octets.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+
 # HTTP bloquant pour l'API Sentry : `ureq` épouse le modèle à threads du
 # runtime — un appel, une attente, rien à entrelacer — là où un client async
 # imposerait tokio pour deux requêtes. `zed-reqwest` traîne déjà dans l'arbre
 # via gpui-component, mais en dépendre transitivement serait fragile.
 ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 
+# Les complétions de la console SQL passent par le fournisseur LSP de
+# gpui-component, dont la signature est faite de types `lsp_types`. La version
+# est celle que gpui-component déclare : deux versions différentes feraient
+# deux traits `CompletionProvider` étrangers l'un à l'autre.
+lsp-types = { version = "0.97", optional = true, features = ["proposed"] }
+
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Le format du fil entre l'interface et `claudhub-server` (runtime::wire).
+# Binaire et non JSON : `Evt::Agents` porte une `HashMap<PathBuf, …>` que JSON
+# refuse en clé, et un `Evt::FileDiff` de relecture d'agent pèse trois à cinq
+# fois plus en texte. Postcard n'a aucun bouton de configuration à désaccorder
+# entre les deux bouts, là où bincode 2 en a plusieurs.
+postcard = { version = "1", default-features = false, features = ["use-std"] }
 toml = "0.9"
 anyhow = "1"
 directories = "6"
@@ -87,7 +158,7 @@ env_logger = "0.11"
 # thread d'interface par des canaux que draine une tâche gpui.
 async-channel = "2"
 # UI en français et en anglais ; toute chaîne visible passe par `tr!`.
-rust-i18n = "4"
+rust-i18n = { version = "4", optional = true }
 
 [profile.dev]
 # gpui et son graphe (blade, tree-sitter, alacritty) sont insupportables en

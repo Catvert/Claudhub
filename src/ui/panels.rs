@@ -100,34 +100,14 @@ pub fn register(app: &Entity<ClaudhubApp>, cx: &mut App) {
         NotesPanel => "ClaudhubNotes",
         ConflictsPanel => "ClaudhubConflicts",
         FilesPanel => "ClaudhubFiles",
+        DbPanel => "ClaudhubDb",
         SentryPanel => "ClaudhubSentry",
         DiffPanel => "ClaudhubDiff",
+        EditorPanel => "ClaudhubEditor",
+        ConsolePanel => "ClaudhubConsole",
         TerminalPanel => "ClaudhubTerminal",
     }
 }
-
-/// Les vues qui se masquent, dans l'ordre où le menu principal les propose.
-///
-/// Un nom de panneau et la clé i18n de son titre. Les noms viennent des
-/// constantes des panneaux eux-mêmes : une table de littéraux se serait
-/// désaccordée au premier renommage, et un nom qui ne désigne plus rien ne
-/// masque plus rien — en silence.
-///
-/// Les conflits n'y sont pas. Leur visibilité se décide toute seule — il y a
-/// une opération en cours, ou il n'y en a pas — et les masquer à la main
-/// reviendrait à cacher le seul endroit d'où l'on peut la terminer.
-pub const VIEWS: &[(&str, &str)] = &[
-    (SidebarPanel::NAME, "panel-repositories"),
-    (BranchesPanel::NAME, "panel-branches"),
-    (FilesPanel::NAME, "panel-files"),
-    (NotesPanel::NAME, "panel-notes"),
-    (ChangesPanel::NAME, "range-working"),
-    (BranchPanel::NAME, "range-branch"),
-    (HistoryPanel::NAME, "panel-history"),
-    (SentryPanel::NAME, "panel-sentry"),
-    (DiffPanel::NAME, "panel-diff"),
-    (TerminalPanel::NAME, "panel-terminal"),
-];
 
 /// « Masquer cette vue », la seule entrée que le menu `…` du dock mérite.
 ///
@@ -282,106 +262,16 @@ panels! {
     BranchPanel => ("ClaudhubBranch", "range-branch", render_branch_review, Branch),
     NotesPanel => ("ClaudhubNotes", "panel-notes", render_notes, Notes),
     FilesPanel => ("ClaudhubFiles", "panel-files", render_files, Files),
+    DbPanel => ("ClaudhubDb", "panel-databases", render_db, Db),
     SentryPanel => ("ClaudhubSentry", "panel-sentry", render_sentry, Sentry),
-}
-
-/// Le panneau central : un diff, ou le fichier qu'on est en train de retoucher.
-///
-/// **Son titre suit son contenu.** L'éditeur intégré prend la place du diff —
-/// on regarde l'un *ou* l'autre, et deux onglets à faire basculer pour un
-/// geste qui vient de l'explorateur seraient un aller-retour de trop — mais un
-/// onglet qui annonce « Diff » pendant qu'il montre un éditeur ment sur ce
-/// qu'on a sous les yeux.
-///
-/// Le titre est **mis en cache**, pour la même raison que la visibilité des
-/// conflits : `Panel::title` est appelé par le dock au fil du rendu de la
-/// barre d'onglets, et y lire l'entité racine pendant qu'elle se met à jour
-/// est ce que gpui refuse par une panique.
-pub struct DiffPanel {
-    app: WeakEntity<ClaudhubApp>,
-    focus: FocusHandle,
-    editing: bool,
-    visible: bool,
-}
-
-impl DiffPanel {
-    pub const NAME: &'static str = "ClaudhubDiff";
-
-    pub fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
-        cx.observe(app, |this: &mut Self, app, cx| {
-            let app = app.read(cx);
-            let editing = app.is_editing();
-            let visible = app.panel_visible(Self::NAME);
-            if this.editing != editing || this.visible != visible {
-                this.editing = editing;
-                this.visible = visible;
-                // C'est la barre d'onglets qui porte le titre, pas le panneau :
-                // sa propre notification ne suffit pas à la faire redessiner.
-                cx.emit(PanelEvent::LayoutChanged);
-            }
-            cx.notify();
-        })
-        .detach();
-        Self {
-            app: app.downgrade(),
-            focus: cx.focus_handle(),
-            editing: false,
-            visible: visible_at_startup(Self::NAME, cx),
-        }
-    }
-}
-
-impl Focusable for DiffPanel {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
-    }
-}
-
-impl EventEmitter<PanelEvent> for DiffPanel {}
-
-impl BasePanel for DiffPanel {
-    fn panel_name(&self) -> &'static str {
-        Self::NAME
-    }
-    fn closable(&self, _: &App) -> bool {
-        false
-    }
-    fn visible(&self, _: &App) -> bool {
-        self.visible
-    }
-}
-
-impl Panel for DiffPanel {
-    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        if self.editing {
-            tr!("panel-editor")
-        } else {
-            tr!("panel-diff")
-        }
-    }
-
-    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
-        zoom_in_toolbar()
-    }
-
-    fn dropdown_menu(
-        &mut self,
-        menu: PopupMenu,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> PopupMenu {
-        hide_view(&self.app, Self::NAME, menu)
-    }
-}
-
-impl Render for DiffPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(app) = self.app.upgrade() else {
-            return div().into_any_element();
-        };
-        let content = app.update(cx, |app, cx| app.render_diff(window, cx).into_any_element());
-        pane_root(&app, Pane::Diff, content, cx).into_any_element()
-    }
+    // Le centre de chaque écran. **Trois panneaux et non un seul dont le
+    // titre change** : ils appartenaient au même parce qu'ils se disputaient
+    // la place centrale, et un onglet qui annonçait « Diff », « Éditeur » ou
+    // « SQL » selon le dernier geste disait bien qu'il en portait trois. Les
+    // écrans leur donnent chacun sa place.
+    DiffPanel => ("ClaudhubDiff", "panel-diff", render_diff, Diff),
+    EditorPanel => ("ClaudhubEditor", "panel-editor", render_editor_panel, Editor),
+    ConsolePanel => ("ClaudhubConsole", "panel-sql", render_console_panel, Console),
 }
 
 /// Les conflits n'apparaissent que quand il y en a.

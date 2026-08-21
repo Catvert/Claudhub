@@ -59,7 +59,7 @@ pub fn disinherit_session() {
 }
 
 /// Un processus d'agent trouvé dans un worktree.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Process {
     pub pid: u32,
     /// Le programme reconnu, tel que les profils le nomment.

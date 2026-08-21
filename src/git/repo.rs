@@ -19,7 +19,7 @@ pub struct Repo {
 }
 
 /// Un checkout : le principal ou un worktree lié.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Worktree {
     pub path: PathBuf,
     /// Nom court de la branche, ou `None` en HEAD détachée.
@@ -292,7 +292,7 @@ pub fn delete_branch(main: &Path, name: &str, force: bool) -> Result<()> {
 /// qu'on croit. La barre d'état la nomme : sans cela, l'utilisateur se
 /// retrouve dans un état que Claudhub ne dit pas, à se demander pourquoi la
 /// liste des fichiers ressemble à ça.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Pending {
     Merge,
     Rebase,

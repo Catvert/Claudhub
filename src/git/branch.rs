@@ -7,21 +7,21 @@ use anyhow::Result;
 
 use super::{git, git_ok, git_opt};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BranchKind {
     Local,
     /// Branche de suivi à distance (`origin/…`) sans équivalent local.
     Remote,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Upstream {
     pub name: String,
     pub ahead: usize,
     pub behind: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Branch {
     pub name: String,
     pub kind: BranchKind,

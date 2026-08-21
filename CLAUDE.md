@@ -11,20 +11,59 @@ que si les bibliothèques de `shell.nix` sont déjà dans le périmètre.
 
 - `just` / `just run` — build debug et lancement
 - `just check` / `just clippy` (`-D warnings`) / `just fmt` / `just test`
+- `just check-server` — le serveur headless sans la feature `ui` : c'est le
+  portillon qui prouve qu'aucun module du cœur ne tire gpui
 - Un test isolé : `nix-shell --quiet --run "cargo test watch"`
 
 Le projet doit passer `cargo fmt --check`, `clippy --all-targets -- -D warnings`
 et `cargo test` en permanence.
+
+## Distribution
+
+Le binaire release ne tourne que sur cette machine : compilé sous `nix-shell`,
+il est lié contre la glibc du nix store, interpréteur ELF compris.
+`tools/make_appimage.sh` (à lancer **hors** nix-shell, après un build release)
+produit dans `target/appimage/` deux formes du même contenu — la closure
+complète, glibc et `ld-linux` avec, lancée par un `AppRun` qui invoque le
+loader embarqué explicitement : `Claudhub-x86_64.AppImage`, qui exige un
+`fusermount` sur la cible, et `Claudhub-x86_64.run`, auto-extractrice, qui ne
+demande que `sh`, `tar` et `gzip` — elle se déballe dans `~/.cache` une fois
+par build (contenu adressé par empreinte, anciens builds purgés) et lance
+instantanément ensuite. Deux choses à ne pas défaire : les pilotes GPU (ICD
+Vulkan) viennent de l'**hôte**, dont les chemins ferment le `--library-path` —
+embarquer un Mesa casserait les machines NVIDIA ; et rien n'exporte
+`LD_LIBRARY_PATH`, si bien que les sous-processus (`git`, `claude`, les shells
+du terminal) restent des programmes de l'hôte avec les bibliothèques de
+l'hôte. La machine cible fournit `git`, un pilote Vulkan, et l'agent.
 
 ## Architecture
 
 Trois couches, et une règle qui les sépare : **seule `src/ui/` connaît gpui, et
 elle ne fait jamais d'entrée-sortie**.
 
+Le crate est une **bibliothèque et deux binaires** : `claudhub` (l'interface)
+et `claudhub-server` (les mêmes workers, headless, derrière stdin/stdout —
+destiné à tourner dans WSL2 quand l'interface est un `.exe` Windows). La
+feature `ui`, active par défaut, porte gpui, gpui-component, alacritty et tout
+ce qui s'affiche ; le serveur se construit avec `--no-default-features`, et un
+module du cœur qui toucherait à gpui — `tr!` compris, le macro n'existe que
+sous `ui` — casse ce build. C'est la règle des trois couches, vérifiée par le
+compilateur.
+
 ```
 src/
+  lib.rs        les modules, l'i18n et `tr!` (feature `ui`)
+  main.rs       le binaire de l'interface — trois lignes
+  bin/server.rs le serveur headless (le transport arrive avec `runtime::wire`)
+  cmdline.rs    découpe et recompose une ligne de commande (guillemets POSIX)
+  wslpath.rs    chemins Windows ⇄ distro WSL, textuel et pur — n'existe
+                qu'aux bords : sélecteurs de fichiers, ouverture du coffre
   commit_msg.rs le message de commit proposé : prompt, nettoyage, agent
   files.rs      lire, écrire (sous condition), ranger, éditeur externe
+  db/           bases de données — `sqlx`, asynchrone, testable sans gpui
+    mod.rs      connexions, schémas, résultats ; le choix du moteur
+    sqlite.rs   en lecture seule, schéma lu par les pragmas
+    mysql.rs    MySQL et MariaDB, par `information_schema`
   sentry.rs     issues et traces Sentry, testées sur fixture
   wt.rs         le `wt.toml` d'un projet : questions, tâches, statut, URLs
   git/          couche git — sous-processus `git`, testable sans gpui
@@ -35,10 +74,16 @@ src/
     diff.rs     `--numstat` et diff unifié → fichiers, hunks, lignes
     history.rs  `git log` → commits, et la disposition du graphe
   runtime/      les workers
-    protocol.rs `Cmd` / `Evt` — des données, aucune logique
-    mod.rs      trois threads consommant le même canal de commandes
+    protocol.rs `Cmd` / `Evt` — des données, aucune logique, sérialisables
+    mod.rs      quatre files, des threads consommant les mêmes canaux,
+                et le surveillant de fichiers en cinquième voie
+    executor.rs l'exécuteur tokio partagé, et le pont `block_on`
     watch.rs    surveillance de fichiers (notify), debounce 250 ms,
                 limitée aux dossiers que git connaît
+    wire.rs     les trames du fil UI ↔ serveur : postcard, longueur en
+                tête, `PROTOCOL_VERSION`
+    remote.rs   le client du fil : lance `claudhub-server`, trois threads
+                de pont, la mort du serveur en `Evt::ServerLost`
   terminal/     émulation
     mod.rs      pty + `Term` alacritty derrière un `FairMutex`
     snapshot.rs grille → lignes et runs de style, sans tenir le verrou
@@ -47,6 +92,7 @@ src/
   ui/           tout gpui
     mod.rs      `run()`, `AssetSource`, polices, i18n
     app.rs      `ClaudhubApp` : l'état, la pompe d'événements, le chrome
+    workspace.rs   les quatre écrans, leur dock et la barre qui les choisit
     diff_view.rs   la vue de diff, virtualisée
     history_view.rs  l'historique et son graphe peint
     highlight.rs   coloration tree-sitter d'un diff
@@ -58,6 +104,8 @@ src/
                     (marques dans assets/icons/lang/, CC0)
     explorer.rs     l'explorateur de projet et l'éditeur intégré
     sentry_view.rs  les issues, leur trace, et de quoi les confier
+    db.rs           l'arbre des bases : connexion, base, table, colonne
+    db_query.rs     la console SQL, ses complétions et sa table de résultats
     conflicts.rs    les conflits et le garde-fou d'une opération à mi-chemin
     worktree_ops.rs création guidée, tâches du projet, intégration
     store.rs        ce qu'on retient par worktree : base, replis, notes
@@ -85,6 +133,48 @@ Ajouter une opération, c'est : une variante de `Cmd`, un bras dans
 `runtime::handle`, une ou plusieurs variantes d'`Evt`, un bras dans
 `ClaudhubApp::handle_event`. Jamais un appel à git depuis un `render` ou un
 gestionnaire de clic — la plus rapide des commandes coûte déjà une frame.
+**Et un coup d'incrément à `wire::PROTOCOL_VERSION`** dès que la forme d'un
+message change : les deux bouts du fil sont installés séparément, et postcard
+est positionnel — un désaccord doit se dire à la poignée de main, pas en
+charabia au premier diff.
+
+### Le mode distant
+
+`Handle` a deux modes, et les soixante-dix points d'envoi de la vue n'en
+savent rien. **Local** : les files de ce processus, comme toujours.
+**Distant** : `runtime::remote::connect` lance `claudhub-server` en enfant et
+tout passe par des trames sur ses stdin/stdout (`runtime::wire` — postcard,
+longueur en tête, un `flush` par trame) ; c'est le serveur qui refait le tri
+entre ses files à l'arrivée. Le serveur est le même `runtime::spawn` derrière
+un fil — `handle()`, l'exécuteur et les workers ne savent pas qu'ils sont
+loin. C'est l'architecture de la cible Windows : l'interface en `.exe` natif,
+les workers dans la distro WSL2, seuls les terminaux n'y passant pas
+(`wsl.exe` depuis ConPTY).
+
+Quatre points qui ne se devinent pas :
+
+- **La poignée de main est hors des deux grandes énumérations**
+  (`wire::Hello`, champs jamais réordonnés) : c'est elle qui détecte un
+  désaccord de version, elle doit se relire depuis n'importe quelle version.
+  Le lecteur du client la traduit en `Evt::ServerHello` — le seul flux que la
+  vue draine — qui porte ce que la vue ne peut pas savoir de sa machine à
+  elle : le `cwd` du serveur (c'est lui qui vaut « lancé depuis son projet »),
+  son appartenance à WSL, ses `/etc/shells`.
+- **`connect` ne bloque jamais l'appelant** : un `wsl.exe` froid met des
+  secondes, et c'est le thread d'interface qui appelle. Tout ce qui suit le
+  lancement — poignée de main comprise — arrive en événements.
+- **La mort du serveur est un événement** (`Evt::ServerLost`, synthétisé par
+  le lecteur), jamais un silence : la barre d'état le dit et porte le bouton
+  de relance. La relance est **manuelle** — un serveur qui meurt en boucle se
+  relancerait en boucle — et repasse les dépôts ouverts au serveur neuf.
+- **stdout du serveur appartient au fil.** Un `println!` dans du code worker
+  corromprait le flux ; les traces vont sur stderr, que le client pompe dans
+  les nôtres (`target: "claudhub_server"`).
+
+Le levier de test est `CLAUDHUB_SERVER_CMD` (une ligne de commande, par
+exemple `target/debug/claudhub-server`) : tout le fil s'exerce sous Linux,
+sans Windows ni WSL. `tests/server_wire.rs` le fait à chaque `cargo test`,
+avec le vrai binaire.
 
 Toute écriture git est suivie d'une relecture du statut (`write_then_refresh`),
 pour que la vue n'ait pas à savoir quelle commande touche quoi.
@@ -132,10 +222,17 @@ garde dans `.git/index`, qui est justement l'un des fichiers surveillés.
 
 **Poser les surveillances ne se fait jamais dans le thread d'interface** :
 c'était une demi-seconde de fenêtre figée à chaque changement de worktree.
-`Watcher::watch` n'envoie qu'un ordre à un thread dédié et rend la main
-immédiatement. Corollaire à connaître : la surveillance n'est pas effective au
-retour de l'appel — sans importance, puisque la sélection d'un worktree
-déclenche de toute façon une lecture du statut.
+La vue envoie `Cmd::Watch`/`Cmd::WatchDir`, que `Handle::send` remet
+directement au thread du surveillant — la cinquième voie, hors des files : la
+pose est déjà différée, la faire attendre derrière un diff n'aurait pas de
+sens. Ce qui en revient est un `Evt::FilesChanged`, un **lot** de chemins par
+fenêtre de regroupement, sur le même canal que tout le reste — un seul flux à
+faire passer sur un fil, local ou distant. Le surveillant vit dans le runtime
+et non dans la vue : c'est le disque du worktree qu'il regarde, et ce disque
+est celui du serveur quand les workers tournent dans WSL. Corollaire à
+connaître : la surveillance n'est pas effective au retour de l'appel — sans
+importance, puisque la sélection d'un worktree déclenche de toute façon une
+lecture du statut.
 
 **Sur un disque Windows monté par WSL, la surveillance ne marche pas et ne le
 dit pas.** `notify` pose ses surveillances sur drvfs (`/mnt/c`) sans erreur et
@@ -483,14 +580,14 @@ correction de faute de frappe. Corollaire : après un enregistrement réussi,
 l'empreinte retenue suit ce qu'on vient d'écrire — sinon le deuxième
 enregistrement d'affilée échouerait, le fichier ayant changé par notre faute.
 
-L'éditeur **prend la place du diff** plutôt que d'occuper un panneau à lui : on
-regarde l'un ou l'autre, et deux onglets à faire basculer pour un geste qui
-vient de l'explorateur seraient un aller-retour de trop. **L'onglet dit alors
-« Éditeur »** : le titre suit le contenu, sans quoi un onglet nommé « Diff »
-ment sur ce qu'on a sous les yeux. Il est mis en cache dans `DiffPanel`, pour
-la même raison que la visibilité des conflits — `Panel::title` est appelé par
-le dock au fil du rendu de sa barre d'onglets, et y lire l'entité racine
-pendant qu'elle se met à jour est ce que gpui refuse par une panique.
+L'éditeur **a son écran** (« Édition ») et son panneau, `EditorPanel`. Il a
+longtemps pris la place du diff, faute de place ailleurs : les deux
+partageaient un panneau dont le titre changeait de « Diff » à « Éditeur » selon
+le dernier geste, ce qui disait bien qu'il en portait deux. Les écrans ont
+rendu la question sans objet — voir « Les sous-applications ». Ouvrir un
+fichier **bascule sur cet écran-là** : le geste vient de l'explorateur, qui y
+vit, mais aussi d'une ligne de diff, et y répondre en silence sur l'écran d'à
+côté serait un fichier ouvert que personne ne voit.
 
 L'éditeur externe se déclare par une commande avec `{path}` et `{line}`
 (`code -g {path}:{line}`, `phpstorm --line {line} {path}`,
@@ -966,7 +1063,7 @@ liste garantit — c'est la relecture de la réponse qui clôt une note, pas son
 envoi. Les variables n'y sont pas développées : elles partent telles quelles,
 ce qui garde `notes::prompt` pur et testable.
 
-**Le coffre est surveillé comme le worktree** (`Watcher::watch_dir`, un dossier
+**Le coffre est surveillé comme le worktree** (`Cmd::WatchDir`, un dossier
 sans récursion et sans passer par git). Sans cela, ce que l'agent écrit
 n'apparaîtrait qu'au prochain changement de worktree — un aller sans retour.
 Deux détails s'y paient :
@@ -1179,10 +1276,12 @@ gardent donc leur curseur pendant la frappe.
 ### La répartition du chrome
 
 La barre d'outils ne porte que des **actions** ; ce qui décrit l'endroit où
-l'on est — branche, avance et retard sur l'amont — vit dans la barre d'état.
-Ces informations ne changent presque jamais, et la barre d'état ne portait
-qu'un message épisodique, donc restait vide la plupart du temps pendant que la
-barre du haut débordait.
+l'on est — l'écran, la branche, l'avance et le retard sur l'amont — vit dans la
+barre d'état. Ces informations ne changent presque jamais, et la barre d'état
+ne portait qu'un message épisodique, donc restait vide la plupart du temps
+pendant que la barre du haut débordait. C'est aussi ce qui lui a valu le choix
+de l'écran, plutôt qu'une seconde barre juste au-dessus d'elle — voir « Les
+sous-applications ».
 
 **Une action va où se fait le geste dont elle est la fin.** `fetch`, `pull` et
 `push` vivent donc dans la barre du panneau « Modifications » et non en haut de
@@ -1346,6 +1445,74 @@ la seule qui ne mente pas quand l'apparence suit le système.
 Le chargement du registre est asynchrone : au premier `apply`, le thème choisi
 n'y est pas encore, d'où la ré-application dans le rappel de `watch_dir`.
 
+### Les sous-applications
+
+Claudhub fait quatre métiers qui n'ont presque rien en commun : relire un
+diff, retoucher un fichier, interroger une base, dépouiller une erreur. Tant
+qu'ils partageaient une seule fenêtre, chacun payait la place des trois
+autres — huit onglets au centre dont on n'en regarde jamais que deux, et un
+panneau central qui changeait de nature selon le dernier geste.
+
+Il y a donc quatre **écrans** (`ui::workspace::Workspace`) : Revue, Édition,
+Bases, Sentry. On passe de l'un à l'autre par la barre d'état, ou par `Alt+1`
+à `Alt+4`.
+
+**Un dock par écran, et non un dock dont le centre change.** Chacun a ses
+panneaux, ses onglets et ses tailles, mémorisés séparément : régler la revue
+ne déplace plus rien sur l'écran des bases. Les quatre sont **construits au
+démarrage** et non à la première visite — un dock se bâtit avec `window`, et le
+faire au rendu reviendrait à créer des entités au milieu d'une frame ; le coût
+est une vingtaine de panneaux, qui ne portent aucun état.
+
+**Deux vues sont partout : les dépôts et les terminaux.** La première dit *où*
+l'on travaille — le choix vaut pour les quatre écrans —, la seconde est ce à
+quoi on parle pendant qu'on regarde n'importe lequel d'entre eux. Ce sont les
+deux seuls panneaux instanciés une fois **par dock** : un panneau n'appartient
+qu'à une aire à la fois, et un seul dock est affiché.
+
+**Le panneau central cesse d'être partagé** : le diff appartient à la revue,
+l'éditeur à l'édition, la console SQL aux bases. C'est ce que la découpe achète
+de plus visible, et le titre de l'onglet redevient une constante.
+
+Cinq points qui ne se devinent pas :
+
+- **Rien à faire en changeant d'écran que de changer de dock.** L'état — le
+  worktree choisi, le fichier ouvert, la requête en cours — vit dans
+  `ClaudhubApp` et non dans les panneaux : il est donc le même des quatre
+  côtés, et c'est ce qui rend la bascule instantanée.
+- **Un geste qui ouvre quelque chose emmène sur son écran.** Ouvrir un fichier
+  bascule sur « Édition », ouvrir une console sur « Bases ». Le geste vient
+  parfois d'ailleurs — une ligne de diff, le menu d'une table —, et y répondre
+  en silence sur l'écran d'à côté serait un travail fait que personne ne voit.
+- **Les tailles d'une division se donnent toutes, et ici ça se paie
+  vraiment.** Un `None` vaut cent pixels dans l'état enregistré, et la pile
+  répartit **au prorata** de ce qu'elle y lit : un centre décrit
+  `[None, 220]` s'affiche à 31 / 69 au lieu de 76 / 24. La disposition d'un
+  écran qu'on n'a jamais ouvert n'est jamais mesurée — elle garde ses valeurs
+  de construction jusqu'à la première visite —, si bien que le défaut mal
+  écrit se voyait sur trois écrans sur quatre. Les largeurs se donnent sur
+  celle du **centre** et non de la fenêtre, pour la même raison de prorata.
+- **Le choix de l'écran vit dans la barre d'état**, à son extrémité gauche, et
+  non dans une barre à lui. Les deux se suivaient, hautes de trente pixels à
+  elles deux pour porter quatre boutons et un nom de branche — deux bandeaux
+  gris empilés sous la fenêtre, là où le dock se bat pour chaque ligne. Elles
+  disent d'ailleurs la même chose : *où* l'on est. La branche, l'avance sur
+  l'amont et l'écran regardé sont trois façons de répondre, et elles se lisent
+  d'un coup d'œil sur une seule ligne. La barre passe donc à
+  `theme::toolbar_height` : elle porte des boutons désormais, et vingt-deux
+  pixels les feraient déborder. Elle est peinte par la **vue racine** et non
+  par le panneau des dépôts — un panneau se glisse ailleurs et se masque, et
+  la navigation ne peut pas partir avec lui.
+- **L'écran actif est plein, les autres en contour.** L'état « sélectionné »
+  d'un `ButtonGroup` en contour n'est qu'un fond à peine plus clair, invisible
+  sur la moitié des thèmes — c'est le constat qui avait déjà décidé du choix
+  du moteur d'une connexion, et « où suis-je » est exactement la question que
+  cette barre doit répondre sans qu'on la cherche.
+
+L'écran qu'on regardait en fermant revient à l'ouverture. Il est retenu dans
+`layout.json` et non dans les réglages : c'est l'état d'une fenêtre, au même
+titre que la place des panneaux, pas une préférence qu'on écrit à la main.
+
 ### Le dock
 
 La disposition appartient à `gpui_component::dock` : c'est lui qui gère le
@@ -1362,17 +1529,12 @@ Rendre depuis un `update` sur `ClaudhubApp` est licite : le rendu d'une vue enfa
 a lieu *après* que la fermeture de rendu du parent a rendu la main, donc hors
 de cet emprunt.
 
-Quatre pièges, tous rencontrés :
+Six pièges, tous rencontrés :
 
-- **`DockItem::split_with_sizes` de gpui-component 0.5.1 ajoute chaque panneau
-  deux fois** — deux boucles identiques dans le même corps — et la disposition
-  obtenue n'est pas celle qu'on décrit. D'où `ui/layout.rs`, qui refait la
-  fonction correctement.
-- **Un panneau sans `StackPanel` parent est verrouillé.**
-  `TabPanel::is_locked` rend vrai quand `stack_panel` est `None`, et rien ne se
-  glisse ni ne s'accueille plus. S'être passé de `split` pour contourner le
-  point précédent avait donc supprimé le glissement en entier : tout panneau
-  doit être enveloppé, fût-ce dans un conteneur d'un seul élément (`wrap`).
+- **Un panneau sans pile parente est verrouillé.** `is_locked` rend vrai quand
+  le groupe n'a pas de pile au-dessus de lui, et rien ne se glisse ni ne
+  s'accueille plus. Tout panneau doit donc être enveloppé, fût-ce dans une
+  division d'un seul élément.
 - **`toggle_dock` ne notifie pas l'aire**, seulement le dock intérieur :
   l'observation qui enregistre ne se déclenche pas toute seule, d'où l'appel
   explicite.
@@ -1382,9 +1544,10 @@ Quatre pièges, tous rencontrés :
   non dans une zone d'accueil — leur pile en compte deux, donc ils se
   glissent. Leur disparition passe alors par `Panel::visible`, pas par un
   repli de zone.
-- **Les tailles d'une division se donnent toutes.** Un `None` laisse la pile
-  partager la hauteur en parts égales, et la proportion demandée passe à la
-  trappe.
+- **Les tailles d'une division se donnent toutes.** Un `None` vaut cent pixels
+  dans l'état, et la pile répartit **au prorata** de ce qu'elle y lit : la
+  proportion demandée passe à la trappe. Voir « Les sous-applications », où
+  cela se voyait sur trois écrans sur quatre.
 - **L'état se relit au moment d'écrire**, pas à l'appel : l'ouverture d'une
   zone est différée d'une frame, et le capturer tout de suite enregistrerait
   l'état d'avant le geste.
@@ -1394,9 +1557,10 @@ Quatre pièges, tous rencontrés :
   `TabPanel::render_toolbar` le pose sans condition, et le retirer demanderait
   de vendorer gpui-component —, d'où l'entrée qu'il porte désormais.
 
-La disposition est enregistrée dans `<config>/layout.json`, à part des
-réglages : c'est l'état d'une fenêtre, volumineux et illisible, pas une
-préférence qu'on écrit à la main. `LAYOUT_VERSION` la fait écarter quand les
+La disposition est enregistrée dans `<config>/layout.json` — **quatre**, une
+par écran, et le nom de celui qu'on regardait —, à part des réglages : c'est
+l'état d'une fenêtre, volumineux et illisible, pas une préférence qu'on écrit à
+la main. `LAYOUT_VERSION` la fait écarter quand les
 panneaux changent de nom — reconstruire à partir de noms inconnus donnerait une
 fenêtre pleine de cadres vides. Les panneaux se déclarent au registre du dock
 (`panels::register`), sans quoi une disposition relue ne saurait pas les
@@ -1416,7 +1580,8 @@ dupliquer là ferait deux chemins pour un même geste. Masquer, lui, ne parle pa
 du contenu du panneau mais de sa place dans la fenêtre, et c'est le dock qui la
 tient.
 
-On revient par le **menu principal**, sous-menu « Vues » (`panels::VIEWS`) :
+On revient par le **menu principal**, sous-menu « Vues »
+(`Workspace::views`) :
 une vue masquée n'a plus d'onglet, donc plus rien à cliquer, et ce sous-menu
 est du même coup le seul endroit qui dise ce que la fenêtre ne montre pas.
 
@@ -1439,7 +1604,10 @@ Cinq points qui ne se devinent pas :
   valeur initiale se lit donc dans les réglages (`visible_at_startup`), et
   l'observation prend le relais. Un changement émet `PanelEvent::LayoutChanged`
   — c'est l'aire, pas le panneau, qui fait disparaître un onglet.
-- **`VIEWS` est bâtie sur les constantes `Panel::NAME`**, pas sur des
+- **La liste est celle de l'écran courant**, et non les onze de la fenêtre :
+  masquer « Console SQL » depuis la revue ne ferait rien voir changer, et une
+  entrée sans effet se lit comme une entrée cassée.
+- **Elle est bâtie sur les constantes `Panel::NAME`**, pas sur des
   littéraux : un nom recopié se serait désaccordé au premier renommage, et un
   nom qui ne désigne plus rien ne masque plus rien, en silence. Les conflits
   n'y sont pas — leur visibilité se décide toute seule, et les masquer
@@ -1592,6 +1760,275 @@ Trois règles à respecter :
 Le relevé de `[status] up` et de `[open]` est une commande shell par worktree :
 **file de fond uniquement**, à la période des résumés, jamais devant un diff
 demandé.
+
+### L'exécuteur asynchrone
+
+`runtime::executor` tient un runtime tokio multi-thread, démarré au premier
+usage. Claudhub reste un programme à threads — les workers consomment des
+`Cmd` et lancent des sous-processus git, parce qu'un `fork` bloque de toute
+façon — et cet exécuteur **s'ajoute** à côté, pour les bibliothèques qui n'ont
+pas d'interface bloquante.
+
+La première est `sqlx`. Ce qu'il apporte et qu'un pilote bloquant ne pouvait
+pas donner : un **vrai délai** (un futur qu'on laisse tomber s'annule), et une
+seule pile pour ce qui viendra — un client HTTP asynchrone pour Sentry, des
+sous-processus git lancés de front (`tokio::process`), tout ce qui voudra de
+l'asynchrone le trouvera ici plutôt que d'amener un second exécuteur.
+
+Trois règles :
+
+- **Le pont est `block_on`, et il est à un seul endroit** : le worker qui
+  traite la commande. C'est ce qui garde `runtime::handle` synchrone et pur —
+  il rend un `Vec<Evt>`, il ne connaît pas le canal, et il se teste. Un worker
+  qui attend un futur attend exactement comme il attendait `git`.
+- **Jamais depuis le thread d'interface.** `block_on` y figerait la fenêtre,
+  ce qui est précisément ce que le protocole `Cmd`/`Evt` existe pour éviter ;
+  gpui a son propre exécuteur pour ce dont la vue a besoin.
+- **Deux threads, et non le nombre de cœurs** que tokio prend par défaut : ce
+  qui tourne dessus attend une socket, il n'y a pas de calcul à répartir, et
+  une machine à seize cœurs n'a aucune raison de porter seize threads
+  endormis. C'est aussi ce qui borne la concurrence vers un serveur qu'on ne
+  veut pas inonder.
+
+### Les bases de données
+
+Deux surfaces : un **arbre** à gauche — connexion, base, table, colonne — et
+une **console SQL** au centre du même écran. C'est l'explorateur de
+PhpStorm, et le geste est le même : on déplie ce qu'on cherche, on interroge la
+table qu'on a trouvée. Le port de ce que le fork Zed d'Acetics ajoute à
+`database_panel`.
+
+**Un seul pilote, `sqlx`**, pour SQLite comme pour MySQL et MariaDB — et le
+même modèle pour le troisième moteur qu'on ajouterait : une variante
+d'`Engine`, un module à côté, et rien à changer ni au protocole ni aux vues.
+Il est asynchrone de bout en bout, d'où l'exécuteur partagé (voir plus bas).
+
+**`NULL` n'est pas la chaîne « NULL ».** Une valeur de résultat est un
+`db::Cell`, c'est-à-dire un `Option<String>`, et une colonne `TEXT` contient
+couramment le mot. Les confondre se paie trois fois : la grille les affiche
+pareil, l'export CSV écrit `NULL` là où un champ vide est attendu, et la copie
+sort un mot qui ne veut plus rien dire une fois collée ailleurs.
+
+**Une connexion par requête, jamais gardée.** Un panneau qui tient une
+connexion ouverte sur un serveur qu'on n'interroge plus occupe un descripteur
+et un processus côté serveur, et découvre la coupure du réseau au pire moment.
+Un `connect` coûte quelques millisecondes en local.
+
+**Une file à elles**, et deux workers. Ni celle des lectures — un `SELECT`
+malheureux y emporterait un worker sur trois et le diff attendrait derrière —,
+ni celle du réseau : une requête de trente secondes retarderait un `fetch`, et
+un `fetch` lent retarderait la lecture d'un schéma. Deux workers parce que
+déplier une base en demande plusieurs à la fois — ses tables, puis toutes ses
+colonnes — et qu'ils attendent une socket, pas un cœur.
+
+**Un délai qui annule vraiment.** `tokio::time::timeout` laisse tomber le
+futur de la requête, et le pilote ferme la connexion en cours de route. C'est
+ce qu'un pilote bloquant ne sait pas faire : il faut le convaincre de
+s'arrêter par un moyen qui lui est propre — un rappel de progression pour
+SQLite, un délai de socket pour MySQL — et ce qu'il n'a pas prévu ne
+s'interrompt pas du tout. Le délai enveloppe le **geste entier** et non chaque
+requête : une introspection en enchaîne plusieurs, et c'est la lecture du
+schéma qu'on abandonne, pas sa troisième requête.
+
+**SQLite est ouvert en lecture seule.** On interroge une base de
+développement pendant qu'on relit le code qui l'écrit, et un `DELETE` parti
+d'un doigt qui a glissé n'y est jamais un service ; c'est le moteur qui
+refuse, ce qui vaut mieux qu'un filtre à nous sur le texte de la requête — on
+ne devine pas ce qu'une requête fait en la lisant. Pour MySQL, la seule
+barrière qui tienne est celle du compte de connexion : en poser une seconde
+ici interdirait un `UPDATE` que l'utilisateur a le droit de faire.
+
+**Les connexions se déclarent dans les réglages**, comme les profils d'agent :
+c'est le deuxième niveau du système d'extension. Une connexion n'appartient pas
+à un dépôt — on relit un projet dans cinq worktrees et la base de
+développement est la même — d'où `Settings::databases` et non le magasin
+d'état.
+
+Trois choses à savoir sur ce formulaire, et chacune vient d'un essai raté :
+
+- **La table est un `SettingItem::render` et non un `SettingItem::new`**, seule
+  de toute la fenêtre. Un item ordinaire met son libellé dans une colonne et
+  son champ dans ce qui reste — quatre cents pixels, taillés pour une case à
+  cocher — et une connexion en demande cinq. Le premier essai posait une
+  largeur en dur : elle débordait de la colonne, et c'est le sélecteur de
+  moteur qui sortait de l'écran.
+- **`min_w_0` sur chaque champ élastique.** La taille minimale d'un élément
+  flex vaut celle de son contenu, et une saisie ne descend pas sous la
+  sienne : sans lui, une ligne étroite pousse ses voisins dehors au lieu de
+  les rétrécir. Le même piège que celui des barres de défilement.
+- **Le moteur se choisit par deux boutons, plein contre contour.** Un menu
+  déroulant cache le choix derrière un clic, et l'état « sélectionné » de deux
+  boutons de même variante ne se lit pas — or « lequel des deux est actif »
+  est exactement la question qu'on se pose en arrivant. Le bouton du panneau
+  ouvre d'ailleurs les réglages **sur cette page** (`open_settings_at`) : la
+  page se retient au moment où on l'ajoute à la liste, jamais par un indice
+  écrit en dur qui désignerait la voisine dès la première page insérée avant
+  elle.
+
+**Le mot de passe voyage dans la `Cmd`**, ce qui déroge à la règle du jeton
+Sentry, et la dérogation est bornée : `db::Connection` a un `Debug` **écrit à
+la main** qui le masque, donc rien ne l'écrit dans une trace. Le faire relire
+au worker coûterait un identifiant de connexion à faire voyager, une relecture
+du fichier de réglages, et — l'écriture étant différée d'une demi-seconde — une
+connexion qu'on vient de saisir interrogée avec ce qu'elle contenait avant.
+
+Cinq points de l'arbre qui ne se devinent pas :
+
+- **Chaque niveau se charge à son dépliage**, et un `Load` à quatre états
+  (`Idle`, `Loading`, `Ready`, `Failed`) les distingue. Confondre « pas encore
+  demandé » et « en route » relance la commande à chaque frame ; les deux se
+  dessinent d'ailleurs différemment — un nœud vide, une roue qui tourne.
+- **L'échec vit dans l'événement, pas dans la barre d'état.** Les `Evt::Db*`
+  portent un `DbResult`, si bien qu'une erreur s'affiche **sous le nœud qui
+  l'a demandée**. Un `Evt::Failed` l'aurait mise dans la barre d'état, où le
+  message suivant l'efface, et rien n'aurait distingué la ligne en erreur de
+  la ligne pas encore chargée.
+- **Le filtre indexe ce qui est déjà ouvert, jamais ce qui ne l'est pas.**
+  Taper trois lettres dans une recherche ne doit pas ouvrir une connexion vers
+  un serveur de production. « Tout indexer » (l'éclair de la barre) est le
+  geste qui se connecte partout, et il est explicite ; il avance par
+  `db_continue_indexing`, appelé à chaque lecture qui arrive, et **ne retente
+  jamais** ce qui a échoué — ce serait une boucle.
+- **Les colonnes d'une base se lisent d'un coup** (`Cmd::DbAllColumns`) : une
+  commande par table ferait trois cents connexions sur un schéma Laravel. La
+  même réponse remplit l'arbre **et** l'index de complétions de la console.
+- **Une entrée ne porte que des indices.** C'est la règle de `ui::tree` pour la
+  même raison : la reconstruction est fréquente, et cloner le nom de chaque
+  colonne d'un schéma entier à chaque fois est ce qu'une frame ne peut pas
+  payer. L'arbre a son propre contexte clavier (`ClaudhubDb`), comme
+  l'explorateur de projet et pour la même raison — deux jeux de flèches sur la
+  même touche ne se départageraient pas.
+
+### La console SQL
+
+**Elle est le centre de l'écran des bases** (`ConsolePanel`). Elle a longtemps
+pris la place du diff, faute d'un endroit à elle : le dock de gpui-component ne
+sait pas activer un onglet depuis le code (`TabPanel::set_active_ix` est
+privé), si bien qu'un panneau ouvert ailleurs se serait ouvert sans se montrer.
+Les écrans lèvent la contrainte — chacun a son dock, et changer d'écran est un
+geste à nous. Ouvrir une console **bascule sur l'écran des bases**.
+
+**Une seule console à la fois.** Zed en ouvre une par onglet ; ici la place
+centrale est unique, et deux consoles superposées demanderaient une barre
+d'onglets à nous.
+
+**Une fenêtre sur le résultat, et non « la page *n* ».** Elle commence à
+`offset`, compte `shown` lignes, et **grandit** quand le défilement atteint le
+bas (`TableDelegate::load_more`) : on parcourt un million de lignes sans jamais
+en charger plus qu'on n'en a lu, et sans le saut de contexte qu'un « page
+suivante » impose à l'œil au milieu d'une lecture. Les boutons de la barre
+déplacent la fenêtre d'un bloc, le défilement la prolonge — et dans les deux
+cas c'est le même envoi, à un `offset` différent. Prolonger n'appelle donc
+**pas** `refresh` : il remettrait le défilement en haut, ce qui est le
+contraire de ce qu'on vient de demander.
+
+Neuf points :
+
+- **La pagination se fait en lisant, pas en réécrivant la requête.** Ajouter un
+  `LIMIT` à ce que l'utilisateur a écrit demanderait de comprendre sa requête —
+  un `LIMIT` déjà présent, une union, une procédure — et de la réécrire, ce qui
+  est le plus sûr moyen de lui faire exécuter autre chose que ce qu'il lit. Les
+  lignes qui précèdent la page sont donc produites par le moteur puis jetées ;
+  celles qui suivent ne sont jamais lues.
+- **Le tri est fait par le moteur, jamais sur la page.** Trier en mémoire ce
+  qu'on a sous les yeux mentirait dès la deuxième page : les mille lignes
+  chargées seraient rangées entre elles, et la plus grande du résultat
+  resterait à la page suivante. `db::order_by` **enveloppe** donc la requête
+  (`SELECT * FROM (…) AS claudhub_result ORDER BY 3 DESC`) — une table dérivée
+  ne change pas le sens de ce qu'elle contient, là où insérer un `ORDER BY`
+  demanderait de comprendre la requête. On ordonne par le **rang** de la
+  colonne : un rang ne se cite pas, alors qu'un nom demanderait les règles de
+  guillemets de chaque moteur, et une colonne calculée s'appelle `count(*)`.
+  La parenthèse fermante est sur sa propre ligne, hors de portée d'un
+  commentaire `--` terminant la requête. Ce qu'on ne sait pas envelopper n'est
+  **pas triable du tout** (`db::can_order`) plutôt que trié faux : plusieurs
+  instructions, autre chose qu'une lecture, ou deux colonnes de même nom — ce
+  qu'un `SELECT * FROM a JOIN b` produit, et que MySQL refuse dans une table
+  dérivée. Les en-têtes perdent alors leur flèche.
+- **L'enchaînement du tri est le nôtre, pas celui de la table.** Celui de
+  gpui-component part du décroissant, ce qui surprend sur une grille, et il
+  vit dans un état qu'un `refresh` reconstruit depuis `column()` à chaque
+  résultat. Une seule des deux mémoires peut faire foi, et c'est celle de la
+  console — c'est elle qui décide de la requête envoyée. La flèche suit le
+  geste et non la réponse : une requête met parfois une seconde, et un en-tête
+  qui ne bouge pas se lit comme un clic perdu.
+- **Un identifiant d'envoi, et non la requête, écarte le résultat en retard.**
+  Changer de page, trier et prolonger rejouent tous le **même texte** : les
+  comparer ne distinguerait pas la réponse d'un geste de celle du geste qui
+  l'a remplacé. `Cmd::DbQuery` porte donc un compteur qui ne recule jamais.
+- **La sélection de cellules est la nôtre.** Celle de gpui-component n'en
+  connaît qu'une à la fois (`cell_selectable`, `selected_cell`), or ce qu'on
+  copie d'une grille de résultats est presque toujours une colonne ou un bloc.
+  Deux mécanismes se disputeraient le clic et la couleur de fond : il n'y en a
+  donc qu'un — clic, glissement, Maj+clic, `Ctrl+A` —, et `Results::selection`
+  garde une **ancre et un curseur** plutôt que deux coins ordonnés, l'ancre
+  étant ce qu'un Maj+clic conserve. Deux corollaires : la colonne est déclarée
+  sans rembourrage (`Column::p_0`) pour que ce soit **notre** élément qui
+  remplisse la cellule — sinon huit pixels de chaque bord ne répondent pas au
+  clic — et un clic dans la grille **prend le focus**, sans quoi le `Ctrl+C`
+  qui suit partirait à qui l'avait et `ClaudhubQuery` ne serait pas dans la
+  pile de contextes.
+- **Le presse-papiers prend des tabulations, le fichier des virgules.** Un
+  presse-papiers se **colle** — dans une grille de tableur, dans un message —
+  où la tabulation garde les colonnes et où la virgule ne fait qu'une seule
+  cellule d'une ligne entière ; un fichier s'**ouvre**, et ce qui l'ouvre sait
+  analyser du CSV. Une cellule seule, elle, sort telle quelle : c'est une
+  valeur qu'on va coller dans une autre requête, pas un tableau. Un clic droit
+  **hors** de la sélection la remplace, dedans il la garde — sans quoi le menu
+  copierait la seule cellule qu'on vient de viser.
+- **L'export rejoue la requête et écrit au fil de l'eau.** Exporter ce qui est
+  affiché n'exporterait qu'une fenêtre — ce n'est jamais ce qu'on veut d'un
+  export — et tout charger pour l'écrire ensuite ferait tenir un million de
+  lignes dans le tas pour les recopier aussitôt. Le tri en vigueur part avec :
+  on exporte ce qu'on lit, dans l'ordre où on le lit. Le délai est le sien
+  (`db::EXPORT_TIMEOUT`), dix fois celui d'une requête, qui ne porte que sur
+  une page.
+- **La durée est mesurée dans le worker.** Depuis la vue, elle comprendrait
+  l'attente dans la file et le prochain tour de la pompe d'événements — une
+  requête d'une milliseconde passerait pour une requête de vingt.
+- **L'éditeur et la grille se partagent la hauteur, et le partage se règle**
+  (`v_resizable`) : on écrit une requête de vingt lignes, puis on lit trois
+  cents lignes de résultat, et aucune proportion figée ne convient aux deux.
+- **La durée est mesurée dans le worker.** Depuis la vue, elle comprendrait
+  l'attente dans la file et le prochain tour de la pompe d'événements — une
+  requête d'une milliseconde passerait pour une requête de vingt.
+- **La table est une entité créée une fois** (`DataTable` de gpui-component,
+  avec son délégué). La reconstruire à chaque résultat perdrait les largeurs
+  qu'on vient de régler à la souris et remettrait le défilement en haut au
+  milieu d'une pagination. Les largeurs de départ sont déduites des cinquante
+  premières lignes seulement : une fenêtre en compte mille, et la colonne la
+  plus large de la fenêtre n'est pas celle qu'on regarde — et elles ne sont
+  **pas** recalculées quand la fenêtre grandit, ce qui ferait bouger les
+  colonnes sous les yeux de qui défile. Sa molette est lissée comme partout
+  ailleurs, par `ClaudhubApp::smoothed` et non `scrolled` : la table peint ses
+  propres barres, et lui en poser une troisième en ferait deux à la même place.
+- **Tout geste de la table repart vers l'application en différé.** Trier,
+  prolonger, copier : la table appelle son délégué au milieu d'un `update` sur
+  elle-même, et l'application répond en remplaçant ce délégué — donc en
+  réempruntant l'entité qu'on est en train d'emprunter, ce que gpui refuse par
+  une panique. D'où `Results::report`, et la référence **faible** à
+  l'application qu'il porte, comme les panneaux du dock.
+- **Le fournisseur de complétions filtre lui-même.** La liste de
+  gpui-component affiche ce qu'on lui rend, en surlignant le préfixe, sans rien
+  écarter : un schéma de trois cents tables proposerait sinon trois cents
+  lignes à la première lettre tapée. Et le remplacement est donné en clair
+  (`text_edit`), parce que la plage de repli de l'éditeur part du mot
+  déclencheur — qui englobe le `users.` d'une colonne qualifiée, et l'on
+  remplacerait la table par sa colonne.
+- **`Ctrl+Entrée` est la touche de la requête**, c'est-à-dire celle du commit.
+  Les deux ne peuvent pas coexister : la console déclare son contexte
+  (`ClaudhubQuery`) et la liaison du commit l'exclut explicitement, plutôt que
+  de se fier à une résolution par profondeur que personne ne relit. `Ctrl+C` et
+  `Ctrl+A` sont dans le même cas face à la copie du diff, qui occupe la même
+  place à l'écran : `COPY_PREDICATE` exclut la console, et
+  `QUERY_COPY_PREDICATE` exclut les champs de saisie — l'éditeur de requête
+  garde sa propre copie, comme le champ de message de commit.
+
+Ce qu'il n'y a pas, et pourquoi : **aucun cache de schéma sur le disque**. Zed
+en garde un dans son magasin clé-valeur pour que le filtre voie tout dès le
+démarrage ; ici le magasin d'état fait un kilo-octet et se lit à la main, et un
+schéma indexé en pèserait mille fois plus. L'index vit donc pour la session, et
+« tout indexer » le refait en une commande par base.
 
 ### Les domaines de revue
 
@@ -1850,10 +2287,14 @@ un point de départ souvent meilleur qu'une intention — il porte déjà la tra
 et le fichier fautif — et le geste utile est de le confier à un agent avec le
 code autour des frames de l'application.
 
-- **Le jeton ne circule pas dans une `Cmd`.** Le worker le lit lui-même
-  (`SENTRY_TOKEN`, puis les réglages) : un secret n'a rien à faire dans une
-  énumération qu'on journalise. Le fichier de réglages est en 0600, ce qui ne
-  fait pas de lui un coffre — d'où la priorité donnée à l'environnement.
+- **Le jeton voyage en `Secret`**, un newtype dont le `Debug` écrit à la main
+  masque la valeur — même motif que le mot de passe de `db::Connection` : une
+  `Cmd` se journalise, un secret non. Il voyage parce que le worker tourne
+  parfois dans un autre processus (le serveur WSL), dont le fichier de
+  réglages n'est pas le nôtre ; `SENTRY_TOKEN` garde la priorité **côté
+  worker**, c'est l'environnement du serveur qui fait foi. La commande de
+  l'éditeur externe et celle du message de commit voyagent pour la même
+  raison, dans leurs `Cmd` respectives.
 - **L'organisation est un réglage, le projet appartient au dépôt**
   (`Store::repos`) : deux dépôts d'une même organisation n'ont pas les mêmes
   erreurs.
@@ -1896,7 +2337,14 @@ parce que Ctrl+C est pris.
 n'en tient lieu. `Ctrl+1` à `Ctrl+9` désignent donc des **worktrees**, ce qui
 est de toute façon le geste central — et leur ordre est celui de la barre
 latérale, replis compris, sans quoi le même chiffre ne désignerait pas le même
-worktree d'un pliage à l'autre.
+worktree d'un pliage à l'autre. Les **écrans**, eux, s'atteignent par
+`Alt+1` à `Alt+4`, et **pas** par `Ctrl+Maj+1` : gpui *retire* le Maj des
+modificateurs quand la touche est un caractère sans casse — « on ne garde Maj
+que pour les majuscules » —, si bien qu'un `secondary-shift-1` arrive comme
+`ctrl-&` ou `ctrl-#` selon la disposition du clavier et ne se déclenche jamais,
+en silence. Alt est conservé et la touche reste le chiffre. C'est valable
+jusque dans le terminal : ce qu'on lui prend est le préfixe d'argument
+numérique de readline, pas un caractère de contrôle.
 
 L'aide se lit dans `shortcuts::sheet`, qui **réunit sur une ligne** les
 plusieurs façons de faire un même geste : `F5` et `Ctrl+R`, `Ctrl+1` à `Ctrl+9`
@@ -1938,7 +2386,8 @@ niveaux, du moins cher au plus cher :
    le premier exemple : un nom, une commande, un environnement. Le message de
    commit proposé en est le second, et il montre la forme la plus économe :
    une ligne de commande, le texte par l'entrée standard, la réponse par la
-   sortie. Pour ce qui n'est pas propre à un projet.
+   sortie. Les connexions aux bases de données en sont le troisième. Pour ce
+   qui n'est pas propre à un projet.
 3. **Des extensions wasm, à la Zed — écarté.** Rien dans les besoins listés ne
    le demande, et le coût est sans commune mesure.
 

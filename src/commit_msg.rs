@@ -148,7 +148,7 @@ pub fn suggest(worktree: &Path, command_line: &str) -> Result<String> {
 /// kilo-octets d'un tube. Écrire d'abord puis attendre donnerait l'interblocage
 /// classique — le processus attend qu'on lise, nous attendons qu'il finisse.
 fn ask(worktree: &Path, command_line: &str, prompt: &str) -> Result<String> {
-    let mut parts = crate::ui::split_command(command_line).into_iter();
+    let mut parts = crate::cmdline::split_command(command_line).into_iter();
     let program = parts
         .next()
         .ok_or_else(|| anyhow!("aucune commande de génération de message dans les réglages"))?;

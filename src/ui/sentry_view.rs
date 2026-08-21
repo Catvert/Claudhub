@@ -15,7 +15,7 @@ use gpui_component::{
     h_flex, v_flex, ActiveTheme, Disableable, Sizable,
 };
 
-use crate::runtime::Cmd;
+use crate::runtime::{Cmd, Secret};
 use crate::sentry::{Event, Issue};
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
@@ -79,10 +79,12 @@ impl ClaudhubApp {
         }
         self.sentry.loading = true;
         self.sentry.asked = true;
+        let token = Secret(Settings::global(cx).sentry_token.clone());
         self.git.send(Cmd::LoadIssues {
             org,
             project,
             query,
+            token,
         });
         cx.notify();
     }
@@ -113,7 +115,8 @@ impl ClaudhubApp {
         }
         self.sentry.selected = Some(id.clone());
         self.sentry.event = None;
-        self.git.send(Cmd::LoadIssueEvent { issue: id });
+        let token = Secret(Settings::global(cx).sentry_token.clone());
+        self.git.send(Cmd::LoadIssueEvent { issue: id, token });
         cx.notify();
     }
 
@@ -123,7 +126,8 @@ impl ClaudhubApp {
         let event = self.sentry.event.as_ref()?;
         let id = self.sentry.selected.as_deref()?;
         let issue = self.sentry.issues.iter().find(|issue| issue.id == id)?;
-        Some(crate::sentry::prompt(issue, event, worktree))
+        let intro = crate::tr!("sentry-prompt-intro", { title: issue.title.clone() });
+        Some(crate::sentry::prompt(&intro, issue, event, worktree))
     }
 
     /// Confie l'issue à l'agent du worktree courant.

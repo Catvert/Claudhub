@@ -14,7 +14,7 @@ use anyhow::Result;
 use super::git;
 
 /// Un commit tel que la liste l'affiche.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Commit {
     pub id: String,
     pub short: String,
@@ -35,7 +35,7 @@ impl Commit {
 }
 
 /// Ce que l'historique montre.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LogRange {
     /// L'historique du checkout courant.
     Head,
@@ -154,7 +154,7 @@ fn parse_refs(text: &str) -> Vec<String> {
 }
 
 /// La place d'un commit dans le graphe.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct GraphRow {
     /// Colonne où se trouve la puce du commit.
     pub column: usize,

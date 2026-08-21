@@ -202,6 +202,10 @@ impl Terminal {
         // Repère pour les scripts et les invites : on est dans Claudhub.
         env.insert("CLAUDHUB".into(), "1".into());
 
+        // Sous Linux le repli `..Default::default()` ne couvre aucun champ,
+        // d'où l'allow ; sous Windows il fournit `escape_args`, sans lequel le
+        // littéral ne compile pas.
+        #[allow(clippy::needless_update)]
         let pty_options = tty::Options {
             shell: options
                 .command
@@ -211,6 +215,7 @@ impl Terminal {
             // perdue — c'est-à-dire l'erreur qu'on cherchait à lire.
             drain_on_exit: true,
             env,
+            ..Default::default()
         };
 
         let config = Config {

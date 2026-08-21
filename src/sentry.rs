@@ -29,7 +29,7 @@ const DEFAULT_HOST: &str = "https://sentry.io";
 const TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Une issue, réduite à ce que le panneau affiche.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Issue {
     pub id: String,
     /// `ValueError`, `TypeError`… ce que Sentry appelle le type.
@@ -45,7 +45,7 @@ pub struct Issue {
 }
 
 /// Une ligne d'une pile d'appels.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Frame {
     /// Chemin tel que Sentry le connaît. Il n'est pas toujours relatif au
     /// dépôt — d'où `Frame::repo_path`, qui fait de son mieux.
@@ -84,7 +84,7 @@ impl Frame {
 }
 
 /// L'événement le plus récent d'une issue : sa pile et son message.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Event {
     pub message: String,
     /// Les frames, de la plus ancienne à la plus récente — l'ordre de Sentry,
@@ -255,9 +255,12 @@ fn collect_frames(stacktrace: Option<&serde_json::Value>, out: &mut Vec<Frame>) 
 /// Les frames hors application sont **citées sans leur code** : une pile de
 /// framework fait cent lignes, et ce n'est pas là qu'est le bug. Fonction
 /// libre et testée, comme celle des notes : c'est la pièce à verrouiller.
-pub fn prompt(issue: &Issue, event: &Event, worktree: &Path) -> String {
+///
+/// L'introduction arrive traduite de la vue : `tr!` appartient à la feature
+/// `ui`, et ce module doit compiler dans le serveur headless.
+pub fn prompt(intro: &str, issue: &Issue, event: &Event, worktree: &Path) -> String {
     let mut out = String::new();
-    out.push_str(&crate::tr!("sentry-prompt-intro", { title: issue.title.clone() }));
+    out.push_str(intro);
     out.push_str("\n\n");
     if !issue.culprit.is_empty() {
         out.push_str(&issue.culprit);
@@ -479,7 +482,12 @@ mod tests {
     fn the_prompt_lists_the_stack_and_quotes_only_the_application_code() {
         let issue = parse_issues(ISSUES).unwrap().remove(0);
         let event = parse_event(EVENT).unwrap();
-        let text = prompt(&issue, &event, Path::new("/nulle-part"));
+        let text = prompt(
+            "Voici une erreur Sentry.",
+            &issue,
+            &event,
+            Path::new("/nulle-part"),
+        );
         // Toute la pile, frames de framework comprises : c'est le chemin qui
         // a mené là.
         assert!(text.contains("Kernel.php:141"), "{text}");

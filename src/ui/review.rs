@@ -606,8 +606,11 @@ impl ClaudhubApp {
         if self.suggesting_message.is_some() {
             return;
         }
+        let command = crate::ui::settings::Settings::global(cx)
+            .commit_message_command
+            .clone();
         self.suggesting_message = Some(worktree.clone());
-        self.git.send(Cmd::SuggestMessage { worktree });
+        self.git.send(Cmd::SuggestMessage { worktree, command });
         self.announce(tr!("commit-suggest-running"), cx);
         cx.notify();
     }

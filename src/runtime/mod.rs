@@ -10,6 +10,7 @@
 //! des diffs. Git protège lui-même l'index par un verrou `index.lock` ; deux
 //! écritures concurrentes échouent proprement au lieu de se corrompre.
 
+pub mod executor;
 pub mod protocol;
 pub mod watch;
 
@@ -17,13 +18,19 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-pub use protocol::{Action, Cmd, Evt, WorktreeId};
+pub mod remote;
+pub mod wire;
+
+pub use protocol::{Action, Cmd, Evt, Secret, WorktreeId};
 
 use crate::git::{branch, diff, history, repo, status};
 
 /// Workers dédiés aux lectures : statut, diffs, branches, et les écritures
 /// locales, qui se comptent toutes en millisecondes.
 const READERS: usize = 3;
+
+/// Workers dédiés aux bases de données. Voir `is_db`.
+const DB_WORKERS: usize = 2;
 
 /// Les opérations qui parlent au réseau ont leur propre file.
 ///
@@ -46,6 +53,29 @@ fn is_network(cmd: &Cmd) -> bool {
             | Cmd::Push { .. }
             | Cmd::LoadIssues { .. }
             | Cmd::LoadIssueEvent { .. }
+    )
+}
+
+/// Les bases de données ont leur propre file.
+///
+/// Ni celle des lectures — un `SELECT` malheureux y emporterait un worker sur
+/// trois et le diff attendrait derrière —, ni celle du réseau : une requête de
+/// trente secondes retarderait un `fetch`, et un `fetch` lent retarderait la
+/// lecture d'un schéma. Ce sont deux mondes qui n'ont aucune raison de se
+/// croiser.
+///
+/// Deux workers, parce que déplier un schéma en demande plusieurs à la fois —
+/// les tables d'une base, puis toutes ses colonnes — et qu'ils attendent une
+/// socket, pas un cœur.
+fn is_db(cmd: &Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::DbDatabases { .. }
+            | Cmd::DbTables { .. }
+            | Cmd::DbColumns { .. }
+            | Cmd::DbAllColumns { .. }
+            | Cmd::DbQuery { .. }
+            | Cmd::DbExport { .. }
     )
 }
 
@@ -74,28 +104,90 @@ fn is_long(cmd: &Cmd) -> bool {
     )
 }
 
+/// De quoi parler aux workers, où qu'ils tournent.
+///
+/// `Local` est le mode normal : les files de ce processus. `Remote` est le
+/// fil vers un `claudhub-server` — une seule voie, c'est le serveur qui
+/// refait le tri entre ses files à l'arrivée. Le même `send` pour les deux :
+/// les soixante-dix points d'envoi de la vue n'ont pas à savoir où les
+/// workers vivent.
 pub struct Handle {
-    reads: async_channel::Sender<Cmd>,
-    network: async_channel::Sender<Cmd>,
-    background: async_channel::Sender<Cmd>,
+    inner: HandleInner,
+}
+
+enum HandleInner {
+    Local {
+        reads: async_channel::Sender<Cmd>,
+        network: async_channel::Sender<Cmd>,
+        background: async_channel::Sender<Cmd>,
+        databases: async_channel::Sender<Cmd>,
+        /// La cinquième voie : les ordres de surveillance ne passent par
+        /// aucune file — poser une surveillance est déjà différé dans le
+        /// thread du surveillant, et la faire attendre derrière un diff
+        /// n'aurait pas de sens. `None` quand la surveillance n'a pas pu
+        /// démarrer : les ordres sont alors jetés, et la revue ne se
+        /// rafraîchit qu'à la main.
+        watcher: Option<watch::Watcher>,
+    },
+    Remote(async_channel::Sender<Cmd>),
 }
 
 impl Handle {
-    /// Envoie une commande dans la file qui lui convient. L'échec (canal
-    /// fermé) n'arrive qu'à l'extinction : il n'y a rien à en dire à
-    /// l'utilisateur, dont la fenêtre se ferme.
-    pub fn send(&self, cmd: Cmd) {
-        let queue = if is_network(&cmd) || is_long(&cmd) {
-            &self.network
-        } else if is_background(&cmd) {
-            &self.background
-        } else {
-            &self.reads
-        };
-        if let Err(err) = queue.try_send(cmd) {
-            log::debug!("commande abandonnée : {err}");
+    /// Le manche d'un transport distant : tout part dans la même voie, vers
+    /// le thread qui écrit les trames.
+    pub(crate) fn remote(wire: async_channel::Sender<Cmd>) -> Self {
+        Self {
+            inner: HandleInner::Remote(wire),
         }
     }
+
+    /// Envoie une commande dans la file qui lui convient. L'échec (canal
+    /// fermé) n'arrive qu'à l'extinction — ou, en distant, à la mort du
+    /// serveur, que la vue apprend par `Evt::ServerLost` : rien à dire ici.
+    pub fn send(&self, cmd: Cmd) {
+        match &self.inner {
+            HandleInner::Local {
+                reads,
+                network,
+                background,
+                databases,
+                watcher,
+            } => {
+                let Some(cmd) = route_watch(watcher.as_ref(), cmd) else {
+                    return;
+                };
+                let queue = if is_network(&cmd) || is_long(&cmd) {
+                    network
+                } else if is_background(&cmd) {
+                    background
+                } else if is_db(&cmd) {
+                    databases
+                } else {
+                    reads
+                };
+                send_to(queue, cmd);
+            }
+            HandleInner::Remote(wire) => send_to(wire, cmd),
+        }
+    }
+}
+
+fn send_to(queue: &async_channel::Sender<Cmd>, cmd: Cmd) {
+    if let Err(err) = queue.try_send(cmd) {
+        log::debug!("commande abandonnée : {err}");
+    }
+}
+
+/// Remet les ordres de surveillance au surveillant et rend les autres.
+fn route_watch(watcher: Option<&watch::Watcher>, cmd: Cmd) -> Option<Cmd> {
+    match cmd {
+        Cmd::Watch { worktree } => watcher?.watch(&worktree),
+        Cmd::Unwatch { worktree } => watcher?.unwatch(&worktree),
+        Cmd::WatchDir { dir } => watcher?.watch_dir(&dir),
+        Cmd::UnwatchDir { dir } => watcher?.unwatch_dir(&dir),
+        other => return Some(other),
+    }
+    None
 }
 
 /// Démarre les workers et rend de quoi leur parler et les écouter.
@@ -103,6 +195,7 @@ pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
     let (read_tx, read_rx) = async_channel::unbounded::<Cmd>();
     let (net_tx, net_rx) = async_channel::unbounded::<Cmd>();
     let (bg_tx, bg_rx) = async_channel::unbounded::<Cmd>();
+    let (db_tx, db_rx) = async_channel::unbounded::<Cmd>();
     let (evt_tx, evt_rx) = async_channel::unbounded::<Evt>();
 
     for n in 0..READERS {
@@ -111,13 +204,47 @@ pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
     // Un seul pour le réseau : deux `fetch` simultanés sur le même dépôt se
     // disputeraient le verrou des références sans rien accélérer.
     worker("claudhub-git-net".into(), net_rx, evt_tx.clone());
-    worker("claudhub-scan".into(), bg_rx, evt_tx);
+    worker("claudhub-scan".into(), bg_rx, evt_tx.clone());
+    for n in 0..DB_WORKERS {
+        worker(format!("claudhub-db-{n}"), db_rx.clone(), evt_tx.clone());
+    }
+
+    // La surveillance de fichiers vit ici et non dans la vue : ses lots
+    // deviennent des `Evt::FilesChanged` sur le même canal que tout le reste —
+    // un seul flux à faire passer sur un fil, local ou distant.
+    let watcher = match watch::Watcher::new() {
+        Ok((watcher, changes)) => {
+            let forward = evt_tx.clone();
+            let spawned = std::thread::Builder::new()
+                .name("claudhub-watch-evt".into())
+                .spawn(move || {
+                    while let Ok(paths) = changes.recv_blocking() {
+                        if forward.send_blocking(Evt::FilesChanged { paths }).is_err() {
+                            return;
+                        }
+                    }
+                });
+            if let Err(e) = spawned {
+                log::warn!("relais de surveillance indisponible : {e:#}");
+            }
+            Some(watcher)
+        }
+        Err(e) => {
+            log::warn!("surveillance des fichiers indisponible : {e:#}");
+            None
+        }
+    };
+    drop(evt_tx);
 
     (
         Handle {
-            reads: read_tx,
-            network: net_tx,
-            background: bg_tx,
+            inner: HandleInner::Local {
+                reads: read_tx,
+                network: net_tx,
+                background: bg_tx,
+                databases: db_tx,
+                watcher,
+            },
         },
         evt_rx,
     )
@@ -155,6 +282,23 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
                 message: describe_error(e),
             }],
         },
+        // Le répertoire de lancement : ouvert s'il est un dépôt, silence
+        // sinon — un message d'erreur pour un `claudhub` lancé depuis `~`
+        // serait du bruit.
+        Cmd::OpenIfRepo(path) => {
+            if repo::is_repo(&path) {
+                handle(Cmd::OpenRepo(path))
+            } else {
+                Vec::new()
+            }
+        }
+        // Remises au surveillant par `Handle::send` avant toute file : si
+        // l'une arrive ici, c'est qu'un transport les a fait passer par un
+        // chemin qui ne les route pas encore.
+        Cmd::Watch { .. } | Cmd::Unwatch { .. } | Cmd::WatchDir { .. } | Cmd::UnwatchDir { .. } => {
+            log::debug!("ordre de surveillance arrivé dans un worker");
+            Vec::new()
+        }
         Cmd::RefreshRepo { main } => match (repo::Repo { main: main.clone() }).worktrees() {
             Ok(worktrees) => vec![Evt::Worktrees { main, worktrees }],
             Err(e) => vec![fail(None, Action::Refresh, e)],
@@ -281,8 +425,8 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
                 },
             )
         }),
-        Cmd::SuggestMessage { worktree } => {
-            match crate::commit_msg::suggest(&worktree, &suggest_command()) {
+        Cmd::SuggestMessage { worktree, command } => {
+            match crate::commit_msg::suggest(&worktree, &command) {
                 Ok(message) => vec![Evt::CommitMessage { worktree, message }],
                 Err(e) => vec![fail(Some(worktree), Action::SuggestMessage, e)],
             }
@@ -368,7 +512,8 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
             org,
             project,
             query,
-        } => match sentry_token() {
+            token,
+        } => match crate::sentry::token(&token.0) {
             Some(token) => match crate::sentry::issues(&org, &project, &query, &token) {
                 Ok(issues) => vec![Evt::Issues { issues }],
                 Err(e) => vec![fail(None, Action::Sentry, e)],
@@ -379,7 +524,7 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
                 anyhow::anyhow!("aucun jeton Sentry : SENTRY_TOKEN ou les réglages"),
             )],
         },
-        Cmd::LoadIssueEvent { issue } => match sentry_token() {
+        Cmd::LoadIssueEvent { issue, token } => match crate::sentry::token(&token.0) {
             Some(token) => match crate::sentry::latest_event(&issue, &token) {
                 Ok(event) => vec![Evt::IssueEvent { issue, event }],
                 Err(e) => vec![fail(None, Action::Sentry, e)],
@@ -390,6 +535,99 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
                 anyhow::anyhow!("aucun jeton Sentry : SENTRY_TOKEN ou les réglages"),
             )],
         },
+        Cmd::DbDatabases { connection } => {
+            let key = connection.key();
+            vec![Evt::DbDatabases {
+                key,
+                databases: db_result(executor::block_on(crate::db::databases(&connection))),
+            }]
+        }
+        Cmd::DbTables {
+            connection,
+            database,
+        } => {
+            let key = connection.key();
+            let tables = db_result(executor::block_on(crate::db::tables(
+                &connection,
+                &database,
+            )));
+            vec![Evt::DbTables {
+                key,
+                database,
+                tables,
+            }]
+        }
+        Cmd::DbColumns {
+            connection,
+            database,
+            table,
+        } => {
+            let key = connection.key();
+            let columns = db_result(executor::block_on(crate::db::columns(
+                &connection,
+                &database,
+                &table,
+            )));
+            vec![Evt::DbColumns {
+                key,
+                database,
+                table,
+                columns,
+            }]
+        }
+        Cmd::DbAllColumns {
+            connection,
+            database,
+        } => {
+            let key = connection.key();
+            let columns = db_result(executor::block_on(crate::db::all_columns(
+                &connection,
+                &database,
+            )));
+            vec![Evt::DbAllColumns {
+                key,
+                database,
+                columns,
+            }]
+        }
+        Cmd::DbQuery {
+            connection,
+            database,
+            sql,
+            offset,
+            limit,
+            request,
+        } => {
+            // Mesuré ici : depuis la vue, la durée comprendrait l'attente dans
+            // la file et le prochain tour de la pompe d'événements.
+            let started = std::time::Instant::now();
+            let rows = db_result(executor::block_on(crate::db::query(
+                &connection,
+                database.as_deref(),
+                &sql,
+                offset,
+                limit,
+            )));
+            vec![Evt::DbRows {
+                request,
+                rows,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            }]
+        }
+        Cmd::DbExport {
+            connection,
+            database,
+            sql,
+            path,
+        } => {
+            let rows = db_result(executor::block_on(crate::db::export_csv(
+                &connection,
+                database.as_deref(),
+                &sql,
+                &path,
+            )));
+            vec![Evt::DbExported { path, rows }]
+        }
         Cmd::ListFiles { worktree, ignored } => match repo::list_files(&worktree, ignored) {
             Ok(files) => vec![Evt::ProjectFiles { worktree, files }],
             Err(e) => vec![fail(Some(worktree), Action::Read, e)],
@@ -442,13 +680,11 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
             worktree,
             path,
             line,
-        } => {
-            let template = editor_template();
-            match crate::files::open_external(&worktree, &template, &path, line) {
-                Ok(program) => vec![done(Some(worktree), Action::OpenExternal, program)],
-                Err(e) => vec![fail(Some(worktree), Action::OpenExternal, e)],
-            }
-        }
+            editor,
+        } => match crate::files::open_external(&worktree, &editor, &path, line) {
+            Ok(program) => vec![done(Some(worktree), Action::OpenExternal, program)],
+            Err(e) => vec![fail(Some(worktree), Action::OpenExternal, e)],
+        },
         Cmd::WtLoad { main } => {
             let project = crate::wt::snapshot(&main);
             vec![Evt::WtProject { main, project }]
@@ -565,30 +801,6 @@ fn integrate(main: &Path, branch: &str, base: &str, no_ff: bool) -> Result<Strin
     repo::merge(main, branch, no_ff)
 }
 
-/// Le jeton Sentry, lu **dans le worker** et jamais transporté par une
-/// commande : un secret n'a rien à faire dans une énumération qu'on
-/// journalise. `SENTRY_TOKEN` l'emporte sur le fichier de réglages, qui est en
-/// 0600 mais n'est pas un coffre pour autant.
-fn sentry_token() -> Option<String> {
-    crate::sentry::token(&crate::ui::Settings::load().sentry_token)
-}
-
-/// La commande de l'éditeur externe, telle que les réglages la portent.
-///
-/// Lue ici et non passée dans la commande : c'est un réglage global, et le
-/// faire voyager dans chaque `Cmd::OpenExternal` reviendrait à le recopier
-/// pour rien. Le worker n'a pas accès au global gpui — il passe donc par le
-/// fichier, ce que fait déjà `Settings::load`.
-fn editor_template() -> String {
-    crate::ui::Settings::load().external_editor
-}
-
-/// La commande qui rédige un message de commit, telle que les réglages la
-/// portent. Lue ici pour la même raison que `editor_template`.
-fn suggest_command() -> String {
-    crate::ui::Settings::load().commit_message_command
-}
-
 fn open_repo(path: &Path) -> Result<Evt> {
     let r = repo::Repo::discover(path)?;
     let worktrees = r.worktrees()?;
@@ -657,6 +869,19 @@ fn describe_error(err: anyhow::Error) -> String {
         .map(|c| c.to_string())
         .collect::<Vec<_>>()
         .join(" : ")
+}
+
+/// Met un résultat de base au format que porte l'événement.
+///
+/// L'erreur est mise à plat ici plutôt que dans la vue : c'est le seul endroit
+/// qui ait encore la chaîne des causes, et c'est elle qui dit à la fois ce que
+/// le moteur a refusé et ce qu'on essayait de faire.
+fn db_result<T>(result: Result<T>) -> protocol::DbResult<T> {
+    result.map_err(|e| {
+        let message = describe_error(e);
+        log::warn!("base de données : {message}");
+        message
+    })
 }
 
 fn fail(worktree: Option<PathBuf>, action: Action, err: anyhow::Error) -> Evt {

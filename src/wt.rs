@@ -37,7 +37,7 @@ use ::wt::{ops, state, tmpl, util};
 /// Un instantané de données nues plutôt que l'`App` de `wt` : la vue n'a pas à
 /// tenir un objet qui sait lancer des shells, et le reconstruire à chaque
 /// opération ne coûte qu'une lecture de fichier.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Snapshot {
     pub name: String,
     /// Répertoire qui accueille les worktrees du projet.
@@ -52,7 +52,7 @@ pub struct Snapshot {
     pub has_prompts: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TaskInfo {
     pub name: String,
     pub description: String,
@@ -62,7 +62,7 @@ pub struct TaskInfo {
 ///
 /// Les choix peuvent venir d'une commande shell (`source`) : ils sont donc
 /// calculés dans le worker, jamais au moment de dessiner le dialogue.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Question {
     pub name: String,
     pub title: String,
@@ -73,7 +73,7 @@ pub struct Question {
     pub separator: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Choice,
     Multi,
@@ -81,7 +81,7 @@ pub enum Kind {
     Text,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Choice {
     pub value: String,
     pub label: String,
@@ -89,7 +89,7 @@ pub struct Choice {
 }
 
 /// De quoi lancer une tâche dans un onglet de terminal.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Launch {
     /// Les commandes du projet, modèles déjà résolus.
     pub commands: Vec<String>,
@@ -109,7 +109,7 @@ impl Launch {
 }
 
 /// Une adresse que le projet sait ouvrir.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Endpoint {
     pub url: String,
     pub label: String,

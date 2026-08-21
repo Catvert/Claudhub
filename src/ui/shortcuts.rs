@@ -76,9 +76,28 @@ actions!(
         ExplorerRight,
         ExplorerHome,
         ExplorerEnd,
-        ExplorerOpen
+        ExplorerOpen,
+        DbUp,
+        DbDown,
+        DbLeft,
+        DbRight,
+        DbOpen,
+        RunDbQuery,
+        CopyDbResult,
+        ExportDbCsv,
+        SelectWholeResult
     ]
 );
+
+/// Aller au n-ième écran.
+///
+/// Une action *avec une donnée* plutôt que quatre actions, comme pour les
+/// worktrees : `Alt+1` à `Alt+4` font la même chose à un indice près.
+#[derive(Clone, PartialEq, Debug, Default, gpui::Action)]
+#[action(namespace = claudhub, no_json)]
+pub struct GoToWorkspace {
+    pub index: usize,
+}
 
 /// Aller au n-ième worktree de la barre latérale.
 ///
@@ -100,6 +119,16 @@ pub struct SelectWorktree {
 /// `KeyBinding::new`. La passer à `key_context` fait boucler le parseur.
 const PREDICATE: &str = "Claudhub && !Dialog && !PopupMenu && !Popover";
 
+/// Prédicat de la validation d'un commit.
+///
+/// `Ctrl+Entrée` est aussi la touche qui lance une requête dans toutes les
+/// consoles SQL qu'on a déjà sous les doigts. Les deux ne peuvent pas coexister
+/// sur la même touche sans que l'une prenne l'autre, et c'est la console qui
+/// gagne quand on écrit dedans : elle est plus profonde dans la pile de
+/// contextes, mais l'exclusion est écrite plutôt que déduite — une résolution
+/// par profondeur est exactement le genre de chose qu'on ne relit pas.
+const COMMIT_PREDICATE: &str = "Claudhub && !Dialog && !PopupMenu && !Popover && !ClaudhubQuery";
+
 /// Prédicat de ce qui s'écrit avec la touche système et **une seule lettre**.
 ///
 /// Sous Linux, `secondary-s` *est* Ctrl+S, c'est-à-dire XOFF, et `secondary-r`
@@ -114,8 +143,16 @@ const WINDOW_PREDICATE: &str = "Claudhub && !Dialog && !PopupMenu && !Popover &&
 /// a sa propre copie, et le terminal transmet la touche au programme qui
 /// tourne. Sans ces deux exclusions, copier une ligne saisie dans le message de
 /// commit rendrait le diff à la place.
-const COPY_PREDICATE: &str =
-    "Claudhub && !Dialog && !PopupMenu && !Popover && !Input && !ClaudhubTerminal";
+const COPY_PREDICATE: &str = "Claudhub && !Dialog && !PopupMenu && !Popover && !Input \
+     && !ClaudhubTerminal && !ClaudhubQuery";
+
+/// Prédicat de la copie depuis la grille de résultats.
+///
+/// La console occupe la place du diff : `Ctrl+C` y copie une cellule ou le
+/// résultat, jamais le fichier relu — d'où l'exclusion réciproque dans
+/// `COPY_PREDICATE`. L'éditeur de requête, lui, garde la sienne, comme le
+/// champ de message de commit.
+const QUERY_COPY_PREDICATE: &str = "ClaudhubQuery && !Input && !PopupMenu && !Popover";
 
 /// Prédicat de la navigation au clavier.
 ///
@@ -129,7 +166,7 @@ const COPY_PREDICATE: &str =
 /// y parcourt une arborescence, pas un diff — et deux jeux de liaisons sur la
 /// même touche ne se départageraient pas.
 const NAVIGATION_PREDICATE: &str = "Claudhub && !Dialog && !PopupMenu && !Popover && !Input \
-     && !ClaudhubTerminal && !ClaudhubExplorer";
+     && !ClaudhubTerminal && !ClaudhubExplorer && !ClaudhubDb";
 
 /// Prédicat de la navigation en mode vim.
 ///
@@ -139,7 +176,7 @@ const NAVIGATION_PREDICATE: &str = "Claudhub && !Dialog && !PopupMenu && !Popove
 /// identifiants déclarés à deux profondeurs différentes ne se rencontrent
 /// jamais dans un `&&`.
 const VIM_PREDICATE: &str = "Claudhub && ClaudhubVim && !Dialog && !PopupMenu && !Popover \
-     && !Input && !ClaudhubTerminal && !ClaudhubExplorer";
+     && !Input && !ClaudhubTerminal && !ClaudhubExplorer && !ClaudhubDb";
 
 /// Le contexte que la vue racine déclare. Des identifiants, pas un prédicat :
 /// c'est le nom auquel `PREDICATE` se réfère.
@@ -199,6 +236,38 @@ const EXPLORER_PREDICATE: &str = "ClaudhubExplorer";
 /// lui-même** et non par la racine : voir `VIM_PREDICATE`.
 const VIM_EXPLORER_PREDICATE: &str = "ClaudhubExplorer && ClaudhubVim";
 
+/// Contexte déclaré par l'arbre des bases.
+///
+/// Les mêmes flèches que l'explorateur de projet, sur un autre arbre : celui
+/// qui a le focus les prend. Sans ce contexte, elles appartiendraient à la
+/// relecture du diff, et parcourir un schéma ferait défiler le code d'à côté.
+const DB_PREDICATE: &str = "ClaudhubDb";
+
+/// Les mêmes en mode vim. `ClaudhubVim` doit être déclaré **par l'arbre
+/// lui-même** : voir `VIM_PREDICATE`.
+const VIM_DB_PREDICATE: &str = "ClaudhubDb && ClaudhubVim";
+
+pub fn db_context(vim: bool) -> KeyContext {
+    let mut context = KeyContext::default();
+    context.add("ClaudhubDb");
+    if vim {
+        context.add("ClaudhubVim");
+    }
+    context
+}
+
+/// Contexte déclaré par la console SQL.
+///
+/// `Ctrl+Entrée` y lance la requête plutôt que de valider un commit ; c'est la
+/// convention de toutes les consoles SQL.
+const QUERY_PREDICATE: &str = "ClaudhubQuery";
+
+pub fn query_context() -> KeyContext {
+    let mut context = KeyContext::default();
+    context.add("ClaudhubQuery");
+    context
+}
+
 pub fn explorer_context(vim: bool) -> KeyContext {
     let mut context = KeyContext::default();
     context.add("ClaudhubExplorer");
@@ -216,17 +285,19 @@ pub enum Group {
     Repository,
     Review,
     Explorer,
+    Database,
     Search,
     Terminal,
 }
 
 impl Group {
-    pub const ORDER: [Group; 7] = [
+    pub const ORDER: [Group; 8] = [
         Group::Window,
         Group::Worktrees,
         Group::Repository,
         Group::Review,
         Group::Explorer,
+        Group::Database,
         Group::Search,
         Group::Terminal,
     ];
@@ -241,6 +312,7 @@ impl Group {
             Group::Repository => "shortcut-group-repository",
             Group::Review => "shortcut-group-review",
             Group::Explorer => "shortcut-group-explorer",
+            Group::Database => "shortcut-group-database",
             Group::Search => "shortcut-group-search",
             Group::Terminal => "shortcut-group-terminal",
         }
@@ -303,6 +375,23 @@ table!(STANDARD, standard_bindings, [
     Window "secondary--" => ZoomOut, PREDICATE, "shortcut-zoom-out";
     Window "secondary-0" => ZoomReset, PREDICATE, "shortcut-zoom-reset";
 
+    // ── Les écrans ──────────────────────────────────────────────────────────
+    // Quatre liaisons et une seule ligne d'aide, comme les worktrees.
+    //
+    // **Alt et non `secondary-shift`.** gpui **retire** le Maj des modificateurs
+    // quand la touche est un caractère sans casse : `secondary-shift-1` arrive
+    // comme `ctrl-&` ou `ctrl-#` selon la disposition du clavier, et la liaison
+    // ne se déclenche jamais — en silence. Alt, lui, est conservé, et la touche
+    // reste le chiffre. C'est aussi la convention de qui change d'onglet.
+    //
+    // Valables jusque dans le terminal : ce qu'on lui prend est le préfixe
+    // d'argument numérique de readline (`M-1`), et non un caractère de
+    // contrôle comme `Ctrl+R` — voir `WINDOW_PREDICATE`.
+    Window "alt-1" => GoToWorkspace { index: 0 }, PREDICATE, "shortcut-workspace";
+    Window "alt-2" => GoToWorkspace { index: 1 }, PREDICATE, "shortcut-workspace";
+    Window "alt-3" => GoToWorkspace { index: 2 }, PREDICATE, "shortcut-workspace";
+    Window "alt-4" => GoToWorkspace { index: 3 }, PREDICATE, "shortcut-workspace";
+
     // ── Les worktrees ───────────────────────────────────────────────────────
     // Neuf liaisons et une seule ligne d'aide : `merge` reconnaît la suite de
     // chiffres et l'affiche comme une plage.
@@ -322,7 +411,7 @@ table!(STANDARD, standard_bindings, [
     Repository "secondary-shift-r" => Fetch, PREDICATE, "shortcut-fetch";
     Repository "secondary-shift-u" => Pull, PREDICATE, "shortcut-pull";
     Repository "secondary-shift-p" => Push, PREDICATE, "shortcut-push";
-    Repository "secondary-enter" => Commit, PREDICATE, "shortcut-commit";
+    Repository "secondary-enter" => Commit, COMMIT_PREDICATE, "shortcut-commit";
 
     // ── La relecture ────────────────────────────────────────────────────────
     // Les flèches nues vont d'une modification à la suivante — c'est le geste
@@ -368,6 +457,19 @@ table!(STANDARD, standard_bindings, [
     Explorer "home" => ExplorerHome, EXPLORER_PREDICATE, "shortcut-explorer-first";
     Explorer "end" => ExplorerEnd, EXPLORER_PREDICATE, "shortcut-explorer-last";
     Explorer "enter" => ExplorerOpen, EXPLORER_PREDICATE, "shortcut-explorer-open";
+
+    // ── Les bases ───────────────────────────────────────────────────────────
+    // Le même jeu que l'explorateur, sur un autre arbre : c'est celui qui a le
+    // focus qui les prend.
+    Database "up" => DbUp, DB_PREDICATE, "shortcut-db-up";
+    Database "down" => DbDown, DB_PREDICATE, "shortcut-db-down";
+    Database "left" => DbLeft, DB_PREDICATE, "shortcut-db-collapse";
+    Database "right" => DbRight, DB_PREDICATE, "shortcut-db-expand";
+    Database "enter" => DbOpen, DB_PREDICATE, "shortcut-db-open";
+    Database "secondary-enter" => RunDbQuery, QUERY_PREDICATE, "shortcut-db-run";
+    Database "secondary-c" => CopyDbResult, QUERY_COPY_PREDICATE, "shortcut-db-copy";
+    Database "secondary-a" => SelectWholeResult, QUERY_COPY_PREDICATE, "shortcut-db-select-all";
+    Database "secondary-shift-e" => ExportDbCsv, QUERY_PREDICATE, "shortcut-db-export";
 
     // ── La recherche ────────────────────────────────────────────────────────
     // `Ctrl+F` cherche dans le panneau où le dernier clic a eu lieu. Il est
@@ -422,6 +524,11 @@ table!(VIM, vim_bindings, [
     Explorer "h" => ExplorerLeft, VIM_EXPLORER_PREDICATE, "shortcut-explorer-collapse";
     Explorer "g g" => ExplorerHome, VIM_EXPLORER_PREDICATE, "shortcut-explorer-first";
     Explorer "shift-g" => ExplorerEnd, VIM_EXPLORER_PREDICATE, "shortcut-explorer-last";
+
+    Database "j" => DbDown, VIM_DB_PREDICATE, "shortcut-db-down";
+    Database "k" => DbUp, VIM_DB_PREDICATE, "shortcut-db-up";
+    Database "l" => DbRight, VIM_DB_PREDICATE, "shortcut-db-expand";
+    Database "h" => DbLeft, VIM_DB_PREDICATE, "shortcut-db-collapse";
 
     Search "/" => Find, VIM_PREDICATE, "shortcut-find";
     Search "n" => FindNext, VIM_PREDICATE, "shortcut-find-next";
@@ -913,6 +1020,101 @@ pub fn explorer_open(
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.activate_project_cursor(cx);
+}
+
+pub fn db_up(
+    this: &mut ClaudhubApp,
+    _: &DbUp,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.db_step_cursor(-1, cx);
+}
+
+pub fn db_down(
+    this: &mut ClaudhubApp,
+    _: &DbDown,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.db_step_cursor(1, cx);
+}
+
+pub fn db_left(
+    this: &mut ClaudhubApp,
+    _: &DbLeft,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.db_fold_cursor(false, cx);
+}
+
+pub fn db_right(
+    this: &mut ClaudhubApp,
+    _: &DbRight,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.db_fold_cursor(true, cx);
+}
+
+pub fn db_open(
+    this: &mut ClaudhubApp,
+    _: &DbOpen,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.db_open_cursor(window, cx);
+}
+
+pub fn run_db_query(
+    this: &mut ClaudhubApp,
+    _: &RunDbQuery,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.run_db_query(cx);
+}
+
+pub fn go_to_workspace(
+    this: &mut ClaudhubApp,
+    action: &GoToWorkspace,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    if let Some(workspace) = crate::ui::workspace::Workspace::ALL
+        .get(action.index)
+        .copied()
+    {
+        this.enter_workspace(workspace, window, cx);
+    }
+}
+
+pub fn copy_db_result(
+    this: &mut ClaudhubApp,
+    _: &CopyDbResult,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.copy_db_result(cx);
+}
+
+pub fn select_whole_result(
+    this: &mut ClaudhubApp,
+    _: &SelectWholeResult,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.select_whole_db_result(cx);
+}
+
+pub fn export_db_csv(
+    this: &mut ClaudhubApp,
+    _: &ExportDbCsv,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.export_db_csv(cx);
 }
 
 pub fn find(

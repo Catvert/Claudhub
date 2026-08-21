@@ -11,7 +11,6 @@
 //! seule façon de ne pas effacer une heure de travail d'un agent avec une
 //! correction de faute de frappe.
 
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -22,7 +21,7 @@ use anyhow::{bail, Context, Result};
 pub const MAX_LINES: usize = 50_000;
 
 /// Ce qu'on a lu, et de quoi vérifier qu'on écrit bien par-dessus.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Content {
     pub text: String,
     /// Empreinte du texte lu.
@@ -34,10 +33,21 @@ pub struct Content {
 }
 
 /// Empreinte d'un texte, pour la détection d'écriture concurrente.
+///
+/// FNV-1a écrit à la main, et non `DefaultHasher` : l'empreinte est produite
+/// par le worker et comparée par la vue, qui seront deux **binaires** quand le
+/// worker tournera dans le serveur WSL — or `DefaultHasher` ne promet rien
+/// d'un processus à l'autre. FNV-1a est défini par ses deux constantes, et un
+/// test fige une valeur connue pour qu'aucun changement ne passe inaperçu.
 pub fn digest(text: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut hasher);
-    hasher.finish()
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET;
+    for byte in text.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
 }
 
 /// Vrai si ce contenu n'est pas du texte.
@@ -101,7 +111,7 @@ pub fn write_at(full: &Path, text: &str, expect: Option<u64>) -> Result<()> {
 }
 
 /// Ce qu'on fait à un fichier depuis l'explorateur.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Op {
     Rename { from: PathBuf, to: PathBuf },
     Delete { path: PathBuf },
@@ -195,7 +205,7 @@ pub fn editor_command(template: &str, path: &Path, line: usize) -> Option<(Strin
         return None;
     }
     let path = path.display().to_string();
-    let mut parts: Vec<String> = crate::ui::split_command(template)
+    let mut parts: Vec<String> = crate::cmdline::split_command(template)
         .into_iter()
         .map(|part| {
             part.replace("{path}", &path)
@@ -341,6 +351,18 @@ pub fn sync_notes(dir: &Path, files: &[(String, String)]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L'empreinte est comparée entre deux processus — la vue et le serveur —
+    /// et doit donc être identique d'un binaire à l'autre. Ces valeurs sont
+    /// celles de FNV-1a 64 bits ; si ce test casse, c'est que l'algorithme a
+    /// changé, et toute empreinte retenue par une session en cours ment.
+    #[test]
+    fn the_digest_is_stable_across_binaries() {
+        assert_eq!(digest(""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(digest("a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(digest("Claudhub\n"), digest("Claudhub\n"));
+        assert_ne!(digest("Claudhub\n"), digest("Claudhub"));
+    }
 
     /// La chaîne complète du dossier de notes : ce qu'on écrit se relit, ce
     /// qui n'est plus dans la liste s'en va, et ce que nous n'avons pas écrit

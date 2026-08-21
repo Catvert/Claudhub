@@ -16,10 +16,37 @@ use crate::git::{
 /// il est stable, unique, et c'est aussi le répertoire de travail passé à git.
 pub type WorktreeId = PathBuf;
 
-#[derive(Debug, Clone)]
+/// Un secret qui voyage dans une commande sans finir dans une trace.
+///
+/// Le `Debug` est écrit à la main et masque la valeur, comme celui de
+/// `db::Connection` : `Cmd` se journalise, un jeton non. C'est ce qui permet
+/// au jeton Sentry de voyager dans la commande plutôt que d'être relu par le
+/// worker — le worker d'un serveur distant n'a pas nos réglages sous la main.
+#[derive(Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_empty() {
+            "Secret(vide)"
+        } else {
+            "Secret(…)"
+        })
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Cmd {
     /// Ouvre un dépôt (ou le worktree d'un dépôt) et énumère ses worktrees.
     OpenRepo(PathBuf),
+    /// Ouvre le chemin **si** c'est un dépôt, et ne dit rien sinon.
+    ///
+    /// C'est le répertoire de lancement de `claudhub` : lancé depuis son
+    /// projet, on s'attend à l'y trouver ouvert ; lancé d'ailleurs, un message
+    /// d'erreur serait du bruit. La vérification vit ici et non dans la vue —
+    /// `is_repo` coûte un sous-processus git, ce qu'un constructeur d'entité
+    /// gpui n'a pas le droit de payer.
+    OpenIfRepo(PathBuf),
     /// Relit worktrees, état et branches d'un dépôt déjà ouvert.
     RefreshRepo {
         main: PathBuf,
@@ -104,11 +131,12 @@ pub enum Cmd {
     /// Demande un message de commit à l'agent configuré, à partir de ce qui
     /// est indexé.
     ///
-    /// La commande n'y figure pas : le worker lit les réglages lui-même, comme
-    /// il le fait pour l'éditeur externe et le jeton Sentry. C'est un réglage
-    /// global, et le recopier dans chaque commande ne dirait rien de plus.
+    /// La commande voyage dans le message : le worker tourne parfois dans un
+    /// autre processus — le serveur WSL —, dont le fichier de réglages n'est
+    /// pas le nôtre. La vue, elle, a toujours le réglage sous la main.
     SuggestMessage {
         worktree: WorktreeId,
+        command: String,
     },
     Fetch {
         worktree: WorktreeId,
@@ -193,17 +221,82 @@ pub enum Cmd {
     /// Les issues d'un projet. **File réseau** : une API distante met parfois
     /// plusieurs secondes et ne doit pas occuper un worker de lecture.
     ///
-    /// Le jeton n'y figure pas : le worker le lit lui-même, dans
-    /// `SENTRY_TOKEN` puis dans les réglages. Un secret n'a rien à faire dans
-    /// une commande que l'on journalise.
+    /// Le jeton voyage en [`Secret`], dont le `Debug` masque la valeur : une
+    /// commande se journalise, un secret non. Côté worker, `SENTRY_TOKEN`
+    /// garde la priorité — c'est l'environnement du serveur qui fait foi.
     LoadIssues {
         org: String,
         project: String,
         query: String,
+        token: Secret,
     },
     /// L'événement le plus récent d'une issue : sa pile et son message.
     LoadIssueEvent {
         issue: String,
+        token: Secret,
+    },
+
+    // — Bases de données —————————————————————————————————————————
+    /// Les bases d'une connexion.
+    ///
+    /// **La connexion voyage entière, mot de passe compris**, là où le jeton
+    /// Sentry est relu par le worker. La raison de cette dérogation est que
+    /// la raison de la règle ne s'applique pas : `db::Connection` a un `Debug`
+    /// écrit à la main qui masque le mot de passe, donc rien ne l'écrit dans
+    /// une trace. Et le prix serait réel : il y a plusieurs connexions, il
+    /// faudrait en désigner une par un identifiant et la relire depuis le
+    /// fichier de réglages, dont l'écriture est différée d'une demi-seconde —
+    /// une connexion qu'on vient de saisir serait interrogée avec ce qu'elle
+    /// contenait avant.
+    DbDatabases {
+        connection: crate::db::Connection,
+    },
+    DbTables {
+        connection: crate::db::Connection,
+        database: String,
+    },
+    DbColumns {
+        connection: crate::db::Connection,
+        database: String,
+        table: String,
+    },
+    /// Les colonnes de toutes les tables d'une base, d'un coup.
+    ///
+    /// C'est ce qui rend le filtre et les complétions possibles sans déplier
+    /// l'arbre table par table : une connexion, une requête, trois cents
+    /// tables.
+    DbAllColumns {
+        connection: crate::db::Connection,
+        database: String,
+    },
+    /// Exécute une requête et rend une page de résultats.
+    ///
+    /// `database` est la base courante de la console — celle que `USE`
+    /// choisirait. `None` pour SQLite, qui n'en a qu'une.
+    DbQuery {
+        connection: crate::db::Connection,
+        database: Option<String>,
+        sql: String,
+        offset: usize,
+        limit: usize,
+        /// De quoi reconnaître la réponse de **cet** envoi.
+        ///
+        /// Comparer la requête ne suffit pas : changer de page, trier et
+        /// charger la suite rejouent tous le même texte, et la console doit
+        /// pouvoir écarter la réponse d'un geste qu'un autre a remplacé. Un
+        /// compteur qui ne recule jamais le dit sans ambiguïté.
+        request: u64,
+    },
+    /// Rejoue une requête et en écrit le résultat **entier** dans un fichier
+    /// CSV.
+    ///
+    /// Le chemin est choisi par un sélecteur natif avant l'envoi : un worker
+    /// ne pose pas de question.
+    DbExport {
+        connection: crate::db::Connection,
+        database: Option<String>,
+        sql: String,
+        path: std::path::PathBuf,
     },
 
     // — Fichiers du projet ————————————————————————————————————————
@@ -272,10 +365,38 @@ pub enum Cmd {
         expect: Option<u64>,
     },
     /// Lance l'éditeur externe sur un fichier, à une ligne donnée.
+    ///
+    /// Le modèle de commande voyage ici pour la même raison que celle de
+    /// `SuggestMessage` : les réglages sont ceux de la vue, pas du worker.
     OpenExternal {
         worktree: WorktreeId,
         path: PathBuf,
         line: usize,
+        editor: String,
+    },
+
+    // — Surveillance de fichiers ——————————————————————————————————
+    // La surveillance vit avec les workers et non dans la vue : c'est le
+    // disque du worktree qu'elle regarde, et ce disque est celui du serveur
+    // quand les workers tournent dans WSL. Ces quatre ordres ne passent par
+    // aucune file — `Handle::send` les remet directement au thread du
+    // surveillant — et ce qui en revient est un [`Evt::FilesChanged`].
+    /// Surveille un worktree : les dossiers que git connaît, sans récursion,
+    /// plus son `HEAD` et son `index`.
+    Watch {
+        worktree: WorktreeId,
+    },
+    Unwatch {
+        worktree: WorktreeId,
+    },
+    /// Surveille un dossier tel quel, sans récursion ni git : le coffre de
+    /// notes d'un worktree. Sans effet tant que le dossier n'existe pas —
+    /// l'ordre est à renvoyer après l'avoir créé.
+    WatchDir {
+        dir: PathBuf,
+    },
+    UnwatchDir {
+        dir: PathBuf,
     },
 
     // — `wt` : ce que le `wt.toml` du projet ajoute ————————————————
@@ -341,7 +462,15 @@ pub enum Cmd {
     },
 }
 
-#[derive(Debug, Clone)]
+/// Ce qu'une lecture de base rend : le résultat, ou le message d'erreur déjà
+/// mis à plat.
+///
+/// Un `String` et non une `anyhow::Error` : `Evt` est `Clone`, ce qu'une
+/// erreur d'`anyhow` n'est pas, et la vue n'affiche de toute façon qu'une
+/// phrase.
+pub type DbResult<T> = std::result::Result<T, String>;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Evt {
     RepoOpened {
         main: PathBuf,
@@ -462,10 +591,91 @@ pub enum Evt {
     VaultWritten {
         worktree: WorktreeId,
     },
+    /// Des chemins surveillés ont changé — un lot par fenêtre de
+    /// regroupement du surveillant (250 ms), ce qui en fait un seul
+    /// événement sur le fil au lieu d'un par fichier d'une compilation.
+    ///
+    /// Les chemins sont quelconques : c'est la vue qui les rattache aux
+    /// worktrees ouverts, elle seule sait lesquels le sont.
+    FilesChanged {
+        paths: Vec<PathBuf>,
+    },
+
+    // — Transport ——————————————————————————————————————————————————
+    // Jamais produits par un worker : c'est le client du transport distant
+    // (`runtime::remote`) qui les synthétise, à la poignée de main et à la
+    // mort du serveur. Ils passent par le canal d'événements parce que c'est
+    // le seul flux que la vue draine — un second canal serait une seconde
+    // pompe.
+    /// Le serveur a répondu à la poignée de main : ce qu'il sait et que la
+    /// vue ne peut pas deviner de sa machine à elle.
+    ServerHello {
+        build: String,
+        /// Son répertoire de lancement — c'est lui qui vaut comme « dossier
+        /// courant » quand les workers tournent ailleurs.
+        cwd: PathBuf,
+        running_under_wsl: bool,
+        /// Ses `/etc/shells`, pour le formulaire des réglages.
+        shells: Vec<String>,
+    },
+    /// Le serveur est parti — fin de flux ou trame illisible. La revue reste
+    /// affichée mais plus rien ne bouge : la vue le dit et propose de
+    /// relancer.
+    ServerLost {
+        message: String,
+    },
     /// Le contenu du dossier de notes : nom de fichier et texte.
     NotesRead {
         worktree: WorktreeId,
         files: Vec<(String, String)>,
+    },
+    /// Les bases d'une connexion, ou ce qui a empêché de les lire.
+    ///
+    /// **Un `Result` dans l'événement plutôt qu'un `Evt::Failed`.** Un échec
+    /// de lecture appartient à l'endroit de l'arbre qui l'a demandé — c'est
+    /// là qu'il se lit, sous le nœud qu'on vient de déplier — et non à la
+    /// barre d'état, qui l'aurait remplacé par le message suivant. C'est
+    /// aussi ce qui rend la ligne « en erreur » distincte de la ligne « pas
+    /// encore chargée ».
+    DbDatabases {
+        /// La connexion visée, par sa clé : les réglages ont pu changer entre
+        /// la demande et la réponse, et un indice ne désignerait plus la même.
+        key: String,
+        databases: DbResult<Vec<crate::db::Database>>,
+    },
+    DbTables {
+        key: String,
+        database: String,
+        tables: DbResult<Vec<crate::db::Table>>,
+    },
+    DbColumns {
+        key: String,
+        database: String,
+        table: String,
+        columns: DbResult<Vec<crate::db::Column>>,
+    },
+    DbAllColumns {
+        key: String,
+        database: String,
+        columns: DbResult<std::collections::BTreeMap<String, Vec<crate::db::Column>>>,
+    },
+    /// Le résultat d'une requête, et le temps qu'elle a mis.
+    ///
+    /// La durée est mesurée **dans le worker** : depuis la vue, elle
+    /// comprendrait l'attente dans la file et le prochain tour de la pompe
+    /// d'événements, ce qui ferait passer une requête d'une milliseconde pour
+    /// une requête de vingt.
+    DbRows {
+        /// L'envoi auquel ces lignes répondent. Voir `Cmd::DbQuery`.
+        request: u64,
+        rows: DbResult<crate::db::Rows>,
+        elapsed_ms: u64,
+    },
+    /// Un export CSV a abouti, ou non.
+    DbExported {
+        path: std::path::PathBuf,
+        /// Le nombre de lignes écrites.
+        rows: DbResult<u64>,
     },
     History {
         worktree: WorktreeId,
@@ -491,7 +701,7 @@ pub enum Evt {
 }
 
 /// Ce que `wt` sait d'un worktree, et que git ignore.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WtWorktree {
     /// `None` quand le projet ne déclare pas de `[status] up` : il n'y a alors
     /// rien à démarrer, et afficher « arrêté » serait une information fausse.
@@ -501,7 +711,7 @@ pub struct WtWorktree {
 
 /// Ce que l'utilisateur a demandé, pour formuler le message de résultat et
 /// savoir quoi rafraîchir ensuite.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Action {
     Refresh,
     Stage,

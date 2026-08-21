@@ -511,15 +511,13 @@ impl ClaudhubApp {
             hash: content.hash,
             dirty: false,
         });
+        // Un fichier qui s'ouvre appelle l'écran où il s'édite. Le geste vient
+        // de l'explorateur — donc de cet écran-là la plupart du temps — mais
+        // aussi d'une ligne de diff, et y répondre en silence sur l'écran d'à
+        // côté serait un fichier ouvert que personne ne voit.
+        self.enter_workspace(crate::ui::workspace::Workspace::Files, window, cx);
+        self.set_panel_visible(crate::ui::panels::EditorPanel::NAME, true, cx);
         cx.notify();
-    }
-
-    /// Un fichier est-il ouvert dans l'éditeur intégré ?
-    ///
-    /// L'onglet du panneau central s'en sert pour dire lequel des deux il
-    /// montre — un diff, ou un fichier qu'on retouche.
-    pub(super) fn is_editing(&self) -> bool {
-        self.editing.is_some()
     }
 
     pub(super) fn save_file(&mut self, cx: &mut Context<Self>) {
@@ -588,7 +586,8 @@ impl ClaudhubApp {
         let Some(worktree) = self.active.clone() else {
             return;
         };
-        if Settings::global(cx).external_editor.trim().is_empty() {
+        let editor = Settings::global(cx).external_editor.clone();
+        if editor.trim().is_empty() {
             self.announce(tr!("editor-none-configured"), cx);
             return;
         }
@@ -596,6 +595,7 @@ impl ClaudhubApp {
             worktree,
             path,
             line,
+            editor,
         });
         cx.notify();
     }

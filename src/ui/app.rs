@@ -14,7 +14,7 @@ use gpui::{
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
-    dock::{panel_handle, DockArea, DockLayout, DockPlacement, DockSkin},
+    dock::{DockArea, DockSkin},
     h_flex,
     input::{InputState, TextareaState},
     menu::{DropdownMenu, PopupMenuItem},
@@ -24,24 +24,15 @@ use gpui_component::{
 };
 
 use crate::git::{Branch, Commit, DiffFile, DiffRange, GraphRow, LogRange, Status, Worktree};
-use crate::runtime::watch::Watcher;
 use crate::runtime::{self, Action, Cmd, Evt};
 use crate::tr;
-use std::sync::Arc;
 
 use crate::ui::base_select::BaseChoice;
 use crate::ui::diff_view::Rendered;
 use crate::ui::icons::icon;
-use crate::ui::panels::{
-    BranchPanel, BranchesPanel, ChangesPanel, ConflictsPanel, DiffPanel, FilesPanel, HistoryPanel,
-    NotesPanel, SentryPanel, SidebarPanel, TerminalPanel,
-};
 use crate::ui::settings::Settings;
 use crate::ui::store::Store;
 use crate::ui::terminal_view::TerminalGroup;
-
-/// Hauteur d'origine du panneau des terminaux.
-const TERMINAL_HEIGHT: gpui::Pixels = px(280.);
 
 /// Version de la disposition enregistrée. À incrémenter quand les panneaux
 /// changent de nom ou de nature, pour que gpui-component écarte une
@@ -49,139 +40,59 @@ const TERMINAL_HEIGHT: gpui::Pixels = px(280.);
 // 9 : le schéma de `DockAreaState` a changé avec la refonte du dock. Une
 // disposition écrite par la version précédente se relirait de travers plutôt
 // que de refuser franchement, ce qui donne une fenêtre pleine de cadres vides.
-const LAYOUT_VERSION: usize = 9;
+// 10 : le panneau « Bases » est apparu. Une disposition écrite avant lui ne le
+// contient pas, et rien ne l'y ajouterait : la vue existerait sans onglet.
+// 11 : les écrans. Le fichier ne porte plus une disposition mais quatre, et le
+// panneau central s'est scindé en trois — un fichier d'avant n'a ni la forme
+// ni les noms qu'il faut.
+const LAYOUT_VERSION: usize = 11;
 
-/// Les panneaux de la disposition par défaut.
+/// Les dispositions enregistrées, une par écran.
 ///
-/// `BasePanelView` et non `PanelView` : c'est le type que rend `panel_handle`,
-/// et c'est **lui** qu'il faut. `Entity<P>` sait se convertir tout seul en
-/// `Arc<dyn BasePanelView>` — et le dock le prend sans broncher, mais sans la
-/// présentation qui va avec : ni onglet, ni titre, ni contenu. C'est la panne
-/// silencieuse de cette refonte, et la seule chose que `panel_handle` empêche.
-struct DefaultPanels {
-    sidebar: Arc<dyn gpui_component::dock::BasePanelView>,
-    branches: Arc<dyn gpui_component::dock::BasePanelView>,
-    files: Arc<dyn gpui_component::dock::BasePanelView>,
-    changes: Arc<dyn gpui_component::dock::BasePanelView>,
-    branch: Arc<dyn gpui_component::dock::BasePanelView>,
-    history: Arc<dyn gpui_component::dock::BasePanelView>,
-    notes: Arc<dyn gpui_component::dock::BasePanelView>,
-    sentry: Arc<dyn gpui_component::dock::BasePanelView>,
-    conflicts: Arc<dyn gpui_component::dock::BasePanelView>,
-    diff: Arc<dyn gpui_component::dock::BasePanelView>,
-    terminal: Arc<dyn gpui_component::dock::BasePanelView>,
+/// **Un fichier et non quatre** : c'est l'état d'*une* fenêtre, et le lire en
+/// morceaux ne rendrait service à personne — surtout pas à qui l'ouvre pour
+/// comprendre pourquoi son écran est de travers. La version enveloppe le tout
+/// : les écrans peuvent apparaître, disparaître et se renommer, et une carte
+/// de noms inconnus ne construit rien.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct Layouts {
+    version: Option<usize>,
+    /// L'écran qu'on regardait en fermant.
+    ///
+    /// Il vit ici et non dans les réglages : c'est l'état d'une fenêtre, au
+    /// même titre que la place des panneaux, et non une préférence qu'on
+    /// écrit à la main.
+    current: Option<String>,
+    workspaces: std::collections::BTreeMap<String, gpui_component::dock::DockAreaState>,
 }
 
-/// La disposition d'origine : les dépôts à gauche, la revue et le diff au
-/// centre, les terminaux en dessous sur toute la largeur.
-///
-/// Le diff est dans le **centre** et non dans une zone d'accueil à droite :
-/// les zones latérales occupent toute la hauteur, et le diff à droite couperait
-/// les terminaux en deux au lieu de les laisser courir sous toute la revue.
-fn install_default_layout(
-    area: &mut DockArea,
-    panels: DefaultPanels,
-    window: &mut Window,
-    cx: &mut Context<DockArea>,
-) {
-    // Les dépôts et les branches l'un au-dessus de l'autre, et non en onglets :
-    // on choisit un worktree *puis* on regarde ses branches, et devoir passer
-    // de l'un à l'autre pour cela est un aller-retour de trop. Un tiers pour
-    // les branches, mesuré sur la fenêtre plutôt que fixé en pixels : la
-    // proportion tient d'un écran à l'autre, là où un nombre de pixels
-    // occuperait la moitié d'une petite fenêtre.
-    //
-    // Les fichiers du projet sont l'onglet voisin des dépôts, et non celui des
-    // branches : ce sont deux façons de désigner ce qu'on veut ouvrir — un
-    // worktree, un fichier dedans —, et l'arbre d'un projet est ce qui a le
-    // plus besoin des deux tiers du haut. Les branches, elles, sont une liste
-    // courte qu'on filtre.
-    // La moitié **fixe** d'une division est celle du bas, jamais celle du
-    // haut : l'aire du dock est plus petite que la fenêtre — barres,
-    // rembourrage, gouttières — et deux tailles fixes qui somment à la hauteur
-    // de la fenêtre débordent. Le bas de la colonne se faisait couper les
-    // coins, et la gouttière au-dessus des terminaux était avalée.
-    let height = window.viewport_size().height.max(px(600.));
-    let third = height / 3.;
-    let left = DockLayout::v_split()
-        .child(
-            DockLayout::tabs()
-                .panel_view(panels.sidebar, cx)
-                .panel_view(panels.files, cx),
-            None,
-        )
-        .child(
-            DockLayout::tabs().panel_view(panels.branches, cx),
-            Some(third),
-        );
-
-    let center = DockLayout::v_split()
-        .child(
-            DockLayout::h_split()
-                // Les façons de choisir quoi relire : ce qui reste à faire et
-                // ce qu'on a eu à dire, ce qui change maintenant, ce que la
-                // branche a écrit, ce qui est déjà committé. Des onglets et non
-                // des panneaux côte à côte — ils répondent à la même question,
-                // et se glissent ailleurs d'un geste si l'on préfère les voir
-                // ensemble.
-                .child(
-                    DockLayout::tabs()
-                        // Les notes en premier : elles disent où l'on en est,
-                        // là où les suivantes disent ce qu'il y a à lire. C'est
-                        // par là qu'on reprend un worktree quitté hier.
-                        .panel_view(panels.notes, cx)
-                        .panel_view(panels.changes, cx)
-                        .panel_view(panels.branch, cx)
-                        .panel_view(panels.history, cx)
-                        // Les issues sont un point de départ comme un autre,
-                        // souvent meilleur qu'une intention : elles se lisent
-                        // où l'on choisit quoi relire.
-                        .panel_view(panels.sentry, cx)
-                        // Masqué tant qu'il n'y a rien à résoudre : un onglet
-                        // permanent décalerait les autres pour servir une fois
-                        // sur cent.
-                        .panel_view(panels.conflicts, cx),
-                    Some(px(420.)),
-                )
-                .child(DockLayout::tabs().panel_view(panels.diff, cx), None),
-            None,
-        )
-        // Les terminaux vivent dans le centre et non dans une zone d'accueil :
-        // le dernier panneau d'une zone ne se déplace pas, et une zone qui n'en
-        // contient qu'un est donc figée. Ici la pile en compte deux — il se
-        // glisse.
-        .child(
-            DockLayout::tabs().panel_view(panels.terminal, cx),
-            Some(TERMINAL_HEIGHT),
-        );
-
-    area.set_center(center, window, cx);
-    area.set_dock(DockPlacement::Left, left, window, cx);
-    area.set_dock_size(DockPlacement::Left, px(280.), window, cx);
-}
-
-fn load_layout() -> Option<gpui_component::dock::DockAreaState> {
-    let path = crate::ui::settings::layout_path()?;
-    let text = std::fs::read_to_string(path).ok()?;
-    match serde_json::from_str(&text) {
-        Ok(state) => Some(state),
+fn load_layouts() -> Layouts {
+    let Some(path) = crate::ui::settings::layout_path() else {
+        return Layouts::default();
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Layouts::default();
+    };
+    match serde_json::from_str::<Layouts>(&text) {
+        // Une disposition illisible n'est pas une raison de ne pas démarrer :
+        // on repart de celle par défaut.
+        Ok(layouts) if layouts.version == Some(LAYOUT_VERSION) => layouts,
+        Ok(_) => Layouts::default(),
         Err(e) => {
-            // Une disposition illisible n'est pas une raison de ne pas
-            // démarrer : on repart de celle par défaut.
             log::warn!("disposition illisible : {e}");
-            None
+            Layouts::default()
         }
     }
 }
 
-fn save_layout(state: &gpui_component::dock::DockAreaState) {
+fn save_layouts(layouts: &Layouts) {
     let Some(path) = crate::ui::settings::layout_path() else {
         return;
     };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    match serde_json::to_string_pretty(state) {
+    match serde_json::to_string_pretty(layouts) {
         Ok(json) => {
             if let Err(e) = std::fs::write(&path, json) {
                 log::warn!("écriture de la disposition : {e}");
@@ -429,6 +340,15 @@ pub struct Toast {
 pub struct ClaudhubApp {
     pub(super) git: runtime::Handle,
     pub(super) repos: Vec<RepoState>,
+
+    /// Le serveur distant est parti — le message du transport, à afficher
+    /// tant qu'on n'a pas relancé. `None` en mode local, où les workers ne
+    /// meurent qu'avec la fenêtre.
+    pub(super) server_lost: Option<String>,
+    /// Le serveur tourne sous WSL (dit par sa poignée de main) : c'est là
+    /// que « ce chemin est un montage Windows » a un sens, et la machine de
+    /// la vue ne peut pas le savoir à sa place.
+    pub(super) server_wsl: bool,
     /// Les dépôts mémorisés qui ne s'ouvrent pas.
     ///
     /// Ils restent affichés — c'est la seule façon de les retirer, et un dépôt
@@ -507,6 +427,33 @@ pub struct ClaudhubApp {
     pub(super) explorer_focus: FocusHandle,
     /// Les issues Sentry du dépôt courant, et celle qu'on regarde.
     pub(super) sentry: crate::ui::sentry_view::SentryState,
+    /// L'arbre des bases de données : connexions, schémas, tables, colonnes.
+    pub(super) db: crate::ui::db::DbState,
+    pub(super) db_scroll: gpui::UniformListScrollHandle,
+    /// Le focus de l'arbre des bases, qui lui donne ses flèches.
+    ///
+    /// Un handle à lui, comme celui de l'explorateur de projet : c'est ce qui
+    /// distingue « les flèches parcourent le schéma » de « les flèches
+    /// parcourent le diff ».
+    pub(super) db_focus: FocusHandle,
+    /// La console SQL, quand il y en a une ouverte.
+    pub(super) query: crate::ui::db_query::QueryState,
+    /// L'éditeur de la console. Créé **une fois** : recréé au rendu, il
+    /// perdrait curseur, sélection et texte dès la première frappe.
+    pub(super) db_query_input: Entity<gpui_component::input::EditorState>,
+    /// Les noms que la console complète, partagés avec le fournisseur de
+    /// complétions que l'éditeur tient.
+    pub(super) db_schema: std::rc::Rc<std::cell::RefCell<crate::ui::db_query::SchemaIndex>>,
+    /// La table des résultats. Une entité créée une fois, elle aussi : la
+    /// reconstruire à chaque requête perdrait les largeurs de colonnes qu'on
+    /// vient de régler à la souris.
+    pub(super) db_table: Entity<gpui_component::table::TableState<crate::ui::db_query::Results>>,
+    /// Le partage de hauteur entre l'éditeur de la console et sa grille.
+    ///
+    /// Une entité, parce que c'est ce que `v_resizable` demande, et créée une
+    /// fois : recréée au rendu, la poignée reviendrait à sa place à chaque
+    /// frame et ne se laisserait pas glisser.
+    pub(super) db_split: Entity<gpui_component::resizable::ResizableState>,
     /// Un worktree qu'on attend, et le prompt à y livrer une fois créé.
     ///
     /// La création de `wt` lance des hooks qui durent des minutes ; rien
@@ -532,7 +479,22 @@ pub struct ClaudhubApp {
     /// La disposition. Elle appartient à gpui-component : c'est lui qui gère
     /// le glissement d'un panneau d'une zone à l'autre, les onglets et les
     /// zones d'accueil.
+    /// L'écran courant. Voir `ui::workspace`.
+    pub(super) workspace: crate::ui::workspace::Workspace,
+    /// Le dock de l'écran courant — celui que la vue racine affiche.
+    ///
+    /// Une copie de l'entrée de `docks`, et non un indice : tout ce qui parle
+    /// au dock — le repli de la zone de gauche, le zoom, la largeur que lit la
+    /// barre de navigation — s'adresse à celui qu'on regarde, et le retrouver
+    /// par une clé à chaque fois n'ajouterait qu'une occasion de se tromper.
     pub(super) dock: Entity<DockArea>,
+    /// Les quatre docks, un par écran.
+    ///
+    /// Ils sont tous **construits au démarrage** plutôt qu'à la première
+    /// visite : un dock se bâtit avec `window`, et le faire au rendu
+    /// reviendrait à créer des entités au milieu d'une frame. Le coût est une
+    /// vingtaine de panneaux, qui ne portent aucun état.
+    pub(super) docks: HashMap<crate::ui::workspace::Workspace, Entity<DockArea>>,
     /// La peau du dock, gardée en vie : c'est elle qui dessine les onglets, et
     /// c'est par elle que passent les réglages de présentation.
     #[allow(dead_code)]
@@ -565,11 +527,6 @@ pub struct ClaudhubApp {
     /// barre latérale, sur une poignée de redimensionnement — d'étendre la
     /// sélection en passant au-dessus du code.
     pub(super) diff_dragging: bool,
-
-    /// Surveillance du worktree affiché. `None` si le système refuse de nous
-    /// donner un observateur (limite d'inotify atteinte, par exemple) : Claudhub
-    /// marche encore, il faut seulement actualiser à la main.
-    watcher: Option<Watcher>,
 
     /// Défilement de la liste virtualisée du diff. Il vit sur la vue et n'est
     /// jamais reconstruit : le recréer par frame remettrait le diff en haut à
@@ -669,8 +626,65 @@ fn view_toggle(app: Entity<ClaudhubApp>, name: &'static str, title: &'static str
 }
 
 impl ClaudhubApp {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// Les workers, locaux ou derrière un serveur distant.
+    ///
+    /// Le mode distant se choisit par `CLAUDHUB_SERVER_CMD` — le chemin de
+    /// test Linux ↔ Linux, qui exerce tout le fil sans Windows ni WSL ; la
+    /// cible Windows le rendra automatique. Un lancement qui échoue retombe
+    /// sur les workers locaux plutôt que d'ouvrir une fenêtre sourde.
+    fn spawn_backend() -> (runtime::Handle, async_channel::Receiver<Evt>, bool) {
+        if let Some(target) = runtime::remote::target_from_env() {
+            match runtime::remote::connect(&target) {
+                Ok((git, events)) => return (git, events, true),
+                Err(e) => log::warn!("serveur distant indisponible, repli local : {e:#}"),
+            }
+        }
         let (git, events) = runtime::spawn();
+        (git, events, false)
+    }
+
+    /// Relance le serveur distant après sa mort, à la demande.
+    ///
+    /// Manuelle et non automatique : un serveur qui meurt en boucle se
+    /// relancerait en boucle, et c'est l'utilisateur qui sait s'il vient de
+    /// mettre à jour, de fermer sa distro, ou de tuer le mauvais processus.
+    /// L'ancienne pompe s'éteint d'elle-même — son canal est fermé, ses
+    /// émetteurs morts avec le serveur.
+    pub(super) fn reconnect_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = runtime::remote::target_from_env() else {
+            return;
+        };
+        let (git, events) = match runtime::remote::connect(&target) {
+            Ok(pair) => pair,
+            Err(e) => {
+                self.server_lost = Some(format!("{e:#}"));
+                cx.notify();
+                return;
+            }
+        };
+        self.git = git;
+        self.server_lost = None;
+        self.pump_events(events, window, cx);
+        // Le serveur neuf ne sait rien : on lui redonne les dépôts ouverts,
+        // et la surveillance du worktree affiché — le reste (statut, diff)
+        // se redemande par les chemins habituels à l'arrivée des réponses.
+        for repo in &self.repos {
+            self.git.send(Cmd::OpenRepo(repo.main.clone()));
+        }
+        if let Some(active) = self.active.clone() {
+            self.git.send(Cmd::Watch {
+                worktree: active.clone(),
+            });
+            if let Some(vault) = self.notes_dir(&active, cx) {
+                self.git.send(Cmd::WatchDir { dir: vault });
+            }
+            self.request_status(active);
+        }
+        cx.notify();
+    }
+
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let (git, events, remote) = Self::spawn_backend();
 
         let commit_input =
             cx.new(|cx| TextareaState::new(window, cx).placeholder(tr!("commit-placeholder")));
@@ -704,6 +718,39 @@ impl ClaudhubApp {
                 .placeholder(tr!("journal-placeholder"))
         });
 
+        // La console SQL : son éditeur, son index de complétions, sa table.
+        // Les trois vivent aussi longtemps que la fenêtre — c'est la règle des
+        // entités gpui — et la console ne fait que les remplir.
+        let db_schema: std::rc::Rc<std::cell::RefCell<crate::ui::db_query::SchemaIndex>> =
+            Default::default();
+        let db_query_input = cx.new(|cx| {
+            gpui_component::input::EditorState::new(window, cx)
+                .language("sql")
+                .line_number(true)
+                .placeholder("SELECT * FROM …")
+        });
+        db_query_input.update(cx, |state, cx| {
+            state.lsp_mut().completion_provider =
+                Some(std::rc::Rc::new(crate::ui::db_query::SqlCompletions {
+                    schema: db_schema.clone(),
+                }));
+            cx.notify();
+        });
+        let db_table = cx.new(|cx| {
+            gpui_component::table::TableState::new(
+                crate::ui::db_query::Results::default(),
+                window,
+                cx,
+            )
+            // Les en-têtes portent leur flèche de tri. La sélection de
+            // cellules de gpui-component, elle, reste éteinte : elle n'en
+            // connaît qu'une à la fois, et ce qu'on copie d'une grille de
+            // résultats est presque toujours un bloc — voir
+            // `db_query::Results::selection`.
+            .sortable(true)
+        });
+        let db_split = crate::ui::db_query::split_state(cx);
+
         let base_select = cx.new(|cx| {
             SelectState::new(
                 SearchableVec::new(Vec::<BaseChoice>::new()),
@@ -723,88 +770,76 @@ impl ClaudhubApp {
         })
         .detach();
 
-        // Le dock et ses panneaux. Les panneaux ne portent aucun état : ils
-        // délèguent à cette entité, dont ils ne gardent qu'une référence
+        // Les docks et leurs panneaux. Les panneaux ne portent aucun état :
+        // ils délèguent à cette entité, dont ils ne gardent qu'une référence
         // faible pour ne pas former de cycle.
         let this = cx.entity();
-        // **Par `DockSkin` et non par `DockArea::new`.** Depuis que le moteur
-        // de disposition vit dans `gpui-base`, une aire construite sans peau
-        // dock, glisse et persiste très bien — mais ne dessine **aucun
-        // chrome** : ni barre d'onglets, ni titre, ni cadre. Les panneaux
-        // s'empilent alors nus, ce qui se lit comme une fenêtre cassée sans
-        // qu'une seule erreur soit signalée.
-        let (dock, dock_skin) = DockSkin::dock_area("claudhub", Some(LAYOUT_VERSION), window, cx);
-        // `Segmented` : la pastille arrondie dans un rail, à la place du
-        // rectangle bordé dont le rayon est un zéro codé en dur. C'est notre
-        // commit sur le fork qui expose ce réglage.
-        dock_skin.set_tab_variant(gpui_component::tab::TabVariant::Segmented, cx);
-        // Barre d'onglets partout, y compris sur les groupes d'un seul
-        // panneau : le défaut (`Auto`) rend alors un titre plat, et
-        // « Branches » ou « Terminaux » n'avaient pas le même bandeau que
-        // leurs voisins — deux chromes pour une même fenêtre.
-        dock_skin.set_panel_style(gpui_component::dock::PanelStyle::TabBar, cx);
-
         crate::ui::panels::register(&this, cx);
 
         // Une disposition enregistrée reprend la main sur celle par défaut.
-        // Elle est écartée si sa version diffère : les panneaux ont pu changer
-        // de nom, et reconstruire à partir de noms inconnus donnerait une
-        // fenêtre pleine de cadres vides.
+        // Le fichier entier est écarté si sa version diffère : les panneaux
+        // ont pu changer de nom, et reconstruire à partir de noms inconnus
+        // donnerait une fenêtre pleine de cadres vides.
+        let saved = load_layouts();
         let mut app_needs_layout_save = false;
-        let restored = load_layout()
-            .filter(|state| state.version == Some(LAYOUT_VERSION))
-            .and_then(|state| {
-                dock.update(cx, |area, cx| area.load(state, window, cx))
-                    .ok()
-            })
-            .is_some();
-        let sidebar = cx.new(|cx| SidebarPanel::new(&this, cx));
-        let branches = cx.new(|cx| BranchesPanel::new(&this, cx));
-        let files = cx.new(|cx| FilesPanel::new(&this, cx));
-        let changes = cx.new(|cx| ChangesPanel::new(&this, cx));
-        let branch = cx.new(|cx| BranchPanel::new(&this, cx));
-        let history = cx.new(|cx| HistoryPanel::new(&this, cx));
-        let notes = cx.new(|cx| NotesPanel::new(&this, cx));
-        let sentry = cx.new(|cx| SentryPanel::new(&this, cx));
-        let conflicts = cx.new(|cx| ConflictsPanel::new(&this, cx));
-        let diff = cx.new(|cx| DiffPanel::new(&this, cx));
-        let terminal = cx.new(|cx| TerminalPanel::new(&this, cx));
+        let mut docks = HashMap::new();
+        let mut dock_skin = None;
+        for workspace in crate::ui::workspace::Workspace::ALL {
+            // **Par `DockSkin` et non par `DockArea::new`.** Depuis que le
+            // moteur de disposition vit dans `gpui-base`, une aire construite
+            // sans peau dock, glisse et persiste très bien — mais ne dessine
+            // **aucun chrome** : ni barre d'onglets, ni titre, ni cadre. Les
+            // panneaux s'empilent alors nus, ce qui se lit comme une fenêtre
+            // cassée sans qu'une seule erreur soit signalée.
+            let (area, skin) =
+                DockSkin::dock_area(workspace.dock_id(), Some(LAYOUT_VERSION), window, cx);
+            // `Segmented` : la pastille arrondie dans un rail, à la place du
+            // rectangle bordé dont le rayon est un zéro codé en dur. C'est
+            // notre commit sur le fork qui expose ce réglage.
+            skin.set_tab_variant(gpui_component::tab::TabVariant::Segmented, cx);
+            // Barre d'onglets partout, y compris sur les groupes d'un seul
+            // panneau : le défaut (`Auto`) rend alors un titre plat, et
+            // « Branches » ou « Terminaux » n'auraient pas le même bandeau
+            // que leurs voisins — deux chromes pour une même fenêtre.
+            skin.set_panel_style(gpui_component::dock::PanelStyle::TabBar, cx);
 
-        if !restored {
-            let panels = DefaultPanels {
-                sidebar: panel_handle(sidebar),
-                branches: panel_handle(branches),
-                files: panel_handle(files),
-                changes: panel_handle(changes),
-                branch: panel_handle(branch),
-                history: panel_handle(history),
-                notes: panel_handle(notes),
-                sentry: panel_handle(sentry),
-                conflicts: panel_handle(conflicts),
-                diff: panel_handle(diff),
-                terminal: panel_handle(terminal),
-            };
-            dock.update(cx, |area, cx| {
-                install_default_layout(area, panels, window, cx);
-            });
+            let restored = saved
+                .workspaces
+                .get(workspace.key())
+                .cloned()
+                .and_then(|state| area.update(cx, |a, cx| a.load(state, window, cx)).ok())
+                .is_some();
+            if !restored {
+                area.update(cx, |a, cx| {
+                    crate::ui::workspace::install_default_layout(workspace, &this, a, window, cx);
+                });
+                // La disposition d'origine est écrite tout de suite : sans
+                // cela, le fichier garde celle d'une version antérieure
+                // jusqu'au premier déplacement, et c'est elle qu'on relirait
+                // au prochain démarrage.
+                app_needs_layout_save = true;
+            }
+            // Le dock notifie à chaque déplacement, redimensionnement ou
+            // changement d'onglet : c'est le signal d'enregistrement, différé
+            // pour qu'un glissement n'écrive pas un fichier par pixel.
+            cx.observe(&area, |this, _, cx| this.schedule_layout_save(cx))
+                .detach();
+            docks.insert(workspace, area);
+            dock_skin = Some(skin);
         }
-
-        // La disposition d'origine est écrite tout de suite : sans cela, le
-        // fichier garde celle d'une version antérieure jusqu'au premier
-        // déplacement, et c'est elle qu'on relirait au prochain démarrage.
-        if !restored {
-            app_needs_layout_save = true;
-        }
-
-        // Le dock notifie à chaque déplacement, redimensionnement ou
-        // changement d'onglet : c'est le signal d'enregistrement, différé pour
-        // qu'un glissement n'écrive pas un fichier par pixel.
-        cx.observe(&dock, |this, _, cx| this.schedule_layout_save(cx))
-            .detach();
+        let workspace = saved
+            .current
+            .as_deref()
+            .and_then(crate::ui::workspace::Workspace::from_key)
+            .unwrap_or_default();
+        let dock = docks[&workspace].clone();
+        let dock_skin = dock_skin.expect("BUG: au moins un écran");
 
         let mut app = Self {
             git,
             repos: Vec::new(),
+            server_lost: None,
+            server_wsl: false,
             unavailable: Vec::new(),
             active: None,
             review: HashMap::new(),
@@ -829,12 +864,22 @@ impl ClaudhubApp {
             editing: None,
             files_scroll: gpui::UniformListScrollHandle::new(),
             sentry: Default::default(),
+            db: Default::default(),
+            db_scroll: gpui::UniformListScrollHandle::new(),
+            db_focus: cx.focus_handle(),
+            query: Default::default(),
+            db_query_input,
+            db_schema,
+            db_table,
+            db_split,
             awaiting_agent: None,
             toast: None,
             pending_status: std::collections::HashSet::new(),
             last_auto_fetch: None,
             suggesting_message: None,
+            workspace,
             dock,
+            docks,
             dock_skin,
             layout_save_scheduled: false,
             hidden_panels: Settings::global(cx).hidden_panels.iter().cloned().collect(),
@@ -842,7 +887,6 @@ impl ClaudhubApp {
             agents: HashMap::new(),
             agent_cpu: HashMap::new(),
             diff_dragging: false,
-            watcher: None,
             diff_scroll: gpui::UniformListScrollHandle::new(),
             diff_width: gpui::px(0.),
             diff_measures: 0,
@@ -868,19 +912,21 @@ impl ClaudhubApp {
         }
         app.pump_events(events, window, cx);
         app.start_scanning(cx);
-        app.start_watching(window, cx);
         app.watch_vault_inputs(window, cx);
 
         // Les dépôts de la session précédente, puis le répertoire courant s'il
         // en est un — c'est ce qu'attend quelqu'un qui lance `claudhub` depuis son
-        // projet.
+        // projet. La vérification part au worker : `is_repo` coûte un
+        // sous-processus git, ce que ce constructeur n'a pas le droit de payer.
         let remembered = Settings::global(cx).repositories.clone();
         for path in remembered {
             app.git.send(Cmd::OpenRepo(path));
         }
-        if let Ok(cwd) = std::env::current_dir() {
-            if crate::git::repo::is_repo(&cwd) {
-                app.git.send(Cmd::OpenRepo(cwd));
+        // En distant, le répertoire qui compte est celui du **serveur** : il
+        // arrive avec `Evt::ServerHello`, et le nôtre ne désigne rien là-bas.
+        if !remote {
+            if let Ok(cwd) = std::env::current_dir() {
+                app.git.send(Cmd::OpenIfRepo(cwd));
             }
         }
         app
@@ -988,7 +1034,18 @@ impl ClaudhubApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.layout_save_scheduled = false;
-                save_layout(&this.dock.read(cx).dump(cx));
+                let layouts = Layouts {
+                    version: Some(LAYOUT_VERSION),
+                    current: Some(this.workspace.key().to_string()),
+                    workspaces: this
+                        .docks
+                        .iter()
+                        .map(|(workspace, area)| {
+                            (workspace.key().to_string(), area.read(cx).dump(cx))
+                        })
+                        .collect(),
+                };
+                save_layouts(&layouts);
             });
         })
         .detach();
@@ -1022,34 +1079,6 @@ impl ClaudhubApp {
                     .is_ok();
                 if !alive {
                     break; // la fenêtre est fermée
-                }
-            }
-        })
-        .detach();
-    }
-
-    /// Branche la surveillance de fichiers sur le rafraîchissement du statut.
-    ///
-    /// Le chemin reçu est rattaché au worktree ouvert qui le contient : le
-    /// surveillant ne connaît que des fichiers, l'application seule sait à
-    /// quel checkout ils appartiennent.
-    fn start_watching(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (watcher, changes) = match Watcher::new() {
-            Ok(pair) => pair,
-            Err(e) => {
-                log::warn!("surveillance des fichiers indisponible : {e:#}");
-                return;
-            }
-        };
-        self.watcher = Some(watcher);
-
-        cx.spawn_in(window, async move |this, cx| {
-            while let Ok(path) = changes.recv().await {
-                let alive = this
-                    .update(cx, |app, cx| app.file_changed(&path, cx))
-                    .is_ok();
-                if !alive {
-                    break;
                 }
             }
         })
@@ -1455,6 +1484,30 @@ impl ClaudhubApp {
             // fait foi, et une écriture refusée (l'agent avait touché au
             // fichier entre-temps) doit rendre la vue à ce qui est vraiment
             // là plutôt qu'à ce qu'on croyait y avoir mis.
+            Evt::FilesChanged { paths } => {
+                for path in paths {
+                    self.file_changed(&path, cx);
+                }
+            }
+            Evt::ServerHello {
+                build,
+                cwd,
+                running_under_wsl,
+                shells: _,
+            } => {
+                log::info!("serveur distant prêt (build {build})");
+                self.server_lost = None;
+                self.server_wsl = running_under_wsl;
+                // Le « lancé depuis son projet » du mode distant : c'est le
+                // répertoire du serveur qui le dit, pas le nôtre.
+                self.git.send(Cmd::OpenIfRepo(cwd));
+                cx.notify();
+            }
+            Evt::ServerLost { message } => {
+                log::warn!("serveur distant perdu : {message}");
+                self.server_lost = Some(message);
+                cx.notify();
+            }
             Evt::VaultWritten { worktree } => {
                 self.watch_vault(&worktree, cx);
                 if let Some(dir) = self.notes_dir(&worktree, cx) {
@@ -1556,6 +1609,29 @@ impl ClaudhubApp {
                 self.agent_cpu = cpu;
                 self.agents = next;
             }
+            Evt::DbDatabases { key, databases } => self.db_databases_arrived(key, databases, cx),
+            Evt::DbTables {
+                key,
+                database,
+                tables,
+            } => self.db_tables_arrived(key, database, tables, cx),
+            Evt::DbColumns {
+                key,
+                database,
+                table,
+                columns,
+            } => self.db_columns_arrived(key, database, table, columns, cx),
+            Evt::DbAllColumns {
+                key,
+                database,
+                columns,
+            } => self.db_all_columns_arrived(key, database, columns, cx),
+            Evt::DbRows {
+                request,
+                rows,
+                elapsed_ms,
+            } => self.db_rows_arrived(request, rows, elapsed_ms, cx),
+            Evt::DbExported { path, rows } => self.db_exported(path, rows, cx),
             Evt::History {
                 worktree,
                 range,
@@ -1696,17 +1772,17 @@ impl ClaudhubApp {
             .as_deref()
             .and_then(|previous| self.notes_dir(previous, cx));
         let vault = self.notes_dir(&path, cx);
-        if let Some(watcher) = self.watcher.as_mut() {
-            if let Some(previous) = self.active.as_deref() {
-                watcher.unwatch(previous);
-            }
-            if let Some(previous) = previous_vault {
-                watcher.unwatch_dir(&previous);
-            }
-            watcher.watch(&path);
-            if let Some(vault) = vault {
-                watcher.watch_dir(&vault);
-            }
+        if let Some(previous) = self.active.clone() {
+            self.git.send(Cmd::Unwatch { worktree: previous });
+        }
+        if let Some(previous) = previous_vault {
+            self.git.send(Cmd::UnwatchDir { dir: previous });
+        }
+        self.git.send(Cmd::Watch {
+            worktree: path.clone(),
+        });
+        if let Some(vault) = vault {
+            self.git.send(Cmd::WatchDir { dir: vault });
         }
         self.active = Some(path.clone());
         self.ensure_review(&path, cx);
@@ -2011,9 +2087,7 @@ impl ClaudhubApp {
         let Some(vault) = self.notes_dir(worktree, cx) else {
             return;
         };
-        if let Some(watcher) = self.watcher.as_mut() {
-            watcher.watch_dir(&vault);
-        }
+        self.git.send(Cmd::WatchDir { dir: vault });
     }
 
     /// La vue en deux colonnes est-elle repliée ?
@@ -2237,12 +2311,15 @@ impl ClaudhubApp {
                 // Les vues masquées n'ont plus d'onglet : c'est le seul
                 // endroit d'où les rappeler, et donc le seul endroit qui dise
                 // ce que la fenêtre ne montre pas.
-                .submenu(tr!("menu-views"), window, cx, move |menu, _window, _cx| {
-                    super::panels::VIEWS
-                        .iter()
-                        .fold(menu, |menu, &(name, title)| {
-                            menu.item(view_toggle(for_views.clone(), name, title))
-                        })
+                // Les vues de **cet écran**, et non les onze de la fenêtre :
+                // masquer la console SQL depuis la revue ne ferait rien voir
+                // changer, et une entrée sans effet se lit comme une entrée
+                // cassée.
+                .submenu(tr!("menu-views"), window, cx, move |menu, _window, cx| {
+                    let views = for_views.read(cx).workspace.views();
+                    views.iter().fold(menu, |menu, &(name, title)| {
+                        menu.item(view_toggle(for_views.clone(), name, title))
+                    })
                 })
                 .item(PopupMenuItem::new(tr!("menu-reset-layout")).on_click(
                     move |_, window, cx| {
@@ -2278,14 +2355,20 @@ impl ClaudhubApp {
         // de « Claudhub ne voit plus rien ». Le calcul est refait à chaque frame
         // parce qu'il ne coûte qu'une comparaison de composants de chemin,
         // l'appartenance à WSL étant retenue une fois pour toutes.
-        let unwatched = self
-            .active
-            .as_deref()
-            .is_some_and(crate::runtime::watch::on_windows_filesystem);
+        let unwatched = self.active.as_deref().is_some_and(|path| {
+            crate::runtime::watch::on_windows_filesystem(path)
+                // En distant, c'est la machine du **serveur** qui sait si
+                // elle est sous WSL : sa poignée de main l'a dit, et le
+                // montage se reconnaît au chemin seul.
+                || (self.server_wsl && crate::runtime::watch::is_windows_mount(path))
+        });
         let muted = cx.theme().muted_foreground;
 
         h_flex()
-            .h(super::theme::row_height(cx))
+            // Une barre d'outils et non une ligne de liste : elle porte
+            // désormais des boutons, et vingt-deux pixels les feraient
+            // déborder sur le bas de la fenêtre.
+            .h(super::theme::toolbar_height(cx))
             .w_full()
             .px_2()
             .items_center()
@@ -2295,6 +2378,11 @@ impl ClaudhubApp {
             .bg(cx.theme().title_bar)
             .text_xs()
             .text_color(muted)
+            // Le choix de l'écran ouvre la barre : c'est la plus large des
+            // trois façons de dire où l'on est, et les deux autres — la
+            // branche, l'avance sur l'amont — s'y rangent derrière.
+            .child(self.render_workspace_nav(cx))
+            .child(Divider::vertical().h(px(12.)))
             .when(self.active.is_some(), |el| {
                 el.child(icon("git-branch").xsmall())
                     .child(div().max_w(px(220.)).truncate().child(branch))
@@ -2307,6 +2395,29 @@ impl ClaudhubApp {
             // Une opération à mi-chemin passe avant tout le reste : tant
             // qu'elle dure, ce que la revue affiche n'est pas ce qu'on croit.
             .children(self.render_pending_bar(cx))
+            // Le serveur parti passe avant les avertissements ordinaires :
+            // tant qu'il manque, plus rien de ce que la fenêtre montre ne
+            // bouge, et chaque geste part dans le vide.
+            .when_some(self.server_lost.clone(), |el, message| {
+                el.child(
+                    h_flex()
+                        .gap_1()
+                        .text_color(cx.theme().danger)
+                        .child(icon("triangle-alert").xsmall())
+                        .child(div().max_w(px(360.)).truncate().child(tr!("server-lost")))
+                        .child(
+                            Button::new("server-relaunch")
+                                .ghost()
+                                .xsmall()
+                                .label(tr!("server-relaunch"))
+                                .tooltip(message)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.reconnect_server(window, cx);
+                                })),
+                        ),
+                )
+                .child(Divider::vertical().h(px(12.)))
+            })
             .when(unwatched, |el| {
                 el.child(
                     h_flex()
@@ -2379,6 +2490,16 @@ impl Render for ClaudhubApp {
             .on_action(cx.listener(super::shortcuts::explorer_open))
             .on_action(cx.listener(super::shortcuts::explorer_home))
             .on_action(cx.listener(super::shortcuts::explorer_end))
+            .on_action(cx.listener(super::shortcuts::db_up))
+            .on_action(cx.listener(super::shortcuts::db_down))
+            .on_action(cx.listener(super::shortcuts::db_left))
+            .on_action(cx.listener(super::shortcuts::db_right))
+            .on_action(cx.listener(super::shortcuts::db_open))
+            .on_action(cx.listener(super::shortcuts::run_db_query))
+            .on_action(cx.listener(super::shortcuts::go_to_workspace))
+            .on_action(cx.listener(super::shortcuts::copy_db_result))
+            .on_action(cx.listener(super::shortcuts::select_whole_result))
+            .on_action(cx.listener(super::shortcuts::export_db_csv))
             .on_action(cx.listener(super::shortcuts::show_shortcuts))
             .on_action(cx.listener(super::shortcuts::toggle_sidebar))
             .on_action(cx.listener(super::shortcuts::previous_terminal))
@@ -2482,26 +2603,37 @@ impl ClaudhubApp {
     ///
     /// La sortie de secours d'un système où l'on peut tout déplacer : un
     /// panneau glissé hors de vue n'a sinon aucun moyen de revenir.
+    /// Rend à l'écran courant sa disposition d'origine.
+    ///
+    /// **Celui-ci et pas les quatre** : on casse la géométrie d'un écran en
+    /// tirant un séparateur de travers, pas celle de tous, et emporter les
+    /// trois autres ferait payer cher un geste de réparation.
     pub(super) fn reset_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let this = cx.entity();
-
-        let panels = DefaultPanels {
-            sidebar: panel_handle(cx.new(|cx| SidebarPanel::new(&this, cx))),
-            branches: panel_handle(cx.new(|cx| BranchesPanel::new(&this, cx))),
-            files: panel_handle(cx.new(|cx| FilesPanel::new(&this, cx))),
-            changes: panel_handle(cx.new(|cx| ChangesPanel::new(&this, cx))),
-            branch: panel_handle(cx.new(|cx| BranchPanel::new(&this, cx))),
-            history: panel_handle(cx.new(|cx| HistoryPanel::new(&this, cx))),
-            notes: panel_handle(cx.new(|cx| NotesPanel::new(&this, cx))),
-            sentry: panel_handle(cx.new(|cx| SentryPanel::new(&this, cx))),
-            conflicts: panel_handle(cx.new(|cx| ConflictsPanel::new(&this, cx))),
-            diff: panel_handle(cx.new(|cx| DiffPanel::new(&this, cx))),
-            terminal: panel_handle(cx.new(|cx| TerminalPanel::new(&this, cx))),
-        };
+        let workspace = self.workspace;
         self.dock.update(cx, |area, cx| {
-            install_default_layout(area, panels, window, cx);
+            crate::ui::workspace::install_default_layout(workspace, &this, area, window, cx);
         });
         self.schedule_layout_save(cx);
+        cx.notify();
+    }
+
+    /// Passe à un autre écran.
+    ///
+    /// Rien d'autre à faire que de changer de dock : l'état — le worktree
+    /// choisi, le fichier ouvert, la requête en cours — vit dans cette entité
+    /// et non dans les panneaux, et il est donc le même des quatre côtés.
+    pub(super) fn enter_workspace(
+        &mut self,
+        workspace: crate::ui::workspace::Workspace,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspace == workspace {
+            return;
+        }
+        self.workspace = workspace;
+        self.dock = self.docks[&workspace].clone();
         cx.notify();
     }
 

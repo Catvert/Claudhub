@@ -50,13 +50,15 @@ pub struct Watcher {
 impl Watcher {
     /// Démarre la surveillance et rend le récepteur des chemins modifiés.
     ///
-    /// Ce que le récepteur livre est un chemin *quelconque* sous un worktree
-    /// surveillé ; c'est à l'appelant de le rattacher au worktree qu'il
-    /// connaît, lui seul sachant lesquels sont ouverts.
-    pub fn new() -> anyhow::Result<(Self, async_channel::Receiver<PathBuf>)> {
+    /// Ce que le récepteur livre est un **lot** de chemins quelconques sous
+    /// les worktrees surveillés — un lot par fenêtre de regroupement, ce qui
+    /// en fait un seul `Evt` sur le fil ; c'est à l'appelant de rattacher
+    /// chaque chemin au worktree qu'il connaît, lui seul sachant lesquels
+    /// sont ouverts.
+    pub fn new() -> anyhow::Result<(Self, async_channel::Receiver<Vec<PathBuf>>)> {
         // Canal async : c'est une tâche gpui qui le draine, et elle ne peut pas
         // se permettre d'attendre sur un `recv` bloquant.
-        let (tx, rx) = async_channel::unbounded::<PathBuf>();
+        let (tx, rx) = async_channel::unbounded::<Vec<PathBuf>>();
         let (raw_tx, raw_rx) = mpsc::channel();
         let mut debouncer = new_debouncer(DEBOUNCE, None, raw_tx)?;
         let (order_tx, order_rx) = mpsc::channel::<Order>();
@@ -141,10 +143,8 @@ impl Watcher {
                             }
                         }
                     }
-                    for path in seen {
-                        if tx.send_blocking(path).is_err() {
-                            return; // la fenêtre est partie
-                        }
+                    if !seen.is_empty() && tx.send_blocking(seen).is_err() {
+                        return; // la fenêtre est partie
                     }
                 }
             })?;
@@ -154,11 +154,11 @@ impl Watcher {
 
     /// Surveille un worktree. Appeler deux fois est sans effet, et l'appel rend
     /// la main immédiatement : le travail se fait ailleurs.
-    pub fn watch(&mut self, worktree: &Path) {
+    pub fn watch(&self, worktree: &Path) {
         let _ = self.orders.send(Order::Watch(worktree.to_path_buf()));
     }
 
-    pub fn unwatch(&mut self, worktree: &Path) {
+    pub fn unwatch(&self, worktree: &Path) {
         let _ = self.orders.send(Order::Unwatch(worktree.to_path_buf()));
     }
 
@@ -167,11 +167,11 @@ impl Watcher {
     /// C'est ce qu'il faut pour un coffre de notes : ni git, ni sous-dossiers,
     /// et un seul appel système. Ce qui en revient passe par le même canal —
     /// l'appelant sait, lui, à quel worktree ce dossier appartient.
-    pub fn watch_dir(&mut self, dir: &Path) {
+    pub fn watch_dir(&self, dir: &Path) {
         let _ = self.orders.send(Order::WatchDir(dir.to_path_buf()));
     }
 
-    pub fn unwatch_dir(&mut self, dir: &Path) {
+    pub fn unwatch_dir(&self, dir: &Path) {
         let _ = self.orders.send(Order::UnwatchDir(dir.to_path_buf()));
     }
 }
@@ -269,7 +269,7 @@ pub fn on_windows_filesystem(path: &Path) -> bool {
 /// Le noyau de WSL porte « microsoft » dans sa version, sous WSL1 comme sous
 /// WSL2 ; c'est la façon dont tout le monde le reconnaît, faute d'autre
 /// marqueur stable.
-fn running_under_wsl() -> bool {
+pub(crate) fn running_under_wsl() -> bool {
     static WSL: OnceLock<bool> = OnceLock::new();
     *WSL.get_or_init(|| {
         std::fs::read_to_string("/proc/sys/kernel/osrelease")
@@ -284,7 +284,7 @@ fn running_under_wsl() -> bool {
 /// reconnaissance rate les installations qui l'ont déplacée. C'est assumé :
 /// ce test ne sert qu'à afficher un avertissement, et un avertissement qui
 /// manque vaut mieux qu'un avertissement qui ment.
-fn is_windows_mount(path: &Path) -> bool {
+pub(crate) fn is_windows_mount(path: &Path) -> bool {
     let mut parts = path.components();
     if parts.next() != Some(Component::RootDir) {
         return false;
@@ -540,7 +540,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("claudhub-watch-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("répertoire temporaire");
 
-        let (mut watcher, changes) = Watcher::new().expect("observateur disponible");
+        let (watcher, changes) = Watcher::new().expect("observateur disponible");
         watcher.watch(&dir);
 
         let file = dir.join("écrit pendant la surveillance.txt");
@@ -555,8 +555,8 @@ mod tests {
         while std::time::Instant::now() < deadline {
             std::fs::write(&file, b"contenu").expect("écriture");
             std::thread::sleep(Duration::from_millis(100));
-            if let Ok(path) = changes.try_recv() {
-                received = Some(path);
+            if let Ok(batch) = changes.try_recv() {
+                received = batch.into_iter().next();
                 break;
             }
         }

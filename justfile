@@ -6,13 +6,18 @@ _cargo := if `command -v nix-shell >/dev/null 2>&1 && echo yes || echo no` == "y
 default: run
 
 run:
-    {{_cargo}} "cargo run"
+    {{_cargo}} "cargo run --bin claudhub"
 
 release:
-    {{_cargo}} "cargo run --release"
+    {{_cargo}} "cargo run --release --bin claudhub"
 
 check:
     {{_cargo}} "cargo check --all-targets"
+
+# Le portillon du serveur headless : prouve qu'aucun module du cœur ne tire
+# gpui. C'est ce build (sans la feature `ui`) qui part dans la distro WSL2.
+check-server:
+    {{_cargo}} "cargo check --no-default-features --bin claudhub-server"
 
 test:
     {{_cargo}} "cargo test"

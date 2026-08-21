@@ -62,7 +62,7 @@ impl Range {
 }
 
 /// Un fichier de la liste de revue, avec son volume de modifications.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DiffFile {
     pub path: PathBuf,
     /// Ancien chemin d'un renommage.
@@ -73,7 +73,7 @@ pub struct DiffFile {
     pub binary: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DiffLineKind {
     Context,
     Added,
@@ -82,7 +82,7 @@ pub enum DiffLineKind {
     NoNewline,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DiffLine {
     pub kind: DiffLineKind,
     /// Numéros dans l'ancien et le nouveau fichier ; une ligne ajoutée n'a pas
@@ -92,7 +92,7 @@ pub struct DiffLine {
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Hunk {
     /// L'en-tête `@@ … @@` tel quel, avec la section que git y ajoute.
     pub header: String,
@@ -102,7 +102,7 @@ pub struct Hunk {
 }
 
 /// Le diff d'un seul fichier.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileDiff {
     pub hunks: Vec<Hunk>,
     pub binary: bool,

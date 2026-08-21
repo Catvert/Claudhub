@@ -940,17 +940,40 @@ impl ClaudhubApp {
 }
 
 impl ClaudhubApp {
+    /// Le centre de l'écran d'édition : le fichier ouvert, ou de quoi savoir
+    /// qu'il faut en choisir un.
+    ///
+    /// Il ne partage plus la place du diff : ce sont deux écrans, et l'onglet
+    /// dit ce qu'il porte sans avoir à changer de nom.
+    pub(super) fn render_editor_panel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        match self.render_editor(window, cx) {
+            Some(editor) => editor.into_any_element(),
+            None => centered_message(tr!("editor-pick-a-file"), cx),
+        }
+    }
+
+    /// Le centre de l'écran des bases : la console, ou de quoi savoir d'où
+    /// elle s'ouvre.
+    pub(super) fn render_console_panel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        if self.db_console_open() {
+            return self.render_db_console(window, cx).into_any_element();
+        }
+        centered_message(tr!("db-open-a-console"), cx)
+    }
+
     pub(super) fn render_diff(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // Un fichier ouvert pour retouche prend la place du diff : on regarde
-        // l'un *ou* l'autre, et deux onglets à faire basculer pour un geste
-        // qui vient de l'explorateur seraient un aller-retour de trop.
-        if let Some(editor) = self.render_editor(window, cx) {
-            return editor.into_any_element();
-        }
         // Les occurrences sont recalculées ici plutôt qu'à chaque endroit d'où
         // la requête peut changer : la comparaison d'une chaîne par frame est
         // le prix de n'avoir personne à prévenir.

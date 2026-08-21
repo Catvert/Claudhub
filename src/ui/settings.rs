@@ -206,70 +206,10 @@ fn command_name(command: &str) -> &str {
     command.rsplit('/').next().unwrap_or(command)
 }
 
-/// Découpe une ligne de commande en honorant les guillemets.
-///
-/// `split_whitespace` casse sur tout chemin contenant une espace — et sous
-/// Windows comme sous macOS, c'est le cas courant. Les règles sont celles d'un
-/// shell POSIX réduites à l'essentiel : `'…'` littéral, `"…"` avec échappement
-/// par contre-oblique, contre-oblique hors guillemets.
-pub fn split_command(line: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut started = false;
-    let mut chars = line.chars().peekable();
-    let mut quote: Option<char> = None;
-    while let Some(c) = chars.next() {
-        match (quote, c) {
-            (Some(q), c) if c == q => quote = None,
-            (Some('\''), c) => current.push(c),
-            (Some(_), '\\') => current.push(chars.next().unwrap_or('\\')),
-            (Some(_), c) => current.push(c),
-            (None, '\'') | (None, '"') => {
-                quote = Some(c);
-                // Un argument vide est un argument : `--sep ''` en est un.
-                started = true;
-            }
-            (None, '\\') => current.push(chars.next().unwrap_or('\\')),
-            (None, c) if c.is_whitespace() => {
-                if started || !current.is_empty() {
-                    parts.push(std::mem::take(&mut current));
-                    started = false;
-                }
-            }
-            (None, c) => current.push(c),
-        }
-    }
-    if started || !current.is_empty() {
-        parts.push(current);
-    }
-    parts
-}
-
-/// Recompose une ligne de commande à partir de ses morceaux.
-///
-/// L'aller-retour avec `split_command` doit être fidèle : le formulaire écrit
-/// des morceaux et les relit en une ligne, et un chemin avec une espace ne
-/// doit pas se scinder en deux au premier passage.
-pub fn join_command(parts: impl IntoIterator<Item = impl AsRef<str>>) -> String {
-    parts
-        .into_iter()
-        .map(|part| {
-            let part = part.as_ref();
-            // La contre-oblique aussi : hors guillemets elle échappe, et un
-            // chemin Windows perdrait les siennes au premier aller-retour.
-            if part.is_empty()
-                || part
-                    .chars()
-                    .any(|c| c.is_whitespace() || c == '\'' || c == '"' || c == '\\')
-            {
-                format!("\"{}\"", part.replace('\\', "\\\\").replace('"', "\\\""))
-            } else {
-                part.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
+// Le découpage d'une ligne de commande vit dans `crate::cmdline` : les
+// workers s'en servent aussi, et un binaire serveur sans gpui doit pouvoir le
+// faire. Ré-exporté ici parce que c'est le formulaire qui s'en sert le plus.
+pub use crate::cmdline::{join_command, split_command};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -486,6 +426,19 @@ pub struct Settings {
     /// Une liste de noms plutôt qu'un booléen par panneau : un panneau ajouté
     /// est visible sans que ce fichier ait à le savoir.
     pub hidden_panels: Vec<String>,
+    /// Les bases de données du panneau « Bases ».
+    ///
+    /// Déclarées ici comme les profils d'agent, et pour la même raison : c'est
+    /// le deuxième niveau du système d'extension — une déclaration, pas du
+    /// code. Une connexion n'appartient pas à un dépôt : on relit un projet
+    /// dans plusieurs worktrees et la base de développement est la même.
+    pub databases: Vec<crate::db::Connection>,
+    /// Lignes rendues par page dans la console SQL.
+    ///
+    /// Une page et non tout le résultat : un `SELECT *` sur une table de deux
+    /// millions de lignes remplirait la mémoire de la fenêtre avant d'avoir
+    /// affiché quoi que ce soit.
+    pub db_page_size: usize,
 }
 
 impl Default for Settings {
@@ -519,6 +472,8 @@ impl Default for Settings {
             vim_mode: false,
             notes_dir: String::new(),
             hidden_panels: Vec::new(),
+            databases: Vec::new(),
+            db_page_size: 500,
         }
     }
 }
@@ -1026,36 +981,6 @@ mod tests {
                 ]
             ))
         );
-    }
-
-    #[test]
-    fn a_command_line_survives_quotes_and_spaces() {
-        // Le défaut que ce découpage corrige : un chemin contenant une espace.
-        assert_eq!(
-            split_command(r#""/opt/mon agent/bin/agent" --model "gpt 5""#),
-            vec!["/opt/mon agent/bin/agent", "--model", "gpt 5"]
-        );
-        // Guillemets simples, littéraux.
-        assert_eq!(
-            split_command("sh -c 'echo un deux'"),
-            vec!["sh", "-c", "echo un deux"]
-        );
-        // Un argument vide en est un.
-        assert_eq!(split_command("agent --sep ''"), vec!["agent", "--sep", ""]);
-        assert_eq!(split_command("   "), Vec::<String>::new());
-    }
-
-    #[test]
-    fn a_command_line_round_trips() {
-        for line in [
-            "claude",
-            r#""/opt/mon agent/bin/agent" --model "gpt 5""#,
-            r#"agent --say "il dit \"non\"""#,
-            r#""C:\Program Files\agent.exe""#,
-        ] {
-            let parts = split_command(line);
-            assert_eq!(split_command(&join_command(&parts)), parts, "{line}");
-        }
     }
 
     #[test]

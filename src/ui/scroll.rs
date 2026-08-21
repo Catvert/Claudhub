@@ -130,6 +130,43 @@ impl ClaudhubApp {
             .or_insert_with(|| ScrollMotion::new(axes))
     }
 
+    /// Le seul lissage, pour ce qui peint déjà sa propre barre.
+    ///
+    /// La table de résultats de la console SQL est dans ce cas : elle pose ses
+    /// deux barres elle-même, et lui en ajouter une troisième par-dessus en
+    /// ferait deux à la même place. Le mouvement, lui, n'a rien à voir avec la
+    /// barre — c'est l'écouteur de molette d'un ancêtre non défilant, et c'est
+    /// la seule chose dont on ait besoin ici.
+    ///
+    /// L'identifiant reste la clé du mouvement, comme pour `scrolled` : deux
+    /// panneaux ne peuvent pas animer le même décalage.
+    pub(super) fn smoothed<H: Scrollable>(
+        &mut self,
+        id: impl Into<SharedString>,
+        handle: &H,
+        axes: Axes,
+        window: &Window,
+        content: impl IntoElement,
+        cx: &Context<Self>,
+    ) -> Stateful<gpui::Div> {
+        let id: SharedString = id.into();
+        let base = handle.base();
+        self.motion(id.clone(), axes).advance(&base, window);
+        div()
+            .id(gpui::ElementId::Name(id.clone()))
+            .size_full()
+            .min_h_0()
+            .min_w_0()
+            .child(content)
+            .on_scroll_wheel(cx.listener(
+                move |this, event: &gpui::ScrollWheelEvent, window, cx| {
+                    if this.motion(id.clone(), axes).on_wheel(&base, event, window) {
+                        cx.notify();
+                    }
+                },
+            ))
+    }
+
     /// Un contenu défilant, sa barre, et le lissage de sa molette.
     ///
     /// L'écouteur est posé sur le conteneur de la barre, qui ne défile pas

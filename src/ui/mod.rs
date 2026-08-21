@@ -10,6 +10,8 @@ mod base_select;
 mod blade;
 mod branches;
 mod conflicts;
+mod db;
+mod db_query;
 mod diff_view;
 mod explorer;
 mod file_icons;
@@ -34,6 +36,7 @@ mod terminal_view;
 mod theme;
 mod tree;
 mod vault;
+mod workspace;
 mod worktree_ops;
 
 use gpui::{px, size, App, AppContext, Bounds, WindowBounds, WindowOptions};
@@ -182,9 +185,14 @@ mod i18n_tests {
     #[test]
     fn every_view_has_a_title_in_both_catalogs() {
         let (en, fr) = (keys(EN), keys(FR));
-        for (_, title) in crate::ui::panels::VIEWS {
-            assert!(en.contains(*title), "absente de en.json : {title}");
-            assert!(fr.contains(*title), "absente de fr.json : {title}");
+        for workspace in crate::ui::workspace::Workspace::ALL {
+            let label = workspace.label();
+            assert!(en.contains(label), "absente de en.json : {label}");
+            assert!(fr.contains(label), "absente de fr.json : {label}");
+            for (_, title) in workspace.views() {
+                assert!(en.contains(*title), "absente de en.json : {title}");
+                assert!(fr.contains(*title), "absente de fr.json : {title}");
+            }
         }
     }
 

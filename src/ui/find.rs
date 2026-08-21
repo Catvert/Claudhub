@@ -41,6 +41,7 @@ use crate::ui::icons::icon;
 pub enum Pane {
     Sidebar,
     Files,
+    Db,
     Changes,
     Branch,
     Branches,
@@ -49,6 +50,12 @@ pub enum Pane {
     Sentry,
     Conflicts,
     Diff,
+    /// L'éditeur intégré. Il a la recherche d'`InputState`, pas la nôtre —
+    /// mais il lui faut sa clé comme aux autres, ne serait-ce que pour que
+    /// `Ctrl+F` ne parte pas au panneau touché avant lui.
+    Editor,
+    /// La console SQL. Même chose : c'est l'éditeur de requête qui cherche.
+    Console,
 }
 
 impl Pane {
