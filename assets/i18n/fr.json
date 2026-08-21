@@ -453,6 +453,8 @@
   "terminal-copy": "Copier",
   "terminal-new": "Nouveau terminal",
   "terminal-paste": "Coller",
+  "terminal-rename": "Renommer l'onglet",
+  "terminal-rename-placeholder": "Nom de l'onglet, vide pour celui du programme",
   "terminal-select-all": "Tout sélectionner",
   "terminal-shell": "shell",
   "todo-add": "Ajouter une tâche",

@@ -19,6 +19,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::dock::{BasePanel, Panel, PanelControl, PanelEvent};
+use gpui_component::menu::ContextMenuExt as _;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::ActiveTheme;
 use gpui_component::Sizable as _;
@@ -543,12 +544,37 @@ impl Panel for TerminalPanel {
     /// carry a button. That saves a sixth commit on the fork for something only
     /// the terminals want.
     fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let label = self.view.read(cx).label();
         let id = self.view.entity_id();
         let app = self.app.clone();
+        // The name comes from the application and not from the view: it can be
+        // given by hand, and the five panels of one terminal must say the same
+        // thing. Reading it here is legitimate — a panel renders after the
+        // application's own render closure has returned.
+        let label = app
+            .upgrade()
+            .map(|app| app.read(cx).terminal_label(id, cx))
+            .unwrap_or_default();
+        let rename = app.clone();
         gpui_component::h_flex()
+            .id(("terminal-tab", id))
             .gap_1()
             .items_center()
+            // Renaming is a right click and not a double click: a double click
+            // on a tab bar already means "zoom this group" everywhere else, and
+            // the tab under this element consumes the plain click to select.
+            .context_menu(move |menu, _window, _cx| {
+                let app = rename.clone();
+                menu.item(
+                    gpui_component::menu::PopupMenuItem::new(tr!("terminal-rename"))
+                        .icon(crate::ui::icons::icon("pencil"))
+                        .on_click(move |_, window, cx| {
+                            let Some(app) = app.upgrade() else {
+                                return;
+                            };
+                            app.update(cx, |app, cx| app.ask_terminal_name(id, window, cx));
+                        }),
+                )
+            })
             .child(label)
             .child(
                 Button::new("close-terminal")

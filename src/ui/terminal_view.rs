@@ -1033,6 +1033,11 @@ impl Launch {
 pub struct OpenTerminal {
     pub worktree: PathBuf,
     pub view: Entity<TerminalView>,
+    /// The name given by hand, if it was. Failing that the tab carries the
+    /// running program, which is right until one opens three shells: they are
+    /// then three tabs called `bash`, and only what one is doing in each tells
+    /// them apart — which is precisely what the program name cannot say.
+    pub name: Option<SharedString>,
     /// The panels, in the order of `Workspace::ALL`.
     pub panels: Vec<Entity<crate::ui::panels::TerminalPanel>>,
 }
@@ -1132,6 +1137,7 @@ impl ClaudhubApp {
         self.terminals.push(OpenTerminal {
             worktree: worktree.clone(),
             view: view.clone(),
+            name: None,
             panels: panels.clone(),
         });
         for (workspace, panel) in crate::ui::workspace::Workspace::ALL.into_iter().zip(panels) {
@@ -1163,7 +1169,19 @@ impl ClaudhubApp {
             .filter_map(|terminal| terminal.panels.get(workspace.index()).cloned())
             .rfind(|other| other.entity_id() != panel.entity_id());
         dock.update(cx, |dock, cx| {
-            dock.add_panel(panel.clone(), DockPlacement::Center, None, window, cx);
+            // **`panel_handle` and `add_panel_view`, never `add_panel`.** An
+            // `Entity<P>` converts itself into base's `PanelView` and the dock
+            // takes it without complaint — but without the presentation that
+            // goes with it: no tab, no title, no content. It is the silent
+            // failure of the dock rework, already written down in
+            // `workspace.rs`, and it is what made a terminal open into nothing.
+            dock.add_panel_view(
+                gpui_component::dock::panel_handle(panel.clone()),
+                DockPlacement::Center,
+                None,
+                window,
+                cx,
+            );
             let id = PanelId::from(panel.entity_id());
             let target = sibling
                 .and_then(|sibling| {
@@ -1192,6 +1210,62 @@ impl ClaudhubApp {
                 dock.move_panel(id, target, window, cx);
             }
         });
+    }
+
+    /// What a terminal's tab says: the name given by hand, or the program.
+    pub(super) fn terminal_label(&self, view: gpui::EntityId, cx: &App) -> SharedString {
+        let Some(terminal) = self
+            .terminals
+            .iter()
+            .find(|terminal| terminal.view.entity_id() == view)
+        else {
+            return SharedString::default();
+        };
+        terminal
+            .name
+            .clone()
+            .unwrap_or_else(|| terminal.view.read(cx).label())
+    }
+
+    /// Renames a terminal, or gives it its program's name back.
+    ///
+    /// An empty name **clears** it rather than showing an empty tab: it is the
+    /// convention of the task list two panels over, and it saves a second
+    /// gesture for "actually, put it back".
+    pub(super) fn rename_terminal(
+        &mut self,
+        view: gpui::EntityId,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(terminal) = self
+            .terminals
+            .iter_mut()
+            .find(|terminal| terminal.view.entity_id() == view)
+        else {
+            return;
+        };
+        let name = name.trim();
+        terminal.name = (!name.is_empty()).then(|| SharedString::from(name.to_string()));
+        cx.notify();
+    }
+
+    /// Asks for a terminal's new name.
+    pub(super) fn ask_terminal_name(
+        &mut self,
+        view: gpui::EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.terminal_label(view, cx);
+        self.open_text_dialog_with(
+            tr!("terminal-rename"),
+            tr!("terminal-rename-placeholder"),
+            current,
+            window,
+            cx,
+            move |this, name, _window, cx| this.rename_terminal(view, name, cx),
+        );
     }
 
     /// Closes a terminal: its pty, and its panel in each of the five docks.

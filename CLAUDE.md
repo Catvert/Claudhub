@@ -1987,6 +1987,16 @@ Sept points, et aucun ne se devine :
   le panneau permanent ; les suivants rejoignent son groupe d'onglets
   (`InsertTarget::Tabs`, `activate: true` — l'onglet qu'on vient d'ouvrir est
   celui qu'on regarde).
+- **`panel_handle` et `add_panel_view`, jamais `add_panel`.** Un `Entity<P>` se
+  convertit tout seul en `PanelView` de la couche base, et le dock l'accepte
+  sans rien dire — mais sans la présentation qui va avec : ni onglet, ni titre,
+  ni contenu. C'est l'échec silencieux de la refonte du dock, déjà écrit dans
+  `workspace.rs` pour la disposition par défaut, et c'est ce qui faisait ouvrir
+  un terminal sur du vide.
+- **Le nom de l'onglet vient de l'application, pas de la vue.** Il peut être
+  donné à la main (clic droit sur l'onglet), et les cinq panneaux d'un même
+  terminal doivent dire la même chose. Un nom vide rend au programme le sien,
+  comme un libellé vidé supprime une tâche.
 - **La croix est peinte par `Panel::title`**, et non par la peau du dock, qui
   ne dessine aucun bouton de fermeture par onglet — son menu ferme un *groupe*,
   ce qui n'est pas le même geste. `title` rend un élément, et un élément porte

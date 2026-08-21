@@ -453,6 +453,8 @@
   "terminal-copy": "Copy",
   "terminal-new": "New terminal",
   "terminal-paste": "Paste",
+  "terminal-rename": "Rename the tab",
+  "terminal-rename-placeholder": "Tab name, empty for the program's",
   "terminal-select-all": "Select all",
   "terminal-shell": "shell",
   "todo-add": "Add a task",
