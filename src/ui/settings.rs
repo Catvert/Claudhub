@@ -504,23 +504,33 @@ impl Default for Settings {
             wsl_distro: String::new(),
             hidden_panels: Vec::new(),
             databases: Vec::new(),
-            lsp: vec![phpantom()],
+            lsp: shipped_servers(),
             shortcuts: std::collections::BTreeMap::new(),
             db_page_size: 500,
         }
     }
 }
 
-/// The language server shipped as a default: PHPantom, on PHP and on Blade.
+/// The language servers shipped as defaults, and why these three.
+///
+/// They are the languages this repository and the projects it reviews are
+/// written in — PHP with its Blade views, Rust, TypeScript and what comes with
+/// it — and none of them is special beyond that. The list is a declaration like
+/// any other: emptying it or adding to it is a choice, and it is kept.
+///
+/// **No binary is downloaded.** Each is a program the user installs, like the
+/// terminal's agents and the commit-message command. Absent, the server fails
+/// to start and the button says so, which is a better answer than an interface
+/// that quietly fetches a hundred megabytes.
+fn shipped_servers() -> Vec<crate::lsp::Server> {
+    vec![phpantom(), rust_analyzer(), typescript()]
+}
+
+/// PHPantom, on PHP and on Blade.
 ///
 /// Blade is served by the same one — it preprocesses a view into virtual PHP —
 /// so the two extensions belong to a single entry, and `blade.php` being the
 /// longer is what makes it win the tie over `php`.
-///
-/// The binary is **not** downloaded: it is a program the user installs, like
-/// the terminal's agents and the commit-message command. Absent, the server
-/// fails to start and the button says so, which is a better answer than an
-/// interface that quietly fetches a hundred megabytes.
 fn phpantom() -> crate::lsp::Server {
     crate::lsp::Server {
         name: "PHPantom".into(),
@@ -529,6 +539,42 @@ fn phpantom() -> crate::lsp::Server {
         env: std::collections::BTreeMap::new(),
         extensions: vec!["php".into(), "blade.php".into()],
         language_id: "php".into(),
+    }
+}
+
+/// rust-analyzer, on Rust.
+///
+/// No `language_id`: `rs` is one of the extensions the table names, and writing
+/// `rust` here would only be a second place to keep it right.
+fn rust_analyzer() -> crate::lsp::Server {
+    crate::lsp::Server {
+        name: "rust-analyzer".into(),
+        command: "rust-analyzer".into(),
+        args: Vec::new(),
+        env: std::collections::BTreeMap::new(),
+        extensions: vec!["rs".into()],
+        language_id: String::new(),
+    }
+}
+
+/// typescript-language-server, on TypeScript and JavaScript.
+///
+/// The four extensions are **four languages** to the protocol — `typescript`,
+/// `typescriptreact`, `javascript`, `javascriptreact` — which is exactly why
+/// `language_id` is left empty here: a single one written on the entry would be
+/// announced for all four, and this server acts on what it is told a document
+/// is. `lsp::language_of` gives each file its own.
+///
+/// `--stdio` is not optional: without it the binary picks a socket and nothing
+/// ever answers.
+fn typescript() -> crate::lsp::Server {
+    crate::lsp::Server {
+        name: "TypeScript".into(),
+        command: "typescript-language-server".into(),
+        args: vec!["--stdio".into()],
+        env: std::collections::BTreeMap::new(),
+        extensions: vec!["ts".into(), "tsx".into(), "js".into(), "jsx".into()],
+        language_id: String::new(),
     }
 }
 
@@ -979,6 +1025,46 @@ pub(super) fn write_private(path: &Path, contents: &str) -> std::io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A shipped entry that serves nothing, or that no file reaches, is a line
+    /// in a form that never does anything — and nothing else would say so.
+    #[test]
+    fn every_shipped_server_serves_the_files_it_names() {
+        let servers = shipped_servers();
+        for server in &servers {
+            assert!(server.is_runnable(), "{} has no command", server.name);
+            assert!(
+                !server.extensions.is_empty(),
+                "{} serves nothing",
+                server.name
+            );
+        }
+        let picked = |file: &str| {
+            crate::lsp::pick(&servers, std::path::Path::new(file))
+                .map(|s| (s.name.clone(), s.language_for(std::path::Path::new(file))))
+        };
+        assert_eq!(
+            picked("a.php"),
+            Some(("PHPantom".into(), "php".into())),
+            "PHP"
+        );
+        assert_eq!(
+            picked("page.blade.php"),
+            Some(("PHPantom".into(), "php".into())),
+            "a Blade view goes to the same one"
+        );
+        assert_eq!(
+            picked("main.rs"),
+            Some(("rust-analyzer".into(), "rust".into())),
+            "Rust"
+        );
+        assert_eq!(
+            picked("app.tsx"),
+            Some(("TypeScript".into(), "typescriptreact".into())),
+            "TSX is its own language"
+        );
+        assert_eq!(picked("README.md"), None, "nothing shipped serves Markdown");
+    }
 
     #[test]
     fn missing_keys_take_their_defaults() {

@@ -854,9 +854,24 @@ pas de bouton.
 la machine dit ce qu'elle a installé, le projet dit ce que son code veut. Le
 fichier ouvert choisit : `lsp::pick` prend la **plus longue extension qui
 correspond**, si bien qu'une vue Blade va à l'entrée qui dit `blade.php` et non
-à celle qui dit `php`. PHPantom est livré comme entrée par défaut ; son binaire
-n'est **pas** téléchargé, c'est un programme que l'utilisateur installe, comme
-les agents du terminal.
+à celle qui dit `php`.
+
+**Trois entrées sont livrées** — PHPantom sur PHP et Blade, rust-analyzer sur
+Rust, typescript-language-server sur TypeScript et JavaScript : les langages de
+ce dépôt et de ceux qu'on y relit, et rien de plus. Aucun binaire n'est
+**téléchargé** ; ce sont des programmes que l'utilisateur installe, comme les
+agents du terminal, et un serveur absent le dit sur son bouton plutôt que de
+faire chercher cent mégaoctets à une interface.
+
+**Le `languageId` n'est pas l'extension**, et c'est le piège que PHP cachait :
+`php` est son propre nom, si bien que deviner à partir du suffixe marchait
+partout où on regardait. Un `.ts` annoncé `ts` est un document que
+typescript-language-server refuse, et `.tsx` est un **autre langage** que `.ts`
+pour le protocole. D'où `lsp::language_of`, une table des identifiants usuels
+que `language_for` consulte quand la déclaration n'en dit rien — c'est aussi ce
+qui permet à une seule entrée d'en servir quatre. Une déclaration peut toujours
+le dire elle-même, `language_id` l'emporte, et ce que la table ignore retombe
+sur l'extension, ce qui n'est pas pire qu'avant.
 
 **Une session par worktree**, et ouvrir un fichier d'un autre langage la
 remplace : un worktree est un projet, et deux serveurs répondraient deux fois à

@@ -101,15 +101,62 @@ impl Server {
         if !self.language_id.is_empty() {
             return self.language_id.clone();
         }
-        path.extension()
+        let ext = path
+            .extension()
             .and_then(|e| e.to_str())
-            .unwrap_or("plaintext")
-            .to_ascii_lowercase()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        match language_of(&ext) {
+            Some(id) => id.to_string(),
+            None if ext.is_empty() => "plaintext".to_string(),
+            None => ext,
+        }
     }
 
     pub fn is_runnable(&self) -> bool {
         !self.command.trim().is_empty()
     }
+}
+
+/// The `languageId` of a well-known extension, or `None`.
+///
+/// The identifiers are the protocol's own, and they are **not** the extension:
+/// a `.ts` announced as `ts` is a document `typescript-language-server` refuses
+/// to serve, and `.tsx` is a different language from `.ts` as far as the
+/// protocol is concerned. Guessing from the extension was right for PHP, which
+/// is why it went unnoticed, and wrong for every language whose name is not its
+/// suffix. A declaration may still say it outright — `language_id` wins — and
+/// what is not in this table falls back to the extension, which is the old
+/// behaviour and no worse than it was.
+pub fn language_of(ext: &str) -> Option<&'static str> {
+    Some(match ext {
+        "rs" => "rust",
+        "ts" => "typescript",
+        "tsx" => "typescriptreact",
+        "js" | "mjs" | "cjs" => "javascript",
+        "jsx" => "javascriptreact",
+        "php" => "php",
+        "py" => "python",
+        "go" => "go",
+        "rb" => "ruby",
+        "c" | "h" => "c",
+        "cc" | "cpp" | "cxx" | "hpp" => "cpp",
+        "cs" => "csharp",
+        "java" => "java",
+        "json" => "json",
+        "yml" | "yaml" => "yaml",
+        "toml" => "toml",
+        "md" => "markdown",
+        "html" => "html",
+        "css" => "css",
+        "scss" => "scss",
+        "sh" | "bash" => "shellscript",
+        "sql" => "sql",
+        "vue" => "vue",
+        "svelte" => "svelte",
+        "nix" => "nix",
+        _ => return None,
+    })
 }
 
 /// The server that serves a file, the longest matching extension winning.
@@ -896,6 +943,28 @@ mod tests {
         let mut blade = server("blade", &["blade.php"]);
         blade.language_id = "blade".into();
         assert_eq!(blade.language_for(Path::new("a.blade.php")), "blade");
+        // Nothing names `.zig`, and the extension is still a better guess than
+        // refusing to open the document.
+        assert_eq!(
+            server("z", &["zig"]).language_for(Path::new("a.zig")),
+            "zig"
+        );
+    }
+
+    /// One server, four languages: `typescript-language-server` is told what a
+    /// document is and acts on it, and announcing `ts` for a `.ts` is how it is
+    /// told nothing at all.
+    #[test]
+    fn one_entry_can_serve_several_languages() {
+        let ts = server("ts", &["ts", "tsx", "js", "jsx"]);
+        assert_eq!(ts.language_for(Path::new("a.ts")), "typescript");
+        assert_eq!(ts.language_for(Path::new("a.tsx")), "typescriptreact");
+        assert_eq!(ts.language_for(Path::new("a.js")), "javascript");
+        assert_eq!(ts.language_for(Path::new("a.jsx")), "javascriptreact");
+        assert_eq!(
+            server("rs", &["rs"]).language_for(Path::new("a.rs")),
+            "rust"
+        );
     }
 
     /// Both shapes of `textDocumentSync` are current, and reading the object
