@@ -2500,8 +2500,23 @@ panneau central qui changeait de nature selon le dernier geste.
 
 Il y a donc cinq **écrans** (`ui::workspace::Workspace`) : Revue, Édition,
 Bases, Sentry, Réglages. On passe de l'un à l'autre par la barre d'état, ou
-par `Alt+1` à `Alt+5`. Les Réglages viennent en dernier, étant le seul qui ne
-soit pas du travail — voir « Les réglages ».
+par `Alt+1` à `Alt+6`.
+
+**Les Réglages ne sont pas dans cette barre-là**, et c'est la conclusion de ce
+qui les mettait déjà en dernier : on n'y va pas travailler, on y va changer la
+façon dont le reste se comporte. Ils gardent leur écran — c'est un formulaire
+qui veut la fenêtre entière — mais on y entre par un **engrenage à l'extrémité
+droite de la barre de titre**, là où sont les réglages d'une application. Le
+choix des écrans redevient donc la rangée de ce dans quoi on travaille, d'où
+`Workspace::working()` : l'indice que le groupe de boutons rend est un indice
+dans ce qu'il **affiche**, jamais dans `ALL`, et les lire l'un pour l'autre
+ouvrirait l'écran d'à côté.
+
+**Les boutons portent leur nom** et non leur seule icône. L'icône dit ce que
+l'écran contient et reste ce qu'on vise, mais six icônes en rang sont un rébus
+qu'on apprend au lieu de le lire, et une infobulle est un nom qu'il faut aller
+demander. La place existe : cette barre est au bout d'une ligne d'état vide la
+plupart du temps.
 
 **Un dock par écran, et non un dock dont le centre change.** Chacun a ses
 panneaux, ses onglets et ses tailles, mémorisés séparément : régler la revue
@@ -3925,7 +3940,7 @@ n'en tient lieu. `Ctrl+1` à `Ctrl+9` désignent donc des **worktrees**, ce qui
 est de toute façon le geste central — et leur ordre est celui de la barre
 latérale, replis compris, sans quoi le même chiffre ne désignerait pas le même
 worktree d'un pliage à l'autre. Les **écrans**, eux, s'atteignent par
-`Alt+1` à `Alt+5`, et **pas** par `Ctrl+Maj+1` : gpui *retire* le Maj des
+`Alt+1` à `Alt+6`, et **pas** par `Ctrl+Maj+1` : gpui *retire* le Maj des
 modificateurs quand la touche est un caractère sans casse — « on ne garde Maj
 que pour les majuscules » —, si bien qu'un `secondary-shift-1` arrive comme
 `ctrl-&` ou `ctrl-#` selon la disposition du clavier et ne se déclenche jamais,

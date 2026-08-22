@@ -560,6 +560,7 @@ table!(STANDARD, standard_bindings, false, [
     Window "alt-3" => GoToWorkspace { index: 2 }, PREDICATE, "shortcut-workspace";
     Window "alt-4" => GoToWorkspace { index: 3 }, PREDICATE, "shortcut-workspace";
     Window "alt-5" => GoToWorkspace { index: 4 }, PREDICATE, "shortcut-workspace";
+    Window "alt-6" => GoToWorkspace { index: 5 }, PREDICATE, "shortcut-workspace";
 
     // ── The worktrees ───────────────────────────────────────────────────────
     // Nine bindings and a single help line: `merge` recognises the run of digits

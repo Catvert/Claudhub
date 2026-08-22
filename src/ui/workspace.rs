@@ -80,6 +80,20 @@ impl Workspace {
         Workspace::Settings,
     ];
 
+    /// The screens the bar offers, which is every one that is **work**.
+    ///
+    /// The settings are not among them, and it is the same reasoning that put
+    /// them last when they were: one does not go there to work, one goes there
+    /// to change how the rest behaves. They have their own gear, at the far
+    /// right of the title bar, where an application's settings are — see
+    /// `topbar::render_topbar`.
+    pub fn working() -> Vec<Workspace> {
+        Self::ALL
+            .into_iter()
+            .filter(|w| *w != Workspace::Settings)
+            .collect()
+    }
+
     /// The name this screen's layout is saved under.
     ///
     /// A stable key and not the variant's index: inserting a screen in the
@@ -315,13 +329,21 @@ impl ClaudhubApp {
     /// it.
     pub(super) fn render_workspace_nav(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.workspace;
+        let shown = Workspace::working();
         ButtonGroup::new("workspace-nav")
             .compact()
-            .children(Workspace::ALL.map(|workspace| {
+            .children(shown.iter().map(|workspace| {
+                let workspace = *workspace;
                 let here = workspace == current;
                 Button::new(("workspace", workspace as usize))
                     .icon(icon(workspace.icon()))
-                    .tooltip(tr!(workspace.label()))
+                    // **The name is written, not hovered.** The icon says what
+                    // the screen holds and is what one aims at, but six icons in
+                    // a row is a rebus one learns rather than reads, and a
+                    // tooltip is a name one has to ask for. The bar has the
+                    // width: it sits at the end of a status line that is empty
+                    // most of the time.
+                    .label(tr!(workspace.label()))
                     // **Solid against outline**, and not the "selected" state of
                     // a whole outlined group: that is only a slightly lighter
                     // background, invisible on half the themes. It is the same
@@ -336,11 +358,14 @@ impl ClaudhubApp {
                         }
                     })
             }))
-            .on_click(cx.listener(|this, selected: &Vec<usize>, window, cx| {
+            .on_click(cx.listener(move |this, selected: &Vec<usize>, window, cx| {
                 let Some(index) = selected.first() else {
                     return;
                 };
-                let Some(workspace) = Workspace::ALL.get(*index).copied() else {
+                // The index is into what the group **shows**, which is not
+                // `ALL`: the settings are not in it, and reading `ALL` here
+                // would open the screen next door.
+                let Some(workspace) = shown.get(*index).copied() else {
                     return;
                 };
                 this.enter_workspace(workspace, window, cx);

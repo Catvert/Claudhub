@@ -199,14 +199,34 @@ impl ClaudhubApp {
                     )
                     .children(active.and_then(|worktree| self.render_wt_links(&worktree, cx)))
                     .children(self.render_worktree_actions(cx))
-                    // Nothing on the right, and the space is not lost: it is the
-                    // window's drag region. Neither `fetch`, nor `pull`, nor
-                    // `push` — they have moved down into the "Changes" panel's
-                    // bar, where the rest of the gesture happens: tick, commit,
-                    // push. The history and the branches are dock tabs. And the
-                    // terminals have gone down to the status bar, at the corner
-                    // of the window they open on.
-                    .child(div().flex_1()),
+                    // The middle is empty on purpose, and the space is not
+                    // lost: it is the window's drag region. Neither `fetch`, nor
+                    // `pull`, nor `push` — they have moved down into the
+                    // "Changes" panel's bar, where the rest of the gesture
+                    // happens: tick, commit, push. The history and the branches
+                    // are dock tabs. And the terminals have gone down to the
+                    // status bar, at the corner of the window they open on.
+                    .child(div().flex_1())
+                    // The settings, at the far right of the title bar, where an
+                    // application's settings are. They were a seventh button in
+                    // the screen picker, which is the row of what one **works**
+                    // in; going there is not work, it is changing how the rest
+                    // behaves. It stays a screen — `Alt+6` still opens it, and
+                    // the gear only lights the way in.
+                    .child(
+                        Button::new("open-settings")
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("settings"))
+                            .tooltip(tr!("workspace-settings"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.enter_workspace(
+                                    crate::ui::workspace::Workspace::Settings,
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    ),
             )
     }
 
