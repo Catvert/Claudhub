@@ -87,16 +87,20 @@ fn load_layouts() -> Layouts {
     }
 }
 
-/// Takes the terminals out of a layout about to be written.
+/// Takes out of a layout the panels that must not be in it.
 ///
-/// A terminal is the one panel whose content is a process, and `layout.json` is
-/// read on the next launch, when that process is long gone. A group left empty
-/// by the pruning goes too, otherwise the window would reopen with a bare tab
-/// bar where the terminals used to be.
+/// Two callers, and they prune at the two opposite ends. **Before writing**:
+/// the terminals, the one panel whose content is a process — `layout.json` is
+/// read on the next launch, when that process is long gone. **After reading**:
+/// the panels of plugins that are no longer installed, whose name the dock's
+/// registry can no longer build; left in, they come back as an empty frame,
+/// which is exactly what `LAYOUT_VERSION` exists to prevent for our own
+/// panels. A group left empty by the pruning goes too, otherwise the window
+/// would reopen with a bare tab bar.
 ///
 /// Returns whether the node itself should be dropped by its parent.
-fn prune_terminals(state: &mut gpui_component::dock::PanelState) -> bool {
-    if state.panel_name == super::panels::TerminalPanel::NAME {
+fn prune(state: &mut gpui_component::dock::PanelState, doomed: &impl Fn(&str) -> bool) -> bool {
+    if doomed(&state.panel_name) {
         return true;
     }
     if state.children.is_empty() {
@@ -106,7 +110,7 @@ fn prune_terminals(state: &mut gpui_component::dock::PanelState) -> bool {
         .children
         .iter_mut()
         .enumerate()
-        .filter_map(|(ix, child)| prune_terminals(child).then_some(ix))
+        .filter_map(|(ix, child)| prune(child, doomed).then_some(ix))
         .collect();
     for ix in doomed.into_iter().rev() {
         state.children.remove(ix);
@@ -452,6 +456,16 @@ pub struct ClaudhubApp {
     pub(super) explorer_focus: FocusHandle,
     /// The current repository's Sentry issues, and the one being looked at.
     pub(super) sentry: crate::ui::sentry_view::SentryState,
+    /// The plugins, in manifest order. Each holds its script, its state and the
+    /// tree it last produced; the panels only paint what is in here.
+    pub(super) plugins: Vec<crate::plugin::Plugin>,
+    /// The capability calls still out, and the moment each stops being waited
+    /// for. **A request never stays pending**: the background sweep is what
+    /// fails the ones nobody answered, rather than a timer per request.
+    pub(super) plugin_deadlines: Vec<(String, u64, std::time::Instant)>,
+    /// The folded sections of the plugins' panels. In memory, like the notes
+    /// panel's: a reading posture, not a preference.
+    pub(super) plugin_folded: crate::ui::plugin_view::Folds,
     /// The databases tree: connections, schemas, tables, columns.
     pub(super) db: crate::ui::db::DbState,
     pub(super) db_scroll: gpui::UniformListScrollHandle,
@@ -784,6 +798,9 @@ impl ClaudhubApp {
             editings: HashMap::new(),
             files_scroll: gpui::UniformListScrollHandle::new(),
             sentry: Default::default(),
+            plugins: Vec::new(),
+            plugin_deadlines: Vec::new(),
+            plugin_folded: Default::default(),
             db: Default::default(),
             db_scroll: gpui::UniformListScrollHandle::new(),
             db_focus: cx.focus_handle(),
@@ -843,6 +860,9 @@ impl ClaudhubApp {
             app.schedule_layout_save(cx);
         }
         app.pump_events(events, window, cx);
+        // Before the sweep: the sweep is also what expires a plugin's requests,
+        // and it has to find a list to look at rather than build one.
+        app.start_plugins(cx);
         app.start_scanning(cx);
         app.watch_vault_inputs(window, cx);
         app.watch_query_input(cx);
@@ -965,6 +985,18 @@ impl ClaudhubApp {
                 .workspaces
                 .get(workspace.key())
                 .cloned()
+                .map(|mut state| {
+                    // A plugin uninstalled between two sessions leaves its name
+                    // behind in the file, and nothing can build it any more.
+                    // The centre only, like the write-time pruning and with
+                    // the same known corollary: `DockState::panel` is private,
+                    // so a panel dragged into a side zone is out of reach.
+                    prune(&mut state.center, &|name| {
+                        name.starts_with(crate::plugin::manifest::PANEL_PREFIX)
+                            && crate::ui::plugin_view::by_panel(name).is_none()
+                    });
+                    state
+                })
                 .and_then(|state| area.update(cx, |a, cx| a.load(state, window, cx)).ok())
                 .is_some();
             if !restored {
@@ -1011,6 +1043,13 @@ impl ClaudhubApp {
                     .update(cx, |this, cx| {
                         this.scan_now(tick.is_multiple_of(SUMMARY_EVERY), cx);
                         this.auto_fetch_now(cx);
+                        // The plugins ride the same clock. Expiring a request
+                        // wants no finer grain than two seconds against a
+                        // ninety-second ceiling, and re-reading the settings
+                        // here is what lets a token corrected in the form take
+                        // effect without recompiling the script that uses it.
+                        this.expire_plugin_calls();
+                        this.configure_plugins(cx);
                     })
                     .is_ok();
                 if !alive {
@@ -1111,7 +1150,9 @@ impl ClaudhubApp {
                             // terminal is a **process**, and a layout is read
                             // long after that process has died. Rebuilding one
                             // from its name would be a tab showing nothing.
-                            prune_terminals(&mut state.center);
+                            prune(&mut state.center, &|name| {
+                                name == super::panels::TerminalPanel::NAME
+                            });
                             (workspace.key().to_string(), state)
                         })
                         .collect(),
@@ -1300,6 +1341,14 @@ impl ClaudhubApp {
     }
 
     fn file_changed(&mut self, path: &Path, cx: &mut Context<Self>) {
+        // Before the worktree guard: a plugin's directory is not in a worktree,
+        // and its script has to be picked up whether or not one is open.
+        if let Some(dir) = crate::ui::plugin_view::plugins_dir() {
+            if path.starts_with(&dir) {
+                self.reload_plugins(cx);
+                return;
+            }
+        }
         let Some(active) = self.active.clone() else {
             return;
         };
@@ -1452,6 +1501,13 @@ impl ClaudhubApp {
                 }
             }
             Evt::NotesRead { worktree, files } => self.notes_read(worktree, files, window, cx),
+
+            // — Plugins ————————————————————————————————————————————
+            Evt::PluginResult {
+                plugin,
+                call,
+                result,
+            } => self.plugin_result(plugin, call, result),
 
             // — The language server ————————————————————————————————
             Evt::LspReady {
@@ -2146,6 +2202,9 @@ impl ClaudhubApp {
         }
         self.active = Some(path.clone());
         self.ensure_review(&path, cx);
+        // A plugin's panel speaks about the worktree the window shows, like
+        // every other panel: changing it is starting over, not refreshing.
+        self.plugins_follow_worktree(cx);
         // The free note follows the displayed worktree: the input is unique, and
         // keeping the previous one's text would write it here.
         self.sync_journal_input(&path, window, cx);

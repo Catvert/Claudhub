@@ -105,6 +105,20 @@ pub fn register(app: &Entity<ClaudhubApp>, cx: &mut App) {
         ConsolePanel => "ClaudhubConsole",
         SettingsPanel => "ClaudhubSettings",
     }
+    // The plugins' panels. One type, one instance per plugin, named after its
+    // directory — see `ui::plugin_view`. They are registered here and not
+    // built on the fly for one reason that decides the rest: a panel has to be
+    // in this registry **before** `layout.json` is read back, or a plugin's tab
+    // comes back as an empty frame. That is also why adding or removing a
+    // plugin takes a restart, while its *script* reloads hot.
+    for manifest in crate::ui::plugin_view::manifests() {
+        let handle = app.clone();
+        let panel = manifest.panel;
+        register_panel(cx, panel, move |_state, _window, cx| {
+            let handle = handle.clone();
+            panel_handle(cx.new(|cx| PluginPanel::new(&handle, panel, cx)))
+        });
+    }
     // No builder for the terminals, and it is not an oversight: they are the
     // only panel whose content is a **process**, and a saved layout is read
     // long after that process has died. They are pruned from the layout before
@@ -763,5 +777,108 @@ impl Render for HistoryPanel {
             app.render_history(window, cx).into_any_element()
         });
         pane_root(&app, Pane::History, content, cx).into_any_element()
+    }
+}
+
+/// A plugin's panel.
+///
+/// One Rust type for every plugin: what differs between two of them is a
+/// `&'static str`, not a shape. It carries no state — like every other panel it
+/// delegates to `ClaudhubApp`, which holds the script, its state and the tree
+/// it last produced.
+pub struct PluginPanel {
+    app: WeakEntity<ClaudhubApp>,
+    focus: FocusHandle,
+    /// The plugin's id in the dock's registry, leaked once at discovery.
+    /// `BasePanel::panel_name` wants a `&'static str` and a plugin's name is
+    /// only known at run time; see `plugin::manifest::Manifest::panel`.
+    name: &'static str,
+    /// Cached for the same reason as the others': `visible` is called while
+    /// the layout is being built, so inside `ClaudhubApp::new`, where reading
+    /// the root entity is a panic.
+    visible: bool,
+}
+
+impl PluginPanel {
+    pub fn new(app: &Entity<ClaudhubApp>, name: &'static str, cx: &mut Context<Self>) -> Self {
+        cx.observe(app, move |this: &mut Self, app, cx| {
+            let visible = app.read(cx).panel_visible(this.name);
+            if this.visible != visible {
+                this.visible = visible;
+                cx.emit(PanelEvent::LayoutChanged);
+            }
+            cx.notify();
+        })
+        .detach();
+        Self {
+            app: app.downgrade(),
+            focus: cx.focus_handle(),
+            name,
+            visible: visible_at_startup(name, cx),
+        }
+    }
+}
+
+impl Focusable for PluginPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl EventEmitter<PanelEvent> for PluginPanel {}
+
+impl BasePanel for PluginPanel {
+    fn panel_name(&self) -> &'static str {
+        self.name
+    }
+
+    fn closable(&self, _: &App) -> bool {
+        false
+    }
+
+    fn visible(&self, _: &App) -> bool {
+        self.visible
+    }
+}
+
+impl Panel for PluginPanel {
+    /// The title comes from the manifest and not from a catalogue: a plugin's
+    /// strings are its own — `tr!` reads catalogues compiled into the binary,
+    /// and a test compares their keys.
+    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::SharedString::from(
+            crate::ui::plugin_view::by_panel(self.name)
+                .map(|manifest| manifest.title().to_string())
+                .unwrap_or_else(|| self.name.to_string()),
+        )
+    }
+
+    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
+        zoom_in_toolbar()
+    }
+
+    fn dropdown_menu(
+        &mut self,
+        menu: PopupMenu,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> PopupMenu {
+        hide_view(&self.app, self.name, menu)
+    }
+}
+
+impl Render for PluginPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(app) = self.app.upgrade() else {
+            return div().into_any_element();
+        };
+        let name = self.name;
+        let content = app.update(cx, |app, cx| {
+            app.render_plugin(name, window, cx).into_any_element()
+        });
+        // `pane_frame` and not `pane_root`: a plugin's panel is not searchable
+        // — `Ctrl+F` searches a list whose order we own, and here the script
+        // owns it. The terminals are in the same case, for the same reason.
+        pane_frame(content, cx).into_any_element()
     }
 }

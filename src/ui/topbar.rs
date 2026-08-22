@@ -36,6 +36,27 @@ use crate::ui::icons::icon;
 ///   The tick is therefore painted by the row, which re-reads the state on every
 ///   frame.
 fn view_toggle(app: Entity<ClaudhubApp>, name: &'static str, title: &'static str) -> PopupMenuItem {
+    toggle_row(app, name, move || tr!(title))
+}
+
+/// The same, for a plugin: its title comes from its manifest and not from a
+/// catalogue — `tr!` reads catalogues compiled into the binary, and a plugin's
+/// strings are its own.
+fn plugin_toggle(app: Entity<ClaudhubApp>, name: &'static str) -> PopupMenuItem {
+    toggle_row(app, name, move || {
+        gpui::SharedString::from(
+            crate::ui::plugin_view::by_panel(name)
+                .map(|manifest| manifest.title().to_string())
+                .unwrap_or_else(|| name.to_string()),
+        )
+    })
+}
+
+fn toggle_row(
+    app: Entity<ClaudhubApp>,
+    name: &'static str,
+    label: impl Fn() -> gpui::SharedString + 'static,
+) -> PopupMenuItem {
     PopupMenuItem::element(move |_window, cx| {
         let visible = app.read(cx).panel_visible(name);
         let app = app.clone();
@@ -51,7 +72,7 @@ fn view_toggle(app: Entity<ClaudhubApp>, name: &'static str, title: &'static str
                     .w(px(14.))
                     .when(visible, |this| this.child(icon("check").xsmall())),
             )
-            .child(tr!(title))
+            .child(label())
             .on_click(move |_, _window, cx| {
                 cx.stop_propagation();
                 app.update(cx, |this, cx| this.toggle_panel(name, cx));
@@ -248,10 +269,19 @@ impl ClaudhubApp {
                 // visibly change, and an entry with no effect reads as a broken
                 // entry.
                 .submenu(tr!("menu-views"), window, cx, move |menu, _window, cx| {
-                    let views = for_views.read(cx).workspace.views();
-                    views.iter().fold(menu, |menu, &(name, title)| {
+                    let workspace = for_views.read(cx).workspace;
+                    let menu = workspace.views().iter().fold(menu, |menu, &(name, title)| {
                         menu.item(view_toggle(for_views.clone(), name, title))
-                    })
+                    });
+                    // The plugins of **this screen**, after the built-in views:
+                    // a hidden panel has no tab left, so this submenu is the
+                    // only place that says what the window is not showing.
+                    crate::ui::plugin_view::on_screen(workspace.key()).fold(
+                        menu,
+                        |menu, manifest| {
+                            menu.item(plugin_toggle(for_views.clone(), manifest.panel))
+                        },
+                    )
                 })
                 .item(PopupMenuItem::new(tr!("menu-reset-layout")).on_click(
                     move |_, window, cx| {

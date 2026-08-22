@@ -190,6 +190,27 @@ type View = std::sync::Arc<dyn gpui_component::dock::BasePanelView>;
 ///
 /// Each screen has **its** instances, including of the two shared views: a
 /// panel belongs to only one dock at a time, and only one dock is displayed.
+/// A screen's plugin panels, in manifest order.
+///
+/// They join the screen's **natural tab group** rather than a place of their
+/// own: a plugin's panel is one more way of looking at the worktree, and a
+/// column reserved for it would cost the review its width whether a plugin is
+/// installed or not.
+fn plugin_views(
+    workspace: Workspace,
+    app: &Entity<ClaudhubApp>,
+    cx: &mut Context<DockArea>,
+) -> Vec<View> {
+    crate::ui::plugin_view::on_screen(workspace.key())
+        .map(|manifest| {
+            let panel = manifest.panel;
+            gpui_component::dock::panel_handle(
+                cx.new(|cx| panels::PluginPanel::new(app, panel, cx)),
+            ) as View
+        })
+        .collect()
+}
+
 pub fn install_default_layout(
     workspace: Workspace,
     app: &Entity<ClaudhubApp>,
@@ -216,6 +237,18 @@ pub fn install_default_layout(
     // `Option`, because three screens have no left column at all: the review
     // and Sentry fill the width, and the settings' form has a sidebar of pages
     // of its own.
+    // Added to whichever group of this screen holds its lists.
+    let plugins = plugin_views(workspace, app, cx);
+    macro_rules! with_plugins {
+        ($group:expr) => {{
+            let mut group = $group;
+            for view in plugins {
+                group = group.panel_view(view, cx);
+            }
+            group
+        }};
+    }
+
     let (left, center): (Option<DockLayout>, DockLayout) = match workspace {
         // The review takes the whole width: the ways of choosing what to review
         // — what changes now, what the branch wrote, what is already committed —
@@ -230,14 +263,14 @@ pub fn install_default_layout(
         Workspace::Review => {
             let list = DockLayout::v_split()
                 .child(
-                    DockLayout::tabs()
+                    with_plugins!(DockLayout::tabs()
                         .panel_view(panel!(ChangesPanel), cx)
                         .panel_view(panel!(BranchPanel), cx)
                         .panel_view(panel!(HistoryPanel), cx)
                         // Hidden while there is nothing to resolve: a permanent
                         // tab would shift the others aside to serve one time in
                         // a hundred.
-                        .panel_view(panel!(ConflictsPanel), cx),
+                        .panel_view(panel!(ConflictsPanel), cx)),
                     None,
                 )
                 .child(
@@ -254,7 +287,7 @@ pub fn install_default_layout(
         }
         // Editing: the project tree on the left, the editor in the centre.
         Workspace::Files => {
-            let left = DockLayout::tabs().panel_view(panel!(FilesPanel), cx);
+            let left = with_plugins!(DockLayout::tabs().panel_view(panel!(FilesPanel), cx));
             let center = DockLayout::tabs().panel_view(panel!(EditorPanel), cx);
             (Some(left), center)
         }
@@ -265,23 +298,26 @@ pub fn install_default_layout(
             // The history is a tab beside the tree and not a panel of its own:
             // one looks at the schema **or** at what one has already asked of
             // it, and two columns would leave the console half the screen.
-            let left = DockLayout::tabs()
+            let left = with_plugins!(DockLayout::tabs()
                 .panel_view(panel!(DbPanel), cx)
-                .panel_view(panel!(SqlHistoryPanel), cx);
+                .panel_view(panel!(SqlHistoryPanel), cx));
             let center = DockLayout::tabs().panel_view(panel!(ConsolePanel), cx);
             (Some(left), center)
         }
         // Sentry stands alone: the issue list and the trace of the one opened
         // are two halves of a single panel.
         Workspace::Sentry => {
-            let center = DockLayout::tabs().panel_view(panel!(SentryPanel), cx);
+            let center = with_plugins!(DockLayout::tabs().panel_view(panel!(SentryPanel), cx));
             (None, center)
         }
         // The settings take the whole width: the form has a sidebar of its own,
         // and two side by side would be two lists of pages to read before
         // finding the field. The terminals stay underneath — a setting is
         // adjusted then checked, and what checks it is a shell.
+        // No plugin lands here: `manifest::SCREENS` does not offer the
+        // settings, which hold the form and nothing else.
         Workspace::Settings => {
+            let _ = plugins;
             let center = DockLayout::tabs().panel_view(panel!(SettingsPanel), cx);
             (None, center)
         }

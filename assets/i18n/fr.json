@@ -214,6 +214,8 @@
   "panel-notes": "Notes",
   "panel-review": "Revue",
   "panel-sentry": "Sentry",
+  "plugin-missing": "Ce plugin n'est plus installé.",
+  "plugin-failed": "Le script n'a pas abouti",
   "panel-settings": "Réglages",
   "panel-sql": "SQL",
   "panel-sql-history": "Historique",

@@ -127,6 +127,18 @@ enum Queue {
 }
 
 fn queue_of(cmd: &Cmd) -> Queue {
+    // A plugin's request says itself which of the two slow queues it belongs
+    // to: an HTTP call is Sentry's profile, a shell command is the `wt` status
+    // sweep's. Reading it off the capability rather than off the variant is
+    // what keeps one table for both — and what lets a capability be added
+    // without this function growing a special case.
+    if let Cmd::PluginCall { cap, .. } = cmd {
+        return if cap.is_network() {
+            Queue::Network
+        } else {
+            Queue::Background
+        };
+    }
     if is_network(cmd) {
         Queue::Network
     } else if is_long(cmd) {
@@ -627,6 +639,16 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
                 Err(e) => vec![fail(None, Action::Sentry, e)],
             }
         }),
+
+        // — Plugins —————————————————————————————————————————————————————
+        // No `Done`/`Failed` here: a plugin's request is not an operation on
+        // the repository, and a failure belongs under the panel that asked for
+        // it, not in a status bar the next message overwrites.
+        Cmd::PluginCall { plugin, call, cap } => vec![Evt::PluginResult {
+            plugin,
+            call,
+            result: cap.run(),
+        }],
 
         // — Databases ———————————————————————————————————————————————————
         Cmd::DbDatabases { connection } => vec![Evt::DbDatabases {
@@ -1254,6 +1276,41 @@ mod tests {
         assert_eq!(
             queue_of(&Cmd::AutoFetch { main: worktree() }),
             Queue::Network
+        );
+    }
+
+    /// A plugin never gets in front of a diff, and never behind a `composer
+    /// install` either.
+    ///
+    /// The routing is read off the capability, which is what keeps one table
+    /// for both: an HTTP call has Sentry's profile — seconds, a socket — and a
+    /// shell command has the `wt` sweep's.
+    #[test]
+    fn a_plugins_request_lands_by_what_it_asks_for() {
+        assert_eq!(
+            queue_of(&Cmd::PluginCall {
+                plugin: "ci".into(),
+                call: 1,
+                cap: crate::plugin::caps::Cap::Http {
+                    method: "GET".into(),
+                    url: "https://example.test".into(),
+                    headers: Vec::new(),
+                    body: None,
+                    secret: None,
+                },
+            }),
+            Queue::Network
+        );
+        assert_eq!(
+            queue_of(&Cmd::PluginCall {
+                plugin: "ci".into(),
+                call: 2,
+                cap: crate::plugin::caps::Cap::Shell {
+                    worktree: worktree(),
+                    command: "gh run list".into(),
+                },
+            }),
+            Queue::Background
         );
     }
 

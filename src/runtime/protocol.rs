@@ -522,6 +522,28 @@ pub enum Cmd {
         applied: bool,
     },
 
+    // — Plugins ———————————————————————————————————————————————————
+    /// One capability a plugin asked for.
+    ///
+    /// **One variant and not one per plugin**, which is the whole point:
+    /// postcard is positional and `PROTOCOL_VERSION` is announced at the
+    /// handshake, so a plugin able to add a message would break the wire for
+    /// every other one. Adding a *capability* is a change to Claudhub,
+    /// versioned once; adding a plugin is no change to the wire at all.
+    ///
+    /// The queue is read off the capability, not off this variant: an HTTP
+    /// request is the network's business, a shell command the background
+    /// sweep's. See `runtime::queue_of`.
+    PluginCall {
+        /// Which plugin is asking — the directory's name. It is what carries
+        /// the answer home.
+        plugin: String,
+        /// The host's counter, which never goes back: the same device as the
+        /// SQL console's send id and the language client's request id.
+        call: u64,
+        cap: crate::plugin::caps::Cap,
+    },
+
     AddWorktree {
         main: PathBuf,
         path: PathBuf,
@@ -612,6 +634,7 @@ impl Cmd {
             Self::WtDown { .. } => "WtDown",
             Self::WtTask { .. } => "WtTask",
             Self::WtScan { .. } => "WtScan",
+            Self::PluginCall { .. } => "PluginCall",
             Self::AddWorktree { .. } => "AddWorktree",
             Self::RemoveWorktree { .. } => "RemoveWorktree",
         }
@@ -732,6 +755,14 @@ pub enum Evt {
         issue: String,
         event: crate::sentry::Event,
     },
+    /// What a plugin's capability answered — the body, or one sentence of why
+    /// not. It goes back to the request that is awaiting it, by `call`.
+    PluginResult {
+        plugin: String,
+        call: u64,
+        result: Result<String, String>,
+    },
+
     ProjectFiles {
         worktree: WorktreeId,
         files: Vec<PathBuf>,

@@ -43,22 +43,6 @@ use anyhow::{bail, Context, Result};
 /// for good, and three freeze the whole application without a single message.
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-// The timeout is adjustable for tests: waiting thirty seconds there would be
-// unbearable, and checking that a stuck command really is interrupted is
-// better than trusting the code.
-#[cfg(test)]
-thread_local! {
-    static TEST_TIMEOUT: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
-}
-
-fn timeout() -> Duration {
-    #[cfg(test)]
-    if let Some(d) = TEST_TIMEOUT.with(|t| t.get()) {
-        return d;
-    }
-    TIMEOUT
-}
-
 /// Runs `git -C <dir> <args…>` and returns its standard output, without the
 /// trailing newline.
 ///
@@ -134,15 +118,22 @@ fn report<S: AsRef<OsStr>>(dir: &Path, args: &[S], elapsed: Duration, out: &std:
 fn run<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<std::process::Output> {
     let mut cmd = command(dir, args);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    wait_with_timeout(cmd, || format!("git {}", describe(args)))
+    wait_with_timeout(cmd, TIMEOUT, || format!("git {}", describe(args)))
 }
 
-/// Waits for a process to finish, or interrupts it once the timeout passes.
+/// Waits for a process to finish, or interrupts it once `limit` passes.
 ///
 /// Separated from `run` so it can be verified: testing it with `git` would
 /// need a git command that hangs reproducibly, and there is none.
-fn wait_with_timeout(
+///
+/// `pub(crate)` and taking its ceiling as an argument because it is not only
+/// git's any more: a plugin's shell capability waits for a process in exactly
+/// the same way, and for the same reason — a full pipe blocks the writer, and
+/// reading after the wait is the classic deadlock. What differs is only how
+/// long one is willing to wait, which is why the constant became a parameter.
+pub(crate) fn wait_with_timeout(
     mut cmd: Command,
+    limit: Duration,
     describe: impl Fn() -> String,
 ) -> Result<std::process::Output> {
     let mut child = cmd
@@ -162,7 +153,6 @@ fn wait_with_timeout(
         buffer
     });
 
-    let limit = timeout();
     let deadline = Instant::now() + limit;
     let status = loop {
         match child.try_wait()? {
@@ -298,16 +288,16 @@ mod tests {
     /// status, no more diff — without a single message.
     #[test]
     fn a_command_that_never_returns_is_interrupted() {
-        TEST_TIMEOUT.with(|t| t.set(Some(Duration::from_millis(300))));
-
         let mut cmd = Command::new("sleep");
         cmd.arg("30").stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let started = Instant::now();
-        let result = wait_with_timeout(cmd, || "sleep 30".into());
+        // Three hundred milliseconds and not the real thirty seconds: the
+        // ceiling is an argument since a plugin's shell capability wants
+        // another one, and that is what removed the test-only override that
+        // used to stand here.
+        let result = wait_with_timeout(cmd, Duration::from_millis(300), || "sleep 30".into());
         let elapsed = started.elapsed();
-
-        TEST_TIMEOUT.with(|t| t.set(None));
 
         let message = result.expect_err("the command should have been interrupted");
         assert!(
@@ -330,8 +320,8 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let out =
-            wait_with_timeout(cmd, || "large output".into()).expect("the command must finish");
+        let out = wait_with_timeout(cmd, TIMEOUT, || "large output".into())
+            .expect("the command must finish");
         assert_eq!(out.stdout.len(), 2_000_000);
     }
 }

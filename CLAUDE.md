@@ -111,6 +111,12 @@ src/
     frame.rs    le cadrage `Content-Length` et JSON-RPC
     sync.rs     versions de document, et l'édition à une plage (UTF-16)
     uri.rs      chemins ⇄ `file://`
+  plugin/       les plugins : un panneau dont le contenu est un script
+    view.rs     l'arbre de vue en données — le vocabulaire borné, et rien d'autre
+    manifest.rs le `plugin.toml` d'un dossier, et la découverte
+    caps.rs     ce qu'un plugin peut faire dehors : les données, et le worker
+    host.rs     la machine Rune (feature `plugins`) — le seul module qui la voit
+    loaded.rs   un plugin tel que la fenêtre le tient : script, état, dernier arbre
   sentry.rs     issues et traces Sentry, testées sur fixture
   wt.rs         le `wt.toml` d'un projet : questions, tâches, statut, URLs
   git/          couche git — sous-processus `git`, testable sans gpui
@@ -183,6 +189,7 @@ src/
                     en Markdown, rendus et relus — aucune entrée-sortie ici
     lsp.rs          le pont vers le serveur de langage : les providers de
                     l'éditeur, les diagnostics, et le bouton « LSP »
+    plugin_view.rs  peint l'arbre d'un plugin, et tient son script en vie
     find.rs         la recherche d'un panneau, et son routage
     motion.rs       le lissage de la molette, sans rien de gpui dedans
     vim.rs          les modes de vim de l'éditeur : motions, opérateurs,
@@ -898,7 +905,8 @@ Sept points qui ne se devinent pas :
   du cœur qui le tirerait casserait le build du serveur — et postcard,
   positionnel, ne sait pas relire un `Value`. Les `Cmd`/`Evt` portent donc des
   chaînes, la vue seule type ce qu'elle lit, et les deux bouts du fil n'ont pas
-  à s'accorder sur une version du crate. `PROTOCOL_VERSION` passe à 4.
+  à s'accorder sur une version du crate. `PROTOCOL_VERSION` était alors passé
+  à 4 ; les plugins l'ont depuis porté à 5.
 - **Une requête ne reste jamais en attente.** Un provider rend une `Task` ;
   celle-ci se résout par un canal à un coup (`async_channel::bounded(1)`) rangé
   sous un identifiant qui ne recule jamais — le motif de la console SQL. Rien
@@ -3989,12 +3997,166 @@ niveaux, du moins cher au plus cher :
    commit proposé en est le second, et il montre la forme la plus économe :
    une ligne de commande, le texte par l'entrée standard, la réponse par la
    sortie. Les connexions aux bases de données en sont le troisième, les
-   serveurs de langage le quatrième. Pour ce qui n'est pas propre à un projet.
-3. **Des extensions wasm, à la Zed — écarté.** Rien dans les besoins listés ne
-   le demande, et le coût est sans commune mesure.
+   serveurs de langage le quatrième, les réglages d'un plugin le cinquième.
+   Pour ce qui n'est pas propre à un projet.
+3. **Un panneau écrit en Rune** — voir « Les plugins ». C'est le niveau que les
+   deux précédents ne couvrent pas : une **vue**, avec son état et ses gestes.
+   Il a été ouvert par un constat de compte plus que par une envie de généralité
+   — cinq capacités génériques sous mille lignes de Rust, et les vues qui
+   viendront ensuite sont toutes de la même forme.
+4. **Des extensions wasm, à la Zed — toujours écarté.** Un script rechargé à
+   chaud fait ce que le point 3 demandait, sans WIT, sans chaîne d'outils
+   croisée et sans deuxième format de paquet.
 
 `wt` et Sentry sont donc des **modules compilés**, pas des greffons : les
 traiter autrement ferait payer un mécanisme générique pour deux cas.
+
+### Les plugins
+
+Une vue de Claudhub, déshabillée, ne contient presque rien qui parle de son
+sujet. Sentry : chercher du JSON derrière un jeton, retenir un réglage par
+dépôt, peindre une liste maître/détail avec un extrait de code, composer un
+prompt et le remettre à l'agent. Mille lignes de Rust — `sentry.rs` et
+`sentry_view.rs`, deux variantes de `Cmd`, deux d'`Evt`, un champ de magasin, un
+panneau, une entrée de `Pane`, une d'`Action`, une douzaine de clés i18n — pour
+cinq capacités génériques, celles dont auraient exactement besoin GitHub Issues,
+un tableau de CI, un flux de logs.
+
+Un plugin est donc le partage que ce dépôt fait déjà six fois — `notes.rs`
+devant `notes_view.rs`, `sql_history.rs` devant `sql_history_view.rs`,
+`inflight.rs`, `vim.rs`, `motion.rs` — poussé d'un cran : **un script rend un
+arbre de vue en données, et la vue le peint**. C'est un panneau, dans le dock
+d'un écran qu'il nomme, rechargé pendant que la fenêtre tourne.
+
+**Trois étages, et chacun est où il est pour une raison :**
+
+- `plugin/view.rs` et `plugin/manifest.rs` sont des données. Ni gpui, ni Rune.
+- `plugin/caps.rs` est ce qu'un plugin peut faire au monde extérieur. Des
+  données aussi, exécutées par un worker — qui est parfois un worker du serveur
+  WSL. **C'est pourquoi il ne porte pas Rune** : le binaire headless doit
+  pouvoir exécuter les requêtes d'un plugin sans moteur de script dedans, et
+  `just check-server` est ce qui le prouve.
+- `plugin/host.rs` est la machine Rune, derrière la feature `plugins` qu'`ui`
+  allume. Le script tourne du côté de l'interface ; seules ses entrées-sorties
+  traversent le fil.
+
+**Le contrat du script tient en trois fonctions**, et le partage entre elles est
+tout le dessin :
+
+```
+pub async fn init(worktree)                 -> Result<état>
+pub fn view(état)                           -> nœud
+pub async fn update(état, action, charge)   -> Result<état>
+```
+
+`view` est **synchrone et pure** : elle transforme un état en arbre et ne touche
+à rien. C'est ce qui permet de l'appeler chaque fois que l'état bouge, et c'est
+la règle de toute la fenêtre — `diff_view::Rendered` se calcule à l'arrivée du
+diff, jamais dans la fermeture de rendu. L'arbre est rangé derrière un `Rc`, et
+le panneau ne fait que le lire.
+
+**Le vocabulaire de vue est borné exprès** : colonne, rangée, section repliable,
+texte en quatre rôles, extrait de code, liste, bouton, état vide, roue. Assez
+pour un panneau maître/détail, délibérément pas assez pour être un second
+framework. `List` passe par `uniform_list` à `theme::row_height`, donc une
+entrée fait deux étages au plus et toutes la même hauteur — c'est la borne, et
+c'est celle du reste de la fenêtre.
+
+Un `Code` porte le nom de son langage et n'est **pas encore coloré** : passer
+par `ui::highlight` demande le contexte d'un fichier entier pour dire quelque
+chose d'utile d'un extrait de vingt lignes. Le champ est là pour qu'un plugin
+écrit aujourd'hui continue de dire ce qu'il dit.
+
+Ce qu'il n'y a **pas**, et qui se dit : aucun champ de saisie — il faudrait un
+`InputState` créé une fois dans un constructeur, qu'un arbre reconstruit à
+volonté ne peut pas posséder ; ce qu'on a à dire à un plugin se déclare dans les
+réglages. Et aucune recherche dans son panneau : `Ctrl+F` cherche dans une liste
+dont nous tenons l'ordre, et ici c'est le script qui le tient — les terminaux
+sont dans le même cas et pour la même raison.
+
+Huit points qui ne se devinent pas :
+
+- **Un `Ref<str>` et jamais un `String`, dans chaque fonction hôte.** C'est le
+  seul piège de ce module qui ne se voit pas à la lecture : Rune passe un
+  argument en le **prenant**, si bien qu'une fonction déclarée `|t: String|`
+  sort le champ de l'objet d'où il venait. `item(run.title, …)` vidait donc
+  `run.title` — le premier `view` marchait, le second échouait sur « value is
+  moved », et rien ne désignait la ligne coupable. `Ref<str>` lit sans prendre.
+  Les fonctions asynchrones, elles, convertissent en propriétaire **avant** de
+  construire leur futur : un garde d'emprunt tenu à travers un `await`
+  laisserait l'état emprunté pendant toute la requête.
+- **Trois variantes de protocole, et trois seulement.** postcard est positionnel
+  et `PROTOCOL_VERSION` se dit à la poignée de main : un plugin qui pourrait
+  ajouter un message casserait le fil pour tous les autres. `Cmd::PluginCall`
+  porte une capacité à charge fermée, `Evt::PluginResult` la ramène. Ajouter une
+  **capacité** est un changement de Claudhub, versionné une fois ; ajouter un
+  plugin n'est pas un changement du fil du tout. `PROTOCOL_VERSION` passe à 5.
+- **La file se lit sur la capacité, pas sur la variante.** Un appel HTTP a le
+  profil de Sentry — des secondes, une socket — et part au réseau ; une commande
+  shell a celui du relevé de `wt` et part au fond, jamais devant un diff qu'on
+  vient de demander. C'est une table de plus dans `queue_of`, et un test la
+  verrouille.
+- **Une requête ne reste jamais en attente.** Un canal à un coup rangé sous un
+  identifiant qui ne recule jamais — le motif du client LSP et de la console
+  SQL —, et trois choses le vident : la réponse, le rechargement du plugin, et
+  le balayage de fond qui expire ce qui a dépassé quatre-vingt-dix secondes. Le
+  balayage plutôt qu'un minuteur par requête : il bat déjà toutes les deux
+  secondes, et ce plafond-là n'a que faire d'un grain plus fin.
+- **Le rechargement redémarre le plugin.** L'état ne survit pas : recompiler
+  donne de nouvelles formes aux mêmes noms, et une donnée périmée lue par du
+  code neuf échoue d'une façon que personne n'explique. `init` est rejouée, ce
+  qui est justement ce qu'on veut après avoir modifié le code qui va chercher.
+  Une compilation **ratée garde la machine qui marchait** — un éditeur
+  enregistre au milieu d'un mot, et perdre un panneau qui fonctionne à chaque
+  frappe rendrait le rechargement pire qu'un redémarrage.
+- **L'erreur s'affiche dans le panneau, pas dans la barre d'état**, que le
+  message suivant écrase. Un script qui ne compile pas est précisément ce qu'on
+  revient lire deux fois ; ce sont les diagnostics de Rune tels quels, qui
+  nomment la ligne. C'est le choix que fait déjà l'arbre des bases avec son
+  `DbResult`.
+- **Ajouter ou retirer un plugin demande un redémarrage ; son script, non.** Un
+  panneau doit être dans le registre du dock **avant** que `layout.json` ne soit
+  relu, sans quoi son onglet revient en cadre vide. La découverte a donc lieu
+  dans `ui::run`, avant la fenêtre, et le nom du panneau est un `&'static str`
+  fuité une fois — `BasePanel::panel_name` en veut un, et l'identifiant d'un
+  plugin n'est connu qu'à l'exécution. Ce qui recharge à chaud est le
+  **script**, c'est-à-dire ce qu'on édite.
+- **Les capacités sont déclarées et non devinées.** Un plugin qui atteint autre
+  chose que ce que son `plugin.toml` liste se le voit refuser avant que rien ne
+  parte : c'est un plugin qui fait ce que son auteur n'a pas écrit.
+
+**Les secrets ne passent pas par le script.** Il nomme celui qu'il veut ; c'est
+le **worker** qui le substitue, dans un en-tête qui porte `{secret}`. Le jeton
+voyage en `Secret`, dont le `Debug` masque la valeur — une `Cmd` se journalise,
+un secret non. Les valeurs vivent dans les réglages (`Settings::plugins`),
+jamais dans le manifeste, qui est un fichier qu'on recopie.
+
+**Le plugin livré s'appelle « CI »** et lit les exécutions de GitHub Actions par
+`gh`, avec un bouton qui confie le journal d'un échec à l'agent. Il est là pour
+être lu autant que pour marcher, et comme les thèmes son dossier est **réécrit à
+chaque démarrage** : pour le modifier, il faut le copier sous un autre nom. Le
+formatage est demandé à `gh --template` plutôt que fait dans le script — Rune n'a
+pas de lecteur JSON, et en écrire un ferait du plugin un sujet d'analyse
+syntaxique au lieu d'un tableau de CI.
+
+**Pourquoi Rune.** Pur Rust, donc rien à négocier avec la jambe musl du serveur
+ni avec Windows, là où un Lua vendorerait du C ; une syntaxe proche de celle
+qu'on lit à côté ; et surtout **l'asynchrone de première classe**, qui est
+l'argument décisif : chaque capacité est un aller-retour sur `Cmd`/`Evt`, et un
+script doit pouvoir écrire `shell(…).await`. Rhai ne sait pas faire
+d'asynchrone du tout, Lua le ferait à la main avec des coroutines. Ce que ça
+coûte et qu'il faut savoir : une 0.x qui a déjà cassé entre mineures.
+
+**Le test qui compte ne lance aucun processus et n'ouvre aucune fenêtre.** Un
+script compilé depuis une chaîne, une capacité répondue à la main, et l'arbre
+qui en sort comparé à celui qu'on attend — le motif de `Session::run` du client
+LSP. Le plugin livré y passe aussi : un fichier embarqué qui ne se lit pas ne
+provoque **aucune erreur**, le panneau reste vide et rien ne dit pourquoi.
+
+Ce que la v1 ne fait pas, et c'est délibéré : Sentry n'est **pas** porté. C'est
+lui qui jugera l'API au lot suivant — s'il ne se réécrit pas en Rune sans
+capacité taillée pour lui, l'API est fausse et se reprend là, pas au cinquième
+plugin.
 
 ## Conventions gpui
 

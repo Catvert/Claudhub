@@ -468,6 +468,33 @@ pub struct Settings {
     /// One page and not the whole result: a `SELECT *` on a two-million-row
     /// table would fill the window's memory before showing anything at all.
     pub db_page_size: usize,
+    /// What each plugin is told, by its directory's name.
+    ///
+    /// The **second level** of the extension system, beside the agent profiles,
+    /// the database connections and the language servers: a plugin belongs to
+    /// the machine, not to a repository, and the same one serves five checkouts
+    /// of the same project.
+    ///
+    /// A plugin's manifest carries the defaults; this lays over them. The
+    /// secrets are here and never in the manifest, which is a file one copies
+    /// around — and they leave for a worker inside a `Secret`, whose `Debug`
+    /// masks the value.
+    #[serde(default)]
+    pub plugins: std::collections::BTreeMap<String, PluginSettings>,
+}
+
+/// What one plugin is told.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PluginSettings {
+    /// Read by the script with `setting(name)`.
+    #[serde(default)]
+    pub settings: std::collections::BTreeMap<String, String>,
+    /// Named by the script when it makes a request; never handed to it. The
+    /// value is substituted by the **worker**, into a header that carries
+    /// `{secret}` — writing it into the header on the script's side would put
+    /// it back into something a `Debug` prints.
+    #[serde(default)]
+    pub secrets: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Settings {
@@ -505,6 +532,7 @@ impl Default for Settings {
             hidden_panels: Vec::new(),
             databases: Vec::new(),
             lsp: shipped_servers(),
+            plugins: Default::default(),
             shortcuts: std::collections::BTreeMap::new(),
             db_page_size: 500,
         }

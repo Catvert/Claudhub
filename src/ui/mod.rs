@@ -27,6 +27,7 @@ mod notes;
 pub(crate) mod notes_view;
 mod notify;
 mod panels;
+pub mod plugin_view;
 mod repos;
 mod review;
 mod scroll;
@@ -146,6 +147,11 @@ pub fn run() {
             // Per-worktree state follows the settings: the views read it just
             // the same, and it has to be there before the first of them.
             store::Store::load().init_global(cx);
+            // Before the window: a plugin's panel has to be in the dock's
+            // registry before `layout.json` is read back, or its tab comes back
+            // as an empty frame. That is why adding or removing a plugin takes
+            // a restart, while its script reloads hot.
+            plugin_view::install();
             theme::install(cx);
             theme::apply(&settings, None, cx);
 
