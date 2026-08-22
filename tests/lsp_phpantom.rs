@@ -42,7 +42,11 @@ fn project() -> PathBuf {
     .unwrap();
     std::fs::write(
         dir.join("src/User.php"),
-        "<?php\nnamespace App;\nclass User {\n    public function name(): string { return 'x'; }\n}\n",
+        // A parameter on purpose: PHPantom defaults to `contextual` semantic
+        // tokens, which emit only what a grammar cannot know — a parameter
+        // being the first of them. A class with no parameter anywhere answers
+        // an empty stream, quite correctly.
+        "<?php\nnamespace App;\nclass User {\n    public function greet(string $who): string { return $who; }\n}\n",
     )
     .unwrap();
     dir
@@ -201,6 +205,37 @@ fn a_real_server_starts_opens_a_file_and_answers() {
     .expect("no answer to the resolve")
     .expect("the resolve was refused");
     assert!(resolved.contains("\"edit\""), "{resolved}");
+
+    // Semantic tokens, the colours only the server can give: which ones is its
+    // business, that there are any is ours. PHPantom answers `full` and refuses
+    // `range`, which is exactly why the request is chosen from the capability
+    // rather than from the trait's name.
+    assert!(capabilities.contains(r#""full":true"#));
+    host.ask(
+        &worktree,
+        claudhub::lsp::Ask::Request {
+            id: 45,
+            method: "textDocument/semanticTokens/full".into(),
+            params: serde_json::json!({
+                "textDocument": {"uri": claudhub::lsp::uri::of(&path)},
+            })
+            .to_string(),
+        },
+    );
+    let tokens = wait(&events_rx, READY, |event| match event {
+        Evt::LspAnswer { id: 45, result, .. } => Some(result.clone()),
+        _ => None,
+    })
+    .expect("no answer to the semantic tokens")
+    .expect("the semantic tokens were refused");
+    let tokens: serde_json::Value = serde_json::from_str(&tokens).unwrap();
+    assert!(
+        !tokens["data"]
+            .as_array()
+            .expect("a token stream")
+            .is_empty(),
+        "an empty token stream on a class with a method"
+    );
 
     host.stop(worktree.clone());
     let _ = std::fs::remove_dir_all(&worktree);

@@ -934,12 +934,50 @@ liant déjà —, et trois choses les font marcher qu'un client naïf rate :
   la première déplace ce que la seconde désigne. Les trier en ordre décroissant
   est ce qui fait que chacune tombe encore juste.
 
+**Les jetons sémantiques sont la coloration que le serveur donne**, là où
+tree-sitter ne donne que celle de la grammaire. La grammaire voit `$user->name`
+et sait dire « accès à un membre » ; elle n'a jamais ouvert la classe, donc elle
+ne sait pas si c'est une propriété, une méthode, ni si elle est dépréciée. Le
+serveur, lui, a résolu le type. Ce qu'on y gagne en PHP : un paramètre distingué
+d'une variable locale, un appel statique d'un appel d'instance, un symbole
+déprécié signalé.
+
+Quatre points, et le premier est le seul endroit où cette fonction peut échouer :
+
+- **La légende est traduite dans le vocabulaire de nos thèmes.** Un jeton ne
+  porte qu'un **indice** dans la légende du serveur — `parameter`, `enumMember`,
+  `typeParameter` —, et l'éditeur résout ce *nom* contre le thème au moment de
+  peindre. Nos palettes parlent tree-sitter, qui n'a ni `parameter` ni
+  `enumMember` : un nom que le thème ignore ne rend aucun style, et un jeton sans
+  style ne change rien à l'écran. C'est un échec **silencieux**, indiscernable
+  d'un serveur qui n'aurait rien envoyé. `lsp::theme_name` fait donc la
+  traduction, et deux tests la verrouillent — l'un contre les douze thèmes
+  livrés, l'autre contre les deux de gpui-component. Un nom pointé est gratuit :
+  `function.method` est exact là où un thème distingue les méthodes et retombe
+  sur `function` ailleurs. Un nom **vide** est délibéré : `variable` est laissé à
+  la grammaire, nos thèmes ne donnant aucune couleur propre aux variables.
+- **L'ordre est celui du serveur**, puisque c'est à lui que les indices
+  renvoient. Une entrée déplacée recolore tout un fichier de travers, sans erreur
+  nulle part.
+- **`full` ou `range`, selon ce que le serveur annonce.** L'éditeur demande le
+  document entier — il met le résultat en cache et le fenêtre au moment de
+  peindre, si bien qu'un défilement ne coûte rien — mais PHPantom déclare
+  `full: true, range: false`, et lui demander une plage n'obtient qu'un refus.
+  C'est la capacité qui choisit la requête, pas le nom du trait.
+- **Un flux vide est souvent la bonne réponse.** PHPantom est réglé par défaut
+  sur `contextual` : il n'émet que ce qu'une grammaire ne peut pas savoir —
+  paramètres, `@template`, références dépréciées, accès statiques. Un fichier
+  sans un seul paramètre répond zéro jeton, et c'est juste. Le test contre le
+  vrai binaire a dû se donner un paramètre pour avoir quelque chose à vérifier.
+
+Les **modificateurs** (`deprecated`, `readonly`, `static`) sont reçus et ne sont
+mappés sur rien : ils voudraient un style à eux — un barré pour le premier — et
+il n'y a rien à quoi l'accrocher pour l'instant.
+
 Ce que la v1 ne fait pas, et c'est délibéré : seul le fichier ouvert dans
 l'éditeur est synchronisé (rien dans la vue de diff, qui n'est pas un document
 et dont le texte n'est pas celui du fichier), pas de renommage, pas de
 formatage, pas de recherche de symboles — il n'y a pas de vue pour les porter.
-Les jetons sémantiques attendent : leur trait existe, c'est le travail qui
-reste.
 
 **Ce que le serveur raconte va dans le journal** (`target: "lsp"`), stderr
 compris. `$/progress` fait exception : il remonte en `Evt::LspBusy` et s'affiche
@@ -950,8 +988,8 @@ secondes. PHPantom construit son index par couches et le dit là.
 **Le test qui compte ne lance pas de processus.** `Session::run` prend ce dans
 quoi il écrit et ce qu'il entend : la boucle entière se joue en mémoire, la
 poignée de main comprise. `tests/lsp_phpantom.rs` fait l'autre moitié — le vrai
-binaire, les vrais tubes, la poignée de main, un survol, des diagnostics poussés
-et une action de code résolue — et **se saute** quand `phpantom_lsp` n'est pas
+binaire, les vrais tubes, la poignée de main, un survol, des diagnostics poussés,
+une action de code résolue et un flux de jetons sémantiques — et **se saute** quand `phpantom_lsp` n'est pas
 installé, ce qui est le cas de la CI : un test qui échoue faute d'un programme
 que personne n'a promis est un build rouge qui ne dit rien. Ce qu'il vérifie du
 serveur est la **mécanique** et jamais le contenu : quelles fautes un serveur

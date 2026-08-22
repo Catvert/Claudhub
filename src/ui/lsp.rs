@@ -38,13 +38,13 @@ use anyhow::{anyhow, Result};
 use gpui::Entity;
 use gpui::{App, SharedString, Task, WeakEntity, Window};
 use gpui_component::input::{
-    CodeActionProvider, CompletionProvider, DefinitionProvider, EditorState, HoverProvider, Rope,
-    RopeExt,
+    CodeActionProvider, CompletionProvider, DefinitionProvider,
+    DocumentRangeSemanticTokensProvider, EditorState, HoverProvider, Rope, RopeExt,
 };
 use lsp_types::{
     CodeAction, CodeActionOrCommand, CodeActionResponse, CompletionContext, CompletionResponse,
-    Diagnostic, GotoDefinitionResponse, Hover, LocationLink, ShowDocumentParams, TextEdit,
-    WorkspaceEdit,
+    Diagnostic, GotoDefinitionResponse, Hover, LocationLink, SemanticTokenType, SemanticTokens,
+    SemanticTokensLegend, ShowDocumentParams, TextEdit, WorkspaceEdit,
 };
 use serde_json::{json, Value};
 
@@ -108,6 +108,22 @@ pub struct Capabilities {
     pub hover: bool,
     pub definition: bool,
     pub code_actions: bool,
+    pub semantic: Option<Semantic>,
+}
+
+/// What a server offers in the way of semantic tokens.
+///
+/// The legend is **its** vocabulary — `parameter`, `enumMember`, `decorator` —
+/// and the index in it is all a token carries. We keep it translated into the
+/// names our themes know (see `theme_name`), in the server's own order, because
+/// that order is what the indices refer to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Semantic {
+    pub names: Vec<&'static str>,
+    /// The server answers for the whole document. PHPantom says `full: true,
+    /// range: false`, so asking it for a range is asking for a refusal — and
+    /// the editor asks us for the whole document anyway.
+    pub full: bool,
 }
 
 impl Capabilities {
@@ -137,7 +153,77 @@ impl Capabilities {
             hover: has("hoverProvider"),
             definition: has("definitionProvider"),
             code_actions: has("codeActionProvider"),
+            semantic: value
+                .get("semanticTokensProvider")
+                .map(|provider| Semantic {
+                    names: provider
+                        .get("legend")
+                        .and_then(|legend| legend.get("tokenTypes"))
+                        .and_then(Value::as_array)
+                        .map(|types| {
+                            types
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(theme_name)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    full: !matches!(
+                        provider.get("full"),
+                        None | Some(Value::Bool(false)) | Some(Value::Null)
+                    ),
+                }),
         }
+    }
+}
+
+/// A server's token type, in the vocabulary our themes speak.
+///
+/// **The translation is here and not in the theme**, and that is the whole
+/// difficulty of semantic tokens. What comes back is an index into the server's
+/// legend — `parameter`, `enumMember`, `typeParameter` — and the editor resolves
+/// that *name* against the theme at paint time. Our palettes are written in
+/// tree-sitter's vocabulary, which has no `parameter` and no `enumMember`: a
+/// name the theme does not know resolves to nothing, and a token with no style
+/// is a token that changes nothing. It fails silently, which is the only way
+/// this feature can fail.
+///
+/// So the legend we hand the editor is the server's, **in its order** — the
+/// indices refer to it — with each name replaced by one our themes define. A
+/// dotted name costs nothing: `function.method` is exact where a theme
+/// distinguishes methods and falls back to `function` where it does not.
+///
+/// An empty name is deliberate: it means "say nothing here". `variable` is the
+/// case — our themes give variables no colour of their own, and painting them
+/// would only overwrite what tree-sitter already decided, with the same hue.
+fn theme_name(token_type: &str) -> &'static str {
+    match token_type {
+        // Everything that names a kind of thing takes the type colour. Our
+        // palettes have no hue for a namespace, and inventing one here would be
+        // inventing it for twelve themes at once.
+        "namespace" | "class" | "interface" | "enum" | "struct" | "type" | "typeParameter" => {
+            "type"
+        }
+        // The one that pays for the whole feature: what tells a parameter from
+        // any other variable, which no grammar can know. `variable.special` is
+        // the only variable-ish hue our themes define, and its meaning — this
+        // identifier is not an ordinary one — is the right one to borrow.
+        "parameter" => "variable.special",
+        "property" | "event" => "property",
+        "function" => "function",
+        "method" => "function.method",
+        "macro" => "function.macro",
+        // A PHP attribute, `#[Route(...)]`, which is what a decorator is here.
+        "decorator" => "attribute",
+        "enumMember" => "constant",
+        "keyword" | "modifier" => "keyword",
+        "comment" => "comment",
+        "string" => "string",
+        "number" => "number",
+        "regexp" => "string.regex",
+        "operator" => "operator",
+        // `variable`, and anything a server invents: left to the grammar.
+        _ => "",
     }
 }
 
@@ -269,6 +355,7 @@ impl ClaudhubApp {
             worktree,
             path,
             triggers: capabilities.triggers.clone(),
+            semantic: capabilities.semantic.clone(),
         });
         let app = cx.entity().downgrade();
         editing.input.update(cx, |state, cx| {
@@ -285,6 +372,10 @@ impl ClaudhubApp {
             // A `Vec` in their API: several providers may answer for one
             // document — a linter's fixes next to a server's. We have one, and
             // it is posted or not.
+            lsp.semantic_tokens_provider = capabilities
+                .semantic
+                .as_ref()
+                .map(|_| provider.clone() as Rc<dyn DocumentRangeSemanticTokensProvider>);
             lsp.code_action_providers = if capabilities.code_actions {
                 vec![provider.clone() as Rc<dyn CodeActionProvider>]
             } else {
@@ -585,6 +676,7 @@ struct Provider {
     worktree: PathBuf,
     path: PathBuf,
     triggers: Vec<String>,
+    semantic: Option<Semantic>,
 }
 
 impl Provider {
@@ -885,6 +977,67 @@ pub(super) fn apply_to(
     !elsewhere
 }
 
+impl DocumentRangeSemanticTokensProvider for Provider {
+    /// The server's legend, in its order, spoken in our themes' vocabulary.
+    ///
+    /// The order is not a detail: a token carries an **index** into this list,
+    /// and one entry out of place recolours a whole file wrongly and in
+    /// silence.
+    fn legend(&self) -> SemanticTokensLegend {
+        SemanticTokensLegend {
+            token_types: self
+                .semantic
+                .as_ref()
+                .map(|semantic| {
+                    semantic
+                        .names
+                        .iter()
+                        .map(|name| SemanticTokenType::new(name))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            // Accepted by the editor and not mapped to anything: a modifier
+            // would want a style of its own — `deprecated` struck through — and
+            // there is nothing to hang one on yet.
+            token_modifiers: Vec::new(),
+        }
+    }
+
+    fn semantic_tokens(
+        &self,
+        text: &Rope,
+        range: std::ops::Range<usize>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Task<Result<SemanticTokens>> {
+        // The editor asks for the whole document — it caches and windows the
+        // result at paint time, so scrolling costs nothing. We ask the server
+        // the way it says it can answer: PHPantom offers `full` and refuses
+        // `range`, and asking for the one it refuses gets an error rather than
+        // colours.
+        let full = self.semantic.as_ref().is_some_and(|s| s.full);
+        let (method, params) = if full {
+            (
+                "textDocument/semanticTokens/full",
+                json!({"textDocument": self.document()}),
+            )
+        } else {
+            (
+                "textDocument/semanticTokens/range",
+                json!({
+                    "textDocument": self.document(),
+                    "range": {
+                        "start": self.position(text, range.start),
+                        "end": self.position(text, range.end),
+                    },
+                }),
+            )
+        };
+        let task = self.ask::<SemanticTokens>(method, params, cx);
+        cx.spawn(async move |_cx| Ok(task.await?.unwrap_or_default()))
+    }
+}
+
 /// The three shapes a definition comes back in, brought to the one the editor
 /// takes.
 ///
@@ -917,5 +1070,120 @@ pub fn tooltip(session: Option<&Session>) -> Option<SharedString> {
                 n => format!("{} — {n}", session.server.name),
             })
         })),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_component::highlighter::HighlightTheme;
+
+    /// What PHPantom 0.10 announces, in its order.
+    const PHPANTOM: [&str; 15] = [
+        "namespace",
+        "class",
+        "interface",
+        "enum",
+        "type",
+        "typeParameter",
+        "parameter",
+        "variable",
+        "property",
+        "function",
+        "method",
+        "decorator",
+        "enumMember",
+        "keyword",
+        "comment",
+    ];
+
+    /// A style name a theme does not know resolves to nothing, and a token with
+    /// no style changes nothing on screen. That is the only way this feature
+    /// fails: in silence, and looking exactly like a server that sent nothing.
+    ///
+    /// The rule checked here is the resolver's own: an exact name, or the
+    /// segment before the first dot — which is what makes `function.method`
+    /// safe on a theme that only knows `function`.
+    #[test]
+    fn every_token_type_lands_on_a_colour_our_themes_define() {
+        for file in crate::ui::theme::BundledThemes::iter() {
+            let content = crate::ui::theme::BundledThemes::get(&file).expect("embedded");
+            let value: Value = serde_json::from_slice(&content.data).expect("JSON");
+            for theme in value["themes"].as_array().expect("themes") {
+                let syntax = theme["highlight"]["syntax"]
+                    .as_object()
+                    .expect("a style table");
+                for token_type in PHPANTOM {
+                    let name = theme_name(token_type);
+                    if name.is_empty() {
+                        continue; // deliberately left to the grammar
+                    }
+                    let known = syntax.contains_key(name)
+                        || name
+                            .split_once('.')
+                            .is_some_and(|(prefix, _)| syntax.contains_key(prefix));
+                    assert!(
+                        known,
+                        "{file}: `{token_type}` maps to `{name}`, which the theme does not define"
+                    );
+                }
+            }
+        }
+    }
+
+    /// And the same against the two themes gpui-component ships, which a user
+    /// falls back to when the bundled ones are not on disk yet.
+    #[test]
+    fn every_token_type_lands_on_a_colour_in_the_default_themes() {
+        use gpui_component::input::HighlightStyleResolver as _;
+        for theme in [
+            HighlightTheme::default_dark(),
+            HighlightTheme::default_light(),
+        ] {
+            for token_type in PHPANTOM {
+                let name = theme_name(token_type);
+                if name.is_empty() {
+                    continue;
+                }
+                assert!(
+                    theme.style(name).is_some(),
+                    "`{token_type}` maps to `{name}`, unknown in \"{}\"",
+                    theme.name
+                );
+            }
+        }
+    }
+
+    /// The order is the server's, and it is what the indices refer to: one
+    /// entry out of place recolours a file wrongly and in silence.
+    #[test]
+    fn the_legend_keeps_the_servers_order() {
+        let capabilities = Capabilities::read(
+            &json!({
+                "semanticTokensProvider": {
+                    "legend": {"tokenTypes": ["parameter", "class", "comment"]},
+                    "full": true,
+                    "range": false,
+                },
+            })
+            .to_string(),
+        );
+        let semantic = capabilities.semantic.expect("a legend");
+        assert_eq!(semantic.names, ["variable.special", "type", "comment"]);
+        assert!(semantic.full);
+    }
+
+    /// A server with no semantic tokens must not get a provider: the editor
+    /// would ask on every change and be answered with an error.
+    #[test]
+    fn a_server_without_the_capability_offers_no_legend() {
+        assert!(Capabilities::read("{}").semantic.is_none());
+        // Declared but only by range: the provider is posted, and it is the
+        // request that changes.
+        let only_range = Capabilities::read(
+            &json!({"semanticTokensProvider": {"legend": {"tokenTypes": []}, "range": true}})
+                .to_string(),
+        );
+        assert!(!only_range.semantic.expect("declared").full);
     }
 }

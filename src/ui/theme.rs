@@ -20,7 +20,7 @@ use super::settings::{Settings, ThemeMode};
 #[derive(rust_embed::RustEmbed)]
 #[folder = "assets/themes"]
 #[include = "*.json"]
-struct BundledThemes;
+pub(super) struct BundledThemes;
 
 pub fn themes_dir() -> Option<PathBuf> {
     super::settings::config_dir().map(|dir| dir.join("themes"))
