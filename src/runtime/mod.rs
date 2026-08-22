@@ -163,6 +163,11 @@ enum HandleInner {
         /// start: the orders are then dropped, and the review only refreshes by
         /// hand.
         watcher: Option<watch::Watcher>,
+        /// The seventh lane: the language servers. Outside the queues for the
+        /// watcher's reason and one of its own — **order matters**. A
+        /// `didChange` must reach the server before the completion that depends
+        /// on it, which several workers sharing one channel cannot promise.
+        lsp: std::sync::Arc<crate::lsp::Host>,
     },
     Remote(async_channel::Sender<Cmd>),
     /// No worker at all: the commands are dropped.
@@ -209,8 +214,12 @@ impl Handle {
                 background,
                 databases,
                 watcher,
+                lsp,
             } => {
                 let Some(cmd) = route_watch(watcher.as_ref(), cmd) else {
+                    return;
+                };
+                let Some(cmd) = route_lsp(lsp, cmd) else {
                     return;
                 };
                 let queue = match queue_of(&cmd) {
@@ -241,6 +250,49 @@ fn route_watch(watcher: Option<&watch::Watcher>, cmd: Cmd) -> Option<Cmd> {
         Cmd::Unwatch { worktree } => watcher?.unwatch(&worktree),
         Cmd::WatchDir { dir } => watcher?.watch_dir(&dir),
         Cmd::UnwatchDir { dir } => watcher?.unwatch_dir(&dir),
+        other => return Some(other),
+    }
+    None
+}
+
+/// Hands the language-server orders to their host and returns the others.
+///
+/// The same shape as `route_watch`, and the same reasoning one floor further:
+/// these never queue. Unlike the watcher the host always exists — there is
+/// nothing to fail at startup, a session being born only when a worktree asks
+/// for one.
+fn route_lsp(host: &std::sync::Arc<crate::lsp::Host>, cmd: Cmd) -> Option<Cmd> {
+    use crate::lsp::Ask;
+    match cmd {
+        Cmd::LspStart { worktree, server } => host.start(worktree, server),
+        Cmd::LspStop { worktree } => host.stop(worktree),
+        Cmd::LspOpen {
+            worktree,
+            path,
+            language_id,
+            text,
+        } => host.ask(
+            &worktree,
+            Ask::Open {
+                path,
+                language_id,
+                text,
+            },
+        ),
+        Cmd::LspChange {
+            worktree,
+            path,
+            text,
+        } => host.ask(&worktree, Ask::Change { path, text }),
+        Cmd::LspClose { worktree, path } => host.ask(&worktree, Ask::Close { path }),
+        Cmd::LspSave { worktree, path } => host.ask(&worktree, Ask::Save { path }),
+        Cmd::LspRequest {
+            worktree,
+            id,
+            method,
+            params,
+        } => host.ask(&worktree, Ask::Request { id, method, params }),
+        Cmd::LspCancel { worktree, id } => host.ask(&worktree, Ask::Cancel { id }),
         other => return Some(other),
     }
     None
@@ -294,6 +346,11 @@ pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
             None
         }
     };
+    // The language servers live here too, and for the watcher's reason: what
+    // they push — the diagnostics a server sends for a file an agent has just
+    // written — becomes events on the same channel as everything else, a single
+    // stream to carry over a wire, local or remote.
+    let lsp = std::sync::Arc::new(crate::lsp::Host::new(evt_tx.clone()));
     drop(evt_tx);
 
     (
@@ -305,6 +362,7 @@ pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
                 background: bg_tx,
                 databases: db_tx,
                 watcher,
+                lsp,
             },
         },
         evt_rx,
@@ -386,6 +444,19 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
         // route them yet.
         Cmd::Watch { .. } | Cmd::Unwatch { .. } | Cmd::WatchDir { .. } | Cmd::UnwatchDir { .. } => {
             log::debug!("watch order arrived in a worker");
+            Vec::new()
+        }
+        // Same thing one lane over: the language servers are handed to their
+        // host by `Handle::send`, and never queue.
+        Cmd::LspStart { .. }
+        | Cmd::LspStop { .. }
+        | Cmd::LspOpen { .. }
+        | Cmd::LspChange { .. }
+        | Cmd::LspClose { .. }
+        | Cmd::LspSave { .. }
+        | Cmd::LspRequest { .. }
+        | Cmd::LspCancel { .. } => {
+            log::debug!("language server order arrived in a worker");
             Vec::new()
         }
 

@@ -456,6 +456,63 @@ pub enum Cmd {
         targets: Vec<(PathBuf, WorktreeId)>,
     },
 
+    // — The language server ————————————————————————————————————
+    /// Starts a language server on a worktree, replacing the one running there.
+    ///
+    /// The declaration travels rather than being read back by the worker: it
+    /// comes from the settings, which live on the interface's side, exactly as
+    /// the external editor's command and the Sentry token do — and the worker
+    /// may well be in another process, whose settings file is not ours.
+    LspStart {
+        worktree: WorktreeId,
+        server: crate::lsp::Server,
+    },
+    LspStop {
+        worktree: WorktreeId,
+    },
+    LspOpen {
+        worktree: WorktreeId,
+        path: PathBuf,
+        language_id: String,
+        text: String,
+    },
+    LspChange {
+        worktree: WorktreeId,
+        path: PathBuf,
+        text: String,
+    },
+    LspClose {
+        worktree: WorktreeId,
+        path: PathBuf,
+    },
+    LspSave {
+        worktree: WorktreeId,
+        path: PathBuf,
+    },
+    /// One LSP request — completion, hover, definition, code actions, semantic
+    /// tokens.
+    ///
+    /// **One variant and not six.** The view already builds the parameters and
+    /// reads the result as `lsp_types`; a variant per method would be six pairs
+    /// of `Cmd`/`Evt` carrying the same two strings. `params` is JSON because
+    /// the core must not depend on `lsp-types`, which belongs to the `ui`
+    /// feature, and because postcard cannot carry a `Value` back.
+    LspRequest {
+        worktree: WorktreeId,
+        /// The view's own counter, which never goes back — the same device as
+        /// the SQL console's send id, and for the same reason: the answer to a
+        /// gesture that has been replaced must be recognisable.
+        id: u64,
+        method: String,
+        params: String,
+    },
+    /// Abandons a request. A completion is asked on one keystroke and stale on
+    /// the next, and a server told nothing goes on computing it.
+    LspCancel {
+        worktree: WorktreeId,
+        id: u64,
+    },
+
     AddWorktree {
         main: PathBuf,
         path: PathBuf,
@@ -480,6 +537,14 @@ impl Cmd {
     pub fn name(&self) -> &'static str {
         match self {
             Self::OpenRepo(..) => "OpenRepo",
+            Self::LspStart { .. } => "LspStart",
+            Self::LspStop { .. } => "LspStop",
+            Self::LspOpen { .. } => "LspOpen",
+            Self::LspChange { .. } => "LspChange",
+            Self::LspClose { .. } => "LspClose",
+            Self::LspSave { .. } => "LspSave",
+            Self::LspRequest { .. } => "LspRequest",
+            Self::LspCancel { .. } => "LspCancel",
             Self::OpenIfRepo(..) => "OpenIfRepo",
             Self::RefreshRepo { .. } => "RefreshRepo",
             Self::RefreshStatus { .. } => "RefreshStatus",
@@ -689,6 +754,56 @@ pub enum Evt {
     /// worktrees, being the only one to know which are open.
     FilesChanged {
         paths: Vec<PathBuf>,
+    },
+
+    // — The language server ————————————————————————————————————
+    /// The server answered `initialize`: it is up, and this is what it says it
+    /// can do.
+    ///
+    /// The capabilities travel as JSON and are read by the view alone. They are
+    /// what decides which providers the editor gets — a hover provider posted
+    /// for a server that has none would spend a round trip per pointer rest to
+    /// be told nothing — and they carry the semantic-token legend, which only
+    /// the server knows.
+    LspReady {
+        worktree: WorktreeId,
+        name: String,
+        capabilities: String,
+    },
+    /// The session is over: stopped, crashed, or never started. `reason` is
+    /// `None` when we ended it ourselves.
+    ///
+    /// A dead server is an event and never a silence — the same rule as
+    /// `ServerLost`: the button says so and what was waiting is failed, rather
+    /// than a completion that never comes and a spinner that never stops.
+    LspStopped {
+        worktree: WorktreeId,
+        reason: Option<String>,
+    },
+    /// The answer to one `Cmd::LspRequest`, carrying the view's own id.
+    LspAnswer {
+        worktree: WorktreeId,
+        id: u64,
+        /// The `result` member as JSON, or what the server refused with.
+        result: Result<String, String>,
+    },
+    /// A file's diagnostics, pushed by the server whenever it feels like it —
+    /// which is the whole point: they arrive for a file an agent has just
+    /// written, without anyone asking.
+    LspDiagnostics {
+        worktree: WorktreeId,
+        path: PathBuf,
+        /// The `diagnostics` array as JSON.
+        diagnostics: String,
+    },
+    /// What the server is busy with, from `$/progress`; `None` when it is done.
+    ///
+    /// It answers the one question a fast-starting server still raises: why the
+    /// completion is thin for the first ten seconds. PHPantom builds its index
+    /// in layers and says so here.
+    LspBusy {
+        worktree: WorktreeId,
+        message: Option<String>,
     },
 
     // — Transport ——————————————————————————————————————————————————

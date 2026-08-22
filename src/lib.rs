@@ -26,6 +26,7 @@ pub mod db;
 pub mod files;
 pub mod git;
 pub mod logging;
+pub mod lsp;
 pub mod runtime;
 pub mod sentry;
 #[cfg(feature = "ui")]
