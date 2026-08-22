@@ -114,6 +114,7 @@ src/
   plugin/       les plugins : un panneau dont le contenu est un script
     view.rs     l'arbre de vue en données — le vocabulaire borné, et rien d'autre
     manifest.rs le `plugin.toml` d'un dossier, et la découverte
+    install.rs  installer, mettre à jour, retirer — `git clone`, `git pull`
     caps.rs     ce qu'un plugin peut faire dehors : les données, et le worker
     host.rs     la machine Rune (feature `plugins`) — le seul module qui la voit
     loaded.rs   un plugin tel que la fenêtre le tient : script, état, dernier arbre
@@ -4375,8 +4376,8 @@ niveaux, du moins cher au plus cher :
    commit proposé en est le second, et il montre la forme la plus économe :
    une ligne de commande, le texte par l'entrée standard, la réponse par la
    sortie. Les connexions aux bases de données en sont le troisième, les
-   serveurs de langage le quatrième, les réglages d'un plugin le cinquième.
-   Pour ce qui n'est pas propre à un projet.
+   serveurs de langage le quatrième, les réglages et les secrets d'un plugin le
+   cinquième. Pour ce qui n'est pas propre à un projet.
 3. **Un panneau écrit en Rune** — voir « Les plugins ». C'est le niveau que les
    deux précédents ne couvrent pas : une **vue**, avec son état et ses gestes.
    Il a été ouvert par un constat de compte plus que par une envie de généralité
@@ -4468,10 +4469,12 @@ Huit points qui ne se devinent pas :
   ajouter un message casserait le fil pour tous les autres. `Cmd::PluginCall`
   porte une capacité à charge fermée, `Evt::PluginResult` la ramène. Ajouter une
   **capacité** est un changement de Claudhub, versionné une fois ; ajouter un
-  plugin n'est pas un changement du fil du tout. `PROTOCOL_VERSION` passe à 6 —
-  la fusion avec la branche des étiquettes en avait déjà pris un, et deux
-  incréments qui atterrissent sur le même numéro sont une poignée de main qui
-  accepte deux protocoles différents.
+  plugin n'est pas un changement du fil du tout. Deux incréments à ce jour — les
+  capacités, puis la gestion git — et une leçon payée deux fois en fusionnant :
+  quand deux branches portent chacune le numéro au suivant, git prend la ligne
+  sans conflit et le fil se retrouve avec deux protocoles sous un seul numéro,
+  c'est-à-dire une poignée de main qui accepte un serveur qui ne parle pas la
+  même langue.
 - **La file se lit sur la capacité, pas sur la variante.** Un appel HTTP a le
   profil de Sentry — des secondes, une socket — et part au réseau ; une commande
   shell a celui du relevé de `wt` et part au fond, jamais devant un diff qu'on
@@ -4495,13 +4498,23 @@ Huit points qui ne se devinent pas :
   revient lire deux fois ; ce sont les diagnostics de Rune tels quels, qui
   nomment la ligne. C'est le choix que fait déjà l'arbre des bases avec son
   `DbResult`.
-- **Ajouter ou retirer un plugin demande un redémarrage ; son script, non.** Un
+- **Une surveillance par dossier de plugin, et non une sur leur parent.**
+  `Cmd::WatchDir` pose une surveillance **sans récursion** — c'est la
+  disposition du coffre de notes —, si bien que surveiller `<config>/plugins`
+  seul voit un plugin apparaître et ne voit jamais son `main.rn` changer. C'est
+  tout le rechargement à chaud, et il ne se déclenchait pour rien tant que le
+  dossier de chaque plugin n'était pas surveillé lui aussi. Le parent est gardé
+  quand même : c'est lui qui remarque une installation.
+- **Le panneau d'un plugin neuf attend un redémarrage ; son script, non.** Un
   panneau doit être dans le registre du dock **avant** que `layout.json` ne soit
-  relu, sans quoi son onglet revient en cadre vide. La découverte a donc lieu
-  dans `ui::run`, avant la fenêtre, et le nom du panneau est un `&'static str`
-  fuité une fois — `BasePanel::panel_name` en veut un, et l'identifiant d'un
-  plugin n'est connu qu'à l'exécution. Ce qui recharge à chaud est le
-  **script**, c'est-à-dire ce qu'on édite.
+  relu, sans quoi son onglet revient en cadre vide — et il n'y a pas de place
+  pour lui dans des docks bâtis avant qu'il n'existe. La **liste**, elle, se
+  relit tout de suite : le registre est derrière un verrou et non un `OnceLock`,
+  de sorte qu'un plugin installé est aussitôt dans la page des réglages,
+  configurable, éditable et compilé. Le nom du panneau est un `&'static str`
+  fuité — `BasePanel::panel_name` en veut un, l'identifiant d'un plugin n'est
+  connu qu'à l'exécution, et la fuite est bornée par le nombre d'installations
+  d'une session.
 - **Les capacités sont déclarées et non devinées.** Un plugin qui atteint autre
   chose que ce que son `plugin.toml` liste se le voit refuser avant que rien ne
   parte : c'est un plugin qui fait ce que son auteur n'a pas écrit.
@@ -4538,6 +4551,82 @@ Ce que la v1 ne fait pas, et c'est délibéré : Sentry n'est **pas** porté. C'
 lui qui jugera l'API au lot suivant — s'il ne se réécrit pas en Rune sans
 capacité taillée pour lui, l'API est fausse et se reprend là, pas au cinquième
 plugin.
+
+### Installer un plugin, l'éditer, le mettre à jour
+
+**Le binaire `git` et pas une archive.** Un plugin est un dossier de fichiers
+texte, ce qui est exactement ce à quoi git sert : la mise à jour est un `pull`,
+on lit sur quelle révision on est, et l'auteur publie en poussant. C'est le
+raisonnement qui a déjà fait préférer le binaire à libgit2 — les credential
+helpers de l'utilisateur, ses clés SSH et son `includeIf` marchent ici sans que
+nous sachions qu'ils existent.
+
+**Pas de dépôt central, et c'est une décision.** Un registre, c'est un serveur,
+un espace de noms, une politique de modération et un modèle de confiance, pour
+installer ce qu'une URL nomme déjà. Le raisonnement du `wt.toml`, un étage plus
+haut : le niveau le moins cher qui suffit.
+
+**Une commande et une seule** (`Cmd::PluginManage`), dont la file se lit sur
+l'opération comme celle d'une capacité se lit sur la sienne : un clone et un
+`pull` parlent à un distant et partent au réseau, effacer un dossier se compte
+en millisecondes et part avec les lectures.
+
+Cinq points qui ne se devinent pas :
+
+- **Le nom du dossier est arrêté avant que quoi que ce soit ne parte.**
+  `install::dir_of` refuse un `..`, parce que ce nom finit dans un `git clone`
+  et, pour une désinstallation, dans un `remove_dir_all`. C'est le garde-fou que
+  `files::inside` pose sur les gestes de l'explorateur, voulu ici pour la même
+  raison, et un test l'exerce sur cinq façons de sortir du dossier.
+- **Un dépôt sans manifeste n'est pas un plugin**, et le clone est défait sur
+  place. Le laisser serait un dossier que personne ne sait expliquer ; un test
+  le vérifie avec un vrai dépôt git.
+- **Le nom est suggéré par l'URL et reste modifiable.** Deux plugins peuvent
+  très bien être publiés depuis des dépôts appelés `claudhub-plugin` par deux
+  personnes différentes, et c'est ce nom que tout le reste prend pour clé. La
+  suggestion ne revient pas par-dessus ce qu'on a corrigé.
+- **`pull --ff-only`.** Un plugin qu'on a édité a des commits à lui, et une
+  fusion laissée à mi-chemin dans un dossier que personne ne tient pour un dépôt
+  est un état dont on ne sort pas depuis ici.
+- **Éteindre un plugin ne l'empêche pas de compiler.** Son panneau disparaît et
+  son script ne tourne pas, mais il est lu quand même : cela coûte une
+  milliseconde et achète le seul renseignement qu'on veut d'un plugin qu'on
+  vient d'installer — s'il se lit.
+
+**L'édition passe par l'écran « Édition », et cela n'a coûté aucune plomberie.**
+L'éditeur range ce qu'il tient par une **racine**, qui est un worktree dans le
+cas ordinaire ; `files::read` joint la racine et le chemin, et le dossier d'un
+plugin est simplement une autre racine. D'où `ClaudhubApp::editing_root`, vide
+la plupart du temps et remis à zéro dès qu'on choisit un worktree — y laisser un
+plugin montrerait un fichier que le reste de la fenêtre dément. Enregistrer écrit
+le fichier, la surveillance de son dossier se déclenche, le script recompile :
+le rechargement à chaud se referme sur lui-même.
+
+Un `.rn` est coloré avec la grammaire de **Rust**, et c'est une convention
+assumée : il n'y a pas de grammaire Rune dans l'arbre, et la syntaxe de Rune est
+celle de Rust à dessein — `fn`, `let`, `match`, `?`, `.await`. Ce qu'elle rate
+est la poignée d'endroits où les deux diffèrent, contre un fichier entier sans
+couleurs.
+
+**La page des réglages gère, le panneau diagnostique**, et le partage n'est pas
+qu'éditorial. La fermeture de rendu du formulaire tourne **à l'intérieur** du
+rendu de `ClaudhubApp` — le panneau des réglages lui délègue — donc y lire
+l'entité racine est la panique que la fermeture d'`open_dialog` a déjà enseignée
+ici. Un gestionnaire de clic, lui, s'exécute une fois cet emprunt rendu : d'où
+`settings_view::with_app`, un **handle faible** dans un global, et la règle qui
+va avec — depuis un clic, jamais depuis un rendu. L'état de compilation et son
+erreur restent donc dans le panneau du plugin, où le bouton de rechargement est
+déjà et où l'erreur se lit à la place de l'arbre qu'elle remplace.
+
+**Une installation passe par la mécanique des écritures en vol** (`start` /
+`finish`, `Action::Plugin`) : un clone met des secondes, et la barre d'état est
+l'endroit où l'on regarde s'il se passe quelque chose. La clé est exactement la
+paire que la réponse rapporte — le dossier et l'action —, ce qui est la seule
+panne de cet indicateur.
+
+**Une désinstallation se confirme.** C'est le seul geste d'ici que git ne
+rattrape pas : `remove_dir_all` emporte le dossier et ce qu'on y a écrit, les
+commits du plugin compris.
 
 ## Conventions gpui
 

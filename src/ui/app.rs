@@ -317,6 +317,16 @@ const AGENT_PERIOD: std::time::Duration = std::time::Duration::from_secs(2);
 const SUMMARY_EVERY: u32 = 5;
 
 /// The last action's result, shown in the status bar.
+/// A weak handle to the application, for the closures that only get an `App`.
+///
+/// The settings form declares its fields by closures receiving nothing else —
+/// which is already why the settings themselves are a global — and a plugin's
+/// row has buttons that act on the window. **Weak**, like the dock's panels':
+/// strong, it would keep the application alive past its window.
+pub struct AppHandle(pub gpui::WeakEntity<ClaudhubApp>);
+
+impl gpui::Global for AppHandle {}
+
 pub struct Toast {
     pub text: SharedString,
     pub error: bool,
@@ -504,6 +514,18 @@ pub struct ClaudhubApp {
     /// The folded sections of the plugins' panels. In memory, like the notes
     /// panel's: a reading posture, not a preference.
     pub(super) plugin_folded: crate::ui::plugin_view::Folds,
+    /// The lane a plugin's capabilities leave by. Kept so the list of plugins
+    /// can be rebuilt — after an installation — without spawning a second
+    /// drain task for every one of them.
+    pub(super) plugin_outbox: Option<async_channel::Sender<crate::plugin::host::Request>>,
+    /// What the editing screen shows when it is not a worktree's file.
+    ///
+    /// The editor keys what it holds by a **root**, which is a worktree in the
+    /// ordinary case and a plugin's directory when one edits a script: a folder
+    /// outside any repository is simply another root, and that is what makes
+    /// editing one cost no new plumbing. Cleared by choosing a worktree, whose
+    /// file is then what one expects to find.
+    pub(super) editing_root: Option<PathBuf>,
     /// The databases tree: connections, schemas, tables, columns.
     pub(super) db: crate::ui::db::DbState,
     pub(super) db_scroll: gpui::UniformListScrollHandle,
@@ -856,6 +878,8 @@ impl ClaudhubApp {
             plugins: Vec::new(),
             plugin_deadlines: Vec::new(),
             plugin_folded: Default::default(),
+            plugin_outbox: None,
+            editing_root: None,
             db: Default::default(),
             db_scroll: gpui::UniformListScrollHandle::new(),
             db_focus: cx.focus_handle(),
@@ -916,6 +940,7 @@ impl ClaudhubApp {
         if app_needs_layout_save {
             app.schedule_layout_save(cx);
         }
+        cx.set_global(AppHandle(cx.entity().downgrade()));
         app.pump_events(events, window, cx);
         // Before the sweep: the sweep is also what expires a plugin's requests,
         // and it has to find a list to look at rather than build one.
@@ -1583,6 +1608,9 @@ impl ClaudhubApp {
                 call,
                 result,
             } => self.plugin_result(plugin, call, result),
+            Evt::PluginManaged { dir, op, result } => {
+                self.plugin_managed(dir, op, result, window, cx)
+            }
 
             // — The language server ————————————————————————————————
             Evt::LspReady {
@@ -2021,7 +2049,7 @@ impl ClaudhubApp {
     /// the gpui-component call. `Root` already re-emits the notification layer
     /// at the end of the root view's render — see "Conventions gpui" — so
     /// nothing else is needed to make it appear.
-    fn notify(
+    pub(super) fn notify(
         &mut self,
         notice: Option<crate::ui::notify::Notice>,
         window: &mut Window,
@@ -2281,6 +2309,10 @@ impl ClaudhubApp {
         // A plugin's panel speaks about the worktree the window shows, like
         // every other panel: changing it is starting over, not refreshing.
         self.plugins_follow_worktree(cx);
+        // And the editing screen goes back to this worktree's file: one had
+        // gone off to edit a plugin's script, which belongs to no worktree, and
+        // leaving it there would show a file the rest of the window denies.
+        self.editing_root = None;
         // The free note follows the displayed worktree: the input is unique, and
         // keeping the previous one's text would write it here.
         self.sync_journal_input(&path, window, cx);

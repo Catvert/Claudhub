@@ -17,12 +17,11 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::OnceLock;
 
 use gpui::{div, prelude::*, uniform_list, Context, ElementId, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
-    h_flex, v_flex, ActiveTheme, Disableable as _, Sizable as _, StyledExt as _,
+    h_flex, v_flex, ActiveTheme, Disableable as _, Sizable as _, StyledExt as _, WindowExt as _,
 };
 
 use crate::plugin::host::{Effect, Request};
@@ -52,7 +51,16 @@ const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 #[folder = "plugins"]
 struct BundledPlugins;
 
-static MANIFESTS: OnceLock<Vec<Manifest>> = OnceLock::new();
+/// The plugins found on disk.
+///
+/// Behind a lock and not a `OnceLock`: installing one has to show up in the
+/// settings page at once, without a restart. What is stored is a leaked slice
+/// rather than a `Vec`, so `manifests()` can hand out `&'static` — a manifest
+/// is read on every frame by every plugin's tab title, and cloning one there
+/// would be a frame's work for nothing. The leak is bounded by the number of
+/// installations in a session, which is a handful, and it is the same trade the
+/// panel names already make.
+static MANIFESTS: std::sync::RwLock<&'static [Manifest]> = std::sync::RwLock::new(&[]);
 
 pub fn plugins_dir() -> Option<PathBuf> {
     crate::ui::settings::config_dir().map(|dir| dir.join("plugins"))
@@ -67,11 +75,23 @@ pub fn install() {
     if let Err(e) = write_bundled(&dir) {
         log::warn!(target: "plugin", "bundled plugins not installed: {e}");
     }
+    discover();
+}
+
+/// Reads the plugin directory again. At startup, and after an installation or a
+/// removal — never on a file changing, which is the script's business and not
+/// the list's.
+pub fn discover() {
+    let Some(dir) = plugins_dir() else {
+        return;
+    };
     let found = manifest::discover(&dir);
     for found in &found {
         log::info!(target: "plugin", "{} on the {} screen", found.id, found.declaration.screen);
     }
-    let _ = MANIFESTS.set(found);
+    if let Ok(mut slot) = MANIFESTS.write() {
+        *slot = Vec::leak(found);
+    }
 }
 
 fn write_bundled(dir: &std::path::Path) -> std::io::Result<()> {
@@ -89,7 +109,7 @@ fn write_bundled(dir: &std::path::Path) -> std::io::Result<()> {
 }
 
 pub fn manifests() -> &'static [Manifest] {
-    MANIFESTS.get().map(Vec::as_slice).unwrap_or_default()
+    MANIFESTS.read().map(|slot| *slot).unwrap_or_default()
 }
 
 /// The plugins whose panel belongs to one screen.
@@ -104,6 +124,29 @@ pub fn by_panel(panel: &str) -> Option<&'static Manifest> {
     manifests().iter().find(|m| m.panel == panel)
 }
 
+/// Is this plugin switched on. A plugin nobody has configured is **on**.
+pub fn enabled(id: &str, cx: &gpui::App) -> bool {
+    crate::ui::settings::Settings::global(cx)
+        .plugins
+        .get(id)
+        .map(|p| p.enabled)
+        .unwrap_or(true)
+}
+
+/// The same, from the panel's name — which is what the dock knows it by.
+pub fn panel_enabled(panel: &str, cx: &gpui::App) -> bool {
+    by_panel(panel).is_none_or(|manifest| enabled(&manifest.id, cx))
+}
+
+/// The script of a plugin, as a root and a path.
+///
+/// The **directory** stands where a worktree usually does: `files::read` joins
+/// the two, and the editor keys what it holds by that root. A plugin's folder is
+/// simply another root — which is what makes editing one cost no new plumbing.
+pub fn script_of(manifest: &Manifest) -> (PathBuf, PathBuf) {
+    (manifest.dir.clone(), PathBuf::from("main.rn"))
+}
+
 impl ClaudhubApp {
     /// Loads every plugin and opens the lane their requests leave by.
     ///
@@ -111,11 +154,8 @@ impl ClaudhubApp {
     /// and the answer finds its way home by the plugin's name.
     pub(super) fn start_plugins(&mut self, cx: &mut Context<Self>) {
         let (sender, outbox) = async_channel::unbounded::<Request>();
-        self.plugins = manifests()
-            .iter()
-            .map(|manifest| Plugin::load(manifest.clone(), sender.clone()))
-            .collect();
-        self.configure_plugins(cx);
+        self.plugin_outbox = Some(sender);
+        self.rebuild_plugins(cx);
         // The lane out: a request becomes a `Cmd`, and its deadline is noted.
         cx.spawn(async move |this, cx| {
             while let Ok(request) = outbox.recv().await {
@@ -139,14 +179,184 @@ impl ClaudhubApp {
             }
         })
         .detach();
+    }
 
-        // The plugin directory is watched exactly as the notes vault is: what
-        // one edits in an editor must appear here without a restart.
+    /// Loads every plugin the registry knows, and watches what it lives in.
+    ///
+    /// **One watch per plugin directory, and not one on their parent.**
+    /// `Cmd::WatchDir` sets a watch on a folder **without recursion** — the
+    /// notes vault's arrangement — so watching `<config>/plugins` alone sees a
+    /// plugin appear and never sees its `main.rn` change. That is the whole
+    /// hot reload, and it fired for nothing until each plugin's own folder was
+    /// watched too. The parent is kept as well: it is what notices an install.
+    pub(super) fn rebuild_plugins(&mut self, cx: &mut Context<Self>) {
+        let Some(sender) = self.plugin_outbox.clone() else {
+            return;
+        };
+        self.plugins = manifests()
+            .iter()
+            .map(|manifest| Plugin::load(manifest.clone(), sender.clone()))
+            .collect();
+        self.configure_plugins(cx);
+        self.plugin_deadlines.clear();
         if let Some(dir) = plugins_dir() {
             if dir.is_dir() {
                 self.git.send(Cmd::WatchDir { dir });
             }
         }
+        for manifest in manifests() {
+            self.git.send(Cmd::WatchDir {
+                dir: manifest.dir.clone(),
+            });
+        }
+        let worktree = self.active.clone();
+        for plugin in &mut self.plugins {
+            plugin.set_worktree(worktree.as_deref());
+        }
+        cx.notify();
+    }
+
+    /// Installs, updates or removes a plugin.
+    ///
+    /// The directory is computed here and not in the worker: a name typed by
+    /// hand ends in a `git clone` and, for a removal, in a `remove_dir_all`, so
+    /// what may not leave the plugin directory is settled before anything is
+    /// sent — `install::dir_of` is what refuses a `..`.
+    pub(super) fn manage_plugin(
+        &mut self,
+        id: &str,
+        op: crate::plugin::install::Manage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = plugins_dir() else {
+            return;
+        };
+        match crate::plugin::install::dir_of(&root, id) {
+            Ok(dir) => {
+                // Through the in-flight machinery: a
+                // clone takes seconds, and the status bar is where one looks to
+                // know whether anything is happening. **The key is exactly the
+                // pair the answer comes back with** — the directory and
+                // `Action::Plugin` — which is what keeps a spinner from turning
+                // for ever.
+                self.start(
+                    Some(dir.clone()),
+                    crate::runtime::Action::Plugin,
+                    Cmd::PluginManage { dir, op },
+                    cx,
+                );
+            }
+            Err(e) => self.plugin_failed(format!("{e:#}"), window, cx),
+        }
+        cx.notify();
+    }
+
+    /// What became of it.
+    ///
+    /// The registry is read again on success, so a plugin just installed is in
+    /// the settings page at once — configurable, editable, and saying whether
+    /// it compiles. Its **panel**, on the other hand, waits for a restart: a
+    /// panel has to be in the dock's registry before `layout.json` is read, and
+    /// there is no place in the docks for one that was not there when they were
+    /// built. The page says so rather than letting one look for a tab.
+    pub(super) fn plugin_managed(
+        &mut self,
+        dir: PathBuf,
+        op: String,
+        result: Result<String, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.flight
+            .finish(&Some(dir.clone()), crate::runtime::Action::Plugin);
+        match result {
+            Ok(what) => {
+                discover();
+                self.rebuild_plugins(cx);
+                self.announce(SharedString::from(format!("{op}: {what}")), cx);
+            }
+            Err(message) => self.plugin_failed(message, window, cx),
+        }
+        cx.notify();
+    }
+
+    /// A failure gets its balloon, like every other one in this window: the
+    /// status bar is overwritten by the next message, and "this repository
+    /// carries no plugin.toml" is exactly what one comes back to read.
+    fn plugin_failed(&mut self, message: String, window: &mut Window, cx: &mut Context<Self>) {
+        let text = crate::ui::notify::headline(&message)
+            .map(SharedString::from)
+            .unwrap_or_else(|| SharedString::from(message.clone()));
+        self.toast = Some(crate::ui::app::Toast { text, error: true });
+        self.notify(
+            crate::ui::notify::notice(
+                crate::runtime::Action::Plugin,
+                &message,
+                crate::ui::notify::Level::Error,
+            ),
+            window,
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Asks before removing a plugin.
+    ///
+    /// `remove_dir_all` on a directory one may have edited: this is the one
+    /// gesture here that git does not undo, the plugin's own commits included.
+    pub(super) fn confirm_plugin_removal(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entity = cx.entity();
+        let label = SharedString::from(id.clone());
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let (id, entity, label) = (id.clone(), entity.clone(), label.clone());
+            dialog
+                .title(tr!("settings-plugin-remove"))
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().text_sm().child(label))
+                        .child(div().text_xs().child(tr!("settings-plugin-remove-help"))),
+                )
+                .overlay_closable(false)
+                .close_button(false)
+                .footer(crate::ui::dialogs::confirm())
+                .on_ok(move |_, window, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.manage_plugin(&id, crate::plugin::install::Manage::Remove, window, cx);
+                    });
+                    true
+                })
+        });
+    }
+
+    /// Opens a plugin's script in the editing screen.
+    ///
+    /// The plugin's **directory** stands where a worktree usually does: the
+    /// editor keys what it holds by a root, `files::read` joins the two, and a
+    /// folder outside any repository is simply another root. Saving writes the
+    /// file, the watch on that folder fires, and the script recompiles — the
+    /// hot reload closes on itself without a single line about plugins in the
+    /// editor.
+    pub(super) fn edit_plugin(
+        &mut self,
+        manifest: &Manifest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (root, path) = script_of(manifest);
+        self.editing_root = Some(root.clone());
+        self.git.send(Cmd::ReadFile {
+            worktree: root,
+            path,
+        });
+        self.enter_workspace(crate::ui::workspace::Workspace::Files, window, cx);
+        cx.notify();
     }
 
     /// Hands each plugin what the settings say about it.
@@ -242,6 +452,7 @@ impl ClaudhubApp {
         if self.plugins[index].busy
             || self.plugins[index].started()
             || self.plugins[index].error.is_some()
+            || !enabled(&self.plugins[index].manifest.id, cx)
         {
             return;
         }

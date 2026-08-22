@@ -137,6 +137,7 @@ impl ClaudhubApp {
         let databases_ix = pages.len();
         pages.push(databases_page());
         pages.push(sentry_page());
+        pages.push(plugins_page());
         pages.push(logs_page(logs));
         let selected = match self.settings_page {
             Page::First => None,
@@ -2104,6 +2105,433 @@ fn size_range() -> NumberFieldOptions {
 
 fn clamp_size(value: f64) -> f32 {
     settings::clamp_font_size(value as f32)
+}
+
+// — Les plugins ————————————————————————————————————————————————————————
+
+/// Acts on the application from a form closure.
+///
+/// The form's closures only receive an `App` — the very reason the settings
+/// live in a global — so a gesture that has to reach `ClaudhubApp` needs a way
+/// back. A **weak** handle, like the dock's panels hold: strong, it would keep
+/// the application alive past the window.
+///
+/// Only from a **click**, never from a render. This closure's ancestors run
+/// inside `ClaudhubApp`'s own render — the settings panel delegates to it — and
+/// updating the entity there is the panic `open_dialog`'s closure already
+/// taught this repository. A click handler runs once that borrow is given back.
+fn with_app(
+    window: &mut Window,
+    cx: &mut App,
+    f: impl FnOnce(&mut ClaudhubApp, &mut Window, &mut Context<ClaudhubApp>),
+) {
+    let Some(app) = cx
+        .try_global::<crate::ui::app::AppHandle>()
+        .and_then(|handle| handle.0.upgrade())
+    else {
+        return;
+    };
+    app.update(cx, |app, cx| f(app, window, cx));
+}
+
+/// The plugins page: what is installed, what it is told, and git.
+///
+/// **What it does not carry is as decided as what it does.** The compilation
+/// status and its error stay in the plugin's own panel, where the reload button
+/// already is and where the error is read beside the tree it replaces. The
+/// reason is mechanical as much as editorial: this closure runs **inside**
+/// `ClaudhubApp`'s own render — the settings panel delegates to it — so reading
+/// the root entity here is the panic that `open_dialog`'s closure already
+/// taught this repository. A click handler, on the other hand, runs later, once
+/// that borrow is given back: that is why the buttons can act and the page
+/// cannot report.
+fn plugins_page() -> SettingPage {
+    SettingPage::new(tr!("settings-page-plugins")).group(SettingGroup::new().item(plugins_item()))
+}
+
+/// The state the install row keeps between two frames.
+struct PluginInstallField {
+    url: Entity<InputState>,
+    name: Entity<InputState>,
+    _subscriptions: Vec<Subscription>,
+}
+
+/// One plugin's settings and secrets, kept from one render to the next.
+struct PluginFields {
+    values: Vec<(String, Entity<InputState>)>,
+    secrets: Vec<(String, Entity<InputState>)>,
+    _subscriptions: Vec<Subscription>,
+}
+
+fn plugins_item() -> SettingItem {
+    SettingItem::render(move |_, window, cx| {
+        let manifests = crate::ui::plugin_view::manifests();
+        let count = manifests.len();
+        let rows: Vec<_> = manifests
+            .iter()
+            .map(|manifest| plugin_row(count, manifest, window, cx))
+            .collect();
+        v_flex()
+            .w_full()
+            .gap_2()
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().child(tr!("settings-plugins")))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tr!("settings-plugins-help")),
+                    ),
+            )
+            .when(count == 0, |el| {
+                el.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(tr!("settings-plugins-none")),
+                )
+            })
+            .children(rows)
+            .child(plugin_install_row(count, window, cx))
+    })
+}
+
+/// Cloning a plugin from a repository.
+///
+/// The name is **suggested** from the address and stays editable: two plugins
+/// may well be published from repositories called `claudhub-plugin` by two
+/// different people, and the directory's name is what everything else keys on.
+fn plugin_install_row(count: usize, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    let key = format!("claudhub-plugin-install-{count}");
+    let state = window.use_keyed_state(SharedString::from(key), cx, move |window, cx| {
+        let url = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("settings-plugin-url")));
+        let name =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("settings-plugin-name")));
+        // Typing an address fills the name in, and only while nobody has
+        // touched it: correcting a suggestion that keeps coming back is worse
+        // than having none.
+        // `subscribe_in` and not `subscribe`: writing into an input needs a
+        // window, and an ordinary subscription has none — it is the only place
+        // in this form that writes a field rather than reading it.
+        let suggest = cx.subscribe_in(&url, window, {
+            let name = name.clone();
+            move |_: &mut PluginInstallField, url, event: &InputEvent, window: &mut Window, cx| {
+                if !matches!(event, InputEvent::Change) {
+                    return;
+                }
+                if !name.read(cx).value().trim().is_empty() {
+                    return;
+                }
+                let Some(id) = crate::plugin::install::id_from_url(&url.read(cx).value()) else {
+                    return;
+                };
+                name.update(cx, |state, cx| state.set_value(id, window, cx));
+            }
+        });
+        PluginInstallField {
+            url,
+            name,
+            _subscriptions: vec![suggest],
+        }
+    });
+    let field = state.read(cx);
+    let (url, name) = (field.url.clone(), field.name.clone());
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .gap_1()
+        .items_center()
+        .child(div().flex_1().min_w_0().child(Input::new(&url).small()))
+        .child(div().w(px(150.)).min_w_0().child(Input::new(&name).small()))
+        .child(
+            Button::new("install-plugin")
+                .outline()
+                .small()
+                .icon(icon("download"))
+                .label(tr!("settings-plugin-install"))
+                .on_click({
+                    let (url, name) = (url.clone(), name.clone());
+                    move |_, window, cx| {
+                        let address = url.read(cx).value().trim().to_string();
+                        let id = name.read(cx).value().trim().to_string();
+                        let id = if id.is_empty() {
+                            crate::plugin::install::id_from_url(&address).unwrap_or_default()
+                        } else {
+                            id
+                        };
+                        with_app(window, cx, move |app, window, cx| {
+                            app.manage_plugin(
+                                &id,
+                                crate::plugin::install::Manage::Install { url: address },
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                }),
+        )
+}
+
+fn plugin_row(
+    count: usize,
+    manifest: &crate::plugin::manifest::Manifest,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement {
+    let id = manifest.id.clone();
+    let key = format!("claudhub-plugin-{count}-{id}");
+    let declared = manifest.declaration.clone();
+    let configured = Settings::global(cx).plugins.get(&id).cloned();
+    let enabled = configured.as_ref().map(|p| p.enabled).unwrap_or(true);
+    let state = window.use_keyed_state(SharedString::from(key), cx, {
+        let id = id.clone();
+        move |window, cx| {
+            let mut subscriptions = Vec::new();
+            let mut values = Vec::new();
+            for (name, default) in &declared.settings {
+                let current = configured
+                    .as_ref()
+                    .and_then(|p| p.settings.get(name).cloned())
+                    .unwrap_or_else(|| default.clone());
+                let input = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder(SharedString::from(default.clone()))
+                        .default_value(current)
+                });
+                subscriptions.push(watch_plugin_field(
+                    &input,
+                    id.clone(),
+                    name.clone(),
+                    false,
+                    cx,
+                ));
+                values.push((name.clone(), input));
+            }
+            let mut secrets = Vec::new();
+            for name in &declared.secrets {
+                let current = configured
+                    .as_ref()
+                    .and_then(|p| p.secrets.get(name).cloned())
+                    .unwrap_or_default();
+                let input = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder(SharedString::from(name.clone()))
+                        .default_value(current)
+                        .masked(true)
+                });
+                subscriptions.push(watch_plugin_field(
+                    &input,
+                    id.clone(),
+                    name.clone(),
+                    true,
+                    cx,
+                ));
+                secrets.push((name.clone(), input));
+            }
+            PluginFields {
+                values,
+                secrets,
+                _subscriptions: subscriptions,
+            }
+        }
+    });
+    let fields = state.read(cx);
+    let values = fields.values.clone();
+    let secrets = fields.secrets.clone();
+    let revision = crate::plugin::install::revision(&manifest.dir);
+    let muted = cx.theme().muted_foreground;
+    let title = SharedString::from(manifest.title().to_string());
+    let dir = manifest.dir.clone();
+
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .gap_1p5()
+        .p_2()
+        .rounded(cx.theme().radius)
+        .border_1()
+        .border_color(cx.theme().border)
+        .child(
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .items_center()
+                .child(icon(manifest.icon()).small())
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().truncate().text_sm().child(title))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(muted)
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .child(SharedString::from(match &revision {
+                                    Some(revision) => format!("{id} — {revision}"),
+                                    // A directory dropped in by hand is
+                                    // perfectly legitimate: it simply has
+                                    // nothing to pull from.
+                                    None => format!("{id} — {}", tr!("settings-plugin-handmade")),
+                                })),
+                        ),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("plugin-enabled-{id}")))
+                        .small()
+                        .map(|button| {
+                            if enabled {
+                                button.primary()
+                            } else {
+                                button.outline()
+                            }
+                        })
+                        .selected(enabled)
+                        .label(tr!("settings-plugin-enabled"))
+                        .on_click({
+                            let id = id.clone();
+                            move |_, _window, cx| {
+                                let id = id.clone();
+                                Settings::update_global(cx, move |s| {
+                                    let entry = s.plugins.entry(id).or_default();
+                                    entry.enabled = !entry.enabled;
+                                });
+                            }
+                        }),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("plugin-edit-{id}")))
+                        .ghost()
+                        .small()
+                        .icon(icon("pencil"))
+                        .tooltip(tr!("settings-plugin-edit"))
+                        .on_click({
+                            let id = id.clone();
+                            move |_, window, cx| {
+                                let id = id.clone();
+                                with_app(window, cx, move |app, window, cx| {
+                                    let Some(manifest) = crate::ui::plugin_view::manifests()
+                                        .iter()
+                                        .find(|m| m.id == id)
+                                    else {
+                                        return;
+                                    };
+                                    app.edit_plugin(manifest, window, cx);
+                                });
+                            }
+                        }),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("plugin-update-{id}")))
+                        .ghost()
+                        .small()
+                        .icon(icon("refresh-cw"))
+                        .tooltip(tr!("settings-plugin-update"))
+                        .disabled(revision.is_none())
+                        .on_click({
+                            let id = id.clone();
+                            move |_, window, cx| {
+                                let id = id.clone();
+                                with_app(window, cx, move |app, window, cx| {
+                                    app.manage_plugin(
+                                        &id,
+                                        crate::plugin::install::Manage::Update,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                        }),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("plugin-remove-{id}")))
+                        .ghost()
+                        .small()
+                        .icon(icon("trash-2"))
+                        .tooltip(tr!("settings-plugin-remove"))
+                        .on_click({
+                            let id = id.clone();
+                            move |_, window, cx| {
+                                let id = id.clone();
+                                with_app(window, cx, move |app, window, cx| {
+                                    app.confirm_plugin_removal(id.clone(), window, cx);
+                                });
+                            }
+                        }),
+                ),
+        )
+        .when(!values.is_empty() || !secrets.is_empty(), |el| {
+            el.child(
+                v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_1()
+                    .children(
+                        values
+                            .into_iter()
+                            .map(|(name, input)| plugin_field_row(name, input, cx)),
+                    )
+                    .children(
+                        secrets
+                            .into_iter()
+                            .map(|(name, input)| plugin_field_row(name, input, cx)),
+                    ),
+            )
+        })
+        .child(
+            div()
+                .text_xs()
+                .text_color(muted)
+                .child(SharedString::from(dir.display().to_string())),
+        )
+}
+
+fn plugin_field_row(name: String, input: Entity<InputState>, cx: &mut App) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .gap_2()
+        .items_center()
+        .child(
+            div()
+                .w(px(130.))
+                .truncate()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(SharedString::from(name)),
+        )
+        .child(div().flex_1().min_w_0().child(Input::new(&input).small()))
+}
+
+fn watch_plugin_field(
+    input: &Entity<InputState>,
+    id: String,
+    name: String,
+    secret: bool,
+    cx: &mut Context<PluginFields>,
+) -> Subscription {
+    cx.subscribe(
+        input,
+        move |_: &mut PluginFields, input, event: &InputEvent, cx| {
+            if !matches!(event, InputEvent::Change) {
+                return;
+            }
+            let value = input.read(cx).value().to_string();
+            let (id, name) = (id.clone(), name.clone());
+            Settings::update_global(cx, move |s| {
+                let entry = s.plugins.entry(id).or_default();
+                if secret {
+                    entry.secrets.insert(name, value);
+                } else {
+                    entry.settings.insert(name, value);
+                }
+            });
+        },
+    )
 }
 
 #[cfg(test)]

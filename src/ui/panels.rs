@@ -807,7 +807,11 @@ pub struct PluginPanel {
 impl PluginPanel {
     pub fn new(app: &Entity<ClaudhubApp>, name: &'static str, cx: &mut Context<Self>) -> Self {
         cx.observe(app, move |this: &mut Self, app, cx| {
-            let visible = app.read(cx).panel_visible(this.name);
+            // Two reasons a plugin's tab is not there: hidden from the "Views"
+            // menu like any other panel, or the plugin switched off — which is
+            // not the same gesture and does not live in the same file.
+            let visible = app.read(cx).panel_visible(this.name)
+                && crate::ui::plugin_view::panel_enabled(this.name, cx);
             if this.visible != visible {
                 this.visible = visible;
                 cx.emit(PanelEvent::LayoutChanged);
@@ -819,7 +823,8 @@ impl PluginPanel {
             app: app.downgrade(),
             focus: cx.focus_handle(),
             name,
-            visible: visible_at_startup(name, cx),
+            visible: visible_at_startup(name, cx)
+                && crate::ui::plugin_view::panel_enabled(name, cx),
         }
     }
 }

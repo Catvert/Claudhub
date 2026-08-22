@@ -484,8 +484,23 @@ pub struct Settings {
 }
 
 /// What one plugin is told.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// `Default` is written by hand: a plugin one has never configured is **on**,
+/// and `#[derive(Default)]` would make it off — a plugin installed and invisible
+/// for a reason nobody could see.
+fn yes() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PluginSettings {
+    /// Off, its panel disappears and its script does not run.
+    ///
+    /// It is still **compiled**, which costs a millisecond and buys something:
+    /// a plugin just installed says whether it reads before one turns it on,
+    /// and a compilation error is the first thing one wants to see there.
+    #[serde(default = "yes")]
+    pub enabled: bool,
     /// Read by the script with `setting(name)`.
     #[serde(default)]
     pub settings: std::collections::BTreeMap<String, String>,
@@ -495,6 +510,16 @@ pub struct PluginSettings {
     /// it back into something a `Debug` prints.
     #[serde(default)]
     pub secrets: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for PluginSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            settings: Default::default(),
+            secrets: Default::default(),
+        }
+    }
 }
 
 impl Default for Settings {

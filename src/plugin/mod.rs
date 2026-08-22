@@ -23,6 +23,7 @@
 //!   output cross the wire.
 
 pub mod caps;
+pub mod install;
 pub mod manifest;
 pub mod view;
 

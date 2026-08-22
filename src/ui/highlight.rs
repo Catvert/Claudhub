@@ -434,6 +434,13 @@ pub fn language_for_path(path: &Path) -> Option<&'static str> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     Some(match extension.as_str() {
         "rs" => "rust",
+        // A plugin's script. There is **no Rune grammar** in the tree, and its
+        // syntax is Rust's on purpose — `fn`, `let`, `match`, `?`, `.await`,
+        // the same string literals. Colouring it as Rust is therefore a
+        // convention and not a lie one has to unlearn: what it gets wrong is
+        // the handful of places the two languages differ, against a whole file
+        // with no colours at all.
+        "rn" => "rust",
         "c" | "h" => "c",
         "cc" | "cpp" | "cxx" | "hpp" | "hh" => "cpp",
         "js" | "mjs" | "cjs" => "javascript",

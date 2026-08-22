@@ -615,6 +615,18 @@ pub enum Cmd {
         cap: crate::plugin::caps::Cap,
     },
 
+    /// Install, update or remove a plugin.
+    ///
+    /// **Claudhub's own operation, not a plugin's**: a plugin never asks for
+    /// this, so it does not go through a capability. One variant for the three,
+    /// as ever — the wire does not grow by one message per gesture.
+    PluginManage {
+        /// The plugin's directory, target included: for an install it does not
+        /// exist yet.
+        dir: PathBuf,
+        op: crate::plugin::install::Manage,
+    },
+
     AddWorktree {
         main: PathBuf,
         path: PathBuf,
@@ -714,6 +726,7 @@ impl Cmd {
             Self::WtTask { .. } => "WtTask",
             Self::WtScan { .. } => "WtScan",
             Self::PluginCall { .. } => "PluginCall",
+            Self::PluginManage { .. } => "PluginManage",
             Self::AddWorktree { .. } => "AddWorktree",
             Self::RemoveWorktree { .. } => "RemoveWorktree",
         }
@@ -869,6 +882,18 @@ pub enum Evt {
         path: PathBuf,
         content: DbResult<crate::files::Content>,
     },
+    /// What installing, updating or removing a plugin came to — the revision
+    /// it now sits on, or one sentence of why not.
+    ///
+    /// It carries the **directory** and not an id: an install names a directory
+    /// that had no plugin in it a moment ago, and the page has to be able to
+    /// say what became of exactly the row one clicked.
+    PluginManaged {
+        dir: PathBuf,
+        op: String,
+        result: Result<String, String>,
+    },
+
     ProjectFiles {
         worktree: WorktreeId,
         files: Vec<PathBuf>,
@@ -1110,13 +1135,15 @@ pub enum Action {
     FileOp,
     OpenExternal,
     Sentry,
+    /// Installing, updating or removing a plugin.
+    Plugin,
     Notes,
 }
 
 impl Action {
     /// The i18n key of the message shown on success.
     /// Every action, for the tests that check each has its messages.
-    pub const ALL: [Action; 31] = [
+    pub const ALL: [Action; 32] = [
         Action::Refresh,
         Action::Stage,
         Action::Unstage,
@@ -1147,6 +1174,7 @@ impl Action {
         Action::FileOp,
         Action::OpenExternal,
         Action::Sentry,
+        Action::Plugin,
         Action::Notes,
     ];
 
@@ -1210,6 +1238,7 @@ impl Action {
             Self::FileOp => "action-file-op-ok",
             Self::OpenExternal => "action-open-external-ok",
             Self::Sentry => "action-sentry-ok",
+            Self::Plugin => "action-plugin-ok",
             Self::Resolve => "action-resolve-ok",
             Self::Notes => "action-notes-ok",
         }

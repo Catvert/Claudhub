@@ -168,6 +168,15 @@ fn queue_of(cmd: &Cmd) -> Queue {
             Queue::Background
         };
     }
+    // Same table, one floor up: a clone and a pull talk to a remote, removing a
+    // directory does not.
+    if let Cmd::PluginManage { op, .. } = cmd {
+        return if op.is_network() {
+            Queue::Network
+        } else {
+            Queue::Reads
+        };
+    }
     if is_network(cmd) {
         Queue::Network
     } else if is_long(cmd) {
@@ -730,6 +739,14 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
             call,
             result: cap.run(),
         }],
+        Cmd::PluginManage { dir, op } => {
+            let name = op.name().to_string();
+            vec![Evt::PluginManaged {
+                op: name,
+                result: op.run(&dir).map_err(|e| format!("{e:#}")),
+                dir,
+            }]
+        }
 
         // — Databases ———————————————————————————————————————————————————
         Cmd::DbDatabases { connection } => vec![Evt::DbDatabases {
@@ -1524,6 +1541,31 @@ mod tests {
                 },
             }),
             Queue::Background
+        );
+    }
+
+    /// Installing waits on a socket; removing a directory does not, and
+    /// putting it in the network's single worker would make it queue behind a
+    /// clone that has nothing to do with it.
+    #[test]
+    fn managing_a_plugin_lands_by_what_it_does() {
+        use crate::plugin::install::Manage;
+        let dir = PathBuf::from("/c/plugins/ci");
+        assert_eq!(
+            queue_of(&Cmd::PluginManage {
+                dir: dir.clone(),
+                op: Manage::Install {
+                    url: "https://example.test/x.git".into()
+                },
+            }),
+            Queue::Network
+        );
+        assert_eq!(
+            queue_of(&Cmd::PluginManage {
+                dir,
+                op: Manage::Remove,
+            }),
+            Queue::Reads
         );
     }
 

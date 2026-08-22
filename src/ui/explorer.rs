@@ -382,12 +382,21 @@ impl ClaudhubApp {
     /// There is one editor per worktree, as there is one set of terminals: what
     /// is on screen is what belongs to the tree the rest of the window shows.
     pub(super) fn editing(&self) -> Option<&Editing> {
-        self.editings.get(self.active.as_ref()?)
+        self.editings.get(&self.editing_root()?)
     }
 
     pub(super) fn editing_mut(&mut self) -> Option<&mut Editing> {
-        let worktree = self.active.clone()?;
-        self.editings.get_mut(&worktree)
+        let root = self.editing_root()?;
+        self.editings.get_mut(&root)
+    }
+
+    /// Whose file the editing screen shows.
+    ///
+    /// The displayed worktree, unless one went off to edit a plugin's script —
+    /// which belongs to no worktree, and whose directory stands in for one. See
+    /// `ClaudhubApp::editing_root`.
+    pub(super) fn editing_root(&self) -> Option<PathBuf> {
+        self.editing_root.clone().or_else(|| self.active.clone())
     }
 
     /// Asks for the file list, if it is missing or if the setting has changed.
