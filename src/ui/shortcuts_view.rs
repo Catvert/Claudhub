@@ -31,7 +31,10 @@ impl ClaudhubApp {
         // time, it would put the list back at the top on every frame.
         let scroll = self.scroll_of("shortcuts");
         window.open_dialog(cx, move |dialog, _window, cx| {
-            let sections = shortcuts::sheet(vim);
+            // Read on every frame rather than captured: the help window can be
+            // left open while a shortcut is customised next door, and it is the
+            // one place that must not lie about the keys.
+            let sections = shortcuts::sheet(vim, &Settings::global(cx).shortcuts);
             let (left, right) = split(sections);
             let muted = cx.theme().muted_foreground;
             dialog

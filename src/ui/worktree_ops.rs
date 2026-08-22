@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use gpui::{div, prelude::*, px, Context, Entity, SharedString, Window};
+use gpui::{div, prelude::*, px, App, Context, Entity, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
@@ -1041,8 +1041,24 @@ impl ClaudhubApp {
             )
         };
 
+        // Removing the checkout itself, when `wt` is not the one keeping the
+        // books: it was the sidebar row's dustbin, and the sidebar is gone. Not
+        // offered on the main worktree — git refuses, and the entry would
+        // promise an error.
         let Some(project) = project.filter(|_| known) else {
-            return menu;
+            if worktree != main {
+                let (entity, main, path) = (entity.clone(), main.clone(), worktree.clone());
+                menu = menu.separator().item(
+                    PopupMenuItem::new(tr!("worktree-remove-checkout"))
+                        .icon(icon("trash-2"))
+                        .on_click(move |_, window, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.confirm_remove_worktree(main.clone(), path.clone(), window, cx)
+                            });
+                        }),
+                );
+            }
+            return Self::forget_entry(menu, entity, main);
         };
 
         menu = menu.separator();
@@ -1082,10 +1098,10 @@ impl ClaudhubApp {
         // The project's tasks, as it declares them. Claudhub does not know what
         // they do, and that is the point.
         if project.tasks.is_empty() {
-            return menu;
+            return Self::forget_entry(menu, entity, main);
         }
         menu = menu.separator();
-        project.tasks.into_iter().fold(menu, |menu, task| {
+        let menu = project.tasks.into_iter().fold(menu, |menu, task| {
             let (entity, main, worktree) = (entity.clone(), main.clone(), worktree.clone());
             let name = task.name.clone();
             let label = if task.description.is_empty() {
@@ -1102,7 +1118,31 @@ impl ClaudhubApp {
                         });
                     }),
             )
-        })
+        });
+        Self::forget_entry(menu, entity, main)
+    }
+
+    /// Closing the repository, at the bottom of every worktree menu.
+    ///
+    /// It was the sidebar's right click on a repository heading, and it has to keep
+    /// living somewhere: nothing on disk is touched, but everything opened in the
+    /// repository is closed, which is not a gesture one makes twice a day — hence
+    /// its place, last and behind a separator, rather than a button one brushes
+    /// past.
+    fn forget_entry(
+        menu: gpui_component::menu::PopupMenu,
+        entity: Entity<ClaudhubApp>,
+        main: PathBuf,
+    ) -> gpui_component::menu::PopupMenu {
+        menu.separator().item(
+            PopupMenuItem::new(tr!("repo-forget"))
+                .icon(icon("x"))
+                .on_click(move |_, window, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.forget_repository(main.clone(), window, cx)
+                    });
+                }),
+        )
     }
 
     /// A worktree's "open" button, when the project exposes an address.
@@ -1167,5 +1207,149 @@ impl ClaudhubApp {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// Removes a repository from the list. Nothing on disk is touched.
+    ///
+    /// The same gesture for an open repository and for an unreachable one: in
+    /// both cases what is removed is an entry from the list of repositories
+    /// reopened at startup, and the second case is the only one where it could
+    /// not be done — hence the report.
+    pub(super) fn forget_repository(
+        &mut self,
+        main: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::ui::settings::Settings::update_global(cx, |s| s.forget_repository(&main));
+        let closed = self.repos.close(&main);
+        // What we kept of its worktrees has no further purpose. The state store,
+        // for its part, is not purged: notes and collapses wait for the day the
+        // repository is reopened, and erasing them here would turn a tidy-up
+        // into a loss.
+        for worktree in &closed {
+            self.review.remove(worktree);
+            self.close_terminals_of(worktree, window, cx);
+            self.summaries.remove(worktree);
+        }
+        if self
+            .active
+            .as_deref()
+            .is_some_and(|active| closed.iter().any(|path| path == active))
+        {
+            self.active = None;
+            if let Some(first) = self.first_worktree() {
+                self.select_worktree(first, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Opens a repository. The native folder picker is asynchronous: the answer
+    /// comes back in a task, hence the `spawn`.
+    pub(super) fn prompt_open_repository(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: true,
+            prompt: None,
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return; // cancelled
+            };
+            let _ = this.update(cx, |this, cx| {
+                for path in paths {
+                    match this.repo_path_for_server(path, cx) {
+                        Ok(path) => this.git.send(Cmd::OpenRepo(path)),
+                        Err(message) => this.announce(message, cx),
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The path the native picker returned, as the server will understand it.
+    ///
+    /// On Windows the dialog returns `\\wsl.localhost\Ubuntu\home\…` or `C:\…`;
+    /// the wire, for its part, carries only Linux paths — the server's disk is
+    /// authoritative. It is one of the few points where a path **enters** from
+    /// the Windows world, and therefore one of the few where it has to be
+    /// translated. Elsewhere there is nothing to do.
+    fn repo_path_for_server(&self, path: PathBuf, cx: &App) -> Result<PathBuf, SharedString> {
+        if !cfg!(windows) {
+            return Ok(path);
+        }
+        let distro = Settings::global(cx).wsl_distro.clone();
+        let Some(translated) = crate::wslpath::to_linux(&path) else {
+            return Err(tr!("repo-not-in-wsl"));
+        };
+        // A repository from a **different** distribution than the server's: its
+        // path is valid over there and unreachable here, and opening it would
+        // give an empty folder without saying why.
+        if let Some(other) = translated
+            .distro
+            .filter(|d| !d.eq_ignore_ascii_case(&distro))
+        {
+            return Err(tr!("repo-other-distro", { distro: other }));
+        }
+        Ok(translated.path)
+    }
+
+    pub(super) fn prompt_new_worktree(
+        &mut self,
+        main: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_text_dialog(
+            tr!("worktree-new-title"),
+            tr!("worktree-new-placeholder"),
+            window,
+            cx,
+            // The name typed in, then what the project asks for: its
+            // `[[prompt]]`s become a dialog, its copies and its ports are done
+            // by `wt`. Without a `wt.toml`, the bare git add is enough — a
+            // repository with no configuration must still be able to gain a
+            // worktree.
+            move |this, name, window, cx| {
+                this.start_worktree(main.clone(), name, None, window, cx);
+            },
+        );
+    }
+
+    pub(super) fn confirm_remove_worktree(
+        &mut self,
+        main: PathBuf,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let label = path.display().to_string();
+        let entity = cx.entity();
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let (main, path, entity) = (main.clone(), path.clone(), entity.clone());
+            dialog
+                .title(tr!("worktree-remove-title"))
+                .child(div().text_sm().child(label.clone()))
+                .overlay_closable(false)
+                .close_button(false)
+                .on_ok(move |_, _window, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.git.send(Cmd::RemoveWorktree {
+                            main: main.clone(),
+                            path: path.clone(),
+                            // Without `force`, git refuses to remove a worktree
+                            // that has changes — that is the protection we want
+                            // here, and the message will say so.
+                            force: false,
+                        });
+                        cx.notify();
+                    });
+                    true
+                })
+        });
     }
 }

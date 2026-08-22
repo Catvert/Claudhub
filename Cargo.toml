@@ -31,6 +31,8 @@ ui = [
     "dep:gpui-base",
     "dep:rust-embed",
     "dep:tree-sitter-php",
+    "dep:tree-sitter-nix",
+    "dep:tree-sitter",
     "dep:alacritty_terminal",
     "dep:lsp-types",
     "dep:rust-i18n",
@@ -76,6 +78,16 @@ rust-embed = { version = "8", optional = true }
 # langage de la moitié des dépôts que Claudhub sert à relire. La grammaire est
 # donc enregistrée à la main dans son registre (voir ui::highlight).
 tree-sitter-php = { version = "0.24", optional = true }
+
+# Nix non plus n'y est pas, et c'est le langage du `shell.nix` de ce dépôt : on
+# relit un diff de `shell.nix` ou de `flake.nix` en même temps que le reste.
+tree-sitter-nix = { version = "0.3", optional = true }
+
+# L'arbre lui-même, pour les replis de l'éditeur d'une vue Blade : gpui-component
+# tient sa fonction d'extraction pour lui, et notre coloriseur doit la refaire
+# (voir `ui::blade`). La version suit celle qu'il utilise, faute de quoi cargo
+# compilerait deux crates `tree-sitter` étrangères l'une à l'autre.
+tree-sitter = { version = "0.26", optional = true }
 
 # Émulateur de terminal : le même que Zed et Alacritty. Il fournit le parseur
 # VTE, la grille de cellules, le scrollback et l'ouverture du pty ; le rendu

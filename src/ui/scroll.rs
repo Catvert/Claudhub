@@ -128,6 +128,17 @@ impl ClaudhubApp {
             .or_insert_with(|| ScrollMotion::new(axes))
     }
 
+    /// The smoothing of a surface we scroll ourselves, the built-in editor's.
+    ///
+    /// It differs on one point — an offset read back late does not cancel the
+    /// transition — and that point is the whole difference between a smoothed
+    /// editor and one that does not move at all. See `ScrollMotion::resync`.
+    pub(super) fn owned_motion(&mut self, id: SharedString, axes: Axes) -> &mut ScrollMotion {
+        self.motions
+            .entry(id)
+            .or_insert_with(|| ScrollMotion::owned(axes))
+    }
+
     /// Smoothing alone, for what already paints its own bar.
     ///
     /// The SQL console's result table is such a case: it installs both its bars

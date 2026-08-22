@@ -37,12 +37,10 @@ use crate::ui::icons::icon;
 /// its own `Ctrl+F` — and an alacritty grid's scrollback is not a list we hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Pane {
-    Sidebar,
     Files,
     Db,
     Changes,
     Branch,
-    Branches,
     History,
     Notes,
     Sentry,
@@ -174,12 +172,6 @@ impl ClaudhubApp {
     /// Opens the target panel's bar and gives it the focus.
     pub(super) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let pane = self.pane;
-        // The branches panel already has its permanent filter: putting a second
-        // one above it would give two fields doing the same thing.
-        if pane == Pane::Branches {
-            self.branch_filter.focus_handle(cx).focus(window, cx);
-            return;
-        }
         let input = match self.finders.get_mut(&pane) {
             Some(finder) => {
                 finder.open = true;

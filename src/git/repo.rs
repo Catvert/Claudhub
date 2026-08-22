@@ -427,21 +427,38 @@ pub fn resolve(dir: &Path, path: &Path, ours: bool) -> Result<()> {
 /// refuses to run without `--exclude-standard`, which is the error this used to
 /// put in the journal: `ls-files --ignored needs some exclude pattern`. The
 /// union therefore takes one call for each half.
-pub fn list_files(dir: &Path, ignored: bool) -> Result<Vec<PathBuf>> {
+pub fn list_files(dir: &Path, ignored: bool) -> Result<Files> {
     let mut files = list_of(dir, &["--cached", "--others", "--exclude-standard"])?;
-    if ignored {
-        files.extend(list_of(
-            dir,
-            &["--others", "--ignored", "--exclude-standard"],
-        )?);
+    let excluded = if ignored {
+        let excluded = list_of(dir, &["--others", "--ignored", "--exclude-standard"])?;
+        files.extend(excluded.iter().cloned());
         // Two lists, each sorted, are not a sorted list — and the tree is built
         // from the order git gives.
         files.sort_unstable();
-    }
+        excluded
+    } else {
+        Vec::new()
+    };
     // `--cached --others` may return the same path twice; the list being sorted,
     // a local dedup is enough.
     files.dedup();
-    Ok(files)
+    Ok(Files {
+        all: files,
+        ignored: excluded,
+    })
+}
+
+/// A worktree's files, and which of them `.gitignore` leaves out.
+///
+/// The excluded ones are named separately rather than flagged one by one: the
+/// explorer greys them, and a second sorted list it can binary-search costs
+/// nothing on a project that ignores little, where a `Vec<(PathBuf, bool)>`
+/// would pay a byte and an alignment hole per file either way. It is empty
+/// whenever they were not asked for, which is also what says "nothing to grey".
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct Files {
+    pub all: Vec<PathBuf>,
+    pub ignored: Vec<PathBuf>,
 }
 
 fn list_of(dir: &Path, flags: &[&str]) -> Result<Vec<PathBuf>> {
@@ -559,34 +576,59 @@ mod tests {
         let root = scratch_repo("ls-files");
 
         let plain = list_files(&root, false).unwrap();
-        assert!(plain.contains(&PathBuf::from("src/code.rs")), "{plain:?}");
         assert!(
-            plain.contains(&PathBuf::from("src/new.rs")),
+            plain.all.contains(&PathBuf::from("src/code.rs")),
+            "{plain:?}"
+        );
+        assert!(
+            plain.all.contains(&PathBuf::from("src/new.rs")),
             "a new file too"
         );
         assert!(
-            !plain.iter().any(|p| p.starts_with("vendor")),
+            !plain.all.iter().any(|p| p.starts_with("vendor")),
             "nothing ignored: {plain:?}"
+        );
+        assert!(
+            plain.ignored.is_empty(),
+            "nothing to grey when nothing was asked for"
         );
 
         let all = list_files(&root, true).unwrap();
         assert!(
-            all.contains(&PathBuf::from("vendor/pkg/big.php")),
+            all.all.contains(&PathBuf::from("vendor/pkg/big.php")),
             "the ignored files: {all:?}"
         );
         // And everything the plain listing had is still there.
-        for path in &plain {
+        for path in &plain.all {
             assert!(
-                all.contains(path),
+                all.all.contains(path),
                 "{} is missing from {all:?}",
                 path.display()
             );
         }
-        // Sorted and without duplicates: the tree is built from this order.
-        let mut sorted = all.clone();
-        sorted.sort_unstable();
-        sorted.dedup();
-        assert_eq!(all, sorted);
+        // The excluded ones are named apart, and are a subset of the whole: it
+        // is that list the explorer binary-searches to know what to grey.
+        assert!(all.ignored.contains(&PathBuf::from("vendor/pkg/big.php")));
+        for path in &all.ignored {
+            assert!(
+                all.all.contains(path),
+                "{} is not in the list",
+                path.display()
+            );
+            assert!(
+                !plain.all.contains(path),
+                "{} is not ignored",
+                path.display()
+            );
+        }
+        // Sorted and without duplicates: the tree is built from this order, and
+        // the greying searches the second list the same way.
+        for list in [&all.all, &all.ignored] {
+            let mut sorted = list.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(list, &sorted);
+        }
 
         let _ = std::fs::remove_dir_all(&root);
     }

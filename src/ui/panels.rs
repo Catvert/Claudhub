@@ -92,8 +92,6 @@ pub fn register(app: &Entity<ClaudhubApp>, cx: &mut App) {
         )* };
     }
     declare! {
-        SidebarPanel => "ClaudhubSidebar",
-        BranchesPanel => "ClaudhubBranches",
         ChangesPanel => "ClaudhubChanges",
         BranchPanel => "ClaudhubBranch",
         HistoryPanel => "ClaudhubHistory",
@@ -260,8 +258,6 @@ macro_rules! panels {
 }
 
 panels! {
-    SidebarPanel => ("ClaudhubSidebar", "panel-repositories", render_sidebar, Sidebar),
-    BranchesPanel => ("ClaudhubBranches", "panel-branches", render_branches, Branches),
     ChangesPanel => ("ClaudhubChanges", "range-working", render_changes, Changes),
     BranchPanel => ("ClaudhubBranch", "range-branch", render_branch_review, Branch),
     NotesPanel => ("ClaudhubNotes", "panel-notes", render_notes, Notes),

@@ -660,6 +660,9 @@ pub enum Evt {
     ProjectFiles {
         worktree: WorktreeId,
         files: Vec<PathBuf>,
+        /// The subset of `files` that `.gitignore` excludes, sorted. Empty when
+        /// they were not asked for.
+        ignored: Vec<PathBuf>,
     },
     FileContent {
         worktree: WorktreeId,

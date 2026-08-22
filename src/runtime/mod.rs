@@ -617,7 +617,11 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
 
         // — Project files ———————————————————————————————————————————————
         Cmd::ListFiles { worktree, ignored } => match repo::list_files(&worktree, ignored) {
-            Ok(files) => vec![Evt::ProjectFiles { worktree, files }],
+            Ok(listing) => vec![Evt::ProjectFiles {
+                worktree,
+                files: listing.all,
+                ignored: listing.ignored,
+            }],
             Err(e) => vec![fail(Some(worktree), Action::Read, e)],
         },
         Cmd::ReadFile { worktree, path } => match crate::files::read(&worktree, &path) {

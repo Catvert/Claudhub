@@ -1349,7 +1349,8 @@ fn flush(block: &mut Vec<FileRow>, collapsed: &HashSet<PathBuf>, out: &mut Vec<R
     }
     let files: Vec<FileRow> = std::mem::take(block);
     let paths: Vec<PathBuf> = files.iter().map(|file| file.path.clone()).collect();
-    for entry in crate::ui::tree::build(&paths, collapsed) {
+    // Open unless named: a review is a few dozen files, and is read wide open.
+    for entry in crate::ui::tree::build(&paths, crate::ui::tree::Folds::OpenBut(collapsed)) {
         match entry {
             crate::ui::tree::Entry::Dir {
                 path,

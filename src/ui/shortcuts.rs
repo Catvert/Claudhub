@@ -304,6 +304,23 @@ impl Group {
         Group::Terminal,
     ];
 
+    /// The family's name in a binding's id, and therefore in `settings.json`.
+    ///
+    /// Short and stable: it is written into the user's file, and renaming it
+    /// would silently drop the shortcuts they had customised.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Group::Window => "window",
+            Group::Worktrees => "worktree",
+            Group::Repository => "repo",
+            Group::Review => "review",
+            Group::Explorer => "explorer",
+            Group::Database => "db",
+            Group::Search => "search",
+            Group::Terminal => "terminal",
+        }
+    }
+
     /// The i18n key of the title. The key and not the text: a test checks that
     /// all of this module's exist in both catalogues, and it can only do that on
     /// keys.
@@ -330,17 +347,111 @@ pub struct Entry {
     pub group: Group,
     /// The i18n key of the description.
     pub label: &'static str,
-    /// Kept for what it is worth to the test: two bindings may carry the same
-    /// keys — `Enter` opens a file in the explorer and goes to the next hit in a
-    /// search — provided their predicates never meet.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Two bindings may carry the same keys — `Enter` opens a file in the
+    /// explorer and goes to the next hit in a search — provided their
+    /// predicates never meet. It is also what says whether two keys the user
+    /// has customised collide.
     pub predicate: &'static str,
+    /// Only under vim mode. The settings page says so rather than offering a
+    /// key that does nothing while the mode is off.
+    pub vim: bool,
+}
+
+/// The overrides, as `settings.json` carries them: binding id → keystrokes.
+///
+/// An empty value **disables** the binding rather than removing the entry: the
+/// line stays in the file, and one sees what one has switched off.
+pub type Overrides = std::collections::BTreeMap<String, String>;
+
+impl Entry {
+    /// What names this binding in the settings, for good.
+    ///
+    /// The family and the **default** keys: the default never moves, so an id
+    /// survives the customisation it carries. The action would not do — half
+    /// of them have two bindings, `F5` and `Ctrl+R` for one refresh — and the
+    /// keys alone would not either: `Enter` exists in three families.
+    pub fn id(&self) -> String {
+        format!("{}:{}", self.group.slug(), self.keys)
+    }
+
+    /// The keys in force: the user's, else ours. Empty when switched off.
+    pub fn effective<'a>(&'a self, overrides: &'a Overrides) -> &'a str {
+        overrides
+            .get(&self.id())
+            .map(String::as_str)
+            .unwrap_or(self.keys)
+    }
+}
+
+/// The keys that have a name rather than a character.
+///
+/// Written out because gpui does not offer the list: its own is a *negative*
+/// one, buried in a private function. Without it a typo would pass — `f5` and
+/// `f6` are readable, and so is `nonsense`, which parses perfectly and then
+/// matches nothing for the rest of the session.
+const NAMED_KEYS: &[&str] = &[
+    "escape",
+    "enter",
+    "tab",
+    "space",
+    "backspace",
+    "delete",
+    "insert",
+    "home",
+    "end",
+    "pageup",
+    "pagedown",
+    "up",
+    "down",
+    "left",
+    "right",
+    "back",
+    "forward",
+    "f1",
+    "f2",
+    "f3",
+    "f4",
+    "f5",
+    "f6",
+    "f7",
+    "f8",
+    "f9",
+    "f10",
+    "f11",
+    "f12",
+    "f13",
+    "f14",
+    "f15",
+    "f16",
+    "f17",
+    "f18",
+    "f19",
+    "f20",
+];
+
+/// Can gpui read these keystrokes, and will they ever fire?
+///
+/// Two things, and the second is the one that matters. `KeyBinding::new`
+/// **panics** on what it cannot parse, and this text comes from a form: it is
+/// checked before, one keystroke at a time, exactly as it will be split. But
+/// gpui parses almost anything — `ctrl-nonsense` is a perfectly good keystroke
+/// on a key no keyboard has — and such a binding is worse than a refused one:
+/// it is installed, it never fires, and nothing says why. The key must
+/// therefore be a single character or one of the names above.
+///
+/// An empty text is not invalid — it is a binding switched off.
+pub fn valid_keys(keys: &str) -> bool {
+    keys.split_whitespace().all(|stroke| {
+        gpui::Keystroke::parse(stroke).is_ok_and(|stroke| {
+            stroke.key.chars().count() == 1 || NAMED_KEYS.contains(&stroke.key.as_str())
+        })
+    })
 }
 
 /// Declares a family of bindings: the keys on one side, the help on the other,
 /// written once only.
 macro_rules! table {
-    ($entries:ident, $bind:ident, [
+    ($entries:ident, $bind:ident, $vim:literal, [
         $($group:ident $keys:literal => $action:expr, $predicate:expr, $label:literal;)*
     ]) => {
         static $entries: &[Entry] = &[$(
@@ -349,18 +460,38 @@ macro_rules! table {
                 group: Group::$group,
                 label: $label,
                 predicate: $predicate,
+                vim: $vim,
             },
         )*];
 
-        fn $bind() -> Vec<KeyBinding> {
-            vec![$(
-                KeyBinding::new($keys, $action, Some($predicate)),
-            )*]
+        /// The bindings to install, the user's customisations applied.
+        ///
+        /// A binding whose keys are empty is **not installed**: that is what
+        /// switching one off means. One that does not parse is skipped and
+        /// logged rather than crashing the window — `KeyBinding::new` panics,
+        /// and this text comes from a form; `valid_keys` is what the form
+        /// checks with, this is the belt to its braces.
+        fn $bind(overrides: &Overrides) -> Vec<KeyBinding> {
+            let mut out = Vec::new();
+            let mut entries = $entries.iter();
+            $({
+                let keys = entries
+                    .next()
+                    .map(|entry| entry.effective(overrides))
+                    .unwrap_or($keys);
+                if keys.trim().is_empty() {
+                } else if valid_keys(keys) {
+                    out.push(KeyBinding::new(keys, $action, Some($predicate)));
+                } else {
+                    log::warn!("unreadable shortcut {keys:?}, keeping none");
+                }
+            })*
+            out
         }
     };
 }
 
-table!(STANDARD, standard_bindings, [
+table!(STANDARD, standard_bindings, false, [
     // ── The window ──────────────────────────────────────────────────────────
     Window "f1" => ShowShortcuts, PREDICATE, "shortcut-help";
     Window "f5" => Refresh, PREDICATE, "shortcut-refresh";
@@ -505,15 +636,24 @@ table!(STANDARD, standard_bindings, [
     Terminal "secondary-shift-a" => SelectAllText, TERMINAL_PREDICATE, "shortcut-terminal-select-all";
 ]);
 
-table!(VIM, vim_bindings, [
+table!(VIM, vim_bindings, true, [
     // No modes and no operators: Claudhub is not an editor, and its built-in
     // editor belongs to gpui-component. What is taken over is the left hand on
     // the home row to browse a diff — what a reviewer does a thousand times per
     // review.
-    Review "j" => NextLine, VIM_PREDICATE, "shortcut-next-line";
-    Review "k" => PreviousLine, VIM_PREDICATE, "shortcut-previous-line";
-    // vim-gitgutter's and fugitive's convention for going from one changed block
-    // to the next.
+    // `j` and `k` go from one **hunk** to the next, like the bare arrows and for
+    // the same reason: reading a review is going from one change to the next,
+    // and the context lines in between have nothing to show. The platform key
+    // steps by one line, exactly as `secondary-up`/`down` does — bare for the
+    // gesture one makes a thousand times, modified for the one one makes when
+    // something looks wrong.
+    Review "j" => NextHunk, VIM_PREDICATE, "shortcut-next-hunk";
+    Review "k" => PreviousHunk, VIM_PREDICATE, "shortcut-previous-hunk";
+    Review "secondary-j" => NextLine, VIM_PREDICATE, "shortcut-next-line";
+    Review "secondary-k" => PreviousLine, VIM_PREDICATE, "shortcut-previous-line";
+    // vim-gitgutter's and fugitive's convention for the same gesture. Kept
+    // beside `j`/`k`: it is what the fingers of whoever reviews in vim do, and
+    // the help sheet puts the two ways on one line.
     Review "] c" => NextHunk, VIM_PREDICATE, "shortcut-next-hunk";
     Review "[ c" => PreviousHunk, VIM_PREDICATE, "shortcut-previous-hunk";
     Review "l" => NextFile, VIM_PREDICATE, "shortcut-next-file";
@@ -542,11 +682,95 @@ table!(VIM, vim_bindings, [
 ]);
 
 pub fn init(cx: &mut App) {
+    // What gpui-component bound before us, kept aside. Rebinding means clearing
+    // the keymap — there is one for the whole application — and the library's
+    // own bindings would go with it: the built-in editor would lose its
+    // arrows, dialogs their Escape, and nothing public reinstalls them.
+    // Hence the snapshot, taken **before** ours are added and while the
+    // library's are all there. Whence the order in `ui::run`:
+    // `gpui_component::init` first, since it is what we are keeping, then the
+    // settings global, which `install` reads the customisations from, and only
+    // then this.
+    let base: Vec<KeyBinding> = cx.key_bindings().borrow().bindings().cloned().collect();
+    cx.set_global(BaseKeymap(base));
+    install(cx);
+}
+
+/// The bindings that were there before ours.
+struct BaseKeymap(Vec<KeyBinding>);
+
+impl gpui::Global for BaseKeymap {}
+
+/// Installs ours, the user's customisations applied.
+fn install(cx: &mut App) {
+    let overrides = crate::ui::settings::Settings::global(cx).shortcuts.clone();
     // The vim bindings are installed **always**, and it is the `ClaudhubVim`
-    // context that turns them on: `bind_keys` is called once at startup, whereas
-    // the setting changes along the way.
-    cx.bind_keys(standard_bindings());
-    cx.bind_keys(vim_bindings());
+    // context that turns them on: the setting changes along the way, whereas
+    // the keymap is written here.
+    cx.bind_keys(standard_bindings(&overrides));
+    cx.bind_keys(vim_bindings(&overrides));
+}
+
+/// A keystroke the user has just pressed, written the way the tables write it.
+///
+/// `None` for a modifier held on its own: gpui reports it as the key itself,
+/// and a capture must wait for the one that follows rather than record `Ctrl`.
+///
+/// The platform key comes out as `secondary`, which is what the tables say and
+/// what makes a customised binding read the same on the three platforms — gpui
+/// parses it back to Ctrl here and Cmd on macOS.
+pub fn stroke_syntax(stroke: &gpui::Keystroke) -> Option<String> {
+    let key = stroke.key.as_str();
+    if matches!(
+        key,
+        "shift" | "control" | "alt" | "platform" | "function" | "ctrl" | "cmd"
+    ) {
+        return None;
+    }
+    let modifiers = &stroke.modifiers;
+    let mut parts: Vec<&str> = Vec::new();
+    if cfg!(target_os = "macos") {
+        if modifiers.platform {
+            parts.push("secondary");
+        }
+        if modifiers.control {
+            parts.push("ctrl");
+        }
+    } else {
+        if modifiers.control {
+            parts.push("secondary");
+        }
+        if modifiers.platform {
+            parts.push("super");
+        }
+    }
+    if modifiers.alt {
+        parts.push("alt");
+    }
+    if modifiers.shift {
+        parts.push("shift");
+    }
+    parts.push(key);
+    Some(parts.join("-"))
+}
+
+/// Every binding, in the order the tables declare them: the settings page's
+/// list, and the only one there is.
+pub fn all() -> impl Iterator<Item = &'static Entry> {
+    STANDARD.iter().chain(VIM.iter())
+}
+
+/// Puts the keymap back together after a shortcut has been customised.
+///
+/// A binding cannot be *replaced*: gpui's keymap only takes additions, and the
+/// last one wins — the old key would go on firing beside the new one. The whole
+/// map is therefore rebuilt, the library's snapshot first so that ours keep the
+/// last word.
+pub fn rebind(cx: &mut App) {
+    let base = cx.global::<BaseKeymap>().0.clone();
+    cx.clear_key_bindings();
+    cx.bind_keys(base);
+    install(cx);
 }
 
 /// A help family, ready to display.
@@ -564,7 +788,7 @@ pub struct Row {
 ///
 /// The vim bindings only appear when the mode is on: showing them greyed out
 /// would make a list twice as long, half of which does not work.
-pub fn sheet(vim: bool) -> Vec<Section> {
+pub fn sheet(vim: bool, overrides: &Overrides) -> Vec<Section> {
     let labels = Labels::current();
     let mut sections = Vec::new();
     for group in Group::ORDER {
@@ -579,12 +803,21 @@ pub fn sheet(vim: bool) -> Vec<Section> {
                 None => rows.push(Row { keys, label }),
             }
         };
+        // The keys **in force**, the user's customisations applied: help that
+        // lies about the keys is worse than no help, and a binding switched off
+        // has nothing to show.
         for entry in STANDARD.iter().filter(|e| e.group == group) {
-            push(entry, pretty(entry.keys, &labels));
+            let keys = entry.effective(overrides);
+            if !keys.trim().is_empty() {
+                push(entry, pretty(keys, &labels));
+            }
         }
         if vim {
             for entry in VIM.iter().filter(|e| e.group == group) {
-                push(entry, vim_pretty(entry.keys));
+                let keys = entry.effective(overrides);
+                if !keys.trim().is_empty() {
+                    push(entry, vim_pretty(keys));
+                }
             }
         }
         if !rows.is_empty() {
@@ -1358,8 +1591,9 @@ mod tests {
     /// launching Claudhub.
     #[test]
     fn every_keystroke_parses() {
-        assert_eq!(standard_bindings().len(), STANDARD.len());
-        assert_eq!(vim_bindings().len(), VIM.len());
+        let none = Overrides::new();
+        assert_eq!(standard_bindings(&none).len(), STANDARD.len());
+        assert_eq!(vim_bindings(&none).len(), VIM.len());
     }
 
     /// The label's key is a **variable**, not a literal: if `tr!` could not
@@ -1367,7 +1601,7 @@ mod tests {
     /// of the text, and every other test would still pass.
     #[test]
     fn the_sheet_is_translated_and_not_a_list_of_keys() {
-        let sections = sheet(true);
+        let sections = sheet(true, &Overrides::new());
         assert!(!sections.is_empty());
         for section in &sections {
             assert!(!section.title.starts_with("shortcut-"), "{}", section.title);
@@ -1377,7 +1611,7 @@ mod tests {
             }
         }
         // With the mode off, no vim key is offered.
-        let plain = sheet(false);
+        let plain = sheet(false, &Overrides::new());
         let keys: Vec<&str> = plain
             .iter()
             .flat_map(|s| s.rows.iter().map(|r| r.keys.as_str()))
@@ -1405,6 +1639,74 @@ mod tests {
             assert!(en.contains(key), "\"{key}\" is missing from en.json");
             assert!(fr.contains(key), "\"{key}\" is missing from fr.json");
         }
+    }
+
+    /// What a capture writes has to be what the table would have written:
+    /// otherwise the same key would read one way when we declare it and another
+    /// when the user presses it.
+    #[test]
+    fn a_pressed_key_is_written_the_way_the_table_writes_it() {
+        let round_trip = |keys: &str| {
+            let stroke = gpui::Keystroke::parse(keys).expect("a readable keystroke");
+            stroke_syntax(&stroke)
+        };
+        assert_eq!(
+            round_trip("secondary-shift-p").as_deref(),
+            Some("secondary-shift-p")
+        );
+        assert_eq!(round_trip("alt-1").as_deref(), Some("alt-1"));
+        assert_eq!(round_trip("f5").as_deref(), Some("f5"));
+        assert_eq!(round_trip("j").as_deref(), Some("j"));
+        // A capital arrives as Shift plus the lower-case letter, which is how
+        // the vim table writes `G`.
+        assert_eq!(round_trip("shift-g").as_deref(), Some("shift-g"));
+        // A modifier alone is not a shortcut: the capture waits.
+        assert_eq!(round_trip("ctrl").as_deref(), None);
+        // And whatever comes out is installable.
+        for keys in ["secondary-shift-p", "alt-1", "f5", "j", "shift-g"] {
+            assert!(valid_keys(&round_trip(keys).unwrap()));
+        }
+    }
+
+    /// The id is what `settings.json` carries: two bindings sharing one would
+    /// customise each other, and the file would be read by nobody's rule.
+    #[test]
+    fn every_binding_has_an_id_of_its_own() {
+        let mut seen = std::collections::HashSet::new();
+        for entry in STANDARD.iter().chain(VIM.iter()) {
+            let id = entry.id();
+            assert!(seen.insert(id.clone()), "\"{id}\" is declared twice");
+        }
+    }
+
+    /// A customised binding replaces ours; an empty one switches it off. Both
+    /// go through `KeyBinding::new`, which panics on what it cannot read — the
+    /// whole point of `valid_keys`.
+    #[test]
+    fn a_customised_key_replaces_the_one_it_names() {
+        let entry = STANDARD
+            .iter()
+            .find(|entry| entry.keys == "f5")
+            .expect("the refresh binding");
+        let mut overrides = Overrides::new();
+        overrides.insert(entry.id(), "f9".into());
+        assert_eq!(entry.effective(&overrides), "f9");
+        assert_eq!(standard_bindings(&overrides).len(), STANDARD.len());
+
+        // Switched off: one binding fewer, and no panic.
+        overrides.insert(entry.id(), String::new());
+        assert_eq!(standard_bindings(&overrides).len(), STANDARD.len() - 1);
+
+        // Unreadable: skipped and logged rather than a window that panics at
+        // startup.
+        overrides.insert(entry.id(), "ctrl-nonsense".into());
+        assert!(!valid_keys("ctrl-nonsense"));
+        assert_eq!(standard_bindings(&overrides).len(), STANDARD.len() - 1);
+
+        assert!(valid_keys("secondary-shift-p"));
+        assert!(valid_keys("g g"));
+        // Empty is not invalid: it is a binding one has turned off.
+        assert!(valid_keys(""));
     }
 
     /// Two different bindings on the same keys and the same predicate would be

@@ -25,7 +25,7 @@ use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::setting::{
     NumberFieldOptions, SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage,
 };
-use gpui_component::{h_flex, v_flex, ActiveTheme, Disableable, Selectable, Sizable};
+use gpui_component::{h_flex, v_flex, ActiveTheme, Disableable, Selectable, Sizable, StyledExt};
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
@@ -720,19 +720,309 @@ fn terminal_page(
 /// meaning of half the keys, and it is the first place one goes looking for it.
 /// The reminder about `F1` is there because help you cannot find is not help.
 fn keyboard_page() -> SettingPage {
-    SettingPage::new(tr!("settings-page-keyboard")).group(
-        SettingGroup::new().title(tr!("settings-group-vim")).item(
-            SettingItem::new(
-                tr!("settings-vim-mode"),
-                SettingField::switch(
-                    |cx: &App| Settings::global(cx).vim_mode,
-                    |value: bool, cx: &mut App| Settings::update_global(cx, |s| s.vim_mode = value),
+    SettingPage::new(tr!("settings-page-keyboard"))
+        .group(
+            SettingGroup::new().title(tr!("settings-group-vim")).item(
+                SettingItem::new(
+                    tr!("settings-vim-mode"),
+                    SettingField::switch(
+                        |cx: &App| Settings::global(cx).vim_mode,
+                        |value: bool, cx: &mut App| {
+                            Settings::update_global(cx, |s| s.vim_mode = value)
+                        },
+                    )
+                    .default_value(false),
                 )
-                .default_value(false),
+                .description(tr!("settings-vim-mode-help")),
+            ),
+        )
+        .group(
+            SettingGroup::new()
+                .title(tr!("settings-group-shortcuts"))
+                .item(shortcuts_item()),
+        )
+}
+
+/// Every binding, editable.
+///
+/// **A `SettingItem::render`**, like the databases and for the same reason: an
+/// ordinary item cuts its field to four hundred pixels, and a row here is a
+/// label, a field and two buttons across the page.
+///
+/// The list is `shortcuts::all()` — the table both the keymap and the help come
+/// out of. A second list would have diverged on the first addition, which is
+/// the whole point of that module.
+fn shortcuts_item() -> SettingItem {
+    SettingItem::render(move |_, window, cx| {
+        let overrides = Settings::global(cx).shortcuts.clone();
+        let vim = Settings::global(cx).vim_mode;
+        // Which keys are claimed twice under the same predicate. Counted once
+        // here and not per row: a duplicate is settled by declaration order,
+        // which is never what was meant, and nothing else would say so.
+        let mut claimed: std::collections::HashMap<(&str, String), usize> =
+            std::collections::HashMap::new();
+        for entry in crate::ui::shortcuts::all() {
+            let keys = entry.effective(&overrides).trim().to_string();
+            if !keys.is_empty() {
+                *claimed.entry((entry.predicate, keys)).or_default() += 1;
+            }
+        }
+
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        for group in crate::ui::shortcuts::Group::ORDER {
+            let family: Vec<_> = crate::ui::shortcuts::all()
+                .filter(|entry| entry.group == group)
+                .collect();
+            if family.is_empty() {
+                continue;
+            }
+            rows.push(
+                div()
+                    .pt_2()
+                    .text_sm()
+                    .font_semibold()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tr!(group.key()))
+                    .into_any_element(),
+            );
+            for entry in family {
+                let keys = entry.effective(&overrides).trim().to_string();
+                let conflict = !keys.is_empty()
+                    && claimed
+                        .get(&(entry.predicate, keys))
+                        .is_some_and(|count| *count > 1);
+                rows.push(shortcut_row(entry, vim, conflict, window, cx).into_any_element());
+            }
+        }
+        v_flex()
+            .w_full()
+            .gap_1()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tr!("settings-shortcuts-help")),
             )
-            .description(tr!("settings-vim-mode-help")),
-        ),
-    )
+            .children(rows)
+    })
+}
+
+/// Waits for the next keystroke and records it for that binding.
+///
+/// **A keystroke interceptor and not a focused element.** An interceptor runs
+/// *before* the keymap, and `stop_propagation` there stops the dispatch dead:
+/// pressing `Ctrl+T` to record it must not also hide the terminals. Doing it
+/// with a focusable capture zone would have meant a context excluded from every
+/// predicate — eight strings to keep in step, one forgotten being a shortcut
+/// firing while one records it.
+///
+/// Escape gives up, a modifier held on its own is waited out, and everything
+/// else is written to the field, to the settings and to the keymap at once.
+fn start_capture(
+    entry: &'static crate::ui::shortcuts::Entry,
+    state: &Entity<ShortcutField>,
+    cx: &mut App,
+) {
+    if state.read(cx).capturing {
+        state.update(cx, |field, _| field.capturing = false);
+        return;
+    }
+    let already = state.read(cx)._capture.is_some();
+    state.update(cx, |field, _| field.capturing = true);
+    if already {
+        return;
+    }
+    let handle = state.clone();
+    let subscription = cx.intercept_keystrokes(move |event, window, cx| {
+        if !handle.read(cx).capturing {
+            return;
+        }
+        // The key belongs to the capture, whatever it is bound to elsewhere.
+        cx.stop_propagation();
+        let Some(keys) = crate::ui::shortcuts::stroke_syntax(&event.keystroke) else {
+            return; // a modifier on its own: wait for the key it qualifies
+        };
+        handle.update(cx, |field, _| field.capturing = false);
+        if keys == "escape" {
+            return;
+        }
+        let input = handle.read(cx).keys.clone();
+        input.update(cx, |input, cx| input.set_value(keys.clone(), window, cx));
+        Settings::update_global(cx, |settings| {
+            if keys == entry.keys {
+                settings.shortcuts.remove(&entry.id());
+            } else {
+                settings.shortcuts.insert(entry.id(), keys.clone());
+            }
+        });
+        crate::ui::shortcuts::rebind(cx);
+    });
+    state.update(cx, |field, _| field._capture = Some(subscription));
+}
+
+/// A binding's field, kept from one render to the next.
+struct ShortcutField {
+    keys: Entity<InputState>,
+    /// Waiting for the key to record.
+    capturing: bool,
+    /// The keystroke interceptor, installed on the first capture and kept
+    /// afterwards: `capturing` is what turns it on and off. Dropping a
+    /// subscription from inside its own callback is not a thing to try.
+    _capture: Option<Subscription>,
+    _subscription: Subscription,
+}
+
+/// One binding: what it does, the keys it answers to, and the way back.
+///
+/// **The state's key is the binding's id**, which never moves: the list is
+/// neither added to nor reordered while the window is open, so there is no
+/// count to carry as the agent profiles do. Resetting writes into the field
+/// itself — the state would otherwise keep the text one has just abandoned.
+fn shortcut_row(
+    entry: &'static crate::ui::shortcuts::Entry,
+    vim: bool,
+    conflict: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement {
+    let id = entry.id();
+    let overrides = Settings::global(cx).shortcuts.clone();
+    let current = entry.effective(&overrides).to_string();
+    let customised = overrides.contains_key(&id);
+    let invalid = !crate::ui::shortcuts::valid_keys(&current);
+    // A vim binding while the mode is off is not an error, but it is not a key
+    // either: the row says so rather than offering a gesture that does nothing.
+    let idle = entry.vim && !vim;
+
+    let state = window.use_keyed_state(
+        SharedString::from(format!("claudhub-shortcut-{id}")),
+        cx,
+        move |window, cx| {
+            let keys = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(SharedString::from(entry.keys))
+                    .default_value(current.clone())
+            });
+            let subscription =
+                cx.subscribe(&keys, move |_: &mut ShortcutField, input, event, cx| {
+                    if !matches!(event, InputEvent::Change) {
+                        return;
+                    }
+                    let value = input.read(cx).value().trim().to_string();
+                    // What does not read is left in the field and not written:
+                    // the row says so, and the keymap keeps what it had.
+                    if !crate::ui::shortcuts::valid_keys(&value) {
+                        return;
+                    }
+                    Settings::update_global(cx, |settings| {
+                        if value == entry.keys {
+                            settings.shortcuts.remove(&entry.id());
+                        } else {
+                            settings.shortcuts.insert(entry.id(), value.clone());
+                        }
+                    });
+                    // The keymap is rebuilt at once: a shortcut one has to
+                    // restart to try is a shortcut one sets blind.
+                    crate::ui::shortcuts::rebind(cx);
+                });
+            ShortcutField {
+                keys,
+                capturing: false,
+                _capture: None,
+                _subscription: subscription,
+            }
+        },
+    );
+    let input = state.read(cx).keys.clone();
+    let for_reset = input.clone();
+    let capturing = state.read(cx).capturing;
+    let for_capture = state.clone();
+
+    h_flex()
+        .w_full()
+        .gap_2()
+        .items_center()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_sm()
+                .when(idle, |el| el.text_color(cx.theme().muted_foreground))
+                .child(tr!(entry.label)),
+        )
+        .when(idle, |el| {
+            el.child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tr!("settings-shortcut-vim-only")),
+            )
+        })
+        // The warnings are read, not guessed: a key gpui cannot make sense of,
+        // and a key two bindings claim under the same predicate — which
+        // declaration order settles, silently.
+        .when(invalid, |el| {
+            el.child(
+                icon("triangle-alert")
+                    .xsmall()
+                    .text_color(cx.theme().danger),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().danger)
+                    .child(tr!("settings-shortcut-invalid")),
+            )
+        })
+        .when(conflict && !invalid, |el| {
+            el.child(
+                icon("triangle-alert")
+                    .xsmall()
+                    .text_color(cx.theme().warning),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().warning)
+                    .child(tr!("settings-shortcut-conflict")),
+            )
+        })
+        .child(div().w(px(180.)).child(Input::new(&input).small()))
+        // Pressing the keys rather than spelling them, which is what one wants
+        // nine times out of ten; the field stays for the tenth — a sequence
+        // (`g g`) has no single keystroke to capture, and emptying it is how a
+        // binding is switched off.
+        .child(
+            Button::new(SharedString::from(format!("capture-{id}")))
+                .small()
+                .when(capturing, |el| el.primary())
+                .when(!capturing, |el| el.outline())
+                .label(if capturing {
+                    tr!("settings-shortcut-capturing")
+                } else {
+                    tr!("settings-shortcut-capture")
+                })
+                .on_click(move |_, _window, cx| {
+                    start_capture(entry, &for_capture, cx);
+                }),
+        )
+        .child(
+            Button::new(SharedString::from(format!("reset-{id}")))
+                .ghost()
+                .xsmall()
+                .icon(icon("undo-2"))
+                .tooltip(tr!("settings-shortcut-reset"))
+                .disabled(!customised)
+                .on_click(move |_, window, cx| {
+                    Settings::update_global(cx, |settings| {
+                        settings.shortcuts.remove(&entry.id());
+                    });
+                    for_reset.update(cx, |input, cx| {
+                        input.set_value(entry.keys, window, cx);
+                    });
+                    crate::ui::shortcuts::rebind(cx);
+                }),
+        )
 }
 
 fn review_page() -> SettingPage {

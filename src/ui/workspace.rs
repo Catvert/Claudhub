@@ -133,8 +133,8 @@ impl Workspace {
     ///
     /// **Per screen, and not the whole list.** Hiding "SQL console" from the
     /// review would make nothing visibly change, and an entry that does nothing
-    /// reads as a broken entry. The repositories and the terminals are at the
-    /// end of each: they are everywhere.
+    /// reads as a broken entry. The terminals are at the end of each: they are
+    /// everywhere.
     pub fn views(self) -> &'static [(&'static str, &'static str)] {
         use panels::*;
         match self {
@@ -144,25 +144,20 @@ impl Workspace {
                 (BranchPanel::NAME, "range-branch"),
                 (HistoryPanel::NAME, "panel-history"),
                 (DiffPanel::NAME, "panel-diff"),
-                (BranchesPanel::NAME, "panel-branches"),
-                (SidebarPanel::NAME, "panel-repositories"),
                 (TerminalPanel::NAME, "panel-terminal"),
             ],
             Self::Files => &[
                 (FilesPanel::NAME, "panel-files"),
                 (EditorPanel::NAME, "panel-editor"),
-                (SidebarPanel::NAME, "panel-repositories"),
                 (TerminalPanel::NAME, "panel-terminal"),
             ],
             Self::Db => &[
                 (DbPanel::NAME, "panel-databases"),
                 (ConsolePanel::NAME, "panel-sql"),
-                (SidebarPanel::NAME, "panel-repositories"),
                 (TerminalPanel::NAME, "panel-terminal"),
             ],
             Self::Sentry => &[
                 (SentryPanel::NAME, "panel-sentry"),
-                (SidebarPanel::NAME, "panel-repositories"),
                 (TerminalPanel::NAME, "panel-terminal"),
             ],
             // The settings themselves are not offered: this screen holds them
@@ -210,44 +205,31 @@ pub fn install_default_layout(
 
     // The **fixed** half of a split is the bottom one, never the top: the dock
     // area is smaller than the window — bars, padding, gutters — and two fixed
-    // sizes adding up to the window height overflow. The bottom of the column
-    // had its corners cut, and the gutter above the terminals was swallowed.
-    let height = window.viewport_size().height.max(px(600.));
+    // sizes adding up to the window height overflow.
+    let third = window.viewport_size().height.max(px(600.)) / 3.;
     // The width **of the centre** and not of the window: a split's sizes are
     // shared out in proportion to their sum, and counting the left column in
     // would give the diff a share it never asked for.
     let width = (window.viewport_size().width - SIDEBAR_WIDTH).max(px(600.));
-    let third = height / 3.;
 
-    // `Option`, because one screen has no left column: the settings do not talk
-    // about a worktree, and a repository list beside them would be a picker for
-    // a choice that changes nothing on the page.
+    // `Option`, because three screens have no left column at all: the review
+    // and Sentry fill the width, and the settings' form has a sidebar of pages
+    // of its own.
     let (left, center): (Option<DockLayout>, DockLayout) = match workspace {
-        // The review: what is needed to choose what to review, left of the
-        // diff, and the branches under the repositories — you choose a worktree
-        // *then* look at its branches, and having to switch between the two
-        // would be one round trip too many.
+        // The review takes the whole width: the ways of choosing what to review
+        // — what changes now, what the branch wrote, what is already committed —
+        // are tabs and not panels side by side, since they answer the same
+        // question.
+        //
+        // **The notes are not one of those tabs but the column's bottom third.**
+        // They do not say what there is to read, they say where one stands —
+        // what is left to do, what one had to say — and that is read *while*
+        // choosing a file, not instead of. A tab hid it behind a click, which
+        // is exactly how a to-do list stops being kept.
         Workspace::Review => {
-            let left = DockLayout::v_split()
-                .child(
-                    DockLayout::tabs().panel_view(panel!(SidebarPanel), cx),
-                    None,
-                )
-                .child(
-                    DockLayout::tabs().panel_view(panel!(BranchesPanel), cx),
-                    Some(third),
-                );
-            // The ways of choosing what to review: what is left to do and what
-            // we had to say, what changes now, what the branch wrote, what is
-            // already committed. Tabs and not panels side by side — they answer
-            // the same question.
-            let center = DockLayout::h_split()
+            let list = DockLayout::v_split()
                 .child(
                     DockLayout::tabs()
-                        // Notes first: they say where you stand, where the ones
-                        // after say what there is to read. That is where you
-                        // pick up a worktree left yesterday.
-                        .panel_view(panel!(NotesPanel), cx)
                         .panel_view(panel!(ChangesPanel), cx)
                         .panel_view(panel!(BranchPanel), cx)
                         .panel_view(panel!(HistoryPanel), cx)
@@ -255,52 +237,39 @@ pub fn install_default_layout(
                         // tab would shift the others aside to serve one time in
                         // a hundred.
                         .panel_view(panel!(ConflictsPanel), cx),
-                    Some(REVIEW_LIST_WIDTH),
+                    None,
                 )
+                .child(
+                    DockLayout::tabs().panel_view(panel!(NotesPanel), cx),
+                    Some(third),
+                );
+            let center = DockLayout::h_split()
+                .child(list, Some(REVIEW_LIST_WIDTH))
                 .child(
                     DockLayout::tabs().panel_view(panel!(DiffPanel), cx),
                     Some(width - REVIEW_LIST_WIDTH),
                 );
-            (Some(left), center)
+            (None, center)
         }
-        // Editing: the project tree under the repositories, the editor in the
-        // centre. The tree takes two thirds — it is what you browse, the
-        // worktree list fits in four lines.
+        // Editing: the project tree on the left, the editor in the centre.
         Workspace::Files => {
-            let left = DockLayout::v_split()
-                .child(
-                    DockLayout::tabs().panel_view(panel!(SidebarPanel), cx),
-                    None,
-                )
-                .child(
-                    DockLayout::tabs().panel_view(panel!(FilesPanel), cx),
-                    Some(height * 0.62),
-                );
+            let left = DockLayout::tabs().panel_view(panel!(FilesPanel), cx);
             let center = DockLayout::tabs().panel_view(panel!(EditorPanel), cx);
             (Some(left), center)
         }
-        // The databases: the schema tree under the repositories, the console in
-        // the centre. This is PhpStorm's explorer, and the gesture is the same —
+        // The databases: the schema tree on the left, the console in the
+        // centre. This is PhpStorm's explorer, and the gesture is the same —
         // you unfold what you are looking for, you query what you have found.
         Workspace::Db => {
-            let left = DockLayout::v_split()
-                .child(
-                    DockLayout::tabs().panel_view(panel!(SidebarPanel), cx),
-                    None,
-                )
-                .child(
-                    DockLayout::tabs().panel_view(panel!(DbPanel), cx),
-                    Some(height * 0.62),
-                );
+            let left = DockLayout::tabs().panel_view(panel!(DbPanel), cx);
             let center = DockLayout::tabs().panel_view(panel!(ConsolePanel), cx);
             (Some(left), center)
         }
         // Sentry stands alone: the issue list and the trace of the one opened
         // are two halves of a single panel.
         Workspace::Sentry => {
-            let left = DockLayout::tabs().panel_view(panel!(SidebarPanel), cx);
             let center = DockLayout::tabs().panel_view(panel!(SentryPanel), cx);
-            (Some(left), center)
+            (None, center)
         }
         // The settings take the whole width: the form has a sidebar of its own,
         // and two side by side would be two lists of pages to read before

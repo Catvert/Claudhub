@@ -38,13 +38,42 @@ pub enum Entry {
     },
 }
 
+/// Which directories are open, and which way the set is read.
+///
+/// The two lists that use this module do not start from the same place, and a
+/// single polarity would be wrong for one of them. A review shows a few dozen
+/// files and is meant to be read wide open, so it records what was **closed**.
+/// The project explorer opens on the whole worktree — forty thousand files on
+/// a Laravel project — where everything unfolded is a list nobody scrolls, so
+/// it starts shut and records what was **opened**.
+///
+/// Recording the exception and not the state is what keeps either set small:
+/// seeding one with every directory of a project would be a set the size of
+/// the tree, rebuilt on every fold.
+#[derive(Debug, Clone, Copy)]
+pub enum Folds<'a> {
+    /// Open, except the directories named.
+    OpenBut(&'a HashSet<PathBuf>),
+    /// Shut, except the directories named.
+    ShutBut(&'a HashSet<PathBuf>),
+}
+
+impl Folds<'_> {
+    fn hides(&self, path: &Path) -> bool {
+        match self {
+            Self::OpenBut(named) => named.contains(path),
+            Self::ShutBut(named) => !named.contains(path),
+        }
+    }
+}
+
 /// Turns a list of paths into a tree.
 ///
 /// Directories come before files, in alphabetical order; that is a
 /// `BTreeMap`'s, and it has to be stable from one refresh to the next — a list
 /// that reorders itself on every `git status` is unreadable.
-pub fn build(paths: &[PathBuf], collapsed: &HashSet<PathBuf>) -> Vec<Entry> {
-    build_subset(paths, None, collapsed)
+pub fn build(paths: &[PathBuf], folds: Folds) -> Vec<Entry> {
+    build_subset(paths, None, folds)
 }
 
 /// The same thing, restricted to some of the paths.
@@ -53,11 +82,7 @@ pub fn build(paths: &[PathBuf], collapsed: &HashSet<PathBuf>) -> Vec<Entry> {
 /// **whole** list, the one the caller holds, and never to the subset —
 /// otherwise a lookup table would be needed on every keystroke, and the row
 /// clicked would not open the right file.
-pub fn build_subset(
-    paths: &[PathBuf],
-    keep: Option<&[usize]>,
-    collapsed: &HashSet<PathBuf>,
-) -> Vec<Entry> {
+pub fn build_subset(paths: &[PathBuf], keep: Option<&[usize]>, folds: Folds) -> Vec<Entry> {
     let mut root = Node::default();
     match keep {
         Some(keep) => {
@@ -74,7 +99,7 @@ pub fn build_subset(
         }
     }
     let mut out = Vec::new();
-    emit(&root, paths, Path::new(""), 0, collapsed, &mut out);
+    emit(&root, paths, Path::new(""), 0, folds, &mut out);
     out
 }
 
@@ -110,7 +135,7 @@ fn emit(
     paths: &[PathBuf],
     prefix: &Path,
     depth: usize,
-    collapsed: &HashSet<PathBuf>,
+    folds: Folds,
     out: &mut Vec<Entry>,
 ) {
     for (name, child) in &node.dirs {
@@ -131,7 +156,7 @@ fn emit(
 
         let mut leaves = Vec::new();
         deepest.all(&mut leaves);
-        let is_collapsed = collapsed.contains(&path);
+        let is_collapsed = folds.hides(&path);
         out.push(Entry::Dir {
             label,
             depth,
@@ -140,7 +165,7 @@ fn emit(
             path: path.clone(),
         });
         if !is_collapsed {
-            emit(deepest, paths, &path, depth + 1, collapsed, out);
+            emit(deepest, paths, &path, depth + 1, folds, out);
         }
     }
 
@@ -179,7 +204,7 @@ mod tests {
     #[test]
     fn lonely_directories_are_merged_into_one_line() {
         let paths = paths(&["app/Http/Livewire/Forms/Quote.php", "README.md"]);
-        let entries = build(&paths, &HashSet::new());
+        let entries = build(&paths, Folds::OpenBut(&HashSet::new()));
         assert_eq!(
             labels(&entries, &paths),
             vec!["app/Http/Livewire/Forms/", "  Quote.php", "README.md"]
@@ -189,7 +214,7 @@ mod tests {
     #[test]
     fn directories_come_before_files_at_each_level() {
         let paths = paths(&["z.rs", "src/a.rs", "a.rs"]);
-        let entries = build(&paths, &HashSet::new());
+        let entries = build(&paths, Folds::OpenBut(&HashSet::new()));
         assert_eq!(
             labels(&entries, &paths),
             vec!["src/", "  a.rs", "a.rs", "z.rs"]
@@ -200,7 +225,7 @@ mod tests {
     fn a_collapsed_directory_hides_its_files_but_still_carries_them() {
         let paths = paths(&["src/ui/a.rs", "src/ui/b.rs"]);
         let collapsed: HashSet<PathBuf> = [PathBuf::from("src/ui")].into_iter().collect();
-        let entries = build(&paths, &collapsed);
+        let entries = build(&paths, Folds::OpenBut(&collapsed));
         assert_eq!(entries.len(), 1, "the files are hidden");
         // Ticking a closed directory must act on what it contains, not on what
         // is visible of it.
@@ -215,12 +240,32 @@ mod tests {
         }
     }
 
+    /// The explorer's polarity: shut unless named. A directory nobody opened
+    /// hides its files, and opening one level does not cascade to the next —
+    /// which is the whole difference with seeding the other set with the top
+    /// level only.
+    #[test]
+    fn a_shut_tree_opens_one_level_at_a_time() {
+        let paths = paths(&["src/ui/a.rs", "README.md"]);
+        let shut: HashSet<PathBuf> = HashSet::new();
+        assert_eq!(
+            labels(&build(&paths, Folds::ShutBut(&shut)), &paths),
+            vec!["src/ui/", "README.md"],
+            "a merged chain is one row, and it is closed"
+        );
+        let opened: HashSet<PathBuf> = [PathBuf::from("src/ui")].into_iter().collect();
+        assert_eq!(
+            labels(&build(&paths, Folds::ShutBut(&opened)), &paths),
+            vec!["src/ui/", "  a.rs", "README.md"]
+        );
+    }
+
     /// The indices returned refer to the whole list, not to the subset: that
     /// is what makes filtering possible without a lookup table.
     #[test]
     fn a_subset_still_indexes_the_whole_list() {
         let paths = paths(&["a.rs", "src/b.rs", "src/c.rs"]);
-        let entries = build_subset(&paths, Some(&[2]), &HashSet::new());
+        let entries = build_subset(&paths, Some(&[2]), Folds::OpenBut(&HashSet::new()));
         assert_eq!(labels(&entries, &paths), vec!["src/", "  c.rs"]);
         match entries[1] {
             Entry::Leaf { index, .. } => assert_eq!(index, 2),
@@ -231,7 +276,7 @@ mod tests {
     #[test]
     fn a_flat_list_has_no_directory_at_all() {
         let paths = paths(&["b.rs", "a.rs"]);
-        let entries = build(&paths, &HashSet::new());
+        let entries = build(&paths, Folds::OpenBut(&HashSet::new()));
         assert_eq!(labels(&entries, &paths), vec!["a.rs", "b.rs"]);
     }
 }

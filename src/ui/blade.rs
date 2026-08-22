@@ -13,12 +13,34 @@
 //!
 //! What the overlay recognises: directives (`@if`, `@endforeach`, with their
 //! parenthesised argument), echoes (`{{ }}`, `{!! !!}`) and comments
-//! (`{{-- --}}`), including across several lines.
+//! (`{{-- --}}`), including across several lines — plus the two shapes that
+//! also begin with an `@` and are **not** directives: Alpine's event bindings
+//! (`@click.prevent="…"`) and Blade's escape (`@{{ … }}`, which hands the
+//! braces to the JavaScript framework rather than reading them itself).
+//!
+//! Two things the overlay does not colour itself, because they are not Blade
+//! but another language living inside it:
+//!
+//! - **The body of a `@php` block.** `mask_php` turns the block's markers into
+//!   PHP tags of the very same byte length, so the view's own parse reads what
+//!   is inside as the code it is.
+//! - **The other fragments** — a directive's argument, an echo's body, an Alpine
+//!   value. They are unreachable from that parse, sitting inside what the PHP
+//!   grammar reads as text, so each is handed to the grammar it belongs to. See
+//!   `Tint`.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
+use std::rc::Rc;
 
-use gpui_component::highlighter::HighlightTheme;
+use gpui::{HighlightStyle, SharedString};
+use gpui_component::highlighter::{HighlightTheme, SyntaxHighlighter};
+use gpui_component::input::{
+    EditorState, FoldRange, HighlightStyleResolver, InputEdit, InputHighlighter,
+    InputHighlighterFactory, Rope,
+};
 
 use super::highlight::LineStyles;
 use crate::git::FileDiff;
@@ -35,19 +57,68 @@ pub fn is_blade(path: &Path) -> bool {
 
 /// Paints Blade's constructs over the PHP grammar's styles.
 pub fn overlay(diff: &FileDiff, theme: &HighlightTheme, styles: &mut [Vec<LineStyles>]) {
+    // Built once for the whole file and only for the languages it holds — see
+    // `Tint`. A diff arrives once; this is not a per-frame cost.
+    let mut tint = Tint::default();
     for (h, hunk) in diff.hunks.iter().enumerate() {
         // Comment state starts again from scratch at each hunk: what separates
         // them has been elided, and nothing says a `{{--` left open above was
         // not closed inside the gap.
-        let mut open_comment = false;
+        let mut state = State::default();
         for (l, line) in hunk.lines.iter().enumerate() {
-            let found = scan(&line.text, &mut open_comment);
+            let found = scan(&line.text, &mut state);
             let Some(target) = styles.get_mut(h).and_then(|h| h.get_mut(l)) else {
                 continue;
             };
-            apply(&found, theme, target);
+            apply(&styled(&found, &line.text, theme, &mut tint), target);
         }
     }
+}
+
+/// What a `@php` block's markers become for the grammar, and the reason the
+/// code inside one is coloured at all.
+///
+/// A `@php … @endphp` block holds PHP, and the grammar knows nothing of the two
+/// markers: it reads the whole block as HTML text, so a dozen lines of real code
+/// arrived grey in the middle of a coloured view. The overlay cannot fix that on
+/// its own — colouring the body itself would mean carrying a second PHP parse
+/// through a scanner that reads one line at a time.
+///
+/// So the line handed to the grammar is not quite the line on screen: `@php`
+/// becomes `<?` and `@endphp` becomes `?>`, each padded with spaces to **exactly
+/// the same number of bytes** — four and seven. That is the whole trick, and the
+/// byte count is what makes it safe: every offset the grammar returns still
+/// designates the same character of the real line, so nothing has to be shifted
+/// back. The grammar then reads the block as the PHP it is — `<?` on its own is
+/// a tag it accepts — and the overlay repaints the two markers as directives
+/// over what it made of them.
+///
+/// Returns `None` when the line holds no block marker, which is almost every
+/// line: masking must not cost an allocation per line of a view.
+///
+/// `state` is the scanner's, and for the same reason: a `@php` written inside
+/// `{{-- … --}}` is a comment and must not open anything.
+pub fn mask_php(line: &str, state: &mut State) -> Option<String> {
+    let found = scan(line, state);
+    if !found
+        .iter()
+        .any(|(_, scope)| matches!(scope, Scope::PhpOpen | Scope::PhpClose))
+    {
+        return None;
+    }
+    let mut masked = line.to_string();
+    for (range, scope) in &found {
+        let tag = match scope {
+            Scope::PhpOpen => "<?  ",
+            Scope::PhpClose => "?>     ",
+            _ => continue,
+        };
+        debug_assert_eq!(range.len(), tag.len(), "the mask changes the offsets");
+        if range.len() == tag.len() {
+            masked.replace_range(range.clone(), tag);
+        }
+    }
+    Some(masked)
 }
 
 /// Replaces in `target` whatever the overlay covers.
@@ -55,11 +126,7 @@ pub fn overlay(diff: &FileDiff, theme: &HighlightTheme, styles: &mut [Vec<LineSt
 /// The grammar's styles touching a Blade range are removed rather than layered:
 /// rendering expects sorted, disjoint ranges, and a half-covered keyword means
 /// nothing anyway.
-fn apply(found: &[(Range<usize>, Scope)], theme: &HighlightTheme, target: &mut LineStyles) {
-    let styled: Vec<(Range<usize>, gpui::HighlightStyle)> = found
-        .iter()
-        .filter_map(|(range, scope)| Some((range.clone(), scope.style(theme)?)))
-        .collect();
+fn apply(styled: &[(Range<usize>, HighlightStyle)], target: &mut LineStyles) {
     if styled.is_empty() {
         return;
     }
@@ -68,29 +135,57 @@ fn apply(found: &[(Range<usize>, Scope)], theme: &HighlightTheme, target: &mut L
             .iter()
             .any(|(over, _)| range.start < over.end && over.start < range.end)
     });
-    target.extend(styled);
+    target.extend(styled.iter().cloned());
     target.sort_by_key(|(range, _)| range.start);
+}
+
+/// What one line of a view leaves open for the next.
+///
+/// Two things do, and both would otherwise be read as ordinary text on the line
+/// that continues them: a `{{--` with no `--}}` yet, and an Alpine value whose
+/// closing quote is further down — `x-effect="…"` spanning two lines is the
+/// common way of writing one.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct State {
+    comment: bool,
+    /// The quote that will close the script value being read.
+    script: Option<char>,
 }
 
 /// Cuts a line into Blade ranges, each with the style name it deserves. The
 /// ranges returned are sorted and disjoint.
-///
-/// `open_comment` carries the only state crossing lines: a `{{--` left
-/// unclosed.
-fn scan(line: &str, open_comment: &mut bool) -> Vec<(Range<usize>, Scope)> {
+fn scan(line: &str, state: &mut State) -> Vec<(Range<usize>, Scope)> {
     let mut out = Vec::new();
     let mut i = 0;
 
-    if *open_comment {
+    if state.comment {
         match line.find("--}}") {
             Some(end) => {
                 out.push((0..end + 4, Scope::Comment));
-                *open_comment = false;
+                state.comment = false;
                 i = end + 4;
             }
             None => {
                 if !line.is_empty() {
                     out.push((0..line.len(), Scope::Comment));
+                }
+                return out;
+            }
+        }
+    }
+
+    if let Some(quote) = state.script {
+        match line.find(quote) {
+            Some(end) => {
+                if end > 0 {
+                    out.push((0..end, Scope::Script));
+                }
+                state.script = None;
+                i = end + quote.len_utf8();
+            }
+            None => {
+                if !line.is_empty() {
+                    out.push((0..line.len(), Scope::Script));
                 }
                 return out;
             }
@@ -107,7 +202,7 @@ fn scan(line: &str, open_comment: &mut bool) -> Vec<(Range<usize>, Scope)> {
                 }
                 None => {
                     out.push((i..line.len(), Scope::Comment));
-                    *open_comment = true;
+                    state.comment = true;
                     return out;
                 }
             }
@@ -121,6 +216,14 @@ fn scan(line: &str, open_comment: &mut bool) -> Vec<(Range<usize>, Scope)> {
             // `@@if` is how a literal `@if` is written: it is not a directive,
             // and reporting it as one would be wrong.
             i += 2;
+        } else if rest.starts_with("@{") {
+            // Blade's escape: `@{{ count }}` outputs the braces instead of
+            // reading them, which is how an Alpine or Vue expression survives a
+            // view. Only the `@` is consumed — enough for what follows not to be
+            // taken for an echo, which is the whole point of writing it.
+            i += 2;
+        } else if let Some(len) = binding(rest, line, i, &mut out, state) {
+            i += len;
         } else if rest.starts_with('@') && starts_a_directive(line, i) {
             i += directive(rest, &mut out, i);
         } else {
@@ -137,6 +240,18 @@ enum Scope {
     Comment,
     /// `@if`, `@endforeach`: Blade's own vocabulary.
     Directive,
+    /// A `@php` opening a block, and the `@endphp` closing it. The colour is a
+    /// directive's — they are directives — but they are told apart because
+    /// `mask_php` has to find them again.
+    PhpOpen,
+    PhpClose,
+    /// An Alpine or Livewire event binding: `@click`, `@keydown.escape.window`.
+    /// It begins with an `@` and is not a directive at all.
+    Attribute,
+    /// The JavaScript inside an Alpine value: `x-data`, `x-effect`, `@click`.
+    /// The colour is only the fallback — what is readable is handed to the
+    /// JavaScript grammar, and this is what shows through where it says nothing.
+    Script,
     /// What tells `{{ $x }}` apart from the text around it.
     Delimiter,
     /// What Blade has PHP evaluate — the inside of an echo, a directive's
@@ -155,7 +270,14 @@ impl Scope {
     fn candidates(self) -> &'static [&'static str] {
         match self {
             Scope::Comment => &["comment"],
-            Scope::Directive => &["keyword"],
+            Scope::Directive | Scope::PhpOpen | Scope::PhpClose => &["keyword"],
+            // The colour the HTML grammar gives the attributes next to it: an
+            // `@click` *is* an attribute, and the grammar itself reads `x-data`
+            // and `:class` that way.
+            Scope::Attribute => &["attribute", "property", "tag"],
+            // The colour an attribute's value already had: what the grammar
+            // makes of a quoted string.
+            Scope::Script => &["string"],
             Scope::Delimiter => &["punctuation.special", "tag"],
             Scope::Expression => &["embedded", "variable"],
             // A tag's colour, and not a colour of their own: a component *is* a
@@ -165,8 +287,12 @@ impl Scope {
         }
     }
 
-    fn style(self, theme: &HighlightTheme) -> Option<gpui::HighlightStyle> {
-        self.candidates().iter().find_map(|name| theme.style(name))
+    /// A theme is a resolver: the diff holds one, the editor is handed one, and
+    /// both ask the same names in the same order.
+    fn resolve(self, resolver: &dyn HighlightStyleResolver) -> Option<HighlightStyle> {
+        self.candidates()
+            .iter()
+            .find_map(|name| resolver.style(name))
     }
 }
 
@@ -233,6 +359,75 @@ fn echo(
     }
 }
 
+/// An Alpine attribute and its value: `@click.prevent="open = !open"`,
+/// `x-data="{ tab: 1 }"`, `x-effect="…"`. Returns the length consumed.
+///
+/// **For an `@` name, it is the `=` that tells it from a directive**, and
+/// nothing else: `@click` and `@if` have exactly the same shape, and only an
+/// attribute is immediately followed by its value. Painting it as a directive
+/// was wrong twice over — it took the keyword colour in the middle of a tag, and
+/// it *removed* the attribute colour the HTML grammar had given it, `apply`
+/// replacing what it covers.
+///
+/// The value is marked `Script` so it can be handed to the JavaScript grammar,
+/// and an unclosed quote is left open in `state`: an `x-effect` running over two
+/// lines is how anyone writes one.
+///
+/// What is deliberately left out is `:name="…"`. On a component tag it is a
+/// Blade prop, so PHP; on an ordinary tag it is Alpine's `x-bind`, so
+/// JavaScript. Telling them apart means knowing which tag is open, which this
+/// line-by-line scanner does not — and colouring PHP as JavaScript is worse than
+/// leaving a string a string.
+fn binding(
+    rest: &str,
+    line: &str,
+    at: usize,
+    out: &mut Vec<(Range<usize>, Scope)>,
+    state: &mut State,
+) -> Option<usize> {
+    if !starts_a_directive(line, at) {
+        return None;
+    }
+    let event = rest.starts_with('@');
+    if !event && !rest.starts_with("x-") {
+        return None;
+    }
+    // The modifiers are part of the name — `@click.prevent.stop` is one
+    // attribute — and so is the `:` of `x-on:click`.
+    let head = usize::from(event);
+    let name = rest[head..]
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':')))
+        .unwrap_or(rest.len() - head);
+    if name == 0 || !rest[head + name..].starts_with('=') {
+        return None;
+    }
+    // An `@` name is ours to paint; `x-data` the grammar already reads as the
+    // attribute it is.
+    if event {
+        out.push((at..at + 1 + name, Scope::Attribute));
+    }
+    let mut i = head + name + 1;
+    let Some(quote) = rest[i..].chars().next().filter(|c| matches!(c, '"' | '\'')) else {
+        return Some(i);
+    };
+    i += quote.len_utf8();
+    match rest[i..].find(quote) {
+        Some(end) => {
+            if end > 0 {
+                out.push((at + i..at + i + end, Scope::Script));
+            }
+            Some(i + end + quote.len_utf8())
+        }
+        None => {
+            if i < rest.len() {
+                out.push((at + i..at + rest.len(), Scope::Script));
+            }
+            state.script = Some(quote);
+            Some(rest.len())
+        }
+    }
+}
+
 /// A directive `@name` and, if there is one, its parenthesised argument.
 /// Returns the length consumed — at least 1, so the scanner moves on.
 fn directive(rest: &str, out: &mut Vec<(Range<usize>, Scope)>, at: usize) -> usize {
@@ -244,12 +439,20 @@ fn directive(rest: &str, out: &mut Vec<(Range<usize>, Scope)>, at: usize) -> usi
     if name == 0 {
         return 1;
     }
-    out.push((at..at + 1 + name, Scope::Directive));
     let mut i = 1 + name;
     // Blade tolerates a space before the parenthesis (`@if ($x)`), but not a
     // newline: looking further would catch text that has nothing to do with it.
     let spaces: usize = rest[i..].chars().take_while(|c| *c == ' ').count();
-    if !rest[i + spaces..].starts_with('(') {
+    let argued = rest[i + spaces..].starts_with('(');
+    // `@php($total = 0)` is a statement, not a block: only the block form has an
+    // `@endphp` in front of it, and only it is masked.
+    let scope = match &rest[1..1 + name] {
+        "php" if !argued => Scope::PhpOpen,
+        "endphp" => Scope::PhpClose,
+        _ => Scope::Directive,
+    };
+    out.push((at..at + 1 + name, scope));
+    if !argued {
         return i;
     }
     i += spaces;
@@ -325,12 +528,457 @@ fn next_char(rest: &str) -> usize {
     rest.chars().next().map_or(1, char::len_utf8)
 }
 
+/// The two grammars a view holds inside itself, kept between calls.
+///
+/// A directive's argument and an echo's body are **PHP**; an Alpine value is
+/// **JavaScript**. Neither is reachable from the view's own parse: they live
+/// inside what the PHP grammar reads as text, so the only way to colour them is
+/// to hand each fragment to the grammar it belongs to.
+///
+/// The reason this is a struct and not two calls is `SyntaxHighlighter::new`,
+/// which compiles a grammar's queries — tens of milliseconds. It is paid once
+/// per view, and only for a language the view actually holds: a page with no
+/// Alpine never builds the JavaScript one.
+#[derive(Default)]
+pub struct Tint {
+    php: Option<SyntaxHighlighter>,
+    js: Option<SyntaxHighlighter>,
+}
+
+impl Tint {
+    /// Colours one fragment, in offsets relative to it.
+    fn of(
+        &mut self,
+        scope: Scope,
+        code: &str,
+        resolver: &dyn HighlightStyleResolver,
+    ) -> Vec<(Range<usize>, HighlightStyle)> {
+        // What has to be written in front of the fragment for its grammar to
+        // recognise it, and what has to be written after — the same reasoning as
+        // `highlight::prologue`, one level down.
+        let (before, after) = match scope {
+            // Without an opening tag, the PHP grammar reads the fragment as
+            // HTML text and not one colour comes out.
+            Scope::Expression => ("<?php ", ""),
+            // `x-data="{ tab: 1 }"` is an expression, and a JavaScript program
+            // beginning with a brace is a *block*: `tab:` would be a label. The
+            // parentheses are what make it the object it is. Anything else is
+            // statements, which take no wrapping.
+            Scope::Script if code.trim_start().starts_with('{') => ("(", ")"),
+            Scope::Script => ("", ""),
+            _ => return Vec::new(),
+        };
+        let highlighter = match scope {
+            Scope::Expression => self
+                .php
+                .get_or_insert_with(|| SyntaxHighlighter::new("php")),
+            _ => self
+                .js
+                .get_or_insert_with(|| SyntaxHighlighter::new("javascript")),
+        };
+
+        let source = format!("{before}{code}{after}");
+        highlighter.update(None, &Rope::from_str(&source), None);
+        highlighter
+            .styles(&(0..source.len()), resolver)
+            .into_iter()
+            // The prologue belongs to no part of the fragment; what straddles
+            // its end is clipped back to it.
+            .filter(|(range, style)| range.end > before.len() && style.color.is_some())
+            .map(|(range, style)| {
+                let start = range.start.saturating_sub(before.len());
+                let end = (range.end - before.len()).min(code.len());
+                (start..end, style)
+            })
+            .filter(|(range, _)| range.start < range.end)
+            .collect()
+    }
+}
+
+/// One line's Blade ranges turned into styles, fragments handed to their own
+/// grammar on the way.
+///
+/// `text` is what the ranges are offsets into — a diff line for the overlay, the
+/// whole document for the editor — and what comes back is in the same
+/// coordinates, sorted and disjoint.
+fn styled(
+    found: &[(Range<usize>, Scope)],
+    text: &str,
+    resolver: &dyn HighlightStyleResolver,
+    tint: &mut Tint,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let mut out = Vec::with_capacity(found.len());
+    for (range, scope) in found {
+        let Some(fallback) = scope.resolve(resolver) else {
+            continue;
+        };
+        if matches!(scope, Scope::Expression | Scope::Script) {
+            out.extend(fragment(tint, *scope, range, text, fallback, resolver));
+        } else {
+            out.push((range.clone(), fallback));
+        }
+    }
+    out
+}
+
+/// One fragment's styles, in the containing text's offsets, **with no holes**.
+///
+/// The grammar's colours, and the scope's underneath wherever it says nothing: a
+/// grammar names a keyword and a string, not the space between them, and leaving
+/// those grey would pick a value apart instead of colouring it. It is also what
+/// makes the whole thing safe to try — a fragment its grammar cannot read comes
+/// back looking exactly as it did before.
+fn fragment(
+    tint: &mut Tint,
+    scope: Scope,
+    range: &Range<usize>,
+    text: &str,
+    fallback: HighlightStyle,
+    resolver: &dyn HighlightStyleResolver,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let mut out = Vec::new();
+    let mut at = range.start;
+    for (inner, style) in tint.of(scope, &text[range.clone()], resolver) {
+        let (start, end) = (range.start + inner.start, range.start + inner.end);
+        if start > at {
+            out.push((at..start, fallback));
+        }
+        out.push((start..end, style));
+        at = end;
+    }
+    if at < range.end {
+        out.push((at..range.end, fallback));
+    }
+    out
+}
+
+/// The highlighter a Blade view gets in the **editor**.
+///
+/// The overlay above serves the diff, which owns its own painting; the editor
+/// does not — `EditorState` asks a highlighter for styled runs and paints them
+/// itself. A view opened there therefore had nothing of Blade at all: the PHP
+/// grammar read the whole file as HTML text, so the body of a `@php` block, the
+/// directives, the echoes and the comments all arrived grey, while the tags
+/// around them were coloured. The seam that fixes it is
+/// `gpui_base::input::InputHighlighter`, which `set_highlighter_factory`
+/// installs — that is why `gpui-base` is a direct dependency here as it is in
+/// `theme.rs`.
+///
+/// What it does is what the diff does, in the same order and with the same two
+/// functions: hand the grammar a text whose `@php` markers are masked into PHP
+/// tags, then lay Blade's own ranges over what comes back.
+pub struct BladeHighlighter {
+    /// The PHP grammar, with the HTML injection our registry gives it.
+    inner: SyntaxHighlighter,
+    /// The document as it stands, which the fragments are slices of.
+    source: String,
+    /// Blade's ranges over the whole document, sorted and disjoint, in the
+    /// **real** text's byte offsets — the mask preserves them.
+    blade: Vec<(Range<usize>, Scope)>,
+    /// The styles those ranges resolve to, kept from one frame to the next.
+    painted: RefCell<Painted>,
+}
+
+/// The fragments already coloured, kept from one frame to the next.
+///
+/// `styles` is called for every visible group of lines, at every frame, and
+/// colouring a fragment means parsing it: a view of three hundred echoes costs
+/// seventy milliseconds to paint whole, which is a keystroke's worth of freeze
+/// on every keystroke. Two things bring it back to nothing.
+///
+/// **Only what is asked for is painted.** The editor asks for the lines it is
+/// about to draw, so an edit costs the forty fragments on screen, not the twelve
+/// hundred in the file.
+///
+/// **And each is kept**, keyed by where it starts. What invalidates the lot: an
+/// edit, which `refresh` reports — the offsets have moved — and a change of
+/// theme, which nobody reports, the resolver arriving as a bare `&dyn` with no
+/// identity to compare. So a **witness** is kept: the style of one name,
+/// resolved again at each call. A theme that paints keywords differently is a
+/// theme that changed, and one hash lookup a frame is the whole cost of
+/// noticing.
+#[derive(Default)]
+struct Painted {
+    witness: Option<HighlightStyle>,
+    tint: Tint,
+    done: HashMap<usize, Vec<(Range<usize>, HighlightStyle)>>,
+}
+
+/// The name whose colour stands for the theme. Any would do; a keyword is the
+/// one every theme in this repository defines.
+const WITNESS: &str = "keyword";
+
+/// The factory to hand `EditorState::set_highlighter_factory`.
+///
+/// It ignores the language it is given: it is only installed on a file
+/// `is_blade` recognises, and the language `EditorState` carries there is `php`.
+pub fn input_highlighter_factory() -> InputHighlighterFactory {
+    Rc::new(|_| Some(Box::new(BladeHighlighter::new()) as Box<dyn InputHighlighter>))
+}
+
+/// Beyond this, the file is left to the grammar alone: rescanning and reparsing
+/// a whole document at every keystroke is only cheap while the document is
+/// small, and a Blade view is. The editor refuses anything over
+/// `files::MAX_LINES` anyway; this is the second bound, in bytes.
+const MAX_BYTES: usize = 256 * 1024;
+
+impl Default for BladeHighlighter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BladeHighlighter {
+    pub fn new() -> Self {
+        Self {
+            inner: SyntaxHighlighter::new("php"),
+            source: String::new(),
+            blade: Vec::new(),
+            painted: RefCell::default(),
+        }
+    }
+
+    /// Rescans and reparses a document. Apart from the two bounds, this is all
+    /// `update` does — and it is what a test can call, `update` asking for a
+    /// window and a context that no test has.
+    fn refresh(&mut self, source: &str) {
+        self.blade = scan_document(source);
+        let masked = mask_document(source);
+        self.inner.update(
+            None,
+            &Rope::from_str(masked.as_deref().unwrap_or(source)),
+            None,
+        );
+        self.painted.borrow_mut().done.clear();
+        self.source.clear();
+        self.source.push_str(source);
+    }
+
+    /// Blade's styles over a window, the fragments in it painted or recalled —
+    /// see `Painted`.
+    fn painted(
+        &self,
+        window: &Range<usize>,
+        resolver: &dyn HighlightStyleResolver,
+    ) -> Vec<(Range<usize>, HighlightStyle)> {
+        let mut painted = self.painted.borrow_mut();
+        let witness = resolver.style(WITNESS);
+        if painted.witness != witness {
+            // The colours are stale, the grammars are not: rebuilding them here
+            // would pay their query compilation again at every change of theme.
+            painted.witness = witness;
+            painted.done.clear();
+        }
+        // Split so the cache and the grammars can be borrowed at once.
+        let Painted { tint, done, .. } = &mut *painted;
+
+        let mut out = Vec::new();
+        for (range, scope) in &self.blade {
+            if range.end <= window.start || window.end <= range.start {
+                continue;
+            }
+            let Some(fallback) = scope.resolve(resolver) else {
+                continue;
+            };
+            if !matches!(scope, Scope::Expression | Scope::Script) {
+                out.push((range.clone(), fallback));
+                continue;
+            }
+            let styles = done
+                .entry(range.start)
+                .or_insert_with(|| fragment(tint, *scope, range, &self.source, fallback, resolver));
+            out.extend(styles.iter().cloned());
+        }
+        out
+    }
+}
+
+impl InputHighlighter for BladeHighlighter {
+    fn language(&self) -> SharedString {
+        self.inner.language().clone()
+    }
+
+    /// **The edit is dropped and the document reparsed whole**, which is the one
+    /// thing here that looks like a waste and is not.
+    ///
+    /// An incremental edit describes a change against the text tree-sitter last
+    /// saw — and what it last saw is the *masked* text. The two agree byte for
+    /// byte until the very keystroke that completes a `@php`, at which point
+    /// four bytes far from the caret change meaning and the edit no longer
+    /// describes anything real. The parse would stay wrong, and nothing would
+    /// ever come back to correct it. A whole view is a few tens of kilobytes,
+    /// which tree-sitter parses in a millisecond or two.
+    fn update(
+        &mut self,
+        _edit: Option<InputEdit>,
+        text: &Rope,
+        _folding: bool,
+        _window: &mut gpui::Window,
+        _cx: &mut gpui::Context<EditorState>,
+    ) {
+        if text.len() > MAX_BYTES {
+            return;
+        }
+        self.refresh(&text.to_string());
+    }
+
+    fn styles(
+        &self,
+        range: &Range<usize>,
+        resolver: &dyn HighlightStyleResolver,
+    ) -> Vec<(Range<usize>, HighlightStyle)> {
+        let base = self.inner.styles(range, resolver);
+        let over = self.painted(range, resolver);
+        merge(range, base, &over)
+    }
+
+    fn fold_ranges(&self, _: &Rope) -> Vec<FoldRange> {
+        self.inner.tree().map(folds).unwrap_or_default()
+    }
+}
+
+/// Lays the overlay over the grammar's runs, keeping them sorted, disjoint and
+/// **covering `range` whole** — the contract `InputHighlighter` states and
+/// nothing checks.
+///
+/// Both lists are sorted, so a single walk over the range suffices: at every
+/// position the overlay wins where it reaches, the grammar answers everywhere
+/// else, and what neither covers takes the default style. Walking the range
+/// rather than the grammar's runs is what keeps a Blade range that falls in a
+/// gap — the grammar leaves them — from being dropped in silence.
+fn merge(
+    range: &Range<usize>,
+    base: Vec<(Range<usize>, HighlightStyle)>,
+    over: &[(Range<usize>, HighlightStyle)],
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    if over.is_empty() {
+        return base;
+    }
+    let mut out: Vec<(Range<usize>, HighlightStyle)> = Vec::with_capacity(base.len() + over.len());
+    // An overlay range covering several of the grammar's runs would otherwise
+    // leave one run per cut, all carrying the same style: `@php` came out in two
+    // pieces, the mask having made `<?` a token of its own.
+    {
+        let mut push = |range: Range<usize>, style: HighlightStyle| match out.last_mut() {
+            Some((last, last_style)) if last.end == range.start && *last_style == style => {
+                last.end = range.end;
+            }
+            _ => out.push((range, style)),
+        };
+
+        let (mut at, mut b, mut o) = (range.start, 0usize, 0usize);
+        while at < range.end {
+            // A range spanning several of the other list's is only left behind once
+            // it has been consumed whole.
+            while b < base.len() && base[b].0.end <= at {
+                b += 1;
+            }
+            while o < over.len() && over[o].0.end <= at {
+                o += 1;
+            }
+            if let Some((covering, style)) = over.get(o).filter(|(r, _)| r.start <= at) {
+                let end = covering.end.min(range.end);
+                push(at..end, *style);
+                at = end;
+                continue;
+            }
+            // Nothing is painted past the next overlay range: it is what cuts the
+            // grammar's run in two.
+            let stop = over
+                .get(o)
+                .map_or(range.end, |(r, _)| r.start.min(range.end));
+            let (end, style) = match base.get(b) {
+                Some((run, style)) if run.start <= at => (run.end.min(stop), *style),
+                Some((run, _)) => (run.start.min(stop), HighlightStyle::default()),
+                None => (stop, HighlightStyle::default()),
+            };
+            push(at..end.min(range.end), style);
+            at = end.min(range.end);
+        }
+    }
+    out
+}
+
+/// The fold ranges of a parsed tree: every named node spanning at least three
+/// lines.
+///
+/// It is `gpui-component`'s own rule, rewritten here because the function that
+/// carries it is private to its adapter — and installing a highlighter of our
+/// own means taking on everything the default one provided, folds included. The
+/// tree is the masked text's, whose lines are the real ones.
+fn folds(tree: &tree_sitter::Tree) -> Vec<FoldRange> {
+    fn collect(node: tree_sitter::Node, out: &mut Vec<FoldRange>) {
+        let (start, end) = (node.start_position().row, node.end_position().row);
+        if end.saturating_sub(start) < 2 {
+            return;
+        }
+        out.push(FoldRange::new(start, end));
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            collect(child, out);
+        }
+    }
+
+    let root = tree.root_node();
+    let mut out = Vec::new();
+    let mut cursor = root.walk();
+    for child in root.named_children(&mut cursor) {
+        collect(child, &mut out);
+    }
+    out.sort_by_key(|range| range.start_line);
+    out.dedup_by_key(|range| range.start_line);
+    out
+}
+
+/// Blade's ranges over a whole document, in absolute byte offsets.
+fn scan_document(text: &str) -> Vec<(Range<usize>, Scope)> {
+    let mut out = Vec::new();
+    let mut state = State::default();
+    for (at, line) in lines(text) {
+        out.extend(
+            scan(line, &mut state)
+                .into_iter()
+                .map(|(range, scope)| (at + range.start..at + range.end, scope)),
+        );
+    }
+    out
+}
+
+/// The whole document with its `@php` markers masked, or `None` if it holds
+/// none — see `mask_php`.
+fn mask_document(text: &str) -> Option<String> {
+    let mut masked: Option<String> = None;
+    let mut state = State::default();
+    for (at, line) in lines(text) {
+        let Some(tagged) = mask_php(line, &mut state) else {
+            continue;
+        };
+        let whole = masked.get_or_insert_with(|| text.to_string());
+        whole.replace_range(at..at + line.len(), &tagged);
+    }
+    masked
+}
+
+/// The lines of a text with their byte offset, terminator excluded.
+///
+/// The terminator is left out on purpose: a comment left open would otherwise
+/// carry a range over the newline, and a style is easier to reason about when it
+/// stops where the line does.
+fn lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut at = 0;
+    text.split_inclusive('\n').map(move |line| {
+        let start = at;
+        at += line.len();
+        (start, line.trim_end_matches('\n').trim_end_matches('\r'))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn scan_line(line: &str) -> Vec<(Range<usize>, Scope)> {
-        scan(line, &mut false)
+        scan(line, &mut State::default())
     }
 
     /// Returns what a range covers, so the tests can be read without counting
@@ -340,6 +988,184 @@ mod tests {
             .iter()
             .map(|(r, scope)| (&line[r.clone()], *scope))
             .collect()
+    }
+
+    /// The editor's whole point, and what a screenshot showed missing: a view
+    /// opened there had the tags around a `@php` block coloured and everything
+    /// inside it grey.
+    #[test]
+    fn the_editor_colours_a_view_the_way_the_diff_does() {
+        crate::ui::highlight::register_languages();
+        let source = "@php\n\
+                      use App\\Http\\Livewire\\Forms\\ContractForm;\n\
+                      $can = ActionPermissionHelper::can();\n\
+                      @endphp\n\
+                      {{-- a note --}}\n\
+                      <div x-data=\"{ tab: 1 }\" @click=\"go()\">\n\
+                      @if ($can)\n\
+                      <x-form-model-dialog />\n\
+                      @endif\n\
+                      </div>\n";
+        let theme = HighlightTheme::default_dark();
+        let mut highlighter = BladeHighlighter::new();
+        highlighter.refresh(source);
+        let styles = highlighter.styles(&(0..source.len()), &*theme);
+
+        let coloured = |what: &str| {
+            let at = source.find(what).expect("the fixture holds it");
+            styles
+                .iter()
+                .any(|(r, style)| r.start <= at && at < r.end && style.color.is_some())
+        };
+        // The block's body, which is the whole reason this highlighter exists.
+        assert!(coloured("use"), "the `use` of a @php block stays grey");
+        assert!(coloured("ActionPermissionHelper"));
+        // And Blade's own vocabulary, which the grammar knows nothing of.
+        for what in ["@php", "@endphp", "{{-- a note --}}", "@if", "@endif"] {
+            assert!(coloured(what), "{what} has no colour");
+        }
+        // What the grammar reads well is still its own.
+        assert!(coloured("x-form-model-dialog") && coloured("x-data"));
+    }
+
+    /// What is inside a directive's argument and inside an echo is PHP, and it
+    /// arrived flat: one colour for `$invoice->total()` as for `'net'`.
+    #[test]
+    fn a_directive_argument_and_an_echo_are_php() {
+        crate::ui::highlight::register_languages();
+        let source = "@if (count($lines) > 0)\n<td>{{ $invoice->total() }}</td>\n@endif\n";
+        let theme = HighlightTheme::default_dark();
+        let mut highlighter = BladeHighlighter::new();
+        highlighter.refresh(source);
+        let styles = highlighter.styles(&(0..source.len()), &*theme);
+
+        let colour = |what: &str| {
+            let at = source.find(what).expect("the fixture holds it");
+            styles
+                .iter()
+                .find(|(r, _)| r.start <= at && at < r.end)
+                .and_then(|(_, style)| style.color)
+        };
+        // A call and a number are not the same thing as the text around them.
+        assert!(colour("count") != colour(" > "), "the argument stays flat");
+        assert!(colour("0") != colour(" > "));
+        assert!(colour("total") != colour(" }}"), "the echo stays flat");
+    }
+
+    /// And what is inside an Alpine value is JavaScript.
+    #[test]
+    fn an_alpine_value_is_javascript() {
+        crate::ui::highlight::register_languages();
+        let source = "<div x-data=\"{ tab: 1, open: false }\" x-effect=\"if (open) { go(); }\">\n";
+        let theme = HighlightTheme::default_dark();
+        let mut highlighter = BladeHighlighter::new();
+        highlighter.refresh(source);
+        let styles = highlighter.styles(&(0..source.len()), &*theme);
+
+        let colour = |what: &str| {
+            let at = source.find(what).expect("the fixture holds it");
+            styles
+                .iter()
+                .find(|(r, _)| r.start <= at && at < r.end)
+                .and_then(|(_, style)| style.color)
+        };
+        // `x-data` is an expression: parenthesised, its braces are an object and
+        // `tab` a key. Read as a program it would be a block, and `tab` a label.
+        assert!(
+            colour("tab") != colour(", "),
+            "x-data is not read as an object"
+        );
+        assert!(
+            colour("if") != colour(" (open)"),
+            "x-effect keeps its keywords"
+        );
+    }
+
+    /// A value whose grammar says nothing about a byte keeps the colour it had:
+    /// `data` in `data.schemeCode` is a plain identifier, which no theme here
+    /// names, and it must not come out as a hole in the middle of a value.
+    #[test]
+    fn a_fragment_never_comes_back_with_a_hole() {
+        crate::ui::highlight::register_languages();
+        let source = "<x-input x-model=\"data.schemeCode\" />\n";
+        let theme = HighlightTheme::default_dark();
+        let mut highlighter = BladeHighlighter::new();
+        highlighter.refresh(source);
+        let styles = highlighter.styles(&(0..source.len()), &*theme);
+
+        let value = source
+            .find("data.schemeCode")
+            .expect("the fixture holds it");
+        for at in value..value + "data.schemeCode".len() {
+            let style = styles
+                .iter()
+                .find(|(r, _)| r.start <= at && at < r.end)
+                .expect("every byte is covered");
+            assert!(
+                style.1.color.is_some(),
+                "{:?} has no colour",
+                &source[at..at + 1]
+            );
+        }
+    }
+
+    /// An `x-effect` over two lines is how anyone writes one, and the second
+    /// line is not markup.
+    #[test]
+    fn a_value_may_span_two_lines() {
+        let mut state = State::default();
+        let first = "<div x-effect=\"const id = 1;";
+        let found = scan(first, &mut state);
+        assert_eq!(covered(first, &found), [("const id = 1;", Scope::Script)]);
+        assert_eq!(state.script, Some('"'), "the value stays open");
+
+        let second = "if (id) { go(); }\">";
+        let found = scan(second, &mut state);
+        assert_eq!(
+            covered(second, &found),
+            [("if (id) { go(); }", Scope::Script)]
+        );
+        assert_eq!(state.script, None, "and closes");
+    }
+
+    /// The contract `InputHighlighter` states and nothing checks. A run out of
+    /// order, or a hole, shifts every colour after it.
+    #[test]
+    fn the_merged_runs_are_sorted_disjoint_and_cover_the_range() {
+        crate::ui::highlight::register_languages();
+        let source = "<p>{{ $x }}</p>\n@if ($ok)\n@php\n$y = 1;\n@endphp\n@endif\n";
+        let theme = HighlightTheme::default_dark();
+        let mut highlighter = BladeHighlighter::new();
+        highlighter.refresh(source);
+
+        // A window that starts and ends in the middle of things, as the editor
+        // asks for the lines it is about to paint.
+        for range in [0..source.len(), 4..30, 17..source.len() - 1] {
+            let styles = highlighter.styles(&range, &*theme);
+            let mut at = range.start;
+            for (run, _) in &styles {
+                assert_eq!(run.start, at, "a hole or an overlap in {range:?}");
+                assert!(run.start < run.end);
+                at = run.end;
+            }
+            assert_eq!(at, range.end, "the range is not covered whole");
+        }
+    }
+
+    /// The document walk keeps the offsets of the real text, which is what lets
+    /// the styles be read against it.
+    #[test]
+    fn a_document_is_scanned_and_masked_in_place() {
+        let source = "<p>\n@php\n$x = 1;\n@endphp\n";
+        let masked = mask_document(source).expect("a block opens");
+        assert_eq!(masked, "<p>\n<?  \n$x = 1;\n?>     \n");
+        assert_eq!(masked.len(), source.len(), "the offsets must not move");
+
+        let found = scan_document(source);
+        let covered: Vec<_> = found.iter().map(|(r, _)| &source[r.clone()]).collect();
+        assert_eq!(covered, ["@php", "@endphp"]);
+
+        assert_eq!(mask_document("<p>ordinary</p>\n"), None);
     }
 
     #[test]
@@ -394,22 +1220,22 @@ mod tests {
 
     #[test]
     fn a_comment_spans_the_lines_it_needs() {
-        let mut open = false;
+        let mut open = State::default();
         let first = "{{-- an explanation";
         assert_eq!(
             covered(first, &scan(first, &mut open)),
             [(first, Scope::Comment)]
         );
-        assert!(open, "the comment stays open");
+        assert!(open.comment, "the comment stays open");
 
         let middle = "   that carries on";
         assert_eq!(scan(middle, &mut open).len(), 1);
-        assert!(open);
+        assert!(open.comment);
 
         let last = "  --}} <p>rest</p>";
         let found = scan(last, &mut open);
         assert_eq!(&last[found[0].0.clone()], "  --}}");
-        assert!(!open, "and closes again");
+        assert!(!open.comment, "and closes again");
     }
 
     #[test]
@@ -424,6 +1250,68 @@ mod tests {
                 ("$x", Scope::Expression),
             ]
         );
+    }
+
+    /// The shape a directive shares with an Alpine binding, and the single
+    /// character that tells them apart.
+    #[test]
+    fn an_alpine_binding_is_an_attribute_and_not_a_directive() {
+        let line = "<button @click.prevent=\"open = !open\" @if=\"x\">";
+        let found = scan_line(line);
+        assert_eq!(
+            covered(line, &found),
+            [
+                ("@click.prevent", Scope::Attribute),
+                ("open = !open", Scope::Script),
+                // Even spelled `@if`: what follows is a value, so it is an
+                // attribute — a directive is never followed by an `=`.
+                ("@if", Scope::Attribute),
+                ("x", Scope::Script),
+            ]
+        );
+
+        let directive = "@if ($ok) @click @endif";
+        assert!(
+            covered(directive, &scan_line(directive))
+                .iter()
+                .all(|(_, scope)| *scope != Scope::Attribute),
+            "with no value, an `@word` is Blade's"
+        );
+    }
+
+    /// `@{{ … }}` is how a view hands the braces to Alpine or Vue: they are
+    /// output as they are, so they are not an echo.
+    #[test]
+    fn the_escape_hands_the_braces_to_the_javascript() {
+        let line = "<span>@{{ count }}</span>";
+        assert!(
+            scan_line(line).is_empty(),
+            "neither an echo nor a directive: {:?}",
+            scan_line(line)
+        );
+    }
+
+    /// The masking's whole safety is here: the same number of bytes, so the
+    /// styles the grammar returns still designate the real line.
+    #[test]
+    fn masking_a_php_block_keeps_every_offset() {
+        let mut open = State::default();
+        let masked = mask_php("  @php", &mut open).expect("a block opens");
+        assert_eq!(masked, "  <?  ");
+        let masked = mask_php("@endphp <p>", &mut open).expect("and closes");
+        assert_eq!(masked, "?>      <p>");
+        assert_eq!(masked.len(), "@endphp <p>".len());
+    }
+
+    /// Two `@php` that do not open a block, and masking either would put a PHP
+    /// tag in the middle of a view — which the grammar would keep reading as
+    /// code until the end of the file.
+    #[test]
+    fn what_is_not_a_php_block_is_not_masked() {
+        let mut open = State::default();
+        assert_eq!(mask_php("@php($total = 0)", &mut open), None);
+        assert_eq!(mask_php("{{-- @php --}}", &mut open), None);
+        assert_eq!(mask_php("<p>ordinary</p>", &mut open), None);
     }
 
     /// The naive scanner's trap: not everything that looks like `@word` is a
@@ -487,9 +1375,13 @@ mod tests {
                 Scope::Delimiter,
                 Scope::Expression,
                 Scope::Component,
+                Scope::PhpOpen,
+                Scope::PhpClose,
+                Scope::Attribute,
+                Scope::Script,
             ] {
                 assert!(
-                    scope.style(&theme).is_some(),
+                    scope.resolve(&*theme).is_some(),
                     "{scope:?} with no colour in \"{}\": tried {:?}",
                     theme.name,
                     scope.candidates()
@@ -502,7 +1394,7 @@ mod tests {
     /// cuts into a tag and an attribute.
     #[test]
     fn a_dotted_component_name_is_one_range() {
-        let mut open = false;
+        let mut open = State::default();
         let line = "<x-layout.app title=\"Quote\">";
         let found = scan(line, &mut open);
         let component: Vec<_> = found
@@ -517,7 +1409,7 @@ mod tests {
 
     #[test]
     fn a_closing_component_and_livewire_count_too() {
-        let mut open = false;
+        let mut open = State::default();
         let line = "</x-forms.input><livewire:counter :n=\"$n\" />";
         let found: Vec<_> = scan(line, &mut open)
             .into_iter()
@@ -532,7 +1424,7 @@ mod tests {
     /// finer than its own.
     #[test]
     fn an_ordinary_tag_is_left_to_the_grammar() {
-        let mut open = false;
+        let mut open = State::default();
         for line in ["<div class=\"x\">", "</section>", "<xml-ish>", "a < b"] {
             let found = scan(line, &mut open);
             assert!(

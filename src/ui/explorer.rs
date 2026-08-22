@@ -29,7 +29,7 @@
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gpui::{div, prelude::*, px, uniform_list, Context, Entity, Pixels, SharedString, Window};
+use gpui::{div, prelude::*, px, uniform_list, App, Context, Entity, Pixels, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
@@ -68,7 +68,14 @@ pub struct Explorer {
     pub files: Vec<PathBuf>,
     /// The displayed tree, rebuilt on every collapse and never in a render.
     pub rows: Rc<Vec<tree::Entry>>,
-    pub collapsed: std::collections::HashSet<PathBuf>,
+    /// The folders the user opened.
+    ///
+    /// Opened and not collapsed, unlike the review list: this tree is the
+    /// whole worktree, and a Laravel project unfolded is forty thousand rows
+    /// that say nothing. It therefore starts shut, and what is recorded is the
+    /// exception — a set seeded with every directory would be the size of the
+    /// tree, rebuilt on every fold. See `tree::Folds`.
+    pub expanded: std::collections::HashSet<PathBuf>,
     /// Where the reading of the list stands.
     ///
     /// Four states and not a `pending` flag, for the reason the database tree
@@ -82,6 +89,19 @@ pub struct Explorer {
     pub state: Listing,
     /// Were the ignored files asked for, so we know when to re-read.
     pub ignored: bool,
+    /// The subset of `files` that `.gitignore` excludes, sorted as git gave it.
+    ///
+    /// Kept apart and searched, rather than folded into `files` as a pair: it
+    /// is empty on a project that ignores nothing, and the rows it dims are
+    /// worked out once per rebuild, never in a render.
+    pub ignored_files: Vec<PathBuf>,
+    /// One flag per row of `rows`, saying whether it is dimmed.
+    ///
+    /// Computed with the tree and not at paint time: a leaf costs a binary
+    /// search, but a directory is dimmed only if **everything** under it is
+    /// ignored, and `vendor/` carries thirty thousand leaves. That is a price
+    /// a gesture can pay and a frame cannot.
+    pub dimmed: Rc<Vec<bool>>,
     /// The search `rows` was built for. Compared at render time: that is the
     /// price of having nobody to notify when it changes.
     pub query: String,
@@ -98,9 +118,11 @@ impl Default for Explorer {
         Self {
             files: Vec::new(),
             rows: Rc::new(Vec::new()),
-            collapsed: std::collections::HashSet::new(),
+            expanded: std::collections::HashSet::new(),
             state: Listing::Idle,
             ignored: false,
+            ignored_files: Vec::new(),
+            dimmed: Rc::new(Vec::new()),
             query: String::new(),
             cursor: None,
         }
@@ -120,14 +142,37 @@ impl Explorer {
                 .map(|(index, _)| index)
                 .collect()
         });
-        let open = std::collections::HashSet::new();
-        let collapsed = if keep.is_some() {
-            &open
+        // During a search everything is open, whatever was folded.
+        let all = std::collections::HashSet::new();
+        let folds = if keep.is_some() {
+            tree::Folds::OpenBut(&all)
         } else {
-            &self.collapsed
+            tree::Folds::ShutBut(&self.expanded)
         };
-        let rows = tree::build_subset(&self.files, keep.as_deref(), collapsed);
+        let rows = tree::build_subset(&self.files, keep.as_deref(), folds);
+        self.dimmed = Rc::new(rows.iter().map(|entry| self.is_ignored(entry)).collect());
         self.rows = Rc::new(rows);
+    }
+
+    /// Is this row one that `.gitignore` leaves out?
+    ///
+    /// A directory counts as ignored only when everything under it is —
+    /// `vendor/` is, `app/` with one ignored log file in it is not. Anything
+    /// else would grey out a folder holding code one is looking for.
+    fn is_ignored(&self, entry: &tree::Entry) -> bool {
+        if self.ignored_files.is_empty() {
+            return false;
+        }
+        let excluded = |path: &PathBuf| self.ignored_files.binary_search(path).is_ok();
+        match entry {
+            tree::Entry::Leaf { index, .. } => self.files.get(*index).is_some_and(excluded),
+            tree::Entry::Dir { leaves, .. } => {
+                !leaves.is_empty()
+                    && leaves
+                        .iter()
+                        .all(|index| self.files.get(*index).is_some_and(excluded))
+            }
+        }
     }
 
     /// A displayed entry's path, folder or file.
@@ -149,58 +194,58 @@ impl Explorer {
 
     /// Opens every folder leading to a path.
     ///
-    /// Removing each ancestor is enough, merged chains included:
+    /// Naming each ancestor is enough, merged chains included:
     /// `app/Http/Livewire/Forms` fits on one line but is still an ancestor of
-    /// the file it contains.
+    /// the file it contains. The ancestors that are not rows of their own cost
+    /// an entry in the set and nothing else.
     fn reveal(&mut self, path: &Path) {
         let mut changed = false;
         for ancestor in path.ancestors().skip(1) {
-            changed |= self.collapsed.remove(ancestor);
+            if !ancestor.as_os_str().is_empty() {
+                changed |= self.expanded.insert(ancestor.to_path_buf());
+            }
         }
         if changed {
             self.rebuild();
         }
     }
 
-    /// Collapses everything open at the first level and below.
+    /// Collapses everything, which is the state the tree opens in.
     fn collapse_all(&mut self) {
-        // Every folder, and not only the visible ones: what a closed folder
-        // hides has to be closed too when it is reopened.
-        for path in &self.files {
-            for ancestor in path.ancestors().skip(1) {
-                if !ancestor.as_os_str().is_empty() {
-                    self.collapsed.insert(ancestor.to_path_buf());
-                }
-            }
-        }
+        self.expanded.clear();
         self.rebuild();
     }
 
-    /// Unfolds a whole subtree.
+    /// Unfolds a whole subtree, its root included.
     fn expand_under(&mut self, root: &Path) {
-        self.collapsed
-            .retain(|path| !path.starts_with(root) && path != root);
-        self.rebuild();
-    }
-
-    /// Collapses a whole subtree, its root included.
-    fn collapse_under(&mut self, root: &Path) {
+        // Every folder under the root, and not only the visible ones: what a
+        // closed folder hides has to be open too once it is reopened.
         for path in &self.files {
             if !path.starts_with(root) {
                 continue;
             }
             for ancestor in path.ancestors().skip(1) {
                 if ancestor.starts_with(root) {
-                    self.collapsed.insert(ancestor.to_path_buf());
+                    self.expanded.insert(ancestor.to_path_buf());
                 }
             }
         }
-        self.collapsed.insert(root.to_path_buf());
+        self.expanded.insert(root.to_path_buf());
+        self.rebuild();
+    }
+
+    /// Collapses a whole subtree, its root included.
+    fn collapse_under(&mut self, root: &Path) {
+        self.expanded
+            .retain(|path| !path.starts_with(root) && path != root);
         self.rebuild();
     }
 }
 
 /// A file open in the built-in editor.
+/// The key of the editor's wheel smoothing, as `ui::scroll` keys the others.
+const EDITOR_SCROLL: &str = "editor-scroll";
+
 pub struct Editing {
     pub worktree: PathBuf,
     pub path: PathBuf,
@@ -249,10 +294,16 @@ impl ClaudhubApp {
         self.git.send(Cmd::ListFiles { worktree, ignored });
     }
 
-    pub(super) fn project_files_arrived(&mut self, worktree: PathBuf, files: Vec<PathBuf>) {
+    pub(super) fn project_files_arrived(
+        &mut self,
+        worktree: PathBuf,
+        files: Vec<PathBuf>,
+        ignored: Vec<PathBuf>,
+    ) {
         let explorer = self.explorers.entry(worktree).or_default();
         explorer.state = Listing::Ready;
         explorer.files = files;
+        explorer.ignored_files = ignored;
         explorer.rebuild();
     }
 
@@ -273,8 +324,8 @@ impl ClaudhubApp {
         let Some(explorer) = self.explorer() else {
             return;
         };
-        if !explorer.collapsed.remove(&path) {
-            explorer.collapsed.insert(path);
+        if !explorer.expanded.remove(&path) {
+            explorer.expanded.insert(path);
         }
         explorer.rebuild();
         cx.notify();
@@ -356,12 +407,12 @@ impl ClaudhubApp {
             return;
         };
         if explorer.is_dir(index) {
-            let is_collapsed = explorer.collapsed.contains(&path);
+            let is_collapsed = !explorer.expanded.contains(&path);
             if open == is_collapsed {
                 if open {
-                    explorer.collapsed.remove(&path);
+                    explorer.expanded.insert(path);
                 } else {
-                    explorer.collapsed.insert(path);
+                    explorer.expanded.remove(&path);
                 }
                 explorer.rebuild();
                 cx.notify();
@@ -529,10 +580,18 @@ impl ClaudhubApp {
             // three modes into three types — one line, multi-line text, code.
             // The code features (language, line numbers, LSP) only exist on the
             // third.
-            EditorState::new(window, cx)
+            let mut state = EditorState::new(window, cx)
                 .language(language)
                 .line_number(true)
-                .default_value(content.text)
+                .default_value(content.text);
+            // A Blade view gets a highlighter of ours: the language it declares
+            // is PHP, whose grammar reads a `@php` block and every directive as
+            // plain HTML text. See `ui::blade::BladeHighlighter`. The default
+            // adapter is installed by `ensure_`, which leaves ours in place.
+            if crate::ui::blade::is_blade(&path) {
+                state.set_highlighter_factory(crate::ui::blade::input_highlighter_factory(), cx);
+            }
+            state
         });
         // The subscription is set up here, once per opened file: it is what
         // lights the unsaved-change indicator.
@@ -718,6 +777,7 @@ impl ClaudhubApp {
         let explorer = &*explorer;
         let state = explorer.state;
         let rows = explorer.rows.clone();
+        let dimmed = explorer.dimmed.clone();
         let files = Rc::new(explorer.files.clone());
         let cursor = explorer.cursor.clone();
         let count = rows.len();
@@ -797,6 +857,7 @@ impl ClaudhubApp {
                                         render_row(
                                             &rows,
                                             &files,
+                                            &dimmed,
                                             ix,
                                             &status,
                                             open.as_deref(),
@@ -1033,12 +1094,27 @@ impl ClaudhubApp {
     /// coming from the explorer would be one round trip too many.
     pub(super) fn render_editor(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
         let editing = self.editing.as_ref()?;
         let (path, dirty, input) = (editing.path.clone(), editing.dirty, editing.input.clone());
+        // The smoothing advances by one frame, as the diff's does. The offset
+        // is written back through `InputState`, which is the only way in: the
+        // editor has no `ScrollHandle` of its own to hand out.
+        let (offset, max) = editor_extent(&input, cx);
+        if let Some(next) = self
+            .owned_motion(EDITOR_SCROLL.into(), crate::ui::motion::Axes::Vertical)
+            .advance_at(offset, max, window)
+        {
+            input.update(cx, |state, cx| state.set_scroll_offset(next, cx));
+        }
+        let entity = cx.entity();
         let mono = cx.theme().mono_font_family.clone();
+        // The editor is code, like the diff on the screen next door: same
+        // family, same size. Without saying so it inherits the interface's
+        // proportional font, where an indentation no longer lines up.
+        let code_size = px(crate::ui::settings::Settings::global(cx).diff_font_size);
         let label = SharedString::from(path.display().to_string());
         let for_external = path.clone();
         Some(
@@ -1059,7 +1135,7 @@ impl ClaudhubApp {
                                 .flex_1()
                                 .truncate()
                                 .text_sm()
-                                .font_family(mono)
+                                .font_family(mono.clone())
                                 .child(label),
                         )
                         // A badge and not an asterisk in the title: the title is
@@ -1099,9 +1175,154 @@ impl ClaudhubApp {
                                 ),
                         ),
                 )
-                .child(div().flex_1().min_h_0().child(Editor::new(&input).h_full())),
+                .child(
+                    div()
+                        .id("editor-zoom")
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .child(
+                            Editor::new(&input)
+                                .font_family(mono)
+                                .text_size(code_size)
+                                // **And its line height with it.** `Input`
+                                // declares `line_height(Rems(1.25))`, which is
+                                // rem-based and therefore deaf to the text
+                                // size: zoomed in, the glyphs grew and the
+                                // lines did not, so each one was drawn over the
+                                // one above. Our refinement is applied after
+                                // theirs, and it is the diff's own spacing —
+                                // the same code read the same way on both
+                                // screens.
+                                .line_height(crate::ui::diff_view::line_height(code_size))
+                                .h_full(),
+                        )
+                        // **The wheel is taken before the editor sees it.**
+                        // `InputState::on_scroll_wheel` scrolls and then calls
+                        // `stop_propagation` as soon as the offset moved: a
+                        // listener on the ancestor — the diff's arrangement —
+                        // was never called, except at the very top and bottom.
+                        // Nothing smoothed anything, and `Ctrl`+wheel zoomed
+                        // while the editor went on scrolling underneath. A
+                        // window mouse listener in the **capture** phase runs
+                        // first, and consuming the event there leaves the whole
+                        // movement to us.
+                        .child(
+                            gpui::canvas(
+                                |_, _, _| (),
+                                move |bounds: gpui::Bounds<Pixels>, _, window, _cx| {
+                                    window.on_mouse_event(
+                                        move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
+                                            if phase != gpui::DispatchPhase::Capture
+                                                || !bounds.contains(&event.position)
+                                            {
+                                                return;
+                                            }
+                                            cx.stop_propagation();
+                                            entity.update(cx, |this, cx| {
+                                                this.on_editor_scroll(event, window, cx)
+                                            });
+                                        },
+                                    );
+                                },
+                            )
+                            .absolute()
+                            .inset_0(),
+                        ),
+                ),
         )
     }
+}
+
+/// The editor's wheel: zoom with the platform key, smoothed scrolling
+/// otherwise — the diff's two gestures, on the other screen that shows code.
+///
+/// The same inversion as `on_diff_scroll`, and for the same reason: gpui has no
+/// capture phase for the wheel, so the editor has **already** scrolled when this
+/// runs. We give the jump back rather than try to prevent it.
+impl ClaudhubApp {
+    pub(super) fn on_editor_scroll(
+        &mut self,
+        event: &gpui::ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = self.editing.as_ref().map(|editing| editing.input.clone()) else {
+            return;
+        };
+        let (offset, max) = editor_extent(&input, cx);
+        // The editor's own line height and not the ambient one: it is what its
+        // handler would have used, and three lines apart make a visible
+        // difference on a font that is neither the interface's nor its size.
+        let line = input
+            .read(cx)
+            .line_height()
+            .unwrap_or_else(|| window.line_height())
+            .max(px(1.));
+        let delta = event.delta.pixel_delta(line);
+
+        if event.modifiers.secondary() {
+            // A zoom during a smoothed scroll: the destination was computed on
+            // lines that no longer have the same height. Nothing to give back —
+            // the event was consumed before the editor could scroll on it.
+            self.owned_motion(EDITOR_SCROLL.into(), crate::ui::motion::Axes::Vertical)
+                .cancel();
+            let steps = crate::ui::terminal_view::zoom_steps(delta.y);
+            if steps != 0. {
+                // The diff's size, and not one of its own: it is code on both
+                // sides, never shown at the same time, and two sizes to keep in
+                // step would be one too many.
+                crate::ui::settings::Settings::update_global(cx, |s| {
+                    s.zoom(crate::ui::settings::Zoom::Diff, steps);
+                });
+            }
+            cx.notify();
+            return;
+        }
+
+        let next = match event.delta {
+            // A trackpad is already gradual, and attached to the finger:
+            // smoothing it would add lag to a direct gesture.
+            gpui::ScrollDelta::Pixels(_) => {
+                self.owned_motion(EDITOR_SCROLL.into(), crate::ui::motion::Axes::Vertical)
+                    .cancel();
+                gpui::point(offset.x, offset.y + delta.y)
+            }
+            gpui::ScrollDelta::Lines(_) => self
+                .owned_motion(EDITOR_SCROLL.into(), crate::ui::motion::Axes::Vertical)
+                .push(offset, delta, max),
+        };
+        input.update(cx, |state, cx| state.set_scroll_offset(next, cx));
+        cx.notify();
+    }
+}
+
+/// The editor's scroll offset, and how far it can go.
+///
+/// The travel is **worked out** and not read: `scroll_size` and the viewport's
+/// bounds are `pub(crate)` in gpui-component, where the offset is not. Visible
+/// rows times the line height is the viewport, the file's lines times the same
+/// is the content, and their difference is the travel. It is an approximation —
+/// a soft-wrapped line counts for one — and it does not have to be better than
+/// that: `set_scroll_offset` clamps to the real range, and the next frame reads
+/// back what it actually got.
+fn editor_extent(
+    input: &Entity<EditorState>,
+    cx: &App,
+) -> (gpui::Point<Pixels>, gpui::Point<Pixels>) {
+    let state = input.read(cx);
+    let offset = state.scroll_offset();
+    let travel = match (state.line_height(), state.visible_row_range()) {
+        (Some(line_height), Some(visible)) => {
+            let lines = state.value().lines().count();
+            let hidden = lines.saturating_sub(visible.len()) as f32;
+            line_height * hidden
+        }
+        // Before the first layout there is nothing to clamp against: the motion
+        // aims where it is asked to, and the editor cuts it back.
+        _ => px(f32::MAX / 4.),
+    };
+    (offset, gpui::point(px(0.), travel))
 }
 
 /// What does not depend on the row: colours and geometry.
@@ -1161,6 +1382,7 @@ fn indent_guides(depth: usize, look: &Look) -> impl IntoIterator<Item = gpui::Di
 fn render_row(
     rows: &Rc<Vec<tree::Entry>>,
     files: &Rc<Vec<PathBuf>>,
+    dimmed: &Rc<Vec<bool>>,
     index: usize,
     status: &Rc<std::collections::HashMap<PathBuf, crate::git::StatusCode>>,
     open: Option<&Path>,
@@ -1172,6 +1394,10 @@ fn render_row(
     let Some(entry) = rows.get(index) else {
         return div().into_any_element();
     };
+    // What `.gitignore` leaves out is shown, but shown as secondary — PhpStorm's
+    // convention, and the only thing that keeps `vendor/` from reading like part
+    // of the project.
+    let dim = dimmed.get(index).copied().unwrap_or(false);
     match entry {
         tree::Entry::Dir {
             path,
@@ -1224,6 +1450,7 @@ fn render_row(
                         .flex_1()
                         .truncate()
                         .text_sm()
+                        .when(dim, |el| el.text_color(look.muted))
                         .child(SharedString::from(label.clone())),
                 )
                 .context_menu(move |menu, _window, _cx| dir_menu(menu, &entity, &for_menu))
@@ -1273,6 +1500,7 @@ fn render_row(
                         .flex_1()
                         .truncate()
                         .text_sm()
+                        .when(dim, |el| el.text_color(look.muted))
                         .when_some(code, |el, code| el.text_color(status_color(code, cx)))
                         .child(SharedString::from(name)),
                 )

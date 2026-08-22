@@ -1307,6 +1307,8 @@ impl ClaudhubApp {
             return;
         };
         let terminal = self.terminals.remove(ix);
+        let worktree = terminal.worktree.clone();
+        let had_focus = terminal.view.read(cx).focus_handle(cx).is_focused(window);
         for (workspace, panel) in crate::ui::workspace::Workspace::ALL
             .into_iter()
             .zip(terminal.panels)
@@ -1315,6 +1317,19 @@ impl ClaudhubApp {
                 continue;
             };
             dock.update(cx, |dock, cx| dock.remove_panel(panel, window, cx));
+        }
+        // The focus was on what has just left the tree, and a focus handle
+        // nobody renders any more resolves no binding: every shortcut would
+        // stay dead until a click put the focus back on a live node. It goes to
+        // the neighbouring terminal, which is what one is left looking at, and
+        // to the root when there is none.
+        if had_focus {
+            if self.terminals_of(&worktree).is_empty() {
+                let root = self.focus.clone();
+                window.focus(&root, cx);
+            } else {
+                self.focus_terminal(&worktree, window, cx);
+            }
         }
         cx.notify();
     }
@@ -1387,6 +1402,35 @@ impl ClaudhubApp {
                 terminal.view.clone(),
                 terminal.panels.get(self.workspace.index()).cloned(),
             )
+        };
+        if let Some(panel) = panel {
+            crate::ui::panels::TerminalPanel::activate(&panel, window, cx);
+        }
+        let handle = view.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// Puts the focus on the worktree's last terminal, bringing its tab up.
+    ///
+    /// The last and not the first: it is the one that was opened most recently,
+    /// which is the one being looked at. Showing a terminal is not focusing it
+    /// — the dock only decides which tab is on screen — and a terminal one has
+    /// to click before typing in it is a terminal the shortcut did not finish
+    /// opening.
+    pub(super) fn focus_terminal(
+        &mut self,
+        worktree: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((view, panel)) = self.terminals_of(worktree).last().map(|terminal| {
+            (
+                terminal.view.clone(),
+                terminal.panels.get(self.workspace.index()).cloned(),
+            )
+        }) else {
+            return;
         };
         if let Some(panel) = panel {
             crate::ui::panels::TerminalPanel::activate(&panel, window, cx);

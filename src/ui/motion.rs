@@ -72,6 +72,16 @@ pub struct ScrollMotion {
     x: Axis,
     y: Axis,
     axes: Axes,
+    /// Does an offset written by somebody else win?
+    ///
+    /// True everywhere the view is scrolled by gpui and we only take the jump
+    /// over: an offset that has moved on its own means a `scroll_to_item`, and
+    /// pulling the view back would undo it. False for the built-in editor,
+    /// where we own the movement from end to end and where reading back is
+    /// **late** — `InputState::set_scroll_offset` is applied at the next
+    /// layout, so the value read on the next frame is still the previous one,
+    /// and re-syncing on it dropped every transition on its first frame.
+    resync: bool,
 }
 
 impl ScrollMotion {
@@ -80,7 +90,45 @@ impl ScrollMotion {
             x: Axis::default(),
             y: Axis::default(),
             axes,
+            resync: true,
         }
+    }
+
+    /// A motion for a surface we drive ourselves. See `resync`.
+    pub fn owned(axes: Axes) -> Self {
+        Self {
+            resync: false,
+            ..Self::new(axes)
+        }
+    }
+
+    /// Aims `delta` further than where the view is, for a surface whose wheel
+    /// we have taken **before** it scrolled rather than after.
+    ///
+    /// `on_wheel` takes over a jump already applied; here nothing has moved, so
+    /// we hand it the position the jump would have reached and the jump itself.
+    /// Same arithmetic, opposite starting point.
+    pub fn push(
+        &mut self,
+        from: Point<Pixels>,
+        delta: Point<Pixels>,
+        max: Point<Pixels>,
+    ) -> Point<Pixels> {
+        let now = Instant::now();
+        let (dx, dy) = self.split(delta);
+        let x = if dx == 0. {
+            f32::from(from.x)
+        } else {
+            self.x
+                .on_wheel(f32::from(from.x) + dx, dx, f32::from(max.x), now)
+        };
+        let y = if dy == 0. {
+            f32::from(from.y)
+        } else {
+            self.y
+                .on_wheel(f32::from(from.y) + dy, dy, f32::from(max.y), now)
+        };
+        point(px(x), px(y))
     }
 
     /// Advances the transition by one frame and writes the resulting offset.
@@ -88,17 +136,36 @@ impl ScrollMotion {
     /// To be called once per panel render, before or after building its content
     /// — the element only reads the offset at layout time.
     pub fn advance(&mut self, handle: &ScrollHandle, window: &Window) {
-        let now = Instant::now();
-        let actual = handle.offset();
-        let max = handle.max_offset();
-        let (x, moving_x) = self.x.advance(f32::from(actual.x), f32::from(max.x), now);
-        let (y, moving_y) = self.y.advance(f32::from(actual.y), f32::from(max.y), now);
-        if x != f32::from(actual.x) || y != f32::from(actual.y) {
-            handle.set_offset(point(px(x), px(y)));
+        if let Some(offset) = self.advance_at(handle.offset(), handle.max_offset(), window) {
+            handle.set_offset(offset);
         }
+    }
+
+    /// The same thing over an offset given by hand, for a surface that is not a
+    /// `ScrollHandle`.
+    ///
+    /// The built-in editor is the only one: its offset is reachable through
+    /// `InputState` alone, which reads and writes it but is not a handle.
+    /// `None` when there is nothing to write — the transition is over, or
+    /// somebody else has moved the view.
+    pub fn advance_at(
+        &mut self,
+        actual: Point<Pixels>,
+        max: Point<Pixels>,
+        window: &Window,
+    ) -> Option<Point<Pixels>> {
+        let now = Instant::now();
+        let resync = self.resync;
+        let (x, moving_x) = self
+            .x
+            .advance(f32::from(actual.x), f32::from(max.x), now, resync);
+        let (y, moving_y) = self
+            .y
+            .advance(f32::from(actual.y), f32::from(max.y), now, resync);
         if moving_x || moving_y {
             window.request_animation_frame();
         }
+        (x != f32::from(actual.x) || y != f32::from(actual.y)).then(|| point(px(x), px(y)))
     }
 
     /// Takes over the jump gpui has just applied and replays it as a transition.
@@ -111,22 +178,37 @@ impl ScrollMotion {
         event: &ScrollWheelEvent,
         window: &Window,
     ) -> bool {
+        match self.wheel_at(handle.offset(), handle.max_offset(), event, window) {
+            Some(offset) => {
+                handle.set_offset(offset);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The same thing over an offset given by hand. See `advance_at`.
+    pub fn wheel_at(
+        &mut self,
+        jumped: Point<Pixels>,
+        max: Point<Pixels>,
+        event: &ScrollWheelEvent,
+        window: &Window,
+    ) -> Option<Point<Pixels>> {
         let delta = match event.delta {
             // The finger is already gradual: smoothing it would add lag.
             ScrollDelta::Pixels(_) => {
                 self.cancel();
-                return false;
+                return None;
             }
             ScrollDelta::Lines(_) => event.delta.pixel_delta(window.line_height()),
         };
         let (dx, dy) = self.split(delta);
         if dx == 0. && dy == 0. {
-            return false;
+            return None;
         }
 
         let now = Instant::now();
-        let jumped = handle.offset();
-        let max = handle.max_offset();
         // The axis this notch does not touch keeps the position `advance` wrote
         // for it: reading it back here is handing it back unchanged.
         let x = if dx == 0. {
@@ -141,8 +223,7 @@ impl ScrollMotion {
             self.y
                 .on_wheel(f32::from(jumped.y), dy, f32::from(max.y), now)
         };
-        handle.set_offset(point(px(x), px(y)));
-        true
+        Some(point(px(x), px(y)))
     }
 
     /// Drops the running transition, ahead of a direct gesture.
@@ -181,15 +262,19 @@ struct Axis {
 
 impl Axis {
     /// Returns the offset to write, and whether one more frame is needed.
-    fn advance(&mut self, actual: f32, max: f32, now: Instant) -> (f32, bool) {
+    fn advance(&mut self, actual: f32, max: f32, now: Instant, resync: bool) -> (f32, bool) {
         let Some(mut motion) = self.motion.take() else {
+            // Idle, the offset is read back whatever the mode: between two
+            // transitions it is the caret, a click or a search that moves the
+            // view, and the next notch has to start from there.
             self.last = Some(actual);
             return (actual, false);
         };
         // Somebody else has written the offset: they win.
-        if self
-            .last
-            .is_some_and(|expected| (actual - expected).abs() > SYNC_EPSILON_PX)
+        if resync
+            && self
+                .last
+                .is_some_and(|expected| (actual - expected).abs() > SYNC_EPSILON_PX)
         {
             self.last = Some(actual);
             return (actual, false);
@@ -330,11 +415,11 @@ mod tests {
         let written = axis.on_wheel(-60., -60., MAX, now);
         assert_eq!(written, 0., "the view stays where the eye left it");
 
-        let (middle, moving) = axis.advance(0., MAX, now + Duration::from_millis(80));
+        let (middle, moving) = axis.advance(0., MAX, now + Duration::from_millis(80), true);
         assert!(moving, "the transition asks for one more frame");
         assert!(middle < 0. && middle > -60.);
 
-        let (end, moving) = axis.advance(middle, MAX, now + DURATION);
+        let (end, moving) = axis.advance(middle, MAX, now + DURATION, true);
         assert_eq!(end, -60.);
         assert!(!moving);
     }
@@ -345,11 +430,46 @@ mod tests {
         let mut axis = Axis::default();
         axis.on_wheel(-60., -60., MAX, now);
         let middle = now + Duration::from_millis(80);
-        let (position, _) = axis.advance(0., MAX, middle);
+        let (position, _) = axis.advance(0., MAX, middle, true);
         // gpui jumps again, from the position we have just written.
         axis.on_wheel(position - 60., -60., MAX, middle);
-        let (end, _) = axis.advance(position, MAX, middle + DURATION);
+        let (end, _) = axis.advance(position, MAX, middle + DURATION, true);
         assert_eq!(end, -120., "the two notches add up");
+    }
+
+    /// The built-in editor writes its offset **late** — `set_scroll_offset`
+    /// lands at the next layout — so the value read back a frame later is still
+    /// the previous one. Taken for somebody else's writing, it killed every
+    /// transition on its first frame, and the editor did not move at all.
+    #[test]
+    fn a_surface_we_drive_ourselves_ignores_an_offset_read_back_late() {
+        let now = Instant::now();
+        let mut axis = Axis::default();
+        axis.on_wheel(-60., -60., MAX, now);
+        // Our write has not landed yet: the surface still says zero.
+        let (position, moving) = axis.advance(0., MAX, now + Duration::from_millis(80), false);
+        assert!(moving, "the transition carries on regardless");
+        assert!(position < 0. && position > -60.);
+        // The same reading, with the re-sync on, gives the transition up.
+        let mut other = Axis::default();
+        other.on_wheel(-60., -60., MAX, now);
+        other.advance(0., MAX, now + Duration::from_millis(40), true);
+        let (_, moving) = other.advance(0., MAX, now + Duration::from_millis(80), true);
+        assert!(!moving, "here the offset read back is taken for a jump");
+    }
+
+    /// A surface whose wheel we take **before** it scrolls: nothing has moved,
+    /// so the destination is what the notch asks for from where we are.
+    #[test]
+    fn a_wheel_taken_before_the_jump_aims_from_where_the_view_is() {
+        let mut motion = ScrollMotion::owned(Axes::Vertical);
+        let from = point(px(0.), px(-100.));
+        let written = motion.push(from, point(px(0.), px(-60.)), point(px(0.), px(MAX)));
+        assert_eq!(written, from, "the view does not move on the first frame");
+        let (end, _) = motion
+            .y
+            .advance(-100., MAX, Instant::now() + DURATION, false);
+        assert_eq!(end, -160., "and lands one notch further");
     }
 
     /// `scroll_to_item` writes the offset without telling us; pulling it back
@@ -359,7 +479,7 @@ mod tests {
         let now = Instant::now();
         let mut axis = Axis::default();
         axis.on_wheel(-60., -60., MAX, now);
-        let (position, moving) = axis.advance(-900., MAX, now + Duration::from_millis(40));
+        let (position, moving) = axis.advance(-900., MAX, now + Duration::from_millis(40), true);
         assert_eq!(position, -900., "the requested position is kept");
         assert!(!moving);
         assert!(axis.motion.is_none());
@@ -378,7 +498,7 @@ mod tests {
         };
         let written = axis.on_wheel(-1050., -60., MAX, now);
         assert_eq!(written, -990.);
-        let (end, _) = axis.advance(written, MAX, now + DURATION);
+        let (end, _) = axis.advance(written, MAX, now + DURATION, true);
         assert_eq!(end, -MAX, "the destination is clamped, not the origin");
     }
 

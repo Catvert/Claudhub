@@ -1,55 +1,48 @@
-//! The branches panel.
+//! The branches: what the picker lists, and the two gestures on a branch.
 //!
-//! It serves two purposes: switching the current worktree to another branch,
+//! They serve two purposes: switching the current worktree to another branch,
 //! and creating a worktree from an existing branch — the opening gesture of a
 //! review, when an agent's work has landed on a branch not yet checked out.
 //!
-//! The list is virtualised and filterable. A living repository has dozens of
-//! branches: rebuilding them all on every frame — two buttons each — is
-//! expensive for rows nobody sees, and scanning them by eye to find one whose
-//! name you already know is exactly what a search field saves.
+//! There is no panel any more: the list lives in the top bar's branch picker,
+//! beside the worktree it applies to (see `ui::topbar`). What stays here is the
+//! decision — which branch appears, under which heading — which is free of gpui
+//! and tested, and the two gestures, which are dialogs.
 
 use std::path::PathBuf;
 
-use gpui::{div, prelude::*, uniform_list, Context, SharedString, Window};
-use gpui_component::{
-    button::{Button, ButtonVariants},
-    h_flex,
-    input::Input,
-    v_flex, ActiveTheme, Disableable, Sizable, StyledExt,
-};
+use gpui::{Context, Window};
 
 use crate::git::{Branch, BranchKind};
 use crate::runtime::Cmd;
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
-use crate::ui::icons::icon;
 
 /// One row of the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Row {
+pub(super) enum Row {
     /// A group heading: the locals first, the remotes after.
     Group(BranchKind),
     Branch(BranchRow),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct BranchRow {
-    name: String,
-    kind: BranchKind,
-    is_head: bool,
+pub(super) struct BranchRow {
+    pub(super) name: String,
+    pub(super) kind: BranchKind,
+    pub(super) is_head: bool,
     /// What the branch carries, in one line: its last subject and its date.
-    detail: String,
-    ahead: usize,
-    behind: usize,
+    pub(super) detail: String,
+    pub(super) ahead: usize,
+    pub(super) behind: usize,
     /// Worktree that already holds it. Git refuses two checkouts of the same
     /// branch: saying so beforehand beats an error.
-    taken_by: Option<PathBuf>,
+    pub(super) taken_by: Option<PathBuf>,
 }
 
 impl BranchRow {
     /// Neither checkable out here nor elsewhere: it is already somewhere.
-    fn taken(&self) -> bool {
+    pub(super) fn taken(&self) -> bool {
         self.taken_by.is_some() && !self.is_head
     }
 }
@@ -58,7 +51,7 @@ impl BranchRow {
 ///
 /// A free, tested function: it is this view's only decision — which one
 /// appears, under which group.
-fn rows_for(branches: &[Branch], filter: &str) -> Vec<Row> {
+pub(super) fn rows_for(branches: &[Branch], filter: &str) -> Vec<Row> {
     let needle = filter.trim().to_lowercase();
     let mut rows = Vec::new();
     for kind in [BranchKind::Local, BranchKind::Remote] {
@@ -102,100 +95,7 @@ fn detail(branch: &Branch) -> String {
 }
 
 impl ClaudhubApp {
-    pub(super) fn render_branches(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let Some(worktree) = self.active.clone() else {
-            return div().into_any_element();
-        };
-        let Some(repo) = self.repo_of(&worktree) else {
-            return div().into_any_element();
-        };
-        let main = repo.main.clone();
-        let branch_scroll = self.branch_scroll.clone();
-        let filter = self.branch_filter.read(cx).value().to_string();
-        let rows = std::rc::Rc::new(rows_for(&repo.branches, &filter));
-
-        let header = h_flex()
-            .h(crate::ui::theme::bar_height(cx))
-            .w_full()
-            .px_1()
-            .gap_1()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(
-                div()
-                    .flex_1()
-                    .child(Input::new(&self.branch_filter).xsmall()),
-            )
-            .child(
-                Button::new("new-branch")
-                    .ghost()
-                    .xsmall()
-                    .icon(icon("plus"))
-                    .tooltip(tr!("branch-new"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.prompt_new_branch(window, cx);
-                    })),
-            );
-
-        if rows.is_empty() {
-            return v_flex()
-                .size_full()
-                .child(header)
-                .child(
-                    div()
-                        .p_3()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr!("branch-none")),
-                )
-                .into_any_element();
-        }
-
-        let entity = cx.entity();
-        let count = rows.len();
-        // **A single height for every entry**, group headings included.
-        // `uniform_list` measures one element and reserves its height for all:
-        // giving the heading a one-line height and the branches a two-line one
-        // made every branch spill onto the next, the names drawing over the
-        // previous row's details.
-        let height = crate::ui::theme::tall_row_height(cx);
-
-        v_flex()
-            .size_full()
-            .child(header)
-            .child(
-                div().flex_1().min_h_0().child(
-                    self.scrolled(
-                        "branch-list-bar",
-                        &branch_scroll,
-                        crate::ui::motion::Axes::Vertical,
-                        window,
-                        uniform_list("branch-list", count, move |visible, _window, cx| {
-                            visible
-                                .map(|ix| match rows.get(ix) {
-                                    Some(Row::Group(kind)) => render_group(*kind, height, cx),
-                                    Some(Row::Branch(row)) => render_branch(
-                                        row, ix, &worktree, &main, height, &entity, cx,
-                                    ),
-                                    None => div().into_any_element(),
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .size_full()
-                        .track_scroll(&self.branch_scroll.clone()),
-                        cx,
-                    ),
-                ),
-            )
-            .into_any_element()
-    }
-
-    fn prompt_new_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn prompt_new_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_text_dialog(
             tr!("branch-new"),
             tr!("branch-new-placeholder"),
@@ -223,7 +123,12 @@ impl ClaudhubApp {
     ///
     /// The folder takes the branch's name, slashes becoming dashes:
     /// `origin/feat/x` cannot be a folder name.
-    fn worktree_from_branch(&mut self, main: PathBuf, branch: String, cx: &mut Context<Self>) {
+    pub(super) fn worktree_from_branch(
+        &mut self,
+        main: PathBuf,
+        branch: String,
+        cx: &mut Context<Self>,
+    ) {
         let local = branch
             .strip_prefix("origin/")
             .unwrap_or(&branch)
@@ -245,164 +150,6 @@ impl ClaudhubApp {
         });
         cx.notify();
     }
-}
-
-fn render_group(kind: BranchKind, height: gpui::Pixels, cx: &mut gpui::App) -> gpui::AnyElement {
-    // The title sits at the bottom of its band rather than in its middle: it
-    // announces what follows, and pinning it to its list says better what it
-    // groups than text floating in the centre of a height it does not fill.
-    h_flex()
-        .h(height)
-        .w_full()
-        .px_2()
-        .pb_1()
-        .items_end()
-        .bg(cx.theme().secondary)
-        .text_xs()
-        .font_semibold()
-        .text_color(cx.theme().muted_foreground)
-        .child(match kind {
-            BranchKind::Local => tr!("branches-local"),
-            BranchKind::Remote => tr!("branches-remote"),
-        })
-        .into_any_element()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_branch(
-    row: &BranchRow,
-    index: usize,
-    worktree: &std::path::Path,
-    main: &std::path::Path,
-    height: gpui::Pixels,
-    entity: &gpui::Entity<ClaudhubApp>,
-    cx: &mut gpui::App,
-) -> gpui::AnyElement {
-    let muted = cx.theme().muted_foreground;
-    let taken = row.taken();
-    let detail = if let Some(path) = row.taken_by.as_ref().filter(|_| !row.is_head) {
-        // Where it is checked out matters more than what it carries: that is
-        // what explains why both buttons are disabled.
-        format!(
-            "{} {}",
-            tr!("branch-checked-out"),
-            path.file_name().unwrap_or_default().to_string_lossy()
-        )
-    } else {
-        row.detail.clone()
-    };
-
-    // Two elements and not one: `uniform_list` lays its entries out at a size it
-    // computes itself, and a **margin** on the entry is ignored. The inset is
-    // therefore padding on the container, and it is the child that carries the
-    // rounded background — otherwise a selected row would cross the panel from
-    // edge to edge, which is the graphical gesture of a 2005 file manager.
-    div()
-        .h(height)
-        .w_full()
-        .px_1()
-        .child(
-            h_flex()
-                .id(("branch", index))
-                .size_full()
-                .px_2()
-                .rounded(cx.theme().radius)
-                .gap_2()
-                .items_center()
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .when(row.is_head, |el| el.bg(cx.theme().accent))
-                .hover(|s| s.bg(cx.theme().accent.opacity(0.4)))
-                .child(
-                    icon(match row.kind {
-                        BranchKind::Local => "git-branch",
-                        BranchKind::Remote => "download",
-                    })
-                    .xsmall()
-                    .text_color(muted),
-                )
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .truncate()
-                                .text_sm()
-                                .when(row.is_head, |el| el.font_semibold())
-                                .child(SharedString::from(row.name.clone())),
-                        )
-                        .when(!detail.is_empty(), |el| {
-                            el.child(
-                                div()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .child(SharedString::from(detail)),
-                            )
-                        }),
-                )
-                // Behind before ahead: that is what has to be integrated before
-                // you can push.
-                .when(row.behind > 0, |el| {
-                    el.child(
-                        div()
-                            .flex_none()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(format!("↓{}", row.behind)),
-                    )
-                })
-                .when(row.ahead > 0, |el| {
-                    el.child(
-                        div()
-                            .flex_none()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(format!("↑{}", row.ahead)),
-                    )
-                })
-                .when(!row.is_head, |el| {
-                    let (for_checkout, for_worktree) = (row.name.clone(), row.name.clone());
-                    let (checkout_target, main) = (worktree.to_path_buf(), main.to_path_buf());
-                    let (checkout_entity, worktree_entity) = (entity.clone(), entity.clone());
-                    el.child(
-                        Button::new(("checkout", index))
-                            .ghost()
-                            .xsmall()
-                            .icon(icon("check"))
-                            .tooltip(tr!("branch-checkout"))
-                            .disabled(taken)
-                            .on_click(move |_, _window, cx| {
-                                checkout_entity.update(cx, |this, cx| {
-                                    this.git.send(Cmd::Checkout {
-                                        worktree: checkout_target.clone(),
-                                        branch: for_checkout.clone(),
-                                    });
-                                    cx.notify();
-                                });
-                            }),
-                    )
-                    .child(
-                        Button::new(("worktree-from", index))
-                            .ghost()
-                            .xsmall()
-                            .icon(icon("folder-open"))
-                            .tooltip(tr!("branch-new-worktree"))
-                            .disabled(taken)
-                            .on_click(move |_, _window, cx| {
-                                worktree_entity.update(cx, |this, cx| {
-                                    this.worktree_from_branch(
-                                        main.clone(),
-                                        for_worktree.clone(),
-                                        cx,
-                                    )
-                                });
-                            }),
-                    )
-                }),
-        )
-        .into_any_element()
 }
 
 #[cfg(test)]

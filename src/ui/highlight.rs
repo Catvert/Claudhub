@@ -31,9 +31,10 @@ use crate::git::{DiffLineKind, FileDiff};
 /// Registers the grammars gpui-component does not embed.
 ///
 /// PHP is missing from it, although it is the language of half the repositories
-/// Claudhub serves to review; its grammar is therefore linked directly and
-/// declared in the shared registry, from which the rest of the library will find
-/// it under the name `php` like any other.
+/// Claudhub serves to review; Nix is missing too, and it is what this repository
+/// builds itself with. Both grammars are therefore linked directly and declared
+/// in the shared registry, from which the rest of the library will find them
+/// under the names `php` and `nix` like any other.
 ///
 /// To be called once at startup, before any render: the registry is a locked
 /// singleton, and registering under a keystroke would amount to doing it while a
@@ -52,6 +53,22 @@ pub fn register_languages() {
         "",
     );
     LanguageRegistry::singleton().register("php", &php);
+
+    // Nix injects bash into the phases and hooks of a derivation — `shellHook`,
+    // `buildPhase`, `writeShellScript` — which is where the interesting part of
+    // a `shell.nix` lives; the grammar embedded by gpui-component answers to
+    // that name. The locals query is not registered: the crate ships
+    // `queries/locals.scm` but exposes no constant for it, and the
+    // `#is-not? local` clauses of the highlights simply keep applying.
+    let nix = LanguageConfig::new(
+        "nix",
+        tree_sitter_nix::LANGUAGE.into(),
+        vec!["bash".into()],
+        tree_sitter_nix::HIGHLIGHTS_QUERY,
+        tree_sitter_nix::INJECTIONS_QUERY,
+        "",
+    );
+    LanguageRegistry::singleton().register("nix", &nix);
 }
 
 /// The HTML injection, written here because the crate does not ship it.
@@ -128,7 +145,7 @@ impl DiffHighlights {
         // cost of every opened file.
         let mut highlighter = SyntaxHighlighter::new(language);
         for side in [Side::Old, Side::New] {
-            let (mut text, mut spans) = build_side(diff, side);
+            let (mut text, mut spans) = build_side(diff, side, blade);
             if spans.is_empty() {
                 continue;
             }
@@ -220,16 +237,26 @@ struct Span {
 }
 
 /// Rebuilds one version of the file and records each line's position.
-fn build_side(diff: &FileDiff, side: Side) -> (String, Vec<Span>) {
+///
+/// `blade` masks the markers of the `@php` blocks so the grammar reads their
+/// body as PHP — see `blade::mask_php`. The mask keeps every line's byte length,
+/// so the spans are those of the real text and nothing has to be shifted back.
+fn build_side(diff: &FileDiff, side: Side, blade: bool) -> (String, Vec<Span>) {
     let mut text = String::new();
     let mut spans = Vec::new();
     for (h, hunk) in diff.hunks.iter().enumerate() {
+        // Comment state starts again from scratch at each hunk, as it does in
+        // the overlay: what separates two hunks has been elided.
+        let mut state = blade::State::default();
         for (l, line) in hunk.lines.iter().enumerate() {
             if !side.keeps(line.kind) {
                 continue;
             }
+            let masked = blade
+                .then(|| blade::mask_php(&line.text, &mut state))
+                .flatten();
             let start = text.len();
-            text.push_str(&line.text);
+            text.push_str(masked.as_deref().unwrap_or(&line.text));
             spans.push(Span {
                 hunk: h,
                 line: l,
@@ -288,7 +315,8 @@ fn distribute(
 /// The grammar associated with an extension.
 ///
 /// The list only covers what `gpui-component` embeds with the
-/// `tree-sitter-languages` feature: a missing extension returns `None`, and the
+/// `tree-sitter-languages` feature, plus the two grammars `register_languages`
+/// declares itself: a missing extension returns `None`, and the
 /// view shows bare text rather than wrong highlighting. Some embedded languages
 /// (`swift`, `csharp`, `proto`, `cmake`, `graphql`) have an empty highlight
 /// query upstream; listing them would bring nothing, so they are omitted.
@@ -325,6 +353,7 @@ pub fn language_for_path(path: &Path) -> Option<&'static str> {
         "html" | "htm" => "html",
         "json" => "json",
         "toml" => "toml",
+        "nix" => "nix",
         "yaml" | "yml" => "yaml",
         "sql" => "sql",
         "md" | "markdown" => "markdown",
@@ -500,6 +529,7 @@ mod tests {
         assert_eq!(language_for_path(Path::new("app/index.tsx")), Some("tsx"));
         assert_eq!(language_for_path(Path::new("Makefile")), Some("make"));
         assert_eq!(language_for_path(Path::new("Cargo.toml")), Some("toml"));
+        assert_eq!(language_for_path(Path::new("shell.nix")), Some("nix"));
         // Case-insensitive on the extension.
         assert_eq!(language_for_path(Path::new("SCRIPT.SH")), Some("bash"));
         // Unknown: no highlighting rather than a wrong one.
@@ -515,12 +545,12 @@ mod tests {
             line(DiffLineKind::Added, "let y = 2;"),
         ]);
 
-        let (old_text, old_spans) = build_side(&d, Side::Old);
+        let (old_text, old_spans) = build_side(&d, Side::Old, false);
         assert_eq!(old_text, "fn a() {}\nlet x = 1;\n");
         assert_eq!(old_spans.len(), 2);
         assert_eq!(old_spans[1].line, 1, "the removed line keeps its index");
 
-        let (new_text, new_spans) = build_side(&d, Side::New);
+        let (new_text, new_spans) = build_side(&d, Side::New, false);
         assert_eq!(new_text, "fn a() {}\nlet y = 2;\n");
         assert_eq!(new_spans[1].line, 2, "the added line keeps its own");
     }
@@ -628,6 +658,65 @@ mod php_tests {
             coloured_lines(&diff) > 0,
             "a fragment with no opening tag must be coloured"
         );
+    }
+
+    /// The body of a `@php` block reaches the grammar as PHP, and that is the
+    /// only reason it has colours: without the mask, the whole block is HTML
+    /// text and a dozen lines of real code arrive grey.
+    #[test]
+    fn a_php_block_is_read_as_php() {
+        register_languages();
+        let diff = hunk_of(
+            "<div>\n\
+             @php\n\
+             \x20   $total = 0;\n\
+             \x20   foreach ($lines as $line) { $total += $line->amount; }\n\
+             @endphp\n\
+             </div>",
+        );
+        let styles = DiffHighlights::compute(
+            Path::new("resources/views/invoice.blade.php"),
+            &diff,
+            &HighlightTheme::default_dark(),
+        );
+
+        let line = &diff.hunks[0].lines[3].text;
+        let keyword = styles
+            .line(0, 3)
+            .iter()
+            .find(|(range, _)| &line[range.clone()] == "foreach");
+        assert!(
+            keyword.is_some(),
+            "the block's body stays grey: {:?}",
+            styles.line(0, 3)
+        );
+        assert!(
+            !styles.line(0, 1).is_empty() && !styles.line(0, 4).is_empty(),
+            "and the markers keep their directive colour"
+        );
+    }
+
+    /// Nix is registered by hand like PHP, and a registration that does not take
+    /// raises no error: it gives a file with no colours, which is exactly what
+    /// the absence of a grammar gives.
+    #[test]
+    fn a_nix_derivation_is_coloured() {
+        register_languages();
+        let diff = hunk_of(
+            "let\n\
+             \x20 pkgs = import <nixpkgs> { };\n\
+             in\n\
+             pkgs.mkShell { buildInputs = [ pkgs.rustc ]; }",
+        );
+        let styles = DiffHighlights::compute(
+            Path::new("shell.nix"),
+            &diff,
+            &HighlightTheme::default_dark(),
+        );
+        let coloured = (0..diff.hunks[0].lines.len())
+            .filter(|line| !styles.line(0, *line).is_empty())
+            .count();
+        assert!(coloured > 0, "a nix file must be coloured");
     }
 
     /// End to end: a Blade view crosses the PHP grammar *and* the overlay, and

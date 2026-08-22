@@ -21,7 +21,6 @@ pub struct RepoState {
     /// stays inactive — offering an assumed `main` would produce an "unknown
     /// revision" on any repository not called that.
     pub default_base: Option<String>,
-    pub collapsed: bool,
 }
 
 /// A remembered repository we could not open.
@@ -65,11 +64,6 @@ impl Repos {
         self.open.is_empty()
     }
 
-    /// The main repositories, which is what the background sweep works from.
-    pub fn mains(&self) -> Vec<PathBuf> {
-        self.open.iter().map(|repo| repo.main.clone()).collect()
-    }
-
     pub fn get_mut(&mut self, main: &Path) -> Option<&mut RepoState> {
         self.open.iter_mut().find(|repo| repo.main == main)
     }
@@ -91,7 +85,6 @@ impl Repos {
             worktrees,
             branches: Vec::new(),
             default_base: None,
-            collapsed: false,
         });
         true
     }
@@ -106,16 +99,6 @@ impl Repos {
         self.open.retain(|repo| repo.main != main);
         self.missing.retain(|repo| repo.path != main);
         closed
-    }
-
-    /// Folds or unfolds the repository at that row.
-    ///
-    /// By index and not by path: the sidebar's rows carry their index, and it
-    /// is the same list in the same order.
-    pub fn toggle_collapse(&mut self, ix: usize) {
-        if let Some(repo) = self.open.get_mut(ix) {
-            repo.collapsed = !repo.collapsed;
-        }
     }
 
     /// Records a repository that would not open, and says whether it is new.
@@ -264,7 +247,6 @@ mod tests {
             vec![PathBuf::from("/p/api")]
         );
         assert!(repos.missing().is_empty());
-        assert_eq!(repos.mains(), vec![PathBuf::from("/p/site")]);
     }
 
     #[test]
@@ -280,20 +262,18 @@ mod tests {
     }
 
     #[test]
-    fn the_numbered_shortcuts_follow_the_sidebar() {
-        let mut repos = repos();
-        let order = vec![
-            PathBuf::from("/p/site"),
-            PathBuf::from("/p/site-fix"),
-            PathBuf::from("/p/api"),
-        ];
-        assert_eq!(repos.worktrees_in_order(), order);
-        // Collapsing a repository must not move what `Ctrl+3` names.
-        repos
-            .get_mut(Path::new("/p/site"))
-            .expect("the repo")
-            .collapsed = true;
-        assert_eq!(repos.worktrees_in_order(), order);
+    fn the_numbered_shortcuts_follow_the_picker() {
+        let repos = repos();
+        // The order the picker lists them in, repository by repository: that is
+        // what `Ctrl+3` names, and it must not depend on anything else.
+        assert_eq!(
+            repos.worktrees_in_order(),
+            vec![
+                PathBuf::from("/p/site"),
+                PathBuf::from("/p/site-fix"),
+                PathBuf::from("/p/api"),
+            ]
+        );
         assert_eq!(repos.first_worktree(), Some(PathBuf::from("/p/site")));
     }
 

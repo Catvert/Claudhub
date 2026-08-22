@@ -199,14 +199,6 @@ pub fn row_height(cx: &App) -> Pixels {
     scaled(cx, 1.9, px(22.))
 }
 
-/// The height of a list row carrying two lines of text.
-///
-/// A single-line height would make the second line spill onto the next row —
-/// virtualised lists measure nothing and reserve exactly what they are told.
-pub fn tall_row_height(cx: &App) -> Pixels {
-    scaled(cx, 3.0, px(34.))
-}
-
 /// The height of a header bar: tabs, panel titles.
 pub fn bar_height(cx: &App) -> Pixels {
     scaled(cx, 2.2, px(26.))

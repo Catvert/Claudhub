@@ -19,9 +19,9 @@ use serde::{Deserialize, Serialize};
 
 /// Embedded interface font. It is always available, which makes it the only
 /// default we can promise.
-pub const DEFAULT_UI_FONT: &str = "Inter";
-/// Embedded fixed-pitch font, the terminal's and the diffs'.
-pub const DEFAULT_MONO_FONT: &str = "JetBrains Mono";
+pub const DEFAULT_UI_FONT: &str = "Iosevka Aile";
+/// Embedded fixed-pitch font, the terminal's, the editor's and the diffs'.
+pub const DEFAULT_MONO_FONT: &str = "Iosevka Nerd Font Mono";
 
 /// What writes a commit message when nothing is configured.
 ///
@@ -434,6 +434,13 @@ pub struct Settings {
     /// connection does not belong to a repository: one reviews a project in
     /// several worktrees and the development database is the same.
     pub databases: Vec<crate::db::Connection>,
+    /// The keyboard shortcuts the user has changed: binding id → keystrokes.
+    ///
+    /// Only what differs from ours — the table stays the reference, and a
+    /// version of Claudhub that adds a shortcut must not need this file to say
+    /// anything about it. An empty value switches a binding **off**: the line
+    /// stays, so one sees what one has turned off. See `ui::shortcuts`.
+    pub shortcuts: std::collections::BTreeMap<String, String>,
     /// Rows returned per page in the SQL console.
     ///
     /// One page and not the whole result: a `SELECT *` on a two-million-row
@@ -463,7 +470,7 @@ impl Default for Settings {
             update_with_rebase: false,
             integrate_no_ff: true,
             external_editor: String::new(),
-            show_ignored_files: false,
+            show_ignored_files: true,
             auto_fetch_minutes: 10,
             commit_message_command: DEFAULT_COMMIT_MESSAGE_COMMAND.into(),
             sentry_org: String::new(),
@@ -474,6 +481,7 @@ impl Default for Settings {
             wsl_distro: String::new(),
             hidden_panels: Vec::new(),
             databases: Vec::new(),
+            shortcuts: std::collections::BTreeMap::new(),
             db_page_size: 500,
         }
     }
@@ -1126,7 +1134,7 @@ mod tests {
 
         // Without the filter, the interface sees everything — except the private families.
         let all = font_choices(&installed, false, DEFAULT_UI_FONT);
-        assert_eq!(all, vec!["Fira Code", "Inter"]);
+        assert_eq!(all, vec!["Fira Code", "Inter", DEFAULT_UI_FONT]);
     }
 
     #[test]

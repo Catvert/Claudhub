@@ -118,6 +118,24 @@ impl Rendered {
         out
     }
 
+    /// Which hunk a displayed entry belongs to.
+    ///
+    /// It is what says "you are here": the entry under the selection names a
+    /// hunk, and every row of that hunk is marked. A paired entry answers by
+    /// its old half, and by its new one when the old is empty — both belong to
+    /// the same hunk anyway.
+    pub fn hunk_of(&self, index: usize, split: bool) -> Option<usize> {
+        if !split {
+            return match self.rows.get(index)? {
+                Row::Header { hunk } | Row::Line { hunk, .. } => Some(*hunk),
+            };
+        }
+        match self.split.get(index)? {
+            SplitRow::Header { hunk, .. } => Some(*hunk),
+            SplitRow::Pair { old, new } => old.or(*new).and_then(|row| self.hunk_of(row, false)),
+        }
+    }
+
     /// The indices of a hunk's first and last line.
     pub fn hunk_bounds(&self, hunk: usize) -> Option<(usize, usize)> {
         let first = self
@@ -838,7 +856,7 @@ impl ClaudhubApp {
             .and_then(|state| state.diff_selection)
             .map(|(_, head)| head);
         match next_header(&headers, from, delta) {
-            Some(target) => self.move_diff_selection(target, target, cx),
+            Some(target) => self.move_diff_selection_to_hunk(target, cx),
             None => self.step_file_to_a_hunk(delta, cx),
         }
     }
@@ -865,6 +883,19 @@ impl ClaudhubApp {
         } else {
             crate::ui::app::Jump::Last
         });
+    }
+
+    /// Selects a hunk's header and brings it to the top of the view.
+    ///
+    /// Apart from the scrolling, `move_diff_selection`: what changes is that the
+    /// view **always** moves, see `reveal_diff_row_strict`.
+    fn move_diff_selection_to_hunk(&mut self, target: usize, cx: &mut Context<Self>) {
+        let Some(state) = self.active_review_mut() else {
+            return;
+        };
+        state.diff_selection = Some((target, target));
+        self.reveal_diff_row_strict(target, cx);
+        cx.notify();
     }
 
     fn move_diff_selection(&mut self, anchor: usize, head: usize, cx: &mut Context<Self>) {
@@ -1037,6 +1068,14 @@ impl ClaudhubApp {
             .map(|state| state.note_marks.clone())
             .unwrap_or_default();
         let note_color = cx.theme().warning;
+        // Which hunk is being read, from the entry the selection ends on. It is
+        // computed here and not in the closure below, which runs for every
+        // visible entry of every frame.
+        let current_hunk = self
+            .active_review()
+            .and_then(|state| state.diff_selection)
+            .and_then(|(_, head)| diff.hunk_of(head, split));
+        let hunk_color = cx.theme().primary;
         // The hits are filed by line on every change of query or of diff, and the
         // closure below only looks them up: it runs for every visible line of
         // every frame.
@@ -1059,6 +1098,8 @@ impl ClaudhubApp {
                 selection_bg,
                 annotated: marks.at(ix, split),
                 note_color,
+                current_hunk: current_hunk.is_some() && rows.hunk_of(ix, split) == current_hunk,
+                hunk_color,
             };
             if split {
                 render_split_row(
@@ -1582,6 +1623,25 @@ pub struct RowStyle {
     /// A note is about this entry.
     pub annotated: bool,
     pub note_color: gpui::Hsla,
+    /// The entry belongs to the hunk the selection is in.
+    pub current_hunk: bool,
+    pub hunk_color: gpui::Hsla,
+}
+
+impl RowStyle {
+    /// The rule that says which hunk one is reading.
+    ///
+    /// A **border** and not a child strip: it is outside the padding, so it
+    /// lands at the same place on a header — which is padded — and on a line,
+    /// which is not. Always there, transparent when it is not the current one:
+    /// a width that appears and disappears would shift the whole row.
+    fn hunk_rule<E: Styled>(&self, el: E) -> E {
+        el.border_l_2().border_color(if self.current_hunk {
+            self.hunk_color
+        } else {
+            gpui::transparent_black()
+        })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1612,7 +1672,7 @@ fn render_row(
 
             let for_drag = entity.clone();
             let entity = entity.clone();
-            h_flex()
+            let row = h_flex()
                 .id(("line", index))
                 .h(style.line_height)
                 .min_w(content_width)
@@ -1643,8 +1703,8 @@ fn render_row(
                         .when_some(fg, |el, fg| el.text_color(fg))
                         .child(sign(source.kind)),
                 )
-                .child(content)
-                .into_any_element()
+                .child(content);
+            style.hunk_rule(row).into_any_element()
         }
     }
 }
@@ -1673,7 +1733,7 @@ fn render_header(
     let for_copy = entity.clone();
     let for_click = entity.clone();
     let for_drag = entity.clone();
-    h_flex()
+    let row = h_flex()
         .id(("hunk", index))
         .h(line_height)
         .min_w(content_width)
@@ -1721,8 +1781,8 @@ fn render_header(
                         entity.update(cx, |this, cx| this.apply_hunk(patch.clone(), cx));
                     }),
             )
-        })
-        .into_any_element()
+        });
+    style.hunk_rule(row).into_any_element()
 }
 
 fn line_colors(
@@ -1827,7 +1887,7 @@ fn render_split_row(
     };
     let for_drag = entity.clone();
     let for_click = entity.clone();
-    h_flex()
+    let row = h_flex()
         .id(("pair", index))
         .h(style.line_height * lines as f32)
         .items_start()
@@ -1858,8 +1918,8 @@ fn render_split_row(
             cols,
             lines,
             search,
-        ))
-        .into_any_element()
+        ));
+    style.hunk_rule(row).into_any_element()
 }
 
 /// The margin rule of an annotated row.
@@ -2234,6 +2294,36 @@ mod tests {
             3,
             "the addition and the removal sit on one entry"
         );
+    }
+
+    /// The rule down the side says which hunk one is reading: every entry of
+    /// that hunk carries it, in both layouts, and a paired entry answers by
+    /// whichever half it has.
+    #[test]
+    fn every_entry_names_the_hunk_it_belongs_to() {
+        let diff = FileDiff {
+            hunks: vec![
+                hunk("@@ a @@", &[DiffLineKind::Context, DiffLineKind::Removed]),
+                hunk("@@ b @@", &[DiffLineKind::Added]),
+            ],
+            binary: false,
+            empty: false,
+        };
+        let rendered = Rendered::new(Path::new("x.txt"), diff, &Theme::default_dark());
+        let unified: Vec<Option<usize>> = (0..rendered.len(false))
+            .map(|ix| rendered.hunk_of(ix, false))
+            .collect();
+        assert_eq!(
+            unified,
+            vec![Some(0), Some(0), Some(0), Some(1), Some(1)],
+            "header then lines, hunk by hunk"
+        );
+        let split: Vec<Option<usize>> = (0..rendered.len(true))
+            .map(|ix| rendered.hunk_of(ix, true))
+            .collect();
+        assert_eq!(split, vec![Some(0), Some(0), Some(0), Some(1), Some(1)]);
+        // Past the end there is no hunk, and no rule to paint.
+        assert_eq!(rendered.hunk_of(rendered.len(false), false), None);
     }
 
     #[test]

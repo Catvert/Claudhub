@@ -17,10 +17,9 @@ use gpui_component::{
     dock::{DockArea, DockSkin},
     h_flex,
     input::{InputState, TextareaState},
-    menu::{DropdownMenu, PopupMenuItem},
     select::{SearchableVec, SelectEvent, SelectState},
     separator::Separator as Divider,
-    v_flex, ActiveTheme, Root, Selectable, Sizable, StyledExt, TitleBar, WindowExt,
+    v_flex, ActiveTheme, Root, Selectable, Sizable, WindowExt,
 };
 
 use crate::git::{Branch, Commit, DiffFile, DiffRange, GraphRow, LogRange, Status, Worktree};
@@ -44,7 +43,13 @@ use crate::ui::terminal_view::OpenTerminal;
 // 11: the screens. The file no longer carries one layout but one per screen, and the
 // central panel split into three — a file from before has neither the shape nor
 // the names needed.
-const LAYOUT_VERSION: usize = 12;
+// 13: the repositories and the branches stopped being panels — the top bar
+// carries them as pickers. A layout from before names two panels the registry
+// can no longer build, and three screens lost their left column with them.
+// 14: the notes left the tabs for the bottom third of the review's column. A
+// saved layout would keep them where they were, which is the one place this
+// change is about.
+const LAYOUT_VERSION: usize = 14;
 
 /// The saved layouts, one per screen.
 ///
@@ -324,6 +329,9 @@ pub struct ClaudhubApp {
     pub(super) server_wsl: bool,
     /// The selected worktree: the key to almost everything else.
     pub(super) active: Option<PathBuf>,
+    /// Whether the session's first terminal has been opened. See
+    /// `select_worktree`: it happens once, on the first worktree shown.
+    terminal_started: bool,
     pub(super) review: HashMap<PathBuf, ReviewState>,
     /// Every open terminal, in the order they were opened, all worktrees
     /// together. Each is a dock panel per screen sharing one pty — see
@@ -514,7 +522,6 @@ pub struct ClaudhubApp {
     /// its own. The two are never shown at the same time.
     pub(super) diff_wrap_scroll: gpui_component::VirtualListScrollHandle,
     pub(super) history_scroll: gpui::UniformListScrollHandle,
-    pub(super) branch_scroll: gpui::UniformListScrollHandle,
     /// The file lists' scrolling, **one per range**: "Review" and "Changes" are
     /// shown at the same time, and a single handle would scroll them together.
     file_scroll: HashMap<DiffRange, gpui::UniformListScrollHandle>,
@@ -537,9 +544,6 @@ pub struct ClaudhubApp {
     /// The wheel smoothing, per panel, created on its first use. The key is the
     /// scrollbar's — see `ui::scroll`.
     pub(super) motions: HashMap<gpui::SharedString, crate::ui::motion::ScrollMotion>,
-    /// The branches panel's filter. An entity created once: recreated per frame,
-    /// it would lose the cursor and the text on the first keystroke.
-    pub(super) branch_filter: Entity<InputState>,
     /// The split between the graph and the chosen commit's file list.
     pub(super) history_split: Entity<gpui_component::resizable::ResizableState>,
     /// The write operations in flight — what the buttons carrying a spinner
@@ -564,7 +568,13 @@ pub struct ClaudhubApp {
     /// The log records, copied from the ring only when it has moved.
     pub(super) logs: std::rc::Rc<Vec<crate::logging::Entry>>,
     pub(super) logs_seen: u64,
-    focus: FocusHandle,
+    /// The root's focus, and what a gesture hands the keyboard back to.
+    ///
+    /// A focus handle nobody renders any more resolves no binding: whatever
+    /// removes a focused element from the tree — hiding the terminals, closing
+    /// one — has to say where the focus goes, or every shortcut stays dead
+    /// until a click lands on a live node.
+    pub(super) focus: FocusHandle,
 }
 
 /// The SQL console's entities, handed to the constructor in one piece.
@@ -585,42 +595,6 @@ struct Docks {
     /// written at once: without that, the file keeps an earlier version's until
     /// the first move.
     needs_save: bool,
-}
-
-/// One row of the views menu: the tick, the name, and the gesture that toggles it.
-///
-/// A `PopupMenuItem::element` and not an ordinary entry, for two reasons both of
-/// which come down to the same thing — **several of them get toggled in a row**:
-///
-/// - `PopupMenu::confirm` **closes the menu** after calling an entry's handler,
-///   with no way to prevent it. The row therefore consumes the click itself
-///   (`stop_propagation`): the entry carrying it never sees it, and nothing
-///   closes.
-/// - A `checked` is frozen at the menu's construction, which happens only once.
-///   The tick is therefore painted by the row, which re-reads the state on every
-///   frame.
-fn view_toggle(app: Entity<ClaudhubApp>, name: &'static str, title: &'static str) -> PopupMenuItem {
-    PopupMenuItem::element(move |_window, cx| {
-        let visible = app.read(cx).panel_visible(name);
-        let app = app.clone();
-        h_flex()
-            .id(name)
-            .w_full()
-            .gap_2()
-            .items_center()
-            // The tick's column is reserved permanently: without it, the names
-            // would jump one notch on every toggle.
-            .child(
-                div()
-                    .w(px(14.))
-                    .when(visible, |this| this.child(icon("check").xsmall())),
-            )
-            .child(tr!(title))
-            .on_click(move |_, _window, cx| {
-                cx.stop_propagation();
-                app.update(cx, |this, cx| this.toggle_panel(name, cx));
-            })
-    })
 }
 
 impl ClaudhubApp {
@@ -647,9 +621,6 @@ impl ClaudhubApp {
 
         let commit_input =
             cx.new(|cx| TextareaState::new(window, cx).placeholder(tr!("commit-placeholder")));
-
-        let branch_filter =
-            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("branch-filter-placeholder")));
 
         // `auto_grow` rather than a fixed height: a review remark is two lines
         // or ten, and a frozen area forces scrolling what is being written.
@@ -721,6 +692,7 @@ impl ClaudhubApp {
             wsl_prompt: None,
             server_wsl: false,
             active: None,
+            terminal_started: false,
             review: HashMap::new(),
             terminals: Vec::new(),
             commit_input,
@@ -770,7 +742,6 @@ impl ClaudhubApp {
             diff_measures: 0,
             diff_wrap_scroll: gpui_component::VirtualListScrollHandle::new(),
             history_scroll: gpui::UniformListScrollHandle::new(),
-            branch_scroll: gpui::UniformListScrollHandle::new(),
             file_scroll: HashMap::new(),
             scrolls: HashMap::new(),
             motions: HashMap::new(),
@@ -780,7 +751,6 @@ impl ClaudhubApp {
             // the only one that is always there.
             pane: crate::ui::find::Pane::Diff,
             diff_search: crate::ui::find::DiffSearch::default(),
-            branch_filter,
             history_split: cx.new(|_| gpui_component::resizable::ResizableState::default()),
             flight: crate::ui::inflight::InFlight::default(),
             settings_page: Default::default(),
@@ -810,6 +780,12 @@ impl ClaudhubApp {
                 .ok();
         })
         .detach();
+        // The window opens with the focus nowhere, and a focus handle nobody
+        // holds puts no context on the stack: **every** shortcut was dead until
+        // the first click landed on a live node. It is not a courtesy to the
+        // keyboard, it is what makes the bindings resolve at all — same defect
+        // as hiding a focused terminal, one step earlier.
+        window.focus(&app.focus, cx);
         app
     }
 
@@ -1311,7 +1287,7 @@ impl ClaudhubApp {
                 worktree,
                 action,
                 message,
-            } => self.action_failed(worktree, action, message),
+            } => self.action_failed(worktree, action, message, window, cx),
             Evt::Fetched { main } => self.fetched(main),
             Evt::CommitMessage { worktree, message } => {
                 self.commit_message_arrived(worktree, message, window, cx)
@@ -1356,7 +1332,11 @@ impl ClaudhubApp {
             Evt::IssueEvent { issue, event } => self.issue_event_arrived(issue, event, cx),
 
             // — Files and vault ———————————————————————————————————
-            Evt::ProjectFiles { worktree, files } => self.project_files_arrived(worktree, files),
+            Evt::ProjectFiles {
+                worktree,
+                files,
+                ignored,
+            } => self.project_files_arrived(worktree, files, ignored),
             Evt::FileContent {
                 worktree,
                 path,
@@ -1616,7 +1596,10 @@ impl ClaudhubApp {
         if let Some(id) = note {
             self.select_note_rows(id, cx);
         } else if let Some(row) = jumped {
-            self.reveal_diff_row(row, gpui::ScrollStrategy::Top, cx);
+            // The same strictness as a hunk step, which is what this is the tail
+            // of: entering the neighbouring file by the end one came from puts
+            // that hunk at the top, not wherever the list happened to be.
+            self.reveal_diff_row_strict(row, cx);
         }
     }
 
@@ -1691,12 +1674,20 @@ impl ClaudhubApp {
                 input.set_value("", window, cx);
             });
         }
-        let text = if output.trim().is_empty() {
-            tr!(action.success_key())
-        } else {
-            SharedString::from(output.trim().to_string())
+        // The bar keeps one line and the balloon takes the rest: a `git pull`
+        // answers with a file per line, and poured into a bar one line high
+        // that text does not truncate — it wraps over the window. See
+        // `ui::notify`.
+        let text = match crate::ui::notify::headline(&output) {
+            Some(line) => SharedString::from(line),
+            None => tr!(action.success_key()),
         };
         self.toast = Some(Toast { text, error: false });
+        self.notify(
+            crate::ui::notify::notice(action, &output, crate::ui::notify::Level::Success),
+            window,
+            cx,
+        );
         // The integration has succeeded: what is left is to decide the fate of
         // the worktree and its branch, which `wt` deliberately keeps.
         if action == Action::Integrate {
@@ -1713,7 +1704,14 @@ impl ClaudhubApp {
         }
     }
 
-    fn action_failed(&mut self, worktree: Option<PathBuf>, action: Action, message: String) {
+    fn action_failed(
+        &mut self,
+        worktree: Option<PathBuf>,
+        action: Action,
+        message: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.finish(&worktree, action);
         // Without this, a status that fails once — repository briefly locked,
         // disk busy — would block every later refresh of that worktree for good.
@@ -1736,10 +1734,54 @@ impl ClaudhubApp {
                 self.project_files_failed(worktree);
             }
         }
-        self.toast = Some(Toast {
-            text: SharedString::from(message),
-            error: true,
-        });
+        let text = match crate::ui::notify::headline(&message) {
+            Some(line) => SharedString::from(line),
+            None => tr!(action.success_key()),
+        };
+        self.toast = Some(Toast { text, error: true });
+        // A failure always gets one: the bar is overwritten by the next message
+        // that goes through it, and this is what one comes back to read.
+        self.notify(
+            crate::ui::notify::notice(action, &message, crate::ui::notify::Level::Error),
+            window,
+            cx,
+        );
+    }
+
+    /// Puts an outcome on screen as a balloon, if it earned one.
+    ///
+    /// The decision is `ui::notify`'s and is tested there; what is left here is
+    /// the gpui-component call. `Root` already re-emits the notification layer
+    /// at the end of the root view's render — see "Conventions gpui" — so
+    /// nothing else is needed to make it appear.
+    fn notify(
+        &mut self,
+        notice: Option<crate::ui::notify::Notice>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(notice) = notice else {
+            return;
+        };
+        let kind = match notice.level {
+            crate::ui::notify::Level::Success => {
+                gpui_component::notification::NotificationType::Success
+            }
+            crate::ui::notify::Level::Error => {
+                gpui_component::notification::NotificationType::Error
+            }
+        };
+        window.push_notification(
+            gpui_component::notification::Notification::new()
+                .with_type(kind)
+                .title(tr!(notice.title))
+                .message(SharedString::from(notice.body))
+                // A failure stays until it is dismissed: it is the one thing
+                // here that is read late, and a balloon that fades on its own
+                // is a message one finds gone on coming back to it.
+                .autohide(notice.level == crate::ui::notify::Level::Success),
+            cx,
+        );
     }
 
     // — Operations in flight ——————————————————————————————————————
@@ -1975,6 +2017,17 @@ impl ClaudhubApp {
         // Every worktree has its base: the selector has to show this one, not
         // the one of the worktree just left.
         self.refresh_base_choices(window, cx);
+        // The first worktree of the session opens with a terminal. It is what
+        // one talks to while reviewing, and the first gesture of every session
+        // was `Ctrl+T` — a shell that has to be asked for is a shell one asks
+        // for every time. Only the first: opening one per worktree visited
+        // would leave a dozen shells behind an afternoon's browsing, and the
+        // terminals one has closed must stay closed.
+        if !self.terminal_started {
+            self.terminal_started = true;
+            let worktree = self.active.clone().unwrap_or_default();
+            self.ensure_terminal(&worktree, window, cx);
+        }
         cx.notify();
     }
 
@@ -2295,12 +2348,43 @@ impl ClaudhubApp {
         }
     }
 
-    /// Brings a diff entry into view.
+    /// Brings a diff entry into view, without moving if it is already there.
+    ///
+    /// That is what an arrow moving one line at a time wants: a line already on
+    /// screen must not make the view jump under the eye.
     pub(super) fn reveal_diff_row(&self, row: usize, strategy: gpui::ScrollStrategy, cx: &App) {
         if self.diff_wrapped(cx) {
             self.diff_wrap_scroll.scroll_to_item(row, strategy);
         } else {
             self.diff_scroll.scroll_to_item(row, strategy);
+        }
+    }
+
+    /// Brings a diff entry **to the top of the view**, visible or not.
+    ///
+    /// Going from one hunk to the next is not going one line further: gpui's
+    /// `scroll_to_item` does nothing when the target is already on screen, so
+    /// the key moved the selection by four hundred lines and the view not at
+    /// all — which reads as a key that does nothing, the more so as nothing
+    /// said which hunk one was on. The hunk one has just asked for therefore
+    /// goes to the top, where it is read from.
+    ///
+    /// The wrapped list has no strict variant (`scroll_strict` is hard-coded in
+    /// gpui-component), hence the two steps: put the list at the top first, so
+    /// the target is necessarily below the viewport and the `Top` strategy has
+    /// to bring it up. Both happen before the frame is painted, so nothing
+    /// flashes.
+    pub(super) fn reveal_diff_row_strict(&self, row: usize, cx: &App) {
+        use crate::ui::scroll::Scrollable;
+        if self.diff_wrapped(cx) {
+            self.diff_wrap_scroll
+                .base()
+                .set_offset(gpui::Point::default());
+            self.diff_wrap_scroll
+                .scroll_to_item(row, gpui::ScrollStrategy::Top);
+        } else {
+            self.diff_scroll
+                .scroll_to_item_strict(row, gpui::ScrollStrategy::Top);
         }
     }
 
@@ -2399,113 +2483,6 @@ impl ClaudhubApp {
 
     // — Rendering ——————————————————————————————————————————————————
 
-    fn render_topbar(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let worktree = self.active_worktree();
-        let label = worktree
-            .map(|w| w.label())
-            .unwrap_or_else(|| tr!("no-worktree").to_string());
-
-        // The top bar **is** the window's title bar.
-        //
-        // `TitleBar::title_bar_options()` asks the platform not to draw one: on
-        // Windows the window therefore had nothing left to be moved, minimised
-        // or closed by. One is needed, and stacking one above this would cost
-        // thirty pixels to repeat what it already says — that is the reasoning
-        // that moved the screen picker down into the status bar. `TitleBar`
-        // brings the drag, the double click that maximises and the window
-        // buttons; our actions live inside it. It keeps our height and our
-        // colours, not its own.
-        //
-        // The buttons placed in the drag region stay clickable: the region is
-        // returned as `HTCAPTION`, but gpui handles non-client mouse messages
-        // and redistributes them. It is what Zed's title bar does, on the same
-        // terms.
-        TitleBar::new()
-            .h(super::theme::toolbar_height(cx))
-            .border_color(cx.theme().border)
-            .bg(cx.theme().title_bar)
-            .child(
-                h_flex()
-                    .w_full()
-                    .h_full()
-                    .pr_2()
-                    .gap_2()
-                    .items_center()
-                    .child(self.render_main_menu(cx))
-                    // The worktree, and nothing else: the branch and its
-                    // divergence have moved down into the status bar, which
-                    // carried only an occasional message while this one
-                    // overflowed.
-                    .child(div().font_semibold().text_sm().child(label))
-                    // Nothing on the right any more, and the space is not lost:
-                    // it is the window's drag region. Neither `fetch`, nor
-                    // `pull`, nor `push` — they have moved down into the
-                    // "Changes" panel's bar, where the rest of the gesture
-                    // happens: tick, commit, push. The history and the branches
-                    // are dock tabs. And the terminals have gone down to the
-                    // status bar, at the corner of the window they open on.
-                    .child(div().flex_1()),
-            )
-    }
-
-    /// The application's menu.
-    ///
-    /// A single entry point for what is not about the repository being looked at
-    /// — settings, layout, quit — rather than buttons scattered through a
-    /// toolbar that talks about the current worktree.
-    fn render_main_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let entity = cx.entity();
-        Button::new("main-menu")
-            .ghost()
-            .small()
-            .icon(icon("menu"))
-            .tooltip(tr!("menu-title"))
-            .dropdown_menu(move |menu, window, cx| {
-                let entity = entity.clone();
-                let for_reset = entity.clone();
-                let for_shortcuts = entity.clone();
-                let for_views = entity.clone();
-                menu.item(PopupMenuItem::new(tr!("settings-title")).on_click(
-                    move |_, window, cx| {
-                        entity.update(cx, |this, cx| this.open_settings(window, cx));
-                    },
-                ))
-                // The shortcuts are what one looks for when one no longer knows:
-                // they therefore live where one goes looking, beside the
-                // settings, and not in a help one would have to guess at.
-                .item(
-                    PopupMenuItem::new(tr!("shortcuts-title")).on_click(move |_, window, cx| {
-                        for_shortcuts.update(cx, |this, cx| this.open_shortcuts(window, cx));
-                    }),
-                )
-                // Hidden views have no tab left: this is the only place to call
-                // them back from, and therefore the only place that says what the
-                // window is not showing.
-                // The views of **this screen**, and not the eleven of the window:
-                // hiding the SQL console from the review would make nothing
-                // visibly change, and an entry with no effect reads as a broken
-                // entry.
-                .submenu(tr!("menu-views"), window, cx, move |menu, _window, cx| {
-                    let views = for_views.read(cx).workspace.views();
-                    views.iter().fold(menu, |menu, &(name, title)| {
-                        menu.item(view_toggle(for_views.clone(), name, title))
-                    })
-                })
-                .item(PopupMenuItem::new(tr!("menu-reset-layout")).on_click(
-                    move |_, window, cx| {
-                        for_reset.update(cx, |this, cx| this.reset_layout(window, cx));
-                    },
-                ))
-                .separator()
-                .item(PopupMenuItem::new(tr!("menu-quit")).on_click(|_, _window, cx| cx.quit()))
-            })
-    }
-
-    /// The status bar: where one is, and what has just happened.
-    ///
-    /// The branch and its divergence live there because they almost never change
-    /// and have no business taking up the toolbar; the message, for its part, is
-    /// occasional, and a bar carrying only it stays empty most of the time.
     /// The operations under way, in the status bar.
     ///
     /// Named and not merely counted: "3 operations" says nothing, where
@@ -2538,14 +2515,6 @@ impl ClaudhubApp {
             Some(t) => (t.text.clone(), t.error),
             None => (SharedString::default(), false),
         };
-        let branch = self
-            .active_worktree()
-            .and_then(|w| w.branch.clone())
-            .unwrap_or_else(|| tr!("branch-detached").to_string());
-        let (ahead, behind) = self
-            .active_review()
-            .map(|r| (r.status.ahead, r.status.behind))
-            .unwrap_or((0, 0));
         // On a Windows drive mounted by WSL, watching reports nothing: saying so
         // is the only way to tell "nothing has changed" from "Claudhub no longer
         // sees anything". The computation is redone on every frame because it
@@ -2574,20 +2543,11 @@ impl ClaudhubApp {
             .bg(cx.theme().title_bar)
             .text_xs()
             .text_color(muted)
-            // The screen picker opens the bar: it is the broadest of the three
-            // ways of saying where one is, and the other two — the branch, the
-            // lead over the upstream — line up behind it.
+            // The screen picker opens the bar. The branch and its divergence
+            // used to line up behind it; they have gone back up to the top bar,
+            // where they are a button one clicks rather than a word one reads.
             .child(self.render_workspace_nav(cx))
             .child(Divider::vertical().h(px(12.)))
-            .when(self.active.is_some(), |el| {
-                el.child(icon("git-branch").xsmall())
-                    .child(div().max_w(px(220.)).truncate().child(branch))
-                    // Behind before ahead: that is what has to be integrated
-                    // before one can push.
-                    .when(behind > 0, |el| el.child(format!("↓{behind}")))
-                    .when(ahead > 0, |el| el.child(format!("↑{ahead}")))
-                    .child(Divider::vertical().h(px(12.)))
-            })
             // What is running right now, before what has finished: a menu entry
             // closes on the click, so an integration, a rebase or a `wt rm` has
             // no button of its own to turn, and this line is the only thing
@@ -2937,7 +2897,18 @@ impl ClaudhubApp {
         if self.terminal_visible(cx) {
             if let Some(worktree) = worktree {
                 self.ensure_terminal(&worktree, window, cx);
+                // And the focus goes with it: the gesture is "I want a terminal
+                // now", and one that has to be clicked before it takes a
+                // keystroke is a gesture left half done.
+                self.focus_terminal(&worktree, window, cx);
             }
+        } else {
+            // Hiding takes the focus back to the root, and it is not a courtesy.
+            // What was focused was the terminal this gesture just removed from
+            // the tree; a focus handle nobody renders any more resolves no
+            // binding, so `Ctrl+T` did nothing at all until a click somewhere
+            // put the focus back on a live node.
+            window.focus(&self.focus, cx);
         }
     }
 

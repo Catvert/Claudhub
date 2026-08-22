@@ -23,6 +23,7 @@ mod inflight;
 mod motion;
 mod notes;
 pub(crate) mod notes_view;
+mod notify;
 mod panels;
 mod repos;
 mod review;
@@ -33,10 +34,10 @@ mod settings;
 mod settings_view;
 mod shortcuts;
 mod shortcuts_view;
-mod sidebar;
 mod store;
 mod terminal_view;
 mod theme;
+mod topbar;
 mod tree;
 mod vault;
 mod workspace;
@@ -48,11 +49,19 @@ use rust_embed::RustEmbed;
 
 pub use settings::{split_command, LanguageChoice, Settings, ThemeMode};
 
-/// Interface and body text.
+/// Interface and body text, the default: Iosevka's quasi-proportional cut.
+const IOSEVKA_AILE_FONT: &[u8] = include_bytes!("../../assets/fonts/IosevkaAile.ttf");
+const IOSEVKA_AILE_BOLD_FONT: &[u8] = include_bytes!("../../assets/fonts/IosevkaAile-Bold.ttf");
+/// Terminals, diffs, file paths: everything that has to line up in columns.
+/// The terminal's rendering assumes a fixed pitch, hence the `Mono` cut and not
+/// the plain Nerd Font one, whose `@` and `W` are a cell and a half wide.
+const IOSEVKA_MONO_FONT: &[u8] = include_bytes!("../../assets/fonts/IosevkaNerdFontMono.ttf");
+const IOSEVKA_MONO_BOLD_FONT: &[u8] =
+    include_bytes!("../../assets/fonts/IosevkaNerdFontMono-Bold.ttf");
+/// The former defaults. They stay embedded so that a `settings.json` naming
+/// them keeps working on a machine that never installed them.
 const INTER_FONT: &[u8] = include_bytes!("../../assets/fonts/Inter.ttf");
 const INTER_BOLD_FONT: &[u8] = include_bytes!("../../assets/fonts/Inter-Bold.ttf");
-/// Terminals, diffs, file paths: everything that has to line up in columns.
-/// The terminal's rendering assumes a fixed pitch.
 const JETBRAINS_MONO_FONT: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono.ttf");
 
 /// Assets embedded in the binary and served to gpui.
@@ -87,7 +96,15 @@ pub(crate) fn set_language(language: LanguageChoice) {
 }
 
 fn install_fonts(cx: &mut App) {
-    let fonts = [INTER_FONT, INTER_BOLD_FONT, JETBRAINS_MONO_FONT];
+    let fonts = [
+        IOSEVKA_AILE_FONT,
+        IOSEVKA_AILE_BOLD_FONT,
+        IOSEVKA_MONO_FONT,
+        IOSEVKA_MONO_BOLD_FONT,
+        INTER_FONT,
+        INTER_BOLD_FONT,
+        JETBRAINS_MONO_FONT,
+    ];
     if let Err(e) = cx
         .text_system()
         .add_fonts(fonts.into_iter().map(std::borrow::Cow::Borrowed).collect())
@@ -111,12 +128,15 @@ pub fn run() {
         .run(move |cx| {
             gpui_component::init(cx);
             highlight::register_languages();
-            shortcuts::init(cx);
             install_fonts(cx);
             // The settings become global before anything else: the form writes
             // them from closures that only have an `App`, and installing the
             // themes reads them back to know what to apply.
             settings.clone().init_global(cx);
+            // The keymap comes after them — it reads the shortcuts one has
+            // customised — and after `gpui_component::init`, whose own bindings
+            // it takes a snapshot of: see `shortcuts::init`.
+            shortcuts::init(cx);
             // Per-worktree state follows the settings: the views read it just
             // the same, and it has to be there before the first of them.
             store::Store::load().init_global(cx);
@@ -137,7 +157,7 @@ pub fn run() {
                 // `TitleBar::window_options` rather than `Default`: it also
                 // sets `app_owns_titlebar_drag`, without which the platform
                 // and our bar fight over the double-click and the drag. It is
-                // `app::render_topbar` that draws the bar — without it, the
+                // `topbar::render_topbar` that draws the bar — without it, the
                 // window has nothing left to be moved or closed by.
                 WindowOptions {
                     window_bounds: Some(window_bounds),
