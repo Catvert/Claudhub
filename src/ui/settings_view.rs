@@ -132,6 +132,7 @@ impl ClaudhubApp {
             review_page(),
             keyboard_page(),
             files_page(),
+            lsp_page(),
         ];
         let databases_ix = pages.len();
         pages.push(databases_page());
@@ -1551,6 +1552,223 @@ fn database_row(
                     .child(Input::new(&databases).small()),
             )
         })
+}
+
+/// The language servers page.
+///
+/// The third list declared in the settings, after the agent profiles and the
+/// database connections, and the same reasoning: a declaration, not code. What
+/// it does **not** carry is the server's own configuration — PHPantom reads a
+/// `.phpantom.toml` it watches itself, and a second place to say the same thing
+/// would be a second truth. Nor the environment, which stays writable by hand
+/// in `settings.json`: a language server takes its settings from its own file,
+/// where an agent takes its model from a variable.
+fn lsp_page() -> SettingPage {
+    SettingPage::new(tr!("settings-page-lsp")).group(SettingGroup::new().item(lsp_item()))
+}
+
+/// The servers table, a `SettingItem::render` for the databases' reason: four
+/// fields do not fit in the column an ordinary item leaves.
+fn lsp_item() -> SettingItem {
+    SettingItem::render(move |_, window, cx| {
+        let servers = Settings::global(cx).lsp.clone();
+        let count = servers.len();
+        let rows: Vec<_> = servers
+            .iter()
+            .enumerate()
+            .map(|(index, server)| lsp_row(index, count, server, window, cx))
+            .collect();
+        v_flex()
+            .w_full()
+            .gap_2()
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().child(tr!("settings-lsp")))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tr!("settings-lsp-help")),
+                    ),
+            )
+            .children(rows)
+            .child(
+                h_flex().child(
+                    Button::new("add-lsp")
+                        .outline()
+                        .small()
+                        .icon(icon("plus"))
+                        .label(tr!("settings-lsp-add"))
+                        .on_click(|_, _window, cx| {
+                            Settings::update_global(cx, |s| s.lsp.push(Default::default()));
+                        }),
+                ),
+            )
+    })
+}
+
+/// A server's fields, kept from one render to the next.
+struct LspField {
+    name: Entity<InputState>,
+    command: Entity<InputState>,
+    extensions: Entity<InputState>,
+    language: Entity<InputState>,
+    _subscriptions: Vec<Subscription>,
+}
+
+/// One declared server.
+///
+/// **The command and its arguments are one field**, split by
+/// `cmdline::split_command`, which honours quotes: `split_whitespace` breaks on
+/// every path containing a space, and that is a failure one only understands
+/// after reading the code. The state key carries the count, like the databases'
+/// and the agent profiles': without it, deleting the first row would leave row
+/// zero's fields filled with the old one.
+fn lsp_row(
+    index: usize,
+    count: usize,
+    server: &crate::lsp::Server,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement {
+    let key = format!("claudhub-lsp-{count}-{index}");
+    let values = server.clone();
+    let state = window.use_keyed_state(SharedString::from(key), cx, move |window, cx| {
+        let mut field = |placeholder: SharedString, value: String, cx: &mut Context<LspField>| {
+            cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(placeholder)
+                    .default_value(value)
+            })
+        };
+        let name = field(tr!("settings-lsp-name"), values.name.clone(), cx);
+        let command = field(
+            tr!("settings-lsp-command"),
+            crate::cmdline::join_command(
+                std::iter::once(values.command.clone()).chain(values.args.clone()),
+            ),
+            cx,
+        );
+        let extensions = field(
+            tr!("settings-lsp-extensions"),
+            values.extensions.join(", "),
+            cx,
+        );
+        let language = field(tr!("settings-lsp-language"), values.language_id.clone(), cx);
+        let watch = |input: &Entity<InputState>,
+                     edit: fn(&mut crate::lsp::Server, String),
+                     cx: &mut Context<LspField>| {
+            cx.subscribe(
+                input,
+                move |_: &mut LspField, input, event: &InputEvent, cx| {
+                    if !matches!(event, InputEvent::Change) {
+                        return;
+                    }
+                    let value = input.read(cx).value().to_string();
+                    edit_lsp(index, cx, |server| edit(server, value));
+                },
+            )
+        };
+        let subscriptions = vec![
+            watch(&name, |s, v| s.name = v, cx),
+            watch(
+                &command,
+                |s, v| {
+                    let mut parts = crate::cmdline::split_command(&v).into_iter();
+                    s.command = parts.next().unwrap_or_default();
+                    s.args = parts.collect();
+                },
+                cx,
+            ),
+            watch(
+                &extensions,
+                |s, v| {
+                    s.extensions = v
+                        .split(',')
+                        .map(|ext| ext.trim().trim_start_matches('.').to_string())
+                        .filter(|ext| !ext.is_empty())
+                        .collect()
+                },
+                cx,
+            ),
+            watch(&language, |s, v| s.language_id = v.trim().to_string(), cx),
+        ];
+        LspField {
+            name,
+            command,
+            extensions,
+            language,
+            _subscriptions: subscriptions,
+        }
+    });
+    let field = state.read(cx);
+    let (name, command, extensions, language) = (
+        field.name.clone(),
+        field.command.clone(),
+        field.extensions.clone(),
+        field.language.clone(),
+    );
+
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .gap_1p5()
+        .p_2()
+        .rounded(cx.theme().radius)
+        .border_1()
+        .border_color(cx.theme().border)
+        .child(
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .gap_1()
+                .items_center()
+                .child(div().flex_1().min_w_0().child(Input::new(&name).small()))
+                .child(
+                    Button::new(("remove-lsp", index))
+                        .ghost()
+                        .small()
+                        .icon(icon("trash-2"))
+                        .tooltip(tr!("settings-lsp-remove"))
+                        .on_click(move |_, _window, cx| {
+                            Settings::update_global(cx, |s| {
+                                if index < s.lsp.len() {
+                                    s.lsp.remove(index);
+                                }
+                            });
+                        }),
+                ),
+        )
+        .child(div().w_full().min_w_0().child(Input::new(&command).small()))
+        .child(
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .gap_1()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Input::new(&extensions).small()),
+                )
+                .child(
+                    div()
+                        .w(px(120.))
+                        .flex_none()
+                        .child(Input::new(&language).small()),
+                ),
+        )
+}
+
+/// Changes a server in place, if the index still exists — a subscription set up
+/// for row 2 outlives row 2 by a frame.
+fn edit_lsp(index: usize, cx: &mut App, edit: impl FnOnce(&mut crate::lsp::Server)) {
+    Settings::update_global(cx, |s| {
+        if let Some(server) = s.lsp.get_mut(index) {
+            edit(server);
+        }
+    });
 }
 
 /// Changes a connection in place, if the index still exists.

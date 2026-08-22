@@ -77,6 +77,13 @@ pub struct Snapshot {
     /// would be a click for nothing.
     pub has_new_prompts: bool,
     pub has_up_prompts: bool,
+    /// The language servers the project declares (`[lsp.<name>]`).
+    ///
+    /// `wt` does nothing with them — it neither starts nor supervises one — and
+    /// neither does this module: they are carried through so the editor can
+    /// start what the project's code wants. It is the first level of the
+    /// extension system doing its job, one file and no new mechanism.
+    pub lsp: Vec<crate::lsp::Server>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -178,6 +185,18 @@ pub fn snapshot(main: &Path) -> Option<Snapshot> {
         has_open: app.has_open(),
         has_new_prompts: config.prompts.iter().any(|p| p.ask.covers(Ask::New)),
         has_up_prompts: config.prompts.iter().any(|p| p.ask.covers(Ask::Up)),
+        lsp: config
+            .lsp
+            .iter()
+            .map(|(name, server)| crate::lsp::Server {
+                name: name.clone(),
+                command: server.command.clone(),
+                args: server.args.clone(),
+                env: server.env.clone().into_iter().collect(),
+                extensions: server.extensions.clone(),
+                language_id: server.language_id(name).to_string(),
+            })
+            .collect(),
     })
 }
 

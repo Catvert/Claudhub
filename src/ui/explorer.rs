@@ -258,6 +258,12 @@ pub struct Editing {
     pub hash: u64,
     /// What is on screen differs from what is on disk.
     pub dirty: bool,
+    /// A change is already on its way to the language server.
+    ///
+    /// A keystroke emits a change event, and sending each one is fifty round
+    /// trips for a state nobody asked about in between: the flag is what makes
+    /// the debounce read the latest text once rather than every text in turn.
+    pub lsp_pending: bool,
 }
 
 impl ClaudhubApp {
@@ -602,16 +608,26 @@ impl ClaudhubApp {
             if let Some(editing) = this.editing.as_mut() {
                 editing.dirty = true;
             }
+            this.lsp_editor_changed(cx);
             cx.notify();
         })
         .detach();
+        // The server must forget the file we are leaving, or it goes on
+        // answering about a text nobody holds any more.
+        if let Some(previous) = self.editing.take() {
+            self.lsp_editor_closed(previous.worktree, previous.path);
+        }
         self.editing = Some(Editing {
             worktree,
             path,
             input,
             hash: content.hash,
             dirty: false,
+            lsp_pending: false,
         });
+        // Starts the server this file's language asks for, opens the document
+        // and posts the providers — all of it a no-op when the button is off.
+        self.lsp_sync_editor(window, cx);
         // A file that opens calls up the screen it is edited on. The gesture
         // comes from the explorer — so from that screen most of the time — but
         // also from a diff line, and answering it silently on the screen next
@@ -641,6 +657,9 @@ impl ClaudhubApp {
             editing.hash = files::digest(&content);
             editing.dirty = false;
         }
+        // A server that runs a formatter or an external analyser on save — as
+        // PHPantom does with PHPStan — has no other way of knowing.
+        self.lsp_editor_saved();
         cx.notify();
     }
 
@@ -650,7 +669,9 @@ impl ClaudhubApp {
             return;
         };
         if !editing.dirty {
+            let (worktree, path) = (editing.worktree.clone(), editing.path.clone());
             self.editing = None;
+            self.lsp_editor_closed(worktree, path);
             cx.notify();
             return;
         }
@@ -670,7 +691,9 @@ impl ClaudhubApp {
                 .close_button(false)
                 .on_ok(move |_, _window, cx| {
                     entity.update(cx, |this, cx| {
-                        this.editing = None;
+                        if let Some(previous) = this.editing.take() {
+                            this.lsp_editor_closed(previous.worktree, previous.path);
+                        }
                         cx.notify();
                     });
                     true
@@ -1092,6 +1115,49 @@ impl ClaudhubApp {
     /// It takes the diff's place rather than occupying a panel of its own: one
     /// looks at one *or* the other, and two tabs to switch between for a gesture
     /// coming from the explorer would be one round trip too many.
+    /// The "LSP" button of the editor's bar.
+    ///
+    /// **Here and not in the worktree's menu**, though the setting is per
+    /// worktree: this is where its effect is read — the underlines, the
+    /// completion, the count of what the server has found — and an action goes
+    /// where the gesture it ends is made. It is also the only place with room
+    /// to say what state the server is in.
+    ///
+    /// It only appears when something serves this file. A button that can only
+    /// answer "no server for a Markdown file" is worse than no button.
+    fn render_lsp_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        use crate::ui::lsp::Status;
+        let editing = self.editing.as_ref()?;
+        let servers = self.lsp_servers(&editing.worktree, cx);
+        crate::lsp::pick(&servers, &editing.path)?;
+        let on = self.lsp_enabled(&editing.worktree);
+        let session = self.lsp_session(&editing.worktree);
+        let status = session.map(|session| session.status.clone());
+        let problems = session.map(|session| session.problems()).unwrap_or(0);
+        let colour = match (&status, on) {
+            (_, false) => cx.theme().muted_foreground,
+            (Some(Status::Failed(_)), _) => cx.theme().danger,
+            (Some(Status::Ready), _) if problems > 0 => cx.theme().warning,
+            (Some(Status::Ready), _) => cx.theme().success,
+            // Starting, or nothing yet: neither on nor in trouble.
+            _ => cx.theme().muted_foreground,
+        };
+        let label = match (on, &status) {
+            (true, Some(Status::Ready)) if problems > 0 => format!("LSP {problems}"),
+            _ => "LSP".to_string(),
+        };
+        let tooltip = crate::ui::lsp::tooltip(session).unwrap_or_else(|| tr!("editor-lsp"));
+        Some(
+            Button::new("editor-lsp")
+                .ghost()
+                .xsmall()
+                .label(label)
+                .text_color(colour)
+                .tooltip(tooltip)
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_lsp(window, cx))),
+        )
+    }
+
     pub(super) fn render_editor(
         &mut self,
         window: &mut Window,
@@ -1144,6 +1210,7 @@ impl ClaudhubApp {
                         .when(dirty, |el| {
                             el.child(div().size(px(7.)).rounded_full().bg(cx.theme().warning))
                         })
+                        .children(self.render_lsp_button(cx))
                         .child(
                             Button::new("editor-external")
                                 .ghost()

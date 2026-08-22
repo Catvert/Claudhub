@@ -56,6 +56,14 @@ pub struct WorktreeState {
     /// pour them in once, when the folder arrives, after which it is emptied.
     /// Nothing writes it any more.
     pub notes: Vec<Note>,
+    /// A language server runs on this worktree.
+    ///
+    /// Per worktree and off by default: a server is a process holding hundreds
+    /// of megabytes on a large project, and a dozen open worktrees are not a
+    /// dozen worktrees being edited. It lives in the store and not in the
+    /// settings for the reason the store exists — this is where one is at, like
+    /// the comparison base, not a preference written by hand.
+    pub lsp: bool,
     /// The next note id. It cannot be derived from `notes`: a deleted note
     /// would free its number, and a note already sent to the agent is referred
     /// to there by a number that would then mean another one.

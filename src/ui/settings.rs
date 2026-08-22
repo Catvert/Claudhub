@@ -441,6 +441,18 @@ pub struct Settings {
     /// anything about it. An empty value switches a binding **off**: the line
     /// stays, so one sees what one has turned off. See `ui::shortcuts`.
     pub shortcuts: std::collections::BTreeMap<String, String>,
+    /// The language servers the editor may start.
+    ///
+    /// Declared here like the agent profiles and the database connections: the
+    /// second level of the extension system, a declaration and not code. The
+    /// first level is the project's own `wt.toml`, whose `[lsp.<name>]` says
+    /// the same thing in the same shape and **wins** for a language both
+    /// declare — the project knows better than the machine what its code wants.
+    ///
+    /// PHPantom ships as the default entry, not because PHP is special but
+    /// because an empty list makes a feature that has to be discovered before
+    /// it can be tried. Emptying it is a choice, and it is kept.
+    pub lsp: Vec<crate::lsp::Server>,
     /// Rows returned per page in the SQL console.
     ///
     /// One page and not the whole result: a `SELECT *` on a two-million-row
@@ -481,9 +493,31 @@ impl Default for Settings {
             wsl_distro: String::new(),
             hidden_panels: Vec::new(),
             databases: Vec::new(),
+            lsp: vec![phpantom()],
             shortcuts: std::collections::BTreeMap::new(),
             db_page_size: 500,
         }
+    }
+}
+
+/// The language server shipped as a default: PHPantom, on PHP and on Blade.
+///
+/// Blade is served by the same one — it preprocesses a view into virtual PHP —
+/// so the two extensions belong to a single entry, and `blade.php` being the
+/// longer is what makes it win the tie over `php`.
+///
+/// The binary is **not** downloaded: it is a program the user installs, like
+/// the terminal's agents and the commit-message command. Absent, the server
+/// fails to start and the button says so, which is a better answer than an
+/// interface that quietly fetches a hundred megabytes.
+fn phpantom() -> crate::lsp::Server {
+    crate::lsp::Server {
+        name: "PHPantom".into(),
+        command: "phpantom_lsp".into(),
+        args: Vec::new(),
+        env: std::collections::BTreeMap::new(),
+        extensions: vec!["php".into(), "blade.php".into()],
+        language_id: "php".into(),
     }
 }
 

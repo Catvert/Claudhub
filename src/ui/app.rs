@@ -146,6 +146,9 @@ fn save_layouts(layouts: &Layouts) {
 /// worktree to another to compare is the tool's central gesture, and it must not
 /// cost the loss of the file being read.
 pub struct ReviewState {
+    /// A language server runs on this worktree. Off by default, remembered by
+    /// the store — see `ui::lsp`.
+    pub lsp: bool,
     /// The range of the diff shown on the right. It is no longer the review's
     /// "current" range — each panel has its own — but that of the file last
     /// clicked, whichever panel it came from.
@@ -269,6 +272,7 @@ pub struct History {
 impl Default for ReviewState {
     fn default() -> Self {
         Self {
+            lsp: false,
             range: DiffRange::Working,
             status: Status::default(),
             files: HashMap::new(),
@@ -393,6 +397,19 @@ pub struct ClaudhubApp {
     pub(super) explorers: HashMap<PathBuf, crate::ui::explorer::Explorer>,
     /// The file open in the built-in editor, if there is one.
     pub(super) editing: Option<crate::ui::explorer::Editing>,
+    /// The language servers, one session per worktree. See `ui::lsp`.
+    pub(super) lsp: HashMap<PathBuf, crate::ui::lsp::Session>,
+    /// The requests in flight, by the id we gave them: what a provider's `Task`
+    /// is waiting on. A one-shot channel each, and nothing is ever left in
+    /// here — the core times a request out, and a session's death fails what it
+    /// was carrying.
+    pub(super) lsp_pending: HashMap<u64, async_channel::Sender<Result<String, String>>>,
+    /// The last request of a method for a worktree, so the next one can cancel
+    /// it: a completion is asked on one keystroke and stale on the next.
+    pub(super) lsp_asking: HashMap<(PathBuf, String), u64>,
+    /// Never goes back, like the SQL console's send id: the answer to a gesture
+    /// that has been replaced must be recognisable as such.
+    pub(super) lsp_next_id: u64,
     pub(super) files_scroll: gpui::UniformListScrollHandle,
     /// The explorer tree's focus, which gives it its arrows.
     ///
@@ -708,6 +725,10 @@ impl ClaudhubApp {
             note_draft: None,
             notes_only_open: false,
             wt_projects: HashMap::new(),
+            lsp: HashMap::new(),
+            lsp_pending: HashMap::new(),
+            lsp_asking: HashMap::new(),
+            lsp_next_id: 1,
             wt_states: HashMap::new(),
             creation: None,
             integrated: None,
@@ -1359,6 +1380,21 @@ impl ClaudhubApp {
                 }
             }
             Evt::NotesRead { worktree, files } => self.notes_read(worktree, files, window, cx),
+
+            // — The language server ————————————————————————————————
+            Evt::LspReady {
+                worktree,
+                name,
+                capabilities,
+            } => self.lsp_ready(worktree, name, capabilities, window, cx),
+            Evt::LspStopped { worktree, reason } => self.lsp_stopped(worktree, reason, cx),
+            Evt::LspAnswer { id, result, .. } => self.lsp_answer(id, result),
+            Evt::LspDiagnostics {
+                worktree,
+                path,
+                diagnostics,
+            } => self.lsp_diagnostics(worktree, path, diagnostics, cx),
+            Evt::LspBusy { worktree, message } => self.lsp_busy(worktree, message, cx),
 
             // — Databases —————————————————————————————————————————
             Evt::DbDatabases { key, databases } => self.db_databases_arrived(key, databases, cx),
@@ -2211,6 +2247,7 @@ impl ClaudhubApp {
         let mut state = ReviewState::default();
         if let Some(saved) = saved {
             state.base = saved.base;
+            state.lsp = saved.lsp;
             state.collapsed = saved.collapsed.into_iter().collect();
             // A file written before this field existed carries zero, and a note
             // with a null id would be confused with the absence of a note.
@@ -2260,12 +2297,13 @@ impl ClaudhubApp {
         // would make a file that changes with nothing having changed.
         let mut collapsed: Vec<PathBuf> = state.collapsed.iter().cloned().collect();
         collapsed.sort();
-        let (base, next_note) = (state.base.clone(), state.next_note);
+        let (base, next_note, lsp) = (state.base.clone(), state.next_note, state.lsp);
         Store::update_global(cx, |store| {
             let saved = store.worktree_mut(worktree, &main);
             saved.base = base;
             saved.collapsed = collapsed;
             saved.next_note = next_note;
+            saved.lsp = lsp;
         });
         self.persist_notes(worktree, cx);
     }

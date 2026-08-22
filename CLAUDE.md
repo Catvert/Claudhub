@@ -105,6 +105,11 @@ src/
     mysql.rs    MySQL et MariaDB, par `information_schema`
   logging.rs    `env_logger` sur stderr, et un anneau de deux mille lignes
                 en mémoire, que la page « Journal » lit
+  lsp/          le client de serveur de langage — un processus par worktree
+    mod.rs      la session : poignée de main, requêtes en vol, ce qu'il pousse
+    frame.rs    le cadrage `Content-Length` et JSON-RPC
+    sync.rs     versions de document, et l'édition à une plage (UTF-16)
+    uri.rs      chemins ⇄ `file://`
   sentry.rs     issues et traces Sentry, testées sur fixture
   wt.rs         le `wt.toml` d'un projet : questions, tâches, statut, URLs
   git/          couche git — sous-processus `git`, testable sans gpui
@@ -169,6 +174,8 @@ src/
     notes_view.rs   les gestes de la relecture annotée et son panneau
     vault.rs        les notes, le suivi de relecture et la liste de tâches
                     en Markdown, rendus et relus — aucune entrée-sortie ici
+    lsp.rs          le pont vers le serveur de langage : les providers de
+                    l'éditeur, les diagnostics, et le bouton « LSP »
     find.rs         la recherche d'un panneau, et son routage
     motion.rs       le lissage de la molette, sans rien de gpui dedans
     scroll.rs       la barre de défilement d'un panneau, et son lissage
@@ -222,8 +229,9 @@ la panne qu'on ne diagnostique pas.
   —, ni celle du réseau. Deux, parce que déplier un schéma en demande plusieurs
   à la fois et qu'ils attendent une socket, pas un cœur.
 
-Et hors des files, la surveillance de fichiers, remise directement au thread du
-surveillant.
+Et hors des files, deux voies directes : la surveillance de fichiers, remise au
+thread du surveillant, et les serveurs de langage, remis à leur hôte — voir
+« Le serveur de langage ».
 
 ### Le mode distant
 
@@ -810,6 +818,109 @@ mais non embarqué donnerait une case vide, seulement en release.
 
 Trois glyphes manquaient au jeu de Lucide — `file-code`, `file-json`,
 `database` — et sont redessinés sur sa grille.
+
+### Le serveur de langage
+
+L'éditeur intégré sait désormais compléter, survoler, aller à la définition et
+souligner ce qu'un serveur de langage lui reproche. **Presque rien de tout cela
+n'est écrit ici** : l'éditeur de gpui-component porte déjà un `Lsp` — trois
+providers et un `DiagnosticSet` — avec les popovers, les soulignements et la
+gouttière qui vont avec. Ce qui manquait était le **client**, et le chemin qui
+va d'un provider appelé dans une frame à un worker qui répond trente
+millisecondes plus tard.
+
+**Un bouton « LSP » par worktree, éteint par défaut.** Un serveur tient des
+centaines de mégaoctets sur un gros projet, et douze worktrees ouverts ne sont
+pas douze worktrees qu'on édite. L'état vit dans le magasin (`state.json`) et
+non dans les réglages : c'est où l'on en est, comme la base de comparaison. Le
+bouton est dans la **barre de l'éditeur** et non dans le menu du worktree — une
+action va où se fait le geste dont elle est la fin, et c'est là qu'on lit son
+effet. Il porte quatre états et non deux : éteint, en démarrage, prêt — avec le
+compte de ce que le serveur a trouvé — et en échec, avec la raison en infobulle.
+Un serveur qui ne démarre pas doit le dire ; il n'a pas à ressembler à un serveur
+qui réfléchit. Et il n'apparaît **que si quelque chose sert ce fichier** : un
+bouton qui ne sait répondre que « pas de serveur pour un Markdown » est pire que
+pas de bouton.
+
+**Qui sert quoi.** Les serveurs se déclarent dans le `wt.toml` du projet
+(`[lsp.<nom>]`, premier niveau du système d'extension) **et** dans les réglages
+(`Settings::lsp`, deuxième niveau) ; le projet l'emporte pour un même langage —
+la machine dit ce qu'elle a installé, le projet dit ce que son code veut. Le
+fichier ouvert choisit : `lsp::pick` prend la **plus longue extension qui
+correspond**, si bien qu'une vue Blade va à l'entrée qui dit `blade.php` et non
+à celle qui dit `php`. PHPantom est livré comme entrée par défaut ; son binaire
+n'est **pas** téléchargé, c'est un programme que l'utilisateur installe, comme
+les agents du terminal.
+
+**Une session par worktree**, et ouvrir un fichier d'un autre langage la
+remplace : un worktree est un projet, et deux serveurs répondraient deux fois à
+la même question.
+
+Sept points qui ne se devinent pas :
+
+- **C'est une voie, pas une file.** Un serveur de langage vit des heures, tient
+  un état — quels documents sont ouverts, à quelle version — et pousse des
+  messages qu'on n'a pas demandés. Il est donc remis directement à son hôte par
+  `Handle::send`, comme les ordres du surveillant, et pour une raison de plus :
+  **l'ordre compte**. Un `didChange` doit atteindre le serveur avant la
+  complétion qui en dépend, ce que plusieurs workers sur un canal partagé ne
+  promettent pas.
+- **Un seul propriétaire par session.** Le fil de session reçoit les ordres de
+  la vue et les messages du serveur sur le même canal : pas de verrou, et aucun
+  moyen d'écrire une requête au milieu d'une autre. Le processus meurt avec la
+  session, toujours — un serveur oublié derrière un worktree qu'on ne regarde
+  plus est une fuite que rien d'autre ne rattraperait.
+- **Du JSON brut sur le fil.** `lsp-types` est sous la feature `ui` — un module
+  du cœur qui le tirerait casserait le build du serveur — et postcard,
+  positionnel, ne sait pas relire un `Value`. Les `Cmd`/`Evt` portent donc des
+  chaînes, la vue seule type ce qu'elle lit, et les deux bouts du fil n'ont pas
+  à s'accorder sur une version du crate. `PROTOCOL_VERSION` passe à 4.
+- **Une requête ne reste jamais en attente.** Un provider rend une `Task` ;
+  celle-ci se résout par un canal à un coup (`async_channel::bounded(1)`) rangé
+  sous un identifiant qui ne recule jamais — le motif de la console SQL. Rien
+  ne l'y laisse : le cœur expire une requête au bout de quinze secondes, la
+  mort d'une session échoue tout ce qu'elle portait, et une complétion est
+  **annulée** (`$/cancelRequest`) par celle qui la remplace. Une `Task` que
+  personne ne résout, c'est un popover qui tourne pour toujours.
+- **L'édition est calculée, pas devinée.** Le serveur dit s'il veut le document
+  entier ou des plages ; pour les plages, `lsp::sync` prend le préfixe et le
+  suffixe communs des deux textes. L'unité est le **code UTF-16**, ni l'octet ni
+  le caractère : un `é` vaut une colonne pour deux octets, un emoji deux
+  colonnes pour quatre — compter les octets décale toute ligne accentuée,
+  compter les caractères décale tout emoji. Et les changements sont **groupés**
+  (120 ms) : une frappe émet un événement, et envoyer chacun d'eux ferait
+  cinquante allers-retours pour une ligne tapée.
+- **Les providers ne sont posés que pour ce que le serveur sait faire**, ce que
+  dit sa poignée de main. Un provider de survol posé sur un serveur qui n'en a
+  pas, c'est un aller-retour par pause du pointeur pour s'entendre dire non. Ils
+  sont donc posés une seconde fois à l'arrivée des capacités, la première ayant
+  eu lieu avant qu'on les connaisse.
+- **Un serveur qui demande quelque chose doit être servi.** `client/register-`
+  `Capability`, `workspace/configuration`, la création d'une barre de
+  progression : chacune a une réponse qui ne coûte rien, et le reste reçoit
+  l'erreur que la spécification prévoit. Ne rien répondre est la seule chose qui
+  ne doit pas arriver — un serveur qui attend son accusé de réception s'arrête
+  là.
+
+Ce que la v1 ne fait pas, et c'est délibéré : seul le fichier ouvert dans
+l'éditeur est synchronisé (rien dans la vue de diff, qui n'est pas un document
+et dont le texte n'est pas celui du fichier), pas de renommage, pas de
+formatage, pas de recherche de symboles — il n'y a pas de vue pour les porter.
+Les actions de code et les jetons sémantiques attendent : leurs traits existent,
+c'est le seul travail qui reste.
+
+**Ce que le serveur raconte va dans le journal** (`target: "lsp"`), stderr
+compris. `$/progress` fait exception : il remonte en `Evt::LspBusy` et s'affiche
+dans l'infobulle du bouton, parce qu'il répond à la seule question qu'un serveur
+rapide pose quand même — pourquoi la complétion est maigre les dix premières
+secondes. PHPantom construit son index par couches et le dit là.
+
+**Le test qui compte ne lance pas de processus.** `Session::run` prend ce dans
+quoi il écrit et ce qu'il entend : la boucle entière se joue en mémoire, la
+poignée de main comprise. `tests/lsp_phpantom.rs` fait l'autre moitié — le vrai
+binaire, les vrais tubes — et **se saute** quand `phpantom_lsp` n'est pas
+installé, ce qui est le cas de la CI : un test qui échoue faute d'un programme
+que personne n'a promis est un build rouge qui ne dit rien.
 
 ### Lire et retoucher un fichier
 
@@ -3397,15 +3508,16 @@ D'où `explorer_context(vim)` en plus de `context(vim)`.
 La question revient à chaque intégration, alors elle est tranchée ici. Trois
 niveaux, du moins cher au plus cher :
 
-1. **Le `wt.toml` du projet** — tâches, questions, statuts, URLs. Claudhub les
-   affiche sans les connaître, et cela n'a coûté que la dépendance à `wt`.
-   C'est le vrai système d'extension.
+1. **Le `wt.toml` du projet** — tâches, questions, statuts, URLs, et depuis
+   `wt` 0.7 les **serveurs de langage** (`[lsp.<nom>]`). Claudhub les affiche
+   sans les connaître, et cela n'a coûté que la dépendance à `wt`. C'est le vrai
+   système d'extension.
 2. **Des commandes déclarées dans les réglages** — les profils d'agent en sont
    le premier exemple : un nom, une commande, un environnement. Le message de
    commit proposé en est le second, et il montre la forme la plus économe :
    une ligne de commande, le texte par l'entrée standard, la réponse par la
-   sortie. Les connexions aux bases de données en sont le troisième. Pour ce
-   qui n'est pas propre à un projet.
+   sortie. Les connexions aux bases de données en sont le troisième, les
+   serveurs de langage le quatrième. Pour ce qui n'est pas propre à un projet.
 3. **Des extensions wasm, à la Zed — écarté.** Rien dans les besoins listés ne
    le demande, et le coût est sans commune mesure.
 
