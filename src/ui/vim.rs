@@ -104,6 +104,8 @@ pub enum Command {
     /// `zz`, `zt`, `zb`: where the current line goes in the viewport. The text
     /// does not move, so there is nothing to apply — only a view to scroll.
     Reveal(Reveal),
+    /// `Ctrl+E` and `Ctrl+Y`: that many lines of view, down when positive.
+    Scroll(isize),
     /// The `z` commands that fold. What folds is the grammar's business, not
     /// ours: these say open, close or toggle, and the editor knows where.
     Fold(Fold),
@@ -275,10 +277,15 @@ impl Vim {
             "u" => self.motion_to(text, move_lines(text, self.head, -(half as isize), None)),
             "f" => self.motion_to(text, move_lines(text, self.head, rows as isize, None)),
             "b" => self.motion_to(text, move_lines(text, self.head, -(rows as isize), None)),
-            // `Ctrl+R` never reaches us — the window binds it to a refresh — so
-            // redo is also on the editor's own `Ctrl+Y`. Kept all the same for
-            // the day that binding moves.
+            // The window's `Ctrl+R` refresh steps aside for the editor in vim
+            // mode: here the key is redo, and there is nowhere else for redo to
+            // go — `Ctrl+Y`, which the editor binds to it, is vim's scroll.
             "r" => Response::Command(Command::Redo),
+            // One line of the view, the caret staying where it is unless the
+            // page walks out from under it. The editor knows the height; all
+            // that is decided here is the direction.
+            "e" => Response::Command(Command::Scroll(1)),
+            "y" => Response::Command(Command::Scroll(-1)),
             _ => Response::Ignored,
         }
     }
@@ -1970,6 +1977,32 @@ mod tests {
             Response::Command(Command::Reveal(Reveal::Centre))
         );
         assert_eq!(vim.pending(), "");
+    }
+
+    /// `Ctrl+E` and `Ctrl+Y` move the page, not the caret — and `Ctrl+Y` is
+    /// therefore not the editor's redo any more, which is why `Ctrl+R` has to
+    /// reach us.
+    #[test]
+    fn the_control_keys_scroll_a_line_at_a_time() {
+        let text = "one\ntwo\nthree\n";
+        let ctrl = |name: &str| Key {
+            ch: None,
+            name: name.into(),
+            ctrl: true,
+        };
+        let mut vim = Vim::default();
+        assert_eq!(
+            vim.press(&ctrl("e"), text, 0, 10),
+            Response::Command(Command::Scroll(1))
+        );
+        assert_eq!(
+            vim.press(&ctrl("y"), text, 0, 10),
+            Response::Command(Command::Scroll(-1))
+        );
+        assert_eq!(
+            vim.press(&ctrl("r"), text, 0, 10),
+            Response::Command(Command::Redo)
+        );
     }
 
     #[test]

@@ -259,6 +259,19 @@ pub enum Landing {
 }
 
 /// A file being read, and what must happen to the caret when it arrives.
+/// Where a line should sit once the view has moved.
+#[derive(Clone, Copy)]
+enum Place {
+    /// The least scrolling that brings it into view, and none at all when it is
+    /// already there. What a motion of one line wants.
+    Nearest,
+    /// What `zz`, `zt` and `zb` name — and where a jump lands, which is
+    /// `Centre`: arriving at a symbol on the last line of the panel shows the
+    /// code that leads to it and none of what follows, and reading a definition
+    /// is reading what is around it.
+    Asked(crate::ui::vim::Reveal),
+}
+
 /// The line a byte offset falls on, counted from zero.
 fn line_at(text: &str, offset: usize) -> usize {
     text[..offset.min(text.len())]
@@ -806,7 +819,8 @@ impl ClaudhubApp {
         input.update(cx, |state, cx| {
             state.set_selected_range(offset..offset, cx);
         });
-        if !self.reveal_caret(&input, offset, cx) {
+        let centred = Place::Asked(crate::ui::vim::Reveal::Centre);
+        if !self.scroll_to_line(&input, offset, centred, cx) {
             if let Some(editing) = self.editing_mut() {
                 editing.reveal_at = Some(offset);
                 editing.reveal_tries = 0;
@@ -1168,7 +1182,7 @@ impl ClaudhubApp {
                     }
                     state.set_selected_range(change.selection, cx);
                 });
-                self.reveal_caret(&input, change.head, cx);
+                self.scroll_to_line(&input, change.head, Place::Nearest, cx);
             }
             Response::Command(command) => match command {
                 // Undo and redo belong to the editor, which is the only one that
@@ -1183,6 +1197,7 @@ impl ClaudhubApp {
                 }
                 Command::GoToDefinition => self.goto_definition(window, cx),
                 Command::Reveal(at) => self.place_caret_line(&input, at, cx),
+                Command::Scroll(lines) => self.scroll_by_lines(&input, lines, cx),
                 Command::Fold(op) => self.fold(op, cx),
             },
         }
@@ -1302,22 +1317,29 @@ impl ClaudhubApp {
         at: crate::ui::vim::Reveal,
         cx: &mut Context<Self>,
     ) {
-        use crate::ui::vim::Reveal;
+        let head = input.read(cx).selected_range().start;
+        self.scroll_to_line(input, head, Place::Asked(at), cx);
+    }
+
+    /// `Ctrl+E` and `Ctrl+Y`: the page moves, the caret stays.
+    ///
+    /// Vim drags the caret along only when the page walks out from under it,
+    /// and that part is left to the editor: `set_scroll_offset` is clamped to
+    /// the real range, and the caret is where it was — which is the whole point
+    /// of these two keys, reading ahead without losing one's place.
+    fn scroll_by_lines(
+        &mut self,
+        input: &Entity<EditorState>,
+        lines: isize,
+        cx: &mut Context<Self>,
+    ) {
         input.update(cx, |state, cx| {
-            let (Some(rows), Some(line_height)) = (state.visible_row_range(), state.line_height())
-            else {
+            let Some(line_height) = state.line_height() else {
                 return;
             };
-            let row = line_at(&state.value(), state.selected_range().start);
-            let span = rows.len().max(1);
-            let first = match at {
-                Reveal::Top => row,
-                Reveal::Centre => row.saturating_sub(span / 2),
-                Reveal::Bottom => row.saturating_sub(span - 1),
-            };
-            // The input's scroll handle counts downwards as negative.
             let offset = state.scroll_offset();
-            state.set_scroll_offset(gpui::point(offset.x, -(line_height * first as f32)), cx);
+            let moved = offset.y - line_height * lines as f32;
+            state.set_scroll_offset(gpui::point(offset.x, moved.min(gpui::px(0.))), cx);
         });
     }
 
@@ -1398,32 +1420,40 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Scrolls the caret back into view when the editor will not do it itself.
+    /// Scrolls a line into view, and says whether it could.
     ///
     /// `set_selected_range` scrolls to the **end** of what it is given, which is
     /// where the caret is in normal mode but the wrong end of a selection grown
     /// upwards: `V` then `k` would walk off the top of the panel without the
     /// view ever following. A landing needs it for a plainer reason: it writes
     /// an empty range, and the editor does not always take that for a move.
-    fn reveal_caret(
+    ///
+    /// It answers `false` when the editor has never been laid out and there is
+    /// nothing to divide by — see `Editing::reveal_at`.
+    fn scroll_to_line(
         &mut self,
         input: &Entity<EditorState>,
         head: usize,
+        place: Place,
         cx: &mut Context<Self>,
     ) -> bool {
+        use crate::ui::vim::Reveal;
         input.update(cx, |state, cx| {
             let (Some(rows), Some(line_height)) = (state.visible_row_range(), state.line_height())
             else {
                 return false;
             };
             let row = line_at(&state.value(), head);
-            if rows.contains(&row) {
-                return true;
-            }
-            let first = if row < rows.start {
-                row
-            } else {
-                row.saturating_sub(rows.len().saturating_sub(1))
+            let span = rows.len().max(1);
+            let first = match place {
+                // A line already in view stays where it is: a motion that moves
+                // the caret one line must not move the page under the eye.
+                Place::Nearest if rows.contains(&row) => return true,
+                Place::Nearest if row < rows.start => row,
+                Place::Nearest => row.saturating_sub(span - 1),
+                Place::Asked(Reveal::Top) => row,
+                Place::Asked(Reveal::Centre) => row.saturating_sub(span / 2),
+                Place::Asked(Reveal::Bottom) => row.saturating_sub(span - 1),
             };
             // The input's scroll handle counts downwards as negative.
             let offset = state.scroll_offset();
@@ -1893,7 +1923,8 @@ impl ClaudhubApp {
         // the count is what stops a panel shrunk to nothing from asking for
         // ever.
         if let Some(head) = self.editing().and_then(|editing| editing.reveal_at) {
-            if self.reveal_caret(&input, head, cx) {
+            let centred = Place::Asked(crate::ui::vim::Reveal::Centre);
+            if self.scroll_to_line(&input, head, centred, cx) {
                 if let Some(editing) = self.editing_mut() {
                     editing.reveal_at = None;
                 }
@@ -1989,7 +2020,7 @@ impl ClaudhubApp {
                         .id("editor-zoom")
                         // Three keys of navigation live here and nowhere else:
                         // see `shortcuts::EDITOR_PREDICATE`.
-                        .key_context(crate::ui::shortcuts::editor_context())
+                        .key_context(crate::ui::shortcuts::editor_context(vim))
                         .relative()
                         .flex_1()
                         .min_h_0()

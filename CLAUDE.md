@@ -1087,6 +1087,13 @@ Cinq points :
   définition. La reprise de session n'y passe pas et demande son fichier
   directement : revenir où l'on était n'est pas un saut qu'on doit pouvoir
   défaire.
+- **Un atterrissage centre, une motion non.** `Place` dit lequel des deux :
+  `Nearest` ne défile que le minimum et ne bouge pas du tout quand la ligne est
+  déjà là — c'est ce que veut une flèche qui descend d'une ligne, la page ne
+  doit pas sauter sous l'œil. Un saut, lui, arrive de loin : laissé au
+  minimum, il posait le symbole sur la **dernière** ligne du panneau, avec au-
+  dessus le code qui y mène et rien de ce qui suit — or lire une définition,
+  c'est lire ce qu'il y a autour. Il demande donc `Centre`, comme `zz`.
 - **Un caret peut attendre d'être révélé.** Le fichier qui vient d'être ouvert
   installe un `EditorState` neuf, que rien n'a encore mis en page : il n'a ni
   plage de lignes visibles ni hauteur de ligne, si bien que défiler jusqu'au
@@ -4133,6 +4140,15 @@ Six points qui ne se devinent pas :
   chaque rendu**, comme `TerminalView::sync_font` : le mode change sous les
   touches et le réglage sous le formulaire, l'appel est idempotent, et c'est ce
   qui rend le caret dès qu'on éteint le mode.
+- **`Ctrl+E` et `Ctrl+Y` bougent la page, pas le caret**, et c'est tout leur
+  intérêt : lire la suite sans perdre sa place. Conséquence qui se paie
+  ailleurs : `Ctrl+Y` n'est plus le rétablissement de l'éditeur, donc le redo
+  n'a plus que `Ctrl+R` — que la fenêtre prenait pour un rafraîchissement.
+  D'où `ClaudhubEditorVim`, un **second nom** de contexte et non
+  `ClaudhubEditor && ClaudhubVim` : `depth_of` pèse chaque identifiant contre
+  un seul niveau de la pile et les deux ne se rencontreraient jamais. La
+  liaison de rafraîchissement l'exclut, et garde `F5`, qui est la touche qu'on
+  cherche de toute façon.
 - **Le préfixe `z` fait deux métiers, et aucun ne touche au texte** — d'où sa
   place avant le partage normal/visuel, les deux modes y répondant pareil.
   `zz`, `zt`, `zb` placent la ligne du caret dans la vue **sans déplacer le

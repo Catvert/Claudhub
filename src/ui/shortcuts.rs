@@ -251,11 +251,28 @@ const VIM_EXPLORER_PREDICATE: &str = "ClaudhubExplorer && ClaudhubVim";
 /// vim keys go through, so there is one path and not two.
 const EDITOR_PREDICATE: &str = "ClaudhubEditor";
 
-pub fn editor_context() -> KeyContext {
+/// The editor **in vim mode**, which is a second name and not `ClaudhubEditor
+/// && ClaudhubVim`: `depth_of` weighs each identifier against a single level of
+/// the context stack, and the two would never meet — the same trap as
+/// `VIM_PREDICATE`. It exists so that one window binding can step aside for it.
+const EDITOR_VIM: &str = "ClaudhubEditorVim";
+
+pub fn editor_context(vim: bool) -> KeyContext {
     let mut context = KeyContext::default();
     context.add("ClaudhubEditor");
+    if vim {
+        context.add(EDITOR_VIM);
+    }
     context
 }
+
+/// `Ctrl+R` everywhere **except** an editor with vim keys on.
+///
+/// There it is redo, and redo has nowhere else to go: `Ctrl+Y`, which the
+/// editor binds to it, is vim's scroll-up-one-line. Refresh keeps `F5`, which
+/// is the key one reaches for anyway.
+const REFRESH_PREDICATE: &str = "Claudhub && !Dialog && !PopupMenu && !Popover \
+     && !ClaudhubTerminal && !ClaudhubEditorVim";
 
 /// The context the databases tree declares.
 ///
@@ -514,7 +531,7 @@ table!(STANDARD, standard_bindings, false, [
     // ── The window ──────────────────────────────────────────────────────────
     Window "f1" => ShowShortcuts, PREDICATE, "shortcut-help";
     Window "f5" => Refresh, PREDICATE, "shortcut-refresh";
-    Window "secondary-r" => Refresh, WINDOW_PREDICATE, "shortcut-refresh";
+    Window "secondary-r" => Refresh, REFRESH_PREDICATE, "shortcut-refresh";
     // Every editor's convention, including on Linux.
     Window "secondary-," => OpenSettings, PREDICATE, "shortcut-settings";
     Window "secondary-b" => ToggleSidebar, WINDOW_PREDICATE, "shortcut-sidebar";
