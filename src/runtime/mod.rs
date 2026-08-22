@@ -99,12 +99,16 @@ fn is_background(cmd: &Cmd) -> bool {
 
 /// A project-wide search.
 ///
-/// **Its own queue, one worker.** Neither the reads' — a `git grep` over a
-/// monorepo takes a second, and it would take one read worker in three while
-/// the diff one has just asked for waits behind it — nor the network's, which
-/// has a single worker and where it would sit in front of a `push`. It is the
-/// databases' reasoning exactly: a gesture whose cost is unbounded does not
-/// belong in a queue a frame is waiting on.
+/// **Its own queue, one worker.** Not because `git grep` is slow — measured on
+/// a Laravel project of eight thousand tracked files it answers in forty
+/// milliseconds, sixty for a regular expression, which is a `git status` — but
+/// because its cost is the only one here that is **unbounded**: it grows with
+/// the project rather than with the index, it is asked again on every pause in
+/// the typing, and on a Windows disk mounted by WSL every read costs several
+/// times more. In the read queue a search over a very large checkout would take
+/// one worker in three while the diff just asked for waits behind it; in the
+/// network's, which has a single worker, it would sit in front of a `push`. It
+/// is the databases' reasoning exactly.
 ///
 /// One worker, because a search is **replaced** rather than accumulated: one
 /// types, the earlier query is stale, and the send id is what tells the answer

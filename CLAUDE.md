@@ -1688,6 +1688,25 @@ ce qui est neuf et non ignoré, et `.gitignore` laisse `vendor/` et
 fichiers et quarante mille. Il est threadé, et il écarte les binaires tout seul
 (`-I`).
 
+**Et non ripgrep, la question ayant été posée et mesurée.** Sur Acetics — un
+Laravel de huit mille deux cents fichiers suivis, cache chaud — `git grep`
+répond en 36 ms, 59 ms pour une expression régulière ; `rg` en 15 ms. Il est
+donc deux à quatre fois plus rapide, et les deux sont si loin sous le seuil de
+perception, et sous les trois cents millisecondes de l'amortissement, que
+l'écart ne s'affiche nulle part. Ce que l'échange coûterait, en revanche, est
+réel : `rg` est un programme que la machine cible ne promet pas — la
+distribution ne suppose que `git`, un pilote Vulkan et l'agent, et sous WSL il
+faudrait l'avoir **dans la distro** et non côté Windows. Et par défaut les deux
+ne cherchent pas la même chose : sur le même mot, `rg` a trouvé 97 fichiers de
+plus, ceux d'un **sous-module**, où `git grep` ne descend pas sans
+`--recurse-submodules` — ce qui le rend d'ailleurs cohérent avec l'arbre du
+projet et la surveillance de fichiers, qui n'y descendent pas non plus — et 15
+de moins, tous **cachés** (`.github/workflows/`, `.env.ci`, `.gitignore`),
+qu'il saute sans `--hidden`. Le jour où le coût se verrait vraiment, la sortie
+n'est de toute façon pas le programme `rg` mais le crate `grep` qui le porte,
+en bibliothèque : cela supprimerait le `fork` en plus, au prix de
+réimplémenter ce que l'index sait du projet.
+
 **La casse se déduit de la requête**, comme dans `ui::find` et pour la même
 raison : c'est la convention de tous les éditeurs, et elle épargne un bouton
 pour un réglage qui change à chaque recherche. Ce qui reste en options est ce
@@ -1707,13 +1726,14 @@ Sept points qui ne se devinent pas :
   **dit** que la liste est écourtée : une recherche qui montre ses deux mille
   premières occurrences en silence se lit comme une recherche qui en a trouvé
   deux mille.
-- **La recherche est interactive, donc amortie.** Les résultats arrivent
-  pendant qu'on tape ; ce qui part est ce qu'on a tapé **une fois la frappe
-  arrêtée** (trois cents millisecondes — une pause entre deux mots, pas entre
-  deux lettres). `git grep` sur un monorepo coûte une seconde : partir à chaque
-  lettre occuperait le worker à des requêtes que personne ne lira, et les
-  réponses reviendraient dans le désordre pour des mots que personne n'a
-  écrits. L'amortissement est un **compteur de frappes** relu à l'échéance et
+- **La recherche est interactive, donc amortie** — et ce qu'on amortit est ce
+  qu'on lit, pas ce que ça coûte. Les résultats arrivent pendant qu'on tape ;
+  ce qui part est ce qu'on a tapé **une fois la frappe arrêtée** (trois cents
+  millisecondes — une pause entre deux mots, pas entre deux lettres). Partir à
+  chaque lettre serait payable, à quarante millisecondes la recherche ; ce qui
+  ne le serait pas, c'est la lecture : la liste se reconstruit, resélectionne
+  une première occurrence et relit un aperçu à chaque fois, si bien que le
+  panneau de droite traverse quatre fichiers pendant qu'on tape un mot. L'amortissement est un **compteur de frappes** relu à l'échéance et
   non le drapeau qu'emploient les autres différés de ce dépôt — celui du LSP,
   celui du redimensionnement du terminal : leur drapeau tire à cadence fixe, ce
   qui est juste pour ce qui coûte une milliseconde et faux pour ce qui coûte

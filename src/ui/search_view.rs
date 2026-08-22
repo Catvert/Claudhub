@@ -137,18 +137,23 @@ impl ClaudhubApp {
 
     /// A keystroke: the search goes out once the typing stops.
     ///
-    /// **Interactive, and therefore debounced.** `git grep` over a monorepo
-    /// costs a second: firing on every letter would keep the worker busy on
-    /// queries nobody will read, and the answers would arrive out of order for
-    /// words nobody typed. So the counter is bumped here and read again when
-    /// the timer fires — anything the typing has overtaken gives up. The send
-    /// id and the single worker (`runtime::is_search`) catch whatever slips
-    /// through.
+    /// **Interactive, and therefore debounced** — and the reason is what one
+    /// reads, not what it costs. `git grep` answers in forty milliseconds on a
+    /// Laravel project of eight thousand files, so firing on every letter would
+    /// be affordable; what it would not be is legible. A list rebuilt on every
+    /// letter re-selects a first hit and re-reads a preview each time, so the
+    /// right-hand pane flickers through four files while one word is typed, and
+    /// the answers to prefixes nobody meant arrive in whatever order the worker
+    /// finishes them. So the counter is bumped here and read again when the
+    /// timer fires — anything the typing has overtaken gives up. The send id
+    /// and the single worker (`runtime::is_search`) catch what slips through,
+    /// and they are what keeps this true on the checkout where the forty
+    /// milliseconds are four hundred.
     ///
     /// **Under `MIN_AUTO` characters, nothing goes out by itself.** One letter
-    /// matches half the project: the answer is two thousand hits, capped, and
-    /// nobody asked for it. `Enter` searches anyway — it is a gesture, and a
-    /// gesture is allowed to be expensive.
+    /// matches half the project: the answer is two thousand hits, capped at
+    /// both ends, and nobody asked for it. `Enter` searches anyway — it is a
+    /// gesture, and a gesture is allowed to be expensive.
     pub(super) fn search_typed(&mut self, cx: &mut Context<Self>) {
         self.search.typed = self.search.typed.wrapping_add(1);
         let at = self.search.typed;
@@ -785,8 +790,9 @@ const PREVIEW_CONTEXT: usize = 4;
 /// How long the typing has to stop before the search goes out.
 ///
 /// Three hundred milliseconds is a pause between words and not between
-/// letters: shorter, a slow typist pays a `git grep` per letter; longer, the
-/// list feels like it is answering the previous question.
+/// letters, and it is the value every editor's find-in-files settles on.
+/// Shorter, the list and its preview change under a word still being typed;
+/// longer, the answer reads as one to the previous question.
 const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// Below this many characters, only `Enter` searches. See `search_typed`.
