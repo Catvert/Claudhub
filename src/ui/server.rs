@@ -159,6 +159,7 @@ impl ClaudhubApp {
                 )
                 .overlay_closable(false)
                 .close_button(false)
+                .footer(super::dialogs::confirm())
                 .on_ok(move |_, window, cx| {
                     entity.update(cx, |this, cx| this.accept_wsl_distro(window, cx));
                     true

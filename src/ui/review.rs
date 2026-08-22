@@ -728,6 +728,7 @@ impl ClaudhubApp {
                 )
                 .overlay_closable(false)
                 .close_button(false)
+                .footer(super::dialogs::confirm())
                 .on_ok(move |_, _window, cx| {
                     entity.update(cx, |this, cx| {
                         let paths = vec![path.clone()];

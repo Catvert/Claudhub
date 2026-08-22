@@ -673,6 +673,7 @@ impl ClaudhubApp {
                 )
                 .overlay_closable(false)
                 .close_button(false)
+                .footer(super::dialogs::confirm())
                 .on_ok(move |_, _window, cx| {
                     entity.update(cx, |this, cx| {
                         this.editing = None;
@@ -1227,6 +1228,7 @@ impl ClaudhubApp {
                 )
                 .overlay_closable(false)
                 .close_button(false)
+                .footer(super::dialogs::confirm())
                 .on_ok(move |_, _window, cx| {
                     entity.update(cx, |this, cx| {
                         this.file_op(files::Op::Delete { path: path.clone() }, cx)

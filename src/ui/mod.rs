@@ -12,6 +12,7 @@ mod branches;
 mod conflicts;
 mod db;
 mod db_query;
+mod dialogs;
 mod diff_view;
 mod explorer;
 mod file_icons;

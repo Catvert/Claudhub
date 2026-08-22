@@ -165,6 +165,8 @@ src/
     conflicts.rs    les conflits et le garde-fou d'une opération à mi-chemin
     worktree_ops.rs création guidée, tâches du projet, intégration
     store.rs        ce qu'on retient par worktree : base, replis, notes
+    dialogs.rs      les deux boutons d'un dialogue, que gpui-component ne
+                    peint que pour un `AlertDialog`
     notes.rs        le modèle des notes, leur ancrage et leur prompt
     notes_view.rs   les gestes de la relecture annotée et son panneau
     vault.rs        les notes, le suivi de relecture et la liste de tâches
@@ -3560,6 +3562,15 @@ Elles viennent d'Aviary, et les enfreindre produit des bugs silencieux.
   `on_click` — est libre, l'emprunt étant rendu à ce moment-là. Les autres
   fermetures de ce dépôt reçoivent `_cx` pour cette raison ; celle des
   raccourcis ne s'en sert que pour lire le thème, qui est un global.
+- **Un `Dialog` ne peint pas ses boutons.** `on_ok` et `on_cancel` n'installent
+  que les rappels d'Entrée et d'Échap : la rangée OK/Annuler n'est rendue que
+  par un `AlertDialog`, qui ne prend ni champ de saisie, ni liste de questions,
+  ni extrait de code — c'est-à-dire aucune des confirmations de cette fenêtre.
+  Avec `close_button(false)` et `overlay_closable(false)`, un dialogue auquel on
+  ne sait pas répondre est un dialogue dont on ne sort pas. `ui::dialogs::confirm`
+  rend donc le pied de page, et ses boutons **dispatchent les mêmes actions que
+  les touches** (`Confirm`, `Cancel`) : les deux chemins finissent dans le même
+  `on_ok`, comme les boutons et les flèches de la barre du diff.
 - **`key_context` prend un identifiant, pas un prédicat.** Passer
   `"Claudhub && !Dialog"` à `key_context` fait boucler le parseur et déborder la
   pile au premier rendu. L'expression va dans le troisième argument de

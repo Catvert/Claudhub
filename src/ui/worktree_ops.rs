@@ -459,6 +459,7 @@ impl ClaudhubApp {
                 )
                 .overlay_closable(false)
                 .close_button(false)
+                .footer(super::dialogs::confirm())
                 .on_ok(move |_, _window, cx| {
                     entity.update(cx, |this, cx| this.submit_answers(cx));
                     // The dialog stays open: the next page shows in it, and it is
@@ -992,6 +993,7 @@ impl ClaudhubApp {
                 )
                 .overlay_closable(false)
                 .close_button(false)
+                .footer(super::dialogs::confirm())
                 .on_ok(move |_, _window, cx| {
                     entity.update(cx, |this, cx| {
                         this.wt_remove(main.clone(), &worktree, cx);
@@ -1336,6 +1338,7 @@ impl ClaudhubApp {
                 .child(div().text_sm().child(label.clone()))
                 .overlay_closable(false)
                 .close_button(false)
+                .footer(super::dialogs::confirm())
                 .on_ok(move |_, _window, cx| {
                     entity.update(cx, |this, cx| {
                         this.git.send(Cmd::RemoveWorktree {
