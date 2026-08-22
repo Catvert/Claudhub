@@ -101,6 +101,7 @@ src/
   files.rs      lire, écrire (sous condition), ranger, éditeur externe
   db/           bases de données — `sqlx`, asynchrone, testable sans gpui
     mod.rs      connexions, schémas, résultats ; le choix du moteur
+    scope.rs    quelles bases appartiennent au worktree regardé — motifs
     sqlite.rs   en lecture seule, schéma lu par les pragmas
     mysql.rs    MySQL et MariaDB, par `information_schema`
   logging.rs    `env_logger` sur stderr, et un anneau de deux mille lignes
@@ -167,6 +168,8 @@ src/
     sentry_view.rs  les issues, leur trace, et de quoi les confier
     db.rs           l'arbre des bases : connexion, base, table, colonne
     db_query.rs     la console SQL, ses complétions et sa table de résultats
+    sql_history.rs  les requêtes déjà jouées : dédup, portée, jours — pur
+    sql_history_view.rs  le panneau « Historique » et ses gestes
     conflicts.rs    les conflits et le garde-fou d'une opération à mi-chemin
     worktree_ops.rs création guidée, tâches du projet, intégration
     store.rs        ce qu'on retient par worktree : base, replis, notes
@@ -2331,12 +2334,22 @@ côte feraient deux listes à lire avant d'atteindre un champ.
 l'éditeur à l'édition, la console SQL aux bases. C'est ce que la découpe achète
 de plus visible, et le titre de l'onglet redevient une constante.
 
-Cinq points qui ne se devinent pas :
+Six points qui ne se devinent pas :
 
 - **Rien à faire en changeant d'écran que de changer de dock.** L'état — le
   worktree choisi, le fichier ouvert, la requête en cours — vit dans
   `ClaudhubApp` et non dans les panneaux : il est donc le même de tous les
   côtés, et c'est ce qui rend la bascule instantanée.
+- **Rien, sauf le focus** (`focus_workspace`). On entre sur un écran pour
+  travailler dans ce qu'il porte au centre, et le focus restait où l'écran
+  précédent l'avait laissé — le plus souvent un terminal, à qui appartiennent
+  alors les flèches, les touches de vim et la copie. L'éditeur et la console
+  sont des champs de texte, donc nommés un par un ; partout ailleurs — le diff,
+  Sentry, les réglages — c'est le manche de la racine, celui contre lequel les
+  raccourcis de la fenêtre se résolvent. Un champ qu'on ne voit pas n'est jamais
+  visé : le panneau peut être masqué, et il n'y a pas toujours un fichier ouvert
+  ni une console — l'écran « Édition » rend alors le focus à l'arbre du projet,
+  dont les flèches sont ce qu'on y cherche.
 - **Un geste qui ouvre quelque chose emmène sur son écran.** Ouvrir un fichier
   bascule sur « Édition », ouvrir une console sur « Bases », « ajouter une
   connexion » sur « Réglages ». Le geste vient parfois d'ailleurs — une ligne
@@ -3063,6 +3076,114 @@ en garde un dans son magasin clé-valeur pour que le filtre voie tout dès le
 démarrage ; ici le magasin d'état fait un kilo-octet et se lit à la main, et un
 schéma indexé en pèserait mille fois plus. L'index vit donc pour la session, et
 « tout indexer » le refait en une commande par base.
+
+### Les bases d'un worktree
+
+Un projet comme Acetics **clone ses bases par worktree** : `wt new telavox`
+laisse `wt_telavox_master` et ses `wt_telavox_tenant_*` à côté des quatre-vingts
+bases du dépôt principal. L'arbre les montrait toutes, ce qui revient à n'en
+montrer aucune — les trois qui appartiennent à la branche relue sont perdues
+dans le reste.
+
+**Un motif déclaré sur la connexion** (`db::Connection::scope`, `wt_{slug}_*`),
+c'est-à-dire le deuxième niveau du système d'extension et non le `wt.toml` :
+une connexion appartient à la machine, pas au projet, et le même dépôt se relit
+depuis cinq checkouts contre le même serveur. `db::scope` est pur et testé.
+
+Quatre règles, et chacune est ce qui empêche le filtre de mentir :
+
+- **Un motif dont une variable ne se résout pas est écarté.** Le checkout
+  principal n'a pas de slug : `wt_{slug}_*` n'y dit rien, et le résoudre en
+  chaîne vide donnerait `wt__*`, qui ne correspond à rien du tout. Les
+  variables sont `{worktree}` (le nom du dossier), `{slug}` (le même, mais
+  **absent sur le principal** — c'est ce qui rend le motif inerte là-bas) et
+  `{branch}`.
+- **Aucun motif applicable montre tout.** Un scope qui ne sait pas décider ne
+  doit jamais être la raison qu'une base disparaisse : une connexion sans motif,
+  un worktree pas encore choisi, un projet dont les bases ne sont pas clonées se
+  comportent exactement comme avant.
+- **Rien n'est masqué en silence.** La barre du panneau porte le compte des
+  bases écartées et la bascule qui les rend (`db_hidden_count`,
+  `db_toggle_scope`), et **la bascule n'apparaît que si une connexion déclare un
+  motif** : un bouton qui échange deux listes identiques se lit comme un bouton
+  cassé. L'état vit en mémoire, comme le niveau du journal : c'est une posture
+  de lecture, pas une préférence.
+- **L'indexation suit le scope.** Se connecter aux quatre-vingts bases qu'on
+  vient de masquer est exactement ce qu'on lui a demandé de ne pas faire ; la
+  recherche non plus ne va pas au-delà — un résultat hors scope serait une ligne
+  qu'on ne sait pas expliquer.
+
+Deux corollaires : le filtre s'applique à l'**affichage**, les entrées de
+l'arbre ne portant que des indices dans l'état — masquer, c'est sauter une ligne,
+jamais retirer une base du vecteur ; et le motif n'entre **pas** dans
+`Connection::key`, qui dit quelle connexion c'est et non ce qu'on en montre — une
+console rouverte depuis un autre worktree doit rester la même console.
+
+### L'historique des requêtes
+
+La console retenait la requête affichée et rien d'autre : ce qu'on avait écrit
+la veille, dans le worktree d'à côté, contre le tenant dont on ne se rappelle
+plus le nom, disparaissait au premier effacement de l'éditeur. Une console SQL
+sans historique est une console où l'on réécrit le même `SELECT` chaque
+après-midi.
+
+**Par worktree, parce que c'est là qu'est le travail** — une branche, un jeu de
+bases clonées, une question à laquelle on répond. Rien n'est muré pour autant :
+le sélecteur de portée du panneau lit tout le fichier (« ce worktree », « cette
+connexion », « tout »), mais ce qu'on voit en arrivant est ce qu'on faisait ici.
+
+**Un fichier à lui** (`<config>/sql_history.json`), et non le magasin d'état :
+le magasin dit « où l'on en est », fait un kilo-octet et se réécrit en entier
+toutes les demi-secondes pendant qu'on tape — le texte de la console y passe à
+chaque frappe. Un journal cumulatif de plusieurs centaines de kilo-octets n'a
+rien à faire à ce rythme-là. Il est sérialisé dans le thread d'interface — une
+milliseconde — et **écrit en fond** : un journal s'écrit sur un geste, jamais
+sur une frame.
+
+**Un onglet à côté de l'arbre**, dans la colonne de gauche de l'écran des
+bases, et non un popover : on écrit une requête **pendant** qu'on le regarde,
+comme on prend une table dans l'arbre d'à côté. Derrière un clic, c'est ainsi
+qu'un historique cesse d'être consulté. `LAYOUT_VERSION` passe à 15 — une
+disposition d'avant ne connaît pas ce panneau.
+
+Sept points qui ne se devinent pas :
+
+- **La même requête rejouée ne fait pas une seconde ligne.** On corrige une
+  faute de frappe, on relance le même `SELECT` quatre fois en regardant les
+  données changer : quatre lignes identiques n'en disent pas plus qu'une et
+  chassent la requête de ce matin qu'on cherchait. La ligne remonte, compte un
+  passage de plus (`×4`) et **prend le résultat frais** — ce qu'une ligne dit du
+  nombre de lignes et de la durée porte sur la dernière fois, pas sur la
+  première. Les blancs sont normalisés : réindenter une requête n'en fait pas
+  une autre.
+- **Seul ce qu'un geste a demandé est classé** (`QueryState::record`). Changer
+  de page, trier et prolonger rejouent tous le même texte : les classer
+  compterait quatre passages pour une question posée, et c'est justement le
+  compteur qui donne son sens au `×4`.
+- **Une requête qui échoue est classée aussi.** Une faute de frappe qu'on
+  corrige est exactement ce qu'on veut récupérer, et la ligne le dit — première
+  ligne du message du moteur, le reste n'étant pas lu dans une liste.
+- **Le plafond est par worktree** (`PER_WORKTREE`), pas global : un projet
+  interrogé tout l'après-midi ne doit pas chasser les trois requêtes du worktree
+  d'à côté.
+- **Une entrée nomme sa connexion, elle ne la décrit pas.** On y range la clé
+  (`db::Connection::key`) comme dans le magasin, donc sans mot de passe ; rejouer
+  relit la connexion **dans les réglages**, et une connexion supprimée laisse la
+  ligne en place en le disant plutôt que d'ouvrir une console qui échouerait à sa
+  première requête.
+- **Un clic charge, un double-clic exécute.** Ce qu'on fait d'une requête
+  rappelée est de l'ajuster avant de la lancer : le focus part donc à l'éditeur.
+- **Vider n'oublie que ce qui est affiché.** La portée et la recherche décident
+  de ce qui part : ce qu'on demande d'oublier est ce qu'on a sous les yeux.
+
+La liste est virtualisée par `v_virtual_list` et non `uniform_list` : ses lignes
+n'ont pas la même hauteur — un en-tête de jour fait une ligne, une requête deux
+(la requête, puis ce qu'elle a répondu) —, et les en-têtes sont **dans** la
+liste et non des sections autour, une liste virtualisée ne parcourant qu'un
+vecteur plat. Le groupement par jour, la portée, la déduplication et la
+recherche sont dans `ui::sql_history`, qui ne connaît aucun type de gpui et se
+teste, comme `notes.rs` devant `notes_view.rs` ; « aujourd'hui » et « hier » y
+sont une décision et leur libellé appartient à la vue.
 
 ### Les domaines de revue
 

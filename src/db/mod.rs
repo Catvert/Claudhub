@@ -24,6 +24,7 @@
 //! here would forbid an `UPDATE` the user is entitled to make.
 
 pub mod mysql;
+pub mod scope;
 pub mod sqlite;
 
 use std::collections::BTreeMap;
@@ -131,6 +132,13 @@ pub struct Connection {
     pub password: String,
     /// The databases to show. Empty: all but the system ones.
     pub databases: Vec<String>,
+    /// Which of them belong to the checkout being looked at — patterns with
+    /// `*` and `{slug}` / `{worktree}` / `{branch}`, see `db::scope`.
+    ///
+    /// **Not part of `key()`**: it says what to show, not which connection this
+    /// is, and a console reopened from another worktree must stay the same
+    /// console.
+    pub scope: String,
 }
 
 /// The password is never written.
@@ -150,6 +158,7 @@ impl std::fmt::Debug for Connection {
             .field("user", &self.user)
             .field("password", &if self.password.is_empty() { "" } else { "…" })
             .field("databases", &self.databases)
+            .field("scope", &self.scope)
             .finish()
     }
 }

@@ -263,6 +263,7 @@ panels! {
     NotesPanel => ("ClaudhubNotes", "panel-notes", render_notes, Notes),
     FilesPanel => ("ClaudhubFiles", "panel-files", render_files, Files),
     DbPanel => ("ClaudhubDb", "panel-databases", render_db, Db),
+    SqlHistoryPanel => ("ClaudhubSqlHistory", "panel-sql-history", render_sql_history, SqlHistory),
     SentryPanel => ("ClaudhubSentry", "panel-sentry", render_sentry, Sentry),
     // The centre of each screen. **Three panels and not one whose title
     // changes**: they belonged to the same one because they were fighting over

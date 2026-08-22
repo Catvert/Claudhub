@@ -153,6 +153,7 @@ impl Workspace {
             ],
             Self::Db => &[
                 (DbPanel::NAME, "panel-databases"),
+                (SqlHistoryPanel::NAME, "panel-sql-history"),
                 (ConsolePanel::NAME, "panel-sql"),
                 (TerminalPanel::NAME, "panel-terminal"),
             ],
@@ -261,7 +262,12 @@ pub fn install_default_layout(
         // centre. This is PhpStorm's explorer, and the gesture is the same —
         // you unfold what you are looking for, you query what you have found.
         Workspace::Db => {
-            let left = DockLayout::tabs().panel_view(panel!(DbPanel), cx);
+            // The history is a tab beside the tree and not a panel of its own:
+            // one looks at the schema **or** at what one has already asked of
+            // it, and two columns would leave the console half the screen.
+            let left = DockLayout::tabs()
+                .panel_view(panel!(DbPanel), cx)
+                .panel_view(panel!(SqlHistoryPanel), cx);
             let center = DockLayout::tabs().panel_view(panel!(ConsolePanel), cx);
             (Some(left), center)
         }

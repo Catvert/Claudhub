@@ -22,7 +22,7 @@ use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
     menu::{ContextMenuExt, PopupMenu, PopupMenuItem},
-    v_flex, ActiveTheme, Disableable, Sizable,
+    v_flex, ActiveTheme, Disableable, Selectable, Sizable,
 };
 
 use crate::db;
@@ -133,7 +133,6 @@ impl Entry {
 }
 
 /// The panel's state.
-#[derive(Default)]
 pub struct DbState {
     pub connections: Vec<ConnectionState>,
     /// The displayed rows, rebuilt on every state change, never at render time:
@@ -149,6 +148,26 @@ pub struct DbState {
     pub cursor: Option<usize>,
     /// The connections an "index everything" is walking through.
     pub indexing: HashSet<String>,
+    /// Show only the databases belonging to the selected checkout.
+    ///
+    /// True by default, and it costs nothing where no connection declares a
+    /// scope — `db::scope::allows` keeps everything when no pattern applies.
+    /// In memory and not in the settings: it is a reading posture, like the
+    /// journal's level, that changes several times while looking for something.
+    pub scoped: bool,
+}
+
+impl Default for DbState {
+    fn default() -> Self {
+        Self {
+            connections: Vec::new(),
+            entries: Vec::new(),
+            query: String::new(),
+            cursor: None,
+            indexing: HashSet::new(),
+            scoped: true,
+        }
+    }
 }
 
 impl ClaudhubApp {
@@ -481,6 +500,73 @@ impl ClaudhubApp {
     // — The tree ————————————————————————————————————————————————————
 
     /// Rebuilds the displayed rows.
+    /// What the selected checkout is called, as a scope pattern names it.
+    ///
+    /// The slug is **the linked worktree's folder name, and nothing on the main
+    /// checkout**: `wt` puts a worktree in `<root>/<slug>`, and a pattern that
+    /// names a slug is not about the main repository — see `db::scope`.
+    fn db_scope_vars(&self) -> db::scope::Vars {
+        let Some(worktree) = self.active_worktree() else {
+            return db::scope::Vars::default();
+        };
+        let name = worktree.label();
+        db::scope::Vars {
+            worktree: Some(name.clone()),
+            slug: (!worktree.is_main).then_some(name),
+            branch: worktree.branch.clone(),
+        }
+    }
+
+    /// The patterns in force for a connection, empty when nothing filters.
+    fn db_scope(&self, connection: usize) -> Vec<String> {
+        if !self.db.scoped {
+            return Vec::new();
+        }
+        let Some(state) = self.connection_at(connection) else {
+            return Vec::new();
+        };
+        db::scope::expand(&state.config.scope, &self.db_scope_vars())
+    }
+
+    /// Does this database belong to the checkout being looked at?
+    fn db_in_scope(&self, connection: usize, database: usize) -> bool {
+        let Some(state) = self.database_at(connection, database) else {
+            return true;
+        };
+        db::scope::allows(&self.db_scope(connection), &state.info.name)
+    }
+
+    /// How many databases the scope is hiding, all connections together.
+    ///
+    /// The bar says it: a filter that removes seventy-eight databases without a
+    /// word reads as a broken connection, and the whole point of a scope is that
+    /// one knows it is on.
+    pub(super) fn db_hidden_count(&self) -> usize {
+        (0..self.db.connections.len())
+            .map(|connection| {
+                let patterns = self.db_scope(connection);
+                if patterns.is_empty() {
+                    return 0;
+                }
+                self.connection_at(connection)
+                    .and_then(|state| state.databases.ready())
+                    .map(|databases| {
+                        databases
+                            .iter()
+                            .filter(|state| !db::scope::allows(&patterns, &state.info.name))
+                            .count()
+                    })
+                    .unwrap_or(0)
+            })
+            .sum()
+    }
+
+    /// Shows everything, or only the checkout's databases.
+    pub(super) fn db_toggle_scope(&mut self, cx: &mut Context<Self>) {
+        self.db.scoped = !self.db.scoped;
+        self.db_rebuild(cx);
+    }
+
     pub(super) fn db_rebuild(&mut self, cx: &mut Context<Self>) {
         // The row under the cursor is followed by its value, not by its index:
         // unfolding inserts rows above it.
@@ -517,7 +603,14 @@ impl ClaudhubApp {
                 Load::Loading => entries.push(status(1, true, tr!("db-connecting"))),
                 Load::Failed(message) => entries.push(status(1, false, message.clone().into())),
                 Load::Ready(databases) => {
+                    let patterns = self.db_scope(connection);
                     for (database, state) in databases.iter().enumerate() {
+                        // Out of the checkout's scope: skipped, never removed
+                        // from the state — the indices an entry carries are its
+                        // place in that vector.
+                        if !db::scope::allows(&patterns, &state.info.name) {
+                            continue;
+                        }
                         entries.push(Entry::Database {
                             connection,
                             database,
@@ -586,7 +679,14 @@ impl ClaudhubApp {
             match &state.databases {
                 Load::Loading => children.push(status(1, true, tr!("db-connecting"))),
                 Load::Ready(databases) => {
+                    let patterns = self.db_scope(connection);
                     for (database, state) in databases.iter().enumerate() {
+                        // A search does not reach past the scope: what is not
+                        // this checkout's is not among what one is looking for,
+                        // and the bar says how much that is.
+                        if !db::scope::allows(&patterns, &state.info.name) {
+                            continue;
+                        }
                         let mut rows = Vec::new();
                         match &state.tables {
                             Load::Loading => rows.push(status(2, true, tr!("db-loading-tables"))),
@@ -659,6 +759,9 @@ impl ClaudhubApp {
                 continue;
             };
             for database in 0..databases.len() {
+                if !self.db_in_scope(connection, database) {
+                    continue;
+                }
                 let Some(state) = self.database_at(connection, database) else {
                     break;
                 };
@@ -711,6 +814,12 @@ impl ClaudhubApp {
             Some(Load::Loading) => pending = true,
             Some(Load::Ready(databases)) => {
                 for database in 0..databases.len() {
+                    // Indexing follows the scope: connecting to the eighty
+                    // databases a scope has just hidden is exactly what one
+                    // asked it not to do.
+                    if !self.db_in_scope(connection, database) {
+                        continue;
+                    }
                     let Some(state) = self.database_at(connection, database) else {
                         break;
                     };
@@ -1045,6 +1154,7 @@ impl ClaudhubApp {
                     .text_color(cx.theme().muted_foreground)
                     .child(tr!("db-connections-count", { n: count })),
             )
+            .children(self.render_db_scope(cx))
             .child(
                 Button::new("db-index-all")
                     .ghost()
@@ -1072,6 +1182,52 @@ impl ClaudhubApp {
                         this.open_settings_at(crate::ui::settings_view::Page::Databases, window, cx)
                     })),
             )
+    }
+}
+
+impl ClaudhubApp {
+    /// The scope switch, and what it hides.
+    ///
+    /// **Only where a scope applies**: a project whose databases are not cloned
+    /// per worktree has no pattern, nothing is filtered, and a button that
+    /// switches between two identical lists is a button that reads as broken.
+    fn render_db_scope(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let declared = self
+            .db
+            .connections
+            .iter()
+            .any(|state| !state.config.scope.trim().is_empty());
+        if !declared {
+            return None;
+        }
+        let scoped = self.db.scoped;
+        let hidden = self.db_hidden_count();
+        Some(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .when(scoped && hidden > 0, |el| {
+                    el.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tr!("db-scope-hidden", { n: hidden })),
+                    )
+                })
+                .child(
+                    Button::new("db-scope")
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("funnel"))
+                        .tooltip(if scoped {
+                            tr!("db-scope-on")
+                        } else {
+                            tr!("db-scope-off")
+                        })
+                        .selected(scoped)
+                        .on_click(cx.listener(|this, _, _window, cx| this.db_toggle_scope(cx))),
+                ),
+        )
     }
 }
 

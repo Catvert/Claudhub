@@ -135,6 +135,13 @@ pub struct QueryState {
     pub request: u64,
     /// The running request extends the window instead of replacing it.
     pub appending: bool,
+    /// The running request is a query one **asked for**, and its answer goes
+    /// into the history.
+    ///
+    /// Paging, sorting and scrolling to the bottom all replay the same text:
+    /// filing them would count four runs for one question asked, and a row's
+    /// "×4" is precisely what says a query was worth running again.
+    pub record: bool,
     pub running: bool,
     pub error: Option<SharedString>,
     /// What the displayed window reports, for the status bar and the paging. The
@@ -837,6 +844,7 @@ impl ClaudhubApp {
         self.query.sent = Some(sql);
         self.query.sort = None;
         self.query.can_sort = false;
+        self.query.record = true;
         self.send_db_query(0, false, cx);
     }
 
@@ -849,6 +857,7 @@ impl ClaudhubApp {
             return;
         }
         self.query.sort = sort;
+        self.query.record = false;
         // The arrow follows the gesture and not the answer: a query sometimes
         // takes a second, and a header that does not move reads as a lost click.
         self.db_table.update(cx, |state, cx| {
@@ -860,6 +869,7 @@ impl ClaudhubApp {
 
     /// Moves the window.
     pub(super) fn page_db_query(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.query.record = false;
         self.send_db_query(offset, false, cx);
     }
 
@@ -873,6 +883,7 @@ impl ClaudhubApp {
             });
             return;
         }
+        self.query.record = false;
         let next = self.query.offset + self.query.shown;
         self.send_db_query(next, true, cx);
     }
@@ -928,6 +939,23 @@ impl ClaudhubApp {
         }
         self.query.running = false;
         self.query.elapsed_ms = elapsed_ms;
+        // Filed in the history, and only what a gesture asked for — see
+        // `QueryState::record`.
+        if std::mem::take(&mut self.query.record) {
+            match &rows {
+                Ok(page) => self.record_sql_query(
+                    true,
+                    (!page.columns.is_empty()).then_some(page.rows.len()),
+                    page.affected,
+                    None,
+                    elapsed_ms,
+                    cx,
+                ),
+                Err(message) => {
+                    self.record_sql_query(false, None, None, Some(message.clone()), elapsed_ms, cx)
+                }
+            }
+        }
         match rows {
             Ok(rows) => {
                 self.query.error = None;

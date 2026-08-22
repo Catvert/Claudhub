@@ -49,7 +49,7 @@ use crate::ui::terminal_view::OpenTerminal;
 // 14: the notes left the tabs for the bottom third of the review's column. A
 // saved layout would keep them where they were, which is the one place this
 // change is about.
-const LAYOUT_VERSION: usize = 14;
+const LAYOUT_VERSION: usize = 15;
 
 /// The saved layouts, one per screen.
 ///
@@ -471,6 +471,17 @@ pub struct ClaudhubApp {
     /// The result table. An entity created once as well: rebuilding it on every
     /// query would lose the column widths just adjusted with the mouse.
     pub(super) db_table: Entity<gpui_component::table::TableState<crate::ui::db_query::Results>>,
+    /// Every query run, per worktree, and the reach the panel is showing.
+    ///
+    /// In the application and not in a global: only the history panel reads it,
+    /// and a global is what the settings form needs, not what a panel needs.
+    pub(super) sql_history: crate::ui::sql_history::History,
+    pub(super) sql_history_reach: crate::ui::sql_history::Reach,
+    /// The history list's scroll handle. `VirtualListScrollHandle` because its
+    /// rows are not all the same height — a day's heading is one line, a query
+    /// two — and that is the one case where walking a vector of sizes is worth
+    /// its price.
+    pub(super) sql_history_scroll: gpui_component::VirtualListScrollHandle,
     /// The height split between the console's editor and its grid.
     ///
     /// An entity, because that is what `v_resizable` asks for, and created once:
@@ -781,6 +792,11 @@ impl ClaudhubApp {
             db_schema,
             db_table,
             db_split,
+            // Read once, at startup, like the state store: it is a file of our
+            // own, a few hundred kilobytes at most, and nothing else writes it.
+            sql_history: crate::ui::sql_history::History::load(),
+            sql_history_reach: Default::default(),
+            sql_history_scroll: gpui_component::VirtualListScrollHandle::new(),
             awaiting_agent: None,
             toast: None,
             pending_status: std::collections::HashSet::new(),
@@ -2906,10 +2922,15 @@ impl ClaudhubApp {
     /// Nothing to do but change dock: the state — the chosen worktree, the open
     /// file, the running query — lives in this entity and not in the panels, and
     /// is therefore the same on all four sides.
+    ///
+    /// Nothing but the focus, that is. A screen is entered to work in what it
+    /// carries in the middle, and the focus stayed where the previous screen had
+    /// left it — usually a terminal, from which the arrows, the vim keys and the
+    /// copy all belong to the program running there.
     pub(super) fn enter_workspace(
         &mut self,
         workspace: crate::ui::workspace::Workspace,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.workspace == workspace {
@@ -2917,7 +2938,49 @@ impl ClaudhubApp {
         }
         self.workspace = workspace;
         self.dock = self.docks[&workspace].clone();
+        self.focus_workspace(window, cx);
         cx.notify();
+    }
+
+    /// Gives the focus to what the current screen is entered for.
+    ///
+    /// The centre of a screen is what one comes to it for: the editor on
+    /// "Editing", the query on "Databases". Both are text fields, so they must
+    /// be named one by one; everywhere else — the diff, Sentry, the settings —
+    /// the root handle is the right answer, being the one the review's keys and
+    /// the window's shortcuts are resolved against.
+    ///
+    /// A field one cannot see is never focused: the panel may have been hidden,
+    /// and there may be no file open nor any console at all.
+    fn focus_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::ui::workspace::Workspace;
+        match self.workspace {
+            Workspace::Files => {
+                if self.panel_visible(super::panels::EditorPanel::NAME) {
+                    if let Some(editing) = self.editing() {
+                        let handle = gpui::Focusable::focus_handle(&editing.input, cx);
+                        handle.focus(window, cx);
+                        return;
+                    }
+                }
+                // No file open: the tree is what there is to work in, and its
+                // arrows are the ones one reaches for on this screen.
+                if self.panel_visible(super::panels::FilesPanel::NAME) {
+                    self.explorer_focus.clone().focus(window, cx);
+                    return;
+                }
+            }
+            Workspace::Db
+                if self.db_console_open()
+                    && self.panel_visible(super::panels::ConsolePanel::NAME) =>
+            {
+                let handle = gpui::Focusable::focus_handle(&self.db_query_input, cx);
+                handle.focus(window, cx);
+                return;
+            }
+            _ => {}
+        }
+        window.focus(&self.focus, cx);
     }
 
     pub(super) fn terminal_visible(&self, _cx: &App) -> bool {

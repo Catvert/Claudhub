@@ -1331,6 +1331,7 @@ struct DatabaseField {
     user: Entity<InputState>,
     password: Entity<InputState>,
     databases: Entity<InputState>,
+    scope: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1419,6 +1420,16 @@ fn database_row(
             false,
             cx,
         );
+        let scope = field(
+            SharedString::from(format!(
+                "{} — {}",
+                tr!("settings-database-scope"),
+                crate::db::scope::EXAMPLE
+            )),
+            values.scope.clone(),
+            false,
+            cx,
+        );
         let watch = |input: &Entity<InputState>,
                      edit: fn(&mut crate::db::Connection, String),
                      cx: &mut Context<DatabaseField>| {
@@ -1453,6 +1464,7 @@ fn database_row(
                 },
                 cx,
             ),
+            watch(&scope, |c, v| c.scope = v, cx),
         ];
         DatabaseField {
             name,
@@ -1462,11 +1474,12 @@ fn database_row(
             user,
             password,
             databases,
+            scope,
             _subscriptions: subscriptions,
         }
     });
     let field = state.read(cx);
-    let (name, path, host, port, user, password, databases) = (
+    let (name, path, host, port, user, password, databases, scope) = (
         field.name.clone(),
         field.path.clone(),
         field.host.clone(),
@@ -1474,6 +1487,7 @@ fn database_row(
         field.user.clone(),
         field.password.clone(),
         field.databases.clone(),
+        field.scope.clone(),
     );
     let engine = connection.engine;
     let sqlite = engine == crate::db::Engine::Sqlite;
@@ -1567,6 +1581,16 @@ fn database_row(
                     .child(Input::new(&databases).small()),
             )
         })
+        // The worktree scope, for both engines: it says which of the databases
+        // belong to the checkout being reviewed, and a SQLite file attached
+        // beside others is the same question.
+        .child(div().w_full().min_w_0().child(Input::new(&scope).small()))
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(tr!("settings-database-scope-help")),
+        )
 }
 
 /// The language servers page.

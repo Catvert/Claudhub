@@ -52,6 +52,9 @@ pub enum Pane {
     Editor,
     /// The SQL console. Same thing: the query editor is what searches.
     Console,
+    /// The queries already run. It filters, like every list whose order is
+    /// ours: what is left is what was being looked for.
+    SqlHistory,
     /// The settings. The form has a search of its own, in its sidebar; this key
     /// exists so `Ctrl+F` there does not go to the panel touched before it.
     Settings,
