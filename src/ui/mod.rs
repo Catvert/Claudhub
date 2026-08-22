@@ -32,6 +32,8 @@ mod panels;
 mod repos;
 mod review;
 mod scroll;
+mod search;
+mod search_view;
 mod sentry_view;
 mod server;
 mod session;

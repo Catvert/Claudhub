@@ -97,6 +97,23 @@ fn is_background(cmd: &Cmd) -> bool {
     )
 }
 
+/// A project-wide search.
+///
+/// **Its own queue, one worker.** Neither the reads' — a `git grep` over a
+/// monorepo takes a second, and it would take one read worker in three while
+/// the diff one has just asked for waits behind it — nor the network's, which
+/// has a single worker and where it would sit in front of a `push`. It is the
+/// databases' reasoning exactly: a gesture whose cost is unbounded does not
+/// belong in a queue a frame is waiting on.
+///
+/// One worker, because a search is **replaced** rather than accumulated: one
+/// types, the earlier query is stale, and the send id is what tells the answer
+/// of a gesture from the answer of the gesture that replaced it. Two workers
+/// would only make two stale searches run at once.
+fn is_search(cmd: &Cmd) -> bool {
+    matches!(cmd, Cmd::Search { .. })
+}
+
 /// The `wt` operations that run the project's hooks.
 ///
 /// **Their own queue**, and not the network's. They were there first, for the
@@ -131,6 +148,7 @@ enum Queue {
     Long,
     Background,
     Databases,
+    Search,
 }
 
 fn queue_of(cmd: &Cmd) -> Queue {
@@ -142,6 +160,8 @@ fn queue_of(cmd: &Cmd) -> Queue {
         Queue::Background
     } else if is_db(cmd) {
         Queue::Databases
+    } else if is_search(cmd) {
+        Queue::Search
     } else {
         Queue::Reads
     }
@@ -164,6 +184,7 @@ enum HandleInner {
         long: async_channel::Sender<Cmd>,
         background: async_channel::Sender<Cmd>,
         databases: async_channel::Sender<Cmd>,
+        search: async_channel::Sender<Cmd>,
         /// The fifth channel: watch orders go through no queue — setting up a
         /// watch is already deferred into the watcher thread, and making it wait
         /// behind a diff would make no sense. `None` when watching could not
@@ -220,6 +241,7 @@ impl Handle {
                 long,
                 background,
                 databases,
+                search,
                 watcher,
                 lsp,
             } => {
@@ -234,6 +256,7 @@ impl Handle {
                     Queue::Long => long,
                     Queue::Background => background,
                     Queue::Databases => databases,
+                    Queue::Search => search,
                     Queue::Reads => reads,
                 };
                 send_to(queue, cmd);
@@ -317,6 +340,7 @@ pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
     let (long_tx, long_rx) = async_channel::unbounded::<Cmd>();
     let (bg_tx, bg_rx) = async_channel::unbounded::<Cmd>();
     let (db_tx, db_rx) = async_channel::unbounded::<Cmd>();
+    let (search_tx, search_rx) = async_channel::unbounded::<Cmd>();
     let (evt_tx, evt_rx) = async_channel::unbounded::<Evt>();
 
     for n in 0..READERS {
@@ -332,6 +356,8 @@ pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
     for n in 0..DB_WORKERS {
         worker(format!("claudhub-db-{n}"), db_rx.clone(), evt_tx.clone());
     }
+    // One for the searches — see `is_search`.
+    worker("claudhub-search".into(), search_rx, evt_tx.clone());
 
     // File watching lives here and not in the view: its batches become
     // `Evt::FilesChanged` on the same channel as everything else — a single
@@ -373,6 +399,7 @@ pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
                 long: long_tx,
                 background: bg_tx,
                 databases: db_tx,
+                search: search_tx,
                 watcher,
                 lsp,
             },
@@ -740,6 +767,32 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
                 &path,
             )));
             vec![Evt::DbExported { path, rows }]
+        }
+
+        // — Searching the project ———————————————————————————————————————
+        Cmd::Search {
+            worktree,
+            query,
+            request,
+        } => {
+            let result = crate::git::search::run(&worktree, &query).map_err(|e| format!("{e:#}"));
+            vec![Evt::SearchDone {
+                worktree,
+                request,
+                result,
+            }]
+        }
+        // The failure travels **in the event** and not as an `Evt::Failed`: it
+        // belongs under the preview that asked for it — a status bar the next
+        // message wipes is where a file too large to show would be announced
+        // and lost.
+        Cmd::ReadPreview { worktree, path } => {
+            let content = crate::files::read(&worktree, &path).map_err(|e| format!("{e:#}"));
+            vec![Evt::Preview {
+                worktree,
+                path,
+                content,
+            }]
         }
 
         // — Project files ———————————————————————————————————————————————
@@ -1355,6 +1408,30 @@ mod tests {
                 name: "v1.0".into(),
             }),
             Queue::Network
+        );
+    }
+
+    /// A search is unbounded in cost and a preview is a file read: they must
+    /// not share a queue, and neither may sit where a frame is waiting.
+    #[test]
+    fn a_search_waits_in_its_own_queue_and_its_preview_does_not() {
+        assert_eq!(
+            queue_of(&Cmd::Search {
+                worktree: worktree(),
+                query: crate::git::search::Query {
+                    text: "todo".into(),
+                    ..Default::default()
+                },
+                request: 1,
+            }),
+            Queue::Search
+        );
+        assert_eq!(
+            queue_of(&Cmd::ReadPreview {
+                worktree: worktree(),
+                path: "src/main.rs".into(),
+            }),
+            Queue::Reads
         );
     }
 

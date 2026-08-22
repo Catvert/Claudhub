@@ -121,6 +121,7 @@ src/
     diff.rs     `--numstat` et diff unifié → fichiers, hunks, lignes
     history.rs  `git log` → commits, et la disposition du graphe
     tags.rs     les tags : lecture, création, publication, suppression
+    search.rs   `git grep` : les arguments, le parsage, les plafonds
   agent.rs      les agents dans `/proc`, et le suivi qui dit lesquels
                 travaillent
   runtime/      les workers
@@ -148,7 +149,7 @@ src/
                     leur demande — sans gpui, donc testé
     inflight.rs     les écritures en vol, et ce que la barre en dit —
                     sans gpui, donc testé
-    workspace.rs   les cinq écrans, leur dock et la barre qui les choisit
+    workspace.rs   les six écrans, leur dock et la barre qui les choisit
     diff_view.rs   la vue de diff, virtualisée
     history_view.rs  l'historique et son graphe peint
     tags.rs         le panneau des tags, et les quatre gestes sur un tag
@@ -172,6 +173,9 @@ src/
     db_query.rs     la console SQL, ses complétions et sa table de résultats
     sql_history.rs  les requêtes déjà jouées : dédup, portée, jours — pur
     sql_history_view.rs  le panneau « Historique » et ses gestes
+    search.rs       les lignes de la recherche projet, ses replis, ses
+                    flèches — pur
+    search_view.rs  la loupe : le champ, la liste des occurrences, l'aperçu
     conflicts.rs    les conflits et le garde-fou d'une opération à mi-chemin
     worktree_ops.rs création guidée, tâches du projet, intégration
     store.rs        ce qu'on retient par worktree : base, replis, notes
@@ -215,7 +219,7 @@ message change : les deux bouts du fil sont installés séparément, et postcard
 est positionnel — un désaccord doit se dire à la poignée de main, pas en
 charabia au premier diff.
 
-### Les cinq files
+### Les six files
 
 `queue_of` dit, du seul examen d'une commande, dans quelle file elle part.
 C'est une table qu'on lit d'un bout à l'autre, et un test la verrouille — une
@@ -242,6 +246,12 @@ la panne qu'on ne diagnostique pas.
   malheureux y emporterait un worker sur trois et le diff attendrait derrière
   —, ni celle du réseau. Deux, parce que déplier un schéma en demande plusieurs
   à la fois et qu'ils attendent une socket, pas un cœur.
+- **La recherche** (un worker) : `git grep` sur un monorepo coûte une seconde,
+  c'est-à-dire le profil des bases et non celui d'une lecture. Un seul worker,
+  parce qu'une recherche se **remplace** et ne s'accumule pas : on retape, la
+  précédente est périmée, et deux workers ne feraient tourner que deux
+  recherches mortes à la fois — c'est l'identifiant d'envoi qui trie, comme
+  dans la console SQL.
 
 Et hors des files, deux voies directes : la surveillance de fichiers, remise au
 thread du surveillant, et les serveurs de langage, remis à leur hôte — voir
@@ -1663,6 +1673,88 @@ Le terminal n'a pas de recherche : `Ctrl+F` y appartient au programme qui
 tourne, et l'historique d'une grille alacritty n'est pas une liste que nous
 tenions.
 
+### Chercher dans tout le projet
+
+`Ctrl+Maj+F` — la loupe, l'écran « Recherche ». C'est un autre geste que le
+précédent et il faut les tenir séparés : `Ctrl+F` filtre une liste que Claudhub
+tient déjà, celle-ci demande à git ce que le worktree **contient**. Le premier
+répond en une frame, le second en une seconde.
+
+**`git grep`, jamais un parcours à nous** (`git::search`), pour la raison qui
+justifie toute la couche `git/` : il sait déjà ce qui appartient au projet.
+L'index lui donne les fichiers suivis sans un `readdir`, `--untracked` ajoute
+ce qui est neuf et non ignoré, et `.gitignore` laisse `vendor/` et
+`node_modules/` dehors — sur un projet Laravel, la différence entre sept cents
+fichiers et quarante mille. Il est threadé, et il écarte les binaires tout seul
+(`-I`).
+
+**La casse se déduit de la requête**, comme dans `ui::find` et pour la même
+raison : c'est la convention de tous les éditeurs, et elle épargne un bouton
+pour un réglage qui change à chaque recherche. Ce qui reste en options est ce
+qui ne se devine pas — l'expression régulière, le mot entier, les chemins où
+chercher.
+
+Sept points qui ne se devinent pas :
+
+- **`-E` et non `-P`.** PCRE est une option de compilation de git, absente de
+  plusieurs paquets de distribution : une recherche qui échoue sur la machine
+  de l'utilisateur et pas sur la nôtre est la pire espèce de fonction.
+- **Trois plafonds, et chacun est dit.** Une ligne est coupée à quatre cents
+  octets, sur une **frontière de caractère** — un fichier minifié fait une
+  « ligne » de deux mégaoctets, qui traverse le fil et se fait façonner par
+  gpui ; un fichier ne rend que cent occurrences, un fichier généré remplissant
+  sinon le budget à lui seul ; et le total s'arrête à deux mille. La barre
+  **dit** que la liste est écourtée : une recherche qui montre ses deux mille
+  premières occurrences en silence se lit comme une recherche qui en a trouvé
+  deux mille.
+- **La recherche part sur Entrée, jamais sur une frappe.** `git grep` sur un
+  monorepo coûte une seconde, et chercher à chaque lettre occuperait le worker
+  à des requêtes que personne ne lira. C'est aussi pourquoi la file n'a qu'un
+  worker — voir « Les six files » — et pourquoi la commande porte un
+  identifiant d'envoi : on retape, et la réponse d'un geste que le suivant a
+  remplacé doit se reconnaître comme telle.
+- **La liste prend le focus quand les résultats arrivent.** Les flèches nues
+  appartiennent à qui a le focus, et `InputState` les lie lui-même — plus
+  profond dans la pile de contextes que le panneau, donc il gagne. Une liste
+  qu'il faut cliquer avant de la parcourir est une liste qu'on parcourt à la
+  souris. Le retour au champ est `Ctrl+Maj+F`, qui est aussi la façon d'être
+  venu. D'où un contexte à elle, `ClaudhubSearch`, que `NAVIGATION_PREDICATE`
+  et `VIM_PREDICATE` excluent — comme l'explorateur et l'arbre des bases.
+- **L'aperçu est un aller-retour de plus** (`Cmd::ReadPreview`), et une commande
+  à lui plutôt que `ReadFile` : celle-là *ouvre l'éditeur* — elle pose un caret,
+  écrit la piste et appelle l'écran « Édition » —, or parcourir des occurrences
+  est le geste inverse. Le fichier n'est **pas** relu quand on passe d'une
+  occurrence à l'autre du même fichier ; seule la ligne à révéler change. Et la
+  ligne est **relue à l'arrivée** sur la sélection du moment : on descend deux
+  occurrences plus vite que le fichier ne se lit.
+- **Ouvrir passe par `open_at`/`jump_to`**, l'entonnoir de toute ouverture :
+  l'écran d'édition vient, le caret atterrit, et la piste retient d'où l'on
+  venait — `Ctrl+O` revient donc au fichier de la liste.
+- **`PROTOCOL_VERSION` passe à 6 et `LAYOUT_VERSION` à 17** : deux commandes et
+  deux événements de plus, et une disposition d'avant ne connaît ni l'écran ni
+  ses deux panneaux.
+- **Les résultats d'un worktree qu'on a quitté sont gardés et dits tels.** Une
+  recherche vaut des minutes, et jeter un œil ailleurs ne doit pas les dépenser ;
+  mais montrer sans le dire les occurrences d'un autre projet sous le nom de
+  celui-ci est la seule chose que ce panneau ne doit pas faire. Ouvrir depuis
+  ces résultats-là est refusé, et le refus se dit — `jump_to` ouvrirait dans le
+  worktree **sélectionné**, donc un autre fichier du même nom ou rien.
+
+**La coloration de l'aperçu est celle du diff**, un étage plus haut :
+`highlight::DocumentHighlights` calcule les styles du fichier **une fois**, à
+l'arrivée du contenu, et les découpe par ligne — la fermeture de rendu tourne
+pour chaque ligne visible de chaque frame et n'a rien à y calculer. Une vue
+Blade y passe par `blade::document_styles`, c'est-à-dire par le même objet que
+l'éditeur : sans lui, ses directives et ses blocs `@php` arriveraient gris.
+
+Ce que la v1 ne fait pas, et c'est délibéré : **elle ne cherche que dans le
+worktree affiché**. C'est le sens de `Ctrl+Maj+F` partout ailleurs, la barre du
+haut dit lequel on regarde, et chercher dans les douze worktrees ouverts
+demanderait de grouper par projet puis par fichier — une liste de plus à lire
+avant d'atteindre la ligne. Pas de remplacement non plus : écrire dans des
+fichiers que personne n'a ouverts est exactement ce que la règle de l'empreinte
+repassée à l'écriture interdit ailleurs.
+
 ### Les barres de défilement
 
 Tout panneau qui défile en porte une (`ui::scroll`). Une liste virtualisée ne
@@ -2498,14 +2590,14 @@ qu'ils partageaient une seule fenêtre, chacun payait la place des trois
 autres — huit onglets au centre dont on n'en regarde jamais que deux, et un
 panneau central qui changeait de nature selon le dernier geste.
 
-Il y a donc cinq **écrans** (`ui::workspace::Workspace`) : Revue, Édition,
-Bases, Sentry, Réglages. On passe de l'un à l'autre par la barre d'état, ou
-par `Alt+1` à `Alt+5`. Les Réglages viennent en dernier, étant le seul qui ne
+Il y a donc six **écrans** (`ui::workspace::Workspace`) : Revue, Édition,
+Recherche, Bases, Sentry, Réglages. On passe de l'un à l'autre par la barre
+d'état, ou par `Alt+1` à `Alt+6`. Les Réglages viennent en dernier, étant le seul qui ne
 soit pas du travail — voir « Les réglages ».
 
 **Un dock par écran, et non un dock dont le centre change.** Chacun a ses
 panneaux, ses onglets et ses tailles, mémorisés séparément : régler la revue
-ne déplace plus rien sur l'écran des bases. Les cinq sont **construits au
+ne déplace plus rien sur l'écran des bases. Les six sont **construits au
 démarrage** et non à la première visite — un dock se bâtit avec `window`, et le
 faire au rendu reviendrait à créer des entités au milieu d'une frame ; le coût
 est une vingtaine de panneaux, qui ne portent aucun état.
@@ -2514,7 +2606,7 @@ est une vingtaine de panneaux, qui ne portent aucun état.
 regarde n'importe lequel des écrans. C'est le seul panneau instancié une fois
 **par dock** : un panneau n'appartient qu'à une aire à la fois, et un seul dock
 est affiché. *Où* l'on travaille, en revanche, n'est plus un panneau du tout :
-c'est le sélecteur de la barre du haut, qui vaut pour les cinq écrans — voir
+c'est le sélecteur de la barre du haut, qui vaut pour les six écrans — voir
 « La répartition du chrome ».
 
 **Trois écrans n'ont pas de colonne de gauche**, d'où l'`Option` de
@@ -2651,8 +2743,8 @@ n'était offert par une rangée peinte à la main.
 
 Sept points, et aucun ne se devine :
 
-- **Cinq panneaux par terminal, un par écran.** Un panneau n'appartient qu'à
-  une aire à la fois et il y a cinq docks ; les cinq rendent la **même**
+- **Six panneaux par terminal, un par écran.** Un panneau n'appartient qu'à
+  une aire à la fois et il y a six docks ; les six rendent la **même**
   `Entity<TerminalView>`, donc il n'y a toujours qu'un pty. Un seul dock étant
   affiché, deux d'entre eux ne peignent jamais la même grille dans la même
   frame. `OpenTerminal::panels` les range dans l'ordre de `Workspace::ALL`, d'où
@@ -2676,7 +2768,7 @@ Sept points, et aucun ne se devine :
   `workspace.rs` pour la disposition par défaut, et c'est ce qui faisait ouvrir
   un terminal sur du vide.
 - **Le nom de l'onglet vient de l'application, pas de la vue.** Il peut être
-  donné à la main (clic droit sur l'onglet), et les cinq panneaux d'un même
+  donné à la main (clic droit sur l'onglet), et les six panneaux d'un même
   terminal doivent dire la même chose. Un nom vide rend au programme le sien,
   comme un libellé vidé supprime une tâche.
 - **La croix est peinte par `Panel::title`**, et non par la peau du dock, qui
@@ -2686,9 +2778,9 @@ Sept points, et aucun ne se devine :
   que seuls les terminaux veulent. Le clic est **consommé**
   (`stop_propagation`), sans quoi la croix commencerait par amener au premier
   plan le terminal qu'elle s'apprête à fermer.
-- **Fermer un onglet tue le pty et ses quatre autres faces.** `on_removed` ne
+- **Fermer un onglet tue le pty et ses autres faces.** `on_removed` ne
   concerne que le panneau que l'utilisateur a fermé, celui d'un écran ; les
-  quatre autres resteraient des onglets montrant un shell mort.
+  autres resteraient des onglets montrant un shell mort.
 - **Les terminaux sont retirés de `layout.json` avant écriture**
   (`app::prune_terminals`). Un terminal est le seul panneau dont le contenu est
   un **processus**, et une disposition se relit longtemps après sa mort. Un
@@ -2716,7 +2808,7 @@ Sept points, et aucun ne se devine :
   connaît, et l'observation prend le relais — même motif que le cache de
   visibilité des autres panneaux.
 - **La fermeture est différée.** `on_removed` est appelé depuis l'édition du
-  dock lui-même, et emporter les quatre autres faces repasse par
+  dock lui-même, et emporter les autres faces repasse par
   `DockArea::remove_panel`, y compris sur l'aire en cours de modification. En
   direct, c'est la panique jumelle de la précédente.
 - **Le premier worktree de la session ouvre un terminal.** C'est ce à quoi on
@@ -3908,6 +4000,14 @@ son XOFF, et rien ne le dit. Ce qui s'écrit avec la touche système et une
 qui demande Maj ou une touche de fonction vaut partout (`PREDICATE`). C'est la
 convention que les terminaux ont eux-mêmes fixée : Ctrl+Maj+C pour copier,
 parce que Ctrl+C est pris.
+
+**`Ctrl+Maj+F` appartient à la recherche projet**, et « tout le fichier » a
+déménagé sur `Ctrl+Maj+X` — *expand*. C'est la seule liaison de ce dépôt qu'on
+ait déplacée : `Ctrl+Maj+F` est ce que PhpStorm, VS Code et Eclipse lient tous
+à « chercher dans les fichiers », et une touche dont le sens est à ce point
+arrêté n'est pas une touche que la fenêtre peut dépenser ailleurs. Un test
+verrouille de toute façon qu'aucune touche ne soit déclarée deux fois sous le
+même prédicat, ce qui est la façon dont la collision s'est signalée.
 
 **Une seule lettre est prise quand même**, et l'exception dit la règle :
 `Ctrl+T` masque les terminaux, et ce qu'il masque est le terminal dans lequel

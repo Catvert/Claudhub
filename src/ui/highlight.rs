@@ -328,6 +328,92 @@ fn distribute(
     }
 }
 
+/// A whole file's styles, line by line.
+///
+/// The diff's highlighting rebuilds two versions out of hunks; a preview has
+/// the file itself, so there is nothing to rebuild and no prologue to write —
+/// a file starts where the grammar expects it to. What is left is the cut into
+/// lines, since the reader is a virtualised list and asks for one row at a
+/// time.
+///
+/// **Computed once, when the content arrives, and never in a render closure**:
+/// parsing a file costs milliseconds, and the closure runs for every visible
+/// line of every frame. The rule is the diff's, and the reason is the same.
+#[derive(Default)]
+pub struct DocumentHighlights {
+    lines: Vec<LineStyles>,
+}
+
+impl DocumentHighlights {
+    /// Offsets are **relative to the line** and in bytes, which is what gpui
+    /// wants to style a fragment: indexing by characters breaks at the first
+    /// accent.
+    pub fn line(&self, index: usize) -> &[(Range<usize>, HighlightStyle)] {
+        self.lines.get(index).map(Vec::as_slice).unwrap_or_default()
+    }
+
+    /// Past this, a file is left plain. A preview is read, not studied, and a
+    /// generated file of two megabytes would cost a parse for a page of it.
+    pub const MAX_BYTES: usize = 512 * 1024;
+
+    pub fn compute(path: &Path, text: &str, theme: &HighlightTheme) -> Self {
+        if text.len() > Self::MAX_BYTES {
+            return Self::default();
+        }
+        // A Blade view is HTML and directives before it is PHP: its own
+        // scanner has to pass over the grammar, exactly as in a diff.
+        let styles = if blade::is_blade(path) {
+            blade::document_styles(text, theme)
+        } else {
+            let Some(language) = language_for_path(path) else {
+                return Self::default();
+            };
+            let mut highlighter = SyntaxHighlighter::new(language);
+            highlighter.update(None, &Rope::from_str(text), None);
+            highlighter.styles(&(0..text.len()), theme)
+        };
+        Self {
+            lines: cut_into_lines(text, &styles),
+        }
+    }
+}
+
+/// Redistributes a document's styles onto its lines.
+///
+/// Both lists are walked once, jointly: the styles are sorted by offset, so the
+/// cursor never goes back. A style spilling over a line break — a multi-line
+/// string, a block comment — is **cut at the boundary** rather than dropped,
+/// each piece having to stay coloured.
+fn cut_into_lines(text: &str, styles: &[(Range<usize>, HighlightStyle)]) -> Vec<LineStyles> {
+    let mut out: Vec<LineStyles> = Vec::new();
+    let mut next = 0usize;
+    let mut at = 0usize;
+    for line in text.split('\n') {
+        let span = at..at + line.len();
+        // The newline that separates them belongs to neither.
+        at = span.end + 1;
+        let mut target: LineStyles = Vec::new();
+        while next < styles.len() && styles[next].0.end <= span.start {
+            next += 1;
+        }
+        for (range, style) in &styles[next..] {
+            if range.start >= span.end {
+                break;
+            }
+            if range.end <= span.start || *style == HighlightStyle::default() {
+                continue;
+            }
+            let start = range.start.max(span.start) - span.start;
+            let end = range.end.min(span.end) - span.start;
+            if start < end {
+                target.push((start..end, *style));
+            }
+        }
+        out.push(target);
+    }
+    out
+}
+
 /// The grammar associated with an extension.
 ///
 /// The list only covers what `gpui-component` embeds with the

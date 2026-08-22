@@ -49,7 +49,7 @@ use crate::ui::terminal_view::OpenTerminal;
 // 14: the notes left the tabs for the bottom third of the review's column. A
 // saved layout would keep them where they were, which is the one place this
 // change is about.
-const LAYOUT_VERSION: usize = 16;
+const LAYOUT_VERSION: usize = 17;
 
 /// The saved layouts, one per screen.
 ///
@@ -461,6 +461,33 @@ pub struct ClaudhubApp {
     /// browse the tree" from "the arrows browse the diff", and the bindings'
     /// predicate is read on the focused node's context.
     pub(super) explorer_focus: FocusHandle,
+    /// The project-wide search: what was asked, what came back, and the file
+    /// shown beside it. See `ui::search_view`.
+    pub(super) search: crate::ui::search_view::SearchState,
+    /// The search field. Created **once**, like every other input: rebuilt at
+    /// render time it would lose the cursor and the text on the first
+    /// keystroke.
+    pub(super) search_input: Entity<InputState>,
+    /// The pathspecs to look in, a field of its own: narrowing a search to
+    /// `*.php` must not make one retype the word being looked for.
+    pub(super) search_glob_input: Entity<InputState>,
+    pub(super) search_regex: bool,
+    pub(super) search_whole_word: bool,
+    pub(super) search_scroll: gpui::UniformListScrollHandle,
+    pub(super) search_preview_scroll: gpui::UniformListScrollHandle,
+    /// The result list's focus, which gives it its arrows.
+    ///
+    /// A handle of its own, like the project explorer's and the schema tree's:
+    /// it is what tells "the arrows walk the results" from "the arrows walk the
+    /// diff", and two sets of bindings on one key would not be settled.
+    pub(super) search_focus: FocusHandle,
+    /// The preview read that has gone out, and the line to reveal when it comes
+    /// back.
+    ///
+    /// One walks the results while a file is being read, and painting the
+    /// answer of a row one has already left is worse than painting nothing —
+    /// the same shape as the editor's `landing`, and for the same reason.
+    pub(super) pending_preview: Option<(PathBuf, PathBuf, u32)>,
     /// The current repository's Sentry issues, and the one being looked at.
     pub(super) sentry: crate::ui::sentry_view::SentryState,
     /// The databases tree: connections, schemas, tables, columns.
@@ -761,6 +788,8 @@ impl ClaudhubApp {
             needs_save: app_needs_layout_save,
         } = Self::build_docks(window, cx);
 
+        let search_inputs = crate::ui::search_view::SearchInputs::new(window, cx);
+
         let mut app = Self {
             git,
             repos: crate::ui::repos::Repos::default(),
@@ -800,6 +829,15 @@ impl ClaudhubApp {
             jumps: HashMap::new(),
             landing: None,
             files_scroll: gpui::UniformListScrollHandle::new(),
+            search: Default::default(),
+            search_input: search_inputs.text,
+            search_glob_input: search_inputs.glob,
+            search_regex: false,
+            search_whole_word: false,
+            search_scroll: gpui::UniformListScrollHandle::new(),
+            search_preview_scroll: gpui::UniformListScrollHandle::new(),
+            search_focus: search_inputs.focus,
+            pending_preview: None,
             sentry: Default::default(),
             db: Default::default(),
             db_scroll: gpui::UniformListScrollHandle::new(),
@@ -1456,6 +1494,22 @@ impl ClaudhubApp {
                 path,
                 content,
             } => self.file_content_arrived(worktree, path, content, window, cx),
+            Evt::SearchDone {
+                worktree,
+                request,
+                result,
+            } => {
+                // An answer about a worktree one has left: kept all the same,
+                // the panel saying which checkout its results belong to. What
+                // would be wrong is showing them as this worktree's.
+                let _ = worktree;
+                self.search_done(request, result, window, cx)
+            }
+            Evt::Preview {
+                worktree,
+                path,
+                content,
+            } => self.preview_arrived(worktree, path, content, cx),
             Evt::FilesChanged { paths } => {
                 for path in paths {
                     self.file_changed(&path, cx);
@@ -2806,6 +2860,10 @@ impl Render for ClaudhubApp {
             .on_action(cx.listener(super::shortcuts::close_find))
             .on_action(cx.listener(super::shortcuts::find_next))
             .on_action(cx.listener(super::shortcuts::find_previous))
+            .on_action(cx.listener(super::shortcuts::search_project))
+            .on_action(cx.listener(super::shortcuts::search_up))
+            .on_action(cx.listener(super::shortcuts::search_down))
+            .on_action(cx.listener(super::shortcuts::search_open))
             .on_action(cx.listener(super::shortcuts::explorer_up))
             .on_action(cx.listener(super::shortcuts::explorer_down))
             .on_action(cx.listener(super::shortcuts::explorer_left))
@@ -2994,6 +3052,14 @@ impl ClaudhubApp {
                     self.explorer_focus.clone().focus(window, cx);
                     return;
                 }
+            }
+            // The field is what one comes to this screen for, and a search
+            // screen whose caret is elsewhere is a screen one has to click
+            // before typing in.
+            Workspace::Search if self.panel_visible(super::panels::SearchPanel::NAME) => {
+                let handle = gpui::Focusable::focus_handle(&self.search_input, cx);
+                handle.focus(window, cx);
+                return;
             }
             Workspace::Db
                 if self.db_console_open()

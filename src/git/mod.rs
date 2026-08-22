@@ -17,6 +17,7 @@ pub mod diff;
 // logging library of the same name for the whole file.
 pub mod history;
 pub mod repo;
+pub mod search;
 pub mod status;
 pub mod tags;
 
@@ -24,6 +25,7 @@ pub use branch::{Branch, BranchKind, Upstream};
 pub use diff::{DiffFile, DiffLine, DiffLineKind, FileDiff, Hunk, Range as DiffRange};
 pub use history::{Commit, GraphRow, LogRange};
 pub use repo::{Pending, Repo, Worktree};
+pub use search::Query as SearchQuery;
 pub use status::{FileStatus, Status, StatusCode, Summary};
 pub use tags::Tag;
 

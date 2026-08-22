@@ -51,6 +51,15 @@ pub enum Workspace {
     #[default]
     Review,
     Files,
+    /// Searching the whole project — the magnifier. See `ui::search_view`.
+    ///
+    /// A screen and not a panel dropped into the editing one: a search covers
+    /// the whole checkout while an editor holds one file, the answer is a list
+    /// one walks for minutes, and it wants the width the tree and the editor
+    /// already share. Its two halves — the results, the file under the cursor —
+    /// are read together, which is what makes them two panels side by side
+    /// rather than two tabs.
+    Search,
     Db,
     Sentry,
     /// The settings, and the log they let you read.
@@ -72,9 +81,10 @@ impl Workspace {
         Self::ALL.iter().position(|w| *w == self).unwrap_or(0)
     }
 
-    pub const ALL: [Workspace; 5] = [
+    pub const ALL: [Workspace; 6] = [
         Workspace::Review,
         Workspace::Files,
+        Workspace::Search,
         Workspace::Db,
         Workspace::Sentry,
         Workspace::Settings,
@@ -88,6 +98,7 @@ impl Workspace {
         match self {
             Self::Review => "review",
             Self::Files => "files",
+            Self::Search => "search",
             Self::Db => "db",
             Self::Sentry => "sentry",
             Self::Settings => "settings",
@@ -103,6 +114,7 @@ impl Workspace {
         match self {
             Self::Review => "workspace-review",
             Self::Files => "workspace-files",
+            Self::Search => "workspace-search",
             Self::Db => "workspace-db",
             Self::Sentry => "workspace-sentry",
             Self::Settings => "workspace-settings",
@@ -115,6 +127,7 @@ impl Workspace {
         match self {
             Self::Review => "file-diff",
             Self::Files => "file-code",
+            Self::Search => "search",
             Self::Db => "database",
             Self::Sentry => "triangle-alert",
             Self::Settings => "settings",
@@ -150,6 +163,11 @@ impl Workspace {
             Self::Files => &[
                 (FilesPanel::NAME, "panel-files"),
                 (EditorPanel::NAME, "panel-editor"),
+                (TerminalPanel::NAME, "panel-terminal"),
+            ],
+            Self::Search => &[
+                (SearchPanel::NAME, "panel-search"),
+                (SearchPreviewPanel::NAME, "panel-search-preview"),
                 (TerminalPanel::NAME, "panel-terminal"),
             ],
             Self::Db => &[
@@ -261,6 +279,14 @@ pub fn install_default_layout(
         Workspace::Files => {
             let left = DockLayout::tabs().panel_view(panel!(FilesPanel), cx);
             let center = DockLayout::tabs().panel_view(panel!(EditorPanel), cx);
+            (Some(left), center)
+        }
+        // The search: the results on the left, the file under the cursor in
+        // the centre. The same shape as the editing screen, and for the same
+        // reason — one walks a list on one side and reads on the other.
+        Workspace::Search => {
+            let left = DockLayout::tabs().panel_view(panel!(SearchPanel), cx);
+            let center = DockLayout::tabs().panel_view(panel!(SearchPreviewPanel), cx);
             (Some(left), center)
         }
         // The databases: the schema tree on the left, the console in the
