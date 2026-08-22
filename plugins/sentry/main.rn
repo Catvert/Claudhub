@@ -36,7 +36,15 @@ pub async fn init(worktree) {
 }
 
 fn fresh(issues, note, typed, why) {
-    #{ issues: issues, chosen: -1, event: (), note: note, typed: typed, why: why }
+    #{
+        issues: issues,
+        chosen: -1,
+        event: (),
+        event_why: "",
+        note: note,
+        typed: typed,
+        why: why,
+    }
 }
 
 pub fn view(s) {
@@ -99,12 +107,29 @@ pub async fn update(s, action, payload) {
     if action == "choose" {
         s.chosen = payload.parse::<i64>()?;
         s.event = ();
+        s.event_why = "";
         let id = s.issues[s.chosen].id;
-        // L'événement le plus récent : c'est lui qui porte la trace et le code
-        // **déployé** au moment de l'erreur. Le relire sur le disque
+        // Le dernier événement d'une issue : c'est lui qui porte la trace et le
+        // code **déployé** au moment de l'erreur — le relire sur le disque
         // aujourd'hui donnerait autre chose.
-        let raw = json(api(`/issues/${id}/events/latest/`).await?)?;
-        s.event = event_of(raw);
+        //
+        // `/organizations/{org}/issues/{id}/events/` et non `…/events/latest/`,
+        // qui a disparu de l'API et répond 404. `full=true` est ce qui ramène
+        // la pile : sans lui, la réponse n'a que les métadonnées.
+        let path = `/organizations/${setting("org")}/issues/${id}/events/?full=true&per_page=1`;
+        // Rattrapé et non propagé : une issue dont l'événement a expiré ne doit
+        // pas emporter la liste des autres.
+        match api(path).await {
+            Ok(body) => {
+                let events = json(body)?;
+                if events.is_empty() {
+                    s.event_why = "Sentry ne garde plus d'événement pour cette erreur.";
+                } else {
+                    s.event = event_of(events[0]);
+                }
+            }
+            Err(why) => s.event_why = why,
+        }
         return Ok(s);
     }
 
@@ -138,6 +163,11 @@ fn picker(s) {
 // — Le détail d'une erreur ————————————————————————————————————————————
 
 fn trace(s, issue) {
+    if s.event_why != "" {
+        // Sous l'issue et non à la place du panneau : la liste des autres n'a
+        // rien fait de mal.
+        return [dim(s.event_why)];
+    }
     if s.event is Tuple {
         return [spinner()];
     }

@@ -4078,11 +4078,20 @@ clés globales d'un manifeste. Taper ne va rien chercher — une requête par le
 interrogerait Sentry à chaque caractère du nom —, c'est « Enregistrer » qui
 écrit contre le dépôt et repart chercher.
 
+**L'événement d'une issue se lit par une liste, pas par `events/latest/`.**
+Cette route a quitté l'API de Sentry et répond 404 ; la version Rust la portait
+déjà, et le portage n'y est pour rien. Ce qui existe est org-scopé —
+`/organizations/{org}/issues/{id}/events/` — et il faut `full=true` pour avoir
+la pile, la réponse n'ayant sinon que les métadonnées. On prend le premier, la
+liste étant rendue du plus récent au plus ancien.
+
 **Et le sélecteur est toujours là**, pas seulement quand rien ne marche. Un
 projet mal tapé donne un 404, et c'est justement l'écran qui le dit qui doit
 permettre de le corriger. D'où la règle générale que ce plugin a apprise à ses
 dépens : **un `init` qui échoue supprime la vue entière**, donc tout ce qui
-aurait permis de s'en sortir. Un script rattrape ce qu'il sait montrer et le
+aurait permis de s'en sortir. La même règle vaut un cran plus bas — une issue
+dont l'événement a expiré, ou dont la route a changé, est l'affaire d'une ligne
+et non du panneau : l'échec se range sous elle et la liste des autres reste. Un script rattrape ce qu'il sait montrer et le
 range dans son état ; il ne rend une erreur que pour ce dont il n'a rien à dire.
 Le champ revient d'ailleurs amorcé avec ce qui a été essayé, la faute de frappe
 étant alors devant le curseur au lieu d'être à retaper.

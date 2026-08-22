@@ -1563,7 +1563,9 @@ mod sentry_plugin {
             .expect("init succeeds");
         let state = answer_with(
             &probe,
-            |_| Ok(EVENT.into()),
+            // The endpoint answers a **list** of events, newest first: the
+            // `events/latest/` that returned one has gone from the API.
+            |_| Ok(format!("[{EVENT}]")),
             probe.host.update(&state, "choose", "0"),
         )
         .expect("choosing an issue fetches its event");
@@ -1602,7 +1604,9 @@ mod sentry_plugin {
             answer_with(&probe, |_| Ok(ISSUES.into()), probe.host.init(None)).expect("init");
         let state = answer_with(
             &probe,
-            |_| Ok(EVENT.into()),
+            // The endpoint answers a **list** of events, newest first: the
+            // `events/latest/` that returned one has gone from the API.
+            |_| Ok(format!("[{EVENT}]")),
             probe.host.update(&state, "choose", "0"),
         )
         .expect("choose");
@@ -1722,6 +1726,76 @@ mod sentry_plugin {
         assert!(
             matches!(children.get(1), Some(Node::Empty { .. })),
             "{children:?}"
+        );
+    }
+
+    /// **One issue whose event has gone must not take the list with it.**
+    ///
+    /// `events/latest/` has left the API and answers 404; an event outside the
+    /// retention window does too. Either way it is one row's business, and
+    /// letting `update` fail would replace the whole panel with a raw message
+    /// — the list, the picker and the way back included.
+    #[test]
+    fn an_issue_with_no_event_left_keeps_the_others() {
+        let probe = probe_sentry();
+        let state =
+            answer_with(&probe, |_| Ok(ISSUES.into()), probe.host.init(None)).expect("init");
+
+        let state = answer_with(
+            &probe,
+            |_| Err("https://sentry.io/…/events/: http status: 404".into()),
+            probe.host.update(&state, "choose", "0"),
+        )
+        .expect("a 404 on one issue is not the panel's death");
+
+        let tree = probe.host.view(&state).expect("view renders");
+        let Node::Column(children) = &tree else {
+            panic!("expected a column, got {tree:?}");
+        };
+        // The list is still there, and the reason sits under the issue.
+        assert!(
+            matches!(children.get(1), Some(Node::List { items, .. }) if items.len() == 2),
+            "the list is gone: {children:?}"
+        );
+        let Some(Node::Section { body, .. }) = children.get(2) else {
+            panic!("expected the issue's section, got {children:?}");
+        };
+        assert!(
+            body.iter()
+                .any(|node| matches!(node, Node::Text { text, .. } if text.contains("404"))),
+            "{body:?}"
+        );
+    }
+
+    /// An issue Sentry keeps no event for says so, rather than spinning.
+    #[test]
+    fn an_issue_whose_events_expired_says_so() {
+        let probe = probe_sentry();
+        let state =
+            answer_with(&probe, |_| Ok(ISSUES.into()), probe.host.init(None)).expect("init");
+        let state = answer_with(
+            &probe,
+            |_| Ok("[]".into()),
+            probe.host.update(&state, "choose", "0"),
+        )
+        .expect("an empty list is an answer");
+        let tree = probe.host.view(&state).expect("view");
+        let Node::Column(children) = &tree else {
+            panic!("expected a column");
+        };
+        let Some(Node::Section { body, .. }) = children.get(2) else {
+            panic!("expected the issue's section, got {children:?}");
+        };
+        assert!(
+            body.iter().any(
+                |node| matches!(node, Node::Text { text, .. } if text.contains("ne garde plus"))
+            ),
+            "{body:?}"
+        );
+        // And not a spinner, which would turn for ever.
+        assert!(
+            !body.iter().any(|node| matches!(node, Node::Spinner)),
+            "{body:?}"
         );
     }
 
