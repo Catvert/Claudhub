@@ -22,6 +22,8 @@ pub enum Mode {
     Visual,
     /// Linewise visual — `V`.
     VisualLine,
+    /// Blockwise visual — `Ctrl+V`: a rectangle, and not a run of text.
+    VisualBlock,
 }
 
 impl Mode {
@@ -32,6 +34,7 @@ impl Mode {
             Mode::Insert => "vim-mode-insert",
             Mode::Visual => "vim-mode-visual",
             Mode::VisualLine => "vim-mode-visual-line",
+            Mode::VisualBlock => "vim-mode-visual-block",
         }
     }
 }
@@ -74,13 +77,15 @@ pub struct Change {
     /// Where vim considers the caret to be, which is the start of the selection
     /// except when the visual head is its end.
     pub head: usize,
-    /// The range a **copy** left in place, for the view to flash.
+    /// The ranges a **copy** left in place, for the view to flash.
     ///
     /// A yank is the one gesture of vim that changes nothing on screen: without
     /// a sign, one is never sure it took. It is what vim-highlightedyank exists
-    /// for, and it is `Some` for a yank only — a delete has taken the text away,
-    /// and there is nothing left to light up.
-    pub flash: Option<Range<usize>>,
+    /// for, and it is filled for a yank only — a delete has taken the text away,
+    /// and there is nothing left to light up. Several ranges rather than one
+    /// because a blockwise yank takes a rectangle, and lighting the whole span
+    /// would say it took the lines and not the columns.
+    pub flash: Vec<Range<usize>>,
     /// What this keystroke tore out or copied, when it did.
     ///
     /// The view is what puts it on the system clipboard, the setting being on:
@@ -181,11 +186,41 @@ pub struct Vim {
     register: Register,
     /// What the keystroke under way has taken, waiting for its `Change`.
     yanked: Option<Register>,
-    /// The range it copied without touching it, waiting for the same.
-    flashed: Option<Range<usize>>,
+    /// The ranges it copied without touching them, waiting for the same.
+    flashed: Vec<Range<usize>>,
     prompt: Option<Prompt>,
     last_search: String,
     search_backward: bool,
+    /// A blockwise insertion under way, waiting for the `Esc` that repeats it
+    /// down the other rows.
+    block_insert: Option<BlockInsert>,
+}
+
+/// What `I`, `A` and `c` set up in blockwise visual mode: one types on the top
+/// row, and `Esc` writes the same thing on all the others.
+///
+/// That repeat is the reason one reaches for `Ctrl+V` in the first place — a
+/// prefix on twenty lines — and it is the only gesture of this module whose two
+/// halves are several keystrokes apart.
+struct BlockInsert {
+    /// The line **indices** the typing is repeated on, the caret's own excluded.
+    ///
+    /// Indices and not offsets: what is typed on the top row shifts every offset
+    /// below it, and a line number does not move as long as no newline is typed
+    /// — which is exactly the case this gives up on.
+    lines: Vec<usize>,
+    /// The column it goes in, `None` being the end of each line — what `$A`
+    /// asks for.
+    column: Option<usize>,
+    /// Whether a line too short to reach the column is padded with blanks, as
+    /// `A` does, or skipped, as `I` does.
+    pad: bool,
+    /// Where the insertion began, and how long the text was then: together they
+    /// tell a plain forward insertion from one that has been clicked away from
+    /// or backspaced through, which is what this gives up on rather than repeat
+    /// something nobody typed.
+    start: usize,
+    len: usize,
 }
 
 impl Vim {
@@ -238,8 +273,12 @@ impl Vim {
                 self.mode = Mode::Normal;
                 self.pending.clear();
                 self.column = None;
+                let caret = cursor.min(text.len());
+                if let Some(change) = self.repeat_block_insert(text, caret) {
+                    return Response::Apply(change);
+                }
                 // vim steps back onto the last character typed.
-                let head = clamp_to_line(text, prev_boundary(text, cursor.min(text.len())));
+                let head = clamp_to_line(text, prev_boundary(text, caret));
                 return Response::Apply(self.landing(text, head));
             }
             return Response::Ignored;
@@ -286,6 +325,10 @@ impl Vim {
             // that is decided here is the direction.
             "e" => Response::Command(Command::Scroll(1)),
             "y" => Response::Command(Command::Scroll(-1)),
+            // A rectangle. `Ctrl+Q` is vim's own second key for it, kept here
+            // for the same reason vim has it: `Ctrl+V` is the paste of every
+            // other program, and it does not always reach us.
+            "v" | "q" => self.toggle_visual(text, Mode::VisualBlock),
             _ => Response::Ignored,
         }
     }
@@ -387,7 +430,7 @@ impl Vim {
             let Some(range) = text_object(text, self.head, around, object) else {
                 return Response::Consumed;
             };
-            if self.mode == Mode::VisualLine {
+            if self.mode != Mode::Visual {
                 self.mode = Mode::Visual;
             }
             self.anchor = range.start;
@@ -489,7 +532,7 @@ impl Vim {
                 // Yanking leaves the caret at the start of what was taken, and
                 // the range lit for a moment: nothing else on screen says it
                 // took.
-                self.flashed = Some(range.clone());
+                self.flashed = vec![range.clone()];
                 let head = clamp_to_line(text, range.start);
                 Response::Apply(self.landing(text, head))
             }
@@ -530,6 +573,9 @@ impl Vim {
                 return Response::Consumed;
             }
             self.pending.clear();
+            if self.mode == Mode::VisualBlock {
+                return self.block_replace(text, rest[1]);
+            }
             let end = advance(text, self.head, n).min(end_of_line(text, self.head));
             if end <= self.head {
                 return Response::Consumed;
@@ -584,8 +630,8 @@ impl Vim {
             'A' => self.insert_at(text, end_of_line(text, self.head)),
             'o' => self.open_line(text, false),
             'O' => self.open_line(text, true),
-            'v' => self.enter_visual(text, Mode::Visual),
-            'V' => self.enter_visual(text, Mode::VisualLine),
+            'v' => self.toggle_visual(text, Mode::Visual),
+            'V' => self.toggle_visual(text, Mode::VisualLine),
             'x' => {
                 let end = advance(text, self.head, n).min(end_of_line(text, self.head));
                 self.yank(text, self.head..end, false);
@@ -636,6 +682,15 @@ impl Vim {
 
     /// The commands of visual mode, which act on the selection.
     fn visual_simple(&mut self, text: &str, ch: char) -> Response {
+        // A rectangle is not a run of text: what cuts, copies or fills it is one
+        // edit per line, and it answers before the arms below ever ask for a
+        // range. What it has no answer of its own to — `o`, `v`, `u`, a search —
+        // falls through to them.
+        if self.mode == Mode::VisualBlock {
+            if let Some(response) = self.block_command(text, ch) {
+                return response;
+            }
+        }
         let linewise = self.mode == Mode::VisualLine;
         let range = self.visual_range(text);
         match ch {
@@ -652,22 +707,8 @@ impl Vim {
                 std::mem::swap(&mut self.anchor, &mut self.head);
                 Response::Apply(self.landing(text, self.head))
             }
-            'v' => {
-                self.mode = if self.mode == Mode::Visual {
-                    Mode::Normal
-                } else {
-                    Mode::Visual
-                };
-                Response::Apply(self.landing(text, self.head))
-            }
-            'V' => {
-                self.mode = if self.mode == Mode::VisualLine {
-                    Mode::Normal
-                } else {
-                    Mode::VisualLine
-                };
-                Response::Apply(self.landing(text, self.head))
-            }
+            'v' => self.toggle_visual(text, Mode::Visual),
+            'V' => self.toggle_visual(text, Mode::VisualLine),
             'u' => Response::Command(Command::Undo),
             ':' | '/' | '?' => {
                 self.prompt = Some(Prompt {
@@ -680,10 +721,232 @@ impl Vim {
         }
     }
 
-    fn enter_visual(&mut self, text: &str, mode: Mode) -> Response {
+    /// `v`, `V` and `Ctrl+V`, from wherever one is.
+    ///
+    /// The same key again leaves visual mode; another one swaps to it and
+    /// **keeps the anchor**, which is what makes `v` after `V` narrow what is
+    /// selected rather than start again from the caret.
+    fn toggle_visual(&mut self, text: &str, mode: Mode) -> Response {
+        if self.mode == mode {
+            self.mode = Mode::Normal;
+            let head = clamp_to_line(text, self.head);
+            return Response::Apply(self.landing(text, head));
+        }
+        if self.mode == Mode::Normal {
+            self.anchor = self.head;
+            // A desired column left over from an earlier `$` would make the
+            // rectangle reach the end of every line before one has asked for it.
+            self.column = None;
+        }
         self.mode = mode;
-        self.anchor = self.head;
         Response::Apply(self.landing(text, self.head))
+    }
+
+    /// The two columns a blockwise selection lies between.
+    ///
+    /// The right one is `usize::MAX` when `$` has been pressed: the rectangle
+    /// then reaches the end of every line it covers, however long they are —
+    /// which is the whole reason vim keeps a desired column.
+    fn block_columns(&self, text: &str) -> (usize, usize) {
+        let anchor = column_of(text, self.anchor);
+        let head = self.column.unwrap_or_else(|| column_of(text, self.head));
+        (anchor.min(head), anchor.max(head))
+    }
+
+    /// The rectangle, one range per line — empty on a line too short to reach
+    /// the left column, which is a line the block covers and has nothing of.
+    fn block_rows(&self, text: &str) -> Vec<Range<usize>> {
+        let (left, right) = self.block_columns(text);
+        let (a, b) = (line_index(text, self.anchor), line_index(text, self.head));
+        (a.min(b)..=a.max(b))
+            .map(|row| {
+                let start = start_of_line_no(text, row);
+                let from = column_offset(text, start, left);
+                let to = if right == usize::MAX {
+                    end_of_line(text, start)
+                } else {
+                    column_offset(text, start, right + 1)
+                };
+                from..to.max(from)
+            })
+            .collect()
+    }
+
+    /// The rectangle the view paints.
+    ///
+    /// Blockwise is the one selection the editor cannot hold: its own is a
+    /// single run of text, and a block is one range per line. It is asked for at
+    /// every frame, like `cursor`, and for the same reason.
+    pub fn block_selection(&self, text: &str) -> Vec<Range<usize>> {
+        if self.mode != Mode::VisualBlock {
+            return Vec::new();
+        }
+        self.block_rows(text)
+            .into_iter()
+            .filter(|row| !row.is_empty())
+            .collect()
+    }
+
+    /// The commands of blockwise visual mode, `None` being "not one of mine".
+    fn block_command(&mut self, text: &str, ch: char) -> Option<Response> {
+        if !matches!(ch, 'd' | 'x' | 'y' | 'c' | 's' | 'p' | 'I' | 'A') {
+            return None;
+        }
+        let rows = self.block_rows(text);
+        let first = rows.first()?.start;
+        let (left, right) = self.block_columns(text);
+        let top = line_index(text, first);
+        let bottom = top + rows.len() - 1;
+        if matches!(ch, 'I' | 'A') {
+            // `A` goes past the right edge, and `$A` past the end of every line,
+            // however long each one is.
+            let column = match ch {
+                'I' => Some(left),
+                _ if right == usize::MAX => None,
+                _ => Some(right + 1),
+            };
+            let start = start_of_line_no(text, top);
+            let at = match column {
+                Some(column) => column_offset(text, start, column),
+                None => end_of_line(text, start),
+            };
+            self.mode = Mode::Insert;
+            self.arm_block_insert(text, top, bottom, column, ch == 'A', at);
+            return Some(Response::Apply(self.landing(text, at)));
+        }
+        // What is taken goes to the register in every case, `p` excepted, which
+        // has to read what is in there before it clobbers it.
+        let pasted = (ch == 'p').then(|| self.register.text.clone());
+        self.record(Register {
+            text: block_text(text, &rows),
+            linewise: false,
+        });
+        if ch == 'y' {
+            self.flashed = rows.into_iter().filter(|row| !row.is_empty()).collect();
+            self.mode = Mode::Normal;
+            let head = clamp_to_line(text, first);
+            return Some(Response::Apply(self.landing(text, head)));
+        }
+        let cuts: Vec<_> = rows
+            .iter()
+            .filter(|row| !row.is_empty())
+            .map(|row| (row.clone(), String::new()))
+            .collect();
+        let mut edit = if cuts.is_empty() {
+            Edit {
+                range: first..first,
+                text: String::new(),
+            }
+        } else {
+            splice(text, &cuts)
+        };
+        if let Some(pasted) = pasted {
+            // A register has no width of its own: it goes back where the
+            // rectangle began, in one piece, rather than be cut into rows one
+            // would have invented.
+            edit.text.insert_str(0, &pasted);
+        }
+        let after = apply_edit(text, &edit);
+        if matches!(ch, 'c' | 's') {
+            self.mode = Mode::Insert;
+            self.arm_block_insert(&after, top, bottom, Some(left), false, first);
+            return Some(Response::Apply(
+                self.edit(text, edit.range, edit.text, first),
+            ));
+        }
+        self.mode = Mode::Normal;
+        let head = clamp_to_line(&after, first);
+        Some(Response::Apply(
+            self.edit(text, edit.range, edit.text, head),
+        ))
+    }
+
+    /// `r` over a rectangle: every character of it becomes the same one.
+    fn block_replace(&mut self, text: &str, ch: char) -> Response {
+        let rows = self.block_rows(text);
+        let head = rows.first().map(|row| row.start).unwrap_or(self.head);
+        let cuts: Vec<_> = rows
+            .iter()
+            .filter(|row| !row.is_empty())
+            .map(|row| {
+                let filled = text[row.clone()].chars().map(|_| ch).collect::<String>();
+                (row.clone(), filled)
+            })
+            .collect();
+        self.mode = Mode::Normal;
+        if cuts.is_empty() {
+            let head = clamp_to_line(text, head);
+            return Response::Apply(self.landing(text, head));
+        }
+        let edit = splice(text, &cuts);
+        let head = clamp_to_line(&apply_edit(text, &edit), head);
+        Response::Apply(self.edit(text, edit.range, edit.text, head))
+    }
+
+    /// Arms the repeat `Esc` will make of what is about to be typed.
+    fn arm_block_insert(
+        &mut self,
+        text: &str,
+        top: usize,
+        bottom: usize,
+        column: Option<usize>,
+        pad: bool,
+        start: usize,
+    ) {
+        self.block_insert = Some(BlockInsert {
+            lines: (top + 1..=bottom).collect(),
+            column,
+            pad,
+            start,
+            len: text.len(),
+        });
+    }
+
+    /// Writes what has just been typed on the other rows of the block.
+    ///
+    /// It gives up — and gives up entirely, rather than repeat something nobody
+    /// typed — on anything but a plain forward insertion at the caret: a
+    /// newline, a backspace, a click elsewhere. Vim gives up on the newline too.
+    fn repeat_block_insert(&mut self, text: &str, caret: usize) -> Option<Change> {
+        let pending = self.block_insert.take()?;
+        if caret < pending.start || text.len() != pending.len + (caret - pending.start) {
+            return None;
+        }
+        let typed = text.get(pending.start..caret)?;
+        if typed.is_empty() || typed.contains('\n') {
+            return None;
+        }
+        let typed = typed.to_string();
+        let mut cuts = Vec::new();
+        for line in pending.lines {
+            let start = start_of_line_no(text, line);
+            let end = end_of_line(text, start);
+            let (at, payload) = match pending.column {
+                None => (end, typed.clone()),
+                Some(column) => {
+                    let at = column_offset(text, start, column);
+                    if at >= end {
+                        // The line stops before the block: `A` pads out to the
+                        // column, `I` skips the line, as vim does with each.
+                        if !pending.pad {
+                            continue;
+                        }
+                        let blanks = column.saturating_sub(column_of(text, end));
+                        (end, format!("{}{typed}", " ".repeat(blanks)))
+                    } else {
+                        (at, typed.clone())
+                    }
+                }
+            };
+            cuts.push((at..at, payload));
+        }
+        if cuts.is_empty() {
+            return None;
+        }
+        let edit = splice(text, &cuts);
+        let after = apply_edit(text, &edit);
+        let head = clamp_to_line(&after, prev_boundary(text, caret));
+        Some(self.edit(text, edit.range, edit.text, head))
     }
 
     fn insert_at(&mut self, text: &str, offset: usize) -> Response {
@@ -817,7 +1080,7 @@ impl Vim {
             edit: None,
             selection: self.selection(text),
             head: self.head,
-            flash: self.flashed.take(),
+            flash: std::mem::take(&mut self.flashed),
             yank: self.yanked.take(),
         }
     }
@@ -845,7 +1108,7 @@ impl Vim {
                 text: replacement,
             }),
             head,
-            flash: self.flashed.take(),
+            flash: std::mem::take(&mut self.flashed),
             yank: self.yanked.take(),
         }
     }
@@ -854,7 +1117,10 @@ impl Vim {
     fn selection(&self, text: &str) -> Range<usize> {
         match self.mode {
             Mode::Insert => self.head..self.head,
-            Mode::Normal => block(text, self.head),
+            // A rectangle is painted by the view, on a layer of its own: the
+            // editor's selection is one run of text, and handing it the whole
+            // span would light the columns the block leaves out.
+            Mode::Normal | Mode::VisualBlock => block(text, self.head),
             _ => self.visual_range(text),
         }
     }
@@ -1256,6 +1522,63 @@ fn clamp_to_line(text: &str, at: usize) -> usize {
     at.max(start)
 }
 
+/// The offset of the `column`-th character of the line starting at `start`,
+/// clamped to that line's end.
+fn column_offset(text: &str, start: usize, column: usize) -> usize {
+    let end = end_of_line(text, start);
+    let mut at = start;
+    for _ in 0..column {
+        if at >= end {
+            return end;
+        }
+        at = next_boundary(text, at);
+    }
+    at.min(end)
+}
+
+/// A rectangle, as one text: the rows one under the other.
+fn block_text(text: &str, rows: &[Range<usize>]) -> String {
+    rows.iter()
+        .map(|row| &text[row.clone()])
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Several cuts of one rectangle, made into the single edit the view applies.
+///
+/// The rows of a block are contiguous lines, so what lies between two cuts is
+/// text to keep: one range from the first cut to the last, with the kept pieces
+/// spliced back in, leaves the same thing behind as many edits would — and it is
+/// **one** transaction, which is what an undo has to take back in one go.
+///
+/// The cuts are in the order of the text and do not overlap, which is what the
+/// rows of a rectangle are.
+fn splice(text: &str, cuts: &[(Range<usize>, String)]) -> Edit {
+    let start = cuts[0].0.start;
+    let end = cuts[cuts.len() - 1].0.end;
+    let mut out = String::new();
+    let mut at = start;
+    for (range, replacement) in cuts {
+        out.push_str(&text[at..range.start]);
+        out.push_str(replacement);
+        at = range.end;
+    }
+    out.push_str(&text[at..end]);
+    Edit {
+        range: start..end,
+        text: out,
+    }
+}
+
+/// The text an edit leaves behind.
+fn apply_edit(text: &str, edit: &Edit) -> String {
+    let mut out = String::with_capacity(text.len() + edit.text.len());
+    out.push_str(&text[..edit.range.start]);
+    out.push_str(&edit.text);
+    out.push_str(&text[edit.range.end..]);
+    out
+}
+
 fn delete_result(text: &str, range: &Range<usize>) -> String {
     let mut out = String::with_capacity(text.len() - (range.end - range.start));
     out.push_str(&text[..range.start]);
@@ -1650,7 +1973,8 @@ mod tests {
                 }
                 // Insert mode: the editor would have typed the character.
                 Response::Ignored => {
-                    if let Some(ch) = key.ch {
+                    let typed = key.ch.or_else(|| key.is("enter").then_some('\n'));
+                    if let Some(ch) = typed {
                         self.text.insert(self.cursor, ch);
                         self.cursor += ch.len_utf8();
                     }
@@ -2055,19 +2379,19 @@ mod tests {
         let Response::Apply(change) = vim.press(&key('w'), text, 0, 10) else {
             panic!("an operator with its motion applies");
         };
-        assert_eq!(change.flash, Some(0..4));
+        assert_eq!(change.flash, vec![0..4]);
         let mut vim = Vim::default();
         vim.press(&key('y'), text, 0, 10);
         let Response::Apply(change) = vim.press(&key('y'), text, 0, 10) else {
             panic!("a doubled operator applies");
         };
-        assert_eq!(change.flash, Some(0..10));
+        assert_eq!(change.flash, vec![0..10]);
         let mut vim = Vim::default();
         vim.press(&key('d'), text, 0, 10);
         let Response::Apply(change) = vim.press(&key('w'), text, 0, 10) else {
             panic!("an operator with its motion applies");
         };
-        assert_eq!(change.flash, None);
+        assert!(change.flash.is_empty());
     }
 
     /// The cursor is there before the first keystroke, which is what a file
@@ -2262,7 +2586,7 @@ mod tests {
         let Response::Apply(change) = vim.press(&key('w'), text, 0, 10) else {
             panic!("yw copies");
         };
-        assert_eq!(change.flash, Some(0..4));
+        assert_eq!(change.flash, vec![0..4]);
 
         // A whole line, without its newline.
         let mut vim = Vim::default();
@@ -2270,21 +2594,123 @@ mod tests {
         let Response::Apply(change) = vim.press(&key('y'), text, 0, 10) else {
             panic!("yy copies");
         };
-        assert_eq!(change.flash, Some(0..7));
+        assert_eq!(change.flash, vec![0..7]);
 
         let mut vim = Vim::default();
         vim.press(&key('d'), text, 0, 10);
         let Response::Apply(change) = vim.press(&key('w'), text, 0, 10) else {
             panic!("dw deletes");
         };
-        assert_eq!(change.flash, None);
+        assert!(change.flash.is_empty());
 
         // And a motion flashes nothing at all.
         let mut vim = Vim::default();
         let Response::Apply(change) = vim.press(&key('l'), text, 0, 10) else {
             panic!("a motion applies");
         };
-        assert_eq!(change.flash, None);
+        assert!(change.flash.is_empty());
+    }
+
+    /// A rectangle is what `Ctrl+V` selects, and what it cuts is the same
+    /// columns of every line it covers — never the lines themselves.
+    #[test]
+    fn a_block_is_cut_out_of_every_line_it_covers() {
+        let mut editor = Editor::new("one\ntwo\nthree\n");
+        editor.control("v");
+        assert_eq!(editor.mode(), Mode::VisualBlock);
+        editor.press("jl").press("d");
+        assert_eq!(editor.text, "e\no\nthree\n");
+        assert_eq!(editor.mode(), Mode::Normal);
+        // And the same key again is the way out of the mode.
+        editor.control("v");
+        assert_eq!(editor.mode(), Mode::VisualBlock);
+        editor.control("v");
+        assert_eq!(editor.mode(), Mode::Normal);
+    }
+
+    /// `Ctrl+V` then `I` is what one comes to this mode for: a prefix on every
+    /// line at once, written by the `Esc` that ends the insertion.
+    #[test]
+    fn a_block_insertion_repeats_down_the_rows() {
+        let mut editor = Editor::new("a\nb\nc\n");
+        editor.control("v");
+        editor.press("jjI// \x1b");
+        assert_eq!(editor.text, "// a\n// b\n// c\n");
+        assert_eq!(editor.mode(), Mode::Normal);
+
+        // A newline gives the repeat up rather than write something nobody
+        // typed — which is what vim does with it too.
+        let mut editor = Editor::new("a\nb\n");
+        editor.control("v");
+        editor.press("jIx\ny\x1b");
+        assert_eq!(editor.text, "x\nya\nb\n");
+    }
+
+    /// `A` goes past the right edge of the block, and pads out a line too short
+    /// to reach it; `I` skips such a line, as vim does.
+    #[test]
+    fn appending_to_a_block_pads_a_short_line() {
+        let mut editor = Editor::new("ab\nc\nde\n");
+        editor.control("v");
+        editor.press("ljjA!\x1b");
+        assert_eq!(editor.text, "ab!\nc !\nde!\n");
+
+        let mut editor = Editor::new("ab\nc\nde\n");
+        editor.press("l").control("v");
+        editor.press("jjI!\x1b");
+        assert_eq!(editor.text, "a!b\nc\nd!e\n");
+    }
+
+    /// `$` sticks here as it does everywhere: the block reaches the end of every
+    /// line it crosses, however long each one is.
+    #[test]
+    fn the_dollar_block_reaches_the_end_of_every_line() {
+        let mut editor = Editor::new("long\nab\n");
+        editor.control("v");
+        editor.press("$j").press("d");
+        assert_eq!(editor.text, "\n\n");
+    }
+
+    /// A blockwise copy takes the rows one under the other, and lights each of
+    /// them: the span between them is not what was taken.
+    #[test]
+    fn a_blockwise_yank_takes_the_rows_and_lights_them() {
+        let mut vim = Vim::default();
+        let text = "one\ntwo\nthree\n";
+        vim.press(&control("v"), text, 0, 10);
+        vim.press(&key('j'), text, 0, 10);
+        vim.press(&key('l'), text, 0, 10);
+        assert_eq!(vim.block_selection(text), vec![0..2, 4..6]);
+        let Response::Apply(change) = vim.press(&key('y'), text, 0, 10) else {
+            panic!("a blockwise yank copies");
+        };
+        assert_eq!(change.flash, vec![0..2, 4..6]);
+        assert_eq!(
+            change.yank,
+            Some(Register {
+                text: "on\ntw".into(),
+                linewise: false,
+            })
+        );
+        // Nothing paints a rectangle outside the mode that has one.
+        assert!(vim.block_selection(text).is_empty());
+    }
+
+    /// `r` fills the rectangle, and only the rectangle.
+    #[test]
+    fn replacing_a_block_fills_its_columns() {
+        let mut editor = Editor::new("one\ntwo\nthree\n");
+        editor.control("v");
+        editor.press("jl").press("rX");
+        assert_eq!(editor.text, "XXe\nXXo\nthree\n");
+    }
+
+    fn control(name: &str) -> Key {
+        Key {
+            ch: None,
+            name: name.into(),
+            ctrl: true,
+        }
     }
 
     fn key(ch: char) -> Key {

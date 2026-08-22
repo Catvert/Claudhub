@@ -339,6 +339,12 @@ pub struct Editing {
     /// which is a few percent of lightness away from the background — a block
     /// one has to look for is a block one does not see.
     pub cursor: gpui_component::input::TextDecorationCollection,
+    /// The layer a blockwise selection is painted on, created **after** the
+    /// cursor's so that the block cursor keeps its colour where the two meet.
+    ///
+    /// It exists because the editor's own selection is a single run of text and
+    /// a rectangle is one range per line: there is nothing to hand it.
+    pub selection: gpui_component::input::TextDecorationCollection,
     /// A caret waiting for the editor to be measured before it can be revealed.
     ///
     /// A file opened by a jump installs a brand-new `EditorState`, which has
@@ -898,8 +904,9 @@ impl ClaudhubApp {
         // order, the first one keeping its properties. The block stays visible
         // through a yank's flash, which is the right way round — the flash says
         // what was taken, the block says where one is.
-        let (cursor, flash) = input.update(cx, |state, cx| {
+        let (cursor, flash, selection) = input.update(cx, |state, cx| {
             (
+                state.create_decorations_collection(Vec::new(), cx),
                 state.create_decorations_collection(Vec::new(), cx),
                 state.create_decorations_collection(Vec::new(), cx),
             )
@@ -921,6 +928,7 @@ impl ClaudhubApp {
                 flash,
                 flash_timer: None,
                 cursor,
+                selection,
                 cursor_at: None,
             },
         );
@@ -1108,8 +1116,6 @@ impl ClaudhubApp {
     /// a bare `d` from being typed into the file; letting it through is what
     /// makes insert mode an ordinary editor again.
     fn vim_key(&mut self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        use crate::ui::vim::{Command, Response};
-
         if !Settings::global(cx).vim_mode || self.editing().is_none() {
             return;
         }
@@ -1138,9 +1144,49 @@ impl ClaudhubApp {
             name: keystroke.key.clone(),
             ctrl,
         };
+        if self.vim_press(key, window, cx) {
+            // Everything vim claims is ours: the key must not reach the file.
+            cx.stop_propagation();
+        }
+    }
+
+    /// `Ctrl+V`, which never arrives as a keystroke.
+    ///
+    /// The input binds it to `Paste`, and a **binding runs before** the
+    /// capture-phase listener vim keys go through — so the rectangle would have
+    /// been a paste, in silence. The action is therefore caught on its way down,
+    /// on the same ancestor, where a capture-phase listener is ahead of the
+    /// input's own. In insert mode it is let through, where it is the paste
+    /// everyone means by it.
+    pub(super) fn vim_paste(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        use crate::ui::vim::Mode;
+
+        if !Settings::global(cx).vim_mode {
+            return false;
+        }
+        let mode = self.editing().map(|editing| editing.vim.mode());
+        if !matches!(mode, Some(mode) if mode != Mode::Insert) {
+            return false;
+        }
+        let key = crate::ui::vim::Key {
+            ch: None,
+            name: "v".into(),
+            ctrl: true,
+        };
+        self.vim_press(key, window, cx)
+    }
+
+    /// One keystroke, handed to vim — `true` when it took it.
+    fn vim_press(
+        &mut self,
+        key: crate::ui::vim::Key,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::ui::vim::{Command, Response};
 
         let Some(input) = self.editing().map(|editing| editing.input.clone()) else {
-            return;
+            return false;
         };
         let (text, cursor, rows) = {
             let state = input.read(cx);
@@ -1164,25 +1210,23 @@ impl ClaudhubApp {
             .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
             .flatten();
         let Some(editing) = self.editing_mut() else {
-            return;
+            return false;
         };
         if let Some(text) = pasted {
             editing.vim.set_register(text);
         }
         let response = editing.vim.press(&key, &text, cursor, rows);
         if matches!(response, Response::Ignored) {
-            return;
+            return false;
         }
-        // Everything else is ours: the key must not reach the file.
-        cx.stop_propagation();
         match response {
             Response::Ignored | Response::Consumed => {}
             Response::Apply(change) => {
                 if let Some(yank) = change.yank.filter(|_| clipboard) {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(yank.text));
                 }
-                if let Some(range) = change.flash {
-                    self.flash_yank(range, cx);
+                if !change.flash.is_empty() {
+                    self.flash_yank(change.flash, cx);
                 }
                 input.update(cx, |state, cx| {
                     if let Some(edit) = change.edit {
@@ -1211,6 +1255,7 @@ impl ClaudhubApp {
             },
         }
         cx.notify();
+        true
     }
 
     /// Paints the block cursor, and takes the editor's caret out from under it.
@@ -1232,9 +1277,10 @@ impl ClaudhubApp {
         let Some(editing) = self.editing() else {
             return;
         };
-        let (input, layer, mode) = (
+        let (input, layer, rectangle, mode) = (
             editing.input.clone(),
             editing.cursor.clone(),
+            editing.selection.clone(),
             editing.vim.mode(),
         );
         let (caret, len) = {
@@ -1247,13 +1293,30 @@ impl ClaudhubApp {
         if editing.cursor_at == Some(at) {
             return;
         }
-        let block = on
-            .then(|| {
+        let (block, rows) = match on {
+            true => {
                 let text = input.read(cx).value();
-                editing.vim.cursor(&text, caret)
-            })
-            .flatten()
-            .filter(|range| !range.is_empty());
+                (
+                    editing.vim.cursor(&text, caret),
+                    editing.vim.block_selection(&text),
+                )
+            }
+            false => (None, Vec::new()),
+        };
+        let block = block.filter(|range| !range.is_empty());
+        // The theme's `selection`, which is exactly what `v` and `V` look like
+        // next door: this is the same gesture, on a rectangle the editor has no
+        // way of holding.
+        let selected = gpui::HighlightStyle {
+            background_color: Some(cx.theme().selection),
+            ..Default::default()
+        };
+        rectangle.set(
+            rows.into_iter()
+                .map(|range| gpui_component::input::TextDecoration::new(range, selected))
+                .collect(),
+            cx,
+        );
         let colour = vim_mode_colour(mode, cx);
         let style = gpui::HighlightStyle {
             color: Some(ink_on(colour, cx)),
@@ -1287,7 +1350,7 @@ impl ClaudhubApp {
     /// which was chosen for a terminal where nothing else moves, and it does not
     /// hold a timer per yank: the task is **replaced**, and dropping a gpui task
     /// cancels it.
-    fn flash_yank(&mut self, range: std::ops::Range<usize>, cx: &mut Context<Self>) {
+    fn flash_yank(&mut self, ranges: Vec<std::ops::Range<usize>>, cx: &mut Context<Self>) {
         let Some(editing) = self.editing() else {
             return;
         };
@@ -1299,7 +1362,10 @@ impl ClaudhubApp {
             ..Default::default()
         };
         flash.set(
-            vec![gpui_component::input::TextDecoration::new(range, style)],
+            ranges
+                .into_iter()
+                .map(|range| gpui_component::input::TextDecoration::new(range, style))
+                .collect(),
             cx,
         );
         let timer = cx.spawn(async move |this, cx| {
@@ -2041,6 +2107,15 @@ impl ClaudhubApp {
                             el.capture_key_down(cx.listener(|this, event, window, cx| {
                                 this.vim_key(event, window, cx)
                             }))
+                            // `Ctrl+V` is a binding of the input's before it is
+                            // a keystroke: see `vim_paste`.
+                            .capture_action(cx.listener(
+                                |this, _: &gpui_component::input::Paste, window, cx| {
+                                    if this.vim_paste(window, cx) {
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
                         })
                         .child(
                             Editor::new(&input)
@@ -2236,6 +2311,7 @@ fn vim_mode_colour(mode: crate::ui::vim::Mode, cx: &gpui::App) -> gpui::Hsla {
         crate::ui::vim::Mode::Insert => cx.theme().success,
         crate::ui::vim::Mode::Visual => cx.theme().magenta,
         crate::ui::vim::Mode::VisualLine => cx.theme().cyan,
+        crate::ui::vim::Mode::VisualBlock => cx.theme().yellow,
     }
 }
 

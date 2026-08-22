@@ -566,6 +566,7 @@
   "vim-mode-insert": "INSERT",
   "vim-mode-normal": "NORMAL",
   "vim-mode-visual": "VISUAL",
+  "vim-mode-visual-block": "VISUAL BLOCK",
   "vim-mode-visual-line": "VISUAL LINE",
   "watch-windows-filesystem": "Repository on a Windows drive: no automatic refresh",
   "workspace-db": "Databases",

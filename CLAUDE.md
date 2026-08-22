@@ -4297,16 +4297,64 @@ D'où `explorer_context(vim)` en plus de `context(vim)`.
 les opérateurs, les registres. **Elle ne connaît aucun type de gpui** — elle
 reçoit le texte et le curseur, elle rend l'édition à appliquer —, comme
 `motion.rs` et `notes.rs` devant leurs vues, et c'est ce qui la rend testable :
-vingt-six tests décrivent ce que fait chaque touche.
+une quarantaine de tests décrivent ce que fait chaque touche.
 
 C'est un **sous-ensemble**, et c'en est un exprès : ce qu'une main tape sans y
 penser. `hjkl`, `w`/`b`/`e` (et leurs majuscules), `0`/`^`/`$`, `gg`/`G`,
 `f`/`F`/`t`/`T`, `Ctrl+D`/`Ctrl+U`/`Ctrl+F`/`Ctrl+B` ; `d`, `c`, `y` avec leur
 motion, doublés, avec un compte ou avec un **objet de texte** ; `x`, `X`, `s`,
 `S`, `D`, `C`, `Y`, `r`, `J`, `p`, `P`, `o`, `O`, `i`, `a`, `I`, `A` ; `v`,
-`V`, `Esc` ; `u` ; `/`, `?`, `n`, `N` ; et `:w`, `:q`, `:wq`, `:42`. Ce qui n'y
-est pas est ce qu'un éditeur fait déjà mieux (les registres nommés, les macros,
-les marques) ou ce que Claudhub a ailleurs.
+`V`, `Ctrl+V`, `Esc` ; `u` ; `/`, `?`, `n`, `N` ; et `:w`, `:q`, `:wq`, `:42`.
+Ce qui n'y est pas est ce qu'un éditeur fait déjà mieux (les registres nommés,
+les macros, les marques) ou ce que Claudhub a ailleurs.
+
+**Le mode bloc** (`Ctrl+V`) est une **colonne**, et c'est le seul mode dont la
+sélection ne soit pas un morceau de texte : `d`, `x`, `y`, `c`, `s`, `p` et `r`
+y agissent sur un rectangle, `o` en échange les coins, et `$` le fait courir
+jusqu'au bout de chaque ligne, si longue soit-elle. `v` et `V` y passent d'un
+mode visuel à l'autre en **gardant l'ancre**, ce qui est la façon de rétrécir
+une sélection plutôt que de la recommencer.
+
+Sept points, et le premier est ce pour quoi on vient :
+
+- **`I`, `A` et `c` se répètent sur toutes les lignes du bloc**, et c'est le
+  geste qui vaut le mode : un préfixe sur vingt lignes. On tape sur la ligne du
+  haut, et c'est l'`Esc` qui écrit la même chose sur les autres — la seule
+  chose de ce module dont les deux moitiés soient séparées par des frappes.
+  `A` va au-delà du bord droit et **complète d'espaces** une ligne trop courte
+  pour l'atteindre, `I` la **saute** : c'est ce que vim fait de chacun.
+- **Les lignes visées sont retenues par leur numéro, pas par leur position.**
+  Ce qu'on tape en haut décale tout ce qui est en dessous ; un numéro de ligne,
+  lui, ne bouge pas tant qu'aucun saut de ligne n'est tapé — et c'est
+  exactement le cas où la répétition **abandonne**, comme vim. Elle abandonne
+  de même sur tout ce qui n'est pas une insertion en avant au caret : un clic
+  ailleurs, une correction en arrière. La longueur du texte au départ est ce
+  qui le dit, et abandonner vaut mieux que répéter ce que personne n'a tapé.
+- **Un rectangle, ce sont plusieurs coupes et une seule édition** (`splice`).
+  Les lignes d'un bloc se suivent : une plage de la première coupe à la
+  dernière, avec ce qu'on garde recousu dedans, laisse le même texte que
+  plusieurs éditions — et c'est **une** transaction, ce qu'un `u` doit reprendre
+  d'un coup.
+- **Le registre n'a pas de largeur.** Ce qu'un bloc copie est rangé en lignes
+  l'une sous l'autre, et un `p` le remet **d'un seul tenant** là où le rectangle
+  commençait : le découper en colonnes serait lui inventer une forme que le
+  presse-papiers ne porte pas.
+- **La sélection est peinte par nous** (`Editing::selection`, une troisième
+  `TextDecorationCollection`), dans le `selection` du thème — c'est-à-dire
+  exactement ce à quoi `v` et `V` ressemblent à côté. Celle de l'éditeur est un
+  **seul** morceau de texte : lui donner toute l'étendue du bloc allumerait les
+  colonnes qu'il laisse justement de côté. Elle est créée **après** celle du
+  curseur, qui garde donc sa couleur là où les deux se rencontrent.
+- **`Ctrl+V` n'arrive jamais comme une frappe.** L'`Input` le lie à `Paste`, et
+  une liaison passe **avant** l'écouteur en phase de capture par lequel les
+  touches de vim arrivent : le rectangle aurait été un collage, en silence.
+  C'est donc l'**action** qu'on attrape au vol, en phase de capture sur le même
+  ancêtre, où l'on précède l'`Input` ; en mode insertion elle passe, où elle est
+  le collage que tout le monde veut dire. `Ctrl+Q` fait la même chose sans
+  détour — vim le propose lui-même, et pour cette raison-là.
+- **La colonne désirée est ce qui donne sa largeur au bloc**, `$` compris : un
+  `$` d'avant la sélection en donnerait une qu'on n'a pas demandée, d'où la
+  remise à zéro en entrant dans un mode visuel depuis le mode normal.
 
 **Les objets de texte** — `iw`/`aw`, `i(`/`a(` et leurs frères pour `{`, `[`,
 `<`, `i"`/`a"` pour les trois guillemets — valent après un opérateur et en mode
