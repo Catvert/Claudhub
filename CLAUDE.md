@@ -1707,12 +1707,26 @@ Sept points qui ne se devinent pas :
   **dit** que la liste est écourtée : une recherche qui montre ses deux mille
   premières occurrences en silence se lit comme une recherche qui en a trouvé
   deux mille.
-- **La recherche part sur Entrée, jamais sur une frappe.** `git grep` sur un
-  monorepo coûte une seconde, et chercher à chaque lettre occuperait le worker
-  à des requêtes que personne ne lira. C'est aussi pourquoi la file n'a qu'un
-  worker — voir « Les six files » — et pourquoi la commande porte un
-  identifiant d'envoi : on retape, et la réponse d'un geste que le suivant a
-  remplacé doit se reconnaître comme telle.
+- **La recherche est interactive, donc amortie.** Les résultats arrivent
+  pendant qu'on tape ; ce qui part est ce qu'on a tapé **une fois la frappe
+  arrêtée** (trois cents millisecondes — une pause entre deux mots, pas entre
+  deux lettres). `git grep` sur un monorepo coûte une seconde : partir à chaque
+  lettre occuperait le worker à des requêtes que personne ne lira, et les
+  réponses reviendraient dans le désordre pour des mots que personne n'a
+  écrits. L'amortissement est un **compteur de frappes** relu à l'échéance et
+  non le drapeau qu'emploient les autres différés de ce dépôt — celui du LSP,
+  celui du redimensionnement du terminal : leur drapeau tire à cadence fixe, ce
+  qui est juste pour ce qui coûte une milliseconde et faux pour ce qui coûte
+  une seconde. La file à un worker et l'identifiant d'envoi rattrapent ce qui
+  passe quand même à travers.
+- **Sous deux caractères, rien ne part tout seul.** Une lettre correspond à la
+  moitié du projet : la réponse est deux mille occurrences, écourtées, que
+  personne n'a demandées. `Enter` cherche quand même — c'est un geste, et un
+  geste a le droit de coûter cher.
+- **Seule une recherche demandée prend le focus.** `Enter` et le bouton veulent
+  dire « j'ai fini de taper, je vais lire » ; les réponses qui arrivent pendant
+  la frappe doivent laisser le caret exactement où il est. C'est la seule chose
+  qu'une recherche interactive ne doit pas faire.
 - **La liste prend le focus quand les résultats arrivent.** Les flèches nues
   appartiennent à qui a le focus, et `InputState` les lie lui-même — plus
   profond dans la pile de contextes que le panneau, donc il gagne. Une liste

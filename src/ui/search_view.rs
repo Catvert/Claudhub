@@ -67,6 +67,22 @@ pub struct SearchState {
     /// query is stale, and this is what tells the answer of a gesture from the
     /// answer of the gesture that replaced it.
     pub request: u64,
+    /// Bumped on every keystroke, and read again when the debounce fires.
+    ///
+    /// That comparison is the whole of the debounce, and it is what makes it a
+    /// **trailing** one: a deferred search that finds the counter has moved
+    /// simply gives up, so nothing goes out until the typing stops. The flag
+    /// the rest of this file uses for deferred work — the LSP's, the
+    /// terminal's — fires at a fixed rate instead, which is right for
+    /// something that costs a millisecond and wrong for something that costs a
+    /// second.
+    pub typed: u64,
+    /// Whether the answer being waited for should hand the list the focus.
+    ///
+    /// True for a search one **asked** for — Enter, the button — and false for
+    /// one the typing triggered: taking the caret out of the field one is
+    /// typing in is the one thing an interactive search must not do.
+    pub focus_on_answer: bool,
     /// The files whose hits are hidden.
     pub folded: HashSet<PathBuf>,
     /// The selected row, as an index into the displayed list.
@@ -119,13 +135,57 @@ impl ClaudhubApp {
         }
     }
 
+    /// A keystroke: the search goes out once the typing stops.
+    ///
+    /// **Interactive, and therefore debounced.** `git grep` over a monorepo
+    /// costs a second: firing on every letter would keep the worker busy on
+    /// queries nobody will read, and the answers would arrive out of order for
+    /// words nobody typed. So the counter is bumped here and read again when
+    /// the timer fires — anything the typing has overtaken gives up. The send
+    /// id and the single worker (`runtime::is_search`) catch whatever slips
+    /// through.
+    ///
+    /// **Under `MIN_AUTO` characters, nothing goes out by itself.** One letter
+    /// matches half the project: the answer is two thousand hits, capped, and
+    /// nobody asked for it. `Enter` searches anyway — it is a gesture, and a
+    /// gesture is allowed to be expensive.
+    pub(super) fn search_typed(&mut self, cx: &mut Context<Self>) {
+        self.search.typed = self.search.typed.wrapping_add(1);
+        let at = self.search.typed;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(DEBOUNCE).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.search.typed != at {
+                    return; // the typing went on: this query is already stale
+                }
+                let query = this.search_query(cx);
+                // An emptied field empties the list: leaving the last answer
+                // under an empty field would read as a search that found it.
+                if query.is_empty() {
+                    this.run_search(false, cx);
+                    return;
+                }
+                if query.text.trim().chars().count() < MIN_AUTO {
+                    return;
+                }
+                // The same query as the one on screen: nothing to ask again.
+                // A checkbox that changes nothing, a glob one retyped
+                // identically — both come through here.
+                if query == this.search.sent && this.search.error.is_none() {
+                    return;
+                }
+                this.run_search(false, cx);
+            });
+        })
+        .detach();
+    }
+
     /// Sends the search.
     ///
-    /// On `Enter` and on a button, never on a keystroke: `git grep` over a
-    /// monorepo costs a second, and searching on every letter would keep one
-    /// worker busy on queries nobody will read. That is also why the queue has
-    /// a single worker — see `runtime::is_search`.
-    pub(super) fn run_search(&mut self, cx: &mut Context<Self>) {
+    /// `hand` is true for a search one asked for — `Enter`, the button — which
+    /// is what decides whether the answer takes the focus.
+    pub(super) fn run_search(&mut self, hand: bool, cx: &mut Context<Self>) {
+        self.search.focus_on_answer = hand;
         let Some(worktree) = self.active.clone() else {
             return;
         };
@@ -178,13 +238,16 @@ impl ClaudhubApp {
                 let rows = search::rows(&self.search.results, &self.search.folded);
                 self.search.selected = search::first_hit(&rows);
                 self.sync_search_preview(window, cx);
-                // **The list takes the focus, the field lets it go.** The bare
-                // arrows belong to whoever holds it, and `InputState` binds
-                // them itself — deeper in the context stack than the panel, so
-                // it wins. A result list one has to click before walking it is
-                // a list one walks with the mouse. Coming back to the field is
-                // `Ctrl+Shift+F`, which is also how one got here.
-                if self.search.selected.is_some() {
+                // **A search one asked for hands the list the focus.** The
+                // bare arrows belong to whoever holds it, and `InputState`
+                // binds them itself — deeper in the context stack than the
+                // panel, so it wins; a result list one has to click before
+                // walking it is a list one walks with the mouse. But only for
+                // `Enter` and the button: the answers that arrive while one is
+                // typing must leave the caret exactly where it is. Coming back
+                // to the field is `Ctrl+Shift+F`, which is also how one got
+                // here.
+                if self.search.selected.is_some() && self.search.focus_on_answer {
                     window.focus(&self.search_focus, cx);
                 }
             }
@@ -451,7 +514,9 @@ impl ClaudhubApp {
                             .icon(icon("search"))
                             .tooltip(tr!("search-run"))
                             .disabled(running)
-                            .on_click(cx.listener(|this, _, _window, cx| this.run_search(cx))),
+                            .on_click(
+                                cx.listener(|this, _, _window, cx| this.run_search(true, cx)),
+                            ),
                     ),
             )
             .child(
@@ -465,6 +530,10 @@ impl ClaudhubApp {
                             .checked(self.search_regex)
                             .on_click(cx.listener(|this, checked: &bool, _window, cx| {
                                 this.search_regex = *checked;
+                                // An option is a question asked again: leaving
+                                // the previous answer under a changed switch
+                                // would say the switch does nothing.
+                                this.search_typed(cx);
                                 cx.notify();
                             })),
                     )
@@ -474,6 +543,7 @@ impl ClaudhubApp {
                             .checked(self.search_whole_word)
                             .on_click(cx.listener(|this, checked: &bool, _window, cx| {
                                 this.search_whole_word = *checked;
+                                this.search_typed(cx);
                                 cx.notify();
                             })),
                     )
@@ -711,6 +781,16 @@ impl ClaudhubApp {
 
 /// How many lines of context are kept above the revealed one.
 const PREVIEW_CONTEXT: usize = 4;
+
+/// How long the typing has to stop before the search goes out.
+///
+/// Three hundred milliseconds is a pause between words and not between
+/// letters: shorter, a slow typist pays a `git grep` per letter; longer, the
+/// list feels like it is answering the previous question.
+const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Below this many characters, only `Enter` searches. See `search_typed`.
+const MIN_AUTO: usize = 2;
 
 /// What the theme gives a row, read once per frame and not per row.
 #[derive(Clone, Copy)]
@@ -951,21 +1031,26 @@ pub(super) struct SearchInputs {
 impl SearchInputs {
     pub fn new(window: &mut Window, cx: &mut Context<ClaudhubApp>) -> Self {
         let text = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("search-placeholder")));
-        // Enter searches: it is the key one's hand is already on, and a search
-        // is a gesture and not a keystroke — see `run_search`.
-        cx.subscribe(&text, |this, _, event, cx| {
-            if matches!(event, gpui_component::input::InputEvent::PressEnter { .. }) {
-                this.run_search(cx);
+        // Typing searches, once it stops (`search_typed`); `Enter` searches
+        // now and hands the list the focus — it is the key that says "I have
+        // finished typing, I am going to read".
+        fn watch(
+            this: &mut ClaudhubApp,
+            event: &gpui_component::input::InputEvent,
+            cx: &mut Context<ClaudhubApp>,
+        ) {
+            use gpui_component::input::InputEvent;
+            match event {
+                InputEvent::Change => this.search_typed(cx),
+                InputEvent::PressEnter { .. } => this.run_search(true, cx),
+                _ => {}
             }
-        })
-        .detach();
+        }
+        cx.subscribe(&text, |this, _, event, cx| watch(this, event, cx))
+            .detach();
         let glob = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("search-glob")));
-        cx.subscribe(&glob, |this, _, event, cx| {
-            if matches!(event, gpui_component::input::InputEvent::PressEnter { .. }) {
-                this.run_search(cx);
-            }
-        })
-        .detach();
+        cx.subscribe(&glob, |this, _, event, cx| watch(this, event, cx))
+            .detach();
         Self {
             text,
             glob,
