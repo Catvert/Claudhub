@@ -40,6 +40,7 @@ mod shortcuts_view;
 mod sql_history;
 mod sql_history_view;
 mod store;
+mod tags;
 mod terminal_view;
 mod theme;
 mod topbar;

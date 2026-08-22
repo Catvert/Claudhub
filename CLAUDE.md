@@ -120,6 +120,7 @@ src/
     branch.rs   `for-each-ref` → branches, amont, divergence
     diff.rs     `--numstat` et diff unifié → fichiers, hunks, lignes
     history.rs  `git log` → commits, et la disposition du graphe
+    tags.rs     les tags : lecture, création, publication, suppression
   agent.rs      les agents dans `/proc`, et le suivi qui dit lesquels
                 travaillent
   runtime/      les workers
@@ -150,6 +151,7 @@ src/
     workspace.rs   les cinq écrans, leur dock et la barre qui les choisit
     diff_view.rs   la vue de diff, virtualisée
     history_view.rs  l'historique et son graphe peint
+    tags.rs         le panneau des tags, et les quatre gestes sur un tag
     highlight.rs   coloration tree-sitter d'un diff
     blade.rs        les vues Blade : la surcouche du diff, et le coloriseur
                     de l'éditeur
@@ -1120,6 +1122,65 @@ dernier pour recouvrir les courbes qui l'atteignent.
 Le module s'appelle `history` et non `log` : un module `log` dans ce crate
 masquerait la bibliothèque de journalisation du même nom.
 
+### Les tags
+
+Un tag est le seul objet git qu'une relecture crée **exprès** — une version, un
+jalon, un point où l'on veut revenir — et c'était la seule chose que Claudhub ne
+savait ni montrer ni faire. Le panneau est un onglet **à côté de « Historique »**,
+et c'est sa place : un tag nomme un commit, l'historique montre les commits, et
+le geste qu'on fait après avoir trouvé le commit à marquer est juste là. Cliquer
+un tag ouvre le diff de son commit, exactement comme une ligne d'historique —
+deux listes sur la même chose, l'une rangée par date de commit, l'autre par date
+de tag.
+
+**Le local et le distant sont deux savoirs différents**, et c'est ce qui
+structure le module. Lister les tags est une lecture de `refs/tags`, quelques
+millisecondes ; savoir si `origin` a un tag est un `ls-remote`, un aller-retour.
+Tant que le bouton globe n'a pas été pressé, **rien ne dit quoi que ce soit du
+distant** — le compte de la barre change de phrase, et aucune ligne ne porte
+« local ». Prétendre le second en n'ayant fait que le premier, c'est un panneau
+qui dit « poussé » d'un tag que personne n'a poussé.
+
+Sept points qui ne se devinent pas :
+
+- **Le message décide du genre.** Un message donné fait un tag annoté (objet à
+  lui : auteur, date, texte), sans message c'est un tag léger — c'est la
+  distinction de git, et un interrupteur de plus à côté du champ dirait la même
+  chose deux fois.
+- **Une création qui pousse est *une* commande** (`Cmd::CreateTag { push }`), et
+  c'est le seul endroit qui déroge à « un geste, une commande ». La création est
+  locale, le push est un aller-retour : deux commandes partiraient dans **deux
+  files**, que rien n'ordonne, et le push pourrait partir avant que le tag
+  existe — git refusant alors un tag dont il n'a jamais entendu parler. Le
+  drapeau se lit dans `queue_of`, ce qui suffit à envoyer le tout dans la file
+  du réseau. Un test verrouille les six commandes de tag et leur file.
+- **Le commit visé est celui qu'on lit.** Le dialogue marque le commit
+  sélectionné dans l'historique quand il y en a un, HEAD sinon : « taguer *ce*
+  commit » est le geste qu'on a en le lisant.
+- **`PROTOCOL_VERSION` passe à 5** : six commandes et deux événements de plus,
+  et postcard est positionnel — les deux bouts du fil s'installent séparément.
+- **Le nom est validé sous le champ** (`tags::is_valid_name`, pur et testé) : le
+  refus de git — `fatal: 'v 1.0' is not a valid tag name` — arrive après la
+  fermeture du dialogue, c'est-à-dire trop tard pour corriger quoi que ce soit.
+- **Un tag annoté rapporte le commit qu'il marque**, jamais son propre objet :
+  `%(*objectname:short)` déréférence, et l'empreinte de l'objet tag
+  n'apparaîtrait nulle part ailleurs dans la fenêtre.
+- **`ls-remote` liste un tag annoté deux fois** — l'objet, puis le commit sous
+  `^{}` : c'est un tag, pas deux, et `parse_remote` le sait.
+- **Un push de tag écrit `refs/tags/<nom>` en entier**, jamais le nom nu : une
+  branche et un tag peuvent porter le même nom, et git pousse alors celui qu'il
+  veut.
+
+**Supprimer ici et supprimer sur origin sont deux entrées de menu**, pas un
+drapeau sur une seule : ce sont deux regrets différents, et le second se dit —
+un tag que quelqu'un d'autre a déjà récupéré ne revient pas. Les deux passent
+par un dialogue de confirmation.
+
+Deux détails de la liste : la lecture est gardée par `loaded` et non par « la
+liste est vide » — un dépôt sans aucun tag redemanderait sinon à chaque frame —
+et un rafraîchissement **oublie** ce qu'on savait du distant, puisque c'est
+précisément le moment où l'on cesse d'en répondre.
+
 ### Les réglages
 
 Ils vivent dans un **global gpui** (`settings::SettingsStore`) et non dans
@@ -1382,6 +1443,20 @@ Quatre points :
   troisième famille de trente clés en miroir de `success_key` : ce qui a échoué
   est dans le corps, git nommant l'opération lui-même — `error: failed to push
   some refs`.
+- **Toute opération distante a sa bulle**, même quand elle tient sur une ligne
+  (`notify::always_worth_reading` : fetch, pull, push, et les gestes de tag qui
+  sont des pushes). Elle a coûté des secondes, on a fait autre chose pendant ce
+  temps, et sa réponse se lit **après** — c'est-à-dire exactement ce que la
+  barre ne sait pas servir, puisque le message suivant l'écrase. Un commit avait
+  sa bulle par accident, sa sortie faisant deux lignes ; un push qui venait de
+  publier trois commits n'en avait aucune.
+- **Ce que git a écrit sur stderr en fait partie** (`git::git_reporting`, pour
+  les commandes réseau et elles seules). `git push` et `git fetch` écrivent tout
+  leur compte rendu là — `To github.com:…`, les références déplacées, `From
+  origin` — et leur stdout est vide : lue par `git`, qui ne garde que stdout,
+  une publication réussie ne rapportait littéralement rien à dire. stderr passe
+  **en premier**, git menant par le compte rendu et finissant par ses conseils,
+  et c'est la première ligne que la barre retient.
 
 ### Le magasin d'état
 

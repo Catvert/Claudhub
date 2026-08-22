@@ -49,7 +49,7 @@ use crate::ui::terminal_view::OpenTerminal;
 // 14: the notes left the tabs for the bottom third of the review's column. A
 // saved layout would keep them where they were, which is the one place this
 // change is about.
-const LAYOUT_VERSION: usize = 15;
+const LAYOUT_VERSION: usize = 16;
 
 /// The saved layouts, one per screen.
 ///
@@ -471,6 +471,10 @@ pub struct ClaudhubApp {
     /// The result table. An entity created once as well: rebuilding it on every
     /// query would lose the column widths just adjusted with the mouse.
     pub(super) db_table: Entity<gpui_component::table::TableState<crate::ui::db_query::Results>>,
+    /// What is known of each repository's tags, by main repository: tags live
+    /// in the shared `.git` and are the same seen from every worktree.
+    pub(super) tags: HashMap<PathBuf, crate::ui::tags::TagsState>,
+    pub(super) tags_scroll: gpui::UniformListScrollHandle,
     /// Every query run, per worktree, and the reach the panel is showing.
     ///
     /// In the application and not in a global: only the history panel reads it,
@@ -794,6 +798,8 @@ impl ClaudhubApp {
             db_split,
             // Read once, at startup, like the state store: it is a file of our
             // own, a few hundred kilobytes at most, and nothing else writes it.
+            tags: HashMap::new(),
+            tags_scroll: gpui::UniformListScrollHandle::new(),
             sql_history: crate::ui::sql_history::History::load(),
             sql_history_reach: Default::default(),
             sql_history_scroll: gpui_component::VirtualListScrollHandle::new(),
@@ -1369,6 +1375,8 @@ impl ClaudhubApp {
                 branches,
                 default_base,
             } => self.branches_arrived(main, branches, default_base, window, cx),
+            Evt::Tags { main, tags } => self.tags_arrived(main, tags, cx),
+            Evt::RemoteTags { main, names } => self.remote_tags_arrived(main, names, cx),
 
             // — Writes ————————————————————————————————————————————
             Evt::Done {

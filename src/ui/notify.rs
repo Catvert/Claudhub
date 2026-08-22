@@ -54,13 +54,34 @@ pub fn headline(output: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Does this action always deserve a balloon, whatever it answered?
+///
+/// The ones that reach the network do: `fetch`, `pull`, `push`, and the two tag
+/// gestures that are pushes. They cost seconds, one goes on doing something
+/// else while they run, and what they answered is read **afterwards** — which
+/// is exactly what the status bar cannot serve, being overwritten by the next
+/// message that goes through it. A commit got its balloon by accident, its
+/// output happening to run to two lines; a push that published three commits
+/// got none, git having written its whole account on stderr.
+///
+/// The automatic fetch is not among them and cannot be: it never produces a
+/// `Done` — see `Cmd::AutoFetch`. A balloon every ten minutes saying nothing
+/// happened would wear out the very place one looks at what has just happened.
+fn always_worth_reading(action: Action) -> bool {
+    matches!(
+        action,
+        Action::Fetch | Action::Pull | Action::Push | Action::PushTag
+    )
+}
+
 /// The balloon an outcome deserves, if it deserves one.
 ///
-/// Three rules, and each has a case behind it:
+/// Four rules, and each has a case behind it:
 ///
 /// - **Every failure gets one.** The bar is overwritten by the next message,
 ///   and a `git push` refused for want of an upstream is precisely what one
 ///   comes back to read a minute later.
+/// - **Every remote operation gets one** — see `always_worth_reading`.
 /// - **An output with more than one line gets one**: that is the definition of
 ///   "there is something to read here", and it is what a pull produces.
 /// - **Nothing else does.** A `Stage` that finishes in ten milliseconds with
@@ -68,7 +89,10 @@ pub fn headline(output: &str) -> Option<String> {
 ///   and one that pushes the useful ones off the screen.
 pub fn notice(action: Action, output: &str, level: Level) -> Option<Notice> {
     let body = output.trim();
-    if level == Level::Success && body.lines().filter(|l| !l.trim().is_empty()).count() < 2 {
+    if level == Level::Success
+        && !always_worth_reading(action)
+        && body.lines().filter(|l| !l.trim().is_empty()).count() < 2
+    {
         return None;
     }
     Some(Notice {
@@ -117,10 +141,33 @@ mod tests {
         assert_eq!(balloon.title, Action::Pull.success_key());
         assert!(balloon.body.contains("app/Config.php"));
 
+        // A local gesture with nothing to read gets none. A pull with nothing
+        // to bring back does get one, being a remote operation — see
+        // `a_remote_operation_always_earns_one`.
+        assert_eq!(notice(Action::Stage, "", Level::Success), None);
         assert_eq!(
-            notice(Action::Pull, "Already up to date.", Level::Success),
+            notice(Action::Commit, "nothing to commit", Level::Success),
             None
         );
+    }
+
+    /// A push that published three commits used to get nothing: git writes its
+    /// account on stderr, and what reached here was empty. Now the account
+    /// arrives (`git_reporting`) — and even a one-line one earns its balloon,
+    /// because a round trip's answer is read after the fact.
+    #[test]
+    fn a_remote_operation_always_earns_one() {
+        let push = "To github.com:acetics/claudhub.git\n   9ae0f50..55e38b3  master -> master";
+        let balloon = notice(Action::Push, push, Level::Success).expect("a push says what it did");
+        assert_eq!(balloon.title, Action::Push.success_key());
+        assert!(balloon.body.contains("master -> master"));
+
+        // Even when there was nothing to bring back.
+        let quiet = notice(Action::Pull, "Already up to date.", Level::Success)
+            .expect("a pull always says where it stands");
+        assert_eq!(quiet.body, "Already up to date.");
+
+        // And a local gesture still gets none.
         assert_eq!(notice(Action::Stage, "", Level::Success), None);
     }
 

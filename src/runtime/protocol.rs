@@ -72,6 +72,16 @@ pub enum Cmd {
     LoadBranches {
         main: PathBuf,
     },
+    /// The repository's tags, read from `refs/tags`. Milliseconds: a read like
+    /// any other.
+    LoadTags {
+        main: PathBuf,
+    },
+    /// The tag names `origin` carries. **The network queue**, because that is a
+    /// round trip — and it is asked for, never done on a repaint.
+    LoadRemoteTags {
+        worktree: WorktreeId,
+    },
     /// Summarises the state of several checkouts at once, for the sidebar. A
     /// queue of its own: this sweep must never get in front of the diff just
     /// asked for.
@@ -168,6 +178,44 @@ pub enum Cmd {
         main: PathBuf,
         name: String,
         force: bool,
+    },
+    /// Creates a tag. Annotated when a message is given — that is git's own
+    /// distinction, and the message is what makes it.
+    CreateTag {
+        worktree: WorktreeId,
+        name: String,
+        message: Option<String>,
+        /// The commit to mark. `None` marks HEAD.
+        at: Option<String>,
+        /// Push it to `origin` in the same breath.
+        ///
+        /// **A flag and not a second command**, which is the one place this
+        /// module departs from "one gesture, one command": the creation is
+        /// local and the push is a round trip, so the two would go into two
+        /// different queues — and nothing orders those. The push could then
+        /// leave before the tag existed, and git would refuse a tag it had
+        /// never heard of. The flag is readable by `queue_of`, which is all it
+        /// takes for the whole thing to go into the network queue.
+        push: bool,
+    },
+    /// Removes a tag locally.
+    DeleteTag {
+        worktree: WorktreeId,
+        name: String,
+    },
+    /// Removes a tag from `origin`, leaving the local one alone. Two commands
+    /// and not a flag, because they are two gestures with two different costs:
+    /// this one is a push, and a tag other people have pulled does not come
+    /// back.
+    DeleteRemoteTag {
+        worktree: WorktreeId,
+        name: String,
+    },
+    /// Pushes one tag to `origin`, or every tag it does not have.
+    PushTag {
+        worktree: WorktreeId,
+        /// `None` pushes them all.
+        name: Option<String>,
     },
 
     /// Integrates `from` into the checkout's branch.
@@ -561,6 +609,8 @@ impl Cmd {
             Self::LoadDiffFiles { .. } => "LoadDiffFiles",
             Self::LoadFileDiff { .. } => "LoadFileDiff",
             Self::LoadBranches { .. } => "LoadBranches",
+            Self::LoadTags { .. } => "LoadTags",
+            Self::LoadRemoteTags { .. } => "LoadRemoteTags",
             Self::LoadSummaries { .. } => "LoadSummaries",
             Self::ScanAgents { .. } => "ScanAgents",
             Self::LoadHistory { .. } => "LoadHistory",
@@ -578,6 +628,10 @@ impl Cmd {
             Self::Checkout { .. } => "Checkout",
             Self::CreateBranch { .. } => "CreateBranch",
             Self::DeleteBranch { .. } => "DeleteBranch",
+            Self::CreateTag { .. } => "CreateTag",
+            Self::DeleteTag { .. } => "DeleteTag",
+            Self::DeleteRemoteTag { .. } => "DeleteRemoteTag",
+            Self::PushTag { .. } => "PushTag",
             Self::Merge { .. } => "Merge",
             Self::Integrate { .. } => "Integrate",
             Self::Rebase { .. } => "Rebase",
@@ -672,6 +726,19 @@ pub enum Evt {
         /// really exist). `None` on a repository that has none: the branch
         /// review then has nothing to compare itself against.
         default_base: Option<String>,
+    },
+    Tags {
+        main: PathBuf,
+        tags: Vec<crate::git::Tag>,
+    },
+    /// The tags `origin` has, as a `ls-remote` has just read them.
+    ///
+    /// Kept apart from `Tags`: what is local is known at every refresh, what is
+    /// on the remote only once it has been asked for — and a panel that mixed
+    /// the two would say "pushed" about a tag nobody ever pushed.
+    RemoteTags {
+        main: PathBuf,
+        names: Vec<String>,
     },
     Summaries {
         summaries: Vec<(WorktreeId, Summary)>,
@@ -952,6 +1019,11 @@ pub enum Action {
     Push,
     Checkout,
     Branch,
+    /// Creating or removing a tag, locally.
+    Tag,
+    /// Pushing a tag, or removing one from the remote: the network's cost, and
+    /// its own message.
+    PushTag,
     Worktree,
     Diff,
     History,
@@ -974,7 +1046,7 @@ pub enum Action {
 impl Action {
     /// The i18n key of the message shown on success.
     /// Every action, for the tests that check each has its messages.
-    pub const ALL: [Action; 29] = [
+    pub const ALL: [Action; 31] = [
         Action::Refresh,
         Action::Stage,
         Action::Unstage,
@@ -987,6 +1059,8 @@ impl Action {
         Action::Push,
         Action::Checkout,
         Action::Branch,
+        Action::Tag,
+        Action::PushTag,
         Action::Worktree,
         Action::Diff,
         Action::History,
@@ -1020,6 +1094,8 @@ impl Action {
             Self::Fetch => "running-fetch",
             Self::Pull => "running-pull",
             Self::Push => "running-push",
+            Self::Tag => "running-tag",
+            Self::PushTag => "running-push-tag",
             Self::Checkout => "running-checkout",
             Self::Merge => "running-merge",
             Self::Integrate => "running-integrate",
@@ -1047,6 +1123,8 @@ impl Action {
             Self::Push => "action-push-ok",
             Self::Checkout => "action-checkout-ok",
             Self::Branch => "action-branch-ok",
+            Self::Tag => "action-tag-ok",
+            Self::PushTag => "action-push-tag-ok",
             Self::Worktree => "action-worktree-ok",
             Self::Diff => "action-diff-ok",
             Self::History => "action-history-ok",

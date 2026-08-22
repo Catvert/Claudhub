@@ -143,6 +143,7 @@ impl Workspace {
                 (ChangesPanel::NAME, "range-working"),
                 (BranchPanel::NAME, "range-branch"),
                 (HistoryPanel::NAME, "panel-history"),
+                (TagsPanel::NAME, "panel-tags"),
                 (DiffPanel::NAME, "panel-diff"),
                 (TerminalPanel::NAME, "panel-terminal"),
             ],
@@ -234,6 +235,10 @@ pub fn install_default_layout(
                         .panel_view(panel!(ChangesPanel), cx)
                         .panel_view(panel!(BranchPanel), cx)
                         .panel_view(panel!(HistoryPanel), cx)
+                        // Beside the history, and that is where it belongs: a
+                        // tag names a commit, and the gesture one makes after
+                        // finding the commit worth marking is right there.
+                        .panel_view(panel!(TagsPanel), cx)
                         // Hidden while there is nothing to resolve: a permanent
                         // tab would shift the others aside to serve one time in
                         // a hundred.
