@@ -171,6 +171,8 @@ src/
                     en Markdown, rendus et relus — aucune entrée-sortie ici
     find.rs         la recherche d'un panneau, et son routage
     motion.rs       le lissage de la molette, sans rien de gpui dedans
+    vim.rs          les modes de vim de l'éditeur : motions, opérateurs,
+                    registres — sans rien de gpui dedans
     scroll.rs       la barre de défilement d'un panneau, et son lissage
     shortcuts.rs    les actions, leurs touches, et l'aide qui en sort
     shortcuts_view.rs  la fenêtre d'aide, en deux colonnes
@@ -842,6 +844,10 @@ rendu la question sans objet — voir « Les sous-applications ». Ouvrir un
 fichier **bascule sur cet écran-là** : le geste vient de l'explorateur, qui y
 vit, mais aussi d'une ligne de diff, et y répondre en silence sur l'écran d'à
 côté serait un fichier ouvert que personne ne voit.
+
+**Les modes de vim s'y appliquent**, quand le réglage est allumé : c'est le
+seul endroit de la fenêtre où il y a du texte à éditer, et ce sont des modes et
+non des liaisons — voir « Les modes de vim dans l'éditeur ».
 
 L'éditeur externe se déclare par une commande avec `{path}` et `{line}`
 (`code -g {path}:{line}`, `phpstorm --line {line} {path}`,
@@ -3390,11 +3396,14 @@ cherche dans cette liste, pas la touche.
 ### Le mode vim
 
 Désactivé par défaut, et il faut que ça le reste : ses liaisons sont des
-**lettres nues**. Ce n'est pas un mode d'édition — il n'y a rien à éditer dans
-un diff, et l'éditeur intégré appartient à gpui-component — mais la main gauche
-sur la rangée de repos pour relire : `j`/`k` d'un **bloc modifié** au suivant,
-`h`/`l` d'un fichier à l'autre, `gg`/`G`, `Ctrl+D`/`Ctrl+U`, `y` pour copier,
-`/` puis `n`/`N` pour chercher.
+**lettres nues**. Un seul réglage (`Settings::vim_mode`) allume deux mécanismes
+qui n'ont rien en commun, et les confondre est la façon la plus sûre de ne
+comprendre ni l'un ni l'autre.
+
+**Hors de l'éditeur, ce sont des liaisons**, et une liaison ne connaît pas de
+mode : la main gauche sur la rangée de repos pour relire — `j`/`k` d'un **bloc
+modifié** au suivant, `h`/`l` d'un fichier à l'autre, `gg`/`G`,
+`Ctrl+D`/`Ctrl+U`, `y` pour copier, `/` puis `n`/`N` pour chercher.
 
 `j`/`k` suivent les flèches nues et non la ligne : relire, c'est aller d'une
 modification à la suivante, et les lignes de contexte entre deux blocs n'ont
@@ -3403,6 +3412,10 @@ exactement comme `secondary-up`/`down` à côté : nu pour le geste qu'on fait
 mille fois, modifié pour celui qu'on fait quand quelque chose cloche.
 `]c`/`[c`, la convention de vim-gitgutter, restent à côté ; l'aide réunit les
 deux façons sur une ligne.
+
+**Dans l'éditeur, ce sont des modes** (`ui::vim`) : là, il y a du texte à
+éditer, et `d` veut dire deux choses selon l'endroit où l'on en est. Voir « Les
+modes de vim dans l'éditeur ».
 
 **Le réglage n'ajoute pas de liaisons, il allume un contexte.** `bind_keys`
 s'appelle une fois au démarrage ; les liaisons vim sont donc posées
@@ -3416,6 +3429,89 @@ déclaré sur le même nœud que l'identifiant avec lequel il se combine.**
 niveau de la pile de contextes, si bien que `ClaudhubExplorer && ClaudhubVim`
 ne se rencontre jamais quand l'un est sur l'arbre et l'autre sur la racine.
 D'où `explorer_context(vim)` en plus de `context(vim)`.
+
+### Les modes de vim dans l'éditeur
+
+`ui::vim` est la machine modale de l'éditeur intégré : les modes, les motions,
+les opérateurs, les registres. **Elle ne connaît aucun type de gpui** — elle
+reçoit le texte et le curseur, elle rend l'édition à appliquer —, comme
+`motion.rs` et `notes.rs` devant leurs vues, et c'est ce qui la rend testable :
+vingt-six tests décrivent ce que fait chaque touche.
+
+C'est un **sous-ensemble**, et c'en est un exprès : ce qu'une main tape sans y
+penser. `hjkl`, `w`/`b`/`e` (et leurs majuscules), `0`/`^`/`$`, `gg`/`G`,
+`f`/`F`/`t`/`T`, `Ctrl+D`/`Ctrl+U`/`Ctrl+F`/`Ctrl+B` ; `d`, `c`, `y` avec leur
+motion, doublés, avec un compte ou avec un **objet de texte** ; `x`, `X`, `s`,
+`S`, `D`, `C`, `Y`, `r`, `J`, `p`, `P`, `o`, `O`, `i`, `a`, `I`, `A` ; `v`,
+`V`, `Esc` ; `u` ; `/`, `?`, `n`, `N` ; et `:w`, `:q`, `:wq`, `:42`. Ce qui n'y
+est pas est ce qu'un éditeur fait déjà mieux (les registres nommés, les macros,
+les marques) ou ce que Claudhub a ailleurs.
+
+**Les objets de texte** — `iw`/`aw`, `i(`/`a(` et leurs frères pour `{`, `[`,
+`<`, `i"`/`a"` pour les trois guillemets — valent après un opérateur et en mode
+visuel, jamais seuls : `i` et `a` sont d'abord les deux façons d'entrer en
+insertion, et c'est le contexte qui décide. Trois choses s'y jouent :
+
+- **Un objet de mot ne traverse pas un saut de ligne.** `daw` sur le dernier
+  mot d'une ligne prendrait sinon la suivante et son indentation. `aw` prend
+  les blancs qui **suivent**, ou ceux qui précèdent quand il n'y en a pas
+  après — c'est la règle de vim, et c'est ce qui fait qu'effacer un mot au
+  milieu d'une phrase ne laisse pas deux espaces.
+- **Les paires se comptent par imbrication**, dans les deux sens : `di(` depuis
+  l'intérieur d'un appel qui en contient un autre prend le bon. Le curseur
+  posé **sur** un des deux délimiteurs désigne cette paire-là.
+- **Les guillemets d'une ligne s'apparient dans l'ordre** — le deuxième ferme
+  le premier, le quatrième le troisième. C'est la seule lecture qui n'ait
+  besoin de savoir ni ce qu'est une échappement ni ce qu'est un commentaire, et
+  c'est celle de vim ; le prix est qu'un `\"` au milieu d'une chaîne décale
+  l'appariement, ce qui se voit tout de suite et se corrige d'un `u`.
+
+Six points qui ne se devinent pas :
+
+- **L'écoute est en phase de capture, sur un ancêtre de l'éditeur**, et cette
+  place *est* le mécanisme. Un écouteur de touche s'exécute **après** les
+  liaisons — ce qui laisse `Ctrl+S` et `Alt+2` à la fenêtre — mais **avant** que
+  la plateforme ne livre le caractère au champ qui a le focus. Consommer
+  l'événement est donc ce qui empêche un `d` nu d'être tapé dans le fichier ; le
+  laisser passer est ce qui fait du mode insertion un éditeur ordinaire. Rien
+  n'est posé quand le réglage est éteint.
+- **Le caractère lu est celui que la frappe a *produit*** (`key_char`), pas la
+  touche sur laquelle on a appuyé : c'est ce qui met `$`, `^` et `0` là où il
+  faut sur un clavier AZERTY, où ils sont décalés ou dans la rangée des
+  chiffres.
+- **Le curseur bloc est une sélection d'un caractère.** L'éditeur ne dessine
+  qu'un trait ; le bloc de vim est rendu en sélectionnant le caractère sous le
+  curseur, ce qui a un second effet heureux — la position de vim se relit
+  ensuite dans `selected_range().start`, si bien qu'un clic de souris déplace
+  le curseur de vim sans qu'on ait rien à synchroniser. Le découpage se compte
+  en **caractères** : en octets, un fichier accentué se couperait au milieu
+  d'un caractère et paniquerait.
+- **`u` et `Ctrl+R` sont rendus à l'éditeur**, qui est le seul à savoir ce
+  qu'était la dernière transaction — d'où `Command::Undo`, une action que la
+  vue redispatche. `Ctrl+R` ne nous parvient d'ailleurs jamais : la fenêtre en
+  fait un rafraîchissement, et le rétablissement se fait donc par le `Ctrl+Y`
+  de l'éditeur.
+- **Le défilement est repris à la main quand la tête remonte.**
+  `set_selected_range` défile vers la **fin** de ce qu'on lui donne, ce qui est
+  le curseur en mode normal mais le mauvais bout d'une sélection étendue vers
+  le haut : `V` puis `k` sortirait du panneau sans que la vue suive.
+- **Le registre est interne, sauf réglage.** `Settings::vim_clipboard` — éteint
+  par défaut, comme vim — fait passer `y`, `d`, `x` et `p` par le presse-papiers
+  du système, ce qui est le `unnamedplus` de vim. Le module pur n'a évidemment
+  pas de presse-papiers : il **dit** ce qu'il vient d'arracher (`Change::yank`)
+  et **accepte** qu'on lui pose un registre (`set_register`), et c'est la vue
+  qui fait la navette. Deux détails s'y paient : le presse-papiers n'est lu
+  qu'au moment où un `p` arrive et non à chaque frappe — une lecture est un
+  aller-retour au serveur d'affichage —, et le drapeau « lignes entières », qui
+  n'existe pas dans un presse-papiers, se relit sur le saut de ligne final.
+- **`w` a l'exception de vim** : `dw` sur le dernier mot d'une ligne s'arrête
+  au bout de la ligne au lieu d'avaler le saut de ligne et l'indentation de la
+  suivante. C'est la seule irrégularité de la grammaire, et elle est dans
+  l'opérateur, pas dans la motion.
+
+Le mode courant et ce qui est en train d'être tapé — la ligne `/`, les touches
+d'une commande incomplète — s'affichent dans la **barre du fichier**, là où
+l'œil est déjà, et non dans la barre d'état à l'autre bout de la fenêtre.
 
 ### Ce qui tient lieu de système d'extension
 

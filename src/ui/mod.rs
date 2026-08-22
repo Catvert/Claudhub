@@ -40,6 +40,7 @@ mod theme;
 mod topbar;
 mod tree;
 mod vault;
+mod vim;
 mod workspace;
 mod worktree_ops;
 

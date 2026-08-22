@@ -256,6 +256,10 @@ pub struct Editing {
     /// Digest of the content read, which makes it possible to refuse to
     /// overwrite an agent's work.
     pub hash: u64,
+    /// The modal state, when vim keys are on. One per open file: leaving a file
+    /// in insert mode and coming back to another in normal mode is what a tabbed
+    /// vim does anyway.
+    pub vim: crate::ui::vim::Vim,
     /// What is on screen differs from what is on disk.
     pub dirty: bool,
 }
@@ -611,6 +615,7 @@ impl ClaudhubApp {
             input,
             hash: content.hash,
             dirty: false,
+            vim: crate::ui::vim::Vim::default(),
         });
         // A file that opens calls up the screen it is edited on. The gesture
         // comes from the explorer — so from that screen most of the time — but
@@ -741,6 +746,152 @@ impl ClaudhubApp {
             explorer.state = Listing::Idle;
         }
         cx.notify();
+    }
+
+    // — The vim keys ————————————————————————————————————————————
+
+    /// One keystroke, when vim keys are on and the built-in editor has the
+    /// focus.
+    ///
+    /// It is listened for in the **capture** phase, on an ancestor of the
+    /// editor, and that placement is the whole mechanism. A key listener runs
+    /// *after* the bindings have had their turn — which is what leaves `Ctrl+S`
+    /// and `Alt+2` to the window — but *before* the platform hands the character
+    /// to the focused input handler. Consuming the event is therefore what keeps
+    /// a bare `d` from being typed into the file; letting it through is what
+    /// makes insert mode an ordinary editor again.
+    fn vim_key(&mut self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::ui::vim::{Command, Response};
+
+        if !Settings::global(cx).vim_mode || self.editing.is_none() {
+            return;
+        }
+        let keystroke = &event.keystroke;
+        let modifiers = keystroke.modifiers;
+        // Alt belongs to the window — it is how one changes screen — and a
+        // function key has nothing vim wants.
+        if modifiers.alt || modifiers.function {
+            return;
+        }
+        let ctrl = modifiers.control || modifiers.platform;
+        // The character the keystroke **produced**, and not the key it was
+        // pressed on: that is what puts `$`, `^` and `0` where they belong on an
+        // AZERTY keyboard, where they are shifted or in the digit row.
+        let ch = keystroke
+            .key_char
+            .as_deref()
+            .filter(|_| !ctrl)
+            .and_then(|typed| {
+                let mut chars = typed.chars();
+                let ch = chars.next()?;
+                (chars.next().is_none() && !ch.is_control()).then_some(ch)
+            });
+        let key = crate::ui::vim::Key {
+            ch,
+            name: keystroke.key.clone(),
+            ctrl,
+        };
+
+        let Some(input) = self.editing.as_ref().map(|editing| editing.input.clone()) else {
+            return;
+        };
+        let (text, cursor, rows) = {
+            let state = input.read(cx);
+            let rows = state
+                .visible_row_range()
+                .map(|rows| rows.len())
+                .unwrap_or(DEFAULT_ROWS)
+                .max(2);
+            (
+                state.value().to_string(),
+                state.selected_range().start,
+                rows,
+            )
+        };
+        // The clipboard is read **when a paste is about to happen**, and not at
+        // every keystroke: a read is a round trip to the display server, and
+        // pasting is the only gesture that consumes a register.
+        let clipboard = Settings::global(cx).vim_clipboard;
+        let pasting = clipboard && matches!(key.ch, Some('p') | Some('P'));
+        let pasted = pasting
+            .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
+            .flatten();
+        let Some(editing) = self.editing.as_mut() else {
+            return;
+        };
+        if let Some(text) = pasted {
+            editing.vim.set_register(text);
+        }
+        let response = editing.vim.press(&key, &text, cursor, rows);
+        if matches!(response, Response::Ignored) {
+            return;
+        }
+        // Everything else is ours: the key must not reach the file.
+        cx.stop_propagation();
+        match response {
+            Response::Ignored | Response::Consumed => {}
+            Response::Apply(change) => {
+                if let Some(yank) = change.yank.filter(|_| clipboard) {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(yank.text));
+                }
+                input.update(cx, |state, cx| {
+                    if let Some(edit) = change.edit {
+                        state.set_selected_range(edit.range, cx);
+                        state.replace(edit.text, window, cx);
+                    }
+                    state.set_selected_range(change.selection, cx);
+                });
+                self.reveal_vim_head(&input, change.head, cx);
+            }
+            Response::Command(command) => match command {
+                // Undo and redo belong to the editor, which is the only one that
+                // knows what the last transaction was.
+                Command::Undo => window.dispatch_action(Box::new(gpui_component::input::Undo), cx),
+                Command::Redo => window.dispatch_action(Box::new(gpui_component::input::Redo), cx),
+                Command::Save => self.save_file(cx),
+                Command::Close => self.close_editor(window, cx),
+                Command::SaveAndClose => {
+                    self.save_file(cx);
+                    self.close_editor(window, cx);
+                }
+            },
+        }
+        cx.notify();
+    }
+
+    /// Scrolls the caret back into view when the editor will not do it itself.
+    ///
+    /// `set_selected_range` scrolls to the **end** of what it is given, which is
+    /// where the caret is in normal mode but the wrong end of a selection grown
+    /// upwards: `V` then `k` would walk off the top of the panel without the
+    /// view ever following.
+    fn reveal_vim_head(
+        &mut self,
+        input: &Entity<EditorState>,
+        head: usize,
+        cx: &mut Context<Self>,
+    ) {
+        input.update(cx, |state, cx| {
+            let (Some(rows), Some(line_height)) = (state.visible_row_range(), state.line_height())
+            else {
+                return;
+            };
+            let row = state.value()[..head.min(state.value().len())]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count();
+            if rows.contains(&row) {
+                return;
+            }
+            let first = if row < rows.start {
+                row
+            } else {
+                row.saturating_sub(rows.len().saturating_sub(1))
+            };
+            // The input's scroll handle counts downwards as negative.
+            let offset = state.scroll_offset();
+            state.set_scroll_offset(gpui::point(offset.x, -(line_height * first as f32)), cx);
+        });
     }
 
     // — The panel  ——————————————————————————————————————————————
@@ -1099,6 +1250,15 @@ impl ClaudhubApp {
     ) -> Option<impl IntoElement> {
         let editing = self.editing.as_ref()?;
         let (path, dirty, input) = (editing.path.clone(), editing.dirty, editing.input.clone());
+        let vim = Settings::global(cx).vim_mode;
+        let mode = editing.vim.mode();
+        // The `/` line being typed, or the keys of a command not complete yet:
+        // vim shows both, and they are the only thing that says why the next key
+        // will not do what it usually does.
+        let hint = editing
+            .vim
+            .prompt()
+            .unwrap_or_else(|| editing.vim.pending().to_string());
         // The smoothing advances by one frame, as the diff's does. The offset
         // is written back through `InputState`, which is the only way in: the
         // editor has no `ScrollHandle` of its own to hand out.
@@ -1138,6 +1298,10 @@ impl ClaudhubApp {
                                 .font_family(mono.clone())
                                 .child(label),
                         )
+                        // The mode, where the eye already is: on the file's
+                        // own bar, and not in the window's status bar at the
+                        // other end of the screen.
+                        .when(vim, |el| el.child(self.render_vim_mode(mode, &hint, cx)))
                         // A badge and not an asterisk in the title: the title is
                         // already a truncated path, and one more character at the
                         // end goes unseen.
@@ -1181,6 +1345,15 @@ impl ClaudhubApp {
                         .relative()
                         .flex_1()
                         .min_h_0()
+                        // The capture phase, on an ancestor of the editor: see
+                        // `vim_key`. Installed only when the mode is on, so that
+                        // nothing stands between the keyboard and the input
+                        // otherwise.
+                        .when(vim, |el| {
+                            el.capture_key_down(cx.listener(|this, event, window, cx| {
+                                this.vim_key(event, window, cx)
+                            }))
+                        })
                         .child(
                             Editor::new(&input)
                                 .font_family(mono)
@@ -1231,6 +1404,42 @@ impl ClaudhubApp {
                         ),
                 ),
         )
+    }
+
+    /// The mode pill, and what is being typed towards a command.
+    fn render_vim_mode(
+        &self,
+        mode: crate::ui::vim::Mode,
+        hint: &str,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let colour = match mode {
+            crate::ui::vim::Mode::Insert => cx.theme().success,
+            crate::ui::vim::Mode::Normal => cx.theme().muted_foreground,
+            _ => cx.theme().warning,
+        };
+        h_flex()
+            .gap_1()
+            .items_center()
+            .child(
+                div()
+                    .px_1p5()
+                    .rounded(cx.theme().radius)
+                    .text_xs()
+                    .border_1()
+                    .border_color(colour)
+                    .text_color(colour)
+                    .child(tr!(mode.key())),
+            )
+            .when(!hint.is_empty(), |el| {
+                el.child(
+                    div()
+                        .text_xs()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .text_color(cx.theme().muted_foreground)
+                        .child(SharedString::from(hint.to_string())),
+                )
+            })
     }
 }
 
@@ -1324,6 +1533,10 @@ fn editor_extent(
     };
     (offset, gpui::point(px(0.), travel))
 }
+
+/// How many lines `Ctrl+D` moves by half of, before the editor has been laid out
+/// once and can say how tall it is.
+const DEFAULT_ROWS: usize = 20;
 
 /// What does not depend on the row: colours and geometry.
 ///

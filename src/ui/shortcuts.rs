@@ -637,10 +637,12 @@ table!(STANDARD, standard_bindings, false, [
 ]);
 
 table!(VIM, vim_bindings, true, [
-    // No modes and no operators: Claudhub is not an editor, and its built-in
-    // editor belongs to gpui-component. What is taken over is the left hand on
-    // the home row to browse a diff — what a reviewer does a thousand times per
-    // review.
+    // No modes and no operators **here**: these are bindings, and a binding
+    // knows nothing of the mode one is in. What is taken over is the left hand
+    // on the home row to browse a diff — what a reviewer does a thousand times
+    // per review. The built-in editor's modes are another mechanism entirely,
+    // and live in `ui::vim`: a key listener rather than a table, since a bare
+    // `d` there means one thing in normal mode and another in insert mode.
     // `j` and `k` go from one **hunk** to the next, like the bare arrows and for
     // the same reason: reading a review is going from one change to the next,
     // and the context lines in between have nothing to show. The platform key
