@@ -633,6 +633,17 @@ Deux endroits où cette simplification pourrait mentir, et ce qui l'en empêche 
 - **Les fichiers non suivis**, dont cocher ne veut pas dire la même chose que
   pour un fichier déjà suivi : ils forment leur propre groupe.
 
+**Un bouton d'une ligne consomme son clic.** La ligne entière est cliquable —
+elle ouvre le fichier et **reprend le focus**, pour que les flèches reviennent à
+la revue — et la case à cocher, la coche de relecture et la corbeille sont ses
+enfants. Sans `stop_propagation`, cocher ouvrait aussi le fichier, et surtout la
+corbeille était inutilisable : le dialogue de confirmation s'ouvrait, prenait le
+focus, puis le clic finissait de remonter et la ligne le lui reprenait — Échap
+et les deux boutons du pied de page envoient tous une action, et une action se
+distribue sur le nœud qui a le focus. Le dialogue restait ouvert et sourd. C'est
+la même règle que celle des lignes de menu, et le même piège : ce qui casse
+n'est pas le geste qu'on vient de faire mais celui d'après.
+
 La liste est une **arborescence de dossiers**, repliable, comme celle de
 PhpStorm — un bouton bascule vers la liste plate, et le choix est persistant.
 Trois points la font tenir :
