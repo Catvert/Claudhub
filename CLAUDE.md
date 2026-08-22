@@ -2011,7 +2011,7 @@ liste n'est pas virtualisée, un `mx_1` sur la ligne suffit.
 du dock, `Tab`, a un rayon **codé en dur à zéro** et rien dans le thème ne
 l'atteint ; `Tab::with_variant` et `TabBar::with_variant` existent pourtant,
 c'est seulement le panneau d'onglets du dock qui ne les transmettait pas. D'où
-le **fork** (voir `Cargo.toml`) : six commits au-dessus de leur `main` — le
+le **fork** (voir `Cargo.toml`) : sept commits au-dessus de leur `main` — le
 `TabVariant` que `DockSkin` fait passer jusqu'au `TabBar` ; les coins en boîte
 bordée du bandeau réservés au variant classique, dont ils épousent les
 rectangles ; le groupe lu comme une carte hors variant classique — cadre
@@ -2030,6 +2030,11 @@ par-dessus un texte qui n'avait plus l'air sélectionné — sur le seul geste p
 lequel la sélection est justement conservée, comme le dit leur propre `on_blur`.
 Elle est désormais peinte dans le ton atténué déjà calculé pour les occurrences
 de recherche, la sélection inactive que dessine tout éditeur.
+
+Un septième, qui n'en parle pas non plus : **un contrôle peut cacher son caret
+sans se désactiver** (`set_cursor_hidden`). C'est ce que demande un éditeur
+modal, dont le curseur bloc est une sélection d'un caractère — voir « Les modes
+de vim dans l'éditeur ».
 
 Les commits ont vocation à partir en PR, et le fork à disparaître avec elle.
 
@@ -3549,6 +3554,18 @@ Six points qui ne se devinent pas :
   le curseur de vim sans qu'on ait rien à synchroniser. Le découpage se compte
   en **caractères** : en octets, un fichier accentué se couperait au milieu
   d'un caractère et paniquerait.
+- **Le caret s'éteint hors du mode insertion**, et c'est le septième commit du
+  fork (`InputState::set_cursor_hidden`). Rien de public ne le faisait : le
+  style de l'éditeur — qui porte la couleur du caret — est reconstruit depuis
+  le thème à **chaque** rendu, si bien qu'un caret transparent posé par nous ne
+  survivrait pas à la frame suivante, et `disabled`, qui le cache, grise le
+  texte et le fond avec. Le clignotement est arrêté avec lui plutôt que laissé
+  à tourner derrière un caret que personne ne peint : un clignotement est un
+  rendu de la fenêtre deux fois par seconde tant que le champ a le focus —
+  c'est le raisonnement du curseur du terminal. La consigne est **relue à
+  chaque rendu**, comme `TerminalView::sync_font` : le mode change sous les
+  touches et le réglage sous le formulaire, l'appel est idempotent, et c'est ce
+  qui rend le caret dès qu'on éteint le mode.
 - **`u` et `Ctrl+R` sont rendus à l'éditeur**, qui est le seul à savoir ce
   qu'était la dernière transaction — d'où `Command::Undo`, une action que la
   vue redispatche. `Ctrl+R` ne nous parvient d'ailleurs jamais : la fenêtre en

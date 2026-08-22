@@ -1280,6 +1280,16 @@ impl ClaudhubApp {
         {
             input.update(cx, |state, cx| state.set_scroll_offset(next, cx));
         }
+        // **The caret goes away outside insert mode.** The block cursor is a
+        // selection of one character, and the editor's own caret would blink on
+        // top of it: two cursors on one character say less than one. Reread at
+        // every frame and not set once, like `TerminalView::sync_font`, because
+        // the mode changes under the keys and the setting under the form; the
+        // call is idempotent, and it is what makes turning vim mode off give the
+        // caret back without anything else to do.
+        input.update(cx, |state, cx| {
+            state.set_cursor_hidden(vim && mode != crate::ui::vim::Mode::Insert, cx);
+        });
         let entity = cx.entity();
         let mono = cx.theme().mono_font_family.clone();
         // The editor is code, like the diff on the screen next door: same
