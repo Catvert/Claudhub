@@ -133,9 +133,47 @@ pub fn enabled(id: &str, cx: &gpui::App) -> bool {
         .unwrap_or(true)
 }
 
+/// What the user still has to say before this plugin can work.
+///
+/// The manifest's defaults laid over by the settings, secrets included: from
+/// here a setting and a secret are the same thing, something one has to say.
+pub fn missing(manifest: &'static Manifest, cx: &gpui::App) -> Vec<&'static str> {
+    let configured = crate::ui::settings::Settings::global(cx)
+        .plugins
+        .get(&manifest.id)
+        .cloned()
+        .unwrap_or_default();
+    manifest.missing(&|name| {
+        configured
+            .settings
+            .get(name)
+            .or_else(|| configured.secrets.get(name))
+            .cloned()
+            .or_else(|| manifest.declaration.settings.get(name).cloned())
+    })
+}
+
+/// Switched on **and** told what it needs.
+///
+/// A plugin missing a required field has no panel and does not run: landing on
+/// an empty view and having to work out that the fault is a blank in another
+/// page is the worst way to learn it.
+pub fn usable(manifest: &'static Manifest, cx: &gpui::App) -> bool {
+    enabled(&manifest.id, cx) && missing(manifest, cx).is_empty()
+}
+
 /// The same, from the panel's name — which is what the dock knows it by.
 pub fn panel_enabled(panel: &str, cx: &gpui::App) -> bool {
-    by_panel(panel).is_none_or(|manifest| enabled(&manifest.id, cx))
+    by_panel(panel).is_none_or(|manifest| usable(manifest, cx))
+}
+
+/// Does this screen have anything at all to show.
+///
+/// A screen carrying panels of its own always does. One that carries **only**
+/// plugins — Sentry's, since Sentry became one — has something to show only
+/// while one of them is usable; otherwise the bar points at an empty room.
+pub fn screen_has_content(workspace: crate::ui::workspace::Workspace, cx: &gpui::App) -> bool {
+    workspace.carries_own_panels() || on_screen(workspace.key()).any(|m| usable(m, cx))
 }
 
 /// The script of a plugin, as a root and a path.
@@ -274,6 +312,7 @@ impl ClaudhubApp {
             Ok(what) => {
                 discover();
                 self.rebuild_plugins(cx);
+                self.leave_empty_workspace(window, cx);
                 self.announce(SharedString::from(format!("{op}: {what}")), cx);
             }
             Err(message) => self.plugin_failed(message, window, cx),
@@ -400,6 +439,23 @@ impl ClaudhubApp {
             .ok();
         })
         .detach();
+    }
+
+    /// Leaves a screen that has nothing left to show.
+    ///
+    /// Three moments make one: opening a window whose `layout.json` remembers a
+    /// screen whose plugin is no longer configured, switching that plugin off,
+    /// and uninstalling it. Staying would leave the bar pointing at a room with
+    /// nothing in it, and no button lit.
+    pub(super) fn leave_empty_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::ui::workspace::Workspace;
+        if self.workspace == Workspace::Settings
+            || crate::ui::plugin_view::screen_has_content(self.workspace, cx)
+        {
+            return;
+        }
+        let elsewhere = Workspace::working(cx).first().copied().unwrap_or_default();
+        self.enter_workspace(elsewhere, window, cx);
     }
 
     /// Asks before removing a plugin.
@@ -553,7 +609,7 @@ impl ClaudhubApp {
         if self.plugins[index].busy
             || self.plugins[index].started()
             || self.plugins[index].error.is_some()
-            || !enabled(&self.plugins[index].manifest.id, cx)
+            || !usable_id(&self.plugins[index].manifest.id, cx)
         {
             return;
         }
@@ -1241,6 +1297,14 @@ fn empty_panel(message: SharedString, cx: &Context<ClaudhubApp>) -> impl IntoEle
         .text_color(cx.theme().muted_foreground)
         .child(icon("puzzle"))
         .child(div().text_sm().px_4().child(message))
+}
+
+/// [`usable`], from an id — what a loaded plugin knows itself by.
+fn usable_id(id: &str, cx: &gpui::App) -> bool {
+    manifests()
+        .iter()
+        .find(|m| m.id == id)
+        .is_some_and(|m| usable(m, cx))
 }
 
 /// A plugin field's input, owned by the window under its key.

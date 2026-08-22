@@ -12,31 +12,50 @@ const ISSUES_PER_PAGE = 25;
 pub async fn init(worktree) {
     let project = state("project");
     if project == "" {
-        return Ok(#{ issues: [], chosen: -1, event: (), note: "no-project", typed: "" });
+        return Ok(fresh([], "no-project", "", ""));
     }
-    let body = api(`/projects/${setting("org")}/${project}/issues/?query=${escape(setting("query"))}&statsPeriod=14d&limit=${ISSUES_PER_PAGE}`).await?;
+    let path = `/projects/${setting("org")}/${project}/issues/?query=${escape(setting("query"))}&statsPeriod=14d&limit=${ISSUES_PER_PAGE}`;
+    // **L'échec est rattrapé et non propagé.** Un `?` ici rendrait `init`
+    // fautif, donc l'état absent, donc `view` jamais appelée — et le sélecteur
+    // s'en irait avec elle. Un projet mal tapé donne un 404, et il faut
+    // précisément pouvoir le corriger depuis l'écran qui le dit.
+    let body = match api(path).await {
+        Ok(body) => body,
+        Err(why) => return Ok(fresh([], "failed", project, why)),
+    };
     let issues = [];
     for raw in json(body)? {
         issues.push(issue_of(raw));
     }
-    Ok(#{
-        issues: issues,
-        chosen: -1,
-        event: (),
-        note: if issues.is_empty() { "empty" } else { "" },
-        typed: project,
-    })
+    Ok(fresh(
+        issues,
+        if issues.is_empty() { "empty" } else { "" },
+        project,
+        "",
+    ))
+}
+
+fn fresh(issues, note, typed, why) {
+    #{ issues: issues, chosen: -1, event: (), note: note, typed: typed, why: why }
 }
 
 pub fn view(s) {
+    // **Le sélecteur est toujours là**, et pas seulement quand rien ne marche.
+    // C'est le seul réglage de ce plugin qui appartient au dépôt, on le corrige
+    // aussi souvent qu'on le pose, et une commande qu'il faut faire échouer
+    // pour retrouver n'est pas une commande.
     if s.note == "no-project" {
+        return column([picker(s), empty("Quel projet Sentry, pour ce dépôt ?")]);
+    }
+    if s.note == "failed" {
         return column([
-            empty("Quel projet Sentry, pour ce dépôt ?"),
             picker(s),
+            empty("Sentry n'a pas répondu pour ce projet."),
+            code(s.why, ""),
         ]);
     }
     if s.note == "empty" {
-        return column([empty("Aucune erreur non résolue."), picker(s)]);
+        return column([picker(s), empty("Aucune erreur non résolue.")]);
     }
 
     let rows = [];
@@ -45,7 +64,7 @@ pub fn view(s) {
     }
 
     let body = [
-        row([title(`${setting("org")}/${state("project")}`)]),
+        picker(s),
         list("issues", rows, s.chosen, "choose"),
     ];
 
@@ -110,6 +129,7 @@ pub async fn update(s, action, payload) {
 /// globales d'un plugin, et un projet Sentry change d'un dépôt à l'autre.
 fn picker(s) {
     row([
+        dim(setting("org")),
         field("project", s.typed, "nom du projet Sentry", "typing"),
         primary(button("Enregistrer", "check", "set-project", "")),
     ])

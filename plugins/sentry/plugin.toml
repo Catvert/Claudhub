@@ -15,6 +15,12 @@ icon = "triangle-alert"
 
 capabilities = ["http"]
 
+# Sans ces deux-là, il n'y a rien à montrer : le panneau n'apparaît pas, ni
+# l'écran qui ne portait que lui, et la page des réglages dit ce qui manque. Le
+# projet, lui, n'est pas ici — il appartient au dépôt et se choisit dans le
+# panneau.
+required = ["org", "token"]
+
 # Le jeton est nommé par le script et **jamais lu par lui** : c'est le worker
 # qui le substitue, dans un en-tête qui porte `{secret}`. Trois formes, dans la
 # page « Plugins » : le jeton lui-même ; `$SENTRY_TOKEN`, lu dans

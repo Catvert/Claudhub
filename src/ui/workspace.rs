@@ -23,7 +23,7 @@
 //! "Diff" to "Editor" to "SQL" depending on what you had just done was saying
 //! plainly that it carried three things.
 
-use gpui::{prelude::*, px, Context, Entity, Window};
+use gpui::{prelude::*, px, App, Context, Entity, Window};
 use gpui_component::{
     button::{Button, ButtonGroup, ButtonVariants as _},
     dock::{DockArea, DockLayout, DockPlacement},
@@ -97,11 +97,28 @@ impl Workspace {
     /// to change how the rest behaves. They have their own gear, at the far
     /// right of the title bar, where an application's settings are — see
     /// `topbar::render_topbar`.
-    pub fn working() -> Vec<Workspace> {
+    /// The screens the bar offers, in order.
+    ///
+    /// The settings are not among them — one does not go there to work — and
+    /// neither is a screen with **nothing to show**: since Sentry became a
+    /// plugin, its screen carries no panel of ours, and a button opening an
+    /// empty room is worse than no button. See `plugin_view::screen_has_content`.
+    pub fn working(cx: &App) -> Vec<Workspace> {
         Self::ALL
             .into_iter()
             .filter(|w| *w != Workspace::Settings)
+            .filter(|w| crate::ui::plugin_view::screen_has_content(*w, cx))
             .collect()
+    }
+
+    /// Does this screen hold panels of its own, or only whatever plugins land
+    /// on it.
+    ///
+    /// Only Sentry's does not, and that is not an accident of naming: it is
+    /// where the plugins that watch what happens **outside** the repository go,
+    /// and everything it used to carry itself is now one of them.
+    pub fn carries_own_panels(self) -> bool {
+        !matches!(self, Self::Sentry)
     }
 
     /// The name this screen's layout is saved under.
@@ -393,7 +410,7 @@ impl ClaudhubApp {
     /// it.
     pub(super) fn render_workspace_nav(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.workspace;
-        let shown = Workspace::working();
+        let shown = Workspace::working(cx);
         ButtonGroup::new("workspace-nav")
             .compact()
             .children(shown.iter().map(|workspace| {

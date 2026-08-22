@@ -228,6 +228,7 @@
   "settings-plugins-help": "A plugin is a folder of scripts, reloaded as soon as one is saved. Its panel, on the other hand, only appears on the next start: a view has to be known to the dock before it reads its layout back.",
   "settings-plugins-none": "No plugin installed.",
   "settings-plugin-enabled": "Enabled",
+  "settings-plugin-missing": "Off: %{names} still missing.",
   "settings-plugin-edit": "Edit the script",
   "settings-plugin-update": "Update (git pull)",
   "settings-plugin-remove": "Uninstall",

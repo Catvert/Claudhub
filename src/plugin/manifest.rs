@@ -71,6 +71,19 @@ pub struct Declaration {
     /// the settings file, never here: a manifest is a file one copies around.
     #[serde(default)]
     pub secrets: Vec<String>,
+    /// The settings and secrets without which the plugin cannot work.
+    ///
+    /// Declared and not guessed, for the same reason the capabilities are: only
+    /// the author knows that a Sentry plugin without an organisation and a
+    /// token has nothing to show. A plugin missing one of these is **not
+    /// switched on** — its panel is not there, and neither is the screen that
+    /// carried only it. Otherwise one lands on an empty view and has to work
+    /// out that the fault is a field left blank in another page.
+    ///
+    /// Names, matched against both settings and secrets: from here they are the
+    /// same thing, something the user has to say.
+    #[serde(default)]
+    pub required: Vec<String>,
 }
 
 fn default_screen() -> String {
@@ -111,6 +124,24 @@ impl Manifest {
 
     pub fn allows(&self, capability: Capability) -> bool {
         self.declaration.capabilities.contains(&capability)
+    }
+
+    /// What the user still has to say before this plugin can work.
+    ///
+    /// `have` is what is actually set — the manifest's defaults laid over by
+    /// the settings, secrets included — and a value that is only whitespace
+    /// counts as unsaid, a field one has cleared being a field one has emptied.
+    pub fn missing<'a>(&'a self, have: &dyn Fn(&str) -> Option<String>) -> Vec<&'a str> {
+        self.declaration
+            .required
+            .iter()
+            .filter(|name| {
+                have(name)
+                    .map(|value| value.trim().is_empty())
+                    .unwrap_or(true)
+            })
+            .map(String::as_str)
+            .collect()
     }
 }
 
@@ -194,6 +225,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         dir
+    }
+
+    /// A plugin says what it cannot work without, and a blank counts as unsaid.
+    #[test]
+    fn a_plugin_says_what_it_still_needs() {
+        let root = scratch("required");
+        write(
+            &root,
+            "sentry",
+            "title = \"Sentry\"\ncapabilities = [\"http\"]\nsecrets = [\"token\"]\nrequired = [\"org\", \"token\"]\n[settings]\norg = \"\"\n",
+            Some("pub fn view(s){}"),
+        );
+        let found = discover(&root);
+        let manifest = &found[0];
+
+        // Nothing said yet: both are missing, in the order the manifest lists
+        // them — what one reads is a checklist, not a set.
+        assert_eq!(manifest.missing(&|_| None), vec!["org", "token"]);
+        // A field cleared is a field emptied.
+        assert_eq!(
+            manifest.missing(&|name| Some(if name == "org" {
+                "  ".into()
+            } else {
+                "t".into()
+            })),
+            vec!["org"]
+        );
+        assert!(manifest
+            .missing(&|name| Some(format!("{name}-value")))
+            .is_empty());
+    }
+
+    /// A manifest that requires nothing is configured from the start: that is
+    /// the CI plugin's case, and most plugins'.
+    #[test]
+    fn a_plugin_that_asks_for_nothing_is_ready() {
+        let root = scratch("nothing-required");
+        write(&root, "ci", "title = \"CI\"\n", Some("pub fn view(s){}"));
+        assert!(discover(&root)[0].missing(&|_| None).is_empty());
     }
 
     #[test]

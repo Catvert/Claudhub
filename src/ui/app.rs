@@ -946,6 +946,9 @@ impl ClaudhubApp {
         app.watch_vault_inputs(window, cx);
         app.watch_query_input(cx);
 
+        // A layout remembering a screen whose plugin is no longer configured
+        // would open on a room with nothing in it.
+        app.leave_empty_workspace(window, cx);
         app.restore_console(window, cx);
         app.open_remembered_repositories(remote, cx);
         // Starting the server waits for the window to be mounted: a dialog needs

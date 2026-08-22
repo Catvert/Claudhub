@@ -4078,6 +4078,15 @@ clés globales d'un manifeste. Taper ne va rien chercher — une requête par le
 interrogerait Sentry à chaque caractère du nom —, c'est « Enregistrer » qui
 écrit contre le dépôt et repart chercher.
 
+**Et le sélecteur est toujours là**, pas seulement quand rien ne marche. Un
+projet mal tapé donne un 404, et c'est justement l'écran qui le dit qui doit
+permettre de le corriger. D'où la règle générale que ce plugin a apprise à ses
+dépens : **un `init` qui échoue supprime la vue entière**, donc tout ce qui
+aurait permis de s'en sortir. Un script rattrape ce qu'il sait montrer et le
+range dans son état ; il ne rend une erreur que pour ce dont il n'a rien à dire.
+Le champ revient d'ailleurs amorcé avec ce qui a été essayé, la faute de frappe
+étant alors devant le curseur au lieu d'être à retaper.
+
 **Les réglages d'avant se reprennent tout seuls**, par le même chemin qu'une
 installation neuve, comme `migrate_agents` : `sentry_org`, `sentry_token` et
 `sentry_query` sont versés dans `plugins["sentry"]`, le projet de chaque dépôt
@@ -4581,6 +4590,20 @@ Huit points qui ne se devinent pas :
   fuité — `BasePanel::panel_name` en veut un, l'identifiant d'un plugin n'est
   connu qu'à l'exécution, et la fuite est bornée par le nombre d'installations
   d'une session.
+- **Un plugin dit ce dont il ne peut pas se passer** (`required` du manifeste),
+  et tant que ces champs sont vides il n'est **pas allumé** : pas de panneau, et
+  pas non plus l'écran qui ne portait que lui. Atterrir sur une vue vide et
+  devoir en déduire que la faute est un champ laissé blanc dans une autre page
+  est la pire façon de l'apprendre — la page des réglages nomme ce qui manque,
+  et l'interrupteur ne bouge pas tant qu'il manque quelque chose. Un réglage et
+  un secret sont la même chose ici : quelque chose que l'utilisateur doit dire.
+- **Un écran qui ne porte que des plugins disparaît de la barre** quand aucun
+  n'est utilisable (`Workspace::carries_own_panels`, `screen_has_content`).
+  C'est le cas de celui de Sentry depuis que Sentry en est un, et cela remplace
+  la verrue qu'on assumait — un bouton qui ouvre une pièce vide est pire que
+  pas de bouton. Trois moments demandent de quitter un écran devenu vide
+  (`leave_empty_workspace`) : l'ouverture d'une fenêtre dont le `layout.json`
+  se souvient de cet écran-là, l'extinction du plugin, sa désinstallation.
 - **Les capacités sont déclarées et non devinées.** Un plugin qui atteint autre
   chose que ce que son `plugin.toml` liste se le voit refuser avant que rien ne
   parte : c'est un plugin qui fait ce que son auteur n'a pas écrit.

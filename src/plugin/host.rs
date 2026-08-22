@@ -1009,6 +1009,7 @@ mod tests_support {
             capabilities,
             settings: BTreeMap::from([("base".to_string(), "https://api.test".to_string())]),
             secrets: Vec::new(),
+            required: Vec::new(),
         }
     }
 
@@ -1649,11 +1650,14 @@ mod sentry_plugin {
         let Node::Column(children) = &tree else {
             panic!("expected a column, got {tree:?}");
         };
-        let Some(Node::Row(picker)) = children.get(1) else {
+        // Le sélecteur mène, et il est là quoi qu'il arrive : c'est le seul
+        // réglage de ce plugin qui appartient au dépôt, et on le corrige aussi
+        // souvent qu'on le pose.
+        let Some(Node::Row(picker)) = children.first() else {
             panic!("expected the picker, got {children:?}");
         };
         assert!(
-            matches!(picker.first(), Some(Node::Field { id, .. }) if id == "project"),
+            matches!(picker.get(1), Some(Node::Field { id, .. }) if id == "project"),
             "{picker:?}"
         );
 
@@ -1710,8 +1714,49 @@ mod sentry_plugin {
         let Node::Column(children) = &tree else {
             panic!("expected a column, got {tree:?}");
         };
+        // The picker leads, and the sentence explaining why follows it.
         assert!(
-            matches!(children.first(), Some(Node::Empty { .. })),
+            matches!(children.first(), Some(Node::Row(_))),
+            "{children:?}"
+        );
+        assert!(
+            matches!(children.get(1), Some(Node::Empty { .. })),
+            "{children:?}"
+        );
+    }
+
+    /// **A project typed wrong must be correctable from the screen that says
+    /// so.** Letting `init` fail would make the state absent, so `view` would
+    /// never be called, so the picker would go with it — and a 404 would be a
+    /// panel one cannot leave.
+    #[test]
+    fn a_project_that_does_not_exist_can_still_be_corrected() {
+        let probe = probe_sentry();
+        let state = answer_with(
+            &probe,
+            |_| Err("https://sentry.io/… answered 404 Not Found".into()),
+            probe.host.init(None),
+        )
+        .expect("a 404 is an answer, not a reason to have no view");
+
+        let tree = probe.host.view(&state).expect("view renders");
+        let Node::Column(children) = &tree else {
+            panic!("expected a column, got {tree:?}");
+        };
+        // The picker is there, seeded with what was tried, so the typo is in
+        // front of the cursor rather than to be typed again.
+        let Some(Node::Row(picker)) = children.first() else {
+            panic!("expected the picker, got {children:?}");
+        };
+        assert!(
+            matches!(picker.get(1), Some(Node::Field { value, .. }) if value == "site"),
+            "{picker:?}"
+        );
+        // And what Sentry said is shown, not swallowed.
+        assert!(
+            children
+                .iter()
+                .any(|node| matches!(node, Node::Code { text, .. } if text.contains("404"))),
             "{children:?}"
         );
     }

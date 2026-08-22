@@ -228,6 +228,7 @@
   "settings-plugins-help": "Un plugin est un dossier de scripts, rechargé dès qu'on l'enregistre. Son panneau, lui, n'apparaît qu'au prochain démarrage : une vue doit être connue du dock avant qu'il ne relise sa disposition.",
   "settings-plugins-none": "Aucun plugin installé.",
   "settings-plugin-enabled": "Activé",
+  "settings-plugin-missing": "Inactif : il manque %{names}.",
   "settings-plugin-edit": "Éditer le script",
   "settings-plugin-update": "Mettre à jour (git pull)",
   "settings-plugin-remove": "Désinstaller",

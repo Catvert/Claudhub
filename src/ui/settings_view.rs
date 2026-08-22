@@ -2230,7 +2230,7 @@ fn plugin_install_row(count: usize, window: &mut Window, cx: &mut App) -> impl I
 
 fn plugin_row(
     count: usize,
-    manifest: &crate::plugin::manifest::Manifest,
+    manifest: &'static crate::plugin::manifest::Manifest,
     window: &mut Window,
     cx: &mut App,
 ) -> impl IntoElement {
@@ -2254,6 +2254,10 @@ fn plugin_row(
         })
         .collect();
     let enabled = configured.as_ref().map(|p| p.enabled).unwrap_or(true);
+    // What is still unsaid. A plugin missing one of these does not run and has
+    // no panel: the page has to say which, or it is a switch that refuses to
+    // move for a reason nobody can see.
+    let missing = crate::ui::plugin_view::missing(manifest, cx);
     let state = window.use_keyed_state(SharedString::from(key), cx, {
         let id = id.clone();
         move |window, cx| {
@@ -2354,15 +2358,21 @@ fn plugin_row(
                                 button.outline()
                             }
                         })
-                        .selected(enabled)
+                        .selected(enabled && missing.is_empty())
+                        .disabled(!missing.is_empty())
                         .label(tr!("settings-plugin-enabled"))
                         .on_click({
                             let id = id.clone();
-                            move |_, _window, cx| {
-                                let id = id.clone();
+                            move |_, window, cx| {
+                                let switched = id.clone();
                                 Settings::update_global(cx, move |s| {
-                                    let entry = s.plugins.entry(id).or_default();
+                                    let entry = s.plugins.entry(switched).or_default();
                                     entry.enabled = !entry.enabled;
+                                });
+                                // Switching the last plugin of a screen off
+                                // leaves the bar pointing at an empty room.
+                                with_app(window, cx, |app, window, cx| {
+                                    app.leave_empty_workspace(window, cx);
                                 });
                             }
                         }),
@@ -2446,6 +2456,20 @@ fn plugin_row(
                             .unwrap_or(crate::plugin::host::SecretPlace::Plain);
                         plugin_secret_row(name, input, place, cx)
                     })),
+            )
+        })
+        .when(!missing.is_empty(), |el| {
+            el.child(
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .text_xs()
+                    .text_color(cx.theme().warning)
+                    .child(icon("triangle-alert").xsmall())
+                    .child(tr!(
+                        "settings-plugin-missing",
+                        { names: missing.join(", ") }
+                    )),
             )
         })
         .child(
