@@ -54,6 +54,28 @@ use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::settings::Settings;
 
+/// The absolute path the protocol names a document by.
+///
+/// Everything else in this window calls a file by its path **inside** the
+/// worktree — that is what git prints, and what every command joins the
+/// worktree onto at the last moment. The protocol has no worktree to join: a
+/// URI is absolute or it is nothing, and `file://app/User.php` reads as a host
+/// called `app` and a file called `/User.php`. The join therefore happens here,
+/// at the one boundary, and never in the core, which is handed a path already
+/// made.
+fn full(worktree: &Path, path: &Path) -> PathBuf {
+    worktree.join(path)
+}
+
+/// And back: what the rest of the window calls that file.
+///
+/// A path outside the worktree is left as it is — a server may point into a
+/// runtime's sources, which belong to nobody's tree — and one inside comes back
+/// relative, which is what makes it the same file as the explorer's.
+fn local(worktree: &Path, path: &Path) -> PathBuf {
+    path.strip_prefix(worktree).unwrap_or(path).to_path_buf()
+}
+
 /// How long a change waits before it is sent.
 ///
 /// A keystroke emits a change event, and a document is sent whole or as an
@@ -329,8 +351,8 @@ impl ClaudhubApp {
             .map(|editing| editing.input.read(cx).value().to_string())
             .unwrap_or_default();
         self.git.send(Cmd::LspOpen {
+            path: full(&worktree, &path),
             worktree: worktree.clone(),
-            path: path.clone(),
             language_id: server.language_for(&path),
             text,
         });
@@ -349,10 +371,11 @@ impl ClaudhubApp {
         // Before the handshake there are no capabilities to read: the providers
         // are posted again when it lands, which is `lsp_ready`'s other job.
         let capabilities = session.capabilities.clone();
+        let home = worktree.clone();
         let provider = Rc::new(Provider {
             app: cx.entity().downgrade(),
+            path: full(&worktree, &path),
             worktree,
-            path,
             triggers: capabilities.triggers.clone(),
             semantic: capabilities.semantic.clone(),
         });
@@ -388,13 +411,19 @@ impl ClaudhubApp {
                 let Some(path) = crate::lsp::uri::path(params.uri.as_str()) else {
                     return false;
                 };
-                let line = params
-                    .selection
-                    .map(|range| range.start.line as usize + 1)
-                    .unwrap_or(1);
-                let _ = line; // the editor has no "go to line" yet
-                app.update(cx, |this, cx| this.open_in_editor(path, cx))
-                    .is_ok()
+                let path = local(&home, &path);
+                let landing =
+                    params
+                        .selection
+                        .map(|range| crate::ui::explorer::Landing::Position {
+                            line: range.start.line,
+                            character: range.start.character,
+                        });
+                app.update(cx, |this, cx| match landing {
+                    Some(landing) => this.jump_to(path, landing, cx),
+                    None => this.open_in_editor(path, cx),
+                })
+                .is_ok()
             }));
             cx.notify();
         });
@@ -432,8 +461,8 @@ impl ClaudhubApp {
                     return;
                 }
                 this.git.send(Cmd::LspChange {
+                    path: full(&worktree, &path),
                     worktree,
-                    path,
                     text,
                 });
             });
@@ -449,8 +478,8 @@ impl ClaudhubApp {
             return;
         }
         self.git.send(Cmd::LspSave {
+            path: full(&editing.worktree, &editing.path),
             worktree: editing.worktree.clone(),
-            path: editing.path.clone(),
         });
     }
 
@@ -460,6 +489,7 @@ impl ClaudhubApp {
         if !self.lsp.contains_key(&worktree) {
             return;
         }
+        let path = full(&worktree, &path);
         self.git.send(Cmd::LspClose { worktree, path });
     }
 
@@ -541,7 +571,8 @@ impl ClaudhubApp {
         let edit: Option<WorkspaceEdit> = serde_json::from_str(&payload).ok();
         let applied = match (edit, self.editing()) {
             (Some(edit), Some(editing)) if editing.worktree == worktree => {
-                let (state, path) = (editing.input.clone(), editing.path.clone());
+                let state = editing.input.clone();
+                let path = full(&editing.worktree, &editing.path);
                 apply_to(&state, &path, &edit, window, cx)
             }
             // Nothing open to apply it to, or an unreadable edit: refused, and
@@ -573,6 +604,9 @@ impl ClaudhubApp {
         payload: String,
         cx: &mut gpui::Context<Self>,
     ) {
+        // The server answers by URI, so the path arrives absolute; everything
+        // it is compared against here is a path inside the worktree.
+        let path = local(&worktree, &path);
         let diagnostics: Vec<Diagnostic> = serde_json::from_str(&payload).unwrap_or_default();
         if let Some(session) = self.lsp.get_mut(&worktree) {
             if diagnostics.is_empty() {
@@ -622,6 +656,77 @@ impl ClaudhubApp {
                 cx.notify();
             }
         });
+    }
+
+    /// Follows the definition of what is under the caret.
+    ///
+    /// **It does not go through gpui-component's `GoToDefinition`.** That action
+    /// reads `hover_definition`, which is only filled by Cmd-hovering the
+    /// symbol: from the keyboard, with no pointer anywhere near, it has nothing
+    /// to act on and does nothing at all — silently, which is how `gd` looked
+    /// like a key that was not bound. The request is ours, asked at the caret.
+    ///
+    /// The **first** location is taken. A server may answer several — an
+    /// interface and its implementations — and choosing between them wants a
+    /// list to pick from, which is a gesture this editor does not have; landing
+    /// on the first is what every editor does before it grows one.
+    pub(super) fn goto_definition(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some(editing) = self.editing() else {
+            return;
+        };
+        let (worktree, path) = (editing.worktree.clone(), editing.path.clone());
+        let state = editing.input.read(cx);
+        let offset = state.selected_range().start;
+        let position = state.text().offset_to_position(offset);
+        if !self.lsp_enabled(&worktree) || !self.lsp.contains_key(&worktree) {
+            self.announce(tr!("editor-lsp-off"), cx);
+            return;
+        }
+        let params = json!({
+            "textDocument": {"uri": crate::lsp::uri::of(&full(&worktree, &path))},
+            "position": {"line": position.line, "character": position.character},
+        });
+        let receiver = self.lsp_request(&worktree, "textDocument/definition", params);
+        cx.spawn(async move |this, cx| {
+            let answer = receiver.recv().await;
+            let _ = this.update(cx, |this, cx| {
+                let target = match answer {
+                    Ok(Ok(payload)) => serde_json::from_str::<GotoDefinitionResponse>(&payload)
+                        .ok()
+                        .map(links)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .next(),
+                    _ => None,
+                };
+                let Some(link) = target else {
+                    // Said out loud: a key that answers nothing is a key one
+                    // presses again, and the answer here is "the server does
+                    // not know", not "the key is broken".
+                    this.announce(tr!("editor-no-definition"), cx);
+                    return;
+                };
+                let Some(path) = crate::lsp::uri::path(link.target_uri.as_str()) else {
+                    this.announce(tr!("editor-no-definition"), cx);
+                    return;
+                };
+                // A definition in `vendor/` is a file of the worktree like any
+                // other, and it has to be called by the same name as the
+                // explorer calls it — otherwise the same file open twice under
+                // two names, and a save that writes to neither.
+                let path = local(&worktree, &path);
+                let start = link.target_selection_range.start;
+                this.jump_to(
+                    path,
+                    crate::ui::explorer::Landing::Position {
+                        line: start.line,
+                        character: start.character,
+                    },
+                    cx,
+                );
+            });
+        })
+        .detach();
     }
 
     // — The bridge ——————————————————————————————————————————————
@@ -821,7 +926,10 @@ impl CodeActionProvider for Provider {
         // server given none has nothing to fix — the list comes back empty and
         // reads as "this server has no code actions".
         let app = self.app.clone();
-        let (worktree, path) = (self.worktree.clone(), self.path.clone());
+        let worktree = self.worktree.clone();
+        // The set is keyed the way the rest of the window names files; ours is
+        // the absolute path the protocol wants.
+        let path = local(&worktree, &self.path);
         let diagnostics = app
             .update(cx, |this, _| {
                 this.lsp
@@ -1081,6 +1189,33 @@ pub fn tooltip(session: Option<&Session>) -> Option<SharedString> {
 mod tests {
     use super::*;
     use gpui_component::highlighter::HighlightTheme;
+
+    /// The protocol wants an absolute path and the window keeps a relative one,
+    /// and the two must be the same file in both directions — a URI built from
+    /// a relative path names a *host*, and a diagnostic filed under a path the
+    /// editor does not use is a diagnostic nobody sees.
+    #[test]
+    fn a_document_is_the_same_file_on_both_sides() {
+        let worktree = Path::new("/home/me/site");
+        let path = Path::new("app/Models/User.php");
+        let absolute = full(worktree, path);
+        assert_eq!(absolute, Path::new("/home/me/site/app/Models/User.php"));
+        assert_eq!(
+            crate::lsp::uri::of(&absolute),
+            "file:///home/me/site/app/Models/User.php"
+        );
+        assert_eq!(local(worktree, &absolute), path);
+        // A definition in `vendor/` is a file of the worktree like any other.
+        let vendor = Path::new("/home/me/site/vendor/laravel/framework/src/Foo.php");
+        assert_eq!(
+            local(worktree, vendor),
+            Path::new("vendor/laravel/framework/src/Foo.php")
+        );
+        // What is outside is left alone: a runtime's sources belong to no tree,
+        // and half a path would name nothing.
+        let outside = Path::new("/usr/lib/php/Bar.php");
+        assert_eq!(local(worktree, outside), outside);
+    }
 
     /// What PHPantom 0.10 announces, in its order.
     const PHPANTOM: [&str; 15] = [

@@ -185,6 +185,8 @@ src/
                     en Markdown, rendus et relus — aucune entrée-sortie ici
     lsp.rs          le pont vers le serveur de langage : les providers de
                     l'éditeur, les diagnostics, et le bouton « LSP »
+    jumps.rs        la piste de l'éditeur : d'où l'on vient, où l'on
+                    repart — sans rien de gpui dedans
     find.rs         la recherche d'un panneau, et son routage
     motion.rs       le lissage de la molette, sans rien de gpui dedans
     vim.rs          les modes de vim de l'éditeur : motions, opérateurs,
@@ -636,6 +638,17 @@ Deux endroits où cette simplification pourrait mentir, et ce qui l'en empêche 
 - **Les fichiers non suivis**, dont cocher ne veut pas dire la même chose que
   pour un fichier déjà suivi : ils forment leur propre groupe.
 
+**Un bouton d'une ligne consomme son clic.** La ligne entière est cliquable —
+elle ouvre le fichier et **reprend le focus**, pour que les flèches reviennent à
+la revue — et la case à cocher, la coche de relecture et la corbeille sont ses
+enfants. Sans `stop_propagation`, cocher ouvrait aussi le fichier, et surtout la
+corbeille était inutilisable : le dialogue de confirmation s'ouvrait, prenait le
+focus, puis le clic finissait de remonter et la ligne le lui reprenait — Échap
+et les deux boutons du pied de page envoient tous une action, et une action se
+distribue sur le nœud qui a le focus. Le dialogue restait ouvert et sourd. C'est
+la même règle que celle des lignes de menu, et le même piège : ce qui casse
+n'est pas le geste qu'on vient de faire mais celui d'après.
+
 La liste est une **arborescence de dossiers**, repliable, comme celle de
 PhpStorm — un bouton bascule vers la liste plate, et le choix est persistant.
 Trois points la font tenir :
@@ -999,6 +1012,18 @@ l'éditeur est synchronisé (rien dans la vue de diff, qui n'est pas un document
 et dont le texte n'est pas celui du fichier), pas de renommage, pas de
 formatage, pas de recherche de symboles — il n'y a pas de vue pour les porter.
 
+**Le fil ne transporte que des chemins absolus, et c'est le seul endroit de la
+fenêtre où c'est vrai.** Partout ailleurs un fichier s'appelle par son chemin
+*dans* le worktree — c'est ce que git imprime, et chaque commande y joint la
+racine au dernier moment. Le protocole n'a pas de racine à joindre : une URI est
+absolue ou elle n'est rien, et `file://app/User.php` se lit « l'hôte `app`, le
+fichier `/User.php` ». La jonction se fait donc aux quatre frontières de
+`ui::lsp` (`full`, `local`) et jamais dans le cœur, à qui on remet un chemin
+déjà fait. L'oubli ne provoque aucune erreur : le serveur répond sur un document
+qu'il n'a pas su placer dans le projet, et les diagnostics reviennent classés
+sous un chemin que l'éditeur n'emploie pas — donc invisibles. Un test tient
+l'aller-retour.
+
 **Ce que le serveur raconte va dans le journal** (`target: "lsp"`), stderr
 compris. `$/progress` fait exception : il remonte en `Evt::LspBusy` et s'affiche
 dans l'infobulle du bouton, parce qu'il répond à la seule question qu'un serveur
@@ -1014,6 +1039,64 @@ installé, ce qui est le cas de la CI : un test qui échoue faute d'un programme
 que personne n'a promis est un build rouge qui ne dit rien. Ce qu'il vérifie du
 serveur est la **mécanique** et jamais le contenu : quelles fautes un serveur
 signale est son affaire et celle de sa version.
+
+### Aller à la définition, et revenir
+
+Deux gestes, et le second est ce qui rend le premier utilisable : suivre une
+définition emmène ailleurs — souvent dans un autre fichier, souvent dans
+`vendor/` — et rien à l'écran ne dit d'où l'on venait.
+
+**`gd` ne passe pas par le `GoToDefinition` de gpui-component.** Leur action lit
+`hover_definition`, que seul un survol avec la touche système remplit : au
+clavier, sans pointeur nulle part, elle n'a rien sur quoi agir et ne fait
+**rien**, en silence — c'est exactement ainsi que `gd` avait l'air d'une touche
+non liée. La requête est donc la nôtre, posée au caret. La **première** réponse
+est prise : un serveur en rend parfois plusieurs — une interface et ses
+implémentations — et choisir demanderait une liste, qui est un geste que cet
+éditeur n'a pas.
+
+**`Ctrl+O` et `Ctrl+I` sont des liaisons, pas des touches de vim.** Elles sont
+déclarées dans la table sous `ClaudhubEditor`, un contexte que l'éditeur pose
+lui-même, et non dans la machine modale : une liaison s'exécute **avant**
+l'écouteur en phase de capture par lequel les touches de vim passent, si bien
+qu'elles marchent le mode éteint aussi. Un contexte à lui plutôt qu'`Input` :
+le champ de message de commit et les champs de recherche en sont, et n'ont pas
+de piste. `F12` complète, pour qui ne connaît pas les deux autres — une lettre
+avec la touche système n'était pas possible, tout caractère dans un éditeur
+étant un caractère que quelqu'un tape.
+
+**La piste est un module pur** (`ui::jumps`), comme `motion.rs` et `notes.rs` :
+on lui donne un endroit, elle en rend un. Ce qui s'y teste est la seule partie
+qui ne se devine pas — ce qu'un nouveau saut fait à ce qu'on avait rembobiné.
+
+Cinq points :
+
+- **Une piste par worktree**, comme il y a un éditeur par worktree, et elle s'en
+  va avec lui.
+- **Le départ est lu au moment du saut**, jamais repris dans la piste : on lit
+  quelques lignes avant de suivre une définition, et revenir là où l'on avait
+  atterri plutôt que là où l'on est parti est la différence entre une piste et
+  une liste de signets. Un pas en arrière réécrit de même l'endroit qu'il
+  quitte, pour que le pas en avant rende le caractère qu'on a laissé.
+- **Un nouveau saut jette ce qui était devant**, comme un navigateur jette son
+  avant quand on suit un lien depuis le milieu de son historique : deux futurs
+  ne peuvent pas être tous les deux le suivant.
+- **Toute ouverture passe par `open_at`**, qui est du même coup le seul endroit
+  où la piste s'écrit — l'explorateur, une ligne de diff, une trame Sentry, une
+  définition. La reprise de session n'y passe pas et demande son fichier
+  directement : revenir où l'on était n'est pas un saut qu'on doit pouvoir
+  défaire.
+- **Un saut vers un autre fichier ne pose pas son caret lui-même** : le texte
+  n'arrive qu'un aller-retour plus tard. Le geste est noté (`explorer::Pending`)
+  et consommé à l'arrivée — la même forme que le `pending_jump` de la revue, et
+  pour la même raison. Il porte son worktree : on se promène pendant qu'un
+  fichier se lit, et poser un caret dans l'éditeur de quelqu'un d'autre est pire
+  que de ne pas le poser.
+
+Les deux flèches de la barre du fichier sont ces deux touches, pour qui n'a pas
+le mode vim. Elles sont **toujours là**, éteintes quand il n'y a nulle part où
+aller : une flèche qui apparaît et disparaît déplace les quatre boutons voisins
+à chaque définition suivie.
 
 ### Lire et retoucher un fichier
 
