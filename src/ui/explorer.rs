@@ -578,6 +578,7 @@ impl ClaudhubApp {
     ) {
         // The language follows from the extension, as for a diff's highlighting:
         // it is the same table, PHP included.
+        let restored = self.take_restored_editing(&worktree, &path);
         let language = crate::ui::highlight::language_for_path(&path).unwrap_or("text");
         let input = cx.new(|cx| {
             // `EditorState` and not `InputState`: the input rework split the
@@ -621,8 +622,14 @@ impl ClaudhubApp {
         // comes from the explorer — so from that screen most of the time — but
         // also from a diff line, and answering it silently on the screen next
         // door would be an opened file nobody sees.
-        self.enter_workspace(crate::ui::workspace::Workspace::Files, window, cx);
-        self.set_panel_visible(crate::ui::panels::EditorPanel::NAME, true, cx);
+        //
+        // Unless it is the previous session being put back: there is no gesture
+        // then, and the screen that comes back is the one `layout.json` carries.
+        if !restored {
+            self.enter_workspace(crate::ui::workspace::Workspace::Files, window, cx);
+            self.set_panel_visible(crate::ui::panels::EditorPanel::NAME, true, cx);
+        }
+        self.persist_session(cx);
         cx.notify();
     }
 
@@ -656,6 +663,7 @@ impl ClaudhubApp {
         };
         if !editing.dirty {
             self.editing = None;
+            self.persist_session(cx);
             cx.notify();
             return;
         }
@@ -677,6 +685,7 @@ impl ClaudhubApp {
                 .on_ok(move |_, _window, cx| {
                     entity.update(cx, |this, cx| {
                         this.editing = None;
+                        this.persist_session(cx);
                         cx.notify();
                     });
                     true

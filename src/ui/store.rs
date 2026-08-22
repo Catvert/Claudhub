@@ -62,6 +62,51 @@ pub struct WorktreeState {
     pub next_note: u64,
 }
 
+/// The file open in the built-in editor, and the checkout it belongs to.
+///
+/// Both, because they are two independent choices: the editor keeps showing a
+/// file of the worktree one has left, and reopening it under the selected one
+/// would read another file — or none.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenFile {
+    pub worktree: PathBuf,
+    pub path: PathBuf,
+}
+
+/// The SQL console as it stood.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenConsole {
+    /// The connection's key (`db::Connection::key`) and not the connection
+    /// itself: it names it without carrying its password, and the settings are
+    /// where a connection is described — a copy here would age the day one is
+    /// edited.
+    pub connection: String,
+    pub database: Option<String>,
+    /// The text of the query, sent or not. It is what one comes back to
+    /// tomorrow, and the result is not: replaying a `SELECT` nobody asked for
+    /// on opening is a query against a production server one did not ask for.
+    pub query: String,
+}
+
+/// What the window was showing when it was closed.
+///
+/// Not the settings and not `layout.json`: the screen and the panels' places
+/// are the window's geometry, this is where the work was. It goes with the
+/// rest of the store because it is state, and because it is written by the
+/// same deferred save.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Session {
+    /// The selected worktree. It only wins over the first of the list, never
+    /// over the checkout `claudhub` was launched from — see
+    /// `ClaudhubApp::repo_opened`.
+    pub worktree: Option<PathBuf>,
+    pub editing: Option<OpenFile>,
+    pub console: Option<OpenConsole>,
+}
+
 /// What survives a restart for a repository, worktrees taken together.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -77,6 +122,8 @@ pub struct Store {
     pub worktrees: HashMap<PathBuf, WorktreeState>,
     /// Key: the main repository path.
     pub repos: HashMap<PathBuf, RepoState>,
+    /// Where one was, all repositories taken together.
+    pub session: Session,
 }
 
 impl Store {
@@ -221,6 +268,33 @@ mod tests {
         assert!(state.notes.is_empty());
         assert!(state.collapsed.is_empty());
         assert!(store.repos.is_empty());
+        // Including the session, which no file written before it carries.
+        assert_eq!(store.session, Session::default());
+    }
+
+    #[test]
+    fn a_session_survives_the_round_trip() {
+        let store = Store {
+            session: Session {
+                worktree: Some(PathBuf::from("/r/wt/a")),
+                editing: Some(OpenFile {
+                    worktree: PathBuf::from("/r/wt/a"),
+                    path: PathBuf::from("app/Models/User.php"),
+                }),
+                console: Some(OpenConsole {
+                    connection: "mysql:root@localhost:3306/".into(),
+                    database: Some("shop".into()),
+                    query: "SELECT * FROM users".into(),
+                }),
+            },
+            ..Default::default()
+        };
+        let text = serde_json::to_string(&store).unwrap();
+        let back: Store = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.session, store.session);
+        // The password is nowhere in it: a connection is named by its key, and
+        // described in the settings.
+        assert!(!text.contains("password"));
     }
 
     #[test]

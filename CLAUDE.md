@@ -165,6 +165,8 @@ src/
     conflicts.rs    les conflits et le garde-fou d'une opération à mi-chemin
     worktree_ops.rs création guidée, tâches du projet, intégration
     store.rs        ce qu'on retient par worktree : base, replis, notes
+    session.rs      où l'on en était : le worktree, le fichier ouvert, la
+                    console — et la règle, testée, du worktree qui s'ouvre
     dialogs.rs      les deux boutons d'un dialogue, que gpui-component ne
                     peint que pour un `AlertDialog`
     notes.rs        le modèle des notes, leur ancrage et leur prompt
@@ -1179,7 +1181,8 @@ Quatre points :
 Les réglages disent comment Claudhub s'affiche ; le magasin
 (`store::StateStore`, `<config>/state.json`) dit où l'on en est — la base à
 laquelle on compare *ce* worktree, les dossiers qu'on y a repliés, le prochain
-numéro de note. Deux fichiers et non un seul : le premier se modifie à la
+numéro de note, et où l'on en était en fermant (voir « Où l'on en était »).
+Deux fichiers et non un seul : le premier se modifie à la
 main, le second compterait quelques centaines de lignes par dépôt et n'y
 survivrait pas.
 
@@ -2922,6 +2925,64 @@ premier de la liste — qui est toujours le dépôt principal. Lancer `claudhub`
 un worktree doit ouvrir *ce* worktree. Le worktree retenu est le plus profond
 dont le chemin est un préfixe de celui demandé, faute de quoi un worktree
 imbriqué dans un autre serait attribué au mauvais.
+
+Mais `opened_at` ne dit pas à lui seul « lancé ici » : un dépôt mémorisé demande
+sa propre racine, et revient donc lui aussi avec un checkout. Trois candidats se
+départagent par un **rang** (`session::pick_worktree`, libre et testé) : le
+checkout qui contient le dossier de lancement l'emporte toujours, puis le
+worktree de la session précédente, puis le premier de la liste. Le rang est ce
+qui rend l'ordre des réponses sans importance — les dépôts sont énumérés par le
+worker qui finit le premier, et sans lui le worktree mémorisé gagnait ou perdait
+selon le jour. `select_worktree` pose le rang le plus fort, celui d'un choix à
+la main, et `repo_opened` le rabaisse juste après pour les sélections qu'il fait
+lui-même.
+
+Corollaire : la sélection a lieu **même quand le dépôt était déjà ouvert**. Le
+dépôt d'où l'on lance est presque toujours un dépôt mémorisé, donc déjà ouvert
+quand `OpenIfRepo` répond — et cette réponse-là est la seule qui nomme le
+checkout profond où l'on se tient plutôt que le dépôt principal. Le reste de
+l'ouverture, lui, ne se refait pas.
+
+### Où l'on en était
+
+Les réglages disent comment Claudhub s'affiche, `layout.json` où sont les
+panneaux et sur quel écran on était, le magasin ce à quoi un worktree se
+compare. Aucun ne disait ce qu'on **faisait** : rouvrir demandait de retrouver
+le dépôt, le worktree, le fichier, et de retaper la requête qui était prête à
+partir. `store::Session`, écrit par `ui::session`, garde ces trois-là.
+
+**On remet ce qu'on avait choisi, jamais ce qu'on avait obtenu.** Le worktree
+sélectionné, le fichier ouvert dans l'éditeur, la connexion de la console et le
+texte de sa requête — mais pas de diff, pas de grille de résultats, pas de
+statut : tout cela revient de lui-même des lectures que la sélection déclenche,
+et un `SELECT` rejoué au démarrage est une requête vers un serveur que personne
+n'a demandé à joindre.
+
+Cinq points qui ne se devinent pas :
+
+- **La connexion est nommée par sa clé** (`db::Connection::key`) et non
+  recopiée : elle est décrite dans les réglages, une copie ici vieillirait au
+  premier changement, et la clé ne porte pas le mot de passe. Une connexion
+  supprimée ne revient simplement pas.
+- **Rouvrir n'est pas un geste.** Ouvrir un fichier bascule sur l'écran
+  « Édition », ouvrir une console sur celui des bases — voir « Les
+  sous-applications ». Ici il n'y a pas de geste, et l'écran qui revient est
+  celui de `layout.json` : `take_restored_editing` est ce qui distingue les deux,
+  et `reopen_db_console` est `start_db_console` sans ses deux effets de bord.
+- **L'écriture se fait aux gestes, pas à la fermeture.** Une fenêtre se ferme
+  aussi par un plantage ou une session qui s'achève, et un état écrit seulement
+  en sortant est un état qu'on perd les jours où il aurait servi. Le texte de la
+  requête part donc à chaque frappe, la demi-seconde différée du magasin faisant
+  le reste.
+- **Ce qui n'est pas encore remis tient lieu de ce qui n'est pas là.** La
+  première frappe arrive avant qu'un dépôt ait répondu : sans ce repli,
+  `persist_session` écrirait un worktree vide et effacerait celui qu'on est en
+  train de rendre.
+- **La demande de relecture du fichier ne part qu'une fois**
+  (`restore_asked`). Chaque dépôt qui s'ouvre demande si le fichier mémorisé est
+  l'un des siens, et une fenêtre à quatre dépôts lirait sinon quatre fois le même
+  fichier. Ce qui ne trouve jamais son worktree reste là et s'en va avec la
+  fenêtre : un fichier dont le worktree a été supprimé n'a rien à signaler.
 
 ### La base de la revue de branche
 

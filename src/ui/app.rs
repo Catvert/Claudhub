@@ -329,6 +329,33 @@ pub struct ClaudhubApp {
     pub(super) server_wsl: bool,
     /// The selected worktree: the key to almost everything else.
     pub(super) active: Option<PathBuf>,
+    /// The read of the file to put back has gone out.
+    ///
+    /// Every repository that opens asks whether the remembered file is one of
+    /// its own, and the request stands until its content comes back: without
+    /// this, a window with four repositories would read the same file four
+    /// times.
+    pub(super) restore_asked: bool,
+    /// What is left to put back from the previous session — see
+    /// `restore_session`. Emptied piece by piece as the repositories open, and
+    /// what never finds its worktree simply stays there and is dropped.
+    pub(super) restoring: crate::ui::store::Session,
+    /// The directory `claudhub` was launched from, when it is a repository's.
+    ///
+    /// It is what tells a launch from a mere remembered repository: `opened_at`
+    /// names the deepest checkout containing the path asked for, and a
+    /// remembered repository asks for its own root, so both come back with a
+    /// worktree. Remotely it is the **server's** directory, which arrives with
+    /// its handshake — ours names nothing over there.
+    launch_dir: Option<PathBuf>,
+    /// How firm the current selection is, so a weaker one cannot displace it.
+    ///
+    /// The repositories answer in the order the workers happen to finish, and
+    /// the remembered worktree must beat "the first checkout of whichever
+    /// repository answered first" without ever beating the checkout `claudhub`
+    /// was launched from. Ranks rather than flags because there are three of
+    /// them, and the comparison is the whole rule.
+    selection_rank: u8,
     /// Whether the session's first terminal has been opened. See
     /// `select_worktree`: it happens once, on the first worktree shown.
     terminal_started: bool,
@@ -692,6 +719,10 @@ impl ClaudhubApp {
             wsl_prompt: None,
             server_wsl: false,
             active: None,
+            restoring: crate::ui::store::Store::global(cx).session.clone(),
+            restore_asked: false,
+            launch_dir: None,
+            selection_rank: crate::ui::session::SELECTION_NONE,
             terminal_started: false,
             review: HashMap::new(),
             terminals: Vec::new(),
@@ -771,7 +802,9 @@ impl ClaudhubApp {
         app.pump_events(events, window, cx);
         app.start_scanning(cx);
         app.watch_vault_inputs(window, cx);
+        app.watch_query_input(cx);
 
+        app.restore_console(window, cx);
         app.open_remembered_repositories(remote, cx);
         // Starting the server waits for the window to be mounted: a dialog needs
         // `Root`'s layers, which are only installed on the first render.
@@ -804,6 +837,7 @@ impl ClaudhubApp {
         // with `Evt::ServerHello`, and ours names nothing over there.
         if !remote {
             if let Ok(cwd) = std::env::current_dir() {
+                self.launch_dir = Some(cwd.clone());
                 self.git.send(Cmd::OpenIfRepo(cwd));
             }
         }
@@ -1088,6 +1122,22 @@ impl ClaudhubApp {
     /// character would keep the sync busy permanently. No "save" button: it is a
     /// scratchpad, and having to confirm it would be the best way to lose three
     /// sentences in it.
+    /// The query being written is part of where one was, so it is filed as it
+    /// is typed.
+    ///
+    /// On the `Change` event and not on sending: what one comes back to
+    /// tomorrow is often precisely the query that was never sent. The store's
+    /// write is deferred by half a second, which is what keeps a keystroke from
+    /// costing a file.
+    fn watch_query_input(&mut self, cx: &mut Context<Self>) {
+        cx.subscribe(&self.db_query_input.clone(), |this, _, event, cx| {
+            if matches!(event, gpui_component::input::InputEvent::Change) {
+                this.persist_session(cx);
+            }
+        })
+        .detach();
+    }
+
     fn watch_vault_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use gpui_component::input::InputEvent;
         cx.subscribe(&self.journal_input.clone(), |this, _, event, cx| {
@@ -1415,24 +1465,44 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Failing the checkout the opening came from, the first of the list,
-        // which is the main repository.
-        let first = opened_at.or_else(|| worktrees.first().map(|w| w.path.clone()));
+        // Which checkout to show, and how firmly. The decision is outside the
+        // view and tested: the repositories answer in whatever order the
+        // workers finish, and a rule that gets it wrong shows a worktree
+        // nobody asked for.
+        let paths: Vec<PathBuf> = worktrees.iter().map(|w| w.path.clone()).collect();
+        let candidate = crate::ui::session::pick_worktree(
+            opened_at,
+            &paths,
+            self.launch_dir.as_deref(),
+            self.restoring.worktree.as_deref(),
+        );
         // `open` says no when the repository is already there: reopening must
         // not duplicate its row. A folder that is back — remounted, recloned —
         // stops being missing at the same time.
-        if !self.repos.open(main.clone(), name, worktrees) {
-            return;
+        //
+        // The selection below runs **either way**, and that is not a detail:
+        // the repository one launches from is usually a remembered one too, so
+        // it is already open by the time `OpenIfRepo` answers — and that
+        // answer is the only one that names the deep checkout one is standing
+        // in rather than the main repository.
+        if self.repos.open(main.clone(), name, worktrees) {
+            Settings::update_global(cx, |s| s.remember_repository(&main));
+            self.forget_missing_worktrees(&main, cx);
+            self.ensure_wt_project(&main);
+            self.git.send(Cmd::LoadBranches { main });
         }
-        Settings::update_global(cx, |s| s.remember_repository(&main));
-        self.forget_missing_worktrees(&main, cx);
-        self.ensure_wt_project(&main);
-        self.git.send(Cmd::LoadBranches { main });
-        if self.active.is_none() {
-            if let Some(path) = first {
-                self.select_worktree(path, window, cx);
-            }
+        // A weaker candidate never displaces a firmer one, and re-selecting is
+        // free: `select_worktree` returns at once when the path is already the
+        // active one.
+        if let Some((rank, path)) = candidate.filter(|(rank, _)| *rank > self.selection_rank) {
+            self.select_worktree(path, window, cx);
+            // Lowered **after** the call: selecting is the user's gesture and
+            // marks the choice as made by hand, and this one is ours.
+            self.selection_rank = rank;
         }
+        // The file that was open may belong to this repository: it is the only
+        // moment we know its worktree exists.
+        self.restore_editing(cx);
     }
 
     fn repo_unavailable(&mut self, path: PathBuf, message: String, cx: &mut Context<Self>) {
@@ -1966,6 +2036,7 @@ impl ClaudhubApp {
         self.forget_settings_environment();
         // Remote mode's "launched from its project": it is the server's
         // directory that says so, not ours.
+        self.launch_dir = Some(cwd.clone());
         self.git.send(Cmd::OpenIfRepo(cwd));
     }
 
@@ -2028,6 +2099,10 @@ impl ClaudhubApp {
             let worktree = self.active.clone().unwrap_or_default();
             self.ensure_terminal(&worktree, window, cx);
         }
+        // Chosen by hand until proven otherwise: `repo_opened` lowers the rank
+        // again for the selections it makes itself.
+        self.selection_rank = crate::ui::session::SELECTION_CHOSEN;
+        self.persist_session(cx);
         cx.notify();
     }
 
@@ -2469,7 +2544,7 @@ impl ClaudhubApp {
         self.repos.worktree(self.active.as_deref()?)
     }
 
-    fn worktree_exists(&self, path: &Path) -> bool {
+    pub(super) fn worktree_exists(&self, path: &Path) -> bool {
         self.repos.contains_worktree(path)
     }
 
@@ -2737,6 +2812,7 @@ impl ClaudhubApp {
                 .title(title.clone())
                 .overlay_closable(false)
                 .close_button(false)
+                .footer(super::dialogs::confirm())
                 .child(gpui_component::input::Input::new(&input))
                 // The window is passed to the closure: what is launched next —
                 // opening a terminal, delivering a text into it — needs it, and

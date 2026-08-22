@@ -31,6 +31,7 @@ mod review;
 mod scroll;
 mod sentry_view;
 mod server;
+mod session;
 mod settings;
 mod settings_view;
 mod shortcuts;
