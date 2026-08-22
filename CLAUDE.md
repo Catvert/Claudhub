@@ -4034,6 +4034,15 @@ cinquième.
   dépôt et non au compte : deux dépôts d'une même organisation n'ont pas les
   mêmes erreurs. C'est ce que veut dire la configuration d'un projet, et un
   plugin qui veut un grain plus fin met `worktree()` dans sa propre clé.
+  **`set_state` écrit sur place autant qu'il envoie un effet**, et ce n'est pas
+  une ceinture avec des bretelles : les effets sont drainés quand le script
+  **rend la main**, si bien que sans l'écriture immédiate, la ligne suivante qui
+  relit `state` obtiendrait ce qui était là avant. Un magasin dont on ne relit
+  pas ses propres écritures est un piège que tout plugin rencontre — Sentry l'a
+  rencontré, et son bouton « Enregistrer » se comportait comme un bouton mort.
+  La copie durable reste celle de l'application : la valeur posée sur place est
+  écrasée au balayage suivant par ce que le magasin dit, si bien qu'une écriture
+  qui n'a pas pu atterrir — aucun worktree ouvert — s'efface au lieu de mentir.
 - **`worktree_for(nom, prompt)`**, qui crée un worktree et remet un texte à
   l'agent qui y atterrit. Ce n'est pas le geste de Sentry mais celui de tout le
   monde — ouvrir une branche pour un échec de CI, pour une issue, pour un

@@ -72,8 +72,8 @@ pub async fn update(s, action, payload) {
         // Par dépôt : deux dépôts d'une même organisation n'ont pas les mêmes
         // erreurs. `set_state` écrit contre le dépôt regardé.
         set_state("project", name);
-        // L'état revient au tour suivant du balayage ; en attendant, on repart
-        // de zéro avec ce qu'on vient de choisir.
+        // `state` relit ce qu'on vient d'écrire : c'est ce qui permet de
+        // relancer `init` dans la foulée plutôt que d'attendre un tour.
         return init(worktree()).await;
     }
 

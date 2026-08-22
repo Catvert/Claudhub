@@ -638,9 +638,21 @@ fn module(shared: &Arc<Shared>) -> Result<rune::Module, rune::ContextError> {
     let it = shared.clone();
     module
         .function("set_state", move |key: Ref<str>, value: Ref<str>| {
-            // An effect and not a write: a store is a gpui global, and this
-            // module knows nothing of gpui. The application drains it when the
-            // script returns — which is also what keeps the writes in order.
+            // **Written here as well as sent out**, and this is not belt and
+            // braces: the effect is drained when the script *returns*, so
+            // without the write in front, the very next line reading `state`
+            // would get what was there before. A store one cannot read one's
+            // own writes from is a trap every plugin would fall into — Sentry
+            // did, and its "save" button looked like a dead button.
+            //
+            // The lasting copy is still the application's: this one is
+            // overwritten by the next sweep with whatever the store holds, so a
+            // write that could not land — no worktree open — fades rather than
+            // lying about it.
+            it.state
+                .lock()
+                .expect("state lock")
+                .insert(key.to_string(), value.to_string());
             it.effect(Effect::Remember {
                 key: key.to_string(),
                 value: value.to_string(),
@@ -1655,10 +1667,13 @@ mod sentry_plugin {
         .expect("typing");
         assert!(probe.shared.take_effects().is_empty());
 
-        // Enregistrer écrit contre le dépôt, et repart chercher.
+        // Enregistrer écrit contre le dépôt **et repart chercher tout de
+        // suite**. C'est ce que l'ancien test ne vérifiait pas : il regardait
+        // l'effet et se contentait d'un `view` qui rendait quelque chose, si
+        // bien qu'il est resté vert pendant que le bouton ne faisait rien.
         let state = answer_with(
             &probe,
-            |_| Ok("[]".into()),
+            |_| Ok(ISSUES.into()),
             probe.host.update(&state, "set-project", ""),
         )
         .expect("set-project");
@@ -1669,7 +1684,16 @@ mod sentry_plugin {
                 value: "site".into()
             }]
         );
-        probe.host.view(&state).expect("view still renders");
+        // Et le panneau montre les erreurs, pas de nouveau le sélecteur : un
+        // script doit relire ce qu'il vient d'écrire.
+        let tree = probe.host.view(&state).expect("view");
+        let Node::Column(children) = &tree else {
+            panic!("expected a column, got {tree:?}");
+        };
+        assert!(
+            matches!(children.get(1), Some(Node::List { items, .. }) if items.len() == 2),
+            "the picker is still there: {children:?}"
+        );
     }
 
     #[test]
