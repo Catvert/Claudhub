@@ -1290,28 +1290,28 @@ pub fn explorer_open(
 pub fn goto_definition(
     this: &mut ClaudhubApp,
     _: &GoToDefinition,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
-    this.goto_definition(cx);
+    this.goto_definition(window, cx);
 }
 
 pub fn jump_back(
     this: &mut ClaudhubApp,
     _: &JumpBack,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
-    this.jump_back(cx);
+    this.jump_back(window, cx);
 }
 
 pub fn jump_forward(
     this: &mut ClaudhubApp,
     _: &JumpForward,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
-    this.jump_forward(cx);
+    this.jump_forward(window, cx);
 }
 
 pub fn db_up(

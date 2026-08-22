@@ -681,7 +681,13 @@ impl ClaudhubApp {
     }
 
     /// Goes to a place and writes the step down.
-    pub(super) fn jump_to(&mut self, path: PathBuf, landing: Landing, cx: &mut Context<Self>) {
+    pub(super) fn jump_to(
+        &mut self,
+        path: PathBuf,
+        landing: Landing,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(worktree) = self.active.clone() else {
             return;
         };
@@ -695,7 +701,7 @@ impl ClaudhubApp {
         let Some(from) = self.here(cx) else {
             return;
         };
-        let Some(offset) = self.land(&landing, cx) else {
+        let Some(offset) = self.land(&landing, window, cx) else {
             return;
         };
         if offset != from.offset {
@@ -707,15 +713,15 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    pub(super) fn jump_back(&mut self, cx: &mut Context<Self>) {
-        self.step(true, cx);
+    pub(super) fn jump_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.step(true, window, cx);
     }
 
-    pub(super) fn jump_forward(&mut self, cx: &mut Context<Self>) {
-        self.step(false, cx);
+    pub(super) fn jump_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.step(false, window, cx);
     }
 
-    fn step(&mut self, back: bool, cx: &mut Context<Self>) {
+    fn step(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
         };
@@ -736,7 +742,7 @@ impl ClaudhubApp {
             .editing()
             .is_some_and(|editing| editing.path == spot.path)
         {
-            self.land(&Landing::Offset(spot.offset), cx);
+            self.land(&Landing::Offset(spot.offset), window, cx);
         } else {
             // No origin: the step is already written in the trail, and putting
             // it back would be a place one could go back from for ever.
@@ -756,13 +762,29 @@ impl ClaudhubApp {
 
     /// Brings the caret to rest, and the view with it. Gives back the offset it
     /// settled on, which is what the trail records.
-    fn land(&mut self, landing: &Landing, cx: &mut Context<Self>) -> Option<usize> {
+    ///
+    /// **And gives the editor the focus.** A jump is a keyboard gesture whose
+    /// next keystroke is another one — `Ctrl+O` to come straight back, a motion
+    /// to read around where one landed — and a caret in a field nobody is
+    /// typing into answers none of them. Crossing into another file builds a
+    /// new `EditorState`, which starts unfocused; `enter_workspace` only
+    /// focuses when the screen actually changes, so a jump made from the
+    /// editing screen focused nothing at all. Opening a file from the tree does
+    /// **not** come through here: browsing with the arrows must leave them to
+    /// the tree.
+    fn land(
+        &mut self,
+        landing: &Landing,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<usize> {
         let input = self.editing()?.input.clone();
         let offset = offset_of(input.read(cx).text(), landing);
         input.update(cx, |state, cx| {
             state.set_selected_range(offset..offset, cx);
         });
         self.reveal_caret(&input, offset, cx);
+        gpui::Focusable::focus_handle(&input, cx).focus(window, cx);
         Some(offset)
     }
 
@@ -859,7 +881,7 @@ impl ClaudhubApp {
             if (pending.worktree.as_path(), pending.path.as_path()) == (&*opened.0, &*opened.1) {
                 let offset = pending
                     .landing
-                    .and_then(|landing| self.land(&landing, cx))
+                    .and_then(|landing| self.land(&landing, window, cx))
                     .unwrap_or(0);
                 if let Some(from) = pending.from {
                     self.jumps
@@ -1128,7 +1150,7 @@ impl ClaudhubApp {
                     self.save_file(cx);
                     self.close_editor(window, cx);
                 }
-                Command::GoToDefinition => self.goto_definition(cx),
+                Command::GoToDefinition => self.goto_definition(window, cx),
             },
         }
         cx.notify();
@@ -1649,7 +1671,7 @@ impl ClaudhubApp {
                         .icon(icon("arrow-left"))
                         .disabled(!back)
                         .tooltip(tr!("editor-jump-back"))
-                        .on_click(cx.listener(|this, _, _window, cx| this.jump_back(cx))),
+                        .on_click(cx.listener(|this, _, window, cx| this.jump_back(window, cx))),
                 )
                 .child(
                     Button::new("editor-jump-forward")
@@ -1658,7 +1680,7 @@ impl ClaudhubApp {
                         .icon(icon("arrow-right"))
                         .disabled(!forward)
                         .tooltip(tr!("editor-jump-forward"))
-                        .on_click(cx.listener(|this, _, _window, cx| this.jump_forward(cx))),
+                        .on_click(cx.listener(|this, _, window, cx| this.jump_forward(window, cx))),
                 ),
         )
     }

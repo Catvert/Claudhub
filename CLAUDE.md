@@ -1086,6 +1086,16 @@ Cinq points :
   définition. La reprise de session n'y passe pas et demande son fichier
   directement : revenir où l'on était n'est pas un saut qu'on doit pouvoir
   défaire.
+- **Atterrir donne le focus à l'éditeur.** Un saut est un geste au clavier dont
+  la touche suivante en est un autre — `Ctrl+O` pour revenir aussitôt, une
+  motion pour lire autour —, et un caret dans un champ où personne ne tape n'en
+  résout aucune : les touches de la piste vivent sous `ClaudhubEditor`, et les
+  touches de vim sous un écouteur posé dans le même sous-arbre. Traverser vers
+  un autre fichier construit un `EditorState` neuf, qui naît sans focus, et
+  `enter_workspace` n'en donne que si l'écran **change** — un saut fait depuis
+  l'écran « Édition » n'en donnait donc à personne. Ouvrir un fichier depuis
+  l'arbre ne passe pas par là : parcourir au clavier doit laisser les flèches à
+  l'arbre.
 - **Un saut vers un autre fichier ne pose pas son caret lui-même** : le texte
   n'arrive qu'un aller-retour plus tard. Le geste est noté (`explorer::Pending`)
   et consommé à l'arrivée — la même forme que le `pending_jump` de la revue, et

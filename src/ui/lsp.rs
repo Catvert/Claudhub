@@ -407,7 +407,7 @@ impl ClaudhubApp {
             // built-in behaviour jumps inside the document being edited, which
             // is right for a local symbol and useless for the class it came
             // from. Returning `true` says we have shown it.
-            lsp.show_document = Some(Rc::new(move |params: &ShowDocumentParams, _window, cx| {
+            lsp.show_document = Some(Rc::new(move |params: &ShowDocumentParams, window, cx| {
                 let Some(path) = crate::lsp::uri::path(params.uri.as_str()) else {
                     return false;
                 };
@@ -420,7 +420,7 @@ impl ClaudhubApp {
                             character: range.start.character,
                         });
                 app.update(cx, |this, cx| match landing {
-                    Some(landing) => this.jump_to(path, landing, cx),
+                    Some(landing) => this.jump_to(path, landing, window, cx),
                     None => this.open_in_editor(path, cx),
                 })
                 .is_ok()
@@ -670,7 +670,7 @@ impl ClaudhubApp {
     /// interface and its implementations — and choosing between them wants a
     /// list to pick from, which is a gesture this editor does not have; landing
     /// on the first is what every editor does before it grows one.
-    pub(super) fn goto_definition(&mut self, cx: &mut gpui::Context<Self>) {
+    pub(super) fn goto_definition(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
         let Some(editing) = self.editing() else {
             return;
         };
@@ -687,9 +687,9 @@ impl ClaudhubApp {
             "position": {"line": position.line, "character": position.character},
         });
         let receiver = self.lsp_request(&worktree, "textDocument/definition", params);
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let answer = receiver.recv().await;
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 let target = match answer {
                     Ok(Ok(payload)) => serde_json::from_str::<GotoDefinitionResponse>(&payload)
                         .ok()
@@ -722,6 +722,7 @@ impl ClaudhubApp {
                         line: start.line,
                         character: start.character,
                     },
+                    window,
                     cx,
                 );
             });
