@@ -18,12 +18,14 @@ pub mod diff;
 pub mod history;
 pub mod repo;
 pub mod status;
+pub mod tags;
 
 pub use branch::{Branch, BranchKind, Upstream};
 pub use diff::{DiffFile, DiffLine, DiffLineKind, FileDiff, Hunk, Range as DiffRange};
 pub use history::{Commit, GraphRow, LogRange};
 pub use repo::{Pending, Repo, Worktree};
 pub use status::{FileStatus, Status, StatusCode, Summary};
+pub use tags::Tag;
 
 use std::ffi::OsStr;
 use std::io::Read;
@@ -177,6 +179,36 @@ pub(crate) fn wait_with_timeout(
         stdout: out_reader.join().unwrap_or_default(),
         stderr: err_reader.join().unwrap_or_default(),
     })
+}
+
+/// Runs git and returns **what it told the user**, stderr included.
+///
+/// For the network commands, and for them only: `git push` and `git fetch`
+/// write their whole account on **stderr** — `To github.com:…`, the refs they
+/// moved, `From origin` — and their stdout is empty. Read through `git`, which
+/// keeps only stdout, a push that had just published three commits came back
+/// with nothing to say: the status bar fell back on its own success label and
+/// no balloon was raised, since there was not a line to read. What one wants to
+/// know after a push is precisely what git wrote there.
+///
+/// stderr **first**: git leads with the account (`To …`) and finishes with the
+/// advice, and it is the first line the bar keeps.
+pub(crate) fn git_reporting<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<String> {
+    let started = Instant::now();
+    let out = run(dir, args)?;
+    report(dir, args, started.elapsed(), &out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        bail!("git {}: {}", describe(args), stderr.trim());
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut output = String::with_capacity(stderr.len() + stdout.len());
+    output.push_str(stderr.trim_end());
+    if !output.is_empty() && !stdout.trim().is_empty() {
+        output.push('\n');
+    }
+    output.push_str(stdout.trim_end());
+    Ok(output)
 }
 
 /// The same, but failure counts as `None`: for optional reads (an upstream

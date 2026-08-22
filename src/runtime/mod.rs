@@ -23,7 +23,7 @@ pub mod wire;
 
 pub use protocol::{Action, Cmd, Evt, Secret, WorktreeId};
 
-use crate::git::{branch, diff, history, repo, status, DiffRange, LogRange};
+use crate::git::{branch, diff, history, repo, status, tags, DiffRange, LogRange};
 
 /// Workers dedicated to reads: status, diffs, branches, and the local writes,
 /// all of which are measured in milliseconds.
@@ -51,6 +51,13 @@ fn is_network(cmd: &Cmd) -> bool {
             // read queue.
             | Cmd::SuggestMessage { .. }
             | Cmd::Push { .. }
+            // A tag pushed, a tag removed from the remote, the remote's tag
+            // list: three round trips, and they belong where the round trips
+            // are.
+            | Cmd::PushTag { .. }
+            | Cmd::CreateTag { push: true, .. }
+            | Cmd::DeleteRemoteTag { .. }
+            | Cmd::LoadRemoteTags { .. }
             | Cmd::LoadIssues { .. }
             | Cmd::LoadIssueEvent { .. }
     )
@@ -518,6 +525,17 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
             Ok(branches) => vec![branches_evt(main, branches)],
             Err(e) => vec![fail(None, Action::Branch, e)],
         },
+        Cmd::LoadTags { main } => match tags::list(&main) {
+            Ok(tags) => vec![Evt::Tags { main, tags }],
+            Err(e) => vec![fail(None, Action::Tag, e)],
+        },
+        Cmd::LoadRemoteTags { worktree } => match tags::remote(&worktree) {
+            Ok(names) => vec![Evt::RemoteTags {
+                main: main_of(&worktree),
+                names,
+            }],
+            Err(e) => vec![fail(Some(worktree), Action::PushTag, e)],
+        },
 
         // — Writes ——————————————————————————————————————————————————————
         Cmd::Stage { worktree, paths } => write_then_refresh(worktree, Action::Stage, |dir| {
@@ -591,6 +609,38 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
             repo::create_branch(dir, &name, from.as_deref()).map(|_| String::new())
         }),
         Cmd::DeleteBranch { main, name, force } => delete_branch(main, name, force),
+        Cmd::CreateTag {
+            worktree,
+            name,
+            message,
+            at,
+            push,
+        } => tag_written(
+            worktree,
+            if push { Action::PushTag } else { Action::Tag },
+            |dir| {
+                tags::create(dir, &name, message.as_deref(), at.as_deref())?;
+                // Created then pushed, in that order and in one command: two
+                // commands would go into two queues, and nothing orders those.
+                if push {
+                    tags::push(dir, &name)
+                } else {
+                    Ok(String::new())
+                }
+            },
+        ),
+        Cmd::DeleteTag { worktree, name } => tag_written(worktree, Action::Tag, |dir| {
+            tags::delete(dir, &name).map(|_| String::new())
+        }),
+        Cmd::DeleteRemoteTag { worktree, name } => tag_written(worktree, Action::PushTag, |dir| {
+            tags::delete_remote(dir, &name)
+        }),
+        Cmd::PushTag { worktree, name } => {
+            tag_written(worktree, Action::PushTag, |dir| match &name {
+                Some(name) => tags::push(dir, name),
+                None => tags::push_all(dir),
+            })
+        }
         Cmd::Merge {
             worktree,
             from,
@@ -1133,6 +1183,43 @@ fn write_then_refresh(
     }
 }
 
+/// Every tag write is followed by a re-read of the tag list, for the reason
+/// `write_then_refresh` re-reads the status: the panel must not have to know
+/// which command touches what.
+///
+/// The status is **not** re-read: a tag changes no file, and a `git status` per
+/// tag pushed would be a read nobody asked for.
+fn tag_written(
+    worktree: PathBuf,
+    action: Action,
+    op: impl FnOnce(&Path) -> Result<String>,
+) -> Vec<Evt> {
+    match op(&worktree) {
+        Ok(output) => {
+            let main = main_of(&worktree);
+            let mut evts = vec![done(Some(worktree.clone()), action, output)];
+            if let Ok(tags) = tags::list(&worktree) {
+                evts.push(Evt::Tags { main, tags });
+            }
+            evts
+        }
+        Err(e) => vec![fail(Some(worktree), action, e)],
+    }
+}
+
+/// The main repository a checkout belongs to, which is what keys the tag list.
+///
+/// Tags live in the shared `.git`: they are the same seen from every worktree,
+/// and filing them under the checkout they were read from would make one list
+/// per worktree of the same refs. A `rev-parse` costs a fork, and a tag write is
+/// not a thing one does sixty times a second; the checkout itself is the fallback
+/// when discovery fails, so the event is never lost.
+fn main_of(worktree: &Path) -> PathBuf {
+    repo::Repo::discover(worktree)
+        .map(|r| r.main)
+        .unwrap_or_else(|_| worktree.to_path_buf())
+}
+
 fn worktree_changed(r: &repo::Repo, output: String) -> Vec<Evt> {
     let mut evts = vec![done(None, Action::Worktree, output)];
     if let Ok(worktrees) = r.worktrees() {
@@ -1243,6 +1330,51 @@ mod tests {
             queue_of(&Cmd::Push {
                 worktree: worktree(),
                 force_with_lease: false,
+            }),
+            Queue::Network
+        );
+    }
+
+    /// A tag creation is local and instant; pushing one is a round trip. The
+    /// two go into two different queues, and that is exactly why a creation
+    /// that also pushes is **one** command: nothing orders two queues, and the
+    /// push would leave before the tag existed.
+    #[test]
+    fn a_tag_goes_where_its_cost_is() {
+        let local = Cmd::CreateTag {
+            worktree: worktree(),
+            name: "v1.0".into(),
+            message: None,
+            at: None,
+            push: false,
+        };
+        assert_eq!(queue_of(&local), Queue::Reads);
+        let published = Cmd::CreateTag {
+            worktree: worktree(),
+            name: "v1.0".into(),
+            message: None,
+            at: None,
+            push: true,
+        };
+        assert_eq!(queue_of(&published), Queue::Network);
+        assert_eq!(queue_of(&Cmd::LoadTags { main: worktree() }), Queue::Reads);
+        assert_eq!(
+            queue_of(&Cmd::LoadRemoteTags {
+                worktree: worktree()
+            }),
+            Queue::Network
+        );
+        assert_eq!(
+            queue_of(&Cmd::DeleteTag {
+                worktree: worktree(),
+                name: "v1.0".into(),
+            }),
+            Queue::Reads
+        );
+        assert_eq!(
+            queue_of(&Cmd::DeleteRemoteTag {
+                worktree: worktree(),
+                name: "v1.0".into(),
             }),
             Queue::Network
         );

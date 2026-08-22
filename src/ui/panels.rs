@@ -275,6 +275,7 @@ panels! {
     ChangesPanel => ("ClaudhubChanges", "range-working", render_changes, Changes),
     BranchPanel => ("ClaudhubBranch", "range-branch", render_branch_review, Branch),
     NotesPanel => ("ClaudhubNotes", "panel-notes", render_notes, Notes),
+    TagsPanel => ("ClaudhubTags", "panel-tags", render_tags, Tags),
     FilesPanel => ("ClaudhubFiles", "panel-files", render_files, Files),
     DbPanel => ("ClaudhubDb", "panel-databases", render_db, Db),
     SqlHistoryPanel => ("ClaudhubSqlHistory", "panel-sql-history", render_sql_history, SqlHistory),

@@ -49,7 +49,7 @@ const REVIEW_LIST_WIDTH: gpui::Pixels = px(420.);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Workspace {
     #[default]
-    Review,
+    Git,
     Files,
     Db,
     Sentry,
@@ -73,12 +73,26 @@ impl Workspace {
     }
 
     pub const ALL: [Workspace; 5] = [
-        Workspace::Review,
+        Workspace::Git,
         Workspace::Files,
         Workspace::Db,
         Workspace::Sentry,
         Workspace::Settings,
     ];
+
+    /// The screens the bar offers, which is every one that is **work**.
+    ///
+    /// The settings are not among them, and it is the same reasoning that put
+    /// them last when they were: one does not go there to work, one goes there
+    /// to change how the rest behaves. They have their own gear, at the far
+    /// right of the title bar, where an application's settings are — see
+    /// `topbar::render_topbar`.
+    pub fn working() -> Vec<Workspace> {
+        Self::ALL
+            .into_iter()
+            .filter(|w| *w != Workspace::Settings)
+            .collect()
+    }
 
     /// The name this screen's layout is saved under.
     ///
@@ -86,7 +100,10 @@ impl Workspace {
     /// middle would otherwise read back the neighbour's layout.
     pub fn key(self) -> &'static str {
         match self {
-            Self::Review => "review",
+            // "review" and not "git": the key is what a saved layout is read
+            // back by, and renaming the screen must not lose where its panels
+            // were. That is the whole point of it being a name of its own.
+            Self::Git => "review",
             Self::Files => "files",
             Self::Db => "db",
             Self::Sentry => "sentry",
@@ -101,7 +118,7 @@ impl Workspace {
     /// The i18n key of the name, the one in the tooltip.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Review => "workspace-review",
+            Self::Git => "workspace-git",
             Self::Files => "workspace-files",
             Self::Db => "workspace-db",
             Self::Sentry => "workspace-sentry",
@@ -113,7 +130,7 @@ impl Workspace {
     /// called: it is what you aim at, the name only comes in the tooltip.
     pub fn icon(self) -> &'static str {
         match self {
-            Self::Review => "file-diff",
+            Self::Git => "file-diff",
             Self::Files => "file-code",
             Self::Db => "database",
             Self::Sentry => "triangle-alert",
@@ -138,11 +155,12 @@ impl Workspace {
     pub fn views(self) -> &'static [(&'static str, &'static str)] {
         use panels::*;
         match self {
-            Self::Review => &[
+            Self::Git => &[
                 (NotesPanel::NAME, "panel-notes"),
                 (ChangesPanel::NAME, "range-working"),
                 (BranchPanel::NAME, "range-branch"),
                 (HistoryPanel::NAME, "panel-history"),
+                (TagsPanel::NAME, "panel-tags"),
                 (DiffPanel::NAME, "panel-diff"),
                 (TerminalPanel::NAME, "panel-terminal"),
             ],
@@ -260,13 +278,17 @@ pub fn install_default_layout(
         // what is left to do, what one had to say — and that is read *while*
         // choosing a file, not instead of. A tab hid it behind a click, which
         // is exactly how a to-do list stops being kept.
-        Workspace::Review => {
+        Workspace::Git => {
             let list = DockLayout::v_split()
                 .child(
                     with_plugins!(DockLayout::tabs()
                         .panel_view(panel!(ChangesPanel), cx)
                         .panel_view(panel!(BranchPanel), cx)
                         .panel_view(panel!(HistoryPanel), cx)
+                        // Beside the history, and that is where it belongs: a
+                        // tag names a commit, and the gesture one makes after
+                        // finding the commit worth marking is right there.
+                        .panel_view(panel!(TagsPanel), cx)
                         // Hidden while there is nothing to resolve: a permanent
                         // tab would shift the others aside to serve one time in
                         // a hundred.
@@ -346,13 +368,21 @@ impl ClaudhubApp {
     /// it.
     pub(super) fn render_workspace_nav(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.workspace;
+        let shown = Workspace::working();
         ButtonGroup::new("workspace-nav")
             .compact()
-            .children(Workspace::ALL.map(|workspace| {
+            .children(shown.iter().map(|workspace| {
+                let workspace = *workspace;
                 let here = workspace == current;
                 Button::new(("workspace", workspace as usize))
                     .icon(icon(workspace.icon()))
-                    .tooltip(tr!(workspace.label()))
+                    // **The name is written, not hovered.** The icon says what
+                    // the screen holds and is what one aims at, but six icons in
+                    // a row is a rebus one learns rather than reads, and a
+                    // tooltip is a name one has to ask for. The bar has the
+                    // width: it sits at the end of a status line that is empty
+                    // most of the time.
+                    .label(tr!(workspace.label()))
                     // **Solid against outline**, and not the "selected" state of
                     // a whole outlined group: that is only a slightly lighter
                     // background, invisible on half the themes. It is the same
@@ -367,11 +397,14 @@ impl ClaudhubApp {
                         }
                     })
             }))
-            .on_click(cx.listener(|this, selected: &Vec<usize>, window, cx| {
+            .on_click(cx.listener(move |this, selected: &Vec<usize>, window, cx| {
                 let Some(index) = selected.first() else {
                     return;
                 };
-                let Some(workspace) = Workspace::ALL.get(*index).copied() else {
+                // The index is into what the group **shows**, which is not
+                // `ALL`: the settings are not in it, and reading `ALL` here
+                // would open the screen next door.
+                let Some(workspace) = shown.get(*index).copied() else {
                     return;
                 };
                 this.enter_workspace(workspace, window, cx);

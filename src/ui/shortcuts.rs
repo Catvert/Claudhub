@@ -80,6 +80,9 @@ actions!(
         ExplorerHome,
         ExplorerEnd,
         ExplorerOpen,
+        GoToDefinition,
+        JumpBack,
+        JumpForward,
         DbUp,
         DbDown,
         DbLeft,
@@ -237,6 +240,39 @@ const EXPLORER_PREDICATE: &str = "ClaudhubExplorer";
 /// The same in vim mode. `ClaudhubVim` has to be declared **by the tree itself**
 /// and not by the root: see `VIM_PREDICATE`.
 const VIM_EXPLORER_PREDICATE: &str = "ClaudhubExplorer && ClaudhubVim";
+
+/// The context the built-in editor declares.
+///
+/// It exists for three keys that are navigation and not text — following a
+/// definition, and walking the trail back and forth — and it is what keeps them
+/// off the commit message field and the search boxes, which are `Input` too.
+/// They are declared here rather than in `ui::vim` so that they answer whether
+/// vim mode is on or not: a binding runs **before** the capture-phase listener
+/// vim keys go through, so there is one path and not two.
+const EDITOR_PREDICATE: &str = "ClaudhubEditor";
+
+/// The editor **in vim mode**, which is a second name and not `ClaudhubEditor
+/// && ClaudhubVim`: `depth_of` weighs each identifier against a single level of
+/// the context stack, and the two would never meet — the same trap as
+/// `VIM_PREDICATE`. It exists so that one window binding can step aside for it.
+const EDITOR_VIM: &str = "ClaudhubEditorVim";
+
+pub fn editor_context(vim: bool) -> KeyContext {
+    let mut context = KeyContext::default();
+    context.add("ClaudhubEditor");
+    if vim {
+        context.add(EDITOR_VIM);
+    }
+    context
+}
+
+/// `Ctrl+R` everywhere **except** an editor with vim keys on.
+///
+/// There it is redo, and redo has nowhere else to go: `Ctrl+Y`, which the
+/// editor binds to it, is vim's scroll-up-one-line. Refresh keeps `F5`, which
+/// is the key one reaches for anyway.
+const REFRESH_PREDICATE: &str = "Claudhub && !Dialog && !PopupMenu && !Popover \
+     && !ClaudhubTerminal && !ClaudhubEditorVim";
 
 /// The context the databases tree declares.
 ///
@@ -495,7 +531,7 @@ table!(STANDARD, standard_bindings, false, [
     // ── The window ──────────────────────────────────────────────────────────
     Window "f1" => ShowShortcuts, PREDICATE, "shortcut-help";
     Window "f5" => Refresh, PREDICATE, "shortcut-refresh";
-    Window "secondary-r" => Refresh, WINDOW_PREDICATE, "shortcut-refresh";
+    Window "secondary-r" => Refresh, REFRESH_PREDICATE, "shortcut-refresh";
     // Every editor's convention, including on Linux.
     Window "secondary-," => OpenSettings, PREDICATE, "shortcut-settings";
     Window "secondary-b" => ToggleSidebar, WINDOW_PREDICATE, "shortcut-sidebar";
@@ -524,6 +560,7 @@ table!(STANDARD, standard_bindings, false, [
     Window "alt-3" => GoToWorkspace { index: 2 }, PREDICATE, "shortcut-workspace";
     Window "alt-4" => GoToWorkspace { index: 3 }, PREDICATE, "shortcut-workspace";
     Window "alt-5" => GoToWorkspace { index: 4 }, PREDICATE, "shortcut-workspace";
+    Window "alt-6" => GoToWorkspace { index: 5 }, PREDICATE, "shortcut-workspace";
 
     // ── The worktrees ───────────────────────────────────────────────────────
     // Nine bindings and a single help line: `merge` recognises the run of digits
@@ -581,6 +618,16 @@ table!(STANDARD, standard_bindings, false, [
     // and Ctrl+W deletes a word.
     Review "secondary-s" => SaveFile, WINDOW_PREDICATE, "shortcut-save";
     Review "secondary-w" => CloseEditor, WINDOW_PREDICATE, "shortcut-close-editor";
+
+    // ── The editor ──────────────────────────────────────────────────────────
+    // `F12` and not a letter with the system key: the editor is an `Input`, and
+    // every single letter there is a character somebody is typing. `Ctrl+O` and
+    // `Ctrl+I` are vim's, and they are bound here rather than in the modal
+    // machine so that they work with the mode off as well — the buttons on the
+    // bar are the same two gestures for whoever does not know them.
+    Review "f12" => GoToDefinition, EDITOR_PREDICATE, "shortcut-goto-definition";
+    Review "ctrl-o" => JumpBack, EDITOR_PREDICATE, "shortcut-jump-back";
+    Review "ctrl-i" => JumpForward, EDITOR_PREDICATE, "shortcut-jump-forward";
 
     // ── The explorer   ───────────────────────────────────────────────────────
     Explorer "up" => ExplorerUp, EXPLORER_PREDICATE, "shortcut-explorer-up";
@@ -1256,6 +1303,33 @@ pub fn explorer_open(
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.activate_project_cursor(cx);
+}
+
+pub fn goto_definition(
+    this: &mut ClaudhubApp,
+    _: &GoToDefinition,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.goto_definition(window, cx);
+}
+
+pub fn jump_back(
+    this: &mut ClaudhubApp,
+    _: &JumpBack,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.jump_back(window, cx);
+}
+
+pub fn jump_forward(
+    this: &mut ClaudhubApp,
+    _: &JumpForward,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.jump_forward(window, cx);
 }
 
 pub fn db_up(

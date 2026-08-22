@@ -213,13 +213,21 @@ impl ClaudhubApp {
         );
         let entity = cx.entity();
         let handle = self.sql_history_scroll.clone();
+        // Read **here** and not in the row closure: that closure runs while the
+        // application is being rendered, that is, in the middle of its own
+        // update — reading the root entity there is the panic gpui refuses
+        // (`cannot read … while it is already being updated`).
+        let shown = self.query.sent.clone();
         let build = {
             let rows = rows.clone();
             let entries = entries.clone();
             move |index: usize, cx: &mut App| match rows.get(index) {
                 Some(Row::Day(day)) => render_day(day, &look),
                 Some(Row::Entry(entry)) => match entries.get(*entry) {
-                    Some(entry) => render_entry(index, entry, &look, &entity, cx),
+                    Some(entry) => {
+                        let current = shown.as_deref() == Some(entry.sql.as_str());
+                        render_entry(index, entry, current, &look, &entity, cx)
+                    }
                     None => div().into_any_element(),
                 },
                 None => div().into_any_element(),
@@ -391,17 +399,14 @@ fn render_day(day: &Day, look: &Look) -> gpui::AnyElement {
 fn render_entry(
     index: usize,
     entry: &Entry,
+    // The query the console is showing, decided by the caller: reading the
+    // application from here would read it while it is being updated.
+    current: bool,
     look: &Look,
     entity: &Entity<ClaudhubApp>,
     cx: &App,
 ) -> gpui::AnyElement {
     let mono = cx.theme().mono_font_family.clone();
-    let current = entity
-        .read(cx)
-        .query
-        .sent
-        .as_deref()
-        .is_some_and(|sent| sent == entry.sql);
     let (open, menu) = (entity.clone(), entity.clone());
     let (for_open, for_menu) = (entry.clone(), entry.clone());
 

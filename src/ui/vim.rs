@@ -97,6 +97,39 @@ pub enum Command {
     Save,
     Close,
     SaveAndClose,
+    /// `gd`. It is a command and not a motion: where it lands is not something
+    /// the text can be read for — a language server has to be asked, and it may
+    /// answer with another file.
+    GoToDefinition,
+    /// `zz`, `zt`, `zb`: where the current line goes in the viewport. The text
+    /// does not move, so there is nothing to apply — only a view to scroll.
+    Reveal(Reveal),
+    /// `Ctrl+E` and `Ctrl+Y`: that many lines of view, down when positive.
+    Scroll(isize),
+    /// The `z` commands that fold. What folds is the grammar's business, not
+    /// ours: these say open, close or toggle, and the editor knows where.
+    Fold(Fold),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Reveal {
+    Centre,
+    Top,
+    Bottom,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fold {
+    /// `zc`, `zo`, `za`: the fold the cursor is in.
+    Close,
+    Open,
+    Toggle,
+    /// `zM`, `zR`: every fold in the file.
+    CloseAll,
+    OpenAll,
+    /// `zm`, `zr`: one level of nesting more, or less.
+    More,
+    Less,
 }
 
 /// The answer to one keystroke.
@@ -244,10 +277,15 @@ impl Vim {
             "u" => self.motion_to(text, move_lines(text, self.head, -(half as isize), None)),
             "f" => self.motion_to(text, move_lines(text, self.head, rows as isize, None)),
             "b" => self.motion_to(text, move_lines(text, self.head, -(rows as isize), None)),
-            // `Ctrl+R` never reaches us — the window binds it to a refresh — so
-            // redo is also on the editor's own `Ctrl+Y`. Kept all the same for
-            // the day that binding moves.
+            // The window's `Ctrl+R` refresh steps aside for the editor in vim
+            // mode: here the key is redo, and there is nowhere else for redo to
+            // go — `Ctrl+Y`, which the editor binds to it, is vim's scroll.
             "r" => Response::Command(Command::Redo),
+            // One line of the view, the caret staying where it is unless the
+            // page walks out from under it. The editor knows the height; all
+            // that is decided here is the direction.
+            "e" => Response::Command(Command::Scroll(1)),
+            "y" => Response::Command(Command::Scroll(-1)),
             _ => Response::Ignored,
         }
     }
@@ -498,6 +536,39 @@ impl Vim {
             }
             let replacement: String = std::iter::repeat_n(rest[1], n).collect();
             return Response::Apply(self.edit(text, self.head..end, replacement, self.head));
+        }
+        // `z` is a prefix in both modes: none of what it opens touches the
+        // text, so there is no reason for visual mode to answer differently.
+        if ch == 'z' {
+            if rest.len() < 2 {
+                return Response::Consumed;
+            }
+            self.pending.clear();
+            return match rest[1] {
+                'z' => Response::Command(Command::Reveal(Reveal::Centre)),
+                't' => Response::Command(Command::Reveal(Reveal::Top)),
+                'b' => Response::Command(Command::Reveal(Reveal::Bottom)),
+                'c' => Response::Command(Command::Fold(Fold::Close)),
+                'o' => Response::Command(Command::Fold(Fold::Open)),
+                'a' => Response::Command(Command::Fold(Fold::Toggle)),
+                'M' => Response::Command(Command::Fold(Fold::CloseAll)),
+                'R' => Response::Command(Command::Fold(Fold::OpenAll)),
+                'm' => Response::Command(Command::Fold(Fold::More)),
+                'r' => Response::Command(Command::Fold(Fold::Less)),
+                _ => Response::Consumed,
+            };
+        }
+        // `g` is a prefix, and the motion parser has already taken the only
+        // motion it opens (`gg`): what reaches here is a command.
+        if ch == 'g' && self.mode == Mode::Normal {
+            if rest.len() < 2 {
+                return Response::Consumed;
+            }
+            self.pending.clear();
+            return match rest[1] {
+                'd' => Response::Command(Command::GoToDefinition),
+                _ => Response::Consumed,
+            };
         }
         self.pending.clear();
         if self.mode != Mode::Normal {
@@ -1844,6 +1915,94 @@ mod tests {
             vim.press(&enter(), text, 0, 10),
             Response::Apply(_)
         ));
+    }
+
+    /// `gg` is a motion and `gd` a command: the same first key, and the parser
+    /// must not settle on either before the second one arrives.
+    #[test]
+    fn the_g_prefix_tells_a_motion_from_a_jump() {
+        let text = "one\ntwo\n";
+        let mut vim = Vim::default();
+        assert_eq!(vim.press(&key('g'), text, 4, 10), Response::Consumed);
+        assert_eq!(
+            vim.press(&key('d'), text, 4, 10),
+            Response::Command(Command::GoToDefinition)
+        );
+        // And the motion still works, `gd` having cleared what was pending.
+        let mut vim = Vim::default();
+        vim.press(&key('g'), text, 4, 10);
+        let Response::Apply(change) = vim.press(&key('g'), text, 4, 10) else {
+            panic!("gg goes to the first line");
+        };
+        assert_eq!(change.head, 0);
+    }
+
+    /// `z` waits for its second key, and answers in both modes: none of what it
+    /// opens touches the text.
+    #[test]
+    fn the_z_prefix_scrolls_and_folds() {
+        let text = "one\ntwo\n";
+        let mut vim = Vim::default();
+        assert_eq!(vim.press(&key('z'), text, 0, 10), Response::Consumed);
+        assert_eq!(
+            vim.press(&key('z'), text, 0, 10),
+            Response::Command(Command::Reveal(Reveal::Centre))
+        );
+        for (ch, expected) in [
+            ('t', Command::Reveal(Reveal::Top)),
+            ('b', Command::Reveal(Reveal::Bottom)),
+            ('c', Command::Fold(Fold::Close)),
+            ('o', Command::Fold(Fold::Open)),
+            ('a', Command::Fold(Fold::Toggle)),
+            ('M', Command::Fold(Fold::CloseAll)),
+            ('R', Command::Fold(Fold::OpenAll)),
+            ('m', Command::Fold(Fold::More)),
+            ('r', Command::Fold(Fold::Less)),
+        ] {
+            let mut vim = Vim::default();
+            vim.press(&key('z'), text, 0, 10);
+            assert_eq!(
+                vim.press(&key(ch), text, 0, 10),
+                Response::Command(expected),
+                "z{ch}"
+            );
+        }
+        // Visual mode answers the same, and `z` on its own leaves no pending
+        // keys behind for the next command to trip over.
+        let mut vim = Vim::default();
+        vim.press(&key('v'), text, 0, 10);
+        vim.press(&key('z'), text, 0, 10);
+        assert_eq!(
+            vim.press(&key('z'), text, 0, 10),
+            Response::Command(Command::Reveal(Reveal::Centre))
+        );
+        assert_eq!(vim.pending(), "");
+    }
+
+    /// `Ctrl+E` and `Ctrl+Y` move the page, not the caret — and `Ctrl+Y` is
+    /// therefore not the editor's redo any more, which is why `Ctrl+R` has to
+    /// reach us.
+    #[test]
+    fn the_control_keys_scroll_a_line_at_a_time() {
+        let text = "one\ntwo\nthree\n";
+        let ctrl = |name: &str| Key {
+            ch: None,
+            name: name.into(),
+            ctrl: true,
+        };
+        let mut vim = Vim::default();
+        assert_eq!(
+            vim.press(&ctrl("e"), text, 0, 10),
+            Response::Command(Command::Scroll(1))
+        );
+        assert_eq!(
+            vim.press(&ctrl("y"), text, 0, 10),
+            Response::Command(Command::Scroll(-1))
+        );
+        assert_eq!(
+            vim.press(&ctrl("r"), text, 0, 10),
+            Response::Command(Command::Redo)
+        );
     }
 
     #[test]

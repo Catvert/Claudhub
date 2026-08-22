@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use super::{git, git_ok, git_opt, split_nul};
+use super::{git, git_ok, git_opt, git_reporting, split_nul};
 
 /// A repository as Claudhub sees it: the main repository and its linked
 /// worktrees.
@@ -244,14 +244,16 @@ pub fn fetch(dir: &Path, prune: bool) -> Result<String> {
     if prune {
         args.push("--prune");
     }
-    git(dir, &args)
+    // `git_reporting`: a fetch says what it brought back on stderr, and its
+    // stdout is empty.
+    git_reporting(dir, &args)
 }
 
 /// `pull --ff-only`: an automatic merge triggered by a click is the best way to
 /// end up with a conflict nobody asked for. On divergence, git refuses and the
 /// user chooses for themselves.
 pub fn pull(dir: &Path) -> Result<String> {
-    git(dir, &["pull", "--ff-only"])
+    git_reporting(dir, &["pull", "--ff-only"])
 }
 
 /// Pushes the current branch. `--set-upstream` covers the first push of a
@@ -266,7 +268,7 @@ pub fn push(dir: &Path, force_with_lease: bool) -> Result<String> {
         // behind a button.
         args.push("--force-with-lease".into());
     }
-    git(dir, &args)
+    git_reporting(dir, &args)
 }
 
 pub fn checkout(dir: &Path, branch: &str) -> Result<()> {

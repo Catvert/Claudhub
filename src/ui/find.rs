@@ -42,6 +42,9 @@ pub enum Pane {
     Changes,
     Branch,
     History,
+    /// The repository's tags. It filters: the list's order is ours — by date of
+    /// tag — and nothing in it links one row to the next.
+    Tags,
     Notes,
     Sentry,
     Conflicts,

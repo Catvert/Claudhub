@@ -851,6 +851,7 @@ fn render_dir(
                 Checkbox::new(("stage-dir", index))
                     .checked(staged)
                     .on_click(move |_, _window, cx| {
+                        cx.stop_propagation();
                         entity.update(cx, |this, cx| {
                             this.set_staged(worktree.clone(), paths.clone(), !staged, cx)
                         });
@@ -999,6 +1000,7 @@ fn render_file(
                 (entity.clone(), worktree.to_path_buf(), row.path.clone());
             el.child(Checkbox::new(("stage", index)).checked(staged).on_click(
                 move |_, _window, cx| {
+                    cx.stop_propagation();
                     entity.update(cx, |this, cx| {
                         this.set_staged(worktree.clone(), vec![path.clone()], !staged, cx)
                     });
@@ -1087,6 +1089,7 @@ fn render_file(
                         tr!("action-discard")
                     })
                     .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
                         entity.update(cx, |this, cx| {
                             this.confirm_removal(
                                 worktree.clone(),
@@ -1150,6 +1153,7 @@ fn render_reviewed(
             tr!("action-review")
         })
         .on_click(move |_, _window, cx| {
+            cx.stop_propagation();
             entity.update(cx, |this, cx| {
                 this.set_reviewed(
                     worktree.clone(),

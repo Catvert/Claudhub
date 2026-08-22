@@ -35,7 +35,7 @@ use gpui_component::{
     h_flex,
     input::{Editor, EditorState},
     menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
-    v_flex, ActiveTheme, Sizable, WindowExt,
+    v_flex, ActiveTheme, Disableable, Sizable, WindowExt,
 };
 
 use crate::files;
@@ -246,6 +246,67 @@ impl Explorer {
 /// The key of the editor's wheel smoothing, as `ui::scroll` keys the others.
 const EDITOR_SCROLL: &str = "editor-scroll";
 
+/// Where a caret must come to rest.
+///
+/// Two shapes because the two callers hold two different things: a step through
+/// the trail knows a byte offset — it is what the editor handed out — and a
+/// language server answers in lines and UTF-16 columns. Converting the second
+/// needs the text, which for another file does not exist yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Landing {
+    Offset(usize),
+    Position { line: u32, character: u32 },
+}
+
+/// A file being read, and what must happen to the caret when it arrives.
+/// Where a line should sit once the view has moved.
+#[derive(Clone, Copy)]
+enum Place {
+    /// The least scrolling that brings it into view, and none at all when it is
+    /// already there. What a motion of one line wants.
+    Nearest,
+    /// What `zz`, `zt` and `zb` name — and where a jump lands, which is
+    /// `Centre`: arriving at a symbol on the last line of the panel shows the
+    /// code that leads to it and none of what follows, and reading a definition
+    /// is reading what is around it.
+    Asked(crate::ui::vim::Reveal),
+}
+
+/// The line a byte offset falls on, counted from zero.
+fn line_at(text: &str, offset: usize) -> usize {
+    text[..offset.min(text.len())]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+}
+
+/// A landing resolved against the text it lands in.
+///
+/// The offset is clamped: a trail entry is a byte offset in a file that may
+/// have been rewritten while one was away, and a server's position may name a
+/// line the document no longer has.
+fn offset_of(text: &gpui_component::input::Rope, landing: &Landing) -> usize {
+    match landing {
+        Landing::Offset(offset) => (*offset).min(text.len()),
+        Landing::Position { line, character } => {
+            use gpui_component::input::RopeExt;
+            text.position_to_offset(&lsp_types::Position::new(*line, *character))
+        }
+    }
+}
+
+pub struct Pending {
+    pub worktree: PathBuf,
+    pub path: PathBuf,
+    /// Where the caret goes, or `None` to leave it where the editor puts it:
+    /// opening a file from the explorer is a jump to a file, not to a place.
+    pub landing: Option<Landing>,
+    /// Where the jump came from, when it is one. A step through the trail
+    /// leaves this empty: recording it would put back the place one has just
+    /// stepped away from, and the trail would never end.
+    pub from: Option<crate::ui::jumps::Spot>,
+}
+
 pub struct Editing {
     pub worktree: PathBuf,
     pub path: PathBuf,
@@ -278,6 +339,21 @@ pub struct Editing {
     /// which is a few percent of lightness away from the background — a block
     /// one has to look for is a block one does not see.
     pub cursor: gpui_component::input::TextDecorationCollection,
+    /// A caret waiting for the editor to be measured before it can be revealed.
+    ///
+    /// A file opened by a jump installs a brand-new `EditorState`, which has
+    /// never been laid out: it has neither a visible row range nor a line
+    /// height, so scrolling to the caret is a division by nothing and returns
+    /// silently. The caret was in the right place and the view stayed at the
+    /// top of the file, which reads as "the jump missed". The reveal is
+    /// therefore kept until a frame can measure — the same answer as the diff's
+    /// first width, and bounded for the same reason.
+    pub reveal_at: Option<usize>,
+    pub reveal_tries: u8,
+    /// Where `zm` and `zr` have got to: the nesting level below which folds are
+    /// closed. `None` is everything open, which is one past the deepest — the
+    /// state `zR` puts the file back into, and the one it opens in.
+    pub fold_level: Option<usize>,
     /// The mode, caret and text length the cursor was last painted for.
     ///
     /// The block is recomputed at a frame only when one of the three has moved:
@@ -601,11 +677,157 @@ impl ClaudhubApp {
 
     /// Opens a file in the built-in editor.
     pub(super) fn open_in_editor(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.open_at(path, None, cx);
+    }
+
+    /// The same, with a place in the file to come to rest at.
+    ///
+    /// This is the one funnel every opening goes through — the explorer, a diff
+    /// line, a Sentry frame, a definition — and therefore the one place the
+    /// trail is written. Restoring the previous session does not come here: it
+    /// asks for its file directly, which is right, since coming back to where
+    /// one was is not a jump one should be able to undo.
+    pub(super) fn open_at(
+        &mut self,
+        path: PathBuf,
+        landing: Option<Landing>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(worktree) = self.active.clone() else {
             return;
         };
+        // Reopening the file already open is not a jump: it would put the same
+        // place on the trail twice and make one step back do nothing visible.
+        let from = self.here(cx).filter(|spot| spot.path != path);
+        self.landing = Some(Pending {
+            worktree: worktree.clone(),
+            path: path.clone(),
+            landing,
+            from,
+        });
         self.git.send(Cmd::ReadFile { worktree, path });
         cx.notify();
+    }
+
+    /// Where the caret stands, for the trail to remember.
+    pub(super) fn here(&self, cx: &App) -> Option<crate::ui::jumps::Spot> {
+        let editing = self.editing()?;
+        let offset = editing.input.read(cx).selected_range().start;
+        Some(crate::ui::jumps::Spot::new(editing.path.clone(), offset))
+    }
+
+    /// Goes to a place and writes the step down.
+    pub(super) fn jump_to(
+        &mut self,
+        path: PathBuf,
+        landing: Landing,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let same = self.editing().is_some_and(|editing| editing.path == path);
+        if !same {
+            self.open_at(path, Some(landing), cx);
+            return;
+        }
+        // Same file: there is nothing to read, so the trail is written here
+        // rather than on a content that will not arrive.
+        let Some(from) = self.here(cx) else {
+            return;
+        };
+        let Some(offset) = self.land(&landing, window, cx) else {
+            return;
+        };
+        if offset != from.offset {
+            self.jumps
+                .entry(worktree)
+                .or_default()
+                .jump(from, crate::ui::jumps::Spot::new(path, offset));
+        }
+        cx.notify();
+    }
+
+    pub(super) fn jump_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.step(true, window, cx);
+    }
+
+    pub(super) fn jump_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.step(false, window, cx);
+    }
+
+    fn step(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let Some(here) = self.here(cx) else {
+            return;
+        };
+        let Some(trail) = self.jumps.get_mut(&worktree) else {
+            return;
+        };
+        let Some(spot) = (if back {
+            trail.back(here)
+        } else {
+            trail.forward(here)
+        }) else {
+            return;
+        };
+        if self
+            .editing()
+            .is_some_and(|editing| editing.path == spot.path)
+        {
+            self.land(&Landing::Offset(spot.offset), window, cx);
+        } else {
+            // No origin: the step is already written in the trail, and putting
+            // it back would be a place one could go back from for ever.
+            self.landing = Some(Pending {
+                worktree: worktree.clone(),
+                path: spot.path.clone(),
+                landing: Some(Landing::Offset(spot.offset)),
+                from: None,
+            });
+            self.git.send(Cmd::ReadFile {
+                worktree,
+                path: spot.path,
+            });
+        }
+        cx.notify();
+    }
+
+    /// Brings the caret to rest, and the view with it. Gives back the offset it
+    /// settled on, which is what the trail records.
+    ///
+    /// **And gives the editor the focus.** A jump is a keyboard gesture whose
+    /// next keystroke is another one — `Ctrl+O` to come straight back, a motion
+    /// to read around where one landed — and a caret in a field nobody is
+    /// typing into answers none of them. Crossing into another file builds a
+    /// new `EditorState`, which starts unfocused; `enter_workspace` only
+    /// focuses when the screen actually changes, so a jump made from the
+    /// editing screen focused nothing at all. Opening a file from the tree does
+    /// **not** come through here: browsing with the arrows must leave them to
+    /// the tree.
+    fn land(
+        &mut self,
+        landing: &Landing,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        let input = self.editing()?.input.clone();
+        let offset = offset_of(input.read(cx).text(), landing);
+        input.update(cx, |state, cx| {
+            state.set_selected_range(offset..offset, cx);
+        });
+        let centred = Place::Asked(crate::ui::vim::Reveal::Centre);
+        if !self.scroll_to_line(&input, offset, centred, cx) {
+            if let Some(editing) = self.editing_mut() {
+                editing.reveal_at = Some(offset);
+                editing.reveal_tries = 0;
+            }
+        }
+        gpui::Focusable::focus_handle(&input, cx).focus(window, cx);
+        Some(offset)
     }
 
     /// Receives a content and installs the editor.
@@ -673,6 +895,7 @@ impl ClaudhubApp {
                 state.create_decorations_collection(Vec::new(), cx),
             )
         });
+        let opened = (worktree.clone(), path.clone());
         self.editings.insert(
             worktree.clone(),
             Editing {
@@ -682,6 +905,9 @@ impl ClaudhubApp {
                 hash: content.hash,
                 dirty: false,
                 lsp_pending: false,
+                reveal_at: None,
+                reveal_tries: 0,
+                fold_level: None,
                 vim: crate::ui::vim::Vim::default(),
                 flash,
                 flash_timer: None,
@@ -692,6 +918,24 @@ impl ClaudhubApp {
         // Starts the server this file's language asks for, opens the document
         // and posts the providers — all of it a no-op when the button is off.
         self.lsp_sync_editor(window, cx);
+        // The caret the opening was asked for, and the step in the trail that
+        // goes with it. A pending that names another file is stale — one asked
+        // for a second file before the first arrived — and is dropped, not put
+        // back: what it pointed at is not what is on screen.
+        if let Some(pending) = self.landing.take() {
+            if (pending.worktree.as_path(), pending.path.as_path()) == (&*opened.0, &*opened.1) {
+                let offset = pending
+                    .landing
+                    .and_then(|landing| self.land(&landing, window, cx))
+                    .unwrap_or(0);
+                if let Some(from) = pending.from {
+                    self.jumps
+                        .entry(opened.0.clone())
+                        .or_default()
+                        .jump(from, crate::ui::jumps::Spot::new(opened.1.clone(), offset));
+                }
+            }
+        }
         // A file that opens calls up the screen it is edited on. The gesture
         // comes from the explorer — so from that screen most of the time — but
         // also from a diff line, and answering it silently on the screen next
@@ -938,7 +1182,7 @@ impl ClaudhubApp {
                     }
                     state.set_selected_range(change.selection, cx);
                 });
-                self.reveal_vim_head(&input, change.head, cx);
+                self.scroll_to_line(&input, change.head, Place::Nearest, cx);
             }
             Response::Command(command) => match command {
                 // Undo and redo belong to the editor, which is the only one that
@@ -951,6 +1195,10 @@ impl ClaudhubApp {
                     self.save_file(cx);
                     self.close_editor(window, cx);
                 }
+                Command::GoToDefinition => self.goto_definition(window, cx),
+                Command::Reveal(at) => self.place_caret_line(&input, at, cx),
+                Command::Scroll(lines) => self.scroll_by_lines(&input, lines, cx),
+                Command::Fold(op) => self.fold(op, cx),
             },
         }
         cx.notify();
@@ -1058,39 +1306,160 @@ impl ClaudhubApp {
         }
     }
 
-    /// Scrolls the caret back into view when the editor will not do it itself.
+    /// `zz`, `zt`, `zb`: puts the caret's line where the eye wants it.
+    ///
+    /// Nothing here moves the caret — that is what tells these from `z.` and
+    /// `z-`, which also go to the first non-blank and are therefore two answers
+    /// in one, where `Response` carries a single one.
+    fn place_caret_line(
+        &mut self,
+        input: &Entity<EditorState>,
+        at: crate::ui::vim::Reveal,
+        cx: &mut Context<Self>,
+    ) {
+        let head = input.read(cx).selected_range().start;
+        self.scroll_to_line(input, head, Place::Asked(at), cx);
+    }
+
+    /// `Ctrl+E` and `Ctrl+Y`: the page moves, the caret stays.
+    ///
+    /// Vim drags the caret along only when the page walks out from under it,
+    /// and that part is left to the editor: `set_scroll_offset` is clamped to
+    /// the real range, and the caret is where it was — which is the whole point
+    /// of these two keys, reading ahead without losing one's place.
+    fn scroll_by_lines(
+        &mut self,
+        input: &Entity<EditorState>,
+        lines: isize,
+        cx: &mut Context<Self>,
+    ) {
+        input.update(cx, |state, cx| {
+            let Some(line_height) = state.line_height() else {
+                return;
+            };
+            let offset = state.scroll_offset();
+            let moved = offset.y - line_height * lines as f32;
+            state.set_scroll_offset(gpui::point(offset.x, moved.min(gpui::px(0.))), cx);
+        });
+    }
+
+    /// The `z` commands that fold.
+    ///
+    /// Where a fold begins and ends is the grammar's answer, never ours: the
+    /// editor holds the candidates, and all that is decided here is which of
+    /// them to close. `zc`, `zo` and `za` act on the **innermost** fold holding
+    /// the caret, which is the one being read.
+    fn fold(&mut self, op: crate::ui::vim::Fold, cx: &mut Context<Self>) {
+        use crate::ui::vim::Fold;
+        let Some(editing) = self.editing() else {
+            return;
+        };
+        let input = editing.input.clone();
+        let level = editing.fold_level;
+        let ranges: Vec<crate::ui::folds::Range> = input
+            .read(cx)
+            .fold_candidates()
+            .iter()
+            .map(|range| (range.start_line, range.end_line))
+            .collect();
+        if ranges.is_empty() {
+            return;
+        }
+        let caret = {
+            let state = input.read(cx);
+            line_at(&state.value(), state.selected_range().start)
+        };
+        let next = match op {
+            Fold::Close | Fold::Open | Fold::Toggle => {
+                let Some((start, _)) = ranges
+                    .iter()
+                    .filter(|(start, end)| *start <= caret && caret <= *end)
+                    .max_by_key(|(start, _)| *start)
+                    .copied()
+                else {
+                    return;
+                };
+                input.update(cx, |state, cx| {
+                    let folded = match op {
+                        Fold::Close => true,
+                        Fold::Open => false,
+                        _ => !state.is_folded_at(start),
+                    };
+                    state.set_folded(start, folded, cx);
+                });
+                return; // a single fold does not move the level
+            }
+            Fold::CloseAll => Some(0),
+            Fold::OpenAll => None,
+            // The ceiling is one past the deepest nesting: that is "everything
+            // open", and `zr` reaching it is `zR`.
+            Fold::More | Fold::Less => {
+                let ceiling = crate::ui::folds::max_depth(&ranges).unwrap_or(0) + 1;
+                let current = level.unwrap_or(ceiling);
+                let wanted = match op {
+                    Fold::More => current.saturating_sub(1),
+                    _ => current + 1,
+                };
+                (wanted <= ceiling.saturating_sub(1)).then_some(wanted)
+            }
+        };
+        input.update(cx, |state, cx| {
+            // Rebuilt from nothing each time rather than folded on top of what
+            // is there: `zr` opens a level, and reopening is not something the
+            // fold map does by adding.
+            state.unfold_all(cx);
+            if let Some(level) = next {
+                for start in crate::ui::folds::at_level(&ranges, level) {
+                    state.set_folded(start, true, cx);
+                }
+            }
+        });
+        if let Some(editing) = self.editing_mut() {
+            editing.fold_level = next;
+        }
+        cx.notify();
+    }
+
+    /// Scrolls a line into view, and says whether it could.
     ///
     /// `set_selected_range` scrolls to the **end** of what it is given, which is
     /// where the caret is in normal mode but the wrong end of a selection grown
     /// upwards: `V` then `k` would walk off the top of the panel without the
-    /// view ever following.
-    fn reveal_vim_head(
+    /// view ever following. A landing needs it for a plainer reason: it writes
+    /// an empty range, and the editor does not always take that for a move.
+    ///
+    /// It answers `false` when the editor has never been laid out and there is
+    /// nothing to divide by — see `Editing::reveal_at`.
+    fn scroll_to_line(
         &mut self,
         input: &Entity<EditorState>,
         head: usize,
+        place: Place,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
+        use crate::ui::vim::Reveal;
         input.update(cx, |state, cx| {
             let (Some(rows), Some(line_height)) = (state.visible_row_range(), state.line_height())
             else {
-                return;
+                return false;
             };
-            let row = state.value()[..head.min(state.value().len())]
-                .bytes()
-                .filter(|byte| *byte == b'\n')
-                .count();
-            if rows.contains(&row) {
-                return;
-            }
-            let first = if row < rows.start {
-                row
-            } else {
-                row.saturating_sub(rows.len().saturating_sub(1))
+            let row = line_at(&state.value(), head);
+            let span = rows.len().max(1);
+            let first = match place {
+                // A line already in view stays where it is: a motion that moves
+                // the caret one line must not move the page under the eye.
+                Place::Nearest if rows.contains(&row) => return true,
+                Place::Nearest if row < rows.start => row,
+                Place::Nearest => row.saturating_sub(span - 1),
+                Place::Asked(Reveal::Top) => row,
+                Place::Asked(Reveal::Centre) => row.saturating_sub(span / 2),
+                Place::Asked(Reveal::Bottom) => row.saturating_sub(span - 1),
             };
             // The input's scroll handle counts downwards as negative.
             let offset = state.scroll_offset();
             state.set_scroll_offset(gpui::point(offset.x, -(line_height * first as f32)), cx);
-        });
+            true
+        })
     }
 
     // — The panel  ——————————————————————————————————————————————
@@ -1453,6 +1822,42 @@ impl ClaudhubApp {
     ///
     /// It only appears when something serves this file. A button that can only
     /// answer "no server for a Markdown file" is worse than no button.
+    /// The two arrows of the trail.
+    ///
+    /// They are the same gesture as `Ctrl+O` and `Ctrl+I`, for whoever does not
+    /// have vim mode on — and the only thing on this bar that says the trail
+    /// exists at all. Both are always shown, greyed when there is nowhere to
+    /// go: an arrow that appears and disappears moves the four buttons beside
+    /// it every time one follows a definition.
+    fn render_jump_buttons(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let trail = self.active.as_ref().and_then(|w| self.jumps.get(w));
+        let (back, forward) = match trail {
+            Some(trail) => (trail.can_back(), trail.can_forward()),
+            None => (false, false),
+        };
+        Some(
+            h_flex()
+                .child(
+                    Button::new("editor-jump-back")
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("arrow-left"))
+                        .disabled(!back)
+                        .tooltip(tr!("editor-jump-back"))
+                        .on_click(cx.listener(|this, _, window, cx| this.jump_back(window, cx))),
+                )
+                .child(
+                    Button::new("editor-jump-forward")
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("arrow-right"))
+                        .disabled(!forward)
+                        .tooltip(tr!("editor-jump-forward"))
+                        .on_click(cx.listener(|this, _, window, cx| this.jump_forward(window, cx))),
+                ),
+        )
+    }
+
     fn render_lsp_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         use crate::ui::lsp::Status;
         let editing = self.editing()?;
@@ -1512,6 +1917,26 @@ impl ClaudhubApp {
         {
             input.update(cx, |state, cx| state.set_scroll_offset(next, cx));
         }
+        // The caret a jump left waiting for a measurement. The first frame of a
+        // freshly opened file has none; asking for another is what gets the
+        // view to the symbol instead of leaving it at the top of the file, and
+        // the count is what stops a panel shrunk to nothing from asking for
+        // ever.
+        if let Some(head) = self.editing().and_then(|editing| editing.reveal_at) {
+            let centred = Place::Asked(crate::ui::vim::Reveal::Centre);
+            if self.scroll_to_line(&input, head, centred, cx) {
+                if let Some(editing) = self.editing_mut() {
+                    editing.reveal_at = None;
+                }
+            } else if let Some(editing) = self.editing_mut() {
+                editing.reveal_tries += 1;
+                if editing.reveal_tries > 8 {
+                    editing.reveal_at = None;
+                } else {
+                    window.request_animation_frame();
+                }
+            }
+        }
         // The block cursor, and the caret that goes away under it. Both are
         // reread at every frame and not set once, like `TerminalView::sync_font`:
         // the mode changes under the keys and the setting under the form, the
@@ -1557,6 +1982,7 @@ impl ClaudhubApp {
                         .when(dirty, |el| {
                             el.child(div().size(px(7.)).rounded_full().bg(cx.theme().warning))
                         })
+                        .children(self.render_jump_buttons(cx))
                         .children(self.render_lsp_button(cx))
                         .child(
                             Button::new("editor-external")
@@ -1592,6 +2018,9 @@ impl ClaudhubApp {
                 .child(
                     div()
                         .id("editor-zoom")
+                        // Three keys of navigation live here and nowhere else:
+                        // see `shortcuts::EDITOR_PREDICATE`.
+                        .key_context(crate::ui::shortcuts::editor_context(vim))
                         .relative()
                         .flex_1()
                         .min_h_0()

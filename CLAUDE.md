@@ -126,6 +126,7 @@ src/
     branch.rs   `for-each-ref` → branches, amont, divergence
     diff.rs     `--numstat` et diff unifié → fichiers, hunks, lignes
     history.rs  `git log` → commits, et la disposition du graphe
+    tags.rs     les tags : lecture, création, publication, suppression
   agent.rs      les agents dans `/proc`, et le suivi qui dit lesquels
                 travaillent
   runtime/      les workers
@@ -156,6 +157,7 @@ src/
     workspace.rs   les cinq écrans, leur dock et la barre qui les choisit
     diff_view.rs   la vue de diff, virtualisée
     history_view.rs  l'historique et son graphe peint
+    tags.rs         le panneau des tags, et les quatre gestes sur un tag
     highlight.rs   coloration tree-sitter d'un diff
     blade.rs        les vues Blade : la surcouche du diff, et le coloriseur
                     de l'éditeur
@@ -189,6 +191,9 @@ src/
                     en Markdown, rendus et relus — aucune entrée-sortie ici
     lsp.rs          le pont vers le serveur de langage : les providers de
                     l'éditeur, les diagnostics, et le bouton « LSP »
+    jumps.rs        la piste de l'éditeur : d'où l'on vient, où l'on
+                    repart — sans rien de gpui dedans
+    folds.rs        quels replis un niveau de repli ferme — sans gpui dedans
     plugin_view.rs  peint l'arbre d'un plugin, et tient son script en vie
     find.rs         la recherche d'un panneau, et son routage
     motion.rs       le lissage de la molette, sans rien de gpui dedans
@@ -641,6 +646,17 @@ Deux endroits où cette simplification pourrait mentir, et ce qui l'en empêche 
 - **Les fichiers non suivis**, dont cocher ne veut pas dire la même chose que
   pour un fichier déjà suivi : ils forment leur propre groupe.
 
+**Un bouton d'une ligne consomme son clic.** La ligne entière est cliquable —
+elle ouvre le fichier et **reprend le focus**, pour que les flèches reviennent à
+la revue — et la case à cocher, la coche de relecture et la corbeille sont ses
+enfants. Sans `stop_propagation`, cocher ouvrait aussi le fichier, et surtout la
+corbeille était inutilisable : le dialogue de confirmation s'ouvrait, prenait le
+focus, puis le clic finissait de remonter et la ligne le lui reprenait — Échap
+et les deux boutons du pied de page envoient tous une action, et une action se
+distribue sur le nœud qui a le focus. Le dialogue restait ouvert et sourd. C'est
+la même règle que celle des lignes de menu, et le même piège : ce qui casse
+n'est pas le geste qu'on vient de faire mais celui d'après.
+
 La liste est une **arborescence de dossiers**, repliable, comme celle de
 PhpStorm — un bouton bascule vers la liste plate, et le choix est persistant.
 Trois points la font tenir :
@@ -906,7 +922,7 @@ Sept points qui ne se devinent pas :
   positionnel, ne sait pas relire un `Value`. Les `Cmd`/`Evt` portent donc des
   chaînes, la vue seule type ce qu'elle lit, et les deux bouts du fil n'ont pas
   à s'accorder sur une version du crate. `PROTOCOL_VERSION` était alors passé
-  à 4 ; les plugins l'ont depuis porté à 5.
+  à 4 ; il en est à 6 depuis.
 - **Une requête ne reste jamais en attente.** Un provider rend une `Task` ;
   celle-ci se résout par un canal à un coup (`async_channel::bounded(1)`) rangé
   sous un identifiant qui ne recule jamais — le motif de la console SQL. Rien
@@ -1005,6 +1021,18 @@ l'éditeur est synchronisé (rien dans la vue de diff, qui n'est pas un document
 et dont le texte n'est pas celui du fichier), pas de renommage, pas de
 formatage, pas de recherche de symboles — il n'y a pas de vue pour les porter.
 
+**Le fil ne transporte que des chemins absolus, et c'est le seul endroit de la
+fenêtre où c'est vrai.** Partout ailleurs un fichier s'appelle par son chemin
+*dans* le worktree — c'est ce que git imprime, et chaque commande y joint la
+racine au dernier moment. Le protocole n'a pas de racine à joindre : une URI est
+absolue ou elle n'est rien, et `file://app/User.php` se lit « l'hôte `app`, le
+fichier `/User.php` ». La jonction se fait donc aux quatre frontières de
+`ui::lsp` (`full`, `local`) et jamais dans le cœur, à qui on remet un chemin
+déjà fait. L'oubli ne provoque aucune erreur : le serveur répond sur un document
+qu'il n'a pas su placer dans le projet, et les diagnostics reviennent classés
+sous un chemin que l'éditeur n'emploie pas — donc invisibles. Un test tient
+l'aller-retour.
+
 **Ce que le serveur raconte va dans le journal** (`target: "lsp"`), stderr
 compris. `$/progress` fait exception : il remonte en `Evt::LspBusy` et s'affiche
 dans l'infobulle du bouton, parce qu'il répond à la seule question qu'un serveur
@@ -1020,6 +1048,90 @@ installé, ce qui est le cas de la CI : un test qui échoue faute d'un programme
 que personne n'a promis est un build rouge qui ne dit rien. Ce qu'il vérifie du
 serveur est la **mécanique** et jamais le contenu : quelles fautes un serveur
 signale est son affaire et celle de sa version.
+
+### Aller à la définition, et revenir
+
+Deux gestes, et le second est ce qui rend le premier utilisable : suivre une
+définition emmène ailleurs — souvent dans un autre fichier, souvent dans
+`vendor/` — et rien à l'écran ne dit d'où l'on venait.
+
+**`gd` ne passe pas par le `GoToDefinition` de gpui-component.** Leur action lit
+`hover_definition`, que seul un survol avec la touche système remplit : au
+clavier, sans pointeur nulle part, elle n'a rien sur quoi agir et ne fait
+**rien**, en silence — c'est exactement ainsi que `gd` avait l'air d'une touche
+non liée. La requête est donc la nôtre, posée au caret. La **première** réponse
+est prise : un serveur en rend parfois plusieurs — une interface et ses
+implémentations — et choisir demanderait une liste, qui est un geste que cet
+éditeur n'a pas.
+
+**`Ctrl+O` et `Ctrl+I` sont des liaisons, pas des touches de vim.** Elles sont
+déclarées dans la table sous `ClaudhubEditor`, un contexte que l'éditeur pose
+lui-même, et non dans la machine modale : une liaison s'exécute **avant**
+l'écouteur en phase de capture par lequel les touches de vim passent, si bien
+qu'elles marchent le mode éteint aussi. Un contexte à lui plutôt qu'`Input` :
+le champ de message de commit et les champs de recherche en sont, et n'ont pas
+de piste. `F12` complète, pour qui ne connaît pas les deux autres — une lettre
+avec la touche système n'était pas possible, tout caractère dans un éditeur
+étant un caractère que quelqu'un tape.
+
+**La piste est un module pur** (`ui::jumps`), comme `motion.rs` et `notes.rs` :
+on lui donne un endroit, elle en rend un. Ce qui s'y teste est la seule partie
+qui ne se devine pas — ce qu'un nouveau saut fait à ce qu'on avait rembobiné.
+
+Cinq points :
+
+- **Une piste par worktree**, comme il y a un éditeur par worktree, et elle s'en
+  va avec lui.
+- **Le départ est lu au moment du saut**, jamais repris dans la piste : on lit
+  quelques lignes avant de suivre une définition, et revenir là où l'on avait
+  atterri plutôt que là où l'on est parti est la différence entre une piste et
+  une liste de signets. Un pas en arrière réécrit de même l'endroit qu'il
+  quitte, pour que le pas en avant rende le caractère qu'on a laissé.
+- **Un nouveau saut jette ce qui était devant**, comme un navigateur jette son
+  avant quand on suit un lien depuis le milieu de son historique : deux futurs
+  ne peuvent pas être tous les deux le suivant.
+- **Toute ouverture passe par `open_at`**, qui est du même coup le seul endroit
+  où la piste s'écrit — l'explorateur, une ligne de diff, une trame Sentry, une
+  définition. La reprise de session n'y passe pas et demande son fichier
+  directement : revenir où l'on était n'est pas un saut qu'on doit pouvoir
+  défaire.
+- **Un atterrissage centre, une motion non.** `Place` dit lequel des deux :
+  `Nearest` ne défile que le minimum et ne bouge pas du tout quand la ligne est
+  déjà là — c'est ce que veut une flèche qui descend d'une ligne, la page ne
+  doit pas sauter sous l'œil. Un saut, lui, arrive de loin : laissé au
+  minimum, il posait le symbole sur la **dernière** ligne du panneau, avec au-
+  dessus le code qui y mène et rien de ce qui suit — or lire une définition,
+  c'est lire ce qu'il y a autour. Il demande donc `Centre`, comme `zz`.
+- **Un caret peut attendre d'être révélé.** Le fichier qui vient d'être ouvert
+  installe un `EditorState` neuf, que rien n'a encore mis en page : il n'a ni
+  plage de lignes visibles ni hauteur de ligne, si bien que défiler jusqu'au
+  caret est une division par rien et ne dit rien. Le caret était au bon
+  endroit et la vue restait en haut du fichier, ce qui se lit « le saut a
+  raté ». La révélation est donc gardée (`Editing::reveal_at`) et retentée à
+  chaque frame jusqu'à ce qu'une mesure existe — la même réponse que la
+  première largeur du diff, et bornée pour la même raison : un panneau rétréci
+  à zéro ne doit pas demander des images à l'infini.
+- **Atterrir donne le focus à l'éditeur.** Un saut est un geste au clavier dont
+  la touche suivante en est un autre — `Ctrl+O` pour revenir aussitôt, une
+  motion pour lire autour —, et un caret dans un champ où personne ne tape n'en
+  résout aucune : les touches de la piste vivent sous `ClaudhubEditor`, et les
+  touches de vim sous un écouteur posé dans le même sous-arbre. Traverser vers
+  un autre fichier construit un `EditorState` neuf, qui naît sans focus, et
+  `enter_workspace` n'en donne que si l'écran **change** — un saut fait depuis
+  l'écran « Édition » n'en donnait donc à personne. Ouvrir un fichier depuis
+  l'arbre ne passe pas par là : parcourir au clavier doit laisser les flèches à
+  l'arbre.
+- **Un saut vers un autre fichier ne pose pas son caret lui-même** : le texte
+  n'arrive qu'un aller-retour plus tard. Le geste est noté (`explorer::Pending`)
+  et consommé à l'arrivée — la même forme que le `pending_jump` de la revue, et
+  pour la même raison. Il porte son worktree : on se promène pendant qu'un
+  fichier se lit, et poser un caret dans l'éditeur de quelqu'un d'autre est pire
+  que de ne pas le poser.
+
+Les deux flèches de la barre du fichier sont ces deux touches, pour qui n'a pas
+le mode vim. Elles sont **toujours là**, éteintes quand il n'y a nulle part où
+aller : une flèche qui apparaît et disparaît déplace les quatre boutons voisins
+à chaque définition suivie.
 
 ### Lire et retoucher un fichier
 
@@ -1127,6 +1239,65 @@ dernier pour recouvrir les courbes qui l'atteignent.
 
 Le module s'appelle `history` et non `log` : un module `log` dans ce crate
 masquerait la bibliothèque de journalisation du même nom.
+
+### Les tags
+
+Un tag est le seul objet git qu'une relecture crée **exprès** — une version, un
+jalon, un point où l'on veut revenir — et c'était la seule chose que Claudhub ne
+savait ni montrer ni faire. Le panneau est un onglet **à côté de « Historique »**,
+et c'est sa place : un tag nomme un commit, l'historique montre les commits, et
+le geste qu'on fait après avoir trouvé le commit à marquer est juste là. Cliquer
+un tag ouvre le diff de son commit, exactement comme une ligne d'historique —
+deux listes sur la même chose, l'une rangée par date de commit, l'autre par date
+de tag.
+
+**Le local et le distant sont deux savoirs différents**, et c'est ce qui
+structure le module. Lister les tags est une lecture de `refs/tags`, quelques
+millisecondes ; savoir si `origin` a un tag est un `ls-remote`, un aller-retour.
+Tant que le bouton globe n'a pas été pressé, **rien ne dit quoi que ce soit du
+distant** — le compte de la barre change de phrase, et aucune ligne ne porte
+« local ». Prétendre le second en n'ayant fait que le premier, c'est un panneau
+qui dit « poussé » d'un tag que personne n'a poussé.
+
+Sept points qui ne se devinent pas :
+
+- **Le message décide du genre.** Un message donné fait un tag annoté (objet à
+  lui : auteur, date, texte), sans message c'est un tag léger — c'est la
+  distinction de git, et un interrupteur de plus à côté du champ dirait la même
+  chose deux fois.
+- **Une création qui pousse est *une* commande** (`Cmd::CreateTag { push }`), et
+  c'est le seul endroit qui déroge à « un geste, une commande ». La création est
+  locale, le push est un aller-retour : deux commandes partiraient dans **deux
+  files**, que rien n'ordonne, et le push pourrait partir avant que le tag
+  existe — git refusant alors un tag dont il n'a jamais entendu parler. Le
+  drapeau se lit dans `queue_of`, ce qui suffit à envoyer le tout dans la file
+  du réseau. Un test verrouille les six commandes de tag et leur file.
+- **Le commit visé est celui qu'on lit.** Le dialogue marque le commit
+  sélectionné dans l'historique quand il y en a un, HEAD sinon : « taguer *ce*
+  commit » est le geste qu'on a en le lisant.
+- **`PROTOCOL_VERSION` passe à 5** : six commandes et deux événements de plus,
+  et postcard est positionnel — les deux bouts du fil s'installent séparément.
+- **Le nom est validé sous le champ** (`tags::is_valid_name`, pur et testé) : le
+  refus de git — `fatal: 'v 1.0' is not a valid tag name` — arrive après la
+  fermeture du dialogue, c'est-à-dire trop tard pour corriger quoi que ce soit.
+- **Un tag annoté rapporte le commit qu'il marque**, jamais son propre objet :
+  `%(*objectname:short)` déréférence, et l'empreinte de l'objet tag
+  n'apparaîtrait nulle part ailleurs dans la fenêtre.
+- **`ls-remote` liste un tag annoté deux fois** — l'objet, puis le commit sous
+  `^{}` : c'est un tag, pas deux, et `parse_remote` le sait.
+- **Un push de tag écrit `refs/tags/<nom>` en entier**, jamais le nom nu : une
+  branche et un tag peuvent porter le même nom, et git pousse alors celui qu'il
+  veut.
+
+**Supprimer ici et supprimer sur origin sont deux entrées de menu**, pas un
+drapeau sur une seule : ce sont deux regrets différents, et le second se dit —
+un tag que quelqu'un d'autre a déjà récupéré ne revient pas. Les deux passent
+par un dialogue de confirmation.
+
+Deux détails de la liste : la lecture est gardée par `loaded` et non par « la
+liste est vide » — un dépôt sans aucun tag redemanderait sinon à chaque frame —
+et un rafraîchissement **oublie** ce qu'on savait du distant, puisque c'est
+précisément le moment où l'on cesse d'en répondre.
 
 ### Les réglages
 
@@ -1390,6 +1561,20 @@ Quatre points :
   troisième famille de trente clés en miroir de `success_key` : ce qui a échoué
   est dans le corps, git nommant l'opération lui-même — `error: failed to push
   some refs`.
+- **Toute opération distante a sa bulle**, même quand elle tient sur une ligne
+  (`notify::always_worth_reading` : fetch, pull, push, et les gestes de tag qui
+  sont des pushes). Elle a coûté des secondes, on a fait autre chose pendant ce
+  temps, et sa réponse se lit **après** — c'est-à-dire exactement ce que la
+  barre ne sait pas servir, puisque le message suivant l'écrase. Un commit avait
+  sa bulle par accident, sa sortie faisant deux lignes ; un push qui venait de
+  publier trois commits n'en avait aucune.
+- **Ce que git a écrit sur stderr en fait partie** (`git::git_reporting`, pour
+  les commandes réseau et elles seules). `git push` et `git fetch` écrivent tout
+  leur compte rendu là — `To github.com:…`, les références déplacées, `From
+  origin` — et leur stdout est vide : lue par `git`, qui ne garde que stdout,
+  une publication réussie ne rapportait littéralement rien à dire. stderr passe
+  **en premier**, git menant par le compte rendu et finissant par ses conseils,
+  et c'est la première ligne que la barre retient.
 
 ### Le magasin d'état
 
@@ -2226,7 +2411,7 @@ liste n'est pas virtualisée, un `mx_1` sur la ligne suffit.
 du dock, `Tab`, a un rayon **codé en dur à zéro** et rien dans le thème ne
 l'atteint ; `Tab::with_variant` et `TabBar::with_variant` existent pourtant,
 c'est seulement le panneau d'onglets du dock qui ne les transmettait pas. D'où
-le **fork** (voir `Cargo.toml`) : huit commits au-dessus de leur `main` — le
+le **fork** (voir `Cargo.toml`) : neuf commits au-dessus de leur `main` — le
 `TabVariant` que `DockSkin` fait passer jusqu'au `TabBar` ; les coins en boîte
 bordée du bandeau réservés au variant classique, dont ils épousent les
 rectangles ; le groupe lu comme une carte hors variant classique — cadre
@@ -2262,6 +2447,13 @@ l'éclat d'un yank de s'afficher, et le symptôme se lisait « le curseur
 n'apparaît qu'après un déplacement » — ce qu'on voyait alors était la
 *sélection*, que seule une frappe pose. `LineLayout::paint` fait désormais une
 passe de fond avant la passe de glyphes.
+
+Un neuvième, qui ne parle pas du dock non plus : **une application peut replier
+sans passer par la gouttière** (`fold_candidates`, `is_fold_candidate`,
+`is_folded_at`, `set_folded`, `unfold_all` sur `InputState`). Les icônes de la
+gouttière replient depuis l'intérieur de l'élément, `display_map` étant privé :
+cela sert une souris et rien d'autre, et un éditeur modal n'avait aucun moyen
+d'entrer — voir « Les modes de vim dans l'éditeur ».
 
 Les commits ont vocation à partir en PR, et le fork à disparaître avec elle.
 
@@ -2314,10 +2506,30 @@ qu'ils partageaient une seule fenêtre, chacun payait la place des trois
 autres — huit onglets au centre dont on n'en regarde jamais que deux, et un
 panneau central qui changeait de nature selon le dernier geste.
 
-Il y a donc cinq **écrans** (`ui::workspace::Workspace`) : Revue, Édition,
-Bases, Sentry, Réglages. On passe de l'un à l'autre par la barre d'état, ou
-par `Alt+1` à `Alt+5`. Les Réglages viennent en dernier, étant le seul qui ne
-soit pas du travail — voir « Les réglages ».
+Il y a donc cinq **écrans** (`ui::workspace::Workspace`) : Git, Édition,
+Bases, Sentry, Réglages. Le premier s'appelle « Git » et non « Revue » : il
+porte le diff, mais aussi l'historique, les branches, les conflits et le commit
+— tout ce qu'on fait avec git —, et « Revue » nommait le seul de ses panneaux
+qu'on voit en premier. Sa clé de disposition, elle, reste `review` : c'est ce
+par quoi une disposition enregistrée se relit, et renommer un écran ne doit pas
+perdre la place de ses panneaux. On passe de l'un à l'autre par la barre d'état, ou
+par `Alt+1` à `Alt+6`.
+
+**Les Réglages ne sont pas dans cette barre-là**, et c'est la conclusion de ce
+qui les mettait déjà en dernier : on n'y va pas travailler, on y va changer la
+façon dont le reste se comporte. Ils gardent leur écran — c'est un formulaire
+qui veut la fenêtre entière — mais on y entre par un **engrenage à l'extrémité
+droite de la barre de titre**, là où sont les réglages d'une application. Le
+choix des écrans redevient donc la rangée de ce dans quoi on travaille, d'où
+`Workspace::working()` : l'indice que le groupe de boutons rend est un indice
+dans ce qu'il **affiche**, jamais dans `ALL`, et les lire l'un pour l'autre
+ouvrirait l'écran d'à côté.
+
+**Les boutons portent leur nom** et non leur seule icône. L'icône dit ce que
+l'écran contient et reste ce qu'on vise, mais six icônes en rang sont un rébus
+qu'on apprend au lieu de le lire, et une infobulle est un nom qu'il faut aller
+demander. La place existe : cette barre est au bout d'une ligne d'état vide la
+plupart du temps.
 
 **Un dock par écran, et non un dock dont le centre change.** Chacun a ses
 panneaux, ses onglets et ses tailles, mémorisés séparément : régler la revue
@@ -3741,7 +3953,7 @@ n'en tient lieu. `Ctrl+1` à `Ctrl+9` désignent donc des **worktrees**, ce qui
 est de toute façon le geste central — et leur ordre est celui de la barre
 latérale, replis compris, sans quoi le même chiffre ne désignerait pas le même
 worktree d'un pliage à l'autre. Les **écrans**, eux, s'atteignent par
-`Alt+1` à `Alt+5`, et **pas** par `Ctrl+Maj+1` : gpui *retire* le Maj des
+`Alt+1` à `Alt+6`, et **pas** par `Ctrl+Maj+1` : gpui *retire* le Maj des
 modificateurs quand la touche est un caractère sans casse — « on ne garde Maj
 que pour les majuscules » —, si bien qu'un `secondary-shift-1` arrive comme
 `ctrl-&` ou `ctrl-#` selon la disposition du clavier et ne se déclenche jamais,
@@ -3956,6 +4168,37 @@ Six points qui ne se devinent pas :
   chaque rendu**, comme `TerminalView::sync_font` : le mode change sous les
   touches et le réglage sous le formulaire, l'appel est idempotent, et c'est ce
   qui rend le caret dès qu'on éteint le mode.
+- **`Ctrl+E` et `Ctrl+Y` bougent la page, pas le caret**, et c'est tout leur
+  intérêt : lire la suite sans perdre sa place. Conséquence qui se paie
+  ailleurs : `Ctrl+Y` n'est plus le rétablissement de l'éditeur, donc le redo
+  n'a plus que `Ctrl+R` — que la fenêtre prenait pour un rafraîchissement.
+  D'où `ClaudhubEditorVim`, un **second nom** de contexte et non
+  `ClaudhubEditor && ClaudhubVim` : `depth_of` pèse chaque identifiant contre
+  un seul niveau de la pile et les deux ne se rencontreraient jamais. La
+  liaison de rafraîchissement l'exclut, et garde `F5`, qui est la touche qu'on
+  cherche de toute façon.
+- **Le préfixe `z` fait deux métiers, et aucun ne touche au texte** — d'où sa
+  place avant le partage normal/visuel, les deux modes y répondant pareil.
+  `zz`, `zt`, `zb` placent la ligne du caret dans la vue **sans déplacer le
+  caret** : c'est ce qui les distingue de `z.` et `z-`, qui vont en plus au
+  premier non-blanc et seraient donc deux réponses là où `Response` n'en porte
+  qu'une — ils ne sont pas là. `zc`, `zo`, `za`, `zM`, `zR`, `zm`, `zr`
+  replient : où commence et où finit un repli est la réponse de la grammaire,
+  jamais la nôtre, et tout ce qui se décide ici est **lesquels** fermer. `zc`,
+  `zo` et `za` agissent sur le repli **le plus intérieur** qui contient le
+  caret, celui qu'on est en train de lire.
+- **Un niveau de repli est une profondeur d'imbrication**, et elle se relit
+  dans les plages : l'éditeur les donne à plat, une méthode dans une classe est
+  simplement contenue par elle. `ui::folds` fait ce calcul et rien d'autre —
+  pur, testé, la seule partie de tout cela qui se trompe en silence. Le niveau
+  courant vit dans `Editing::fold_level`, `None` valant « tout ouvert »,
+  c'est-à-dire un cran au-delà du plus profond : `zr` qui l'atteint est `zR`.
+  Chaque changement de niveau **repart de tout ouvert** plutôt que d'ajouter à
+  ce qui est là, la carte des replis ne sachant pas rouvrir par addition.
+- **Rien de tout cela n'était atteignable** : les icônes de la gouttière
+  replient depuis l'intérieur de l'élément, ce qui sert une souris et rien
+  d'autre — `display_map` est privé. C'est le neuvième commit du fork, cinq
+  méthodes sur `InputState` qui font les trois mêmes appels que l'icône.
 - **`u` et `Ctrl+R` sont rendus à l'éditeur**, qui est le seul à savoir ce
   qu'était la dernière transaction — d'où `Command::Undo`, une action que la
   vue redispatche. `Ctrl+R` ne nous parvient d'ailleurs jamais : la fenêtre en
@@ -4090,7 +4333,10 @@ Huit points qui ne se devinent pas :
   ajouter un message casserait le fil pour tous les autres. `Cmd::PluginCall`
   porte une capacité à charge fermée, `Evt::PluginResult` la ramène. Ajouter une
   **capacité** est un changement de Claudhub, versionné une fois ; ajouter un
-  plugin n'est pas un changement du fil du tout. `PROTOCOL_VERSION` passe à 5.
+  plugin n'est pas un changement du fil du tout. `PROTOCOL_VERSION` passe à 6 —
+  la fusion avec la branche des étiquettes en avait déjà pris un, et deux
+  incréments qui atterrissent sur le même numéro sont une poignée de main qui
+  accepte deux protocoles différents.
 - **La file se lit sur la capacité, pas sur la variante.** Un appel HTTP a le
   profil de Sentry — des secondes, une socket — et part au réseau ; une commande
   shell a celui du relevé de `wt` et part au fond, jamais devant un diff qu'on
