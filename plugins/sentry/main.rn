@@ -12,28 +12,31 @@ const ISSUES_PER_PAGE = 25;
 pub async fn init(worktree) {
     let project = state("project");
     if project == "" {
-        return Ok(#{ issues: [], chosen: -1, event: (), note: "no-project" });
+        return Ok(#{ issues: [], chosen: -1, event: (), note: "no-project", typed: "" });
     }
     let body = api(`/projects/${setting("org")}/${project}/issues/?query=${escape(setting("query"))}&statsPeriod=14d&limit=${ISSUES_PER_PAGE}`).await?;
     let issues = [];
     for raw in json(body)? {
         issues.push(issue_of(raw));
     }
-    Ok(#{ issues: issues, chosen: -1, event: (), note: if issues.is_empty() { "empty" } else { "" } })
+    Ok(#{
+        issues: issues,
+        chosen: -1,
+        event: (),
+        note: if issues.is_empty() { "empty" } else { "" },
+        typed: project,
+    })
 }
 
 pub fn view(s) {
     if s.note == "no-project" {
         return column([
-            empty("Aucun projet Sentry pour ce dépôt."),
-            row([primary(button("Choisir le projet", "settings", "ask-project", ""))]),
+            empty("Quel projet Sentry, pour ce dépôt ?"),
+            picker(s),
         ]);
     }
     if s.note == "empty" {
-        return column([
-            empty("Aucune erreur non résolue."),
-            row([button("Changer de projet", "settings", "ask-project", "")]),
-        ]);
+        return column([empty("Aucune erreur non résolue."), picker(s)]);
     }
 
     let rows = [];
@@ -42,10 +45,7 @@ pub fn view(s) {
     }
 
     let body = [
-        row([
-            title(`${setting("org")}/${state("project")}`),
-            button("Changer de projet", "settings", "ask-project", ""),
-        ]),
+        row([title(`${setting("org")}/${state("project")}`)]),
         list("issues", rows, s.chosen, "choose"),
     ];
 
@@ -57,11 +57,24 @@ pub fn view(s) {
 }
 
 pub async fn update(s, action, payload) {
-    if action == "ask-project" {
-        // Le seul champ dont ce plugin a besoin, et il n'y a pas de champ de
-        // saisie dans le vocabulaire : on renvoie vers les réglages, où il est.
-        notify("Le projet Sentry se règle dans la page « Plugins ».");
+    if action == "typing" {
+        // On retient ce qui est tapé sans rien aller chercher : une requête par
+        // frappe interrogerait Sentry à chaque lettre du nom du projet.
+        s.typed = payload;
         return Ok(s);
+    }
+
+    if action == "set-project" {
+        let name = s.typed.trim();
+        if name == "" {
+            return Ok(s);
+        }
+        // Par dépôt : deux dépôts d'une même organisation n'ont pas les mêmes
+        // erreurs. `set_state` écrit contre le dépôt regardé.
+        set_state("project", name);
+        // L'état revient au tour suivant du balayage ; en attendant, on repart
+        // de zéro avec ce qu'on vient de choisir.
+        return init(worktree()).await;
     }
 
     if action == "choose" {
@@ -89,6 +102,17 @@ pub async fn update(s, action, payload) {
     }
 
     Ok(s)
+}
+
+/// Le nom du projet, qui appartient au dépôt et non au compte.
+///
+/// Ici et pas dans les réglages : la page des réglages ne connaît que les clés
+/// globales d'un plugin, et un projet Sentry change d'un dépôt à l'autre.
+fn picker(s) {
+    row([
+        field("project", s.typed, "nom du projet Sentry", "typing"),
+        primary(button("Enregistrer", "check", "set-project", "")),
+    ])
 }
 
 // — Le détail d'une erreur ————————————————————————————————————————————
@@ -174,17 +198,17 @@ fn issue_of(raw) {
 
 fn event_of(raw) {
     let frames = [];
-    for entry in field(raw, "entries", []) {
+    for entry in at(raw, "entries", []) {
         let kind = str_of(entry, "type");
         if kind != "exception" && kind != "stacktrace" {
             continue;
         }
-        let data = field(entry, "data", #{});
+        let data = at(entry, "data", #{});
         // Deux formes selon le SDK : `exception.values[].stacktrace.frames` et
         // `stacktrace.frames`. Les deux existent, et un client qui n'en lit
         // qu'une affiche une trace vide sur la moitié des projets.
-        for values in field(data, "values", []) {
-            collect(field(values, "stacktrace", #{}), frames);
+        for values in at(data, "values", []) {
+            collect(at(values, "stacktrace", #{}), frames);
         }
         collect(data, frames);
     }
@@ -192,8 +216,8 @@ fn event_of(raw) {
 }
 
 fn collect(stack, frames) {
-    for raw in field(stack, "frames", []) {
-        let line = field(raw, "lineNo", 0);
+    for raw in at(stack, "frames", []) {
+        let line = at(raw, "lineNo", 0);
         let name = str_of(raw, "filename");
         if name == "" {
             name = str_of(raw, "absPath");
@@ -205,7 +229,7 @@ fn collect(stack, frames) {
             path: name,
             line: line,
             function: str_of(raw, "function"),
-            in_app: field(raw, "inApp", false),
+            in_app: at(raw, "inApp", false),
             context: context_of(raw, line),
         });
     }
@@ -216,7 +240,7 @@ fn collect(stack, frames) {
 /// donne pas d'un coup d'œil.
 fn context_of(raw, line) {
     let out = [];
-    for pair in field(raw, "context", []) {
+    for pair in at(raw, "context", []) {
         let number = pair[0];
         let mark = if number == line { ">" } else { " " };
         out.push(`${mark} ${number}  ${pair[1]}`);
@@ -226,14 +250,18 @@ fn context_of(raw, line) {
 
 // — Lire du JSON sans se faire piéger par un champ absent ————————————————
 
-/// Un champ, ou le repli quand il n'est pas là.
+/// Un champ d'objet JSON, ou le repli quand il n'est pas là.
+///
+/// `at` et non `field` : le vocabulaire de vue a désormais une fonction de ce
+/// nom. C'est la troisième collision de ce genre, et elle dit une propriété du
+/// dessin — voir « Les plugins » dans CLAUDE.md.
 ///
 /// La garde de type n'est pas de la prudence : une API rend un objet là où on
 /// en attendait un, et un tableau le lendemain. Demander un champ nommé à un
 /// tableau est une erreur d'exécution qui remonte en « Missing instance
 /// function », ce qui ne désigne rien de ce qu'on lit. Un champ absent et un
 /// champ nul se lisent pareil, ce qui est ce qu'on veut d'un JSON facultatif.
-fn field(object, name, fallback) {
+fn at(object, name, fallback) {
     if !(object is Object) {
         return fallback;
     }
@@ -246,7 +274,7 @@ fn field(object, name, fallback) {
 /// `str_of` et non `text` : le vocabulaire de vue a déjà une fonction de ce
 /// nom, et Rune refuse — clairement — qu'un script en redéfinisse une.
 fn str_of(object, name) {
-    let value = field(object, name, "");
+    let value = at(object, name, "");
     if value is String {
         value
     } else if value is Tuple {

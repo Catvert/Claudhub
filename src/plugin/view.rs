@@ -100,6 +100,25 @@ pub enum Node {
         selected: Option<usize>,
         on_select: Option<Handler>,
     },
+    /// A line of text one can type into.
+    ///
+    /// **The tree does not own it.** An `InputState` has to live across frames
+    /// — it holds the caret and the selection — and this tree is rebuilt at
+    /// will. What owns it is the window, under `id`, exactly as the settings
+    /// form owns its rows' fields. The `id` must therefore be stable: a new one
+    /// each frame is a field that loses the caret on every keystroke.
+    ///
+    /// `value` seeds it and **does not follow it afterwards**: the field is the
+    /// source of truth while one types in it, which is the free note's rule —
+    /// putting the state's text back under the fingers would move the caret in
+    /// the middle of a word.
+    Field {
+        id: String,
+        value: String,
+        placeholder: String,
+        /// Handed the text on every keystroke, in the payload.
+        on_change: Option<Handler>,
+    },
     Button {
         label: String,
         icon: Option<String>,
@@ -153,6 +172,12 @@ mod tests {
             Node::Code {
                 text: "fn main() {}".into(),
                 language: Some("rust".into()),
+            },
+            Node::Field {
+                id: "project".into(),
+                value: "site".into(),
+                placeholder: "acme/site".into(),
+                on_change: Some(Handler::new("set-project", String::new())),
             },
         ]);
         let json = serde_json::to_string(&tree).expect("a tree serialises");

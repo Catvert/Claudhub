@@ -510,6 +510,21 @@ fn module(shared: &Arc<Shared>) -> Result<rune::Module, rune::ContextError> {
         .build()?;
     module
         .function(
+            "field",
+            |id: Ref<str>, value: Ref<str>, placeholder: Ref<str>, action: Ref<str>| {
+                RuneNode(Node::Field {
+                    id: id.to_string(),
+                    value: value.to_string(),
+                    placeholder: placeholder.to_string(),
+                    // The text typed is the payload: the script wrote neither,
+                    // and asking it to thread an index would be ceremony.
+                    on_change: maybe(&action).map(|action| Handler::new(action, String::new())),
+                })
+            },
+        )
+        .build()?;
+    module
+        .function(
             "button",
             |label: Ref<str>, icon: Ref<str>, action: Ref<str>, payload: Ref<str>| {
                 RuneNode(Node::Button {
@@ -1600,6 +1615,63 @@ mod sentry_plugin {
 
     /// No project, no request: a plugin must not query a remote API to find out
     /// it has nothing to ask it.
+    /// Le projet se règle **dans le panneau**, pas dans les réglages.
+    ///
+    /// C'est le trou que le portage avait laissé : la page des réglages ne
+    /// connaît que les clés globales d'un manifeste, et un projet Sentry
+    /// appartient au dépôt. Sans champ dans la vue, il n'y avait aucun moyen de
+    /// le poser, et le plugin renvoyait vers une page où il n'était pas.
+    #[test]
+    fn the_project_is_chosen_in_the_panel() {
+        let declaration = toml::from_str(MANIFEST).expect("manifest");
+        let probe = probe_with(SOURCE, declaration).expect("compiles");
+        let state = answer_with(
+            &probe,
+            |_| panic!("nothing must leave before there is a project"),
+            probe.host.init(None),
+        )
+        .expect("init");
+
+        // Le champ est là, avec de quoi enregistrer.
+        let tree = probe.host.view(&state).expect("view");
+        let Node::Column(children) = &tree else {
+            panic!("expected a column, got {tree:?}");
+        };
+        let Some(Node::Row(picker)) = children.get(1) else {
+            panic!("expected the picker, got {children:?}");
+        };
+        assert!(
+            matches!(picker.first(), Some(Node::Field { id, .. }) if id == "project"),
+            "{picker:?}"
+        );
+
+        // Taper ne va rien chercher : une requête par lettre interrogerait
+        // Sentry à chaque caractère du nom.
+        let state = answer_with(
+            &probe,
+            |_| panic!("typing asks nothing of anyone"),
+            probe.host.update(&state, "typing", "site"),
+        )
+        .expect("typing");
+        assert!(probe.shared.take_effects().is_empty());
+
+        // Enregistrer écrit contre le dépôt, et repart chercher.
+        let state = answer_with(
+            &probe,
+            |_| Ok("[]".into()),
+            probe.host.update(&state, "set-project", ""),
+        )
+        .expect("set-project");
+        assert_eq!(
+            probe.shared.take_effects(),
+            vec![super::Effect::Remember {
+                key: "project".into(),
+                value: "site".into()
+            }]
+        );
+        probe.host.view(&state).expect("view still renders");
+    }
+
     #[test]
     fn with_no_project_nothing_leaves() {
         let declaration = toml::from_str(MANIFEST).expect("manifest");

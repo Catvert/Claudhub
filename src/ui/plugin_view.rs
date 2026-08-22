@@ -600,6 +600,45 @@ impl ClaudhubApp {
         .detach();
     }
 
+    /// A keystroke's gesture.
+    ///
+    /// Separate from `plugin_gesture` because a subscription has no window, and
+    /// because typing must not be able to open a terminal or an editor: the
+    /// effects a keystroke produces are applied at the next settling, with the
+    /// window the pump has.
+    fn plugin_gesture_from_field(
+        &mut self,
+        panel: &'static str,
+        action: String,
+        typed: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.plugin_index(panel) else {
+            return;
+        };
+        let (Some(host), Some(state)) = (self.plugins[index].host(), self.plugins[index].state())
+        else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let outcome = host.update(&state, &action, &typed).await;
+            this.update(cx, |this, cx| {
+                let Some(index) = this.plugin_index(panel) else {
+                    return;
+                };
+                match outcome {
+                    Ok(state) => this.plugins[index].settle(state),
+                    Err(message) => this.plugins[index].fail(message),
+                }
+                // The effects wait: a keystroke has no window to open anything
+                // with, and the next settling drains them.
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn plugin_settled(
         &mut self,
         panel: &'static str,
@@ -791,7 +830,7 @@ impl ClaudhubApp {
             None => {
                 // Painted before the scroll wrapper: `scrolled` takes `&mut
                 // self` too, and the two borrows would meet.
-                let painted = self.render_plugin_node(panel, &tree, cx);
+                let painted = self.render_plugin_node(panel, &tree, window, cx);
                 div()
                     .flex_1()
                     .min_h_0()
@@ -828,6 +867,7 @@ impl ClaudhubApp {
         &mut self,
         panel: &'static str,
         node: &Node,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         match node {
@@ -837,7 +877,7 @@ impl ClaudhubApp {
                 .children(
                     children
                         .iter()
-                        .map(|child| self.render_plugin_node(panel, child, cx)),
+                        .map(|child| self.render_plugin_node(panel, child, window, cx)),
                 )
                 .into_any_element(),
             Node::Row(children) => h_flex()
@@ -847,7 +887,7 @@ impl ClaudhubApp {
                 .children(
                     children
                         .iter()
-                        .map(|child| self.render_plugin_node(panel, child, cx)),
+                        .map(|child| self.render_plugin_node(panel, child, window, cx)),
                 )
                 .into_any_element(),
             Node::Section { title, body } => {
@@ -883,7 +923,7 @@ impl ClaudhubApp {
                     .when(!folded, |el| {
                         el.children(
                             body.iter()
-                                .map(|child| self.render_plugin_node(panel, child, cx)),
+                                .map(|child| self.render_plugin_node(panel, child, window, cx)),
                         )
                     })
                     .into_any_element()
@@ -928,6 +968,7 @@ impl ClaudhubApp {
                 selected,
                 on_select,
             } => self.render_plugin_list(panel, id, items, *selected, on_select.as_ref(), cx),
+            field @ Node::Field { .. } => self.render_plugin_field(panel, field, window, cx),
             Node::Button {
                 label,
                 icon: name,
@@ -972,6 +1013,74 @@ impl ClaudhubApp {
                 .child(icon("loader-circle"))
                 .into_any_element(),
         }
+    }
+
+    /// A line of text a plugin can be typed into.
+    ///
+    /// **The window owns the `InputState`, not the tree.** `use_keyed_state` is
+    /// what the settings form already uses for its rows: the state is created
+    /// on the first frame that asks for it under that key and handed back
+    /// afterwards, so the caret and the selection survive a tree rebuilt on
+    /// every gesture. The key carries the panel, so two plugins asking for a
+    /// `project` are two fields.
+    fn render_plugin_field(
+        &mut self,
+        panel: &'static str,
+        field: &Node,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        // The node whole rather than its four parts: a field's shape is one
+        // thing, and spreading it over an argument list is what made clippy
+        // count to eight.
+        let Node::Field {
+            id,
+            value,
+            placeholder,
+            on_change,
+        } = field
+        else {
+            return div().into_any_element();
+        };
+        let key = SharedString::from(format!("{panel}/field/{id}"));
+        let entity = cx.entity();
+        let action = on_change.as_ref().map(|handler| handler.action.clone());
+        let (seed, hint) = (value.to_string(), placeholder.to_string());
+        let state = window.use_keyed_state(key, cx, move |window, cx| {
+            let input = cx.new(|cx| {
+                gpui_component::input::InputState::new(window, cx)
+                    .placeholder(SharedString::from(hint))
+                    .default_value(seed)
+            });
+            let subscription = action.map(|action| {
+                cx.subscribe(
+                    &input,
+                    move |_: &mut PluginField,
+                          input,
+                          event: &gpui_component::input::InputEvent,
+                          cx| {
+                        if !matches!(event, gpui_component::input::InputEvent::Change) {
+                            return;
+                        }
+                        // The typed text is the payload. Every keystroke, which
+                        // is what makes a field a filter as much as a setting —
+                        // `update` is synchronous unless the script awaits.
+                        let typed = input.read(cx).value().to_string();
+                        let action = action.clone();
+                        entity.update(cx, |app, cx| {
+                            app.plugin_gesture_from_field(panel, action, typed, cx)
+                        });
+                    },
+                )
+            });
+            PluginField {
+                input,
+                _subscription: subscription,
+            }
+        });
+        gpui_component::input::Input::new(&state.read(cx).input.clone())
+            .small()
+            .into_any_element()
     }
 
     /// A list, virtualised.
@@ -1132,6 +1241,12 @@ fn empty_panel(message: SharedString, cx: &Context<ClaudhubApp>) -> impl IntoEle
         .text_color(cx.theme().muted_foreground)
         .child(icon("puzzle"))
         .child(div().text_sm().px_4().child(message))
+}
+
+/// A plugin field's input, owned by the window under its key.
+struct PluginField {
+    input: gpui::Entity<gpui_component::input::InputState>,
+    _subscription: Option<gpui::Subscription>,
 }
 
 /// Writes what the settings file holds for one secret. An empty value takes the

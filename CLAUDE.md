@@ -4063,6 +4063,12 @@ commence par `$` est lu dans l'environnement **du worker** — la règle que
 tout plugin. C'est ce qui garde un jeton hors d'un fichier de réglages qu'on
 recopie.
 
+**Le projet se choisit dans le panneau**, par un champ et un bouton : il
+appartient au dépôt et non au compte, et la page des réglages ne connaît que les
+clés globales d'un manifeste. Taper ne va rien chercher — une requête par lettre
+interrogerait Sentry à chaque caractère du nom —, c'est « Enregistrer » qui
+écrit contre le dépôt et repart chercher.
+
 **Les réglages d'avant se reprennent tout seuls**, par le même chemin qu'une
 installation neuve, comme `migrate_agents` : `sentry_org`, `sentry_token` et
 `sentry_query` sont versés dans `plugins["sentry"]`, le projet de chaque dépôt
@@ -4472,12 +4478,35 @@ par `ui::highlight` demande le contexte d'un fichier entier pour dire quelque
 chose d'utile d'un extrait de vingt lignes. Le champ est là pour qu'un plugin
 écrit aujourd'hui continue de dire ce qu'il dit.
 
-Ce qu'il n'y a **pas**, et qui se dit : aucun champ de saisie — il faudrait un
-`InputState` créé une fois dans un constructeur, qu'un arbre reconstruit à
-volonté ne peut pas posséder ; ce qu'on a à dire à un plugin se déclare dans les
-réglages. Et aucune recherche dans son panneau : `Ctrl+F` cherche dans une liste
-dont nous tenons l'ordre, et ici c'est le script qui le tient — les terminaux
-sont dans le même cas et pour la même raison.
+**Un champ de saisie en fait partie**, et il a failli ne pas en être. Il avait
+été écarté au motif qu'un `InputState` doit vivre d'une frame à l'autre — il
+tient le curseur et la sélection — et qu'un arbre reconstruit à volonté ne peut
+pas le posséder. C'est exact et cela ne conclut rien : ce n'est pas l'arbre qui
+le possède mais la **fenêtre**, par `use_keyed_state`, ce que le formulaire des
+réglages fait déjà pour ses lignes. Le motif a coûté un trou entier — Sentry
+porté n'avait aucun moyen de se faire dire son projet, qui appartient au dépôt
+et non au compte, et renvoyait vers une page des réglages où il n'était pas.
+
+Deux règles s'y attachent : l'`id` doit être **stable**, un identifiant neuf à
+chaque frame étant un champ qui perd le curseur à chaque frappe ; et la valeur
+**amorce** le champ sans le suivre ensuite, le champ étant la source de vérité
+pendant qu'on y tape — c'est la règle de la note libre, remettre le texte de
+l'état sous les doigts déplacerait le curseur au milieu d'un mot.
+
+Ce qu'il n'y a **pas**, et qui se dit : aucune recherche dans le panneau d'un
+plugin. `Ctrl+F` cherche dans une liste dont nous tenons l'ordre, et ici c'est le
+script qui le tient — les terminaux sont dans le même cas et pour la même
+raison.
+
+**Ajouter un nom au vocabulaire peut casser un plugin installé.** Un script fait
+`use claudhub::*`, si bien que chaque fonction du vocabulaire réserve son nom :
+le jour où `field` est apparu, le plugin Sentry avait un helper de ce nom et a
+cessé de compiler. C'est arrivé trois fois — `text`, `state`, `field` — et cela
+ne se corrige pas, cela se sait. Ce qui rend la chose supportable est ailleurs :
+Rune **le dit** en nommant les deux définitions, l'erreur s'affiche dans le
+panneau, et une compilation ratée garde la machine qui marchait. Un plugin cassé
+par une mise à jour de Claudhub se répare en renommant une fonction, avec le
+message qui désigne laquelle.
 
 Huit points qui ne se devinent pas :
 
