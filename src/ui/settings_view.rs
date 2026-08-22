@@ -136,7 +136,6 @@ impl ClaudhubApp {
         ];
         let databases_ix = pages.len();
         pages.push(databases_page());
-        pages.push(sentry_page());
         pages.push(plugins_page());
         pages.push(logs_page(logs));
         let selected = match self.settings_page {
@@ -1821,51 +1820,6 @@ fn edit_database(index: usize, cx: &mut App, edit: impl FnOnce(&mut crate::db::C
             edit(connection);
         }
     });
-}
-
-fn sentry_page() -> SettingPage {
-    SettingPage::new(tr!("settings-page-sentry")).group(
-        SettingGroup::new()
-            .item(
-                SettingItem::new(
-                    tr!("settings-sentry-org"),
-                    SettingField::input(
-                        |cx: &App| Settings::global(cx).sentry_org.clone().into(),
-                        |value: SharedString, cx: &mut App| {
-                            Settings::update_global(cx, |s| s.sentry_org = value.to_string())
-                        },
-                    )
-                    .default_value(SharedString::default()),
-                )
-                .description(tr!("settings-sentry-org-help")),
-            )
-            .item(
-                SettingItem::new(
-                    tr!("settings-sentry-token"),
-                    SettingField::input(
-                        |cx: &App| Settings::global(cx).sentry_token.clone().into(),
-                        |value: SharedString, cx: &mut App| {
-                            Settings::update_global(cx, |s| s.sentry_token = value.to_string())
-                        },
-                    )
-                    .default_value(SharedString::default()),
-                )
-                .description(tr!("settings-sentry-token-help")),
-            )
-            .item(
-                SettingItem::new(
-                    tr!("settings-sentry-query"),
-                    SettingField::input(
-                        |cx: &App| Settings::global(cx).sentry_query.clone().into(),
-                        |value: SharedString, cx: &mut App| {
-                            Settings::update_global(cx, |s| s.sentry_query = value.to_string())
-                        },
-                    )
-                    .default_value(SharedString::default()),
-                )
-                .description(tr!("settings-sentry-query-help")),
-            ),
-    )
 }
 
 /// What the logs page needs: the records, what is being shown of them, and a

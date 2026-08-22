@@ -99,7 +99,6 @@ pub fn register(app: &Entity<ClaudhubApp>, cx: &mut App) {
         ConflictsPanel => "ClaudhubConflicts",
         FilesPanel => "ClaudhubFiles",
         DbPanel => "ClaudhubDb",
-        SentryPanel => "ClaudhubSentry",
         SearchPanel => "ClaudhubSearch",
         SearchPreviewPanel => "ClaudhubSearchPreview",
         DiffPanel => "ClaudhubDiff",
@@ -283,7 +282,6 @@ panels! {
     SqlHistoryPanel => ("ClaudhubSqlHistory", "panel-sql-history", render_sql_history, SqlHistory),
     SearchPanel => ("ClaudhubSearch", "panel-search", render_search, Search),
     SearchPreviewPanel => ("ClaudhubSearchPreview", "panel-search-preview", render_search_preview, SearchPreview),
-    SentryPanel => ("ClaudhubSentry", "panel-sentry", render_sentry, Sentry),
     // The centre of each screen. **Three panels and not one whose title
     // changes**: they belonged to the same one because they were fighting over
     // the central slot, and a tab announcing "Diff", "Editor" or "SQL"

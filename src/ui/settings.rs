@@ -387,13 +387,19 @@ pub struct Settings {
     pub commit_message_command: String,
     /// The Sentry organisation. The *project*, for its part, belongs to the
     /// repository and lives in the state store, not here.
+    /// **Legacy**: read once so `migrate_sentry` can pour it into the Sentry
+    /// plugin's settings, then cleared. Kept for the same reason
+    /// `agent_command` is — a file written by an earlier version has to be
+    /// understood, once.
     pub sentry_org: String,
     /// API token, failing `SENTRY_TOKEN`.
     ///
     /// The environment wins: this file is 0600, which does not make it a vault,
     /// and a token lying around in a configuration backup is a token that leaks.
+    /// **Legacy**, see `sentry_org`.
     pub sentry_token: String,
     /// The query sent to Sentry. Empty: the unresolved issues.
+    /// **Legacy**, see `sentry_org`.
     pub sentry_query: String,
     /// Browse diffs and the tree with vim's keys.
     ///
@@ -674,7 +680,35 @@ impl Settings {
     pub fn load() -> Self {
         let mut settings = Self::read();
         settings.terminal.migrate_agents();
+        settings.migrate_sentry();
         settings
+    }
+
+    /// Sentry's settings become the Sentry **plugin**'s.
+    ///
+    /// Through the same path as a fresh install, like `migrate_agents`: the
+    /// three fields are poured into `plugins["sentry"]` and cleared, so it
+    /// happens once. A window that has never seen Sentry has nothing to pour
+    /// and writes nothing.
+    fn migrate_sentry(&mut self) {
+        let carried = [
+            ("org", std::mem::take(&mut self.sentry_org)),
+            ("query", std::mem::take(&mut self.sentry_query)),
+        ];
+        let token = std::mem::take(&mut self.sentry_token);
+        if carried.iter().all(|(_, value)| value.trim().is_empty()) && token.trim().is_empty() {
+            return;
+        }
+        let entry = self.plugins.entry("sentry".to_string()).or_default();
+        for (key, value) in carried {
+            if !value.trim().is_empty() {
+                entry.settings.entry(key.to_string()).or_insert(value);
+            }
+        }
+        if !token.trim().is_empty() {
+            entry.secrets.entry("token".to_string()).or_insert(token);
+        }
+        log::info!(target: "plugin", "Sentry settings carried over to the plugin");
     }
 
     fn read() -> Self {

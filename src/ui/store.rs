@@ -119,8 +119,20 @@ pub struct Session {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RepoState {
-    /// The Sentry project, which belongs to the repository, not to the worktree or the account.
+    /// **Legacy**: read once so `migrate_sentry` can pour it into the Sentry
+    /// plugin's per-repository state, then cleared.
     pub sentry_project: Option<String>,
+    /// What each plugin has remembered about this repository: plugin id → its
+    /// own keys.
+    ///
+    /// **Per repository and not per worktree**, because that is what a
+    /// project's configuration means — a board's identifier, an API's base
+    /// address are the same across five checkouts of the same code. A plugin
+    /// wanting finer grain puts the worktree in its own key; the namespace is
+    /// its own.
+    #[serde(default)]
+    pub plugin_state:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -136,6 +148,34 @@ pub struct Store {
 
 impl Store {
     pub fn load() -> Self {
+        let mut store = Self::read();
+        store.migrate_sentry();
+        store
+    }
+
+    /// The Sentry project of each repository becomes the Sentry **plugin**'s.
+    ///
+    /// The same path as a fresh write, like the notes' recovery and
+    /// `migrate_agents`: the field is poured into `plugin_state` and cleared,
+    /// so it happens once, and a repository already configured through the
+    /// plugin keeps what it has.
+    fn migrate_sentry(&mut self) {
+        for repo in self.repos.values_mut() {
+            let Some(project) = repo.sentry_project.take() else {
+                continue;
+            };
+            if project.trim().is_empty() {
+                continue;
+            }
+            repo.plugin_state
+                .entry("sentry".to_string())
+                .or_default()
+                .entry("project".to_string())
+                .or_insert(project);
+        }
+    }
+
+    fn read() -> Self {
         let Some(path) = state_path() else {
             return Self::default();
         };

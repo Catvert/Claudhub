@@ -64,6 +64,22 @@ pub enum Effect {
     Open { path: PathBuf, line: usize },
     /// Say something in the status bar.
     Notify(String),
+    /// Create a worktree and hand a text to the agent that lands in it.
+    ///
+    /// Not Sentry's gesture but everyone's: opening a branch for a CI failure,
+    /// for an issue, for a report, and starting the agent on it with what one
+    /// already knows. Two things in one effect because they cannot be separated
+    /// — the prompt has to wait for `wt` to finish its hooks, which take
+    /// minutes and whose only signal is the worktree list coming back.
+    Worktree { name: String, prompt: String },
+    /// Remember something about the repository being looked at.
+    ///
+    /// **Per repository and not per worktree**, because that is what a
+    /// project's configuration means: a Sentry project, a board's identifier,
+    /// an API's base address are the same across five checkouts of the same
+    /// code. A plugin that wants finer grain puts `worktree()` in its own key —
+    /// the namespace is its own.
+    Remember { key: String, value: String },
 }
 
 /// One capability call on its way out.
@@ -86,6 +102,10 @@ pub struct Shared {
     worktree: Mutex<Option<PathBuf>>,
     settings: Mutex<BTreeMap<String, String>>,
     secrets: Mutex<BTreeMap<String, String>>,
+    /// What this plugin has remembered about the repository being looked at.
+    /// Refreshed by the application, exactly like the settings: the host holds
+    /// no store of its own, and cannot — a store is a gpui global.
+    state: Mutex<BTreeMap<String, String>>,
     allowed: Vec<Capability>,
     outbox: async_channel::Sender<Request>,
     pending: Mutex<HashMap<u64, async_channel::Sender<Result<String, String>>>>,
@@ -100,6 +120,7 @@ impl Shared {
             worktree: Mutex::new(None),
             settings: Mutex::new(manifest.declaration.settings.clone()),
             secrets: Mutex::new(BTreeMap::new()),
+            state: Mutex::new(BTreeMap::new()),
             allowed: manifest.declaration.capabilities.clone(),
             outbox,
             pending: Mutex::new(HashMap::new()),
@@ -122,6 +143,11 @@ impl Shared {
             current.insert(key, value);
         }
         *self.secrets.lock().expect("secrets lock") = secrets;
+    }
+
+    /// What the repository being looked at has remembered of this plugin.
+    pub fn remember(&self, state: BTreeMap<String, String>) {
+        *self.state.lock().expect("state lock") = state;
     }
 
     /// Hands one capability's answer back to whoever is awaiting it.
@@ -397,6 +423,85 @@ fn module(shared: &Arc<Shared>) -> Result<rune::Module, rune::ContextError> {
     // — What the script may do here ————————————————————————————————————
     let it = shared.clone();
     module
+        .function("worktree_for", move |name: Ref<str>, prompt: Ref<str>| {
+            it.effect(Effect::Worktree {
+                name: name.to_string(),
+                prompt: prompt.to_string(),
+            })
+        })
+        .build()?;
+    let it = shared.clone();
+    module
+        .function("state", move |key: Ref<str>| {
+            it.state
+                .lock()
+                .expect("state lock")
+                .get(&*key)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .build()?;
+    let it = shared.clone();
+    module
+        .function("set_state", move |key: Ref<str>, value: Ref<str>| {
+            // An effect and not a write: a store is a gpui global, and this
+            // module knows nothing of gpui. The application drains it when the
+            // script returns — which is also what keeps the writes in order.
+            it.effect(Effect::Remember {
+                key: key.to_string(),
+                value: value.to_string(),
+            })
+        })
+        .build()?;
+
+    // **Joining strings, because Rune has no `join`.** Its `Vec` has `push`,
+    // `sort` and `remove`, and nothing that turns a list of lines into a text —
+    // which is what these scripts do all day, a prompt and a code excerpt both
+    // being a list of lines. Written here rather than folded by hand in every
+    // plugin, and taking its list **by reference** for the reason every other
+    // argument does: Rune passes by taking, and a `Vec<String>` would empty the
+    // state it came from.
+    let id = shared.id.clone();
+    module
+        .function("join", move |list: Ref<rune::runtime::Vec>, separator: Ref<str>| {
+            let mut out = String::new();
+            let mut first = true;
+            for item in list.iter() {
+                let Ok(text) = item.borrow_string_ref() else {
+                    // **Journalled and skipped, not refused.** Returning a
+                    // `Result` here would thread a `?` through every helper
+                    // that assembles a line — five deep in a plugin that builds
+                    // a prompt — for a mistake that is the script's and that
+                    // the journal names precisely. A list holding something
+                    // that is not a line is a bug; it is said where a plugin's
+                    // misbehaviour is already said.
+                    log::warn!(target: "plugin", "{id}: join skipped a value that is not a string");
+                    continue;
+                };
+                if !first {
+                    out.push_str(&separator);
+                }
+                first = false;
+                out.push_str(&text);
+            }
+            out
+        })
+        .build()?;
+
+    // **A JSON reader, because Rune has none.** It is what the CI plugin dodged
+    // by asking `gh --template` to format for it, and what an HTTP API leaves
+    // no way around. Generic and not Sentry-shaped: every plugin that fetches
+    // needs exactly this.
+    module
+        .function("json", |text: Ref<str>| {
+            serde_json::from_str::<serde_json::Value>(&text)
+                .map_err(|e| format!("unreadable JSON: {e}"))
+                .and_then(|value| to_rune(&value).map_err(|e| format!("unreadable JSON: {e}")))
+        })
+        .build()?;
+
+    let it = shared.clone();
+    module
         .function("agent", move |text: Ref<str>| {
             it.effect(Effect::Agent(text.to_string()))
         })
@@ -464,6 +569,51 @@ fn module(shared: &Arc<Shared>) -> Result<rune::Module, rune::ContextError> {
         .build()?;
 
     Ok(module)
+}
+
+/// Turns what an API answered into something a script can walk.
+///
+/// Numbers all become the shape they were written in — Sentry writes an
+/// occurrence count as a **string** in one endpoint and as a number in
+/// another, and a reader that refused either would fail on half the answers.
+/// Nothing here decides: it is a faithful copy, and it is the script that says
+/// what a field means.
+fn to_rune(value: &serde_json::Value) -> Result<Value, rune::alloc::Error> {
+    /// `()` is what a script reads as "nothing here", and it is also the only
+    /// value that cannot fail to build.
+    fn nothing() -> Value {
+        rune::to_value(()).expect("the unit value always builds")
+    }
+    fn or_nothing<T: rune::runtime::ToValue>(value: T) -> Value {
+        rune::to_value(value).unwrap_or_else(|_| nothing())
+    }
+    Ok(match value {
+        serde_json::Value::Null => nothing(),
+        serde_json::Value::Bool(b) => or_nothing(*b),
+        serde_json::Value::Number(n) => match (n.as_i64(), n.as_f64()) {
+            (Some(i), _) => or_nothing(i),
+            (None, Some(f)) => or_nothing(f),
+            _ => nothing(),
+        },
+        serde_json::Value::String(text) => or_nothing(text.as_str()),
+        serde_json::Value::Array(items) => {
+            let mut out = rune::runtime::Vec::new();
+            for item in items {
+                out.push(to_rune(item)?)?;
+            }
+            or_nothing(out)
+        }
+        serde_json::Value::Object(fields) => {
+            let mut out = rune::runtime::Object::new();
+            for (key, field) in fields {
+                out.insert(
+                    rune::alloc::String::try_from(key.as_str())?,
+                    to_rune(field)?,
+                )?;
+            }
+            or_nothing(out)
+        }
+    })
 }
 
 /// A loaded plugin's Rune side.
@@ -998,5 +1148,211 @@ mod shipped {
         assert!(text.contains("assertion failed"), "{text}");
         // The state came back whole: the run list is still there.
         probe.host.view(&state).expect("view still renders");
+    }
+}
+
+#[cfg(test)]
+mod sentry_plugin {
+    //! Sentry, as a plugin — the acceptance gate the plugin system set itself.
+    //!
+    //! The fixtures are the ones the Rust version was locked by, and they are
+    //! what makes this a test of the **API** and not of Sentry: a count written
+    //! as a string in one endpoint and as a number in another, two shapes of
+    //! stack trace depending on the SDK, an issue with half its fields missing.
+    //! If a script cannot read those without a capability cut for it, the
+    //! vocabulary is wrong.
+
+    use super::tests_support::*;
+    use crate::plugin::manifest::Capability;
+    use crate::plugin::view::Node;
+
+    const MANIFEST: &str = include_str!("../../plugins/sentry/plugin.toml");
+    const SOURCE: &str = include_str!("../../plugins/sentry/main.rn");
+
+    const ISSUES: &str = r#"[
+      {
+        "id": "4508",
+        "title": "TypeError: Cannot read properties of undefined",
+        "culprit": "app/Http/Controllers/QuoteController.php in store",
+        "level": "error",
+        "count": "137",
+        "lastSeen": "2026-08-19T10:12:00Z",
+        "permalink": "https://sentry.io/organizations/acme/issues/4508/"
+      },
+      {
+        "id": "4509",
+        "title": "ValueError",
+        "count": 3,
+        "lastSeen": "2026-08-18T22:00:00Z"
+      }
+    ]"#;
+
+    const EVENT: &str = r#"{
+      "message": "Cannot read properties of undefined (reading 'total')",
+      "entries": [
+        {
+          "type": "exception",
+          "data": {
+            "values": [
+              {
+                "stacktrace": {
+                  "frames": [
+                    {
+                      "filename": "vendor/laravel/framework/src/Foundation/Http/Kernel.php",
+                      "function": "handle",
+                      "lineNo": 141,
+                      "inApp": false
+                    },
+                    {
+                      "filename": "app/Http/Controllers/QuoteController.php",
+                      "function": "store",
+                      "lineNo": 88,
+                      "inApp": true,
+                      "context": [
+                        [86, "    public function store(Request $request)"],
+                        [87, "    {"],
+                        [88, "        return $request->quote->total;"],
+                        [89, "    }"]
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }"#;
+
+    fn probe_sentry() -> Probe {
+        let mut declaration: crate::plugin::manifest::Declaration =
+            toml::from_str(MANIFEST).expect("the shipped manifest reads");
+        assert_eq!(declaration.capabilities, vec![Capability::Http]);
+        assert_eq!(declaration.secrets, vec!["token".to_string()]);
+        declaration.settings.insert("org".into(), "acme".into());
+        let probe = probe_with(SOURCE, declaration).expect("the shipped script compiles");
+        // The project belongs to the repository, which is what `set_state`
+        // writes and what the application hands back.
+        probe.shared.remember(std::collections::BTreeMap::from([(
+            "project".to_string(),
+            "site".to_string(),
+        )]));
+        probe
+    }
+
+    #[test]
+    fn the_issue_list_reads_whatever_shape_the_count_came_in() {
+        let probe = probe_sentry();
+        let state = answer_with(&probe, |_| Ok(ISSUES.into()), probe.host.init(None))
+            .expect("init succeeds");
+        let tree = probe.host.view(&state).expect("view renders");
+        let Node::Column(children) = &tree else {
+            panic!("expected a column, got {tree:?}");
+        };
+        let Some(Node::List { items, .. }) = children.get(1) else {
+            panic!("expected a list, got {children:?}");
+        };
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items[0].title,
+            "TypeError: Cannot read properties of undefined"
+        );
+        // A string in the list, a number elsewhere: both read.
+        assert_eq!(items[0].badge.as_deref(), Some("137"));
+        assert_eq!(items[1].badge.as_deref(), Some("3"));
+        // An issue with no culprit and no permalink still reads.
+        assert_eq!(items[1].detail, None);
+    }
+
+    #[test]
+    fn a_trace_keeps_its_order_and_quotes_only_the_application() {
+        let probe = probe_sentry();
+        let state = answer_with(&probe, |_| Ok(ISSUES.into()), probe.host.init(None))
+            .expect("init succeeds");
+        let state = answer_with(
+            &probe,
+            |_| Ok(EVENT.into()),
+            probe.host.update(&state, "choose", "0"),
+        )
+        .expect("choosing an issue fetches its event");
+
+        let tree = probe.host.view(&state).expect("view renders");
+        let Node::Column(children) = &tree else {
+            panic!("expected a column");
+        };
+        let Some(Node::Section { body, .. }) = children.get(2) else {
+            panic!("expected the trace section, got {children:?}");
+        };
+        // The whole stack is listed — it is the path that led there — and only
+        // the application's frames carry their code.
+        let frames: Vec<_> = body
+            .iter()
+            .filter(|node| matches!(node, Node::Row(_)))
+            .collect();
+        assert_eq!(frames.len(), 3, "two frames plus the button row");
+        let excerpts: Vec<_> = body
+            .iter()
+            .filter_map(|node| match node {
+                Node::Code { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(excerpts.len(), 1, "only the in-app frame is quoted");
+        // The offending line is marked: the numbering does not say it.
+        assert!(excerpts[0].contains(">"), "{}", excerpts[0]);
+        assert!(excerpts[0].contains("88"), "{}", excerpts[0]);
+    }
+
+    #[test]
+    fn handing_it_over_pastes_the_trace_and_the_code() {
+        let probe = probe_sentry();
+        let state =
+            answer_with(&probe, |_| Ok(ISSUES.into()), probe.host.init(None)).expect("init");
+        let state = answer_with(
+            &probe,
+            |_| Ok(EVENT.into()),
+            probe.host.update(&state, "choose", "0"),
+        )
+        .expect("choose");
+        let _ = probe.shared.take_effects();
+
+        answer_with(
+            &probe,
+            |_| panic!("handing over asks nothing of anyone"),
+            probe.host.update(&state, "hand", ""),
+        )
+        .expect("hand");
+        let effects = probe.shared.take_effects();
+        let Some(super::Effect::Agent(text)) = effects.first() else {
+            panic!("expected a paste, got {effects:?}");
+        };
+        assert!(text.contains("QuoteController.php:88"), "{text}");
+        assert!(text.contains("Kernel.php:141"), "the whole stack: {text}");
+        assert!(text.contains("$request->quote->total"), "{text}");
+        // The framework frame is listed but not quoted: a hundred lines where
+        // the bug is not.
+        assert!(!text.contains("public function handle"), "{text}");
+    }
+
+    /// No project, no request: a plugin must not query a remote API to find out
+    /// it has nothing to ask it.
+    #[test]
+    fn with_no_project_nothing_leaves() {
+        let declaration = toml::from_str(MANIFEST).expect("manifest");
+        let probe = probe_with(SOURCE, declaration).expect("compiles");
+        let state = answer_with(
+            &probe,
+            |_| panic!("nothing must reach the workers"),
+            probe.host.init(None),
+        )
+        .expect("init succeeds");
+        let tree = probe.host.view(&state).expect("view renders");
+        let Node::Column(children) = &tree else {
+            panic!("expected a column, got {tree:?}");
+        };
+        assert!(
+            matches!(children.first(), Some(Node::Empty { .. })),
+            "{children:?}"
+        );
     }
 }

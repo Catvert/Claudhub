@@ -46,7 +46,6 @@ pub enum Pane {
     /// tag — and nothing in it links one row to the next.
     Tags,
     Notes,
-    Sentry,
     Conflicts,
     Diff,
     /// The built-in editor. It has `InputState`'s search, not ours — but it

@@ -193,10 +193,7 @@ impl Workspace {
                 (ConsolePanel::NAME, "panel-sql"),
                 (TerminalPanel::NAME, "panel-terminal"),
             ],
-            Self::Sentry => &[
-                (SentryPanel::NAME, "panel-sentry"),
-                (TerminalPanel::NAME, "panel-terminal"),
-            ],
+            Self::Sentry => &[(TerminalPanel::NAME, "panel-terminal")],
             // The settings themselves are not offered: this screen holds them
             // and nothing else, and hiding them would leave a screen the bar
             // still points at with nothing on it.
@@ -352,10 +349,12 @@ pub fn install_default_layout(
             let center = DockLayout::tabs().panel_view(panel!(ConsolePanel), cx);
             (Some(left), center)
         }
-        // Sentry stands alone: the issue list and the trace of the one opened
-        // are two halves of a single panel.
+        // Sentry's screen carries no panel of ours any more: Sentry is a
+        // plugin, and this screen is where the plugins that watch what happens
+        // outside the repository land. Empty when none does — a screen the bar
+        // still points at with nothing on it, which is the honest picture.
         Workspace::Sentry => {
-            let center = with_plugins!(DockLayout::tabs().panel_view(panel!(SentryPanel), cx));
+            let center = with_plugins!(DockLayout::tabs());
             (None, center)
         }
         // The settings take the whole width: the form has a sidebar of its own,

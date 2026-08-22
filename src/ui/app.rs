@@ -502,8 +502,6 @@ pub struct ClaudhubApp {
     /// answer of a row one has already left is worse than painting nothing —
     /// the same shape as the editor's `landing`, and for the same reason.
     pub(super) pending_preview: Option<(PathBuf, PathBuf, u32)>,
-    /// The current repository's Sentry issues, and the one being looked at.
-    pub(super) sentry: crate::ui::sentry_view::SentryState,
     /// The plugins, in manifest order. Each holds its script, its state and the
     /// tree it last produced; the panels only paint what is in here.
     pub(super) plugins: Vec<crate::plugin::Plugin>,
@@ -874,7 +872,6 @@ impl ClaudhubApp {
             search_preview_scroll: gpui::UniformListScrollHandle::new(),
             search_focus: search_inputs.focus,
             pending_preview: None,
-            sentry: Default::default(),
             plugins: Vec::new(),
             plugin_deadlines: Vec::new(),
             plugin_folded: Default::default(),
@@ -1554,8 +1551,6 @@ impl ClaudhubApp {
             }
 
             // — Sentry ————————————————————————————————————————————
-            Evt::Issues { issues } => self.issues_arrived(issues, cx),
-            Evt::IssueEvent { issue, event } => self.issue_event_arrived(issue, event, cx),
 
             // — Files and vault ———————————————————————————————————
             Evt::ProjectFiles {

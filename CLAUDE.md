@@ -118,7 +118,6 @@ src/
     caps.rs     ce qu'un plugin peut faire dehors : les données, et le worker
     host.rs     la machine Rune (feature `plugins`) — le seul module qui la voit
     loaded.rs   un plugin tel que la fenêtre le tient : script, état, dernier arbre
-  sentry.rs     issues et traces Sentry, testées sur fixture
   wt.rs         le `wt.toml` d'un projet : questions, tâches, statut, URLs
   git/          couche git — sous-processus `git`, testable sans gpui
     mod.rs      exécution des commandes (stdin fermé, LC_ALL=C, pas de pager)
@@ -175,7 +174,6 @@ src/
     file_icons.rs   l'icône et la teinte d'un fichier, d'après son nom
                     (marques dans assets/icons/lang/, CC0)
     explorer.rs     l'explorateur de projet et l'éditeur intégré
-    sentry_view.rs  les issues, leur trace, et de quoi les confier
     db.rs           l'arbre des bases : connexion, base, table, colonne
     db_query.rs     la console SQL, ses complétions et sa table de résultats
     sql_history.rs  les requêtes déjà jouées : dédup, portée, jours — pur
@@ -4013,39 +4011,67 @@ couleur. Ce n'est pas un détail d'implémentation : la fusion des runs la prend
 alors en compte toute seule, et une sélection découpe les runs exactement où il
 faut sans une ligne de code dédiée.
 
-### Sentry
+### Sentry, et ce que son portage a prouvé
 
-Claudhub **lit** Sentry ; il ne lui envoie jamais rien. Un rapport d'erreur est
-un point de départ souvent meilleur qu'une intention — il porte déjà la trace
-et le fichier fautif — et le geste utile est de le confier à un agent avec le
-code autour des frames de l'application.
+Sentry n'est plus du Rust. C'est un **plugin livré**, `plugins/sentry/`, et
+c'était le portillon d'acceptation que le système de plugins s'était donné : si
+Sentry ne se réécrivait pas là sans qu'on ajoute une capacité taillée pour lui,
+l'API était fausse et se reprenait avant le deuxième plugin plutôt qu'après le
+cinquième.
 
-- **Le jeton voyage en `Secret`**, un newtype dont le `Debug` écrit à la main
-  masque la valeur — même motif que le mot de passe de `db::Connection` : une
-  `Cmd` se journalise, un secret non. Il voyage parce que le worker tourne
-  parfois dans un autre processus (le serveur WSL), dont le fichier de
-  réglages n'est pas le nôtre ; `SENTRY_TOKEN` garde la priorité **côté
-  worker**, c'est l'environnement du serveur qui fait foi. La commande de
-  l'éditeur externe et celle du message de commit voyagent pour la même
-  raison, dans leurs `Cmd` respectives.
-- **L'organisation est un réglage, le projet appartient au dépôt**
-  (`Store::repos`) : deux dépôts d'une même organisation n'ont pas les mêmes
-  erreurs.
-- **File réseau**, celle de fetch/pull/push : une API distante met parfois
-  plusieurs secondes et ne doit pas occuper un worker de lecture.
-- **Le code cité vient de l'événement**, pas du disque : c'est le code
-  *déployé* au moment de l'erreur, et le relire aujourd'hui donnerait autre
-  chose. `sentry::prompt` cite la pile entière — c'est le chemin qui a mené là
-  — mais le code des seules frames `in_app` : une pile de framework fait cent
-  lignes, et le bug n'y est pas.
-- Deux formes de pile existent selon le SDK (`exception` et `stacktrace`
-  dans `entries`), et le compte d'occurrences arrive tantôt en nombre, tantôt
-  en chaîne. Les deux sont lues, et une fixture le verrouille.
+**Il l'a passé, et il a coûté quatre choses — dont aucune ne parle de Sentry :**
 
-« Ouvrir un worktree pour cette issue » est la boucle complète : `wt` crée le
-worktree avec les copies et les hooks du projet, et le prompt est livré à
-l'agent **quand la liste des worktrees revient** — c'est le seul signal qui
-dise que les hooks ont fini.
+- **Un lecteur JSON** (`json`), parce que Rune n'en a pas. Le plugin CI l'avait
+  esquivé en demandant à `gh --template` de formater pour lui ; une API HTTP ne
+  laisse pas cette porte. Ce que la conversion garde, ce sont les formes telles
+  qu'elles arrivent : Sentry écrit un compte d'occurrences en **chaîne** dans la
+  liste des issues et en **nombre** ailleurs, et un lecteur qui refuserait l'une
+  des deux échouerait un jour sur deux.
+- **Un `join`**, parce que le `Vec` de Rune a `push`, `sort` et `remove`, et
+  rien qui fasse un texte d'une liste de lignes — ce que ces scripts font toute
+  la journée, un prompt comme un extrait de code étant une liste de lignes.
+- **Un état par dépôt** (`state` / `set_state`). Le projet Sentry appartient au
+  dépôt et non au compte : deux dépôts d'une même organisation n'ont pas les
+  mêmes erreurs. C'est ce que veut dire la configuration d'un projet, et un
+  plugin qui veut un grain plus fin met `worktree()` dans sa propre clé.
+- **`worktree_for(nom, prompt)`**, qui crée un worktree et remet un texte à
+  l'agent qui y atterrit. Ce n'est pas le geste de Sentry mais celui de tout le
+  monde — ouvrir une branche pour un échec de CI, pour une issue, pour un
+  rapport. Les deux vont dans un seul effet parce qu'ils ne se séparent pas : le
+  prompt doit attendre que `wt` ait fini ses hooks, qui prennent des minutes et
+  dont le seul signal est le retour de la liste des worktrees.
+
+**Ce que le portage a aussi révélé et qui n'aurait pas été trouvé autrement :**
+un script ne peut pas nommer un de ses helpers comme une fonction du
+vocabulaire — Rune refuse `fn text(…)` à côté de `claudhub::text`, et le dit
+clairement, ce qui est précisément ce qu'on achète en gardant ses diagnostics.
+
+**Ce qui reste vrai** : Claudhub lit Sentry et ne lui envoie jamais rien ; le
+code cité vient de l'**événement** et non du disque, puisque c'est le code
+déployé au moment de l'erreur ; la pile entière part au prompt — c'est le chemin
+qui a mené là — mais le code des seules frames `in_app`, une pile de framework
+faisant cent lignes où le bug n'est pas ; et les deux formes de pile selon le
+SDK (`exception.values[].stacktrace` et `stacktrace`) sont lues toutes les deux,
+un client qui n'en lit qu'une affichant une trace vide sur la moitié des
+projets. Les fixtures qui verrouillaient tout cela en Rust le verrouillent
+maintenant à travers l'API des plugins, ce qui en fait un test de l'API autant
+que de Sentry.
+
+**Le jeton peut nommer une variable d'environnement.** Un secret dont la valeur
+commence par `$` est lu dans l'environnement **du worker** — la règle que
+`SENTRY_TOKEN` suivait déjà quand il était à nous, et qui vaut désormais pour
+tout plugin. C'est ce qui garde un jeton hors d'un fichier de réglages qu'on
+recopie.
+
+**Les réglages d'avant se reprennent tout seuls**, par le même chemin qu'une
+installation neuve, comme `migrate_agents` : `sentry_org`, `sentry_token` et
+`sentry_query` sont versés dans `plugins["sentry"]`, le projet de chaque dépôt
+dans son `plugin_state`, et les champs vidés — donc une seule fois.
+
+**L'écran « Sentry » reste, et ne porte plus aucun panneau de nous.** C'est là
+que se rangent les plugins qui regardent ce qui se passe hors du dépôt. Sans
+plugin qui le réclame, il est vide : un écran que la barre désigne encore et où
+il n'y a rien, ce qui est l'image honnête de la situation.
 
 ### Les raccourcis clavier
 
@@ -4469,8 +4495,10 @@ Huit points qui ne se devinent pas :
   ajouter un message casserait le fil pour tous les autres. `Cmd::PluginCall`
   porte une capacité à charge fermée, `Evt::PluginResult` la ramène. Ajouter une
   **capacité** est un changement de Claudhub, versionné une fois ; ajouter un
-  plugin n'est pas un changement du fil du tout. Deux incréments à ce jour — les
-  capacités, puis la gestion git — et une leçon payée deux fois en fusionnant :
+  plugin n'est pas un changement du fil du tout. Trois incréments à ce jour — les
+  capacités, la gestion git, puis le départ de Sentry, dont les deux commandes
+  ont quitté l'énumération : postcard étant positionnel, retirer une variante
+  déplace toutes les suivantes — et une leçon payée deux fois en fusionnant :
   quand deux branches portent chacune le numéro au suivant, git prend la ligne
   sans conflit et le fil se retrouve avec deux protocoles sous un seul numéro,
   c'est-à-dire une poignée de main qui accepte un serveur qui ne parle pas la
@@ -4547,10 +4575,9 @@ qui en sort comparé à celui qu'on attend — le motif de `Session::run` du cli
 LSP. Le plugin livré y passe aussi : un fichier embarqué qui ne se lit pas ne
 provoque **aucune erreur**, le panneau reste vide et rien ne dit pourquoi.
 
-Ce que la v1 ne fait pas, et c'est délibéré : Sentry n'est **pas** porté. C'est
-lui qui jugera l'API au lot suivant — s'il ne se réécrit pas en Rune sans
-capacité taillée pour lui, l'API est fausse et se reprend là, pas au cinquième
-plugin.
+**Sentry a servi de portillon d'acceptation et l'a passé** — voir « Sentry, et
+ce que son portage a prouvé ». Mille lignes de Rust contre deux cents de Rune,
+au prix de quatre ajouts au vocabulaire dont aucun ne parle de Sentry.
 
 ### Installer un plugin, l'éditer, le mettre à jour
 

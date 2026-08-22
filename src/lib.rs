@@ -29,7 +29,6 @@ pub mod logging;
 pub mod lsp;
 pub mod plugin;
 pub mod runtime;
-pub mod sentry;
 #[cfg(feature = "ui")]
 pub mod terminal;
 #[cfg(feature = "ui")]

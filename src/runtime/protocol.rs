@@ -262,25 +262,6 @@ pub enum Cmd {
         ours: bool,
     },
 
-    // — Sentry ————————————————————————————————————————————————————
-    /// A project's issues. **Network queue**: a remote API sometimes takes
-    /// several seconds and must not occupy a read worker.
-    ///
-    /// The token travels as a [`Secret`], whose `Debug` masks the value: a
-    /// command is logged, a secret is not. On the worker side, `SENTRY_TOKEN`
-    /// keeps priority — the server's environment is authoritative.
-    LoadIssues {
-        org: String,
-        project: String,
-        query: String,
-        token: Secret,
-    },
-    /// An issue's most recent event: its stack and its message.
-    LoadIssueEvent {
-        issue: String,
-        token: Secret,
-    },
-
     // — Databases —————————————————————————————————————————————————
     /// A connection's databases.
     ///
@@ -695,8 +676,6 @@ impl Cmd {
             Self::AbortPending { .. } => "AbortPending",
             Self::ResumePending { .. } => "ResumePending",
             Self::ResolveConflict { .. } => "ResolveConflict",
-            Self::LoadIssues { .. } => "LoadIssues",
-            Self::LoadIssueEvent { .. } => "LoadIssueEvent",
             Self::DbDatabases { .. } => "DbDatabases",
             Self::DbTables { .. } => "DbTables",
             Self::DbColumns { .. } => "DbColumns",
@@ -852,13 +831,6 @@ pub enum Evt {
     },
     WtStates {
         states: Vec<(WorktreeId, WtWorktree)>,
-    },
-    Issues {
-        issues: Vec<crate::sentry::Issue>,
-    },
-    IssueEvent {
-        issue: String,
-        event: crate::sentry::Event,
     },
     /// What a plugin's capability answered — the body, or one sentence of why
     /// not. It goes back to the request that is awaiting it, by `call`.
@@ -1134,7 +1106,6 @@ pub enum Action {
     Write,
     FileOp,
     OpenExternal,
-    Sentry,
     /// Installing, updating or removing a plugin.
     Plugin,
     Notes,
@@ -1143,7 +1114,7 @@ pub enum Action {
 impl Action {
     /// The i18n key of the message shown on success.
     /// Every action, for the tests that check each has its messages.
-    pub const ALL: [Action; 32] = [
+    pub const ALL: [Action; 31] = [
         Action::Refresh,
         Action::Stage,
         Action::Unstage,
@@ -1173,7 +1144,6 @@ impl Action {
         Action::Write,
         Action::FileOp,
         Action::OpenExternal,
-        Action::Sentry,
         Action::Plugin,
         Action::Notes,
     ];
@@ -1237,7 +1207,6 @@ impl Action {
             Self::Write => "action-write-ok",
             Self::FileOp => "action-file-op-ok",
             Self::OpenExternal => "action-open-external-ok",
-            Self::Sentry => "action-sentry-ok",
             Self::Plugin => "action-plugin-ok",
             Self::Resolve => "action-resolve-ok",
             Self::Notes => "action-notes-ok",

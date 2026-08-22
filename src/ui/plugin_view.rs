@@ -301,6 +301,32 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    /// Delivers the held prompt, if the worktree it targets has just arrived.
+    ///
+    /// Called on every `Evt::Worktrees`: it is the only signal that says `wt`
+    /// has finished — creating a worktree runs hooks that take minutes, and
+    /// nothing else marks their end.
+    pub(super) fn deliver_awaited_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((path, _)) = self.awaiting_agent.as_ref() else {
+            return;
+        };
+        let path = path.clone();
+        if !self
+            .repos
+            .iter()
+            .flat_map(|repo| repo.worktrees.iter())
+            .any(|w| w.path == path)
+        {
+            return;
+        }
+        let Some((_, text)) = self.awaiting_agent.take() else {
+            return;
+        };
+        self.select_worktree(path.clone(), window, cx);
+        self.show_terminal_panel(window, cx);
+        self.send_to_agent(&path, text, window, cx);
+    }
+
     /// Asks before removing a plugin.
     ///
     /// `remove_dir_all` on a directory one may have edited: this is the one
@@ -515,13 +541,15 @@ impl ClaudhubApp {
             Err(message) => self.plugins[index].fail(message),
         }
         let effects = self.plugins[index].take_effects();
-        self.apply_plugin_effects(effects, window, cx);
+        let id = self.plugins[index].manifest.id.clone();
+        self.apply_plugin_effects(&id, effects, window, cx);
         cx.notify();
     }
 
     /// What the script asked of the window, in the order it asked.
     fn apply_plugin_effects(
         &mut self,
+        plugin: &str,
         effects: Vec<Effect>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -553,6 +581,48 @@ impl ClaudhubApp {
                     }
                 }
                 Effect::Notify(text) => self.announce(SharedString::from(text), cx),
+                // The worktree does not exist yet: the prompt is **held** and
+                // delivered when the worktree list comes back, which is the
+                // only signal saying `wt` has finished its hooks — they install
+                // dependencies and take minutes.
+                Effect::Worktree { name, prompt } => {
+                    let Some(main) = self
+                        .active
+                        .as_deref()
+                        .and_then(|worktree| self.main_of(worktree))
+                    else {
+                        continue;
+                    };
+                    if let Some(root) = self.wt_project(&main).map(|p| p.root.clone()) {
+                        self.awaiting_agent = Some((root.join(&name), prompt));
+                    }
+                    self.start_worktree(main, name, None, window, cx);
+                }
+                // Written against the **repository**, which is what a project's
+                // configuration belongs to. Nothing to do afterwards: the next
+                // sweep hands it back to the script, and the script asked for
+                // the write because it already holds the value.
+                Effect::Remember { key, value } => {
+                    let Some(main) = self
+                        .active
+                        .as_deref()
+                        .and_then(|worktree| self.main_of(worktree))
+                    else {
+                        continue;
+                    };
+                    let id = plugin.to_string();
+                    crate::ui::store::Store::update_global(cx, move |store| {
+                        store
+                            .repos
+                            .entry(main)
+                            .or_default()
+                            .plugin_state
+                            .entry(id)
+                            .or_default()
+                            .insert(key, value);
+                    });
+                    self.configure_plugins(cx);
+                }
             }
         }
     }

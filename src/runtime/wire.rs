@@ -23,7 +23,7 @@ use serde::Serialize;
 /// `Evt` or to a type they carry: the two ends are two binaries shipped
 /// together but installed separately, and a disagreement should be told at the
 /// handshake rather than as an unreadable frame on the first diff.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// The first frame from each end, before any `Cmd` or `Evt`.
 ///
@@ -276,13 +276,23 @@ mod tests {
     /// The secret crosses the wire but not the traces.
     #[test]
     fn a_secret_crosses_the_wire_but_not_the_logs() {
-        let cmd = Cmd::LoadIssueEvent {
-            issue: "42".into(),
-            token: Secret("sntrys_hunter2".into()),
+        let cmd = Cmd::PluginCall {
+            plugin: "sentry".into(),
+            call: 1,
+            cap: crate::plugin::caps::Cap::Http {
+                method: "GET".into(),
+                url: "https://sentry.io/api/0/issues/42/".into(),
+                headers: vec![("Authorization".into(), "Bearer {secret}".into())],
+                body: None,
+                secret: Some(Secret("sntrys_hunter2".into())),
+            },
         };
         let back = roundtrip(&cmd);
         match back {
-            Cmd::LoadIssueEvent { token, .. } => assert_eq!(token.0, "sntrys_hunter2"),
+            Cmd::PluginCall {
+                cap: crate::plugin::caps::Cap::Http { secret, .. },
+                ..
+            } => assert_eq!(secret.expect("the secret travels").0, "sntrys_hunter2"),
             other => panic!("wrong variant: {other:?}"),
         }
         assert!(!format!("{cmd:?}").contains("hunter2"), "{cmd:?}");

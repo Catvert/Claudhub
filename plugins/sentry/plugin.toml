@@ -1,0 +1,31 @@
+# Sentry, en plugin.
+#
+# C'est le portillon d'acceptation que le système de plugins s'était donné : si
+# Sentry ne se réécrivait pas ici sans qu'on ajoute une capacité taillée pour
+# lui, l'API était fausse. Il a fallu deux choses, et aucune ne parle de
+# Sentry — un lecteur JSON, que toute API HTTP réclame, et un état par dépôt,
+# que toute configuration de projet réclame.
+#
+# Comme les thèmes, ce dossier est réécrit à chaque démarrage : pour le
+# modifier, le copier sous un autre nom.
+
+title = "Sentry"
+screen = "sentry"
+icon = "triangle-alert"
+
+capabilities = ["http"]
+
+# Le jeton est nommé par le script et **jamais lu par lui** : c'est le worker
+# qui le substitue, dans un en-tête qui porte `{secret}`. Sa valeur peut être le
+# jeton lui-même, ou `$SENTRY_TOKEN` — une variable d'environnement lue là où
+# tourne le worker, ce qui la garde hors d'un fichier de réglages qu'on recopie.
+secrets = ["token"]
+
+[settings]
+# L'organisation appartient à la machine ; le projet appartient au dépôt, et
+# c'est `set_state` qui le retient — deux dépôts d'une même organisation n'ont
+# pas les mêmes erreurs.
+org = ""
+host = "https://sentry.io"
+query = "is:unresolved"
+intro = "Cette erreur est remontée par Sentry. Voici sa trace et le code déployé au moment où elle s'est produite. Dis-moi ce qui la provoque, puis corrige-la."

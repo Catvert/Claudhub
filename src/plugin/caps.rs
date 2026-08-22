@@ -142,6 +142,8 @@ fn resolve(
     headers: &[(String, String)],
     secret: Option<&Secret>,
 ) -> Result<Vec<(String, String)>, String> {
+    let secret = secret.map(|secret| Secret(from_env(&secret.0)));
+    let secret = secret.as_ref();
     headers
         .iter()
         .map(|(name, value)| match secret {
@@ -175,6 +177,21 @@ fn shell(worktree: &std::path::Path, command: &str) -> Result<String, String> {
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// A secret written `$NAME` is read from the environment, **here**.
+///
+/// Here, that is, in the worker: the server's environment is what counts, which
+/// is the rule the Sentry token already lived by when it was one of ours. It is
+/// also what lets a token stay out of a settings file that gets copied around,
+/// and it costs a plugin nothing — the value it names is opaque to it either
+/// way. A variable that is not set leaves the text as it stands, so a secret
+/// that genuinely begins with a dollar still works.
+fn from_env(value: &str) -> String {
+    let Some(name) = value.strip_prefix('$') else {
+        return value.to_string();
+    };
+    std::env::var(name).unwrap_or_else(|_| value.to_string())
 }
 
 /// What a message leads with. A CLI writes a paragraph; a panel shows a line.
@@ -236,6 +253,27 @@ mod tests {
         let reported = message.rsplit("— ").next().expect("a reason");
         assert_eq!(reported, "1", "{message}");
         assert!(message.contains("exit status: 9"), "{message}");
+    }
+
+    /// A token in the environment rather than in a file one copies around.
+    #[test]
+    fn a_secret_can_name_a_variable() {
+        // Safety: the test process, one variable, read back at once.
+        unsafe { std::env::set_var("CLAUDHUB_TEST_TOKEN", "s3cret") };
+        let resolved = resolve(
+            &[("Authorization".into(), "Bearer {secret}".into())],
+            Some(&Secret("$CLAUDHUB_TEST_TOKEN".into())),
+        )
+        .expect("the variable is set");
+        assert_eq!(resolved[0].1, "Bearer s3cret");
+        // A variable that is not set leaves the text as it stands: a secret
+        // that genuinely begins with a dollar still works.
+        let plain = resolve(
+            &[("Authorization".into(), "Bearer {secret}".into())],
+            Some(&Secret("$nothing-is-set-here".into())),
+        )
+        .expect("no variable, no failure");
+        assert_eq!(plain[0].1, "Bearer $nothing-is-set-here");
     }
 
     #[test]

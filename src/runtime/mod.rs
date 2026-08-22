@@ -58,8 +58,6 @@ fn is_network(cmd: &Cmd) -> bool {
             | Cmd::CreateTag { push: true, .. }
             | Cmd::DeleteRemoteTag { .. }
             | Cmd::LoadRemoteTags { .. }
-            | Cmd::LoadIssues { .. }
-            | Cmd::LoadIssueEvent { .. }
     )
 }
 
@@ -711,29 +709,10 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
             repo::resolve(dir, &path, ours).map(|_| String::new())
         }),
 
-        // — Sentry ——————————————————————————————————————————————————————
-        Cmd::LoadIssues {
-            org,
-            project,
-            query,
-            token,
-        } => with_sentry_token(token, |token| {
-            match crate::sentry::issues(&org, &project, &query, token) {
-                Ok(issues) => vec![Evt::Issues { issues }],
-                Err(e) => vec![fail(None, Action::Sentry, e)],
-            }
-        }),
-        Cmd::LoadIssueEvent { issue, token } => with_sentry_token(token, |token| {
-            match crate::sentry::latest_event(&issue, token) {
-                Ok(event) => vec![Evt::IssueEvent { issue, event }],
-                Err(e) => vec![fail(None, Action::Sentry, e)],
-            }
-        }),
-
         // — Plugins —————————————————————————————————————————————————————
-        // No `Done`/`Failed` here: a plugin's request is not an operation on
-        // the repository, and a failure belongs under the panel that asked for
-        // it, not in a status bar the next message overwrites.
+        // No `Done`/`Failed` for a capability: a plugin's request is not an
+        // operation on the repository, and a failure belongs under the panel
+        // that asked for it, not in a status bar the next message overwrites.
         Cmd::PluginCall { plugin, call, cap } => vec![Evt::PluginResult {
             plugin,
             call,
@@ -1086,17 +1065,6 @@ fn auto_fetch(main: PathBuf) -> Vec<Evt> {
 ///
 /// `SENTRY_TOKEN` wins over what the command carries: the worker sometimes runs
 /// in another process, and that process's environment is the authority.
-fn with_sentry_token(token: protocol::Secret, f: impl FnOnce(&str) -> Vec<Evt>) -> Vec<Evt> {
-    match crate::sentry::token(&token.0) {
-        Some(token) => f(&token),
-        None => vec![fail(
-            None,
-            Action::Sentry,
-            anyhow::anyhow!("no Sentry token: SENTRY_TOKEN or the settings"),
-        )],
-    }
-}
-
 /// One page of a query's result, and how long it took.
 fn db_query(
     connection: crate::db::Connection,

@@ -15,14 +15,14 @@ use claudhub::*;
 
 pub async fn init(worktree) {
     if worktree == "" {
-        return Ok(state([], "Aucun worktree ouvert."));
+        return Ok(fresh([], "Aucun worktree ouvert."));
     }
     let out = shell(setting("list")).await?;
     let runs = parse(out);
     if runs.is_empty() {
-        return Ok(state(runs, "Aucune exécution — `gh` est-il installé et authentifié ?"));
+        return Ok(fresh(runs, "Aucune exécution — `gh` est-il installé et authentifié ?"));
     }
-    Ok(state(runs, ""))
+    Ok(fresh(runs, ""))
 }
 
 pub fn view(s) {
@@ -97,7 +97,9 @@ ${tail(text, 120)}`);
 
 // — Ce qui n'est pas de l'interface ————————————————————————————————————
 
-fn state(runs, note) {
+/// `fresh` et non `state` : le vocabulaire a une fonction de ce nom, et Rune
+/// refuse — clairement — qu'un script en redéfinisse une.
+fn fresh(runs, note) {
     #{ runs: runs, chosen: -1, note: note }
 }
 
@@ -154,5 +156,5 @@ fn tail(text, lines) {
     for i in (all.len() - lines)..all.len() {
         kept.push(all[i]);
     }
-    kept.join("\n")
+    join(kept, "\n")
 }

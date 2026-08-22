@@ -1,0 +1,271 @@
+// Les erreurs que Sentry remonte, et de quoi les confier à un agent.
+//
+// Claudhub **lit** Sentry ; il ne lui envoie jamais rien. Un rapport d'erreur
+// est un meilleur point de départ qu'une intention — il porte déjà la trace et
+// le fichier fautif —, et le geste utile est de le remettre à l'agent avec le
+// code d'autour.
+
+use claudhub::*;
+
+const ISSUES_PER_PAGE = 25;
+
+pub async fn init(worktree) {
+    let project = state("project");
+    if project == "" {
+        return Ok(#{ issues: [], chosen: -1, event: (), note: "no-project" });
+    }
+    let body = api(`/projects/${setting("org")}/${project}/issues/?query=${escape(setting("query"))}&statsPeriod=14d&limit=${ISSUES_PER_PAGE}`).await?;
+    let issues = [];
+    for raw in json(body)? {
+        issues.push(issue_of(raw));
+    }
+    Ok(#{ issues: issues, chosen: -1, event: (), note: if issues.is_empty() { "empty" } else { "" } })
+}
+
+pub fn view(s) {
+    if s.note == "no-project" {
+        return column([
+            empty("Aucun projet Sentry pour ce dépôt."),
+            row([primary(button("Choisir le projet", "settings", "ask-project", ""))]),
+        ]);
+    }
+    if s.note == "empty" {
+        return column([
+            empty("Aucune erreur non résolue."),
+            row([button("Changer de projet", "settings", "ask-project", "")]),
+        ]);
+    }
+
+    let rows = [];
+    for issue in s.issues {
+        rows.push(item(issue.title, issue.culprit, `${issue.count}`, glyph(issue.level)));
+    }
+
+    let body = [
+        row([
+            title(`${setting("org")}/${state("project")}`),
+            button("Changer de projet", "settings", "ask-project", ""),
+        ]),
+        list("issues", rows, s.chosen, "choose"),
+    ];
+
+    if s.chosen >= 0 {
+        let issue = s.issues[s.chosen];
+        body.push(section(issue.title, trace(s, issue)));
+    }
+    column(body)
+}
+
+pub async fn update(s, action, payload) {
+    if action == "ask-project" {
+        // Le seul champ dont ce plugin a besoin, et il n'y a pas de champ de
+        // saisie dans le vocabulaire : on renvoie vers les réglages, où il est.
+        notify("Le projet Sentry se règle dans la page « Plugins ».");
+        return Ok(s);
+    }
+
+    if action == "choose" {
+        s.chosen = payload.parse::<i64>()?;
+        s.event = ();
+        let id = s.issues[s.chosen].id;
+        // L'événement le plus récent : c'est lui qui porte la trace et le code
+        // **déployé** au moment de l'erreur. Le relire sur le disque
+        // aujourd'hui donnerait autre chose.
+        let raw = json(api(`/issues/${id}/events/latest/`).await?)?;
+        s.event = event_of(raw);
+        return Ok(s);
+    }
+
+    if action == "open" {
+        let parts = payload.split(':').collect::<Vec>();
+        open(parts[0], parts[1].parse::<i64>()?);
+        return Ok(s);
+    }
+
+    if action == "hand" {
+        agent(prompt(s));
+        notify("Erreur confiée à l'agent");
+        return Ok(s);
+    }
+
+    Ok(s)
+}
+
+// — Le détail d'une erreur ————————————————————————————————————————————
+
+fn trace(s, issue) {
+    if s.event is Tuple {
+        return [spinner()];
+    }
+    let out = [];
+    if s.event.message != "" && s.event.message != issue.title {
+        out.push(dim(s.event.message));
+    }
+    out.push(row([
+        primary(button("Confier à l'agent", "bot", "hand", "")),
+        button("Ouvrir dans Sentry", "external-link", "", issue.permalink),
+    ]));
+    for frame in s.event.frames {
+        let mark = if frame.in_app { "chevron-right" } else { "" };
+        out.push(row([
+            button(`${frame.path}:${frame.line}`, mark, "open", `${frame.path}:${frame.line}`),
+            dim(frame.function),
+        ]));
+        if frame.in_app && frame.context != "" {
+            out.push(code(frame.context, ""));
+        }
+    }
+    out
+}
+
+/// Ce qui part à l'agent : la pile entière — c'est le chemin qui a mené là —
+/// mais le code des seules frames de l'application, une pile de framework
+/// faisant cent lignes où le bug n'est pas.
+fn prompt(s) {
+    let issue = s.issues[s.chosen];
+    let out = [setting("intro"), ""];
+    if issue.culprit != "" {
+        out.push(issue.culprit);
+    }
+    if s.event.message != "" && s.event.message != issue.title {
+        out.push(s.event.message);
+    }
+    out.push("");
+    for frame in s.event.frames {
+        let line = `- ${frame.path}:${frame.line}`;
+        if frame.function != "" {
+            line += ` · ${frame.function}`;
+        }
+        out.push(line);
+    }
+    for frame in s.event.frames {
+        if !frame.in_app || frame.context == "" {
+            continue;
+        }
+        out.push("");
+        out.push(`## ${frame.path}:${frame.line}`);
+        out.push("```");
+        out.push(frame.context);
+        out.push("```");
+    }
+    join(out, "\n")
+}
+
+// — Ce que l'API rend ——————————————————————————————————————————————————
+
+async fn api(path) {
+    let url = `${setting("host")}/api/0${path}`;
+    // Le jeton n'est pas lu ici : `{secret}` est remplacé par le worker.
+    http("GET", url, [("Authorization", "Bearer {secret}")], "", "token").await
+}
+
+fn issue_of(raw) {
+    #{
+        id: str_of(raw, "id"),
+        title: str_of(raw, "title"),
+        culprit: str_of(raw, "culprit"),
+        level: str_of(raw, "level"),
+        // Sentry écrit le compte en **chaîne** dans la liste des issues et en
+        // nombre ailleurs. Les deux se lisent.
+        count: str_of(raw, "count"),
+        permalink: str_of(raw, "permalink"),
+    }
+}
+
+fn event_of(raw) {
+    let frames = [];
+    for entry in field(raw, "entries", []) {
+        let kind = str_of(entry, "type");
+        if kind != "exception" && kind != "stacktrace" {
+            continue;
+        }
+        let data = field(entry, "data", #{});
+        // Deux formes selon le SDK : `exception.values[].stacktrace.frames` et
+        // `stacktrace.frames`. Les deux existent, et un client qui n'en lit
+        // qu'une affiche une trace vide sur la moitié des projets.
+        for values in field(data, "values", []) {
+            collect(field(values, "stacktrace", #{}), frames);
+        }
+        collect(data, frames);
+    }
+    #{ message: str_of(raw, "message"), frames: frames }
+}
+
+fn collect(stack, frames) {
+    for raw in field(stack, "frames", []) {
+        let line = field(raw, "lineNo", 0);
+        let name = str_of(raw, "filename");
+        if name == "" {
+            name = str_of(raw, "absPath");
+        }
+        if name == "" {
+            name = str_of(raw, "module");
+        }
+        frames.push(#{
+            path: name,
+            line: line,
+            function: str_of(raw, "function"),
+            in_app: field(raw, "inApp", false),
+            context: context_of(raw, line),
+        });
+    }
+}
+
+/// Le code d'autour, tel que Sentry le rend : `[[numéro, texte], …]`. La ligne
+/// fautive est marquée — c'est le seul renseignement que la numérotation ne
+/// donne pas d'un coup d'œil.
+fn context_of(raw, line) {
+    let out = [];
+    for pair in field(raw, "context", []) {
+        let number = pair[0];
+        let mark = if number == line { ">" } else { " " };
+        out.push(`${mark} ${number}  ${pair[1]}`);
+    }
+    join(out, "\n")
+}
+
+// — Lire du JSON sans se faire piéger par un champ absent ————————————————
+
+/// Un champ, ou le repli quand il n'est pas là.
+///
+/// La garde de type n'est pas de la prudence : une API rend un objet là où on
+/// en attendait un, et un tableau le lendemain. Demander un champ nommé à un
+/// tableau est une erreur d'exécution qui remonte en « Missing instance
+/// function », ce qui ne désigne rien de ce qu'on lit. Un champ absent et un
+/// champ nul se lisent pareil, ce qui est ce qu'on veut d'un JSON facultatif.
+fn field(object, name, fallback) {
+    if !(object is Object) {
+        return fallback;
+    }
+    match object.get(name) {
+        Some(value) => if value is Tuple { fallback } else { value },
+        None => fallback,
+    }
+}
+
+/// `str_of` et non `text` : le vocabulaire de vue a déjà une fonction de ce
+/// nom, et Rune refuse — clairement — qu'un script en redéfinisse une.
+fn str_of(object, name) {
+    let value = field(object, name, "");
+    if value is String {
+        value
+    } else if value is Tuple {
+        ""
+    } else {
+        `${value}`
+    }
+}
+
+fn escape(query) {
+    query.replace(" ", "%20").replace(":", "%3A")
+}
+
+fn glyph(level) {
+    if level == "fatal" || level == "error" {
+        "circle-x"
+    } else if level == "warning" {
+        "triangle-alert"
+    } else {
+        "info"
+    }
+}
