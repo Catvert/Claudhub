@@ -2699,7 +2699,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.5.2"
-source = "git+https://github.com/Catvert/gpui-component?branch=claudhub#7660fdd73782e9662556e2c7e8544e2ba4a5d504"
+source = "git+https://github.com/Catvert/gpui-component?branch=claudhub#83e46ce96ccc508d05f724ad6cf93aa326c520fc"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2731,7 +2731,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.5.2"
-source = "git+https://github.com/Catvert/gpui-component?branch=claudhub#7660fdd73782e9662556e2c7e8544e2ba4a5d504"
+source = "git+https://github.com/Catvert/gpui-component?branch=claudhub#83e46ce96ccc508d05f724ad6cf93aa326c520fc"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2811,7 +2811,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-assets"
 version = "0.5.1"
-source = "git+https://github.com/Catvert/gpui-component?branch=claudhub#7660fdd73782e9662556e2c7e8544e2ba4a5d504"
+source = "git+https://github.com/Catvert/gpui-component?branch=claudhub#83e46ce96ccc508d05f724ad6cf93aa326c520fc"
 dependencies = [
  "anyhow",
  "gpui",
@@ -2825,7 +2825,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.5.1"
-source = "git+https://github.com/Catvert/gpui-component?branch=claudhub#7660fdd73782e9662556e2c7e8544e2ba4a5d504"
+source = "git+https://github.com/Catvert/gpui-component?branch=claudhub#83e46ce96ccc508d05f724ad6cf93aa326c520fc"
 dependencies = [
  "proc-macro2",
  "quote",
