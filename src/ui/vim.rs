@@ -783,10 +783,31 @@ impl Vim {
     fn selection(&self, text: &str) -> Range<usize> {
         match self.mode {
             Mode::Insert => self.head..self.head,
-            Mode::Normal => {
-                self.head..next_boundary(text, self.head).min(end_of_line(text, self.head))
-            }
+            Mode::Normal => block(text, self.head),
             _ => self.visual_range(text),
+        }
+    }
+
+    /// Where the block cursor is to be painted, `caret` being where the editor
+    /// says the caret is.
+    ///
+    /// The view asks at every frame rather than only after a keystroke, and that
+    /// is the point: nothing has been pressed yet when a file opens, and a click
+    /// of the mouse moves the caret without telling vim. Asking is what makes the
+    /// cursor be there from the first frame, and follow the mouse afterwards.
+    ///
+    /// `None` in insert mode, where the editor's own caret is the cursor, and an
+    /// **empty** range on an empty line and at the end of the file, where there
+    /// is no character to paint over — the view gives the caret back for those.
+    pub fn cursor(&self, text: &str, caret: usize) -> Option<Range<usize>> {
+        match self.mode {
+            Mode::Insert => None,
+            // The caret is the editor's in normal mode, as `press` assumes.
+            Mode::Normal => Some(block(text, caret)),
+            // In a visual mode the head is vim's own: the editor's selection
+            // covers the whole range, and its caret says nothing about which end
+            // is being moved.
+            _ => Some(block(text, self.head)),
         }
     }
 
@@ -1012,6 +1033,15 @@ fn parse_motion(keys: &[char]) -> Parsed {
 
 fn char_at(text: &str, at: usize) -> Option<char> {
     text.get(at..).and_then(|rest| rest.chars().next())
+}
+
+/// The one character the block cursor covers, at `caret`.
+///
+/// Empty on an empty line and at the end of the file: there is no character
+/// there, and a block cursor is a character painted over.
+pub fn block(text: &str, caret: usize) -> Range<usize> {
+    let caret = clamp_to_line(text, caret);
+    caret..next_boundary(text, caret).min(end_of_line(text, caret))
 }
 
 fn next_boundary(text: &str, at: usize) -> usize {
@@ -1854,6 +1884,59 @@ mod tests {
             panic!("a motion applies");
         };
         assert_eq!(change.selection, 0..2);
+    }
+
+    /// A copy is the one gesture that changes nothing: it says so by lighting
+    /// what it took, and a `d` has nothing left to light.
+    #[test]
+    fn a_yank_asks_for_its_flash_and_a_delete_does_not() {
+        let mut vim = Vim::default();
+        let text = "let x = 1;\n";
+        vim.press(&key('y'), text, 0, 10);
+        let Response::Apply(change) = vim.press(&key('w'), text, 0, 10) else {
+            panic!("an operator with its motion applies");
+        };
+        assert_eq!(change.flash, Some(0..4));
+        let mut vim = Vim::default();
+        vim.press(&key('y'), text, 0, 10);
+        let Response::Apply(change) = vim.press(&key('y'), text, 0, 10) else {
+            panic!("a doubled operator applies");
+        };
+        assert_eq!(change.flash, Some(0..10));
+        let mut vim = Vim::default();
+        vim.press(&key('d'), text, 0, 10);
+        let Response::Apply(change) = vim.press(&key('w'), text, 0, 10) else {
+            panic!("an operator with its motion applies");
+        };
+        assert_eq!(change.flash, None);
+    }
+
+    /// The cursor is there before the first keystroke, which is what a file
+    /// that has just opened shows.
+    #[test]
+    fn the_cursor_is_painted_without_a_keystroke() {
+        let vim = Vim::default();
+        assert_eq!(vim.cursor("let x = 1;\n", 0), Some(0..1));
+        // And it follows the caret, which is where a click of the mouse left it.
+        assert_eq!(vim.cursor("let x = 1;\n", 4), Some(4..5));
+    }
+
+    /// Nothing to paint over on an empty line: the view gives the caret back
+    /// rather than showing no cursor at all.
+    #[test]
+    fn an_empty_line_has_no_block_to_paint() {
+        let vim = Vim::default();
+        assert_eq!(vim.cursor("\nabc", 0), Some(0..0));
+        assert_eq!(vim.cursor("abc", 3), Some(2..3));
+    }
+
+    /// Insert mode leaves the cursor to the editor, whose caret is a line.
+    #[test]
+    fn insert_mode_has_no_block_cursor() {
+        let mut vim = Vim::default();
+        vim.press(&key('i'), "abc\n", 0, 10);
+        assert_eq!(vim.mode(), Mode::Insert);
+        assert_eq!(vim.cursor("abc\n", 0), None);
     }
 
     #[test]

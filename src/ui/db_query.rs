@@ -695,9 +695,6 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The console takes the diff's place, so also the built-in editor's: all
-        // three fight over the same panel.
-        self.editing = None;
         let changed =
             self.query.connection.as_ref() != Some(&connection) || self.query.database != database;
         self.query.connection = Some(connection.clone());

@@ -418,8 +418,14 @@ pub struct ClaudhubApp {
     pub(super) integrated: Option<(PathBuf, String)>,
     /// Each worktree's files and their tree.
     pub(super) explorers: HashMap<PathBuf, crate::ui::explorer::Explorer>,
-    /// The file open in the built-in editor, if there is one.
-    pub(super) editing: Option<crate::ui::explorer::Editing>,
+    /// The file open in the built-in editor, **one per worktree**.
+    ///
+    /// Like the terminals, and for the same reason: a worktree is where one
+    /// works, and coming back to it should give back what was open there. A
+    /// single editor made switching worktrees leave the previous project's file
+    /// on screen — a file that belongs to a tree the rest of the window is no
+    /// longer showing.
+    pub(super) editings: HashMap<PathBuf, crate::ui::explorer::Editing>,
     pub(super) files_scroll: gpui::UniformListScrollHandle,
     /// The explorer tree's focus, which gives it its arrows.
     ///
@@ -743,7 +749,7 @@ impl ClaudhubApp {
             creation: None,
             integrated: None,
             explorers: HashMap::new(),
-            editing: None,
+            editings: HashMap::new(),
             files_scroll: gpui::UniformListScrollHandle::new(),
             sentry: Default::default(),
             db: Default::default(),
@@ -1544,6 +1550,10 @@ impl ClaudhubApp {
                 self.active = None;
                 self.review.remove(&active);
                 self.close_terminals_of(&active, window, cx);
+                // The editor of a worktree that is gone goes with it, as its
+                // terminals do: the file it holds is on a disk that no longer
+                // has it.
+                self.editings.remove(&active);
                 if let Some(first) = self.first_worktree() {
                     self.select_worktree(first, window, cx);
                 }
