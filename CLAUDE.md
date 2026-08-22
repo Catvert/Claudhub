@@ -1042,6 +1042,17 @@ fichier **bascule sur cet écran-là** : le geste vient de l'explorateur, qui y
 vit, mais aussi d'une ligne de diff, et y répondre en silence sur l'écran d'à
 côté serait un fichier ouvert que personne ne voit.
 
+**Un éditeur par worktree** (`ClaudhubApp::editings`, et `editing()` pour celui
+qui s'affiche), comme il y a des terminaux par worktree et pour la même raison :
+un worktree est un endroit où l'on travaille, et y revenir doit rendre ce qu'on
+y avait ouvert. Un éditeur unique laissait le fichier du projet précédent à
+l'écran après un changement de worktree — un fichier d'un arbre que le reste de
+la fenêtre ne montre plus. Deux corollaires : l'abonnement qui allume
+l'indicateur « non enregistré » **capture** son worktree plutôt que de lire la
+sélection, sans quoi un événement arrivé après la bascule marquerait le
+mauvais fichier ; et l'éditeur d'un worktree qui s'en va — dépôt retiré, worktree
+supprimé — s'en va avec lui, comme ses terminaux.
+
 **Les modes de vim s'y appliquent**, quand le réglage est allumé : c'est le
 seul endroit de la fenêtre où il y a du texte à éditer, et ce sont des modes et
 non des liaisons — voir « Les modes de vim dans l'éditeur ».
@@ -2226,8 +2237,8 @@ de recherche, la sélection inactive que dessine tout éditeur.
 
 Un septième, qui n'en parle pas non plus : **un contrôle peut cacher son caret
 sans se désactiver** (`set_cursor_hidden`). C'est ce que demande un éditeur
-modal, dont le curseur bloc est une sélection d'un caractère — voir « Les modes
-de vim dans l'éditeur ».
+modal, dont le curseur bloc est peint par-dessus le caractère sous le curseur —
+voir « Les modes de vim dans l'éditeur ».
 
 Les commits ont vocation à partir en PR, et le fork à disparaître avec elle.
 
@@ -3740,13 +3751,40 @@ Six points qui ne se devinent pas :
   touche sur laquelle on a appuyé : c'est ce qui met `$`, `^` et `0` là où il
   faut sur un clavier AZERTY, où ils sont décalés ou dans la rangée des
   chiffres.
-- **Le curseur bloc est une sélection d'un caractère.** L'éditeur ne dessine
-  qu'un trait ; le bloc de vim est rendu en sélectionnant le caractère sous le
-  curseur, ce qui a un second effet heureux — la position de vim se relit
-  ensuite dans `selected_range().start`, si bien qu'un clic de souris déplace
-  le curseur de vim sans qu'on ait rien à synchroniser. Le découpage se compte
-  en **caractères** : en octets, un fichier accentué se couperait au milieu
-  d'un caractère et paniquerait.
+- **Le curseur bloc est peint par nous** (`Editing::cursor`, une
+  `TextDecorationCollection` de plus à côté de celle du yank). Il a d'abord été
+  la **sélection** du caractère sous le curseur, et c'était faux deux fois : une
+  sélection ne s'écrit qu'à une frappe, si bien qu'un fichier qui vient de
+  s'ouvrir n'avait aucun curseur jusqu'à la première touche et n'en avait plus
+  après un clic de souris ; et elle se peint dans le `selection` du thème, à
+  quelques pour cent de clarté du fond — sur One Dark, il fallait le chercher.
+  Une décoration, elle, est peinte **par-dessus** la sélection — les runs de
+  texte viennent après les chemins de sélection dans l'ordre de peinture — et
+  dans nos couleurs, c'est-à-dire le curseur bloc de tout terminal. La sélection reste posée par
+  les `Change`, et c'est toujours elle qui dit où vim en est
+  (`selected_range().start`), si bien qu'un clic de souris déplace le curseur
+  sans rien à synchroniser. Le découpage se compte en **caractères** : en
+  octets, un fichier accentué se couperait au milieu d'un caractère et
+  paniquerait.
+- **Le bloc se redemande à chaque frame, et se recalcule rarement.**
+  `Vim::cursor` est interrogé au rendu et non après une frappe — c'est ce qui le
+  met là dès la première image et le fait suivre la souris —, mais `value()`
+  recopie le fichier entier : `Editing::cursor_at` retient le mode, le caret et
+  la longueur du texte (lue sur le rope, qui est emprunté) pour laquelle il a
+  été calculé, et une frame qui n'a rien vu bouger ne calcule rien.
+- **Le curseur dit le mode par sa couleur** (`vim_mode_colour`) : celle du
+  caret du thème en normal — là où l'œil l'attend —, `success` en insertion,
+  `magenta` en visuel, `cyan` en visuel-ligne. Une seule table, partagée avec la
+  pastille de la barre du fichier : le mot et le bloc disent la même chose, et
+  c'est ce qui permet de lire le mode sans quitter le curseur des yeux, ce qui
+  est tout l'intérêt d'un éditeur modal. Le glyphe, lui, prend celle des deux
+  extrémités du thème qui **contraste** avec le bloc (`ink_on`) : le fond seul
+  est juste en thème sombre, où le bloc est clair, et fait un trou en thème
+  clair.
+- **Le caret n'est rendu que là où il n'y a rien à couvrir.** Une ligne vide et
+  la fin du fichier n'ont pas de caractère à peindre : `Vim::cursor` y rend une
+  plage vide, et `set_cursor_hidden` rend alors le trait de l'éditeur — un
+  curseur qui disparaît sur une ligne vide serait pire que deux curseurs.
 - **Un yank s'allume une fraction de seconde**, comme le fait
   vim-highlightedyank. C'est le seul geste de vim qui ne change rien à
   l'écran : sans signe, on n'est jamais sûr qu'il a pris, et on recommence. Le
@@ -3754,14 +3792,19 @@ Six points qui ne se devinent pas :
   un `d` ayant emporté le texte qu'il s'agirait d'éclairer — ; la vue la pose
   sur une `TextDecorationCollection`, créée une fois avec le fichier parce
   qu'une collection suit le texte à travers ses éditions, et l'éteint par un
-  minuteur. Trois choix : la teinte est celle d'une occurrence de recherche
-  (`find::highlight_color`), déjà la couleur que cette interface pose sur du
-  code pour dire « ici » et qui suit le thème ; la marque ne touche pas à la
-  sélection, le curseur bloc étant juste là ; et elle dure trois cents
-  millisecondes et non la seconde du greffon, choisie pour un terminal où rien
-  d'autre ne bouge. Le minuteur est **remplacé** et non empilé — un `Task` gpui
-  s'annule quand on le laisse tomber —, sans quoi le premier éteindrait le
-  second yank.
+  minuteur. Quatre choix : la teinte est celle de l'occurrence de recherche
+  **courante** (`find::highlight_color`), déjà la couleur que cette interface
+  pose sur du code pour dire « ici » et qui suit le thème — la teinte atténuée,
+  un tiers d'alpha pendant un tiers de seconde, faisait une marque qu'il fallait
+  savoir chercher, ce qu'un accusé de réception ne peut pas être ; la marque ne
+  touche pas à la sélection, le curseur bloc étant juste là ; elle dure une
+  demi-seconde et non la seconde du greffon, choisie pour un terminal où rien
+  d'autre ne bouge ; et sa collection est créée **après** celle du curseur, si
+  bien que le bloc reste visible dessous — les collections se composent dans
+  l'ordre de création, la première gardant ses propriétés, et c'est le bon sens
+  de lecture : l'éclat dit ce qui a été pris, le bloc dit où l'on est. Le
+  minuteur est **remplacé** et non empilé — un `Task` gpui s'annule quand on le
+  laisse tomber —, sans quoi le premier éteindrait le second yank.
 - **Le caret s'éteint hors du mode insertion**, et c'est le septième commit du
   fork (`InputState::set_cursor_hidden`). Rien de public ne le faisait : le
   style de l'éditeur — qui porte la couleur du caret — est reconstruit depuis

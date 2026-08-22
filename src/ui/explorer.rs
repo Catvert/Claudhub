@@ -268,6 +268,21 @@ pub struct Editing {
     /// yank replaces the task, and dropping a gpui task cancels it — without
     /// that, the first timer would darken the second yank.
     pub flash_timer: Option<gpui::Task<()>>,
+    /// The layer the block cursor is painted on, created once with the file like
+    /// the flash's.
+    ///
+    /// It is **ours** and not the editor's selection, for two reasons that are
+    /// the same reason: the selection is only ever written by a keystroke, so
+    /// there was no cursor at all until the first key was pressed and none again
+    /// after a click of the mouse; and its colour is the theme's `selection`,
+    /// which is a few percent of lightness away from the background — a block
+    /// one has to look for is a block one does not see.
+    pub cursor: gpui_component::input::TextDecorationCollection,
+    /// The mode, caret and text length the cursor was last painted for.
+    ///
+    /// The block is recomputed at a frame only when one of the three has moved:
+    /// `value()` copies the whole file, and this runs at every frame.
+    pub cursor_at: Option<(crate::ui::vim::Mode, usize, usize, bool)>,
     /// What is on screen differs from what is on disk.
     pub dirty: bool,
     /// A change is already on its way to the language server.
@@ -284,6 +299,19 @@ impl ClaudhubApp {
     fn explorer(&mut self) -> Option<&mut Explorer> {
         let worktree = self.active.clone()?;
         Some(self.explorers.entry(worktree).or_default())
+    }
+
+    /// The file open in the displayed worktree's editor, if there is one.
+    ///
+    /// There is one editor per worktree, as there is one set of terminals: what
+    /// is on screen is what belongs to the tree the rest of the window shows.
+    pub(super) fn editing(&self) -> Option<&Editing> {
+        self.editings.get(self.active.as_ref()?)
+    }
+
+    pub(super) fn editing_mut(&mut self) -> Option<&mut Editing> {
+        let worktree = self.active.clone()?;
+        self.editings.get_mut(&worktree)
     }
 
     /// Asks for the file list, if it is missing or if the setting has changed.
@@ -481,8 +509,7 @@ impl ClaudhubApp {
     /// review is one movement too many.
     pub(super) fn reveal_open_file(&mut self, cx: &mut Context<Self>) {
         let path = self
-            .editing
-            .as_ref()
+            .editing()
             .map(|editing| editing.path.clone())
             .or_else(|| {
                 self.active_review()
@@ -614,36 +641,54 @@ impl ClaudhubApp {
         });
         // The subscription is set up here, once per opened file: it is what
         // lights the unsaved-change indicator.
-        cx.subscribe(&input, |this, _, event, cx| {
+        // The worktree is captured rather than read off the selection: an event
+        // arriving after one has switched worktrees would otherwise mark the
+        // wrong file unsaved.
+        let owner = worktree.clone();
+        cx.subscribe(&input, move |this, _, event, cx| {
             if !matches!(event, gpui_component::input::InputEvent::Change) {
                 return;
             }
-            if let Some(editing) = this.editing.as_mut() {
+            if let Some(editing) = this.editings.get_mut(&owner) {
                 editing.dirty = true;
             }
-            this.lsp_editor_changed(cx);
+            this.lsp_editor_changed(&owner, cx);
             cx.notify();
         })
         .detach();
         // The server must forget the file we are leaving, or it goes on
-        // answering about a text nobody holds any more.
-        if let Some(previous) = self.editing.take() {
+        // answering about a text nobody holds any more. Only this worktree's:
+        // the others keep their document open, as they keep their editor.
+        if let Some(previous) = self.editings.remove(&worktree) {
             self.lsp_editor_closed(previous.worktree, previous.path);
         }
-        let flash = input.update(cx, |state, cx| {
-            state.create_decorations_collection(Vec::new(), cx)
+        // The cursor's layer is created **first**, and that is what decides who
+        // wins where the two overlap: collections are composed in creation
+        // order, the first one keeping its properties. The block stays visible
+        // through a yank's flash, which is the right way round — the flash says
+        // what was taken, the block says where one is.
+        let (cursor, flash) = input.update(cx, |state, cx| {
+            (
+                state.create_decorations_collection(Vec::new(), cx),
+                state.create_decorations_collection(Vec::new(), cx),
+            )
         });
-        self.editing = Some(Editing {
-            worktree,
-            path,
-            input,
-            hash: content.hash,
-            dirty: false,
-            lsp_pending: false,
-            vim: crate::ui::vim::Vim::default(),
-            flash,
-            flash_timer: None,
-        });
+        self.editings.insert(
+            worktree.clone(),
+            Editing {
+                worktree,
+                path,
+                input,
+                hash: content.hash,
+                dirty: false,
+                lsp_pending: false,
+                vim: crate::ui::vim::Vim::default(),
+                flash,
+                flash_timer: None,
+                cursor,
+                cursor_at: None,
+            },
+        );
         // Starts the server this file's language asks for, opens the document
         // and posts the providers — all of it a no-op when the button is off.
         self.lsp_sync_editor(window, cx);
@@ -663,7 +708,7 @@ impl ClaudhubApp {
     }
 
     pub(super) fn save_file(&mut self, cx: &mut Context<Self>) {
-        let Some(editing) = self.editing.as_ref() else {
+        let Some(editing) = self.editing() else {
             return;
         };
         let content = editing.input.read(cx).value().to_string();
@@ -678,7 +723,7 @@ impl ClaudhubApp {
         // The digest follows what has just been sent: without that, two saves in
         // a row would make the second be refused, the file having changed — by
         // us.
-        if let Some(editing) = self.editing.as_mut() {
+        if let Some(editing) = self.editing_mut() {
             editing.hash = files::digest(&content);
             editing.dirty = false;
         }
@@ -690,13 +735,16 @@ impl ClaudhubApp {
 
     /// Closes the editor, asking for confirmation if the file has changed.
     pub(super) fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editing) = self.editing.as_ref() else {
+        let Some(editing) = self.editing() else {
             return;
         };
+        // The worktree the gesture was made in, and not the one selected when
+        // the dialog is answered: one browses while a question is open.
+        let worktree = editing.worktree.clone();
         if !editing.dirty {
-            let (worktree, path) = (editing.worktree.clone(), editing.path.clone());
-            self.editing = None;
-            self.lsp_editor_closed(worktree, path);
+            if let Some(previous) = self.editings.remove(&worktree) {
+                self.lsp_editor_closed(previous.worktree, previous.path);
+            }
             self.persist_session(cx);
             cx.notify();
             return;
@@ -704,7 +752,7 @@ impl ClaudhubApp {
         let label = SharedString::from(editing.path.display().to_string());
         let entity = cx.entity();
         window.open_dialog(cx, move |dialog, _window, _cx| {
-            let (entity, label) = (entity.clone(), label.clone());
+            let (entity, label, worktree) = (entity.clone(), label.clone(), worktree.clone());
             dialog
                 .title(tr!("editor-discard-title"))
                 .child(
@@ -718,7 +766,7 @@ impl ClaudhubApp {
                 .footer(super::dialogs::confirm())
                 .on_ok(move |_, _window, cx| {
                     entity.update(cx, |this, cx| {
-                        if let Some(previous) = this.editing.take() {
+                        if let Some(previous) = this.editings.remove(&worktree) {
                             this.lsp_editor_closed(previous.worktree, previous.path);
                         }
                         this.persist_session(cx);
@@ -809,7 +857,7 @@ impl ClaudhubApp {
     fn vim_key(&mut self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         use crate::ui::vim::{Command, Response};
 
-        if !Settings::global(cx).vim_mode || self.editing.is_none() {
+        if !Settings::global(cx).vim_mode || self.editing().is_none() {
             return;
         }
         let keystroke = &event.keystroke;
@@ -838,7 +886,7 @@ impl ClaudhubApp {
             ctrl,
         };
 
-        let Some(input) = self.editing.as_ref().map(|editing| editing.input.clone()) else {
+        let Some(input) = self.editing().map(|editing| editing.input.clone()) else {
             return;
         };
         let (text, cursor, rows) = {
@@ -862,7 +910,7 @@ impl ClaudhubApp {
         let pasted = pasting
             .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
             .flatten();
-        let Some(editing) = self.editing.as_mut() else {
+        let Some(editing) = self.editing_mut() else {
             return;
         };
         if let Some(text) = pasted {
@@ -908,6 +956,69 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    /// Paints the block cursor, and takes the editor's caret out from under it.
+    ///
+    /// It is **ours** and not a selection of one character, which is what it was
+    /// at first. A selection is only ever written by a keystroke, so there was no
+    /// cursor at all before the first key was pressed on a file that had just
+    /// opened, and none again after a click of the mouse; and it is painted in
+    /// the theme's `selection`, a few percent of lightness away from the
+    /// background — on One Dark one had to look for it. A decoration is painted
+    /// **over** the selection (the text runs come after the selection paths) and
+    /// in colours of ours: the caret's, with the background showing through the
+    /// glyph, which is the block cursor of every terminal.
+    ///
+    /// The caret is only given back where the block has nothing to cover — an
+    /// empty line, the end of the file — since a cursor that disappears there
+    /// would be worse than two.
+    fn sync_block_cursor(&mut self, on: bool, cx: &mut Context<Self>) {
+        let Some(editing) = self.editing() else {
+            return;
+        };
+        let (input, layer, mode) = (
+            editing.input.clone(),
+            editing.cursor.clone(),
+            editing.vim.mode(),
+        );
+        let (caret, len) = {
+            let state = input.read(cx);
+            // The rope's length, which is borrowed: `value()` would copy the
+            // whole file to learn one number.
+            (state.selected_range().start, state.text().len())
+        };
+        let at = (mode, caret, len, on);
+        if editing.cursor_at == Some(at) {
+            return;
+        }
+        let block = on
+            .then(|| {
+                let text = input.read(cx).value();
+                editing.vim.cursor(&text, caret)
+            })
+            .flatten()
+            .filter(|range| !range.is_empty());
+        let colour = vim_mode_colour(mode, cx);
+        let style = gpui::HighlightStyle {
+            color: Some(ink_on(colour, cx)),
+            background_color: Some(colour),
+            ..Default::default()
+        };
+        layer.set(
+            block
+                .clone()
+                .map(|range| gpui_component::input::TextDecoration::new(range, style))
+                .into_iter()
+                .collect(),
+            cx,
+        );
+        input.update(cx, |state, cx| {
+            state.set_cursor_hidden(block.is_some(), cx);
+        });
+        if let Some(editing) = self.editing_mut() {
+            editing.cursor_at = Some(at);
+        }
+    }
+
     /// Lights up what a yank has just copied, and puts it out again.
     ///
     /// A yank changes nothing on screen: without a sign, one is never sure it
@@ -920,14 +1031,17 @@ impl ClaudhubApp {
     /// hold a timer per yank: the task is **replaced**, and dropping a gpui task
     /// cancels it.
     fn flash_yank(&mut self, range: std::ops::Range<usize>, cx: &mut Context<Self>) {
-        let Some(editing) = self.editing.as_ref() else {
+        let Some(editing) = self.editing() else {
             return;
         };
         let flash = editing.flash.clone();
-        // The tone of a search occurrence: it is already the colour this
-        // interface lays over code to say "here", and it follows the theme.
+        // The tone of the **current** search occurrence: it is already the colour
+        // this interface lays over code to say "here", and it follows the theme.
+        // The dimmed one — a third of an alpha, over a third of a second — was
+        // a mark one had to be told about to notice, which is the one thing an
+        // acknowledgement must not be.
         let style = gpui::HighlightStyle {
-            background_color: Some(crate::ui::find::highlight_color(false, cx)),
+            background_color: Some(crate::ui::find::highlight_color(true, cx)),
             ..Default::default()
         };
         flash.set(
@@ -942,7 +1056,7 @@ impl ClaudhubApp {
             // frame would show.
             let _ = this.update(cx, |_, cx| cx.notify());
         });
-        if let Some(editing) = self.editing.as_mut() {
+        if let Some(editing) = self.editing_mut() {
             editing.flash_timer = Some(timer);
         }
     }
@@ -1045,7 +1159,7 @@ impl ClaudhubApp {
                 })
                 .unwrap_or_default(),
         );
-        let open = self.editing.as_ref().map(|editing| editing.path.clone());
+        let open = self.editing().map(|editing| editing.path.clone());
         let entity = cx.entity();
         let look = Look::of(cx);
 
@@ -1344,7 +1458,7 @@ impl ClaudhubApp {
     /// answer "no server for a Markdown file" is worse than no button.
     fn render_lsp_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         use crate::ui::lsp::Status;
-        let editing = self.editing.as_ref()?;
+        let editing = self.editing()?;
         let servers = self.lsp_servers(&editing.worktree, cx);
         crate::lsp::pick(&servers, &editing.path)?;
         let on = self.lsp_enabled(&editing.worktree);
@@ -1380,7 +1494,7 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
-        let editing = self.editing.as_ref()?;
+        let editing = self.editing()?;
         let (path, dirty, input) = (editing.path.clone(), editing.dirty, editing.input.clone());
         let vim = Settings::global(cx).vim_mode;
         let mode = editing.vim.mode();
@@ -1401,16 +1515,12 @@ impl ClaudhubApp {
         {
             input.update(cx, |state, cx| state.set_scroll_offset(next, cx));
         }
-        // **The caret goes away outside insert mode.** The block cursor is a
-        // selection of one character, and the editor's own caret would blink on
-        // top of it: two cursors on one character say less than one. Reread at
-        // every frame and not set once, like `TerminalView::sync_font`, because
-        // the mode changes under the keys and the setting under the form; the
-        // call is idempotent, and it is what makes turning vim mode off give the
-        // caret back without anything else to do.
-        input.update(cx, |state, cx| {
-            state.set_cursor_hidden(vim && mode != crate::ui::vim::Mode::Insert, cx);
-        });
+        // The block cursor, and the caret that goes away under it. Both are
+        // reread at every frame and not set once, like `TerminalView::sync_font`:
+        // the mode changes under the keys and the setting under the form, the
+        // calls are idempotent, and it is what makes turning vim mode off give
+        // the caret back without anything else to do.
+        self.sync_block_cursor(vim, cx);
         let entity = cx.entity();
         let mono = cx.theme().mono_font_family.clone();
         // The editor is code, like the diff on the screen next door: same
@@ -1556,11 +1666,7 @@ impl ClaudhubApp {
         hint: &str,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let colour = match mode {
-            crate::ui::vim::Mode::Insert => cx.theme().success,
-            crate::ui::vim::Mode::Normal => cx.theme().muted_foreground,
-            _ => cx.theme().warning,
-        };
+        let colour = vim_mode_colour(mode, cx);
         h_flex()
             .gap_1()
             .items_center()
@@ -1599,7 +1705,7 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(input) = self.editing.as_ref().map(|editing| editing.input.clone()) else {
+        let Some(input) = self.editing().map(|editing| editing.input.clone()) else {
             return;
         };
         let (offset, max) = editor_extent(&input, cx);
@@ -1681,13 +1787,52 @@ fn editor_extent(
 /// once and can say how tall it is.
 const DEFAULT_ROWS: usize = 20;
 
+/// The colour a mode is said in — the pill on the file's bar, and the block
+/// cursor alike.
+///
+/// One table and not two: the word and the cursor say the same thing, and a
+/// mode one reads in the corner while the block says another colour would be one
+/// of them too many. It is also what makes the mode legible without looking away
+/// from the caret, which is the point of a modal editor.
+fn vim_mode_colour(mode: crate::ui::vim::Mode, cx: &gpui::App) -> gpui::Hsla {
+    match mode {
+        // The theme's own cursor colour, which is what the eye expects there.
+        crate::ui::vim::Mode::Normal => cx.theme().caret,
+        crate::ui::vim::Mode::Insert => cx.theme().success,
+        crate::ui::vim::Mode::Visual => cx.theme().magenta,
+        crate::ui::vim::Mode::VisualLine => cx.theme().cyan,
+    }
+}
+
+/// The ink a block cursor's glyph takes: whichever of the theme's two extremes
+/// stands out against the block.
+///
+/// Not `background` alone: it is the right answer on a dark theme, where the
+/// block is a light colour, and the wrong one on a light theme, where a pale
+/// glyph on a pale block is a hole.
+fn ink_on(colour: gpui::Hsla, cx: &gpui::App) -> gpui::Hsla {
+    let (background, foreground) = (cx.theme().background, cx.theme().foreground);
+    let (darker, lighter) = if background.l < foreground.l {
+        (background, foreground)
+    } else {
+        (foreground, background)
+    };
+    if colour.l > 0.5 {
+        darker
+    } else {
+        lighter
+    }
+}
+
 /// How long a yank stays lit.
 ///
 /// Not vim-highlightedyank's second, which was chosen for a terminal where
 /// nothing else moves: here the mode pill, the dirty badge and an agent's
 /// writing are all on the same screen, and a mark that outstays the gesture
-/// reads as a state rather than as an acknowledgement.
-const YANK_FLASH: std::time::Duration = std::time::Duration::from_millis(300);
+/// reads as a state rather than as an acknowledgement. Three tenths, though, was
+/// on the wrong side of that trade — a flash one is not sure one saw is a flash
+/// one did not get.
+const YANK_FLASH: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// What does not depend on the row: colours and geometry.
 ///

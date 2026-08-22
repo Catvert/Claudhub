@@ -147,8 +147,7 @@ impl ClaudhubApp {
                 .clone()
                 .or_else(|| self.restoring.worktree.clone()),
             editing: self
-                .editing
-                .as_ref()
+                .editing()
                 .map(|editing| OpenFile {
                     worktree: editing.worktree.clone(),
                     path: editing.path.clone(),

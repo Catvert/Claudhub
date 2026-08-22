@@ -1232,6 +1232,7 @@ impl ClaudhubApp {
         for worktree in &closed {
             self.review.remove(worktree);
             self.close_terminals_of(worktree, window, cx);
+            self.editings.remove(worktree);
             self.summaries.remove(worktree);
         }
         if self

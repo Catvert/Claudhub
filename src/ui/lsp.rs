@@ -289,7 +289,7 @@ impl ClaudhubApp {
     /// Called at every opening and whenever the button is switched on, which is
     /// what makes it the single place where a session is born.
     pub(super) fn lsp_sync_editor(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
-        let Some(editing) = self.editing.as_ref() else {
+        let Some(editing) = self.editing() else {
             return;
         };
         let (worktree, path) = (editing.worktree.clone(), editing.path.clone());
@@ -325,8 +325,7 @@ impl ClaudhubApp {
             );
         }
         let text = self
-            .editing
-            .as_ref()
+            .editing()
             .map(|editing| editing.input.read(cx).value().to_string())
             .unwrap_or_default();
         self.git.send(Cmd::LspOpen {
@@ -340,7 +339,7 @@ impl ClaudhubApp {
 
     /// Posts on the editor what the server can answer, and nothing else.
     fn lsp_install_providers(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) {
-        let Some(editing) = self.editing.as_ref() else {
+        let Some(editing) = self.editing() else {
             return;
         };
         let (worktree, path) = (editing.worktree.clone(), editing.path.clone());
@@ -402,8 +401,18 @@ impl ClaudhubApp {
     }
 
     /// The editor's text has changed: tell the server, once the typing pauses.
-    pub(super) fn lsp_editor_changed(&mut self, cx: &mut gpui::Context<Self>) {
-        let Some(editing) = self.editing.as_mut() else {
+    ///
+    /// The worktree is given and not read off the selection, as it is for the
+    /// unsaved indicator: one browses during the debounce, and the flag would
+    /// be cleared on somebody else's editor — leaving this one unable to send
+    /// another change for as long as it stays open.
+    pub(super) fn lsp_editor_changed(
+        &mut self,
+        owner: &std::path::Path,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let owner = owner.to_path_buf();
+        let Some(editing) = self.editings.get_mut(&owner) else {
             return;
         };
         if editing.lsp_pending {
@@ -413,7 +422,7 @@ impl ClaudhubApp {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(CHANGE_DEBOUNCE).await;
             let _ = this.update(cx, |this, cx| {
-                let Some(editing) = this.editing.as_mut() else {
+                let Some(editing) = this.editings.get_mut(&owner) else {
                     return;
                 };
                 editing.lsp_pending = false;
@@ -433,7 +442,7 @@ impl ClaudhubApp {
     }
 
     pub(super) fn lsp_editor_saved(&mut self) {
-        let Some(editing) = self.editing.as_ref() else {
+        let Some(editing) = self.editing() else {
             return;
         };
         if !self.lsp.contains_key(&editing.worktree) {
@@ -471,11 +480,7 @@ impl ClaudhubApp {
             session.capabilities = capabilities;
         }
         // The providers were posted with no capabilities to read: now there are.
-        if self
-            .editing
-            .as_ref()
-            .is_some_and(|e| e.worktree == worktree)
-        {
+        if self.editing().is_some_and(|e| e.worktree == worktree) {
             self.lsp_install_providers(window, cx);
         }
         cx.notify();
@@ -534,7 +539,7 @@ impl ClaudhubApp {
         cx: &mut gpui::Context<Self>,
     ) {
         let edit: Option<WorkspaceEdit> = serde_json::from_str(&payload).ok();
-        let applied = match (edit, self.editing.as_ref()) {
+        let applied = match (edit, self.editing()) {
             (Some(edit), Some(editing)) if editing.worktree == worktree => {
                 let (state, path) = (editing.input.clone(), editing.path.clone());
                 apply_to(&state, &path, &edit, window, cx)
@@ -579,8 +584,7 @@ impl ClaudhubApp {
         // The editor only holds the file it is showing; the rest is kept for
         // the count on the button.
         if self
-            .editing
-            .as_ref()
+            .editing()
             .is_some_and(|e| e.worktree == worktree && e.path == path)
         {
             self.lsp_paint_diagnostics(cx);
@@ -590,7 +594,7 @@ impl ClaudhubApp {
 
     /// Puts the open file's diagnostics into the editor's own set.
     fn lsp_paint_diagnostics(&mut self, cx: &mut gpui::Context<Self>) {
-        let Some(editing) = self.editing.as_ref() else {
+        let Some(editing) = self.editing() else {
             return;
         };
         let diagnostics = self
@@ -609,7 +613,7 @@ impl ClaudhubApp {
     }
 
     fn lsp_clear_diagnostics(&mut self, cx: &mut gpui::Context<Self>) {
-        let Some(editing) = self.editing.as_ref() else {
+        let Some(editing) = self.editing() else {
             return;
         };
         editing.input.update(cx, |state, cx| {
