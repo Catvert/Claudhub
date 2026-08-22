@@ -1,0 +1,54 @@
+# Configuration des worktrees de Claudhub.
+#
+# Un projet Rust n'a ni service à démarrer ni port à réserver : la
+# configuration se réduit aux tâches utiles pendant le développement, celles
+# du `justfile`, qui passent toutes par `nix-shell`. Elles apparaissent dans le
+# menu d'un worktree sans que Claudhub les connaisse — c'est le premier niveau
+# du système d'extension, celui qui ne coûte rien.
+
+# La branche porte le nom du worktree, sans préfixe : c'est la convention déjà
+# suivie ici (`editeur-mode-vim`), et une branche d'agent se lit mieux sans un
+# `wt/` devant.
+branch = "{{slug}}"
+
+[status.info]
+version = "sed -n 's/^version = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -1"
+
+[tasks.check]
+description = "cargo check --all-targets"
+run = "just check"
+
+[tasks.clippy]
+description = "clippy -D warnings"
+run = "just clippy"
+
+[tasks.test]
+description = "cargo test"
+run = "just test"
+
+[tasks.fmt]
+description = "cargo fmt"
+run = "just fmt"
+
+# Le portillon du serveur headless : il prouve qu'aucun module du cœur ne tire
+# gpui, et c'est la porte qu'on oublie le plus souvent avant de poser un tag.
+[tasks.check-server]
+description = "serveur headless, sans la feature ui"
+run = "just check-server"
+
+# Les portes dans l'ordre où la CI les lance. Longue : elle recompile l'arbre
+# gpui entier, d'où le terminal plutôt qu'un panneau de sortie.
+[tasks.ci]
+description = "fmt + clippy + test + check-server"
+run = "just ci"
+interactive = true
+
+[tasks.run]
+description = "lancer l'interface"
+run = "just run"
+interactive = true
+
+[tasks.shell]
+description = "nix-shell"
+run = "nix-shell"
+interactive = true
