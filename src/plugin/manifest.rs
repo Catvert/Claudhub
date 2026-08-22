@@ -24,9 +24,10 @@ pub const PANEL_PREFIX: &str = "ClaudhubPlugin:";
 /// The screens a plugin may put its panel on.
 ///
 /// Named by the same keys the layout is saved under (`workspace::key`), so a
-/// manifest and a `layout.json` speak the same language. The settings are not
-/// among them: that screen holds the form and nothing else.
-pub const SCREENS: [&str; 4] = ["review", "files", "db", "sentry"];
+/// manifest and a `layout.json` speak the same language — which is also why the
+/// first is still `review` after its screen was renamed "Git". The settings are
+/// not among them: that screen holds the form and nothing else.
+pub const SCREENS: [&str; 5] = ["review", "files", "search", "db", "sentry"];
 
 /// What a plugin says it needs.
 ///

@@ -61,6 +61,13 @@ pub enum Pane {
     /// The settings. The form has a search of its own, in its sidebar; this key
     /// exists so `Ctrl+F` there does not go to the panel touched before it.
     Settings,
+    /// The project-wide search. Its field **is** the search, so `Ctrl+F` there
+    /// focuses it rather than opening a second bar over it — see
+    /// `ClaudhubApp::open_find`.
+    Search,
+    /// The file shown beside the results. Same thing: what one searches from
+    /// this screen is the project, not the preview.
+    SearchPreview,
 }
 
 impl Pane {
@@ -178,6 +185,12 @@ impl ClaudhubApp {
     /// Opens the target panel's bar and gives it the focus.
     pub(super) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let pane = self.pane;
+        // The search screen has one field, and it is the search: a second bar
+        // over it would be two places to type the same thing.
+        if matches!(pane, Pane::Search | Pane::SearchPreview) {
+            self.open_search(window, cx);
+            return;
+        }
         let input = match self.finders.get_mut(&pane) {
             Some(finder) => {
                 finder.open = true;

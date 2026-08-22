@@ -91,7 +91,11 @@ actions!(
         RunDbQuery,
         CopyDbResult,
         ExportDbCsv,
-        SelectWholeResult
+        SelectWholeResult,
+        SearchProject,
+        SearchUp,
+        SearchDown,
+        SearchOpen
     ]
 );
 
@@ -172,7 +176,7 @@ const QUERY_COPY_PREDICATE: &str = "ClaudhubQuery && !Input && !PopupMenu && !Po
 /// tree there, not a diff — and two sets of bindings on the same key would not
 /// be settled.
 const NAVIGATION_PREDICATE: &str = "Claudhub && !Dialog && !PopupMenu && !Popover && !Input \
-     && !ClaudhubTerminal && !ClaudhubExplorer && !ClaudhubDb";
+     && !ClaudhubTerminal && !ClaudhubExplorer && !ClaudhubDb && !ClaudhubSearch";
 
 /// The vim navigation predicate.
 ///
@@ -181,7 +185,7 @@ const NAVIGATION_PREDICATE: &str = "Claudhub && !Dialog && !PopupMenu && !Popove
 /// single level of the context stack, so two identifiers declared at two
 /// different depths never meet in an `&&`.
 const VIM_PREDICATE: &str = "Claudhub && ClaudhubVim && !Dialog && !PopupMenu && !Popover \
-     && !Input && !ClaudhubTerminal && !ClaudhubExplorer && !ClaudhubDb";
+     && !Input && !ClaudhubTerminal && !ClaudhubExplorer && !ClaudhubDb && !ClaudhubSearch";
 
 /// The context the root view declares. Identifiers, not a predicate: it is the
 /// name `PREDICATE` refers to.
@@ -240,6 +244,20 @@ const EXPLORER_PREDICATE: &str = "ClaudhubExplorer";
 /// The same in vim mode. `ClaudhubVim` has to be declared **by the tree itself**
 /// and not by the root: see `VIM_PREDICATE`.
 const VIM_EXPLORER_PREDICATE: &str = "ClaudhubExplorer && ClaudhubVim";
+
+/// The context the result list of the project-wide search declares.
+///
+/// Its own, like the explorer's and the schema tree's: the bare arrows belong
+/// to whoever has the focus, and three lists claiming them at once would not be
+/// settled. It is declared by the panel and not by the root — see
+/// `VIM_PREDICATE` for why that matters.
+const SEARCH_PREDICATE: &str = "ClaudhubSearch";
+
+/// The same in vim mode.
+const VIM_SEARCH_PREDICATE: &str = "ClaudhubSearch && ClaudhubVim";
+
+/// The identifier the search panel puts on its node.
+pub const SEARCH_CONTEXT: &str = "ClaudhubSearch";
 
 /// The context the built-in editor declares.
 ///
@@ -306,6 +324,18 @@ pub fn query_context() -> KeyContext {
     context
 }
 
+/// The context the search panel declares, vim's identifier included when the
+/// setting is on — for the reason given in `VIM_PREDICATE`: two identifiers
+/// declared at two different depths never meet in an `&&`.
+pub fn search_context(vim: bool) -> KeyContext {
+    let mut context = KeyContext::default();
+    context.add(SEARCH_CONTEXT);
+    if vim {
+        context.add("ClaudhubVim");
+    }
+    context
+}
+
 pub fn explorer_context(vim: bool) -> KeyContext {
     let mut context = KeyContext::default();
     context.add("ClaudhubExplorer");
@@ -325,11 +355,17 @@ pub enum Group {
     Explorer,
     Database,
     Search,
+    /// Searching the **project**, which is not searching a panel: one asks git
+    /// what the checkout contains, the other filters a list already held. Two
+    /// families rather than one because their keys sit on the same letters —
+    /// `enter` opens a result here and steps to the next occurrence there — and
+    /// a binding's id is its family and its default keys.
+    Project,
     Terminal,
 }
 
 impl Group {
-    pub const ORDER: [Group; 8] = [
+    pub const ORDER: [Group; 9] = [
         Group::Window,
         Group::Worktrees,
         Group::Repository,
@@ -337,6 +373,7 @@ impl Group {
         Group::Explorer,
         Group::Database,
         Group::Search,
+        Group::Project,
         Group::Terminal,
     ];
 
@@ -353,6 +390,7 @@ impl Group {
             Group::Explorer => "explorer",
             Group::Database => "db",
             Group::Search => "search",
+            Group::Project => "project",
             Group::Terminal => "terminal",
         }
     }
@@ -369,6 +407,7 @@ impl Group {
             Group::Explorer => "shortcut-group-explorer",
             Group::Database => "shortcut-group-database",
             Group::Search => "shortcut-group-search",
+            Group::Project => "shortcut-group-project",
             Group::Terminal => "shortcut-group-terminal",
         }
     }
@@ -611,7 +650,11 @@ table!(STANDARD, standard_bindings, false, [
     Review "secondary-shift-k" => AskAgent, COPY_PREDICATE, "shortcut-ask";
     Review "secondary-shift-e" => SendNotes, PREDICATE, "shortcut-send-notes";
     Review "secondary-shift-s" => ToggleDiffSplit, PREDICATE, "shortcut-split";
-    Review "secondary-shift-f" => ToggleWholeFile, PREDICATE, "shortcut-whole-file";
+    // `secondary-shift-x` — expand — and not `secondary-shift-f`, which this
+    // held until the project-wide search arrived: `Ctrl+Shift+F` is what every
+    // editor binds "find in files" to — PhpStorm, VS Code, Eclipse — and a key
+    // whose meaning is that settled is one the window cannot spend elsewhere.
+    Review "secondary-shift-x" => ToggleWholeFile, PREDICATE, "shortcut-whole-file";
     Review "secondary-shift-i" => ToggleStage, PREDICATE, "shortcut-stage";
     Review "secondary-shift-l" => ToggleReviewTree, PREDICATE, "shortcut-review-tree";
     // Save and close target the built-in editor; in the terminal, Ctrl+S is XOFF
@@ -660,6 +703,16 @@ table!(STANDARD, standard_bindings, false, [
     Search "secondary-shift-g" => FindPrevious, PREDICATE, "shortcut-find-previous";
     Search "shift-enter" => FindPrevious, FIND_PREDICATE, "shortcut-find-previous";
     Search "escape" => CloseFind, FIND_PREDICATE, "shortcut-close-find";
+    // ── Searching the project ───────────────────────────────────────────────
+    // `Ctrl+Shift+F` and not `Ctrl+F`: the second is the search *inside* the
+    // panel one is looking at, and every editor writes the project-wide one
+    // with Shift for exactly that reason. Shift also puts it outside
+    // `WINDOW_PREDICATE`'s worry — it is not a control character the shell
+    // wants — so it reaches into the terminal too.
+    Project "secondary-shift-f" => SearchProject, PREDICATE, "shortcut-search-project";
+    Project "up" => SearchUp, SEARCH_PREDICATE, "shortcut-search-up";
+    Project "down" => SearchDown, SEARCH_PREDICATE, "shortcut-search-down";
+    Project "enter" => SearchOpen, SEARCH_PREDICATE, "shortcut-search-open";
 
     // ── The terminals ───────────────────────────────────────────────────────
     Terminal "secondary-shift-t" => NewTerminal, PREDICATE, "shortcut-new-terminal";
@@ -728,6 +781,8 @@ table!(VIM, vim_bindings, true, [
     Search "/" => Find, VIM_PREDICATE, "shortcut-find";
     Search "n" => FindNext, VIM_PREDICATE, "shortcut-find-next";
     Search "shift-n" => FindPrevious, VIM_PREDICATE, "shortcut-find-previous";
+    Project "j" => SearchDown, VIM_SEARCH_PREDICATE, "shortcut-search-down";
+    Project "k" => SearchUp, VIM_SEARCH_PREDICATE, "shortcut-search-up";
 ]);
 
 pub fn init(cx: &mut App) {
@@ -1258,6 +1313,42 @@ pub fn save_file(
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.save_file(cx);
+}
+
+pub fn search_project(
+    this: &mut ClaudhubApp,
+    _: &SearchProject,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.open_search(window, cx);
+}
+
+pub fn search_up(
+    this: &mut ClaudhubApp,
+    _: &SearchUp,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.step_search(-1, window, cx);
+}
+
+pub fn search_down(
+    this: &mut ClaudhubApp,
+    _: &SearchDown,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.step_search(1, window, cx);
+}
+
+pub fn search_open(
+    this: &mut ClaudhubApp,
+    _: &SearchOpen,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.open_search_row(window, cx);
 }
 
 pub fn explorer_up(

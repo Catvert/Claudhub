@@ -822,6 +822,23 @@ impl BladeHighlighter {
     }
 }
 
+/// The styles of a whole view, for a reader that is not the editor.
+///
+/// The search preview shows a file it does not edit: it has no `EditorState`,
+/// so no `InputHighlighter` is installed for it, and a Blade view would arrive
+/// with its directives, echoes and `@php` blocks read as plain HTML text. This
+/// is the same object doing the same work, asked once for the whole document
+/// rather than once per visible group of lines — a preview is read, not typed
+/// in, so there is nothing to keep from one frame to the next.
+pub fn document_styles(text: &str, theme: &HighlightTheme) -> Vec<(Range<usize>, HighlightStyle)> {
+    if text.is_empty() || text.len() > MAX_BYTES {
+        return Vec::new();
+    }
+    let mut highlighter = BladeHighlighter::new();
+    highlighter.refresh(text);
+    InputHighlighter::styles(&highlighter, &(0..text.len()), theme)
+}
+
 impl InputHighlighter for BladeHighlighter {
     fn language(&self) -> SharedString {
         self.inner.language().clone()

@@ -342,6 +342,29 @@ pub enum Cmd {
         path: std::path::PathBuf,
     },
 
+    // — Searching the project ——————————————————————————————————————
+    /// Searches the whole checkout — `git grep`. See `git::search`.
+    ///
+    /// **A queue of its own**, and a send id like the SQL console's: a search
+    /// is retyped letter by letter, and the answer to a query the next
+    /// keystroke has already replaced must be recognisable as stale. A counter
+    /// that never goes back says it unambiguously.
+    Search {
+        worktree: WorktreeId,
+        query: crate::git::search::Query,
+        request: u64,
+    },
+    /// Reads a file to **preview** it beside a search result.
+    ///
+    /// A command of its own and not `ReadFile`: that one opens the editor —
+    /// it lands a caret, writes the trail and calls up the editing screen —
+    /// and previewing is the opposite gesture, walking the hits without
+    /// leaving the list.
+    ReadPreview {
+        worktree: WorktreeId,
+        path: PathBuf,
+    },
+
     // — Project files —————————————————————————————————————————————
     /// Lists the worktree's files, tracked and new-but-not-ignored.
     ListFiles {
@@ -668,6 +691,8 @@ impl Cmd {
             Self::DbAllColumns { .. } => "DbAllColumns",
             Self::DbQuery { .. } => "DbQuery",
             Self::DbExport { .. } => "DbExport",
+            Self::Search { .. } => "Search",
+            Self::ReadPreview { .. } => "ReadPreview",
             Self::ListFiles { .. } => "ListFiles",
             Self::ReadFile { .. } => "ReadFile",
             Self::WriteFile { .. } => "WriteFile",
@@ -830,6 +855,20 @@ pub enum Evt {
         result: Result<String, String>,
     },
 
+    /// What a search found, or why it could not run — a bad regular expression
+    /// is the common one, and it belongs under the field rather than in a
+    /// status bar the next message wipes.
+    SearchDone {
+        worktree: WorktreeId,
+        request: u64,
+        result: DbResult<crate::git::search::Results>,
+    },
+    /// A file read for the search preview.
+    Preview {
+        worktree: WorktreeId,
+        path: PathBuf,
+        content: DbResult<crate::files::Content>,
+    },
     ProjectFiles {
         worktree: WorktreeId,
         files: Vec<PathBuf>,
