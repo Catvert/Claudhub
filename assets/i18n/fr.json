@@ -126,6 +126,7 @@
   "editor-discard-title": "Abandonner les modifications ?",
   "editor-external": "Ouvrir dans l'éditeur externe",
   "editor-lsp": "Serveur de langage",
+  "editor-lsp-edit-refused": "Le serveur a proposé une modification qui touche d'autres fichiers : refusée, il faut les ouvrir.",
   "editor-none-configured": "Aucun éditeur externe configuré",
   "editor-pick-a-file": "Choisissez un fichier à éditer dans l'explorateur.",
   "editor-save": "Enregistrer",

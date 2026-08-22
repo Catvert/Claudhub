@@ -35,16 +35,22 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::{anyhow, Result};
+use gpui::Entity;
 use gpui::{App, SharedString, Task, WeakEntity, Window};
-use gpui_component::input::{CompletionProvider, DefinitionProvider, HoverProvider, Rope, RopeExt};
+use gpui_component::input::{
+    CodeActionProvider, CompletionProvider, DefinitionProvider, EditorState, HoverProvider, Rope,
+    RopeExt,
+};
 use lsp_types::{
-    CompletionContext, CompletionResponse, Diagnostic, GotoDefinitionResponse, Hover, LocationLink,
-    ShowDocumentParams,
+    CodeAction, CodeActionOrCommand, CodeActionResponse, CompletionContext, CompletionResponse,
+    Diagnostic, GotoDefinitionResponse, Hover, LocationLink, ShowDocumentParams, TextEdit,
+    WorkspaceEdit,
 };
 use serde_json::{json, Value};
 
 use crate::lsp::Server;
 use crate::runtime::protocol::Cmd;
+use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::settings::Settings;
 
@@ -101,6 +107,7 @@ pub struct Capabilities {
     pub triggers: Vec<String>,
     pub hover: bool,
     pub definition: bool,
+    pub code_actions: bool,
 }
 
 impl Capabilities {
@@ -129,6 +136,7 @@ impl Capabilities {
                 .unwrap_or_default(),
             hover: has("hoverProvider"),
             definition: has("definitionProvider"),
+            code_actions: has("codeActionProvider"),
         }
     }
 }
@@ -274,6 +282,14 @@ impl ClaudhubApp {
             lsp.definition_provider = capabilities
                 .definition
                 .then(|| provider.clone() as Rc<dyn DefinitionProvider>);
+            // A `Vec` in their API: several providers may answer for one
+            // document — a linter's fixes next to a server's. We have one, and
+            // it is posted or not.
+            lsp.code_action_providers = if capabilities.code_actions {
+                vec![provider.clone() as Rc<dyn CodeActionProvider>]
+            } else {
+                Vec::new()
+            };
             // Following a definition into another file is ours to do: the
             // built-in behaviour jumps inside the document being edited, which
             // is right for a local symbol and useless for the class it came
@@ -416,6 +432,37 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    /// The server asks for an edit: apply what concerns the open file, and
+    /// answer — a request left hanging keeps the server waiting for ever.
+    pub(super) fn lsp_apply_edit(
+        &mut self,
+        worktree: PathBuf,
+        id: u64,
+        payload: String,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let edit: Option<WorkspaceEdit> = serde_json::from_str(&payload).ok();
+        let applied = match (edit, self.editing.as_ref()) {
+            (Some(edit), Some(editing)) if editing.worktree == worktree => {
+                let (state, path) = (editing.input.clone(), editing.path.clone());
+                apply_to(&state, &path, &edit, window, cx)
+            }
+            // Nothing open to apply it to, or an unreadable edit: refused, and
+            // said out loud. A fix that silently does nothing is the worst of
+            // the three answers.
+            _ => false,
+        };
+        if !applied {
+            self.announce(tr!("editor-lsp-edit-refused"), cx);
+        }
+        self.git.send(Cmd::LspApplied {
+            worktree,
+            id,
+            applied,
+        });
+    }
+
     /// One answer, handed to whoever is waiting for it.
     pub(super) fn lsp_answer(&mut self, id: u64, result: Result<String, String>) {
         if let Some(waiting) = self.lsp_pending.remove(&id) {
@@ -532,6 +579,7 @@ impl ClaudhubApp {
 
 /// The three providers, one object: they answer about the same document, and
 /// splitting them would be three weak references and three clones per file.
+#[derive(Clone)]
 struct Provider {
     app: WeakEntity<ClaudhubApp>,
     worktree: PathBuf,
@@ -566,6 +614,13 @@ impl Provider {
             }
             Ok(Some(serde_json::from_str::<T>(&payload)?))
         })
+    }
+
+    /// A copy for the asynchronous leg: `ask` needs the weak handle and the
+    /// paths, and the provider itself lives behind an `Rc` the future cannot
+    /// hold.
+    fn clone_for_command(&self) -> Self {
+        self.clone()
     }
 
     fn document(&self) -> Value {
@@ -645,6 +700,189 @@ impl DefinitionProvider for Provider {
         let task = self.ask::<GotoDefinitionResponse>("textDocument/definition", params, cx);
         cx.spawn(async move |_cx| Ok(task.await?.map(links).unwrap_or_default()))
     }
+}
+
+impl CodeActionProvider for Provider {
+    /// One provider, one id. Theirs is a `Vec` because a document may have
+    /// several — a linter's fixes beside a server's — and the id is how an
+    /// action found its way back to the one that offered it.
+    fn id(&self) -> SharedString {
+        SharedString::from("claudhub-lsp")
+    }
+
+    fn code_actions(
+        &self,
+        state: Entity<EditorState>,
+        range: std::ops::Range<usize>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Task<Result<Vec<CodeAction>>> {
+        let text = state.read(cx).text().clone();
+        let start = text.offset_to_position(range.start);
+        let end = text.offset_to_position(range.end);
+        // **The diagnostics of the range travel with the request**, and they
+        // are not a courtesy: a quick fix is offered *for* a diagnostic, and a
+        // server given none has nothing to fix — the list comes back empty and
+        // reads as "this server has no code actions".
+        let app = self.app.clone();
+        let (worktree, path) = (self.worktree.clone(), self.path.clone());
+        let diagnostics = app
+            .update(cx, |this, _| {
+                this.lsp
+                    .get(&worktree)
+                    .and_then(|session| session.diagnostics.get(&path))
+                    .map(|found| {
+                        found
+                            .iter()
+                            .filter(|d| {
+                                d.range.end.line >= start.line && d.range.start.line <= end.line
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let params = json!({
+            "textDocument": self.document(),
+            "range": {"start": start, "end": end},
+            "context": {"diagnostics": diagnostics},
+        });
+        let task = self.ask::<CodeActionResponse>("textDocument/codeAction", params, cx);
+        cx.spawn(async move |_cx| {
+            Ok(task
+                .await?
+                .unwrap_or_default()
+                .into_iter()
+                .map(|item| match item {
+                    CodeActionOrCommand::CodeAction(action) => action,
+                    // A bare `Command` is the older shape of the same thing:
+                    // dropping it would hide half of what some servers offer.
+                    CodeActionOrCommand::Command(command) => CodeAction {
+                        title: command.title.clone(),
+                        command: Some(command),
+                        ..Default::default()
+                    },
+                })
+                .collect())
+        })
+    }
+
+    /// Carries out an action, in the three shapes one arrives in.
+    ///
+    /// **Resolved first when it has to be.** A server is allowed to answer a
+    /// list of titles and compute the edit only for the one that is chosen —
+    /// that is what `data` without `edit` means, and doing nothing there is how
+    /// a quick fix looks broken.
+    ///
+    /// Then the edit, if it carries one, and then its command, whose own effect
+    /// usually comes back as a `workspace/applyEdit` — the round trip through
+    /// `Evt::LspApplyEdit`.
+    fn perform_code_action(
+        &self,
+        state: Entity<EditorState>,
+        action: CodeAction,
+        _push_to_history: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Task<Result<()>> {
+        let path = self.path.clone();
+        let needs_resolve = action.edit.is_none() && action.data.is_some();
+        let resolve = needs_resolve.then(|| {
+            self.ask::<CodeAction>(
+                "codeAction/resolve",
+                serde_json::to_value(&action).unwrap_or(Value::Null),
+                cx,
+            )
+        });
+        let command = self.clone_for_command();
+        window.spawn(cx, async move |cx| {
+            let action = match resolve {
+                Some(task) => task.await?.unwrap_or(action),
+                None => action,
+            };
+            if let Some(edit) = action.edit.clone() {
+                let state = state.clone();
+                let path = path.clone();
+                cx.update(|window, cx| apply_to(&state, &path, &edit, window, cx))?;
+            }
+            if let Some(invocation) = action.command.clone() {
+                let params = json!({
+                    "command": invocation.command,
+                    "arguments": invocation.arguments.unwrap_or_default(),
+                });
+                let task = cx.update(|_window, cx| {
+                    command.ask::<Value>("workspace/executeCommand", params, cx)
+                })?;
+                task.await?;
+            }
+            Ok(())
+        })
+    }
+}
+
+/// Applies to the open document what a workspace edit says about it, and says
+/// whether it applied all of it.
+///
+/// **Only the open document.** An edit naming another file — what a rename
+/// produces — is refused rather than written: every write in Claudhub carries
+/// the digest of what was read, so that an agent's work is never overwritten,
+/// and applying blind edits to files nobody has open would be the one place
+/// that rule is broken. The server is told, and it reports it.
+///
+/// **Back to front.** The edits' positions all refer to the text as it is now;
+/// applied in reading order, the first one moves everything the second one
+/// points at. Sorting them descending is what makes each in turn land on a
+/// position that is still true.
+pub(super) fn apply_to(
+    state: &Entity<EditorState>,
+    path: &Path,
+    edit: &WorkspaceEdit,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let ours = crate::lsp::uri::of(path);
+    let mut mine: Vec<TextEdit> = Vec::new();
+    let mut elsewhere = false;
+    if let Some(changes) = &edit.changes {
+        for (uri, edits) in changes {
+            if uri.as_str() == ours {
+                mine.extend(edits.iter().cloned());
+            } else {
+                elsewhere = true;
+            }
+        }
+    }
+    if let Some(lsp_types::DocumentChanges::Edits(documents)) = &edit.document_changes {
+        for document in documents {
+            if document.text_document.uri.as_str() == ours {
+                mine.extend(document.edits.iter().map(|edit| match edit {
+                    lsp_types::OneOf::Left(edit) => edit.clone(),
+                    // An annotated edit carries the same text and a label for a
+                    // confirmation dialog we do not show.
+                    lsp_types::OneOf::Right(annotated) => annotated.text_edit.clone(),
+                }));
+            } else {
+                elsewhere = true;
+            }
+        }
+    }
+    // Creating, renaming and deleting files (`DocumentChanges::Operations`) is
+    // the same refusal for the same reason.
+    if matches!(
+        edit.document_changes,
+        Some(lsp_types::DocumentChanges::Operations(_))
+    ) {
+        elsewhere = true;
+    }
+    if !mine.is_empty() {
+        mine.sort_by_key(|edit| std::cmp::Reverse(edit.range.start));
+        state.update(cx, |state, cx| {
+            state.apply_lsp_edits(&mine, window, cx);
+            cx.notify();
+        });
+    }
+    !elsewhere
 }
 
 /// The three shapes a definition comes back in, brought to the one the editor

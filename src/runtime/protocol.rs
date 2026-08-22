@@ -512,6 +512,15 @@ pub enum Cmd {
         worktree: WorktreeId,
         id: u64,
     },
+    /// What the view did with a `workspace/applyEdit`: a code action's fix
+    /// often arrives that way rather than in the action itself, and a server
+    /// left without an answer keeps the request open.
+    LspApplied {
+        worktree: WorktreeId,
+        /// The **server's** request id, echoed back.
+        id: u64,
+        applied: bool,
+    },
 
     AddWorktree {
         main: PathBuf,
@@ -545,6 +554,7 @@ impl Cmd {
             Self::LspSave { .. } => "LspSave",
             Self::LspRequest { .. } => "LspRequest",
             Self::LspCancel { .. } => "LspCancel",
+            Self::LspApplied { .. } => "LspApplied",
             Self::OpenIfRepo(..) => "OpenIfRepo",
             Self::RefreshRepo { .. } => "RefreshRepo",
             Self::RefreshStatus { .. } => "RefreshStatus",
@@ -795,6 +805,20 @@ pub enum Evt {
         path: PathBuf,
         /// The `diagnostics` array as JSON.
         diagnostics: String,
+    },
+    /// The server asks for an edit to be applied (`workspace/applyEdit`).
+    ///
+    /// A request of the server's and not a notification: it waits for a yes or
+    /// a no, and only the view can give one — it holds the buffer, and it is
+    /// the only one that knows which file is open. What it cannot apply it
+    /// refuses, which the server reads and reports; applying to a file nobody
+    /// has open would be writing without the digest that every other write in
+    /// Claudhub carries.
+    LspApplyEdit {
+        worktree: WorktreeId,
+        id: u64,
+        /// The `WorkspaceEdit` as JSON.
+        edit: String,
     },
     /// What the server is busy with, from `$/progress`; `None` when it is done.
     ///

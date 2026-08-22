@@ -1395,6 +1395,9 @@ impl ClaudhubApp {
                 diagnostics,
             } => self.lsp_diagnostics(worktree, path, diagnostics, cx),
             Evt::LspBusy { worktree, message } => self.lsp_busy(worktree, message, cx),
+            Evt::LspApplyEdit { worktree, id, edit } => {
+                self.lsp_apply_edit(worktree, id, edit, window, cx)
+            }
 
             // — Databases —————————————————————————————————————————
             Evt::DbDatabases { key, databases } => self.db_databases_arrived(key, databases, cx),

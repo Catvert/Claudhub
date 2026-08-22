@@ -902,12 +902,38 @@ Sept points qui ne se devinent pas :
   ne doit pas arriver — un serveur qui attend son accusé de réception s'arrête
   là.
 
+**Les actions de code sont là aussi** — `Ctrl+.` ou le clic droit, gpui-base les
+liant déjà —, et trois choses les font marcher qu'un client naïf rate :
+
+- **Une action se résout avant de s'appliquer.** Un serveur a le droit de rendre
+  des titres et de ne calculer la modification que pour celui qu'on choisit :
+  c'est ce que veut dire un `data` sans `edit`, et c'est exactement ce que
+  PHPantom fait de ses trois refactorisations. Ne pas appeler
+  `codeAction/resolve` là donne un correctif qui ne fait rien, ce qui se lit
+  comme cassé et non comme absent.
+- **`workspace/applyEdit` est une requête du serveur**, et elle traverse jusqu'à
+  la vue : elle seule tient le tampon et sait quel fichier est ouvert
+  (`Evt::LspApplyEdit` → `Cmd::LspApplied`). La session n'attend rien pendant ce
+  temps ; le serveur, lui, attend son oui ou son non, et ne rien répondre le
+  laisse bloqué. Beaucoup de correctifs passent par là plutôt que par l'action
+  elle-même.
+- **Ce qui touche un autre fichier est refusé**, et le refus se dit. Toute
+  écriture dans Claudhub repart avec l'empreinte de ce qu'on avait lu — c'est ce
+  qui empêche d'effacer le travail d'un agent — et appliquer des modifications
+  à l'aveugle dans des fichiers que personne n'a ouverts serait le seul endroit
+  où cette règle tomberait. Un renommage à l'échelle du projet n'est donc pas
+  pour cette version.
+- **Les modifications s'appliquent à l'envers.** Leurs positions décrivent
+  toutes le texte tel qu'il est maintenant : appliquées dans l'ordre de lecture,
+  la première déplace ce que la seconde désigne. Les trier en ordre décroissant
+  est ce qui fait que chacune tombe encore juste.
+
 Ce que la v1 ne fait pas, et c'est délibéré : seul le fichier ouvert dans
 l'éditeur est synchronisé (rien dans la vue de diff, qui n'est pas un document
 et dont le texte n'est pas celui du fichier), pas de renommage, pas de
 formatage, pas de recherche de symboles — il n'y a pas de vue pour les porter.
-Les actions de code et les jetons sémantiques attendent : leurs traits existent,
-c'est le seul travail qui reste.
+Les jetons sémantiques attendent : leur trait existe, c'est le travail qui
+reste.
 
 **Ce que le serveur raconte va dans le journal** (`target: "lsp"`), stderr
 compris. `$/progress` fait exception : il remonte en `Evt::LspBusy` et s'affiche
@@ -918,9 +944,12 @@ secondes. PHPantom construit son index par couches et le dit là.
 **Le test qui compte ne lance pas de processus.** `Session::run` prend ce dans
 quoi il écrit et ce qu'il entend : la boucle entière se joue en mémoire, la
 poignée de main comprise. `tests/lsp_phpantom.rs` fait l'autre moitié — le vrai
-binaire, les vrais tubes — et **se saute** quand `phpantom_lsp` n'est pas
+binaire, les vrais tubes, la poignée de main, un survol, des diagnostics poussés
+et une action de code résolue — et **se saute** quand `phpantom_lsp` n'est pas
 installé, ce qui est le cas de la CI : un test qui échoue faute d'un programme
-que personne n'a promis est un build rouge qui ne dit rien.
+que personne n'a promis est un build rouge qui ne dit rien. Ce qu'il vérifie du
+serveur est la **mécanique** et jamais le contenu : quelles fautes un serveur
+signale est son affaire et celle de sa version.
 
 ### Lire et retoucher un fichier
 

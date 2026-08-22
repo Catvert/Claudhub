@@ -293,6 +293,11 @@ fn route_lsp(host: &std::sync::Arc<crate::lsp::Host>, cmd: Cmd) -> Option<Cmd> {
             params,
         } => host.ask(&worktree, Ask::Request { id, method, params }),
         Cmd::LspCancel { worktree, id } => host.ask(&worktree, Ask::Cancel { id }),
+        Cmd::LspApplied {
+            worktree,
+            id,
+            applied,
+        } => host.ask(&worktree, Ask::Applied { id, applied }),
         other => return Some(other),
     }
     None
@@ -455,7 +460,8 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
         | Cmd::LspClose { .. }
         | Cmd::LspSave { .. }
         | Cmd::LspRequest { .. }
-        | Cmd::LspCancel { .. } => {
+        | Cmd::LspCancel { .. }
+        | Cmd::LspApplied { .. } => {
             log::debug!("language server order arrived in a worker");
             Vec::new()
         }

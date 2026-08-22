@@ -154,6 +154,54 @@ fn a_real_server_starts_opens_a_file_and_answers() {
     })
     .expect("no diagnostics for the file that was opened");
 
+    // Code actions, on the file with the mistake in it. What comes back is the
+    // server's business; that the round trip works is ours.
+    host.ask(
+        &worktree,
+        claudhub::lsp::Ask::Request {
+            id: 43,
+            method: "textDocument/codeAction".into(),
+            params: serde_json::json!({
+                "textDocument": {"uri": claudhub::lsp::uri::of(&broken)},
+                "range": {
+                    "start": {"line": 3, "character": 4},
+                    "end": {"line": 3, "character": 40},
+                },
+                "context": {"diagnostics": []},
+            })
+            .to_string(),
+        },
+    );
+    let actions = wait(&events_rx, READY, |event| match event {
+        Evt::LspAnswer { id: 43, result, .. } => Some(result.clone()),
+        _ => None,
+    })
+    .expect("no answer to the code actions");
+    let actions: Vec<serde_json::Value> =
+        serde_json::from_str(&actions.expect("the code actions were refused")).unwrap();
+    assert!(!actions.is_empty(), "no code action on a class method");
+
+    // PHPantom answers titles and computes the edit only for the one chosen —
+    // `data` and no `edit`. That is the leg a client that does not resolve gets
+    // wrong, and it is the one where a quick fix looks broken rather than
+    // absent.
+    assert!(actions[0].get("edit").is_none());
+    host.ask(
+        &worktree,
+        claudhub::lsp::Ask::Request {
+            id: 44,
+            method: "codeAction/resolve".into(),
+            params: actions[0].to_string(),
+        },
+    );
+    let resolved = wait(&events_rx, READY, |event| match event {
+        Evt::LspAnswer { id: 44, result, .. } => Some(result.clone()),
+        _ => None,
+    })
+    .expect("no answer to the resolve")
+    .expect("the resolve was refused");
+    assert!(resolved.contains("\"edit\""), "{resolved}");
+
     host.stop(worktree.clone());
     let _ = std::fs::remove_dir_all(&worktree);
 }

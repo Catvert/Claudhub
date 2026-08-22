@@ -152,6 +152,16 @@ pub enum Ask {
     Cancel {
         id: u64,
     },
+    /// The view's answer to a `workspace/applyEdit` the server asked for.
+    ///
+    /// It is the only order that answers a **request of the server's**, and it
+    /// carries the server's own id: the session held nothing while it waited,
+    /// so a view that never answers costs the server one pending request and
+    /// costs us nothing.
+    Applied {
+        id: u64,
+        applied: bool,
+    },
 }
 
 /// The sessions, one per worktree.
@@ -535,6 +545,15 @@ impl Session {
                     });
                 }
             }
+            Ask::Applied { id, applied } => {
+                let answer = json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": {"applied": applied},
+                });
+                if let Err(e) = frame::write(stdin, &answer.to_string()) {
+                    log::warn!("answering an edit to the language server: {e:#}");
+                }
+            }
             Ask::Cancel { id } => {
                 // The server's id, not ours: find the one that carries it.
                 let server_id = self.pending.iter().find_map(|(server_id, pending)| {
@@ -629,6 +648,22 @@ impl Session {
     /// is the one thing that must not happen: a server that registers a
     /// capability and waits for the acknowledgement stops there.
     fn serve(&self, stdin: &mut impl std::io::Write, id: u64, method: &str, message: &Value) {
+        // The one request we cannot answer from here: applying an edit is the
+        // view's to do — it holds the buffer, and it is the only one that knows
+        // whether the file is open. The answer comes back as `Ask::Applied`.
+        if method == "workspace/applyEdit" {
+            let edit = message
+                .get("params")
+                .and_then(|p| p.get("edit"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            self.emit(Evt::LspApplyEdit {
+                worktree: self.worktree.clone(),
+                id,
+                edit: edit.to_string(),
+            });
+            return;
+        }
         let result = match method {
             "client/registerCapability" | "client/unregisterCapability" => Value::Null,
             "window/workDoneProgress/create" => Value::Null,
@@ -1056,6 +1091,40 @@ mod tests {
         assert_eq!(answered(41)["result"], json!([null, null]));
         // And what we do not do is refused, rather than left silent.
         assert_eq!(answered(42)["error"]["code"], -32601);
+    }
+
+    /// An edit the server asks for goes to the view and comes back: it holds
+    /// the buffer, we hold the pipe.
+    #[test]
+    fn an_edit_the_server_asks_for_goes_through_the_view() {
+        let (written, events) = drive(vec![
+            answer(1, json!({"capabilities": {}})),
+            Message::Incoming(
+                json!({
+                    "jsonrpc": "2.0", "id": 9, "method": "workspace/applyEdit",
+                    "params": {"edit": {"changes": {"file:///p/site/a.php": []}}},
+                })
+                .to_string(),
+            ),
+            Message::Ask(Ask::Applied {
+                id: 9,
+                applied: true,
+            }),
+        ]);
+        // Nothing is answered until the view has spoken...
+        match &events[..] {
+            [Evt::LspReady { .. }, Evt::LspApplyEdit { id: 9, edit, .. }] => {
+                assert!(edit.contains("a.php"))
+            }
+            other => panic!("{other:?}"),
+        }
+        // ...and then it is, with the server's own id.
+        let messages = frames(&written);
+        let answered = messages
+            .iter()
+            .find(|m| m.get("id").and_then(Value::as_u64) == Some(9))
+            .expect("the server was left waiting");
+        assert_eq!(answered["result"], json!({"applied": true}));
     }
 
     /// A dead session must fail what was waiting on it: a `Task` that never
