@@ -259,6 +259,14 @@ pub enum Landing {
 }
 
 /// A file being read, and what must happen to the caret when it arrives.
+/// The line a byte offset falls on, counted from zero.
+fn line_at(text: &str, offset: usize) -> usize {
+    text[..offset.min(text.len())]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+}
+
 /// A landing resolved against the text it lands in.
 ///
 /// The offset is clamped: a trail entry is a byte offset in a file that may
@@ -318,6 +326,21 @@ pub struct Editing {
     /// which is a few percent of lightness away from the background — a block
     /// one has to look for is a block one does not see.
     pub cursor: gpui_component::input::TextDecorationCollection,
+    /// A caret waiting for the editor to be measured before it can be revealed.
+    ///
+    /// A file opened by a jump installs a brand-new `EditorState`, which has
+    /// never been laid out: it has neither a visible row range nor a line
+    /// height, so scrolling to the caret is a division by nothing and returns
+    /// silently. The caret was in the right place and the view stayed at the
+    /// top of the file, which reads as "the jump missed". The reveal is
+    /// therefore kept until a frame can measure — the same answer as the diff's
+    /// first width, and bounded for the same reason.
+    pub reveal_at: Option<usize>,
+    pub reveal_tries: u8,
+    /// Where `zm` and `zr` have got to: the nesting level below which folds are
+    /// closed. `None` is everything open, which is one past the deepest — the
+    /// state `zR` puts the file back into, and the one it opens in.
+    pub fold_level: Option<usize>,
     /// The mode, caret and text length the cursor was last painted for.
     ///
     /// The block is recomputed at a frame only when one of the three has moved:
@@ -783,7 +806,12 @@ impl ClaudhubApp {
         input.update(cx, |state, cx| {
             state.set_selected_range(offset..offset, cx);
         });
-        self.reveal_caret(&input, offset, cx);
+        if !self.reveal_caret(&input, offset, cx) {
+            if let Some(editing) = self.editing_mut() {
+                editing.reveal_at = Some(offset);
+                editing.reveal_tries = 0;
+            }
+        }
         gpui::Focusable::focus_handle(&input, cx).focus(window, cx);
         Some(offset)
     }
@@ -863,6 +891,9 @@ impl ClaudhubApp {
                 hash: content.hash,
                 dirty: false,
                 lsp_pending: false,
+                reveal_at: None,
+                reveal_tries: 0,
+                fold_level: None,
                 vim: crate::ui::vim::Vim::default(),
                 flash,
                 flash_timer: None,
@@ -1151,6 +1182,8 @@ impl ClaudhubApp {
                     self.close_editor(window, cx);
                 }
                 Command::GoToDefinition => self.goto_definition(window, cx),
+                Command::Reveal(at) => self.place_caret_line(&input, at, cx),
+                Command::Fold(op) => self.fold(op, cx),
             },
         }
         cx.notify();
@@ -1258,6 +1291,113 @@ impl ClaudhubApp {
         }
     }
 
+    /// `zz`, `zt`, `zb`: puts the caret's line where the eye wants it.
+    ///
+    /// Nothing here moves the caret — that is what tells these from `z.` and
+    /// `z-`, which also go to the first non-blank and are therefore two answers
+    /// in one, where `Response` carries a single one.
+    fn place_caret_line(
+        &mut self,
+        input: &Entity<EditorState>,
+        at: crate::ui::vim::Reveal,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::ui::vim::Reveal;
+        input.update(cx, |state, cx| {
+            let (Some(rows), Some(line_height)) = (state.visible_row_range(), state.line_height())
+            else {
+                return;
+            };
+            let row = line_at(&state.value(), state.selected_range().start);
+            let span = rows.len().max(1);
+            let first = match at {
+                Reveal::Top => row,
+                Reveal::Centre => row.saturating_sub(span / 2),
+                Reveal::Bottom => row.saturating_sub(span - 1),
+            };
+            // The input's scroll handle counts downwards as negative.
+            let offset = state.scroll_offset();
+            state.set_scroll_offset(gpui::point(offset.x, -(line_height * first as f32)), cx);
+        });
+    }
+
+    /// The `z` commands that fold.
+    ///
+    /// Where a fold begins and ends is the grammar's answer, never ours: the
+    /// editor holds the candidates, and all that is decided here is which of
+    /// them to close. `zc`, `zo` and `za` act on the **innermost** fold holding
+    /// the caret, which is the one being read.
+    fn fold(&mut self, op: crate::ui::vim::Fold, cx: &mut Context<Self>) {
+        use crate::ui::vim::Fold;
+        let Some(editing) = self.editing() else {
+            return;
+        };
+        let input = editing.input.clone();
+        let level = editing.fold_level;
+        let ranges: Vec<crate::ui::folds::Range> = input
+            .read(cx)
+            .fold_candidates()
+            .iter()
+            .map(|range| (range.start_line, range.end_line))
+            .collect();
+        if ranges.is_empty() {
+            return;
+        }
+        let caret = {
+            let state = input.read(cx);
+            line_at(&state.value(), state.selected_range().start)
+        };
+        let next = match op {
+            Fold::Close | Fold::Open | Fold::Toggle => {
+                let Some((start, _)) = ranges
+                    .iter()
+                    .filter(|(start, end)| *start <= caret && caret <= *end)
+                    .max_by_key(|(start, _)| *start)
+                    .copied()
+                else {
+                    return;
+                };
+                input.update(cx, |state, cx| {
+                    let folded = match op {
+                        Fold::Close => true,
+                        Fold::Open => false,
+                        _ => !state.is_folded_at(start),
+                    };
+                    state.set_folded(start, folded, cx);
+                });
+                return; // a single fold does not move the level
+            }
+            Fold::CloseAll => Some(0),
+            Fold::OpenAll => None,
+            // The ceiling is one past the deepest nesting: that is "everything
+            // open", and `zr` reaching it is `zR`.
+            Fold::More | Fold::Less => {
+                let ceiling = crate::ui::folds::max_depth(&ranges).unwrap_or(0) + 1;
+                let current = level.unwrap_or(ceiling);
+                let wanted = match op {
+                    Fold::More => current.saturating_sub(1),
+                    _ => current + 1,
+                };
+                (wanted <= ceiling.saturating_sub(1)).then_some(wanted)
+            }
+        };
+        input.update(cx, |state, cx| {
+            // Rebuilt from nothing each time rather than folded on top of what
+            // is there: `zr` opens a level, and reopening is not something the
+            // fold map does by adding.
+            state.unfold_all(cx);
+            if let Some(level) = next {
+                for start in crate::ui::folds::at_level(&ranges, level) {
+                    state.set_folded(start, true, cx);
+                }
+            }
+        });
+        if let Some(editing) = self.editing_mut() {
+            editing.fold_level = next;
+        }
+        cx.notify();
+    }
+
     /// Scrolls the caret back into view when the editor will not do it itself.
     ///
     /// `set_selected_range` scrolls to the **end** of what it is given, which is
@@ -1265,18 +1405,20 @@ impl ClaudhubApp {
     /// upwards: `V` then `k` would walk off the top of the panel without the
     /// view ever following. A landing needs it for a plainer reason: it writes
     /// an empty range, and the editor does not always take that for a move.
-    fn reveal_caret(&mut self, input: &Entity<EditorState>, head: usize, cx: &mut Context<Self>) {
+    fn reveal_caret(
+        &mut self,
+        input: &Entity<EditorState>,
+        head: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
         input.update(cx, |state, cx| {
             let (Some(rows), Some(line_height)) = (state.visible_row_range(), state.line_height())
             else {
-                return;
+                return false;
             };
-            let row = state.value()[..head.min(state.value().len())]
-                .bytes()
-                .filter(|byte| *byte == b'\n')
-                .count();
+            let row = line_at(&state.value(), head);
             if rows.contains(&row) {
-                return;
+                return true;
             }
             let first = if row < rows.start {
                 row
@@ -1286,7 +1428,8 @@ impl ClaudhubApp {
             // The input's scroll handle counts downwards as negative.
             let offset = state.scroll_offset();
             state.set_scroll_offset(gpui::point(offset.x, -(line_height * first as f32)), cx);
-        });
+            true
+        })
     }
 
     // — The panel  ——————————————————————————————————————————————
@@ -1743,6 +1886,25 @@ impl ClaudhubApp {
             .advance_at(offset, max, window)
         {
             input.update(cx, |state, cx| state.set_scroll_offset(next, cx));
+        }
+        // The caret a jump left waiting for a measurement. The first frame of a
+        // freshly opened file has none; asking for another is what gets the
+        // view to the symbol instead of leaving it at the top of the file, and
+        // the count is what stops a panel shrunk to nothing from asking for
+        // ever.
+        if let Some(head) = self.editing().and_then(|editing| editing.reveal_at) {
+            if self.reveal_caret(&input, head, cx) {
+                if let Some(editing) = self.editing_mut() {
+                    editing.reveal_at = None;
+                }
+            } else if let Some(editing) = self.editing_mut() {
+                editing.reveal_tries += 1;
+                if editing.reveal_tries > 8 {
+                    editing.reveal_at = None;
+                } else {
+                    window.request_animation_frame();
+                }
+            }
         }
         // The block cursor, and the caret that goes away under it. Both are
         // reread at every frame and not set once, like `TerminalView::sync_font`:

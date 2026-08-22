@@ -101,6 +101,33 @@ pub enum Command {
     /// the text can be read for — a language server has to be asked, and it may
     /// answer with another file.
     GoToDefinition,
+    /// `zz`, `zt`, `zb`: where the current line goes in the viewport. The text
+    /// does not move, so there is nothing to apply — only a view to scroll.
+    Reveal(Reveal),
+    /// The `z` commands that fold. What folds is the grammar's business, not
+    /// ours: these say open, close or toggle, and the editor knows where.
+    Fold(Fold),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Reveal {
+    Centre,
+    Top,
+    Bottom,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fold {
+    /// `zc`, `zo`, `za`: the fold the cursor is in.
+    Close,
+    Open,
+    Toggle,
+    /// `zM`, `zR`: every fold in the file.
+    CloseAll,
+    OpenAll,
+    /// `zm`, `zr`: one level of nesting more, or less.
+    More,
+    Less,
 }
 
 /// The answer to one keystroke.
@@ -502,6 +529,27 @@ impl Vim {
             }
             let replacement: String = std::iter::repeat_n(rest[1], n).collect();
             return Response::Apply(self.edit(text, self.head..end, replacement, self.head));
+        }
+        // `z` is a prefix in both modes: none of what it opens touches the
+        // text, so there is no reason for visual mode to answer differently.
+        if ch == 'z' {
+            if rest.len() < 2 {
+                return Response::Consumed;
+            }
+            self.pending.clear();
+            return match rest[1] {
+                'z' => Response::Command(Command::Reveal(Reveal::Centre)),
+                't' => Response::Command(Command::Reveal(Reveal::Top)),
+                'b' => Response::Command(Command::Reveal(Reveal::Bottom)),
+                'c' => Response::Command(Command::Fold(Fold::Close)),
+                'o' => Response::Command(Command::Fold(Fold::Open)),
+                'a' => Response::Command(Command::Fold(Fold::Toggle)),
+                'M' => Response::Command(Command::Fold(Fold::CloseAll)),
+                'R' => Response::Command(Command::Fold(Fold::OpenAll)),
+                'm' => Response::Command(Command::Fold(Fold::More)),
+                'r' => Response::Command(Command::Fold(Fold::Less)),
+                _ => Response::Consumed,
+            };
         }
         // `g` is a prefix, and the motion parser has already taken the only
         // motion it opens (`gg`): what reaches here is a command.
@@ -1880,6 +1928,48 @@ mod tests {
             panic!("gg goes to the first line");
         };
         assert_eq!(change.head, 0);
+    }
+
+    /// `z` waits for its second key, and answers in both modes: none of what it
+    /// opens touches the text.
+    #[test]
+    fn the_z_prefix_scrolls_and_folds() {
+        let text = "one\ntwo\n";
+        let mut vim = Vim::default();
+        assert_eq!(vim.press(&key('z'), text, 0, 10), Response::Consumed);
+        assert_eq!(
+            vim.press(&key('z'), text, 0, 10),
+            Response::Command(Command::Reveal(Reveal::Centre))
+        );
+        for (ch, expected) in [
+            ('t', Command::Reveal(Reveal::Top)),
+            ('b', Command::Reveal(Reveal::Bottom)),
+            ('c', Command::Fold(Fold::Close)),
+            ('o', Command::Fold(Fold::Open)),
+            ('a', Command::Fold(Fold::Toggle)),
+            ('M', Command::Fold(Fold::CloseAll)),
+            ('R', Command::Fold(Fold::OpenAll)),
+            ('m', Command::Fold(Fold::More)),
+            ('r', Command::Fold(Fold::Less)),
+        ] {
+            let mut vim = Vim::default();
+            vim.press(&key('z'), text, 0, 10);
+            assert_eq!(
+                vim.press(&key(ch), text, 0, 10),
+                Response::Command(expected),
+                "z{ch}"
+            );
+        }
+        // Visual mode answers the same, and `z` on its own leaves no pending
+        // keys behind for the next command to trip over.
+        let mut vim = Vim::default();
+        vim.press(&key('v'), text, 0, 10);
+        vim.press(&key('z'), text, 0, 10);
+        assert_eq!(
+            vim.press(&key('z'), text, 0, 10),
+            Response::Command(Command::Reveal(Reveal::Centre))
+        );
+        assert_eq!(vim.pending(), "");
     }
 
     #[test]

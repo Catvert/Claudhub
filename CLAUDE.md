@@ -187,6 +187,7 @@ src/
                     l'éditeur, les diagnostics, et le bouton « LSP »
     jumps.rs        la piste de l'éditeur : d'où l'on vient, où l'on
                     repart — sans rien de gpui dedans
+    folds.rs        quels replis un niveau de repli ferme — sans gpui dedans
     find.rs         la recherche d'un panneau, et son routage
     motion.rs       le lissage de la molette, sans rien de gpui dedans
     vim.rs          les modes de vim de l'éditeur : motions, opérateurs,
@@ -1086,6 +1087,15 @@ Cinq points :
   définition. La reprise de session n'y passe pas et demande son fichier
   directement : revenir où l'on était n'est pas un saut qu'on doit pouvoir
   défaire.
+- **Un caret peut attendre d'être révélé.** Le fichier qui vient d'être ouvert
+  installe un `EditorState` neuf, que rien n'a encore mis en page : il n'a ni
+  plage de lignes visibles ni hauteur de ligne, si bien que défiler jusqu'au
+  caret est une division par rien et ne dit rien. Le caret était au bon
+  endroit et la vue restait en haut du fichier, ce qui se lit « le saut a
+  raté ». La révélation est donc gardée (`Editing::reveal_at`) et retentée à
+  chaque frame jusqu'à ce qu'une mesure existe — la même réponse que la
+  première largeur du diff, et bornée pour la même raison : un panneau rétréci
+  à zéro ne doit pas demander des images à l'infini.
 - **Atterrir donne le focus à l'éditeur.** Un saut est un geste au clavier dont
   la touche suivante en est un autre — `Ctrl+O` pour revenir aussitôt, une
   motion pour lire autour —, et un caret dans un champ où personne ne tape n'en
@@ -2386,7 +2396,7 @@ liste n'est pas virtualisée, un `mx_1` sur la ligne suffit.
 du dock, `Tab`, a un rayon **codé en dur à zéro** et rien dans le thème ne
 l'atteint ; `Tab::with_variant` et `TabBar::with_variant` existent pourtant,
 c'est seulement le panneau d'onglets du dock qui ne les transmettait pas. D'où
-le **fork** (voir `Cargo.toml`) : huit commits au-dessus de leur `main` — le
+le **fork** (voir `Cargo.toml`) : neuf commits au-dessus de leur `main` — le
 `TabVariant` que `DockSkin` fait passer jusqu'au `TabBar` ; les coins en boîte
 bordée du bandeau réservés au variant classique, dont ils épousent les
 rectangles ; le groupe lu comme une carte hors variant classique — cadre
@@ -2422,6 +2432,13 @@ l'éclat d'un yank de s'afficher, et le symptôme se lisait « le curseur
 n'apparaît qu'après un déplacement » — ce qu'on voyait alors était la
 *sélection*, que seule une frappe pose. `LineLayout::paint` fait désormais une
 passe de fond avant la passe de glyphes.
+
+Un neuvième, qui ne parle pas du dock non plus : **une application peut replier
+sans passer par la gouttière** (`fold_candidates`, `is_fold_candidate`,
+`is_folded_at`, `set_folded`, `unfold_all` sur `InputState`). Les icônes de la
+gouttière replient depuis l'intérieur de l'élément, `display_map` étant privé :
+cela sert une souris et rien d'autre, et un éditeur modal n'avait aucun moyen
+d'entrer — voir « Les modes de vim dans l'éditeur ».
 
 Les commits ont vocation à partir en PR, et le fork à disparaître avec elle.
 
@@ -4116,6 +4133,28 @@ Six points qui ne se devinent pas :
   chaque rendu**, comme `TerminalView::sync_font` : le mode change sous les
   touches et le réglage sous le formulaire, l'appel est idempotent, et c'est ce
   qui rend le caret dès qu'on éteint le mode.
+- **Le préfixe `z` fait deux métiers, et aucun ne touche au texte** — d'où sa
+  place avant le partage normal/visuel, les deux modes y répondant pareil.
+  `zz`, `zt`, `zb` placent la ligne du caret dans la vue **sans déplacer le
+  caret** : c'est ce qui les distingue de `z.` et `z-`, qui vont en plus au
+  premier non-blanc et seraient donc deux réponses là où `Response` n'en porte
+  qu'une — ils ne sont pas là. `zc`, `zo`, `za`, `zM`, `zR`, `zm`, `zr`
+  replient : où commence et où finit un repli est la réponse de la grammaire,
+  jamais la nôtre, et tout ce qui se décide ici est **lesquels** fermer. `zc`,
+  `zo` et `za` agissent sur le repli **le plus intérieur** qui contient le
+  caret, celui qu'on est en train de lire.
+- **Un niveau de repli est une profondeur d'imbrication**, et elle se relit
+  dans les plages : l'éditeur les donne à plat, une méthode dans une classe est
+  simplement contenue par elle. `ui::folds` fait ce calcul et rien d'autre —
+  pur, testé, la seule partie de tout cela qui se trompe en silence. Le niveau
+  courant vit dans `Editing::fold_level`, `None` valant « tout ouvert »,
+  c'est-à-dire un cran au-delà du plus profond : `zr` qui l'atteint est `zR`.
+  Chaque changement de niveau **repart de tout ouvert** plutôt que d'ajouter à
+  ce qui est là, la carte des replis ne sachant pas rouvrir par addition.
+- **Rien de tout cela n'était atteignable** : les icônes de la gouttière
+  replient depuis l'intérieur de l'élément, ce qui sert une souris et rien
+  d'autre — `display_map` est privé. C'est le neuvième commit du fork, cinq
+  méthodes sur `InputState` qui font les trois mêmes appels que l'icône.
 - **`u` et `Ctrl+R` sont rendus à l'éditeur**, qui est le seul à savoir ce
   qu'était la dernière transaction — d'où `Command::Undo`, une action que la
   vue redispatche. `Ctrl+R` ne nous parvient d'ailleurs jamais : la fenêtre en
