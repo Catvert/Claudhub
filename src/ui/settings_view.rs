@@ -2238,6 +2238,21 @@ fn plugin_row(
     let key = format!("claudhub-plugin-{count}-{id}");
     let declared = manifest.declaration.clone();
     let configured = Settings::global(cx).plugins.get(&id).cloned();
+    // Where each secret lives, read **now**: the keyed state below is built
+    // once and would hold the picture from the frame a plugin was first shown,
+    // so a token just put into the keyring would still read "in clear".
+    let places: std::collections::BTreeMap<String, crate::plugin::host::SecretPlace> = declared
+        .secrets
+        .iter()
+        .map(|name| {
+            let value = configured
+                .as_ref()
+                .and_then(|p| p.secrets.get(name))
+                .map(String::as_str)
+                .unwrap_or_default();
+            (name.clone(), crate::plugin::host::SecretPlace::of(value))
+        })
+        .collect();
     let enabled = configured.as_ref().map(|p| p.enabled).unwrap_or(true);
     let state = window.use_keyed_state(SharedString::from(key), cx, {
         let id = id.clone();
@@ -2254,13 +2269,7 @@ fn plugin_row(
                         .placeholder(SharedString::from(default.clone()))
                         .default_value(current)
                 });
-                subscriptions.push(watch_plugin_field(
-                    &input,
-                    id.clone(),
-                    name.clone(),
-                    false,
-                    cx,
-                ));
+                subscriptions.push(watch_plugin_field(&input, id.clone(), name.clone(), cx));
                 values.push((name.clone(), input));
             }
             let mut secrets = Vec::new();
@@ -2282,13 +2291,7 @@ fn plugin_row(
                         .default_value(current)
                         .masked(true)
                 });
-                subscriptions.push(watch_plugin_field(
-                    &input,
-                    id.clone(),
-                    name.clone(),
-                    true,
-                    cx,
-                ));
+                subscriptions.push(keep_on_blur(&input, id.clone(), name.clone(), window, cx));
                 secrets.push((name.clone(), input));
             }
             PluginFields {
@@ -2436,11 +2439,13 @@ fn plugin_row(
                             .into_iter()
                             .map(|(name, input)| plugin_field_row(name, input, cx)),
                     )
-                    .children(
-                        secrets
-                            .into_iter()
-                            .map(|(name, input)| plugin_field_row(name, input, cx)),
-                    ),
+                    .children(secrets.into_iter().map(|(name, input)| {
+                        let place = places
+                            .get(&name)
+                            .copied()
+                            .unwrap_or(crate::plugin::host::SecretPlace::Plain);
+                        plugin_secret_row(name, input, place, cx)
+                    })),
             )
         })
         .child(
@@ -2448,6 +2453,38 @@ fn plugin_row(
                 .text_xs()
                 .text_color(muted)
                 .child(SharedString::from(dir.display().to_string())),
+        )
+}
+
+/// A secret's field, and one word saying where its value actually is.
+///
+/// It is the question one comes to this page with — "is my token in a file?" —
+/// and nothing else on the row would answer it: the field is masked, and a
+/// keyring reference behind dots looks exactly like a token.
+fn plugin_secret_row(
+    name: String,
+    input: Entity<InputState>,
+    place: crate::plugin::host::SecretPlace,
+    cx: &mut App,
+) -> impl IntoElement {
+    use crate::plugin::host::SecretPlace;
+    let colour = match place {
+        // In clear in a file is not an error, but it is the one of the three
+        // worth noticing.
+        SecretPlace::Plain => cx.theme().warning,
+        _ => cx.theme().muted_foreground,
+    };
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .gap_0p5()
+        .child(plugin_field_row(name, input, cx))
+        .child(
+            div()
+                .pl(px(138.))
+                .text_xs()
+                .text_color(colour)
+                .child(tr!(place.label())),
         )
 }
 
@@ -2472,7 +2509,6 @@ fn watch_plugin_field(
     input: &Entity<InputState>,
     id: String,
     name: String,
-    secret: bool,
     cx: &mut Context<PluginFields>,
 ) -> Subscription {
     cx.subscribe(
@@ -2484,12 +2520,41 @@ fn watch_plugin_field(
             let value = input.read(cx).value().to_string();
             let (id, name) = (id.clone(), name.clone());
             Settings::update_global(cx, move |s| {
-                let entry = s.plugins.entry(id).or_default();
-                if secret {
-                    entry.secrets.insert(name, value);
-                } else {
-                    entry.settings.insert(name, value);
-                }
+                s.plugins
+                    .entry(id)
+                    .or_default()
+                    .settings
+                    .insert(name, value);
+            });
+        },
+    )
+}
+
+/// A secret is put away when one **leaves** the field, never on a keystroke.
+///
+/// Storing it means a round trip to the system keyring, which can ask the user
+/// to unlock it: doing that per character would be absurd, and would ask once
+/// per letter. Losing the focus validates, which is already this window's rule
+/// for the task list — `InputState` has no escape event, and abandoning what
+/// was typed because one clicked beside it is the worse of the two defaults.
+fn keep_on_blur(
+    input: &Entity<InputState>,
+    id: String,
+    name: String,
+    window: &mut Window,
+    cx: &mut Context<PluginFields>,
+) -> Subscription {
+    cx.subscribe_in(
+        input,
+        window,
+        move |_: &mut PluginFields, input, event: &InputEvent, window: &mut Window, cx| {
+            if !matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                return;
+            }
+            let value = input.read(cx).value().to_string();
+            let (id, name) = (id.clone(), name.clone());
+            with_app(window, cx, move |app, window, cx| {
+                app.keep_secret(id, name, value, window, cx);
             });
         },
     )

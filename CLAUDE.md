@@ -4553,6 +4553,29 @@ voyage en `Secret`, dont le `Debug` masque la valeur — une `Cmd` se journalise
 un secret non. Les valeurs vivent dans les réglages (`Settings::plugins`),
 jamais dans le manifeste, qui est un fichier qu'on recopie.
 
+**Le trousseau est l'endroit par défaut, et c'est tout l'intérêt** : taper un
+jeton dans le formulaire ne doit pas l'écrire en clair dans un fichier.
+`ClaudhubApp::keep_secret` le range dans le trousseau du système et ne laisse
+dans `settings.json` qu'une **référence** — `keyring:sentry.token`. Une valeur
+qui **nomme** déjà où elle vit (`$NOM`, `keyring:…`) est enregistrée telle
+quelle : l'utilisateur a décidé. Une valeur vidée efface l'entrée, sans quoi un
+champ effacé laisserait le jeton dans le trousseau.
+
+Trois points s'y paient :
+
+- **À la perte du focus, jamais à la frappe.** Ranger un secret est un
+  aller-retour vers le trousseau, qui peut demander à l'utilisateur de le
+  déverrouiller : le faire par caractère demanderait le mot de passe une fois
+  par lettre. C'est la règle de la liste de tâches — perdre le focus valide.
+- **En tâche de fond, jamais dans le thread d'interface**, pour la même raison :
+  l'appel bloque tant que l'utilisateur n'a pas répondu.
+- **Un échec se dit.** Le repli vers le fichier de réglages est ce qu'il faut à
+  une machine sans trousseau — une session sans Secret Service, un poste
+  headless —, mais un jeton qui atterrit en clair quand on demandait un
+  trousseau doit être annoncé, pas découvert. La page porte d'ailleurs sous
+  chaque champ un mot disant **où la valeur est vraiment** : c'est la question
+  qu'on vient s'y poser, et un champ masqué ne la distingue pas d'un jeton.
+
 **Et une valeur dit elle-même où elle vit**, en trois formes qui répondent à
 trois questions différentes :
 
@@ -4566,7 +4589,7 @@ trois questions différentes :
 - **`$NOM`**, lu dans l'environnement **du worker**, parce que c'est là que
   tourne le processus qui fait la requête. Sous Windows, c'est donc
   l'environnement de la distribution WSL et non celui de Windows.
-- **`keyring:compte`** ou `keyring:service/compte`, lu dans le trousseau du
+- **`keyring:compte`** ou `keyring:service/compte`, écrit et lu dans le trousseau du
   système — Secret Service, Keychain, Credential Manager. Résolu **côté
   interface** et non dans le worker, et c'est le seul des trois qui change de
   côté : un trousseau appartient à une session de bureau, qui est celle de

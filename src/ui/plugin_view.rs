@@ -327,6 +327,81 @@ impl ClaudhubApp {
         self.send_to_agent(&path, text, window, cx);
     }
 
+    /// Puts a secret where it belongs, and records how to find it again.
+    ///
+    /// **The keyring is the default place**, and that is the point: typing a
+    /// token in the form must not write it in clear into a file. What the
+    /// settings then hold is a reference — `keyring:sentry.token` — and the
+    /// value never touches the disk in readable form.
+    ///
+    /// A value that **names** where it lives (`$NOM`, `keyring:…`) is recorded
+    /// as it stands: the user has already decided.
+    ///
+    /// **In the background**, never on the interface thread: opening a keyring
+    /// can ask the user to unlock it, and the call blocks until they answer.
+    /// And on **blur**, never on a keystroke — a D-Bus round trip per character
+    /// would be absurd, and a locked keyring would ask once per letter.
+    pub(super) fn keep_secret(
+        &mut self,
+        plugin: String,
+        name: String,
+        value: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::plugin::host::{KeyringEntry, SecretPlace};
+        let entry = KeyringEntry::for_plugin(&plugin, &name);
+        let value = value.trim().to_string();
+
+        // Emptied, or already a reference: nothing to put away. What we had put
+        // in the keyring for this name goes, so an emptied field leaves nothing
+        // behind.
+        if value.is_empty() || SecretPlace::of(&value).is_reference() {
+            let forgotten = entry;
+            cx.background_executor()
+                .spawn(async move {
+                    if let Err(e) = forgotten.forget() {
+                        log::debug!(target: "plugin", "{} — {e}", forgotten.describe());
+                    }
+                })
+                .detach();
+            record_secret(&plugin, &name, &value, cx);
+            return;
+        }
+
+        cx.spawn_in(window, async move |this, cx| {
+            let stored = cx
+                .background_executor()
+                .spawn({
+                    let (entry, value) = (entry, value.clone());
+                    async move { entry.store(&value).map(|()| entry.reference()) }
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| match stored {
+                Ok(reference) => record_secret(&plugin, &name, &reference, cx),
+                Err(e) => {
+                    // **Said, not silent.** Falling back to the settings file is
+                    // what a machine with no keyring needs — a headless box, a
+                    // session with no Secret Service — but a token that lands in
+                    // clear when one asked for a keyring has to be announced,
+                    // not discovered.
+                    record_secret(&plugin, &name, &value, cx);
+                    this.plugin_failed(
+                        format!(
+                            "{}: {e}\n{}",
+                            tr!("settings-plugin-secret-failed"),
+                            entry_hint()
+                        ),
+                        window,
+                        cx,
+                    );
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Asks before removing a plugin.
     ///
     /// `remove_dir_all` on a directory one may have edited: this is the one
@@ -1057,6 +1132,25 @@ fn empty_panel(message: SharedString, cx: &Context<ClaudhubApp>) -> impl IntoEle
         .text_color(cx.theme().muted_foreground)
         .child(icon("puzzle"))
         .child(div().text_sm().px_4().child(message))
+}
+
+/// Writes what the settings file holds for one secret. An empty value takes the
+/// entry out rather than leaving a blank one behind.
+fn record_secret(plugin: &str, name: &str, value: &str, cx: &mut gpui::App) {
+    let (plugin, name, value) = (plugin.to_string(), name.to_string(), value.to_string());
+    crate::ui::settings::Settings::update_global(cx, move |settings| {
+        let entry = settings.plugins.entry(plugin).or_default();
+        if value.is_empty() {
+            entry.secrets.remove(&name);
+        } else {
+            entry.secrets.insert(name, value);
+        }
+    });
+}
+
+/// What to try when the keyring refuses.
+fn entry_hint() -> String {
+    tr!("settings-plugin-secret-hint").to_string()
 }
 
 /// Section folds, kept in memory and not persisted: a reading posture that

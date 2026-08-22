@@ -305,12 +305,96 @@ impl KeyringEntry {
         })
     }
 
+    /// Where Claudhub puts a plugin's secret when it stores one itself.
+    ///
+    /// One entry per plugin and per declared name, under our own service: two
+    /// plugins asking for a `token` are two different tokens.
+    pub fn for_plugin(plugin: &str, name: &str) -> Self {
+        Self {
+            service: Self::DEFAULT_SERVICE.to_string(),
+            account: format!("{plugin}.{name}"),
+        }
+    }
+
+    /// What the settings file records in place of the value.
+    ///
+    /// The service is left out when it is ours: `keyring:sentry.token` is what
+    /// one wants to read in a file, and spelling `claudhub/` in front of every
+    /// one of them would say nothing.
+    pub fn reference(&self) -> String {
+        if self.service == Self::DEFAULT_SERVICE {
+            format!("{}{}", Self::PREFIX, self.account)
+        } else {
+            format!("{}{}/{}", Self::PREFIX, self.service, self.account)
+        }
+    }
+
     pub fn describe(&self) -> String {
         format!("keyring {}/{}", self.service, self.account)
     }
 
+    fn entry(&self) -> Result<keyring::Entry, keyring::Error> {
+        keyring::Entry::new(&self.service, &self.account)
+    }
+
     fn read(&self) -> Result<String, keyring::Error> {
-        keyring::Entry::new(&self.service, &self.account)?.get_password()
+        self.entry()?.get_password()
+    }
+
+    /// **Never on the interface thread.** Opening a keyring can ask the user to
+    /// unlock it, and the call blocks until they answer.
+    pub fn store(&self, value: &str) -> Result<(), keyring::Error> {
+        self.entry()?.set_password(value)
+    }
+
+    /// Removing what is no longer referenced. A missing entry is not a failure:
+    /// it is the state one was asking for.
+    pub fn forget(&self) -> Result<(), keyring::Error> {
+        match self.entry()?.delete_credential() {
+            Err(keyring::Error::NoEntry) => Ok(()),
+            other => other,
+        }
+    }
+}
+
+/// Where a secret's value is kept, read off the value alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretPlace {
+    /// In `settings.json`, in clear.
+    Plain,
+    /// In the environment of whichever process makes the request.
+    Environment,
+    /// In the system keyring.
+    Keyring,
+}
+
+impl SecretPlace {
+    pub fn of(value: &str) -> Self {
+        let value = value.trim();
+        if KeyringEntry::parse(value).is_some() {
+            Self::Keyring
+        } else if value.starts_with('$') && value.len() > 1 {
+            Self::Environment
+        } else {
+            Self::Plain
+        }
+    }
+
+    /// Does the value name where it lives rather than being it.
+    ///
+    /// That is what decides whether Claudhub stores anything: a reference typed
+    /// by hand is recorded as it stands, a token is put away.
+    pub fn is_reference(self) -> bool {
+        !matches!(self, Self::Plain)
+    }
+
+    /// The i18n key of the one-word label the form shows under the field.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Plain => "settings-plugin-secret-plain",
+            Self::Environment => "settings-plugin-secret-env",
+            Self::Keyring => "settings-plugin-secret-keyring",
+        }
     }
 }
 
@@ -1140,6 +1224,63 @@ mod tests {
                 .describe(),
             "keyring claudhub/sentry"
         );
+    }
+
+    /// What decides whether Claudhub puts a secret away or records it as it
+    /// stands — the crux of "the keyring is the default place".
+    #[test]
+    fn a_value_says_whether_it_is_a_secret_or_an_address() {
+        use super::SecretPlace;
+        assert_eq!(SecretPlace::of("sntrys_hunter2"), SecretPlace::Plain);
+        assert_eq!(SecretPlace::of("  "), SecretPlace::Plain);
+        // A lone dollar is a token that begins with one, not an address.
+        assert_eq!(SecretPlace::of("$"), SecretPlace::Plain);
+        assert_eq!(SecretPlace::of("$SENTRY_TOKEN"), SecretPlace::Environment);
+        assert_eq!(
+            SecretPlace::of("keyring:sentry.token"),
+            SecretPlace::Keyring
+        );
+        // `keyring:` naming nothing is not an address either: it would become an
+        // entry with an empty account.
+        assert_eq!(SecretPlace::of("keyring:"), SecretPlace::Plain);
+
+        assert!(!SecretPlace::of("sntrys_hunter2").is_reference());
+        assert!(SecretPlace::of("$SENTRY_TOKEN").is_reference());
+        assert!(SecretPlace::of("keyring:sentry.token").is_reference());
+    }
+
+    /// What the settings file records once Claudhub has put a token away.
+    #[test]
+    fn an_entry_of_ours_is_written_without_naming_our_service() {
+        use super::KeyringEntry;
+        let ours = KeyringEntry::for_plugin("sentry", "token");
+        assert_eq!(ours.reference(), "keyring:sentry.token");
+        // And what it writes reads back as what it is.
+        assert_eq!(KeyringEntry::parse(&ours.reference()), Some(ours));
+        // Someone else's service is spelled out, since leaving it out would
+        // point at ours.
+        let theirs = KeyringEntry::parse("keyring:com.acme/api").expect("both");
+        assert_eq!(theirs.reference(), "keyring:com.acme/api");
+    }
+
+    /// The round trip against the **real** keyring, skipped where there is none.
+    ///
+    /// The precedent is `tests/lsp_phpantom.rs`: a test that fails for want of a
+    /// service nobody promised is a red build that says nothing. A desktop
+    /// session has a Secret Service; CI does not.
+    #[test]
+    fn a_secret_goes_into_the_keyring_and_comes_back() {
+        use super::KeyringEntry;
+        let entry = KeyringEntry::for_plugin("claudhub-test", "probe");
+        if entry.store("s3cret").is_err() {
+            eprintln!("no keyring on this machine — skipped");
+            return;
+        }
+        assert_eq!(entry.read().expect("what was just stored"), "s3cret");
+        entry.forget().expect("removing it");
+        assert!(entry.read().is_err(), "it must be gone");
+        // Removing what is not there is the state one asked for, not a failure.
+        entry.forget().expect("removing it twice");
     }
 
     /// The settings a manifest declares reach the script, and the ones the user
