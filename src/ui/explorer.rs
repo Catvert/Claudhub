@@ -1035,13 +1035,10 @@ impl ClaudhubApp {
             return;
         };
         let flash = editing.flash.clone();
-        // The tone of the **current** search occurrence: it is already the colour
-        // this interface lays over code to say "here", and it follows the theme.
-        // The dimmed one — a third of an alpha, over a third of a second — was
-        // a mark one had to be told about to notice, which is the one thing an
-        // acknowledgement must not be.
+        // The tone of a search occurrence: it is already the colour this
+        // interface lays over code to say "here", and it follows the theme.
         let style = gpui::HighlightStyle {
-            background_color: Some(crate::ui::find::highlight_color(true, cx)),
+            background_color: Some(crate::ui::find::highlight_color(false, cx)),
             ..Default::default()
         };
         flash.set(
@@ -1829,10 +1826,8 @@ fn ink_on(colour: gpui::Hsla, cx: &gpui::App) -> gpui::Hsla {
 /// Not vim-highlightedyank's second, which was chosen for a terminal where
 /// nothing else moves: here the mode pill, the dirty badge and an agent's
 /// writing are all on the same screen, and a mark that outstays the gesture
-/// reads as a state rather than as an acknowledgement. Three tenths, though, was
-/// on the wrong side of that trade — a flash one is not sure one saw is a flash
-/// one did not get.
-const YANK_FLASH: std::time::Duration = std::time::Duration::from_millis(500);
+/// reads as a state rather than as an acknowledgement.
+const YANK_FLASH: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// What does not depend on the row: colours and geometry.
 ///

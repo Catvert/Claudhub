@@ -2215,7 +2215,7 @@ liste n'est pas virtualisée, un `mx_1` sur la ligne suffit.
 du dock, `Tab`, a un rayon **codé en dur à zéro** et rien dans le thème ne
 l'atteint ; `Tab::with_variant` et `TabBar::with_variant` existent pourtant,
 c'est seulement le panneau d'onglets du dock qui ne les transmettait pas. D'où
-le **fork** (voir `Cargo.toml`) : sept commits au-dessus de leur `main` — le
+le **fork** (voir `Cargo.toml`) : huit commits au-dessus de leur `main` — le
 `TabVariant` que `DockSkin` fait passer jusqu'au `TabBar` ; les coins en boîte
 bordée du bandeau réservés au variant classique, dont ils épousent les
 rectangles ; le groupe lu comme une carte hors variant classique — cadre
@@ -2239,6 +2239,18 @@ Un septième, qui n'en parle pas non plus : **un contrôle peut cacher son caret
 sans se désactiver** (`set_cursor_hidden`). C'est ce que demande un éditeur
 modal, dont le curseur bloc est peint par-dessus le caractère sous le curseur —
 voir « Les modes de vim dans l'éditeur ».
+
+Un huitième, qui ne parle pas du dock non plus : **le fond d'un run est peint**.
+`ShapedLine::paint` ne dessine que les glyphes, les soulignés et les barrés ; le
+`background_color` d'un run appartient à `paint_background`, que rien dans
+l'input n'appelait. Une `TextDecoration` qui en pose un — la façon documentée,
+calquée sur Monaco, pour une application de marquer une plage — était donc
+**invisible en silence** : ni erreur ni avertissement, la plage se peignait comme
+le reste du fichier. C'est ce qui empêchait à la fois le curseur bloc de vim et
+l'éclat d'un yank de s'afficher, et le symptôme se lisait « le curseur
+n'apparaît qu'après un déplacement » — ce qu'on voyait alors était la
+*sélection*, que seule une frappe pose. `LineLayout::paint` fait désormais une
+passe de fond avant la passe de glyphes.
 
 Les commits ont vocation à partir en PR, et le fork à disparaître avec elle.
 
@@ -3792,13 +3804,11 @@ Six points qui ne se devinent pas :
   un `d` ayant emporté le texte qu'il s'agirait d'éclairer — ; la vue la pose
   sur une `TextDecorationCollection`, créée une fois avec le fichier parce
   qu'une collection suit le texte à travers ses éditions, et l'éteint par un
-  minuteur. Quatre choix : la teinte est celle de l'occurrence de recherche
-  **courante** (`find::highlight_color`), déjà la couleur que cette interface
-  pose sur du code pour dire « ici » et qui suit le thème — la teinte atténuée,
-  un tiers d'alpha pendant un tiers de seconde, faisait une marque qu'il fallait
-  savoir chercher, ce qu'un accusé de réception ne peut pas être ; la marque ne
-  touche pas à la sélection, le curseur bloc étant juste là ; elle dure une
-  demi-seconde et non la seconde du greffon, choisie pour un terminal où rien
+  minuteur. Quatre choix : la teinte est celle d'une occurrence de recherche
+  (`find::highlight_color`), déjà la couleur que cette interface pose sur du
+  code pour dire « ici » et qui suit le thème ; la marque ne touche pas à la
+  sélection, le curseur bloc étant juste là ; elle dure trois cents
+  millisecondes et non la seconde du greffon, choisie pour un terminal où rien
   d'autre ne bouge ; et sa collection est créée **après** celle du curseur, si
   bien que le bloc reste visible dessous — les collections se composent dans
   l'ordre de création, la première gardant ses propriétés, et c'est le bon sens
