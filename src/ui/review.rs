@@ -222,7 +222,8 @@ impl ClaudhubApp {
         // During a search, collapses are ignored: a file found in a closed
         // folder would not be visible, and the search would look as if it had
         // found nothing.
-        let rows = if crate::ui::settings::Settings::global(cx).review_tree {
+        let tree = crate::ui::settings::Settings::global(cx).review_tree;
+        let rows = if tree {
             let collapsed = if query.trim().is_empty() {
                 collapsed
             } else {
@@ -299,6 +300,7 @@ impl ClaudhubApp {
                                                     selected.as_deref(),
                                                     &colors,
                                                     checkable,
+                                                    tree,
                                                     &entity,
                                                     cx,
                                                 )
@@ -773,6 +775,9 @@ fn render_row(
     selected: Option<&Path>,
     colors: &DiffColors,
     checkable: bool,
+    // Is the list in tree form? A file then reserves the place of the chevron
+    // it does not have; flat, that place would be a column of nothing.
+    tree: bool,
     entity: &gpui::Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
@@ -782,18 +787,10 @@ fn render_row(
             render_dir(dir, index, worktree, range, colors, checkable, entity, cx)
         }
         Some(Row::File(file)) => render_file(
-            file, index, worktree, range, selected, colors, checkable, entity, cx,
+            file, index, worktree, range, selected, colors, checkable, tree, entity, cx,
         ),
         None => div().into_any_element(),
     }
-}
-
-/// One tree level's offset.
-///
-/// Proportional to the text, like the heights: a fixed indentation disappears
-/// when the font grows, and the tree becomes a flat list again.
-fn indent(depth: usize, cx: &gpui::App) -> gpui::Pixels {
-    px(8.) + crate::ui::theme::row_height(cx) * 0.5 * depth as f32
 }
 
 /// A folder: the chevron, the box that stages everything it contains, and the
@@ -816,7 +813,7 @@ fn render_dir(
         .id(("dir", index))
         .h(crate::ui::theme::row_height(cx))
         .rounded(cx.theme().radius)
-        .pl(indent(row.depth, cx))
+        .pl_1()
         .pr_2()
         .gap_1()
         .items_center()
@@ -833,6 +830,13 @@ fn render_dir(
                 entity.update(cx, |this, cx| this.toggle_directory(path.clone(), cx));
             }
         })
+        // The rules of the levels above, as in the project explorer: the tree
+        // is the same gesture on both sides of the window, and an indentation
+        // without them reads as names that happen to start further right.
+        .children(crate::ui::theme::indent_guides(
+            row.depth,
+            crate::ui::theme::indent_guide(cx),
+        ))
         .child(
             icon(if row.collapsed {
                 "chevron-right"
@@ -948,6 +952,7 @@ fn render_file(
     selected: Option<&Path>,
     colors: &DiffColors,
     checkable: bool,
+    tree: bool,
     entity: &gpui::Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
@@ -958,7 +963,7 @@ fn render_file(
         .id(("file", index))
         .h(crate::ui::theme::row_height(cx))
         .rounded(cx.theme().radius)
-        .pl(indent(row.depth, cx))
+        .pl_1()
         .pr_2()
         .gap_2()
         .items_center()
@@ -993,6 +998,15 @@ fn render_file(
                 });
             }
         })
+        .children(crate::ui::theme::indent_guides(
+            row.depth,
+            crate::ui::theme::indent_guide(cx),
+        ))
+        // The place of the chevron a file does not have: without it a file's
+        // box sits to the **left** of the box of the folder holding it, and the
+        // whole indentation is read backwards. Only in tree form — flat, that
+        // place is a column of nothing.
+        .when(tree, |el| el.child(crate::ui::theme::chevron_space()))
         // Ticking is staging. The ranges that are about commits already written
         // have nothing to tick: a box there would be a button that lies.
         .when(checkable, |el| {

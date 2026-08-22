@@ -19,7 +19,7 @@ use gpui_component::{
     input::{InputState, TextareaState},
     select::{SearchableVec, SelectEvent, SelectState},
     separator::Separator as Divider,
-    v_flex, ActiveTheme, Root, Selectable, Sizable, WindowExt,
+    v_flex, ActiveTheme, Root, Sizable, WindowExt,
 };
 
 use crate::git::{Branch, Commit, DiffFile, DiffRange, GraphRow, LogRange, Status, Worktree};
@@ -49,7 +49,7 @@ use crate::ui::terminal_view::OpenTerminal;
 // 14: the notes left the tabs for the bottom third of the review's column. A
 // saved layout would keep them where they were, which is the one place this
 // change is about.
-const LAYOUT_VERSION: usize = 17;
+const LAYOUT_VERSION: usize = 18;
 
 /// The saved layouts, one per screen.
 ///
@@ -92,19 +92,51 @@ fn load_layouts() -> Layouts {
 /// Two callers, and they prune at the two opposite ends. **Before writing**:
 /// the terminals, the one panel whose content is a process — `layout.json` is
 /// read on the next launch, when that process is long gone. **After reading**:
-/// the panels of plugins that are no longer installed, whose name the dock's
-/// registry can no longer build; left in, they come back as an empty frame,
-/// which is exactly what `LAYOUT_VERSION` exists to prevent for our own
-/// panels. A group left empty by the pruning goes too, otherwise the window
-/// would reopen with a bare tab bar.
+/// every name the dock's registry cannot build — a plugin uninstalled between
+/// two sessions, a panel of ours that has gone. Left in, they come back as an
+/// empty frame or as the registry's own message printed across the screen, and
+/// they come back at **every** start; `LAYOUT_VERSION` answers only by throwing
+/// away every screen's arrangement, which is a heavy price for one dead name. A
+/// group left empty by the pruning goes too, otherwise the window would reopen
+/// with a bare tab bar.
 ///
 /// Returns whether the node itself should be dropped by its parent.
-fn prune(state: &mut gpui_component::dock::PanelState, doomed: &impl Fn(&str) -> bool) -> bool {
-    if doomed(&state.panel_name) {
-        return true;
+/// Points a saved layout's tab group back at one of its panels.
+///
+/// A group remembers the tab that was on screen when the window closed, and
+/// that is right for the tabs of the work — one comes back to the history one
+/// was reading. It is wrong for the one tab a session should never *open* on:
+/// the Git screen answers "what is there to review", and a plugin's board is
+/// not that answer. Hence at **startup only**, and not on every visit to the
+/// screen: within a session the tab belongs to whoever clicked it, which is the
+/// rule the review's own base follows (`range_chosen`).
+///
+/// Answers whether it found the panel, which is what stops the walk.
+fn open_on(state: &mut gpui_component::dock::PanelState, name: &str) -> bool {
+    if let gpui_component::dock::PanelInfo::Tabs { active_index } = &mut state.info {
+        if let Some(ix) = state
+            .children
+            .iter()
+            .position(|child| child.panel_name == name)
+        {
+            *active_index = ix;
+            return true;
+        }
     }
+    state.children.iter_mut().any(|child| open_on(child, name))
+}
+
+fn prune(state: &mut gpui_component::dock::PanelState, doomed: &impl Fn(&str) -> bool) -> bool {
+    // **Only a leaf is judged by its name.** A container carries one of the
+    // dock's own — `TabPanel`, `StackPanel` — which is not one of ours and is
+    // therefore not in the registry we ask: asked about the root, the reading
+    // side's predicate said "doomed" and the walk stopped there, so **nothing
+    // was ever pruned**. The symptom is what the pruning exists to prevent —
+    // "the `ClaudhubMultiplexer` panel type is not registered" across the
+    // screen, at every start, for a panel that stopped existing the day that
+    // screen became the terminals' own dock.
     if state.children.is_empty() {
-        return false;
+        return doomed(&state.panel_name);
     }
     let doomed: Vec<usize> = state
         .children
@@ -121,6 +153,20 @@ fn prune(state: &mut gpui_component::dock::PanelState, doomed: &impl Fn(&str) ->
                 sizes.remove(ix);
             }
         }
+    }
+    // A split left with **one** slot is not a split, and leaving it as one is
+    // not harmless: the size it keeps is the height that slot had *while the
+    // pruned panel was beside it* — a number measured in a layout that no
+    // longer exists. Read back, it pins the survivor rigidly, and the next
+    // panel opening beneath it — a terminal, always — gets whatever is left of
+    // a container that number no longer describes. Collapsing the wrapper
+    // drops the stale size with it.
+    if state.children.len() == 1
+        && matches!(state.info, gpui_component::dock::PanelInfo::Stack { .. })
+    {
+        let child = state.children.remove(0);
+        *state = child;
+        return false;
     }
     // An empty container is not a container: only a leaf legitimately has no
     // child, and a leaf is not what we have just emptied.
@@ -358,6 +404,15 @@ pub struct ClaudhubApp {
     /// `restore_session`. Emptied piece by piece as the repositories open, and
     /// what never finds its worktree simply stays there and is dropped.
     pub(super) restoring: crate::ui::store::Session,
+    /// The remembered tabs still waiting to be read, in order.
+    ///
+    /// **One at a time**, and that is the whole reason this is a queue rather
+    /// than a handful of commands sent at once: reads are served by three
+    /// workers, so the answers come back in whatever order the disk gives them
+    /// — and the order they come back in is the order the tabs would sit in.
+    pub(super) pending_files: Vec<crate::ui::store::OpenFile>,
+    /// A restore is under way: what arrives is not a gesture.
+    pub(super) restoring_files: bool,
     /// The directory `claudhub` was launched from, when it is a repository's.
     ///
     /// It is what tells a launch from a mere remembered repository: `opened_at`
@@ -375,8 +430,17 @@ pub struct ClaudhubApp {
     /// them, and the comparison is the whole rule.
     selection_rank: u8,
     /// Whether the session's first terminal has been opened. See
-    /// `select_worktree`: it happens once, on the first worktree shown.
+    /// `ensure_session_terminal`: it happens once, on the worktree one **ends
+    /// up** on.
     terminal_started: bool,
+    /// How many repositories have been asked for and have not answered.
+    ///
+    /// It is what tells "this is the checkout one will be looking at" from "this
+    /// is the stopgap filling the window while the others are still being
+    /// enumerated". Only `Cmd::OpenRepo` is counted: `OpenIfRepo` answers
+    /// **nothing** when the launch directory is not a repository, so counting
+    /// it would leave a total that never comes back down.
+    opening_repos: usize,
     pub(super) review: HashMap<PathBuf, ReviewState>,
     /// Every open terminal, in the order they were opened, all worktrees
     /// together. Each is a dock panel per screen sharing one pty — see
@@ -443,7 +507,7 @@ pub struct ClaudhubApp {
     /// single editor made switching worktrees leave the previous project's file
     /// on screen — a file that belongs to a tree the rest of the window is no
     /// longer showing.
-    pub(super) editings: HashMap<PathBuf, crate::ui::explorer::Editing>,
+    pub(super) editings: HashMap<PathBuf, crate::ui::explorer::Editors>,
     /// Where the editor has been, one trail per worktree. See `ui::jumps`.
     pub(super) jumps: HashMap<PathBuf, crate::ui::jumps::Jumps>,
     /// Where the caret must land in the file that is being opened.
@@ -537,6 +601,11 @@ pub struct ClaudhubApp {
     /// The console's editor. Created **once**: recreated at render time, it
     /// would lose the cursor, the selection and the text on the first keystroke.
     pub(super) db_query_input: Entity<gpui_component::input::EditorState>,
+    /// The console's modal harness — the same one the file editor holds, since
+    /// SQL is code read and written the same way. It lives here and not in
+    /// `QueryState`: that one is emptied whenever a query is replaced, and the
+    /// decoration layers must outlive the text they are laid over.
+    pub(super) db_host: crate::ui::surface::VimHost,
     /// The names the console completes, shared with the completion provider the
     /// editor holds.
     pub(super) db_schema: std::rc::Rc<std::cell::RefCell<crate::ui::db_query::SchemaIndex>>,
@@ -588,6 +657,14 @@ pub struct ClaudhubApp {
     pub(super) suggesting_message: Option<PathBuf>,
     /// The current screen. See `ui::workspace`.
     pub(super) workspace: crate::ui::workspace::Workspace,
+    /// The last screen one **worked** in, which is where the multiplexer sends
+    /// a terminal back to.
+    ///
+    /// Neither the settings nor the multiplexer are ever recorded here: they
+    /// are the two screens one only looks at, and "open this terminal where I
+    /// was" has to answer with a screen one was doing something on. It is not
+    /// persisted — a session comes back on the screen `layout.json` names.
+    pub(super) worked_in: crate::ui::workspace::Workspace,
     /// The current screen's dock — the one the root view shows.
     ///
     /// A copy of the `docks` entry, and not an index: everything that talks to
@@ -652,6 +729,17 @@ pub struct ClaudhubApp {
     /// frame on every frame would run the interface flat out for a view nobody
     /// sees.
     pub(super) diff_measures: u8,
+    /// The width the diff's own frame had at the last **layout**, which is not
+    /// the same reading as `diff_width`.
+    ///
+    /// `diff_width` is read at render time and therefore describes the frame
+    /// **before**: a panel that has just been zoomed paints one frame at the
+    /// size it no longer has, and nothing asks for another — the window only
+    /// redraws on an event, so the wrong width stayed on screen until the
+    /// background sweep two seconds later. A canvas measures the frame after
+    /// layout, and a width that has moved since the last one is what asks for
+    /// the frame that repaints it right.
+    pub(super) diff_laid_out: gpui::Pixels,
     /// The handle of the wrapped two-column view.
     ///
     /// A second handle and not the same one: the entries there no longer have
@@ -718,6 +806,7 @@ pub struct ClaudhubApp {
 struct Console {
     db_schema: std::rc::Rc<std::cell::RefCell<crate::ui::db_query::SchemaIndex>>,
     db_query_input: Entity<gpui_component::input::EditorState>,
+    db_host: crate::ui::surface::VimHost,
     db_table: Entity<gpui_component::table::TableState<crate::ui::db_query::Results>>,
     db_split: Entity<gpui_component::resizable::ResizableState>,
 }
@@ -787,6 +876,7 @@ impl ClaudhubApp {
         let Console {
             db_schema,
             db_query_input,
+            db_host,
             db_table,
             db_split,
         } = Self::build_console(window, cx);
@@ -832,10 +922,13 @@ impl ClaudhubApp {
             server_wsl: false,
             active: None,
             restoring: crate::ui::store::Store::global(cx).session.clone(),
+            pending_files: Vec::new(),
+            restoring_files: false,
             restore_asked: false,
             launch_dir: None,
             selection_rank: crate::ui::session::SELECTION_NONE,
             terminal_started: false,
+            opening_repos: 0,
             review: HashMap::new(),
             terminals: Vec::new(),
             commit_input,
@@ -882,6 +975,7 @@ impl ClaudhubApp {
             db_focus: cx.focus_handle(),
             query: Default::default(),
             db_query_input,
+            db_host,
             db_schema,
             db_table,
             db_split,
@@ -898,6 +992,7 @@ impl ClaudhubApp {
             last_auto_fetch: None,
             suggesting_message: None,
             workspace,
+            worked_in: crate::ui::workspace::Workspace::default(),
             dock,
             docks,
             dock_skin,
@@ -909,6 +1004,7 @@ impl ClaudhubApp {
             diff_scroll: gpui::UniformListScrollHandle::new(),
             diff_width: gpui::px(0.),
             diff_measures: 0,
+            diff_laid_out: gpui::px(0.),
             diff_wrap_scroll: gpui_component::VirtualListScrollHandle::new(),
             history_scroll: gpui::UniformListScrollHandle::new(),
             file_scroll: HashMap::new(),
@@ -976,6 +1072,7 @@ impl ClaudhubApp {
     fn open_remembered_repositories(&mut self, remote: bool, cx: &mut Context<Self>) {
         let remembered = Settings::global(cx).repositories.clone();
         for path in remembered {
+            self.opening_repos += 1;
             self.git.send(Cmd::OpenRepo(path));
         }
         // Remotely, the directory that counts is the **server's**: it arrives
@@ -1008,6 +1105,9 @@ impl ClaudhubApp {
                 }));
             cx.notify();
         });
+        // The modal harness, created with the editor and for its whole life:
+        // the decoration layers follow the text through its edits.
+        let db_host = crate::ui::surface::VimHost::new(&db_query_input, cx);
         let db_table = cx.new(|cx| {
             gpui_component::table::TableState::new(
                 crate::ui::db_query::Results::default(),
@@ -1023,6 +1123,7 @@ impl ClaudhubApp {
         Console {
             db_schema,
             db_query_input,
+            db_host,
             db_table,
             db_split: crate::ui::db_query::split_state(cx),
         }
@@ -1067,17 +1168,31 @@ impl ClaudhubApp {
                 .workspaces
                 .get(workspace.key())
                 .cloned()
-                .map(|mut state| {
-                    // A plugin uninstalled between two sessions leaves its name
-                    // behind in the file, and nothing can build it any more.
-                    // The centre only, like the write-time pruning and with
-                    // the same known corollary: `DockState::panel` is private,
-                    // so a panel dragged into a side zone is out of reach.
-                    prune(&mut state.center, &|name| {
-                        name.starts_with(crate::plugin::manifest::PANEL_PREFIX)
-                            && crate::ui::plugin_view::by_panel(name).is_none()
+                .and_then(|mut state| {
+                    // **Anything the dock cannot build**, and not a list of
+                    // known culprits: a plugin uninstalled between two sessions
+                    // leaves its name behind, and so does a panel of ours that
+                    // has gone — the multiplexer's, the day that screen stopped
+                    // being a view and became the terminals' own dock. Left in,
+                    // the registry prints "panel type is not registered" across
+                    // the screen, at every start.
+                    //
+                    // The centre only, like the write-time pruning and with the
+                    // same known corollary: `DockState::panel` is private, so a
+                    // panel dragged into a side zone is out of reach.
+                    let empty = prune(&mut state.center, &|name| {
+                        !crate::ui::panels::is_registered(name)
                     });
-                    state
+                    // The Git screen opens on "Changes", whatever tab was on
+                    // screen when the window last closed — see `open_on`.
+                    if workspace == crate::ui::workspace::Workspace::Git {
+                        open_on(&mut state.center, crate::ui::panels::ChangesPanel::NAME);
+                    }
+                    // Nothing left of the centre: what was saved says only that
+                    // this screen used to hold a panel that has gone, and the
+                    // honest answer is the default layout rather than an empty
+                    // frame kept for a name.
+                    (!empty).then_some(state)
                 })
                 .and_then(|state| area.update(cx, |a, cx| a.load(state, window, cx)).ok())
                 .is_some();
@@ -1232,8 +1347,17 @@ impl ClaudhubApp {
                             // terminal is a **process**, and a layout is read
                             // long after that process has died. Rebuilding one
                             // from its name would be a tab showing nothing.
+                            //
+                            // A file's tab goes the same way, and for a reason
+                            // one step removed: its content is a **text read
+                            // off the disk**, which a builder cannot fetch
+                            // without a round trip — a tab read back would be
+                            // an empty frame. What the previous session had
+                            // open is remembered where the rest of the place
+                            // one was is: in the store, see `ui::session`.
                             prune(&mut state.center, &|name| {
                                 name == super::panels::TerminalPanel::NAME
+                                    || name == super::panels::FilePanel::NAME
                             });
                             (workspace.key().to_string(), state)
                         })
@@ -1468,7 +1592,10 @@ impl ClaudhubApp {
                 worktrees,
                 opened_at,
             } => self.repo_opened(main, name, worktrees, opened_at, window, cx),
-            Evt::RepoUnavailable { path, message } => self.repo_unavailable(path, message, cx),
+            Evt::RepoUnavailable { path, message } => {
+                self.opening_repos = self.opening_repos.saturating_sub(1);
+                self.repo_unavailable(path, message, cx)
+            }
             Evt::Worktrees { main, worktrees } => {
                 self.worktrees_arrived(main, worktrees, window, cx)
             }
@@ -1713,11 +1840,18 @@ impl ClaudhubApp {
         // free: `select_worktree` returns at once when the path is already the
         // active one.
         if let Some((rank, path)) = candidate.filter(|(rank, _)| *rank > self.selection_rank) {
-            self.select_worktree(path, window, cx);
-            // Lowered **after** the call: selecting is the user's gesture and
-            // marks the choice as made by hand, and this one is ours.
-            self.selection_rank = rank;
+            // The rank is **given** rather than lowered after the fact:
+            // choosing by hand and filling the window while the repositories
+            // answer are the same code, and what tells them apart is exactly
+            // this number — which the first terminal reads before opening
+            // anywhere.
+            self.select_worktree_ranked(path, rank, window, cx);
         }
+        // Answered, so it no longer stands in the way of the session's
+        // terminal. **After** the selection above, which is what may have just
+        // made this repository the one being looked at.
+        self.opening_repos = self.opening_repos.saturating_sub(1);
+        self.ensure_session_terminal(window, cx);
         // The file that was open may belong to this repository: it is the only
         // moment we know its worktree exists.
         self.restore_editing(cx);
@@ -1762,10 +1896,10 @@ impl ClaudhubApp {
                 self.active = None;
                 self.review.remove(&active);
                 self.close_terminals_of(&active, window, cx);
-                // The editor of a worktree that is gone goes with it, as its
-                // terminals do: the file it holds is on a disk that no longer
-                // has it.
-                self.editings.remove(&active);
+                // The editors of a worktree that is gone go with it, as its
+                // terminals do: the files they hold are on a disk that no
+                // longer has them, and their tabs would stay in the dock.
+                self.close_files_of(&active, window, cx);
                 self.jumps.remove(&active);
                 if let Some(first) = self.first_worktree() {
                     self.select_worktree(first, window, cx);
@@ -1889,10 +2023,10 @@ impl ClaudhubApp {
         if let Some(id) = note {
             self.select_note_rows(id, cx);
         } else if let Some(row) = jumped {
-            // The same strictness as a hunk step, which is what this is the tail
-            // of: entering the neighbouring file by the end one came from puts
-            // that hunk at the top, not wherever the list happened to be.
-            self.reveal_diff_row_strict(row, cx);
+            // The same placement as a hunk step, which is what this is the tail
+            // of: entering the neighbouring file by the end one came from brings
+            // that hunk under the eye, not wherever the list happened to be.
+            self.reveal_diff_hunk(row, cx);
         }
     }
 
@@ -2278,6 +2412,21 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.select_worktree_ranked(path, crate::ui::session::SELECTION_CHOSEN, window, cx);
+    }
+
+    /// The same, saying how firm the choice is.
+    ///
+    /// Every gesture is `SELECTION_CHOSEN`; the weaker ranks are for the
+    /// selections Claudhub makes for itself while the repositories answer —
+    /// see `session::pick_worktree`.
+    pub(super) fn select_worktree_ranked(
+        &mut self,
+        path: PathBuf,
+        rank: u8,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.active.as_deref() == Some(path.as_path()) {
             return;
         }
@@ -2318,22 +2467,40 @@ impl ClaudhubApp {
         // Every worktree has its base: the selector has to show this one, not
         // the one of the worktree just left.
         self.refresh_base_choices(window, cx);
-        // The first worktree of the session opens with a terminal. It is what
-        // one talks to while reviewing, and the first gesture of every session
-        // was `Ctrl+T` — a shell that has to be asked for is a shell one asks
-        // for every time. Only the first: opening one per worktree visited
-        // would leave a dozen shells behind an afternoon's browsing, and the
-        // terminals one has closed must stay closed.
-        if !self.terminal_started {
-            self.terminal_started = true;
-            let worktree = self.active.clone().unwrap_or_default();
-            self.ensure_terminal(&worktree, window, cx);
-        }
-        // Chosen by hand until proven otherwise: `repo_opened` lowers the rank
-        // again for the selections it makes itself.
-        self.selection_rank = crate::ui::session::SELECTION_CHOSEN;
+        self.selection_rank = rank;
+        self.ensure_session_terminal(window, cx);
         self.persist_session(cx);
         cx.notify();
+    }
+
+    /// The session's first terminal, on the worktree one **ends up** on.
+    ///
+    /// It is what one talks to while reviewing, and the first gesture of every
+    /// session was `Ctrl+T` — a shell that has to be asked for is a shell one
+    /// asks for every time. Only the first: opening one per worktree visited
+    /// would leave a dozen shells behind an afternoon's browsing, and the
+    /// terminals one has closed must stay closed.
+    ///
+    /// **Never on a stopgap selection**, and that is the whole of this
+    /// function. While the repositories are still being enumerated the window
+    /// shows the first checkout of whichever answered first
+    /// (`SELECTION_FALLBACK`); opening the terminal there put a shell in a
+    /// project the session never asked for — and, the flag being set, denied
+    /// the remembered worktree the one that was meant for it. So a rank below
+    /// the session's waits for the repositories still owed an answer; when none
+    /// is left, the stopgap **is** the answer and it opens there.
+    fn ensure_session_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_started {
+            return;
+        }
+        if !crate::ui::session::session_terminal_due(self.selection_rank, self.opening_repos) {
+            return;
+        }
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        self.terminal_started = true;
+        self.ensure_terminal(&worktree, window, cx);
     }
 
     /// Opens a file in the diff view.
@@ -2667,32 +2834,59 @@ impl ClaudhubApp {
         }
     }
 
-    /// Brings a diff entry **to the top of the view**, visible or not.
+    /// Brings a diff entry into view, visible or not.
     ///
     /// Going from one hunk to the next is not going one line further: gpui's
     /// `scroll_to_item` does nothing when the target is already on screen, so
     /// the key moved the selection by four hundred lines and the view not at
     /// all — which reads as a key that does nothing, the more so as nothing
-    /// said which hunk one was on. The hunk one has just asked for therefore
-    /// goes to the top, where it is read from.
+    /// said which hunk one was on. A hunk step therefore **always** moves.
     ///
     /// The wrapped list has no strict variant (`scroll_strict` is hard-coded in
-    /// gpui-component), hence the two steps: put the list at the top first, so
-    /// the target is necessarily below the viewport and the `Top` strategy has
-    /// to bring it up. Both happen before the frame is painted, so nothing
-    /// flashes.
-    pub(super) fn reveal_diff_row_strict(&self, row: usize, cx: &App) {
+    /// gpui-component) — except for `Center`, which it applies unconditionally
+    /// and which therefore needs nothing. `Top` is the one that has to be
+    /// forced, and its non-strict path is **not** a top at all: an entry below
+    /// the viewport is brought to its **bottom** edge, which is where the hunk
+    /// header ended up — one line high, at the very bottom of the screen. The
+    /// list is therefore first scrolled **past the end**, so the target lies
+    /// above the viewport and the only branch left is the one that pins an entry
+    /// to the top. The overshoot is clamped in the same prepaint, before
+    /// anything is painted, so nothing flashes.
+    pub(super) fn reveal_diff_row_strict(
+        &self,
+        row: usize,
+        strategy: gpui::ScrollStrategy,
+        cx: &App,
+    ) {
         use crate::ui::scroll::Scrollable;
+        use gpui_component::scroll::ScrollbarHandle;
         if self.diff_wrapped(cx) {
-            self.diff_wrap_scroll
-                .base()
-                .set_offset(gpui::Point::default());
-            self.diff_wrap_scroll
-                .scroll_to_item(row, gpui::ScrollStrategy::Top);
+            if !matches!(strategy, gpui::ScrollStrategy::Center) {
+                let base = self.diff_wrap_scroll.base();
+                let offset = base.offset();
+                base.set_offset(gpui::point(offset.x, -base.content_size().height));
+            }
+            self.diff_wrap_scroll.scroll_to_item(row, strategy);
         } else {
-            self.diff_scroll
-                .scroll_to_item_strict(row, gpui::ScrollStrategy::Top);
+            self.diff_scroll.scroll_to_item_strict(row, strategy);
         }
+    }
+
+    /// Puts a hunk where it is read from, and moves the view whatever happens.
+    ///
+    /// **In the middle of the view**, which is where the eye already is and
+    /// which shows what comes before the change as well as what follows it —
+    /// reading a hunk is reading it in its context. The exception is a hunk
+    /// **taller than the view**: centring it would push its first lines off the
+    /// top, where they cannot be recovered by reading downwards. Such a hunk
+    /// goes to the top, and is read like a page.
+    pub(super) fn reveal_diff_hunk(&self, row: usize, cx: &App) {
+        let strategy = if self.hunk_fits_the_view(row, cx) {
+            gpui::ScrollStrategy::Center
+        } else {
+            gpui::ScrollStrategy::Top
+        };
+        self.reveal_diff_row_strict(row, strategy, cx);
     }
 
     /// Marks files reviewed, or hands their review back.
@@ -2889,17 +3083,44 @@ impl ClaudhubApp {
             // the window they open on. They were at the top, at the other end of
             // the screen from the panel they show and beside a menu that speaks
             // of the application rather than of the work.
+            //
+            // The toggle carries the **same `+`** as the last terminal tab's,
+            // and after it as the `+` comes after the tabs: with the terminals
+            // hidden there is no tab bar left to open one from, and showing them
+            // first only to ask is a gesture too many.
             .child(
-                Button::new("terminal")
-                    .ghost()
-                    .xsmall()
+                h_flex()
                     .flex_shrink_0()
-                    .icon(icon("square-terminal"))
-                    .tooltip(tr!("panel-terminal"))
-                    .selected(self.terminal_visible(cx))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_terminal_panel(window, cx);
-                    })),
+                    .gap_1()
+                    .child(
+                        Button::new("terminal")
+                            .xsmall()
+                            .compact()
+                            .icon(icon("square-terminal"))
+                            // The name is written and not hovered, as at both ends of
+                            // this bar: an icon alone is a rebus, and a tooltip is a
+                            // name one has to ask for.
+                            .label(tr!("panel-terminal"))
+                            // Solid when they are showing, outline when they are not —
+                            // the screen picker's polarity, at the other end of the same
+                            // line: `ghost` plus `selected` is a background a few
+                            // percent away from the bar's own, invisible on half the
+                            // themes.
+                            .map(|button| {
+                                if self.terminals_on_screen(cx) {
+                                    button.primary()
+                                } else {
+                                    button.outline()
+                                }
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_terminal_panel(window, cx);
+                            })),
+                    )
+                    .child(crate::ui::panels::new_terminal_button(
+                        &cx.entity().downgrade(),
+                        None,
+                    )),
             )
     }
 }
@@ -2987,6 +3208,19 @@ impl Render for ClaudhubApp {
             .on_action(cx.listener(super::shortcuts::diff_page_up))
             .on_action(cx.listener(super::shortcuts::diff_page_down))
             .on_action(cx.listener(super::shortcuts::close_editor))
+            // The thumb buttons, which no keymap carries: gpui gives them as
+            // `Navigate`, X11 from buttons 8 and 9 and Wayland from `BTN_SIDE`
+            // and `BTN_EXTRA`. On the root and in the bubble phase, which is
+            // enough — nothing below listens for them, the terminal included,
+            // where only the left button is handed to the program.
+            .on_mouse_down(
+                gpui::MouseButton::Navigate(gpui::NavigationDirection::Back),
+                cx.listener(|this, _, window, cx| this.jump_back(window, cx)),
+            )
+            .on_mouse_down(
+                gpui::MouseButton::Navigate(gpui::NavigationDirection::Forward),
+                cx.listener(|this, _, window, cx| this.jump_forward(window, cx)),
+            )
             .size_full()
             // The gutter and not the background: what shows between two panels —
             // the resize handles, a collapsed zone — is the plane the cards sit
@@ -2998,7 +3232,21 @@ impl Render for ClaudhubApp {
             // them: without this padding, the zones touch the window's edges, the
             // top bar and the status bar, and the cards only breathe from the
             // inside.
-            .child(div().flex_1().min_h_0().p(px(4.)).child(self.dock.clone()))
+            //
+            // **Wider on the sides than above and below**, which is a ruler
+            // disagreeing with the eye rather than an inconsistency: the top bar
+            // and the status bar each close with a border, so four pixels there
+            // read as a margin, while the same four against the bare window edge
+            // read as nothing at all. Equal numbers looked equal nowhere.
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .py(px(4.))
+                    .px(px(8.))
+                    .child(self.dock.clone()),
+            )
             .child(self.render_status_bar(cx))
             // gpui-component's layers have to be re-emitted by the root view,
             // otherwise dialogs and notifications appear nowhere.
@@ -3108,10 +3356,78 @@ impl ClaudhubApp {
         if self.workspace == workspace {
             return;
         }
+        // Noted before the move, and only for a screen one works in: it is
+        // where the multiplexer's "open this terminal" gives it back.
+        if !matches!(
+            self.workspace,
+            crate::ui::workspace::Workspace::Multiplexer
+                | crate::ui::workspace::Workspace::Settings
+        ) {
+            self.worked_in = self.workspace;
+        }
         self.workspace = workspace;
         self.dock = self.docks[&workspace].clone();
         self.focus_workspace(window, cx);
         cx.notify();
+    }
+
+    /// Goes to another screen **and writes the step down**.
+    ///
+    /// The difference with `enter_workspace` is who decided: this is for the
+    /// gestures where the code takes you somewhere — a table's console, a
+    /// plugin's script, a settings page a panel asked for — **and for the two
+    /// button groups that change screen**, the bar and the aside. A screen one
+    /// clicks is a place one leaves, and what one was doing there is what the
+    /// back arrow is for. Only the keyboard stays out: `Alt+4` is undone by
+    /// pressing the key one came from, and a trail that recorded it would fill
+    /// with round trips one made on purpose.
+    ///
+    /// Opening a file does not come through here: it writes its own step, from
+    /// wherever one stood to the place in the file, and calling up the editing
+    /// screen on the way is the same movement and not a second one.
+    pub(super) fn travel_to(
+        &mut self,
+        workspace: crate::ui::workspace::Workspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspace == workspace {
+            return;
+        }
+        let from = self.here(cx);
+        self.record_step(from, crate::ui::jumps::Place::Screen(workspace), cx);
+        self.enter_workspace(workspace, window, cx);
+    }
+
+    /// Writes one step into the trail of the worktree in hand.
+    ///
+    /// The single place the trail is written outside of an opening — which has
+    /// its own funnel, the content arriving a round trip after the gesture. A
+    /// step from a place to itself is not one: it would cost a press to undo a
+    /// movement that never happened.
+    pub(super) fn record_step(
+        &mut self,
+        from: crate::ui::jumps::Place,
+        to: crate::ui::jumps::Place,
+        cx: &mut Context<Self>,
+    ) {
+        if from == to {
+            return;
+        }
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        self.jumps.entry(worktree).or_default().jump(from, to);
+        cx.notify();
+    }
+
+    /// Whether the trail of the worktree in hand has anywhere to go. What the
+    /// two arrows ask, wherever they are painted.
+    pub(super) fn can_travel(&self) -> (bool, bool) {
+        match self.active.as_ref().and_then(|w| self.jumps.get(w)) {
+            Some(trail) => (trail.can_back(), trail.can_forward()),
+            None => (false, false),
+        }
     }
 
     /// Gives the focus to what the current screen is entered for.
@@ -3165,6 +3481,31 @@ impl ClaudhubApp {
 
     pub(super) fn terminal_visible(&self, _cx: &App) -> bool {
         self.panel_visible(super::panels::TerminalPanel::NAME)
+    }
+
+    /// Whether there is a terminal on screen right now — what the status bar's
+    /// button lights up for.
+    ///
+    /// Not the same reading as `terminal_visible`, which is the **flag**: it
+    /// says the terminals are not hidden, and it stays true when the last tab
+    /// has been closed by hand. A lit button over an empty corner says the one
+    /// thing a toggle must never say, that what it names is on screen when it is
+    /// not. Nothing is written here: the flag describes an intent, and the next
+    /// press reads it — pressed while empty, it opens one, which is what
+    /// `toggle_terminal_panel` already does.
+    pub(super) fn terminals_on_screen(&self, cx: &App) -> bool {
+        if !self.terminal_visible(cx) {
+            return false;
+        }
+        // The multiplexer shows every worktree's, which is the whole of that
+        // screen: counting only the one being looked at would call the corner
+        // empty in front of a dozen live shells.
+        if self.workspace.shows_every_worktree() {
+            return !self.terminals.is_empty();
+        }
+        self.active
+            .as_deref()
+            .is_some_and(|worktree| !self.terminals_of(worktree).is_empty())
     }
 
     /// Whether *this* worktree's terminals are on screen.
@@ -3358,5 +3699,158 @@ impl ClaudhubApp {
         };
         let staged = file.is_staged();
         self.set_staged(worktree, vec![path], !staged, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_component::dock::{PanelInfo, PanelState};
+
+    fn leaf(name: &str) -> PanelState {
+        PanelState::new(name)
+    }
+
+    fn stack(sizes: Vec<gpui::Pixels>, children: Vec<PanelState>) -> PanelState {
+        let mut state = PanelState::new("StackPanel");
+        state.info = PanelInfo::stack(sizes, gpui::Axis::Vertical);
+        state.children = children;
+        state
+    }
+
+    fn tabs(active: usize, children: Vec<PanelState>) -> PanelState {
+        let mut state = PanelState::new("TabPanel");
+        state.info = PanelInfo::tabs(active);
+        state.children = children;
+        state
+    }
+
+    /// A session opens the Git screen on its changes, wherever the tab sits and
+    /// whatever was on screen when the window closed — a plugin's board, here.
+    #[test]
+    fn the_git_screen_opens_on_its_changes() {
+        let mut state = stack(
+            vec![px(400.), px(900.)],
+            vec![
+                tabs(
+                    5,
+                    vec![
+                        leaf("ClaudhubChanges"),
+                        leaf("ClaudhubHistory"),
+                        leaf("ClaudhubPlugin:ci/main"),
+                    ],
+                ),
+                tabs(0, vec![leaf("ClaudhubDiff")]),
+            ],
+        );
+        assert!(open_on(&mut state, "ClaudhubChanges"));
+        assert!(matches!(
+            state.children[0].info,
+            PanelInfo::Tabs { active_index: 0 }
+        ));
+        // A screen that no longer holds the panel is left exactly as it was.
+        let mut without = tabs(1, vec![leaf("ClaudhubDiff"), leaf("ClaudhubNotes")]);
+        assert!(!open_on(&mut without, "ClaudhubChanges"));
+        assert!(matches!(without.info, PanelInfo::Tabs { active_index: 1 }));
+    }
+
+    /// The shape the file actually carries: the group is two splits deep, and
+    /// the plugin's tab is the sixth of six.
+    #[test]
+    fn the_saved_git_screen_opens_on_its_changes() {
+        let mut state = stack(
+            vec![px(400.), px(900.)],
+            vec![
+                stack(
+                    vec![px(600.), px(200.)],
+                    vec![
+                        tabs(
+                            5,
+                            vec![
+                                leaf("ClaudhubChanges"),
+                                leaf("ClaudhubBranch"),
+                                leaf("ClaudhubHistory"),
+                                leaf("ClaudhubTags"),
+                                leaf("ClaudhubConflicts"),
+                                leaf("ClaudhubPlugin:ci/main"),
+                            ],
+                        ),
+                        tabs(0, vec![leaf("ClaudhubNotes")]),
+                    ],
+                ),
+                tabs(0, vec![leaf("ClaudhubDiff")]),
+            ],
+        );
+        assert!(open_on(&mut state, "ClaudhubChanges"));
+        assert!(matches!(
+            state.children[0].children[0].info,
+            PanelInfo::Tabs { active_index: 0 }
+        ));
+    }
+
+    /// The dead name inside a container is what the pruning is for, and the
+    /// container's own name is **not** one the registry knows: judging it too
+    /// stopped the walk at the root, so nothing was ever pruned and the screen
+    /// carried "panel type is not registered" at every start.
+    #[test]
+    fn a_container_is_not_judged_by_its_name() {
+        let known = |name: &str| name == "ClaudhubDiff";
+        let mut state = tabs(0, vec![leaf("ClaudhubMultiplexer")]);
+        assert!(prune(&mut state, &|name| !known(name)), "nothing is left");
+        let mut state = stack(
+            vec![px(400.), px(900.)],
+            vec![tabs(
+                0,
+                vec![leaf("ClaudhubMultiplexer"), leaf("ClaudhubDiff")],
+            )],
+        );
+        assert!(!prune(&mut state, &|name| !known(name)));
+        assert_eq!(state.panel_name, "TabPanel", "the lone split collapsed");
+        assert_eq!(state.children.len(), 1);
+        assert_eq!(state.children[0].panel_name, "ClaudhubDiff");
+    }
+
+    /// The terminal goes, and the split it was half of goes with it.
+    ///
+    /// What the survivor must **not** keep is its size: it was measured while
+    /// the terminal sat below it, and read back it pins the slot to a height
+    /// that describes a window nobody has any more.
+    #[test]
+    fn a_split_left_with_one_slot_stops_being_a_split() {
+        let mut state = stack(
+            vec![px(1108.), px(260.)],
+            vec![leaf("ClaudhubEditor"), leaf("ClaudhubTerminal")],
+        );
+        assert!(!prune(&mut state, &|name| name == "ClaudhubTerminal"));
+        assert_eq!(state.panel_name, "ClaudhubEditor");
+        assert!(state.children.is_empty());
+    }
+
+    /// A split that keeps two slots keeps its sizes, and loses the one whose
+    /// panel went — the sizes of a stack are positional.
+    #[test]
+    fn a_split_that_keeps_two_slots_keeps_its_shape() {
+        let mut state = stack(
+            vec![px(300.), px(400.), px(260.)],
+            vec![
+                leaf("ClaudhubChanges"),
+                leaf("ClaudhubNotes"),
+                leaf("ClaudhubTerminal"),
+            ],
+        );
+        assert!(!prune(&mut state, &|name| name == "ClaudhubTerminal"));
+        assert_eq!(state.children.len(), 2);
+        match state.info {
+            PanelInfo::Stack { sizes, .. } => assert_eq!(sizes, vec![px(300.), px(400.)]),
+            _ => panic!("still a stack"),
+        }
+    }
+
+    /// A container emptied by the pruning is dropped by its parent, and does
+    /// not come back as a bare tab bar.
+    #[test]
+    fn an_emptied_container_is_dropped() {
+        let mut state = stack(vec![px(260.)], vec![leaf("ClaudhubTerminal")]);
+        assert!(prune(&mut state, &|name| name == "ClaudhubTerminal"));
     }
 }

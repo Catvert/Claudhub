@@ -47,7 +47,22 @@ fn fresh(issues, note, typed, why) {
     }
 }
 
-pub fn view(s) {
+/// Les deux panneaux, sur un seul état.
+///
+/// `view` est appelée une fois par panneau déclaré, avec son identifiant. Elle
+/// reste pure et synchrone : c'est ce qui permet de la rappeler chaque fois que
+/// l'état bouge, et donc de peindre les deux d'un même geste — sans quoi le
+/// détail montrerait encore ce que l'état disait avant le clic.
+pub fn view(s, panel) {
+    if panel == "issue" {
+        detail(s)
+    } else {
+        issues(s)
+    }
+}
+
+/// La liste, à gauche : de quoi choisir, et rien d'autre.
+fn issues(s) {
     // **Le sélecteur est toujours là**, et pas seulement quand rien ne marche.
     // C'est le seul réglage de ce plugin qui appartient au dépôt, on le corrige
     // aussi souvent qu'on le pose, et une commande qu'il faut faire échouer
@@ -70,15 +85,24 @@ pub fn view(s) {
     for issue in s.issues {
         rows.push(item(issue.title, issue.culprit, `${issue.count}`, glyph(issue.level)));
     }
+    column([picker(s), list("issues", rows, s.chosen, "choose")])
+}
 
-    let body = [
-        picker(s),
-        list("issues", rows, s.chosen, "choose"),
-    ];
-
-    if s.chosen >= 0 {
-        let issue = s.issues[s.chosen];
-        body.push(section(issue.title, trace(s, issue)));
+/// L'erreur ouverte, au centre : sa trace, le code déployé, et le geste.
+///
+/// C'est la moitié qui a besoin de largeur — un extrait de code et une pile de
+/// chemins — et c'est ce qu'un seul panneau ne pouvait pas donner.
+fn detail(s) {
+    if s.chosen < 0 || s.chosen >= s.issues.len() {
+        return empty("Choisissez une erreur dans la liste.");
+    }
+    let issue = s.issues[s.chosen];
+    let body = [title(issue.title)];
+    if issue.culprit != "" {
+        body.push(dim(issue.culprit));
+    }
+    for node in trace(s, issue) {
+        body.push(node);
     }
     column(body)
 }

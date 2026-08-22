@@ -116,6 +116,28 @@ impl Scrollable for gpui_component::VirtualListScrollHandle {
     }
 }
 
+/// Is this notch ours to smooth?
+///
+/// Only a wheel — a trackpad sends `ScrollDelta::Pixels`, which is the finger
+/// itself — only the vertical axis, and only while the view has somewhere to
+/// go: at the edge the event has to bubble, exactly as the mask lets it.
+fn takes_over(
+    handle: &gpui::ScrollHandle,
+    event: &gpui::ScrollWheelEvent,
+    window: &Window,
+) -> bool {
+    if !matches!(event.delta, gpui::ScrollDelta::Lines(_)) {
+        return false;
+    }
+    let delta = event.delta.pixel_delta(window.line_height());
+    if delta.y == gpui::px(0.) || delta.x.abs() > delta.y.abs() {
+        return false;
+    }
+    let max = handle.max_offset().y.max(gpui::px(0.));
+    let at = handle.offset().y.clamp(-max, gpui::px(0.));
+    (at + delta.y).clamp(-max, gpui::px(0.)) != at
+}
+
 impl ClaudhubApp {
     /// A panel's smoothing, created on its first wheel event.
     ///
@@ -142,9 +164,23 @@ impl ClaudhubApp {
     /// Smoothing alone, for what already paints its own bar.
     ///
     /// The SQL console's result table is such a case: it installs both its bars
-    /// itself, and adding a third on top would make two in the same place. The
-    /// motion has nothing to do with the bar — it is the wheel listener of a
-    /// non-scrolling ancestor, and that is all we need here.
+    /// itself, and adding a third on top would make two in the same place.
+    ///
+    /// **And the notch is taken before the table, not after.** This is the one
+    /// place where the inversion `ui::motion` rests on does not hold:
+    /// gpui-component's table covers itself with a `ScrollableMask`, which
+    /// handles the wheel in the **capture** phase and consumes it, so a
+    /// listener on an ancestor — the bubble phase — was never called and the
+    /// grid alone jumped three rows a notch. We therefore register our own
+    /// capture listener **before** the table paints (capture runs in paint
+    /// order, so the first child registered runs first), consume the event,
+    /// and push the motion ourselves: same arithmetic, opposite starting point
+    /// (`ScrollMotion::push`, the built-in editor's path).
+    ///
+    /// What we deliberately leave to the mask: a trackpad, already gradual and
+    /// attached to the finger, and anything horizontal — the grid scrolls in
+    /// width too, and its axis lock is worth more there than our smoothing. At
+    /// the vertical edge the event is left to bubble as the mask would.
     ///
     /// The id stays the motion's key, as for `scrolled`: two panels cannot
     /// animate the same offset.
@@ -160,19 +196,46 @@ impl ClaudhubApp {
         let id: SharedString = id.into();
         let base = handle.base();
         self.motion(id.clone(), axes).advance(&base, window);
+        let entity = cx.entity();
         div()
             .id(gpui::ElementId::Name(id.clone()))
+            .relative()
             .size_full()
             .min_h_0()
             .min_w_0()
+            .child(
+                gpui::canvas(
+                    |_, _, _| (),
+                    move |bounds: gpui::Bounds<gpui::Pixels>, _, window, _cx| {
+                        window.on_mouse_event({
+                            let id = id.clone();
+                            let base = base.clone();
+                            move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
+                                if phase != gpui::DispatchPhase::Capture
+                                    || !bounds.contains(&event.position)
+                                    || !takes_over(&base, event, window)
+                                {
+                                    return;
+                                }
+                                cx.stop_propagation();
+                                entity.update(cx, |this, cx| {
+                                    let delta = event.delta.pixel_delta(window.line_height());
+                                    let next = this.motion(id.clone(), axes).push(
+                                        base.offset(),
+                                        delta,
+                                        base.max_offset(),
+                                    );
+                                    base.set_offset(next);
+                                    cx.notify();
+                                });
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
             .child(content)
-            .on_scroll_wheel(cx.listener(
-                move |this, event: &gpui::ScrollWheelEvent, window, cx| {
-                    if this.motion(id.clone(), axes).on_wheel(&base, event, window) {
-                        cx.notify();
-                    }
-                },
-            ))
     }
 
     /// Scrolling content, its bar, and its wheel smoothing.

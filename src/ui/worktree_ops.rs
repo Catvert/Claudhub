@@ -858,7 +858,8 @@ impl ClaudhubApp {
         if line.trim().is_empty() {
             return;
         }
-        self.show_terminal_panel(window, cx);
+        // `open_terminal` shows the panel: asking for it here would open a
+        // shell beside the task's own.
         self.open_terminal(
             &worktree,
             crate::ui::terminal_view::Launch {
@@ -1232,7 +1233,7 @@ impl ClaudhubApp {
         for worktree in &closed {
             self.review.remove(worktree);
             self.close_terminals_of(worktree, window, cx);
-            self.editings.remove(worktree);
+            self.close_files_of(worktree, window, cx);
             self.summaries.remove(worktree);
         }
         if self

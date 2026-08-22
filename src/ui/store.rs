@@ -111,7 +111,13 @@ pub struct Session {
     /// over the checkout `claudhub` was launched from — see
     /// `ClaudhubApp::repo_opened`.
     pub worktree: Option<PathBuf>,
+    /// The file that was **on screen**, among the tabs. Kept apart from the
+    /// list so that a state written before tabs existed still opens what it
+    /// named, and so that reopening knows which tab to bring forward.
     pub editing: Option<OpenFile>,
+    /// Every file the editor had open, in tab order.
+    #[serde(default)]
+    pub tabs: Vec<OpenFile>,
     pub console: Option<OpenConsole>,
 }
 
@@ -329,6 +335,16 @@ mod tests {
                     worktree: PathBuf::from("/r/wt/a"),
                     path: PathBuf::from("app/Models/User.php"),
                 }),
+                tabs: vec![
+                    OpenFile {
+                        worktree: PathBuf::from("/r/wt/a"),
+                        path: PathBuf::from("routes/web.php"),
+                    },
+                    OpenFile {
+                        worktree: PathBuf::from("/r/wt/a"),
+                        path: PathBuf::from("app/Models/User.php"),
+                    },
+                ],
                 console: Some(OpenConsole {
                     connection: "mysql:root@localhost:3306/".into(),
                     database: Some("shop".into()),

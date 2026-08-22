@@ -13,7 +13,7 @@
 //!
 //! ```text
 //! pub async fn init(worktree)                 -> Result<state, String>
-//! pub fn view(state)                          -> node
+//! pub fn view(state, panel)                   -> node
 //! pub async fn update(state, action, payload) -> Result<state, String>
 //! ```
 //!
@@ -715,10 +715,19 @@ fn module(shared: &Arc<Shared>) -> Result<rune::Module, rune::ContextError> {
     let it = shared.clone();
     module
         .function("open", move |path: Ref<str>, line: i64| {
-            it.effect(Effect::Open {
-                path: PathBuf::from(&*path),
-                line: usize::try_from(line).unwrap_or(0),
-            })
+            // Read as a path **inside the worktree**, which is what every path
+            // in this window is — see `plugin::in_worktree` for what that costs
+            // and why a `..` is refused rather than resolved.
+            match crate::plugin::in_worktree(&path) {
+                Some(path) => it.effect(Effect::Open {
+                    path,
+                    line: usize::try_from(line).unwrap_or(0),
+                }),
+                None => log::warn!(
+                    target: "plugin",
+                    "{}: `{}` is not a path in the worktree", it.id, &*path
+                ),
+            }
         })
         .build()?;
     let it = shared.clone();
@@ -901,10 +910,17 @@ impl Host {
     }
 
     /// `view(state)` — synchronous, and called whenever the state moves.
-    pub fn view(&self, state: &Value) -> Result<Node, String> {
+    /// `view(state, panel)`, for one of the plugin's panels.
+    ///
+    /// The panel's id and not its dock name: a script names its own panels, and
+    /// `ClaudhubPlugin:sentry/issues` is Claudhub's bookkeeping, not the
+    /// script's. Two panels of one plugin read the **same** state — which is
+    /// what makes a master/detail arrangement work at all, the detail being a
+    /// second reading of what the list chose.
+    pub fn view(&self, state: &Value, panel: &str) -> Result<Node, String> {
         let value = self
             .vm()
-            .call(["view"], (state.clone(),))
+            .call(["view"], (state.clone(), panel.to_string()))
             .map_err(|e| format!("view: {e}"))?;
         let node: RuneNode =
             rune::from_value(value).map_err(|e| format!("view must return a node: {e}"))?;
@@ -1004,6 +1020,7 @@ mod tests_support {
     fn declaration(capabilities: Vec<Capability>) -> Declaration {
         Declaration {
             title: "Probe".into(),
+            panels: Vec::new(),
             screen: "review".into(),
             icon: None,
             capabilities,
@@ -1022,8 +1039,8 @@ mod tests_support {
         let manifest = Manifest {
             id: "probe".into(),
             dir: PathBuf::from("/nowhere"),
+            panels: crate::plugin::manifest::sole_panel("probe", &declaration),
             declaration,
-            panel: "ClaudhubPlugin:probe",
         };
         let shared = Shared::new(&manifest, tx);
         shared.set_worktree(Some(PathBuf::from("/p/site")));
@@ -1086,7 +1103,7 @@ mod tests {
             Ok(#{ runs: runs, chosen: -1 })
         }
 
-        pub fn view(state) {
+        pub fn view(state, panel) {
             let rows = [];
             for run in state.runs {
                 rows.push(item(run, "", "failure", "circle-x"));
@@ -1119,7 +1136,7 @@ mod tests {
         )
         .expect("init succeeds");
 
-        let tree = probe.host.view(&state).expect("view renders");
+        let tree = probe.host.view(&state, "main").expect("view renders");
         let Node::Column(children) = &tree else {
             panic!("expected a column, got {tree:?}");
         };
@@ -1163,7 +1180,7 @@ mod tests {
         )
         .expect("update succeeds");
 
-        let tree = probe.host.view(&state).expect("view renders");
+        let tree = probe.host.view(&state, "main").expect("view renders");
         let Node::Column(children) = &tree else {
             panic!("expected a column");
         };
@@ -1197,7 +1214,7 @@ mod tests {
     /// names the line — the whole point of keeping Rune's own diagnostics.
     #[test]
     fn a_script_that_does_not_compile_says_where() {
-        let message = match probe("pub fn view(state) { column( }", vec![]) {
+        let message = match probe("pub fn view(state, panel) { column( }", vec![]) {
             Err(message) => message,
             Ok(_) => panic!("that is not Rune"),
         };
@@ -1318,12 +1335,12 @@ mod tests {
         const SOURCE: &str = r#"
             use claudhub::*;
             pub async fn init(worktree) { Ok(setting("base")) }
-            pub fn view(state) { text(state) }
+            pub fn view(state, panel) { text(state) }
         "#;
         let probe = probe(SOURCE, vec![]).expect("the script compiles");
         let state = crate::runtime::executor::block_on(probe.host.init(None)).expect("init");
         assert_eq!(
-            probe.host.view(&state).expect("view"),
+            probe.host.view(&state, "main").expect("view"),
             Node::Text {
                 text: "https://api.test".into(),
                 style: TextStyle::Body
@@ -1336,7 +1353,7 @@ mod tests {
         );
         let state = crate::runtime::executor::block_on(probe.host.init(None)).expect("init");
         assert_eq!(
-            probe.host.view(&state).expect("view"),
+            probe.host.view(&state, "main").expect("view"),
             Node::Text {
                 text: "https://other.test".into(),
                 style: TextStyle::Body
@@ -1379,7 +1396,7 @@ mod shipped {
             probe.host.init(Some(std::path::Path::new("/p/site"))),
         )
         .expect("init succeeds");
-        let tree = probe.host.view(&state).expect("view renders");
+        let tree = probe.host.view(&state, "main").expect("view renders");
 
         let Node::Column(children) = &tree else {
             panic!("expected a column, got {tree:?}");
@@ -1419,7 +1436,7 @@ mod shipped {
             probe.host.update(&state, "choose", "0"),
         )
         .expect("choose succeeds");
-        let tree = probe.host.view(&state).expect("view renders");
+        let tree = probe.host.view(&state, "main").expect("view renders");
         let Node::Column(children) = &tree else {
             panic!("expected a column");
         };
@@ -1439,7 +1456,7 @@ mod shipped {
         assert!(text.contains("Refaire le fil"), "{text}");
         assert!(text.contains("assertion failed"), "{text}");
         // The state came back whole: the run list is still there.
-        probe.host.view(&state).expect("view still renders");
+        probe.host.view(&state, "main").expect("view still renders");
     }
 }
 
@@ -1490,7 +1507,7 @@ mod sentry_plugin {
                 "stacktrace": {
                   "frames": [
                     {
-                      "filename": "vendor/laravel/framework/src/Foundation/Http/Kernel.php",
+                      "filename": "/vendor/laravel/framework/src/Foundation/Http/Kernel.php",
                       "function": "handle",
                       "lineNo": 141,
                       "inApp": false
@@ -1537,7 +1554,7 @@ mod sentry_plugin {
         let probe = probe_sentry();
         let state = answer_with(&probe, |_| Ok(ISSUES.into()), probe.host.init(None))
             .expect("init succeeds");
-        let tree = probe.host.view(&state).expect("view renders");
+        let tree = probe.host.view(&state, "issues").expect("view renders");
         let Node::Column(children) = &tree else {
             panic!("expected a column, got {tree:?}");
         };
@@ -1570,12 +1587,11 @@ mod sentry_plugin {
         )
         .expect("choosing an issue fetches its event");
 
-        let tree = probe.host.view(&state).expect("view renders");
-        let Node::Column(children) = &tree else {
+        // The **centre** panel: the trace is what wants the width, and the list
+        // one chose from stays where it was on the left.
+        let tree = probe.host.view(&state, "issue").expect("view renders");
+        let Node::Column(body) = &tree else {
             panic!("expected a column");
-        };
-        let Some(Node::Section { body, .. }) = children.get(2) else {
-            panic!("expected the trace section, got {children:?}");
         };
         // The whole stack is listed — it is the path that led there — and only
         // the application's frames carry their code.
@@ -1630,6 +1646,48 @@ mod sentry_plugin {
         assert!(!text.contains("public function handle"), "{text}");
     }
 
+    /// **A frame opens the file the worktree holds, not one at the root of the
+    /// machine.**
+    ///
+    /// Sentry names a frame after the deployed application's root, and hands
+    /// over what it could not relativise with its leading separator still on —
+    /// `/vendor/laravel/…`. Joined as it stands, an absolute path *replaces*
+    /// the worktree, and the panel answered `No such file or directory` about a
+    /// path nobody had written.
+    #[test]
+    fn a_frame_opens_a_file_inside_the_worktree() {
+        let probe = probe_sentry();
+        let state =
+            answer_with(&probe, |_| Ok(ISSUES.into()), probe.host.init(None)).expect("init");
+        let state = answer_with(
+            &probe,
+            |_| Ok(format!("[{EVENT}]")),
+            probe.host.update(&state, "choose", "0"),
+        )
+        .expect("choose");
+        probe.shared.take_effects();
+
+        let _ = answer_with(
+            &probe,
+            |_| panic!("opening a file asks nothing of anyone"),
+            probe.host.update(
+                &state,
+                "open",
+                "/vendor/laravel/framework/src/Foundation/Http/Kernel.php:141",
+            ),
+        )
+        .expect("open");
+        assert_eq!(
+            probe.shared.take_effects(),
+            vec![super::Effect::Open {
+                path: std::path::PathBuf::from(
+                    "vendor/laravel/framework/src/Foundation/Http/Kernel.php"
+                ),
+                line: 141,
+            }]
+        );
+    }
+
     /// No project, no request: a plugin must not query a remote API to find out
     /// it has nothing to ask it.
     /// Le projet se règle **dans le panneau**, pas dans les réglages.
@@ -1650,7 +1708,7 @@ mod sentry_plugin {
         .expect("init");
 
         // Le champ est là, avec de quoi enregistrer.
-        let tree = probe.host.view(&state).expect("view");
+        let tree = probe.host.view(&state, "issues").expect("view");
         let Node::Column(children) = &tree else {
             panic!("expected a column, got {tree:?}");
         };
@@ -1694,7 +1752,7 @@ mod sentry_plugin {
         );
         // Et le panneau montre les erreurs, pas de nouveau le sélecteur : un
         // script doit relire ce qu'il vient d'écrire.
-        let tree = probe.host.view(&state).expect("view");
+        let tree = probe.host.view(&state, "issues").expect("view");
         let Node::Column(children) = &tree else {
             panic!("expected a column, got {tree:?}");
         };
@@ -1714,7 +1772,7 @@ mod sentry_plugin {
             probe.host.init(None),
         )
         .expect("init succeeds");
-        let tree = probe.host.view(&state).expect("view renders");
+        let tree = probe.host.view(&state, "issues").expect("view renders");
         let Node::Column(children) = &tree else {
             panic!("expected a column, got {tree:?}");
         };
@@ -1748,17 +1806,20 @@ mod sentry_plugin {
         )
         .expect("a 404 on one issue is not the panel's death");
 
-        let tree = probe.host.view(&state).expect("view renders");
+        // The list is still there — that is the whole point, and it is now a
+        // panel of its own, which makes it plainer still.
+        let tree = probe.host.view(&state, "issues").expect("view renders");
         let Node::Column(children) = &tree else {
             panic!("expected a column, got {tree:?}");
         };
-        // The list is still there, and the reason sits under the issue.
         assert!(
             matches!(children.get(1), Some(Node::List { items, .. }) if items.len() == 2),
             "the list is gone: {children:?}"
         );
-        let Some(Node::Section { body, .. }) = children.get(2) else {
-            panic!("expected the issue's section, got {children:?}");
+        // And the reason sits in the issue's own panel.
+        let tree = probe.host.view(&state, "issue").expect("view renders");
+        let Node::Column(body) = &tree else {
+            panic!("expected a column, got {tree:?}");
         };
         assert!(
             body.iter()
@@ -1779,12 +1840,9 @@ mod sentry_plugin {
             probe.host.update(&state, "choose", "0"),
         )
         .expect("an empty list is an answer");
-        let tree = probe.host.view(&state).expect("view");
-        let Node::Column(children) = &tree else {
+        let tree = probe.host.view(&state, "issue").expect("view");
+        let Node::Column(body) = &tree else {
             panic!("expected a column");
-        };
-        let Some(Node::Section { body, .. }) = children.get(2) else {
-            panic!("expected the issue's section, got {children:?}");
         };
         assert!(
             body.iter().any(
@@ -1813,7 +1871,7 @@ mod sentry_plugin {
         )
         .expect("a 404 is an answer, not a reason to have no view");
 
-        let tree = probe.host.view(&state).expect("view renders");
+        let tree = probe.host.view(&state, "issues").expect("view renders");
         let Node::Column(children) = &tree else {
             panic!("expected a column, got {tree:?}");
         };

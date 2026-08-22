@@ -44,6 +44,7 @@ use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
 use crate::ui::settings::Settings;
+use crate::ui::surface::{Place, Surface};
 use crate::ui::theme::status_color;
 use crate::ui::tree;
 
@@ -242,10 +243,6 @@ impl Explorer {
     }
 }
 
-/// A file open in the built-in editor.
-/// The key of the editor's wheel smoothing, as `ui::scroll` keys the others.
-const EDITOR_SCROLL: &str = "editor-scroll";
-
 /// Where a caret must come to rest.
 ///
 /// Two shapes because the two callers hold two different things: a step through
@@ -256,28 +253,6 @@ const EDITOR_SCROLL: &str = "editor-scroll";
 pub enum Landing {
     Offset(usize),
     Position { line: u32, character: u32 },
-}
-
-/// A file being read, and what must happen to the caret when it arrives.
-/// Where a line should sit once the view has moved.
-#[derive(Clone, Copy)]
-enum Place {
-    /// The least scrolling that brings it into view, and none at all when it is
-    /// already there. What a motion of one line wants.
-    Nearest,
-    /// What `zz`, `zt` and `zb` name — and where a jump lands, which is
-    /// `Centre`: arriving at a symbol on the last line of the panel shows the
-    /// code that leads to it and none of what follows, and reading a definition
-    /// is reading what is around it.
-    Asked(crate::ui::vim::Reveal),
-}
-
-/// The line a byte offset falls on, counted from zero.
-fn line_at(text: &str, offset: usize) -> usize {
-    text[..offset.min(text.len())]
-        .bytes()
-        .filter(|byte| *byte == b'\n')
-        .count()
 }
 
 /// A landing resolved against the text it lands in.
@@ -301,10 +276,43 @@ pub struct Pending {
     /// Where the caret goes, or `None` to leave it where the editor puts it:
     /// opening a file from the explorer is a jump to a file, not to a place.
     pub landing: Option<Landing>,
-    /// Where the jump came from, when it is one. A step through the trail
-    /// leaves this empty: recording it would put back the place one has just
-    /// stepped away from, and the trail would never end.
-    pub from: Option<crate::ui::jumps::Spot>,
+    /// Where the jump came from, when it is one — a place in another file, or
+    /// the screen one was reading. A step through the trail leaves this empty:
+    /// recording it would put back the place one has just stepped away from,
+    /// and the trail would never end.
+    pub from: Option<crate::ui::jumps::Place>,
+}
+
+/// The files one worktree has open, and which of them is on screen.
+///
+/// A list and not one file: the tab bar is the dock's own — one panel per open
+/// file, as there is one panel per terminal — and what the rest of the window
+/// asks for is still "the file being edited", which is `active`.
+#[derive(Default)]
+pub struct Editors {
+    pub open: Vec<Editing>,
+    /// Index in `open`. Kept in range by every removal; an empty list has no
+    /// active file and `active()` says so.
+    pub active: usize,
+}
+
+impl Editors {
+    pub fn active(&self) -> Option<&Editing> {
+        self.open.get(self.active)
+    }
+
+    pub fn active_mut(&mut self) -> Option<&mut Editing> {
+        self.open.get_mut(self.active)
+    }
+
+    pub fn index_of(&self, path: &Path) -> Option<usize> {
+        self.open.iter().position(|editing| editing.path == path)
+    }
+
+    pub fn by_path_mut(&mut self, path: &Path) -> Option<&mut Editing> {
+        let ix = self.index_of(path)?;
+        self.open.get_mut(ix)
+    }
 }
 
 pub struct Editing {
@@ -317,34 +325,11 @@ pub struct Editing {
     /// Digest of the content read, which makes it possible to refuse to
     /// overwrite an agent's work.
     pub hash: u64,
-    /// The modal state, when vim keys are on. One per open file: leaving a file
-    /// in insert mode and coming back to another in normal mode is what a tabbed
-    /// vim does anyway.
-    pub vim: crate::ui::vim::Vim,
-    /// The layer a yank lights up on, created once with the file: a collection
-    /// follows the text through its edits, and asking for a new one per yank
-    /// would leave the old ones stacked up for as long as the file is open.
-    pub flash: gpui_component::input::TextDecorationCollection,
-    /// What puts the light out, held so that it can be **dropped**: a second
-    /// yank replaces the task, and dropping a gpui task cancels it — without
-    /// that, the first timer would darken the second yank.
-    pub flash_timer: Option<gpui::Task<()>>,
-    /// The layer the block cursor is painted on, created once with the file like
-    /// the flash's.
-    ///
-    /// It is **ours** and not the editor's selection, for two reasons that are
-    /// the same reason: the selection is only ever written by a keystroke, so
-    /// there was no cursor at all until the first key was pressed and none again
-    /// after a click of the mouse; and its colour is the theme's `selection`,
-    /// which is a few percent of lightness away from the background — a block
-    /// one has to look for is a block one does not see.
-    pub cursor: gpui_component::input::TextDecorationCollection,
-    /// The layer a blockwise selection is painted on, created **after** the
-    /// cursor's so that the block cursor keeps its colour where the two meet.
-    ///
-    /// It exists because the editor's own selection is a single run of text and
-    /// a rectangle is one range per line: there is nothing to hand it.
-    pub selection: gpui_component::input::TextDecorationCollection,
+    /// The modal harness — the vim state and the layers it paints on. One per
+    /// open file: leaving a file in insert mode and coming back to another in
+    /// normal mode is what a tabbed vim does anyway. It is the same type the SQL
+    /// console holds; see `ui::surface`.
+    pub host: crate::ui::surface::VimHost,
     /// A caret waiting for the editor to be measured before it can be revealed.
     ///
     /// A file opened by a jump installs a brand-new `EditorState`, which has
@@ -356,15 +341,6 @@ pub struct Editing {
     /// first width, and bounded for the same reason.
     pub reveal_at: Option<usize>,
     pub reveal_tries: u8,
-    /// Where `zm` and `zr` have got to: the nesting level below which folds are
-    /// closed. `None` is everything open, which is one past the deepest — the
-    /// state `zR` puts the file back into, and the one it opens in.
-    pub fold_level: Option<usize>,
-    /// The mode, caret and text length the cursor was last painted for.
-    ///
-    /// The block is recomputed at a frame only when one of the three has moved:
-    /// `value()` copies the whole file, and this runs at every frame.
-    pub cursor_at: Option<(crate::ui::vim::Mode, usize, usize, bool)>,
     /// What is on screen differs from what is on disk.
     pub dirty: bool,
     /// A change is already on its way to the language server.
@@ -373,6 +349,10 @@ pub struct Editing {
     /// trips for a state nobody asked about in between: the flag is what makes
     /// the debounce read the latest text once rather than every text in turn.
     pub lsp_pending: bool,
+    /// The tab showing this file. It is the dock that draws it, and closing it
+    /// — by the cross, by `Ctrl+W`, by the worktree going away — is what takes
+    /// the file down.
+    pub panel: Entity<crate::ui::panels::FilePanel>,
 }
 
 impl ClaudhubApp {
@@ -383,17 +363,36 @@ impl ClaudhubApp {
         Some(self.explorers.entry(worktree).or_default())
     }
 
-    /// The file open in the displayed worktree's editor, if there is one.
+    /// The file on screen in the displayed worktree's editor, if there is one.
     ///
-    /// There is one editor per worktree, as there is one set of terminals: what
-    /// is on screen is what belongs to the tree the rest of the window shows.
+    /// One **set** of editors per worktree, as there is one set of terminals:
+    /// what is on screen is what belongs to the tree the rest of the window
+    /// shows, and among those the tab the dock is displaying.
     pub(super) fn editing(&self) -> Option<&Editing> {
-        self.editings.get(&self.editing_root()?)
+        self.editings.get(&self.editing_root()?)?.active()
     }
 
     pub(super) fn editing_mut(&mut self) -> Option<&mut Editing> {
         let root = self.editing_root()?;
-        self.editings.get_mut(&root)
+        self.editings.get_mut(&root)?.active_mut()
+    }
+
+    /// The files this worktree holds open, in tab order.
+    pub(super) fn editors(&self, root: &Path) -> Option<&Editors> {
+        self.editings.get(root)
+    }
+
+    /// Whether the "pick a file" panel has anything to say.
+    ///
+    /// It is the centre of the editing screen only while there is no file: as
+    /// soon as one is open it is a tab of its own, and two tabs saying the same
+    /// thing would be one too many.
+    pub(super) fn empty_editor_visible(&self) -> bool {
+        self.panel_visible(crate::ui::panels::EditorPanel::NAME)
+            && self
+                .editing_root()
+                .and_then(|root| self.editings.get(&root))
+                .is_none_or(|tabs| tabs.open.is_empty())
     }
 
     /// Whose file the editing screen shows.
@@ -713,7 +712,7 @@ impl ClaudhubApp {
         };
         // Reopening the file already open is not a jump: it would put the same
         // place on the trail twice and make one step back do nothing visible.
-        let from = self.here(cx).filter(|spot| spot.path != path);
+        let from = Some(self.here(cx)).filter(|from| from.path() != Some(path.as_path()));
         self.landing = Some(Pending {
             worktree: worktree.clone(),
             path: path.clone(),
@@ -724,11 +723,44 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Where the caret stands, for the trail to remember.
-    pub(super) fn here(&self, cx: &App) -> Option<crate::ui::jumps::Spot> {
-        let editing = self.editing()?;
-        let offset = editing.input.read(cx).selected_range().start;
-        Some(crate::ui::jumps::Spot::new(editing.path.clone(), offset))
+    /// Where one stands, for the trail to remember.
+    ///
+    /// The caret when a file is being edited **and shown** — one is on another
+    /// screen most of the time, and a file that stayed open behind it is not
+    /// where the gesture is being made. Everywhere else the answer is the
+    /// screen, which is all a screen ever needs to be put back: what it shows
+    /// is its own state, still there when one comes back to it.
+    pub(super) fn here(&self, cx: &App) -> crate::ui::jumps::Place {
+        // Written out rather than imported: this file has a `Place` of its own,
+        // which says where a line comes to rest on screen.
+        use crate::ui::jumps::Place;
+        use crate::ui::workspace::Workspace;
+        match self.workspace {
+            Workspace::Files => {
+                if let Some(editing) = self.editing() {
+                    let offset = editing.input.read(cx).selected_range().start;
+                    return Place::Editor(crate::ui::jumps::Spot::new(
+                        editing.path.clone(),
+                        offset,
+                    ));
+                }
+            }
+            // A console with nothing sent yet is the screen and no more: there
+            // is no result to come back to.
+            Workspace::Db => {
+                if let (Some(connection), Some(sql)) =
+                    (self.query.connection.as_ref(), self.query.sent.clone())
+                {
+                    return Place::Query {
+                        connection: connection.key(),
+                        database: self.query.database.clone(),
+                        sql,
+                    };
+                }
+            }
+            _ => {}
+        }
+        Place::Screen(self.workspace)
     }
 
     /// Goes to a place and writes the step down.
@@ -749,17 +781,13 @@ impl ClaudhubApp {
         }
         // Same file: there is nothing to read, so the trail is written here
         // rather than on a content that will not arrive.
-        let Some(from) = self.here(cx) else {
-            return;
-        };
+        let from = self.here(cx);
         let Some(offset) = self.land(&landing, window, cx) else {
             return;
         };
-        if offset != from.offset {
-            self.jumps
-                .entry(worktree)
-                .or_default()
-                .jump(from, crate::ui::jumps::Spot::new(path, offset));
+        let to = crate::ui::jumps::Place::Editor(crate::ui::jumps::Spot::new(path, offset));
+        if from != to {
+            self.jumps.entry(worktree).or_default().jump(from, to);
         }
         cx.notify();
     }
@@ -776,37 +804,52 @@ impl ClaudhubApp {
         let Some(worktree) = self.active.clone() else {
             return;
         };
-        let Some(here) = self.here(cx) else {
-            return;
-        };
+        let here = self.here(cx);
         let Some(trail) = self.jumps.get_mut(&worktree) else {
             return;
         };
-        let Some(spot) = (if back {
+        let Some(place) = (if back {
             trail.back(here)
         } else {
             trail.forward(here)
         }) else {
             return;
         };
-        if self
-            .editing()
-            .is_some_and(|editing| editing.path == spot.path)
-        {
-            self.land(&Landing::Offset(spot.offset), window, cx);
-        } else {
-            // No origin: the step is already written in the trail, and putting
-            // it back would be a place one could go back from for ever.
-            self.landing = Some(Pending {
-                worktree: worktree.clone(),
-                path: spot.path.clone(),
-                landing: Some(Landing::Offset(spot.offset)),
-                from: None,
-            });
-            self.git.send(Cmd::ReadFile {
-                worktree,
-                path: spot.path,
-            });
+        match place {
+            // A screen is put back by going to it: what it shows never left.
+            crate::ui::jumps::Place::Screen(workspace) => {
+                self.enter_workspace(workspace, window, cx)
+            }
+            crate::ui::jumps::Place::Query {
+                connection,
+                database,
+                sql,
+            } => self.replay_db_query(connection, database, sql, window, cx),
+            crate::ui::jumps::Place::Editor(spot) => {
+                // The file is opened on its screen, the step having been made
+                // from somewhere else as often as not.
+                if self
+                    .editing()
+                    .is_some_and(|editing| editing.path == spot.path)
+                {
+                    self.enter_workspace(crate::ui::workspace::Workspace::Files, window, cx);
+                    self.land(&Landing::Offset(spot.offset), window, cx);
+                } else {
+                    // No origin: the step is already written in the trail, and
+                    // putting it back would be a place one could go back from
+                    // for ever.
+                    self.landing = Some(Pending {
+                        worktree: worktree.clone(),
+                        path: spot.path.clone(),
+                        landing: Some(Landing::Offset(spot.offset)),
+                        from: None,
+                    });
+                    self.git.send(Cmd::ReadFile {
+                        worktree,
+                        path: spot.path,
+                    });
+                }
+            }
         }
         cx.notify();
     }
@@ -881,57 +924,81 @@ impl ClaudhubApp {
         // The worktree is captured rather than read off the selection: an event
         // arriving after one has switched worktrees would otherwise mark the
         // wrong file unsaved.
+        // The file is captured too, and not only its worktree: several are open
+        // now, and marking "the current one" dirty would put the star on the
+        // wrong tab the moment an edit lands anywhere else.
         let owner = worktree.clone();
+        let edited = path.clone();
         cx.subscribe(&input, move |this, _, event, cx| {
             if !matches!(event, gpui_component::input::InputEvent::Change) {
                 return;
             }
-            if let Some(editing) = this.editings.get_mut(&owner) {
+            if let Some(editing) = this
+                .editings
+                .get_mut(&owner)
+                .and_then(|tabs| tabs.by_path_mut(&edited))
+            {
                 editing.dirty = true;
             }
             this.lsp_editor_changed(&owner, cx);
             cx.notify();
         })
         .detach();
-        // The server must forget the file we are leaving, or it goes on
-        // answering about a text nobody holds any more. Only this worktree's:
-        // the others keep their document open, as they keep their editor.
-        if let Some(previous) = self.editings.remove(&worktree) {
-            self.lsp_editor_closed(previous.worktree, previous.path);
+        // The server must forget the document we are leaving. One session per
+        // worktree holds **one** open document — the tab being read — so
+        // arriving in a file closes the one that was there, exactly as before
+        // tabs existed. Switching tabs does the same, in `show_file`.
+        if let Some(previous) = self
+            .editings
+            .get(&worktree)
+            .and_then(|tabs| tabs.active())
+            .map(|editing| (editing.worktree.clone(), editing.path.clone()))
+        {
+            if previous.1 != path {
+                self.lsp_editor_closed(previous.0, previous.1);
+            }
         }
-        // The cursor's layer is created **first**, and that is what decides who
-        // wins where the two overlap: collections are composed in creation
-        // order, the first one keeping its properties. The block stays visible
-        // through a yank's flash, which is the right way round — the flash says
-        // what was taken, the block says where one is.
-        let (cursor, flash, selection) = input.update(cx, |state, cx| {
-            (
-                state.create_decorations_collection(Vec::new(), cx),
-                state.create_decorations_collection(Vec::new(), cx),
-                state.create_decorations_collection(Vec::new(), cx),
-            )
-        });
+        let host = crate::ui::surface::VimHost::new(&input, cx);
         let opened = (worktree.clone(), path.clone());
-        self.editings.insert(
-            worktree.clone(),
-            Editing {
-                worktree,
-                path,
-                input,
-                hash: content.hash,
-                dirty: false,
-                lsp_pending: false,
-                reveal_at: None,
-                reveal_tries: 0,
-                fold_level: None,
-                vim: crate::ui::vim::Vim::default(),
-                flash,
-                flash_timer: None,
-                cursor,
-                selection,
-                cursor_at: None,
-            },
-        );
+        // The tab of a file already open is **reused**, its content replaced:
+        // reopening the same file is what a save-and-reread does, and a second
+        // tab on one file is the one thing a tab bar must never grow.
+        let reopened = self
+            .editings
+            .get(&worktree)
+            .and_then(|tabs| tabs.index_of(&path));
+        let panel = match reopened {
+            Some(ix) => {
+                let panel = self.editings[&worktree].open[ix].panel.clone();
+                let fresh = input.clone();
+                panel.update(cx, |panel, cx| panel.rebind(fresh, cx));
+                panel
+            }
+            None => self.open_file_tab(&worktree, &path, input.clone(), window, cx),
+        };
+        let editing = Editing {
+            worktree: worktree.clone(),
+            path: path.clone(),
+            input,
+            hash: content.hash,
+            dirty: false,
+            lsp_pending: false,
+            reveal_at: None,
+            reveal_tries: 0,
+            host,
+            panel,
+        };
+        let tabs = self.editings.entry(worktree.clone()).or_default();
+        match reopened {
+            Some(ix) => {
+                tabs.open[ix] = editing;
+                tabs.active = ix;
+            }
+            None => {
+                tabs.open.push(editing);
+                tabs.active = tabs.open.len() - 1;
+            }
+        }
         // Starts the server this file's language asks for, opens the document
         // and posts the providers — all of it a no-op when the button is off.
         self.lsp_sync_editor(window, cx);
@@ -946,10 +1013,13 @@ impl ClaudhubApp {
                     .and_then(|landing| self.land(&landing, window, cx))
                     .unwrap_or(0);
                 if let Some(from) = pending.from {
-                    self.jumps
-                        .entry(opened.0.clone())
-                        .or_default()
-                        .jump(from, crate::ui::jumps::Spot::new(opened.1.clone(), offset));
+                    self.jumps.entry(opened.0.clone()).or_default().jump(
+                        from,
+                        crate::ui::jumps::Place::Editor(crate::ui::jumps::Spot::new(
+                            opened.1.clone(),
+                            offset,
+                        )),
+                    );
                 }
             }
         }
@@ -963,6 +1033,9 @@ impl ClaudhubApp {
         if !restored {
             self.enter_workspace(crate::ui::workspace::Workspace::Files, window, cx);
             self.set_panel_visible(crate::ui::panels::EditorPanel::NAME, true, cx);
+        } else {
+            // The next remembered tab, one at a time: see `read_next_file`.
+            self.continue_restore(window, cx);
         }
         self.persist_session(cx);
         cx.notify();
@@ -994,6 +1067,190 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    /// Opens a tab for a file, and puts it in the editing screen's dock.
+    ///
+    /// The dock's bar **is** the tab bar, as it is for the terminals: that is
+    /// what lets a file be dragged into a split, zoomed, or sent beside
+    /// another. A bar of our own would have been a second chrome painted under
+    /// the one the window already has.
+    ///
+    /// One panel and not one per screen, unlike a terminal: a file is only ever
+    /// read on the editing screen.
+    fn open_file_tab(
+        &mut self,
+        worktree: &Path,
+        path: &Path,
+        input: Entity<EditorState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::ui::panels::FilePanel> {
+        let app = cx.entity();
+        // Handed over rather than read: the panel is built inside an `update`
+        // on the application, so it cannot read the entity to find out for
+        // itself. The observation set up in its constructor takes over.
+        let visible = self.editing_root().as_deref() == Some(worktree)
+            && self.panel_visible(crate::ui::panels::EditorPanel::NAME);
+        let panel = cx.new(|cx| {
+            crate::ui::panels::FilePanel::new(
+                &app,
+                worktree.to_path_buf(),
+                path.to_path_buf(),
+                input,
+                visible,
+                cx,
+            )
+        });
+        // The tab group the new one joins is the one holding the files already
+        // open; failing that, `Anywhere` lands it in the centre — where the
+        // editor panel is, which is precisely the group wanted.
+        let sibling = self
+            .editings
+            .get(worktree)
+            .and_then(|tabs| tabs.open.last())
+            .map(|editing| editing.panel.clone());
+        if let Some(dock) = self
+            .docks
+            .get(&crate::ui::workspace::Workspace::Files)
+            .cloned()
+        {
+            dock.update(cx, |dock, cx| {
+                dock.add_panel_view(
+                    gpui_component::dock::panel_handle(panel.clone()),
+                    gpui_component::dock::DockPlacement::Center,
+                    None,
+                    window,
+                    cx,
+                );
+                let Some(sibling) = sibling else {
+                    return;
+                };
+                let id = gpui_component::dock::PanelId::from(panel.entity_id());
+                let target = dock
+                    .layout(gpui_component::dock::DockPlacement::Center)
+                    .and_then(|layout| {
+                        layout.find_panel_node(gpui_component::dock::PanelId::from(
+                            sibling.entity_id(),
+                        ))
+                    })
+                    .map(|node| gpui_component::dock::InsertTarget::Tabs {
+                        node,
+                        ix: None,
+                        // The file one has just opened is the file one reads.
+                        activate: true,
+                    });
+                if let Some(target) = target {
+                    dock.move_panel(id, target, window, cx);
+                }
+            });
+        }
+        // The file one has just opened is the file one reads. Said here as well
+        // as in the insert target: with no sibling there is no move to carry
+        // the flag, and the group would go on showing whatever tab it had.
+        crate::ui::panels::FilePanel::activate(&panel, window, cx);
+        panel
+    }
+
+    /// Makes an open file the tab on screen.
+    ///
+    /// Called by the panel that is being drawn: the dock renders exactly one
+    /// tab of a group, so **the panel that renders is the file being read** —
+    /// a fact to be read off the frame rather than an event to be caught. The
+    /// language server follows: one session holds one open document, so the
+    /// tab one leaves is closed and the one arriving is opened.
+    pub(super) fn show_file(
+        &mut self,
+        worktree: PathBuf,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tabs) = self.editings.get(&worktree) else {
+            return;
+        };
+        let Some(ix) = tabs.index_of(&path) else {
+            return;
+        };
+        if tabs.active == ix {
+            return;
+        }
+        let left = tabs.active().map(|editing| editing.path.clone());
+        if let Some(tabs) = self.editings.get_mut(&worktree) {
+            tabs.active = ix;
+        }
+        if let Some(left) = left {
+            if left != path {
+                self.lsp_editor_closed(worktree.clone(), left);
+            }
+        }
+        self.lsp_sync_editor(window, cx);
+        self.persist_session(cx);
+        cx.notify();
+    }
+
+    /// Drops a file's tab: the panel goes out of the dock and the state with it.
+    ///
+    /// Idempotent, and it has to be: the dock's cross and `Ctrl+W` both come
+    /// through here, and removing the panel makes the dock call `on_removed`,
+    /// which comes back through here a second time with nothing left to find.
+    pub(super) fn close_file(
+        &mut self,
+        worktree: PathBuf,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tabs) = self.editings.get_mut(&worktree) else {
+            return;
+        };
+        let Some(ix) = tabs.index_of(&path) else {
+            return;
+        };
+        let editing = tabs.open.remove(ix);
+        // The finger stays on the tab that takes its place, and on the last one
+        // when the file closed was itself the last.
+        tabs.active = tabs.active.min(tabs.open.len().saturating_sub(1));
+        let empty = tabs.open.is_empty();
+        if empty {
+            self.editings.remove(&worktree);
+        }
+        if let Some(dock) = self
+            .docks
+            .get(&crate::ui::workspace::Workspace::Files)
+            .cloned()
+        {
+            dock.update(cx, |dock, cx| {
+                dock.remove_panel(editing.panel.clone(), window, cx)
+            });
+        }
+        self.lsp_editor_closed(editing.worktree, editing.path);
+        // The focus was on a node nobody renders any more, and such a handle
+        // resolves no binding: every shortcut would stay dead until a click put
+        // it back. The tree is where one is left looking.
+        if empty {
+            let tree = self.explorer_focus.clone();
+            tree.focus(window, cx);
+        }
+        self.persist_session(cx);
+        cx.notify();
+    }
+
+    /// Drops every tab of a worktree — it is going away.
+    pub(super) fn close_files_of(
+        &mut self,
+        worktree: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let doomed: Vec<PathBuf> = self
+            .editings
+            .get(worktree)
+            .map(|tabs| tabs.open.iter().map(|e| e.path.clone()).collect())
+            .unwrap_or_default();
+        for path in doomed {
+            self.close_file(worktree.to_path_buf(), path, window, cx);
+        }
+    }
+
     /// Closes the editor, asking for confirmation if the file has changed.
     pub(super) fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editing) = self.editing() else {
@@ -1002,18 +1259,16 @@ impl ClaudhubApp {
         // The worktree the gesture was made in, and not the one selected when
         // the dialog is answered: one browses while a question is open.
         let worktree = editing.worktree.clone();
+        let path = editing.path.clone();
         if !editing.dirty {
-            if let Some(previous) = self.editings.remove(&worktree) {
-                self.lsp_editor_closed(previous.worktree, previous.path);
-            }
-            self.persist_session(cx);
-            cx.notify();
+            self.close_file(worktree, path, window, cx);
             return;
         }
         let label = SharedString::from(editing.path.display().to_string());
         let entity = cx.entity();
         window.open_dialog(cx, move |dialog, _window, _cx| {
             let (entity, label, worktree) = (entity.clone(), label.clone(), worktree.clone());
+            let path = path.clone();
             dialog
                 .title(tr!("editor-discard-title"))
                 .child(
@@ -1025,13 +1280,10 @@ impl ClaudhubApp {
                 .overlay_closable(false)
                 .close_button(false)
                 .footer(super::dialogs::confirm())
-                .on_ok(move |_, _window, cx| {
+                .on_ok(move |_, window, cx| {
+                    let (worktree, path) = (worktree.clone(), path.clone());
                     entity.update(cx, |this, cx| {
-                        if let Some(previous) = this.editings.remove(&worktree) {
-                            this.lsp_editor_closed(previous.worktree, previous.path);
-                        }
-                        this.persist_session(cx);
-                        cx.notify();
+                        this.close_file(worktree, path, window, cx);
                     });
                     true
                 })
@@ -1101,440 +1353,6 @@ impl ClaudhubApp {
             explorer.state = Listing::Idle;
         }
         cx.notify();
-    }
-
-    // — The vim keys ————————————————————————————————————————————
-
-    /// One keystroke, when vim keys are on and the built-in editor has the
-    /// focus.
-    ///
-    /// It is listened for in the **capture** phase, on an ancestor of the
-    /// editor, and that placement is the whole mechanism. A key listener runs
-    /// *after* the bindings have had their turn — which is what leaves `Ctrl+S`
-    /// and `Alt+2` to the window — but *before* the platform hands the character
-    /// to the focused input handler. Consuming the event is therefore what keeps
-    /// a bare `d` from being typed into the file; letting it through is what
-    /// makes insert mode an ordinary editor again.
-    fn vim_key(&mut self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if !Settings::global(cx).vim_mode || self.editing().is_none() {
-            return;
-        }
-        let keystroke = &event.keystroke;
-        let modifiers = keystroke.modifiers;
-        // Alt belongs to the window — it is how one changes screen — and a
-        // function key has nothing vim wants.
-        if modifiers.alt || modifiers.function {
-            return;
-        }
-        let ctrl = modifiers.control || modifiers.platform;
-        // The character the keystroke **produced**, and not the key it was
-        // pressed on: that is what puts `$`, `^` and `0` where they belong on an
-        // AZERTY keyboard, where they are shifted or in the digit row.
-        let ch = keystroke
-            .key_char
-            .as_deref()
-            .filter(|_| !ctrl)
-            .and_then(|typed| {
-                let mut chars = typed.chars();
-                let ch = chars.next()?;
-                (chars.next().is_none() && !ch.is_control()).then_some(ch)
-            });
-        let key = crate::ui::vim::Key {
-            ch,
-            name: keystroke.key.clone(),
-            ctrl,
-        };
-        if self.vim_press(key, window, cx) {
-            // Everything vim claims is ours: the key must not reach the file.
-            cx.stop_propagation();
-        }
-    }
-
-    /// `Ctrl+V`, which never arrives as a keystroke.
-    ///
-    /// The input binds it to `Paste`, and a **binding runs before** the
-    /// capture-phase listener vim keys go through — so the rectangle would have
-    /// been a paste, in silence. The action is therefore caught on its way down,
-    /// on the same ancestor, where a capture-phase listener is ahead of the
-    /// input's own. In insert mode it is let through, where it is the paste
-    /// everyone means by it.
-    pub(super) fn vim_paste(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        use crate::ui::vim::Mode;
-
-        if !Settings::global(cx).vim_mode {
-            return false;
-        }
-        let mode = self.editing().map(|editing| editing.vim.mode());
-        if !matches!(mode, Some(mode) if mode != Mode::Insert) {
-            return false;
-        }
-        let key = crate::ui::vim::Key {
-            ch: None,
-            name: "v".into(),
-            ctrl: true,
-        };
-        self.vim_press(key, window, cx)
-    }
-
-    /// One keystroke, handed to vim — `true` when it took it.
-    fn vim_press(
-        &mut self,
-        key: crate::ui::vim::Key,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        use crate::ui::vim::{Command, Response};
-
-        let Some(input) = self.editing().map(|editing| editing.input.clone()) else {
-            return false;
-        };
-        let (text, cursor, rows) = {
-            let state = input.read(cx);
-            let rows = state
-                .visible_row_range()
-                .map(|rows| rows.len())
-                .unwrap_or(DEFAULT_ROWS)
-                .max(2);
-            (
-                state.value().to_string(),
-                state.selected_range().start,
-                rows,
-            )
-        };
-        // The clipboard is read **when a paste is about to happen**, and not at
-        // every keystroke: a read is a round trip to the display server, and
-        // pasting is the only gesture that consumes a register.
-        let clipboard = Settings::global(cx).vim_clipboard;
-        let pasting = clipboard && matches!(key.ch, Some('p') | Some('P'));
-        let pasted = pasting
-            .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
-            .flatten();
-        let Some(editing) = self.editing_mut() else {
-            return false;
-        };
-        if let Some(text) = pasted {
-            editing.vim.set_register(text);
-        }
-        let response = editing.vim.press(&key, &text, cursor, rows);
-        if matches!(response, Response::Ignored) {
-            return false;
-        }
-        match response {
-            Response::Ignored | Response::Consumed => {}
-            Response::Apply(change) => {
-                if let Some(yank) = change.yank.filter(|_| clipboard) {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(yank.text));
-                }
-                if !change.flash.is_empty() {
-                    self.flash_yank(change.flash, cx);
-                }
-                input.update(cx, |state, cx| {
-                    if let Some(edit) = change.edit {
-                        state.set_selected_range(edit.range, cx);
-                        state.replace(edit.text, window, cx);
-                    }
-                    state.set_selected_range(change.selection, cx);
-                });
-                self.scroll_to_line(&input, change.head, Place::Nearest, cx);
-            }
-            Response::Command(command) => match command {
-                // Undo and redo belong to the editor, which is the only one that
-                // knows what the last transaction was.
-                Command::Undo => window.dispatch_action(Box::new(gpui_component::input::Undo), cx),
-                Command::Redo => window.dispatch_action(Box::new(gpui_component::input::Redo), cx),
-                Command::Save => self.save_file(cx),
-                Command::Close => self.close_editor(window, cx),
-                Command::SaveAndClose => {
-                    self.save_file(cx);
-                    self.close_editor(window, cx);
-                }
-                Command::GoToDefinition => self.goto_definition(window, cx),
-                Command::Reveal(at) => self.place_caret_line(&input, at, cx),
-                Command::Scroll(lines) => self.scroll_by_lines(&input, lines, cx),
-                Command::Fold(op) => self.fold(op, cx),
-            },
-        }
-        cx.notify();
-        true
-    }
-
-    /// Paints the block cursor, and takes the editor's caret out from under it.
-    ///
-    /// It is **ours** and not a selection of one character, which is what it was
-    /// at first. A selection is only ever written by a keystroke, so there was no
-    /// cursor at all before the first key was pressed on a file that had just
-    /// opened, and none again after a click of the mouse; and it is painted in
-    /// the theme's `selection`, a few percent of lightness away from the
-    /// background — on One Dark one had to look for it. A decoration is painted
-    /// **over** the selection (the text runs come after the selection paths) and
-    /// in colours of ours: the caret's, with the background showing through the
-    /// glyph, which is the block cursor of every terminal.
-    ///
-    /// The caret is only given back where the block has nothing to cover — an
-    /// empty line, the end of the file — since a cursor that disappears there
-    /// would be worse than two.
-    fn sync_block_cursor(&mut self, on: bool, cx: &mut Context<Self>) {
-        let Some(editing) = self.editing() else {
-            return;
-        };
-        let (input, layer, rectangle, mode) = (
-            editing.input.clone(),
-            editing.cursor.clone(),
-            editing.selection.clone(),
-            editing.vim.mode(),
-        );
-        let (caret, len) = {
-            let state = input.read(cx);
-            // The rope's length, which is borrowed: `value()` would copy the
-            // whole file to learn one number.
-            (state.selected_range().start, state.text().len())
-        };
-        let at = (mode, caret, len, on);
-        if editing.cursor_at == Some(at) {
-            return;
-        }
-        let (block, rows) = match on {
-            true => {
-                let text = input.read(cx).value();
-                (
-                    editing.vim.cursor(&text, caret),
-                    editing.vim.block_selection(&text),
-                )
-            }
-            false => (None, Vec::new()),
-        };
-        let block = block.filter(|range| !range.is_empty());
-        // The theme's `selection`, which is exactly what `v` and `V` look like
-        // next door: this is the same gesture, on a rectangle the editor has no
-        // way of holding.
-        let selected = gpui::HighlightStyle {
-            background_color: Some(cx.theme().selection),
-            ..Default::default()
-        };
-        rectangle.set(
-            rows.into_iter()
-                .map(|range| gpui_component::input::TextDecoration::new(range, selected))
-                .collect(),
-            cx,
-        );
-        let colour = vim_mode_colour(mode, cx);
-        let style = gpui::HighlightStyle {
-            color: Some(ink_on(colour, cx)),
-            background_color: Some(colour),
-            ..Default::default()
-        };
-        layer.set(
-            block
-                .clone()
-                .map(|range| gpui_component::input::TextDecoration::new(range, style))
-                .into_iter()
-                .collect(),
-            cx,
-        );
-        input.update(cx, |state, cx| {
-            state.set_cursor_hidden(block.is_some(), cx);
-        });
-        if let Some(editing) = self.editing_mut() {
-            editing.cursor_at = Some(at);
-        }
-    }
-
-    /// Lights up what a yank has just copied, and puts it out again.
-    ///
-    /// A yank changes nothing on screen: without a sign, one is never sure it
-    /// took, and one yanks again. It is what vim-highlightedyank exists for.
-    ///
-    /// Three things it does not do: it does not touch the selection — the block
-    /// cursor is right there and two marks fighting over one character would say
-    /// less than one —, it does not last a second like the plugin's default,
-    /// which was chosen for a terminal where nothing else moves, and it does not
-    /// hold a timer per yank: the task is **replaced**, and dropping a gpui task
-    /// cancels it.
-    fn flash_yank(&mut self, ranges: Vec<std::ops::Range<usize>>, cx: &mut Context<Self>) {
-        let Some(editing) = self.editing() else {
-            return;
-        };
-        let flash = editing.flash.clone();
-        // The tone of a search occurrence: it is already the colour this
-        // interface lays over code to say "here", and it follows the theme.
-        let style = gpui::HighlightStyle {
-            background_color: Some(crate::ui::find::highlight_color(false, cx)),
-            ..Default::default()
-        };
-        flash.set(
-            ranges
-                .into_iter()
-                .map(|range| gpui_component::input::TextDecoration::new(range, style))
-                .collect(),
-            cx,
-        );
-        let timer = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(YANK_FLASH).await;
-            cx.update(|cx| flash.clear(cx));
-            // The editor repaints of its own accord — the collection notifies —
-            // but the panel is what holds the file, and it is what a stale
-            // frame would show.
-            let _ = this.update(cx, |_, cx| cx.notify());
-        });
-        if let Some(editing) = self.editing_mut() {
-            editing.flash_timer = Some(timer);
-        }
-    }
-
-    /// `zz`, `zt`, `zb`: puts the caret's line where the eye wants it.
-    ///
-    /// Nothing here moves the caret — that is what tells these from `z.` and
-    /// `z-`, which also go to the first non-blank and are therefore two answers
-    /// in one, where `Response` carries a single one.
-    fn place_caret_line(
-        &mut self,
-        input: &Entity<EditorState>,
-        at: crate::ui::vim::Reveal,
-        cx: &mut Context<Self>,
-    ) {
-        let head = input.read(cx).selected_range().start;
-        self.scroll_to_line(input, head, Place::Asked(at), cx);
-    }
-
-    /// `Ctrl+E` and `Ctrl+Y`: the page moves, the caret stays.
-    ///
-    /// Vim drags the caret along only when the page walks out from under it,
-    /// and that part is left to the editor: `set_scroll_offset` is clamped to
-    /// the real range, and the caret is where it was — which is the whole point
-    /// of these two keys, reading ahead without losing one's place.
-    fn scroll_by_lines(
-        &mut self,
-        input: &Entity<EditorState>,
-        lines: isize,
-        cx: &mut Context<Self>,
-    ) {
-        input.update(cx, |state, cx| {
-            let Some(line_height) = state.line_height() else {
-                return;
-            };
-            let offset = state.scroll_offset();
-            let moved = offset.y - line_height * lines as f32;
-            state.set_scroll_offset(gpui::point(offset.x, moved.min(gpui::px(0.))), cx);
-        });
-    }
-
-    /// The `z` commands that fold.
-    ///
-    /// Where a fold begins and ends is the grammar's answer, never ours: the
-    /// editor holds the candidates, and all that is decided here is which of
-    /// them to close. `zc`, `zo` and `za` act on the **innermost** fold holding
-    /// the caret, which is the one being read.
-    fn fold(&mut self, op: crate::ui::vim::Fold, cx: &mut Context<Self>) {
-        use crate::ui::vim::Fold;
-        let Some(editing) = self.editing() else {
-            return;
-        };
-        let input = editing.input.clone();
-        let level = editing.fold_level;
-        let ranges: Vec<crate::ui::folds::Range> = input
-            .read(cx)
-            .fold_candidates()
-            .iter()
-            .map(|range| (range.start_line, range.end_line))
-            .collect();
-        if ranges.is_empty() {
-            return;
-        }
-        let caret = {
-            let state = input.read(cx);
-            line_at(&state.value(), state.selected_range().start)
-        };
-        let next = match op {
-            Fold::Close | Fold::Open | Fold::Toggle => {
-                let Some((start, _)) = ranges
-                    .iter()
-                    .filter(|(start, end)| *start <= caret && caret <= *end)
-                    .max_by_key(|(start, _)| *start)
-                    .copied()
-                else {
-                    return;
-                };
-                input.update(cx, |state, cx| {
-                    let folded = match op {
-                        Fold::Close => true,
-                        Fold::Open => false,
-                        _ => !state.is_folded_at(start),
-                    };
-                    state.set_folded(start, folded, cx);
-                });
-                return; // a single fold does not move the level
-            }
-            Fold::CloseAll => Some(0),
-            Fold::OpenAll => None,
-            // The ceiling is one past the deepest nesting: that is "everything
-            // open", and `zr` reaching it is `zR`.
-            Fold::More | Fold::Less => {
-                let ceiling = crate::ui::folds::max_depth(&ranges).unwrap_or(0) + 1;
-                let current = level.unwrap_or(ceiling);
-                let wanted = match op {
-                    Fold::More => current.saturating_sub(1),
-                    _ => current + 1,
-                };
-                (wanted <= ceiling.saturating_sub(1)).then_some(wanted)
-            }
-        };
-        input.update(cx, |state, cx| {
-            // Rebuilt from nothing each time rather than folded on top of what
-            // is there: `zr` opens a level, and reopening is not something the
-            // fold map does by adding.
-            state.unfold_all(cx);
-            if let Some(level) = next {
-                for start in crate::ui::folds::at_level(&ranges, level) {
-                    state.set_folded(start, true, cx);
-                }
-            }
-        });
-        if let Some(editing) = self.editing_mut() {
-            editing.fold_level = next;
-        }
-        cx.notify();
-    }
-
-    /// Scrolls a line into view, and says whether it could.
-    ///
-    /// `set_selected_range` scrolls to the **end** of what it is given, which is
-    /// where the caret is in normal mode but the wrong end of a selection grown
-    /// upwards: `V` then `k` would walk off the top of the panel without the
-    /// view ever following. A landing needs it for a plainer reason: it writes
-    /// an empty range, and the editor does not always take that for a move.
-    ///
-    /// It answers `false` when the editor has never been laid out and there is
-    /// nothing to divide by — see `Editing::reveal_at`.
-    fn scroll_to_line(
-        &mut self,
-        input: &Entity<EditorState>,
-        head: usize,
-        place: Place,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        use crate::ui::vim::Reveal;
-        input.update(cx, |state, cx| {
-            let (Some(rows), Some(line_height)) = (state.visible_row_range(), state.line_height())
-            else {
-                return false;
-            };
-            let row = line_at(&state.value(), head);
-            let span = rows.len().max(1);
-            let first = match place {
-                // A line already in view stays where it is: a motion that moves
-                // the caret one line must not move the page under the eye.
-                Place::Nearest if rows.contains(&row) => return true,
-                Place::Nearest if row < rows.start => row,
-                Place::Nearest => row.saturating_sub(span - 1),
-                Place::Asked(Reveal::Top) => row,
-                Place::Asked(Reveal::Centre) => row.saturating_sub(span / 2),
-                Place::Asked(Reveal::Bottom) => row.saturating_sub(span - 1),
-            };
-            // The input's scroll handle counts downwards as negative.
-            let offset = state.scroll_offset();
-            state.set_scroll_offset(gpui::point(offset.x, -(line_height * first as f32)), cx);
-            true
-        })
     }
 
     // — The panel  ——————————————————————————————————————————————
@@ -1905,11 +1723,7 @@ impl ClaudhubApp {
     /// go: an arrow that appears and disappears moves the four buttons beside
     /// it every time one follows a definition.
     fn render_jump_buttons(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let trail = self.active.as_ref().and_then(|w| self.jumps.get(w));
-        let (back, forward) = match trail {
-            Some(trail) => (trail.can_back(), trail.can_forward()),
-            None => (false, false),
-        };
+        let (back, forward) = self.can_travel();
         Some(
             h_flex()
                 .child(
@@ -1974,24 +1788,17 @@ impl ClaudhubApp {
         let editing = self.editing()?;
         let (path, dirty, input) = (editing.path.clone(), editing.dirty, editing.input.clone());
         let vim = Settings::global(cx).vim_mode;
-        let mode = editing.vim.mode();
+        let mode = editing.host.vim.mode();
         // The `/` line being typed, or the keys of a command not complete yet:
         // vim shows both, and they are the only thing that says why the next key
         // will not do what it usually does.
         let hint = editing
+            .host
             .vim
             .prompt()
-            .unwrap_or_else(|| editing.vim.pending().to_string());
-        // The smoothing advances by one frame, as the diff's does. The offset
-        // is written back through `InputState`, which is the only way in: the
-        // editor has no `ScrollHandle` of its own to hand out.
-        let (offset, max) = editor_extent(&input, cx);
-        if let Some(next) = self
-            .owned_motion(EDITOR_SCROLL.into(), crate::ui::motion::Axes::Vertical)
-            .advance_at(offset, max, window)
-        {
-            input.update(cx, |state, cx| state.set_scroll_offset(next, cx));
-        }
+            .unwrap_or_else(|| editing.host.vim.pending().to_string());
+        // The smoothing advances by one frame, as the diff's does.
+        self.advance_surface_scroll(Surface::File, &input, window, cx);
         // The caret a jump left waiting for a measurement. The first frame of a
         // freshly opened file has none; asking for another is what gets the
         // view to the symbol instead of leaving it at the top of the file, and
@@ -2017,7 +1824,7 @@ impl ClaudhubApp {
         // the mode changes under the keys and the setting under the form, the
         // calls are idempotent, and it is what makes turning vim mode off give
         // the caret back without anything else to do.
-        self.sync_block_cursor(vim, cx);
+        self.sync_block_cursor(Surface::File, vim, cx);
         let entity = cx.entity();
         let mono = cx.theme().mono_font_family.clone();
         // The editor is code, like the diff on the screen next door: same
@@ -2105,20 +1912,30 @@ impl ClaudhubApp {
                         // otherwise.
                         .when(vim, |el| {
                             el.capture_key_down(cx.listener(|this, event, window, cx| {
-                                this.vim_key(event, window, cx)
+                                this.vim_key(Surface::File, event, window, cx)
                             }))
                             // `Ctrl+V` is a binding of the input's before it is
                             // a keystroke: see `vim_paste`.
                             .capture_action(cx.listener(
                                 |this, _: &gpui_component::input::Paste, window, cx| {
-                                    if this.vim_paste(window, cx) {
+                                    if this.vim_paste(Surface::File, window, cx) {
                                         cx.stop_propagation();
                                     }
                                 },
                             ))
                         })
                         .child(
+                            // **No card of its own.** `Input` paints a
+                            // background, a radius and a border; under the tab
+                            // group's own card that drew a rounded box inset in
+                            // a frame, and its fill is `editor.background` —
+                            // the very colour the card is already painted in.
+                            // All that was left of it was a grey line stitching
+                            // back what the dock had just unstitched. The code
+                            // sits on the card, the way the diff next door
+                            // does.
                             Editor::new(&input)
+                                .appearance(false)
                                 .font_family(mono)
                                 .text_size(code_size)
                                 // **And its line height with it.** `Input`
@@ -2156,7 +1973,12 @@ impl ClaudhubApp {
                                             }
                                             cx.stop_propagation();
                                             entity.update(cx, |this, cx| {
-                                                this.on_editor_scroll(event, window, cx)
+                                                this.on_surface_scroll(
+                                                    Surface::File,
+                                                    event,
+                                                    window,
+                                                    cx,
+                                                )
                                             });
                                         },
                                     );
@@ -2168,180 +1990,7 @@ impl ClaudhubApp {
                 ),
         )
     }
-
-    /// The mode pill, and what is being typed towards a command.
-    fn render_vim_mode(
-        &self,
-        mode: crate::ui::vim::Mode,
-        hint: &str,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
-        let colour = vim_mode_colour(mode, cx);
-        h_flex()
-            .gap_1()
-            .items_center()
-            .child(
-                div()
-                    .px_1p5()
-                    .rounded(cx.theme().radius)
-                    .text_xs()
-                    .border_1()
-                    .border_color(colour)
-                    .text_color(colour)
-                    .child(tr!(mode.key())),
-            )
-            .when(!hint.is_empty(), |el| {
-                el.child(
-                    div()
-                        .text_xs()
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .text_color(cx.theme().muted_foreground)
-                        .child(SharedString::from(hint.to_string())),
-                )
-            })
-    }
 }
-
-/// The editor's wheel: zoom with the platform key, smoothed scrolling
-/// otherwise — the diff's two gestures, on the other screen that shows code.
-///
-/// The same inversion as `on_diff_scroll`, and for the same reason: gpui has no
-/// capture phase for the wheel, so the editor has **already** scrolled when this
-/// runs. We give the jump back rather than try to prevent it.
-impl ClaudhubApp {
-    pub(super) fn on_editor_scroll(
-        &mut self,
-        event: &gpui::ScrollWheelEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(input) = self.editing().map(|editing| editing.input.clone()) else {
-            return;
-        };
-        let (offset, max) = editor_extent(&input, cx);
-        // The editor's own line height and not the ambient one: it is what its
-        // handler would have used, and three lines apart make a visible
-        // difference on a font that is neither the interface's nor its size.
-        let line = input
-            .read(cx)
-            .line_height()
-            .unwrap_or_else(|| window.line_height())
-            .max(px(1.));
-        let delta = event.delta.pixel_delta(line);
-
-        if event.modifiers.secondary() {
-            // A zoom during a smoothed scroll: the destination was computed on
-            // lines that no longer have the same height. Nothing to give back —
-            // the event was consumed before the editor could scroll on it.
-            self.owned_motion(EDITOR_SCROLL.into(), crate::ui::motion::Axes::Vertical)
-                .cancel();
-            let steps = crate::ui::terminal_view::zoom_steps(delta.y);
-            if steps != 0. {
-                // The diff's size, and not one of its own: it is code on both
-                // sides, never shown at the same time, and two sizes to keep in
-                // step would be one too many.
-                crate::ui::settings::Settings::update_global(cx, |s| {
-                    s.zoom(crate::ui::settings::Zoom::Diff, steps);
-                });
-            }
-            cx.notify();
-            return;
-        }
-
-        let next = match event.delta {
-            // A trackpad is already gradual, and attached to the finger:
-            // smoothing it would add lag to a direct gesture.
-            gpui::ScrollDelta::Pixels(_) => {
-                self.owned_motion(EDITOR_SCROLL.into(), crate::ui::motion::Axes::Vertical)
-                    .cancel();
-                gpui::point(offset.x, offset.y + delta.y)
-            }
-            gpui::ScrollDelta::Lines(_) => self
-                .owned_motion(EDITOR_SCROLL.into(), crate::ui::motion::Axes::Vertical)
-                .push(offset, delta, max),
-        };
-        input.update(cx, |state, cx| state.set_scroll_offset(next, cx));
-        cx.notify();
-    }
-}
-
-/// The editor's scroll offset, and how far it can go.
-///
-/// The travel is **worked out** and not read: `scroll_size` and the viewport's
-/// bounds are `pub(crate)` in gpui-component, where the offset is not. Visible
-/// rows times the line height is the viewport, the file's lines times the same
-/// is the content, and their difference is the travel. It is an approximation —
-/// a soft-wrapped line counts for one — and it does not have to be better than
-/// that: `set_scroll_offset` clamps to the real range, and the next frame reads
-/// back what it actually got.
-fn editor_extent(
-    input: &Entity<EditorState>,
-    cx: &App,
-) -> (gpui::Point<Pixels>, gpui::Point<Pixels>) {
-    let state = input.read(cx);
-    let offset = state.scroll_offset();
-    let travel = match (state.line_height(), state.visible_row_range()) {
-        (Some(line_height), Some(visible)) => {
-            let lines = state.value().lines().count();
-            let hidden = lines.saturating_sub(visible.len()) as f32;
-            line_height * hidden
-        }
-        // Before the first layout there is nothing to clamp against: the motion
-        // aims where it is asked to, and the editor cuts it back.
-        _ => px(f32::MAX / 4.),
-    };
-    (offset, gpui::point(px(0.), travel))
-}
-
-/// How many lines `Ctrl+D` moves by half of, before the editor has been laid out
-/// once and can say how tall it is.
-const DEFAULT_ROWS: usize = 20;
-
-/// The colour a mode is said in — the pill on the file's bar, and the block
-/// cursor alike.
-///
-/// One table and not two: the word and the cursor say the same thing, and a
-/// mode one reads in the corner while the block says another colour would be one
-/// of them too many. It is also what makes the mode legible without looking away
-/// from the caret, which is the point of a modal editor.
-fn vim_mode_colour(mode: crate::ui::vim::Mode, cx: &gpui::App) -> gpui::Hsla {
-    match mode {
-        // The theme's own cursor colour, which is what the eye expects there.
-        crate::ui::vim::Mode::Normal => cx.theme().caret,
-        crate::ui::vim::Mode::Insert => cx.theme().success,
-        crate::ui::vim::Mode::Visual => cx.theme().magenta,
-        crate::ui::vim::Mode::VisualLine => cx.theme().cyan,
-        crate::ui::vim::Mode::VisualBlock => cx.theme().yellow,
-    }
-}
-
-/// The ink a block cursor's glyph takes: whichever of the theme's two extremes
-/// stands out against the block.
-///
-/// Not `background` alone: it is the right answer on a dark theme, where the
-/// block is a light colour, and the wrong one on a light theme, where a pale
-/// glyph on a pale block is a hole.
-fn ink_on(colour: gpui::Hsla, cx: &gpui::App) -> gpui::Hsla {
-    let (background, foreground) = (cx.theme().background, cx.theme().foreground);
-    let (darker, lighter) = if background.l < foreground.l {
-        (background, foreground)
-    } else {
-        (foreground, background)
-    };
-    if colour.l > 0.5 {
-        darker
-    } else {
-        lighter
-    }
-}
-
-/// How long a yank stays lit.
-///
-/// Not vim-highlightedyank's second, which was chosen for a terminal where
-/// nothing else moves: here the mode pill, the dirty badge and an agent's
-/// writing are all on the same screen, and a mark that outstays the gesture
-/// reads as a state rather than as an acknowledgement.
-const YANK_FLASH: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// What does not depend on the row: colours and geometry.
 ///
@@ -2369,30 +2018,10 @@ impl Look {
             accent: cx.theme().accent,
             // Pale enough to read as a texture and not as a separator: these
             // rules are on screen by the dozen.
-            guide: cx.theme().border.opacity(0.7),
+            guide: crate::ui::theme::indent_guide(cx),
             folder: cx.theme().muted_foreground,
         }
     }
-}
-
-/// The width of one indentation level, and of the rule marking it.
-const INDENT: f32 = 12.;
-
-/// The vertical rules of the parent levels.
-///
-/// It is what makes a deep tree readable: without them, at six levels of
-/// indentation — the common case on a Laravel project — nothing says any more
-/// which folder a row belongs to.
-fn indent_guides(depth: usize, look: &Look) -> impl IntoIterator<Item = gpui::Div> + use<> {
-    let guide = look.guide;
-    (0..depth).map(move |_| {
-        div()
-            .w(px(INDENT))
-            .h_full()
-            .flex_none()
-            .border_l_1()
-            .border_color(guide)
-    })
 }
 
 /// One row of the explorer: a collapsible folder or a file.
@@ -2444,7 +2073,7 @@ fn render_row(
                         this.toggle_project_dir(for_click.clone(), cx);
                     });
                 })
-                .children(indent_guides(*depth, look))
+                .children(crate::ui::theme::indent_guides(*depth, look.guide))
                 .child(
                     icon(if *collapsed {
                         "chevron-right"
@@ -2507,10 +2136,8 @@ fn render_row(
                         this.open_in_editor(for_open.clone(), cx);
                     });
                 })
-                .children(indent_guides(*depth, look))
-                // The place of the chevron a file does not have: without it, file
-                // names and folder names do not line up.
-                .child(div().w(px(14.)).flex_none())
+                .children(crate::ui::theme::indent_guides(*depth, look.guide))
+                .child(crate::ui::theme::chevron_space())
                 .child(crate::ui::file_icons::file_icon(&path, cx))
                 .child(
                     div()

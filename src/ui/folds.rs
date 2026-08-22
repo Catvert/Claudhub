@@ -45,6 +45,56 @@ pub fn at_level(ranges: &[Range], level: usize) -> Vec<usize> {
         .collect()
 }
 
+/// The first line at or after (or at or before, going up) `row` that a closed
+/// fold does not hide.
+///
+/// A closed fold hides what is **between** its two lines: the line it starts on
+/// carries the marker and the one it ends on closes it, and both stay on
+/// screen. Folds nest, so the answer is looked for again from where the last
+/// one left off — stepping out of an inner fold can land in an outer one.
+fn shown(closed: &[Range], row: usize, down: bool) -> usize {
+    let mut row = row;
+    // Each pass leaves the fold it found, so the row only ever moves away from
+    // where it started; the bound is a belt on top of that.
+    for _ in 0..=closed.len() {
+        let Some((start, end)) = closed
+            .iter()
+            .find(|(start, end)| *start < row && row < *end)
+            .copied()
+        else {
+            break;
+        };
+        row = if down { end } else { start };
+    }
+    row
+}
+
+/// Where `j` and `k` land, `delta` lines away, with what the folds hide skipped.
+///
+/// This is the whole of what a fold changes for a motion, and getting it wrong
+/// is silent: the caret walks into lines nobody can see, taking the block cursor
+/// with it. `last` is the last line of the buffer, which is where going down
+/// stops.
+pub fn step(closed: &[Range], row: usize, delta: isize, last: usize) -> usize {
+    let down = delta > 0;
+    let mut row = row.min(last);
+    for _ in 0..delta.unsigned_abs() {
+        let next = if down {
+            if row >= last {
+                break;
+            }
+            row + 1
+        } else {
+            if row == 0 {
+                break;
+            }
+            row - 1
+        };
+        row = shown(closed, next, down).min(last);
+    }
+    row
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,6 +121,37 @@ mod tests {
         assert_eq!(at_level(&ranges, 1), vec![2, 4, 10], "the class stays open");
         assert_eq!(at_level(&ranges, 2), vec![4]);
         assert!(at_level(&ranges, 3).is_empty(), "past the deepest: zR");
+    }
+
+    /// A markdown title folded shut: the lines under it are gone, and `j` has to
+    /// step over them rather than into them.
+    #[test]
+    fn a_step_lands_on_a_line_that_is_shown() {
+        let closed = vec![(2usize, 8usize)];
+        assert_eq!(step(&closed, 1, 1, 20), 2, "onto the fold's own line");
+        assert_eq!(step(&closed, 2, 1, 20), 8, "over what it hides");
+        assert_eq!(step(&closed, 8, -1, 20), 2, "and back over it");
+        assert_eq!(step(&closed, 2, -1, 20), 1);
+        assert_eq!(
+            step(&closed, 1, 3, 20),
+            9,
+            "a fold costs one step, not its height"
+        );
+    }
+
+    /// Leaving an inner fold can land inside the one holding it.
+    #[test]
+    fn folds_that_hold_one_another_are_left_in_one_go() {
+        let closed = vec![(0usize, 20usize), (2, 8)];
+        assert_eq!(step(&closed, 0, 1, 30), 20);
+        assert_eq!(step(&closed, 20, -1, 30), 0);
+    }
+
+    #[test]
+    fn a_step_stops_at_either_end_of_the_buffer() {
+        assert_eq!(step(&[], 0, -1, 9), 0);
+        assert_eq!(step(&[], 9, 1, 9), 9);
+        assert_eq!(step(&[(5, 9)], 5, 1, 9), 9, "the closing line still shows");
     }
 
     /// Two ranges sharing a start line are not each other's parent: counting

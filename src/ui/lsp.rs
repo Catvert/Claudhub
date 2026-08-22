@@ -419,11 +419,22 @@ impl ClaudhubApp {
                             line: range.start.line,
                             character: range.start.character,
                         });
-                app.update(cx, |this, cx| match landing {
-                    Some(landing) => this.jump_to(path, landing, window, cx),
-                    None => this.open_in_editor(path, cx),
-                })
-                .is_ok()
+                // **Deferred, and it has to be.** This hook is called from
+                // inside the editor entity's own update — the context menu's
+                // "go to definition", and a system-key click, both reach it
+                // that way. Opening a file reads that very entity, to note
+                // where the trail is leaving from, and reading an entity that
+                // is checked out for writing is a panic. The answer stays
+                // immediate: we have taken the jump, we just make it a moment
+                // later.
+                let app = app.clone();
+                window.defer(cx, move |window, cx| {
+                    let _ = app.update(cx, |this, cx| match landing {
+                        Some(landing) => this.jump_to(path, landing, window, cx),
+                        None => this.open_in_editor(path, cx),
+                    });
+                });
+                true
             }));
             cx.notify();
         });
@@ -441,7 +452,11 @@ impl ClaudhubApp {
         cx: &mut gpui::Context<Self>,
     ) {
         let owner = owner.to_path_buf();
-        let Some(editing) = self.editings.get_mut(&owner) else {
+        let Some(editing) = self
+            .editings
+            .get_mut(&owner)
+            .and_then(|tabs| tabs.active_mut())
+        else {
             return;
         };
         if editing.lsp_pending {
@@ -451,7 +466,11 @@ impl ClaudhubApp {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(CHANGE_DEBOUNCE).await;
             let _ = this.update(cx, |this, cx| {
-                let Some(editing) = this.editings.get_mut(&owner) else {
+                let Some(editing) = this
+                    .editings
+                    .get_mut(&owner)
+                    .and_then(|tabs| tabs.active_mut())
+                else {
                     return;
                 };
                 editing.lsp_pending = false;

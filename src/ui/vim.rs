@@ -194,6 +194,9 @@ pub struct Vim {
     /// A blockwise insertion under way, waiting for the `Esc` that repeats it
     /// down the other rows.
     block_insert: Option<BlockInsert>,
+    /// The folds the editor holds shut, given afresh at every keystroke: the
+    /// gutter icons close them too, so this is read and never remembered.
+    folds: Vec<crate::ui::folds::Range>,
 }
 
 /// What `I`, `A` and `c` set up in blockwise visual mode: one types on the top
@@ -239,6 +242,15 @@ impl Vim {
             linewise: text.ends_with('\n'),
             text,
         };
+    }
+
+    /// Hands vim what the editor currently holds folded shut.
+    ///
+    /// Only `j` and `k` read it, and that is deliberate: they are the motions a
+    /// hand runs down a file with, and a fold is precisely what they must step
+    /// over. A jump that names a line — `G`, a search — is asking for that line.
+    pub fn set_folds(&mut self, folds: Vec<crate::ui::folds::Range>) {
+        self.folds = folds;
     }
 
     /// The `/` or `:` line, as the toolbar shows it while it is being typed.
@@ -1169,8 +1181,14 @@ impl Vim {
                 };
                 let column = self.column.unwrap_or_else(|| column_of(text, head));
                 self.column = Some(column);
+                let row = crate::ui::folds::step(
+                    &self.folds,
+                    line_index(text, head),
+                    delta,
+                    last_line(text),
+                );
                 return Some(Target {
-                    offset: move_lines(text, head, delta, Some(column)),
+                    offset: line_column(text, row, column),
                     kind: Kind::Linewise,
                 });
             }
@@ -1499,6 +1517,11 @@ fn move_lines(text: &str, at: usize, delta: isize, column: Option<usize>) -> usi
     let column = column.unwrap_or_else(|| column_of(text, at));
     let row = line_index(text, at) as isize + delta;
     let row = row.clamp(0, last_line(text) as isize) as usize;
+    line_column(text, row, column)
+}
+
+/// The offset of the `column`-th character of line `row`, clamped to its end.
+fn line_column(text: &str, row: usize, column: usize) -> usize {
     let start = start_of_line_no(text, row);
     let end = end_of_line(text, start);
     let mut offset = start;
@@ -2000,6 +2023,26 @@ mod tests {
         assert_eq!(&editor.text[editor.cursor..editor.cursor + 1], "r");
         editor.press("h");
         assert_eq!(&editor.text[editor.cursor..editor.cursor + 1], "h");
+    }
+
+    /// A closed fold is stepped over, not walked into: the lines it hides have
+    /// no cursor to show, so `j` landing on one is a caret nobody can see.
+    #[test]
+    fn the_home_row_steps_over_a_closed_fold() {
+        let mut editor = Editor::new(
+            "# one
+body
+more
+# two
+tail
+",
+        );
+        editor.vim.set_folds(vec![(0, 3)]);
+        editor.press("j");
+        assert_eq!(&editor.text[editor.cursor..editor.cursor + 1], "#", "# two");
+        assert_eq!(line_index(&editor.text, editor.cursor), 3);
+        editor.press("k");
+        assert_eq!(line_index(&editor.text, editor.cursor), 0);
     }
 
     /// `$` sticks: the column it sets follows `j` down every line, however long

@@ -55,6 +55,7 @@ use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
 use crate::ui::motion::Axes;
 use crate::ui::settings::Settings;
+use crate::ui::surface::Surface;
 
 /// The window sizes the bar offers.
 ///
@@ -787,6 +788,9 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Read before anything moves: opening a table replaces the query one
+        // was reading, and that is the thing which had nowhere to be written.
+        let from = self.here(cx);
         let changed =
             self.query.connection.as_ref() != Some(&connection) || self.query.database != database;
         self.query.connection = Some(connection.clone());
@@ -808,13 +812,31 @@ impl ClaudhubApp {
             // written into the text would outlive the query one writes over it.
             let sql = format!("SELECT * FROM {quoted};");
             self.db_query_input.update(cx, |state, cx| {
-                state.set_value(sql, window, cx);
+                state.set_value(sql.clone(), window, cx);
             });
             self.run_db_query(cx);
+            self.record_step(
+                from,
+                crate::ui::jumps::Place::Query {
+                    connection: connection.key(),
+                    database: database.clone(),
+                    sql,
+                },
+                cx,
+            );
+        } else {
+            self.record_step(
+                from,
+                crate::ui::jumps::Place::Screen(crate::ui::workspace::Workspace::Db),
+                cx,
+            );
         }
         // Opening a console calls up the databases screen: the gesture comes
         // from the schema tree, which lives there, but also from the menu of a
         // table opened elsewhere.
+        //
+        // `enter_workspace` and not `travel_to`: the step has just been
+        // written, and it names the query rather than the room it is read in.
         self.enter_workspace(crate::ui::workspace::Workspace::Db, window, cx);
         self.set_panel_visible(crate::ui::panels::ConsolePanel::NAME, true, cx);
         self.persist_session(cx);
@@ -958,10 +980,64 @@ impl ClaudhubApp {
     /// is one row up in the history panel — which is what makes this
     /// overwriting bearable.
     pub(super) fn run_db_sql(&mut self, sql: String, window: &mut Window, cx: &mut Context<Self>) {
+        let from = self.here(cx);
+        self.db_query_input.update(cx, |state, cx| {
+            state.set_value(sql.clone(), window, cx);
+        });
+        self.run_db_query(cx);
+        if let Some(connection) = self.query.connection.as_ref() {
+            let to = crate::ui::jumps::Place::Query {
+                connection: connection.key(),
+                database: self.query.database.clone(),
+                sql,
+            };
+            self.record_step(from, to, cx);
+        }
+    }
+
+    /// Puts a query of the trail back, and runs it.
+    ///
+    /// It runs, where restoring a session does not: a step back is a gesture,
+    /// asked for now, and what one is coming back to is the **result** — the
+    /// row a foreign key was followed from. Putting the text back and leaving
+    /// the previous result on screen would be a back button that undoes the
+    /// half one cannot see.
+    ///
+    /// It is **not filed in the history**: the query is already there, one row
+    /// up, and a `×2` counts the times a question was asked and not the times
+    /// one walked back past it.
+    pub(super) fn replay_db_query(
+        &mut self,
+        connection: String,
+        database: Option<String>,
+        sql: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Named by its key, as a session names it: a connection deleted in the
+        // meantime simply has nowhere to go back to.
+        let Some(target) = crate::ui::settings::Settings::global(cx)
+            .databases
+            .iter()
+            .find(|candidate| candidate.key() == connection)
+            .cloned()
+        else {
+            return;
+        };
+        let elsewhere = self.query.connection.as_ref().map(|c| c.key()) != Some(connection)
+            || self.query.database != database;
+        if elsewhere {
+            self.reopen_db_console(target, database, String::new(), window, cx);
+        }
+        self.enter_workspace(crate::ui::workspace::Workspace::Db, window, cx);
+        self.set_panel_visible(crate::ui::panels::ConsolePanel::NAME, true, cx);
         self.db_query_input.update(cx, |state, cx| {
             state.set_value(sql, window, cx);
         });
         self.run_db_query(cx);
+        self.query.record = false;
+        self.persist_session(cx);
+        cx.notify();
     }
 
     /// Runs whatever is in the editor.
@@ -1317,8 +1393,21 @@ impl ClaudhubApp {
     ) -> impl IntoElement {
         let editor = self.db_query_input.clone();
         let split = self.db_split.clone();
+        let vim = crate::ui::settings::Settings::global(cx).vim_mode;
+        // The same four pieces the file editor installs, on the same harness:
+        // see `ui::surface`. SQL is code, read and written the same way, and the
+        // console was the one code panel that had none of them.
+        self.advance_surface_scroll(Surface::Query, &editor, window, cx);
+        self.sync_block_cursor(Surface::Query, vim, cx);
         let bar = self.render_console_bar(cx);
         let results = self.render_db_results(window, cx);
+        let entity = cx.entity();
+        // SQL is code: same family, same size as the diff and the file editor,
+        // and the line height said explicitly — `Input`'s rem-based default is
+        // deaf to the text size (see the file editor, `explorer.rs`).
+        let mono = cx.theme().mono_font_family.clone();
+        let code_size = px(crate::ui::settings::Settings::global(cx).diff_font_size);
+        let border = cx.theme().border;
         v_flex()
             .id("db-console")
             // The console's context: it is what gives `Ctrl+Enter` to the query
@@ -1339,9 +1428,97 @@ impl ClaudhubApp {
                             .size_range(px(72.)..px(640.))
                             .child(
                                 div()
+                                    .id("db-query-editor")
+                                    .relative()
                                     .size_full()
                                     .overflow_hidden()
-                                    .child(Editor::new(&editor).h_full()),
+                                    .border_b_1()
+                                    .border_color(border)
+                                    // The capture phase, on an ancestor of the
+                                    // editor: see `ClaudhubApp::vim_key`.
+                                    // Installed only when the mode is on, so
+                                    // that nothing stands between the keyboard
+                                    // and the input otherwise.
+                                    .when(vim, |el| {
+                                        el.key_context(
+                                            crate::ui::shortcuts::query_editor_context(),
+                                        )
+                                        .capture_key_down(cx.listener(
+                                            |this, event, window, cx| {
+                                                this.vim_key(Surface::Query, event, window, cx)
+                                            },
+                                        ))
+                                        // `Ctrl+V` is a binding of the input's
+                                        // before it is a keystroke: see
+                                        // `vim_paste`.
+                                        .capture_action(cx.listener(
+                                            |this,
+                                             _: &gpui_component::input::Paste,
+                                             window,
+                                             cx| {
+                                                if this.vim_paste(Surface::Query, window, cx) {
+                                                    cx.stop_propagation();
+                                                }
+                                            },
+                                        ))
+                                    })
+                                    .child(
+                                        // No card of its own: see the file
+                                        // editor in `explorer.rs`. The seam
+                                        // with the grid below is the
+                                        // container's own bottom border — the
+                                        // resize handle paints nothing at
+                                        // rest.
+                                        Editor::new(&editor)
+                                            .appearance(false)
+                                            .font_family(mono)
+                                            .text_size(code_size)
+                                            .line_height(crate::ui::diff_view::line_height(
+                                                code_size,
+                                            ))
+                                            .h_full(),
+                                    )
+                                    // **The wheel is taken before the editor
+                                    // sees it.** `InputState::on_scroll_wheel`
+                                    // consumes the event as soon as the offset
+                                    // moved, so a listener on an ancestor is
+                                    // never called: a window mouse listener in
+                                    // the **capture** phase runs first, and
+                                    // consuming it there leaves the whole
+                                    // movement to us.
+                                    .child(
+                                        gpui::canvas(
+                                            |_, _, _| (),
+                                            move |bounds: gpui::Bounds<gpui::Pixels>,
+                                                  _,
+                                                  window,
+                                                  _cx| {
+                                                window.on_mouse_event(
+                                                    move |event: &gpui::ScrollWheelEvent,
+                                                          phase,
+                                                          window,
+                                                          cx| {
+                                                        if phase != gpui::DispatchPhase::Capture
+                                                            || !bounds.contains(&event.position)
+                                                        {
+                                                            return;
+                                                        }
+                                                        cx.stop_propagation();
+                                                        entity.update(cx, |this, cx| {
+                                                            this.on_surface_scroll(
+                                                                Surface::Query,
+                                                                event,
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        });
+                                                    },
+                                                );
+                                            },
+                                        )
+                                        .absolute()
+                                        .inset_0(),
+                                    ),
                             ),
                     )
                     .child(resizable_panel().child(results)),
@@ -1356,6 +1533,15 @@ impl ClaudhubApp {
         };
         let running = self.query.running;
         let has_result = self.query.has_columns && self.query.shown > 0;
+        // The mode, where the eye already is: on the console's own bar, as the
+        // file editor puts it on the file's.
+        let vim = crate::ui::settings::Settings::global(cx).vim_mode;
+        let mode = self.db_host.vim.mode();
+        let hint = self
+            .db_host
+            .vim
+            .prompt()
+            .unwrap_or_else(|| self.db_host.vim.pending().to_string());
         h_flex()
             .h(crate::ui::theme::bar_height(cx))
             .w_full()
@@ -1381,6 +1567,7 @@ impl ClaudhubApp {
                     .child(SharedString::from(target)),
             )
             .child(div().flex_1())
+            .when(vim, |el| el.child(self.render_vim_mode(mode, &hint, cx)))
             .child(
                 div()
                     .truncate()

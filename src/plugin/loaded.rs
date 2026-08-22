@@ -1,5 +1,6 @@
 //! One plugin as the window holds it: its script, its state, its last tree.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -23,12 +24,20 @@ pub struct Plugin {
     /// choice the database tree makes for its `DbResult`.
     pub error: Option<String>,
     state: Option<Value>,
-    /// The last tree the script produced, behind an `Rc`: the render closure
-    /// runs on every frame and must compute nothing. The rule of
-    /// `diff_view::Rendered`.
-    pub tree: Rc<Node>,
+    /// The last tree the script produced **for each panel**, behind an `Rc`:
+    /// the render closure runs on every frame and must compute nothing. The
+    /// rule of `diff_view::Rendered`.
+    ///
+    /// Keyed by panel id and not by dock name: this is the script's vocabulary,
+    /// and it is what `view`'s second argument carries.
+    trees: HashMap<String, Rc<Node>>,
     /// A gesture has gone out and not come back.
     pub busy: bool,
+    /// The panel it went out from, when a gesture is what sent it.
+    ///
+    /// `None` for a first load, which nobody asked for from anywhere. What it
+    /// decides is `waiting_in`.
+    from: Option<&'static str>,
 }
 
 impl Plugin {
@@ -42,8 +51,9 @@ impl Plugin {
             host: None,
             error: None,
             state: None,
-            tree: Rc::new(Node::nothing()),
+            trees: HashMap::new(),
             busy: false,
+            from: None,
         };
         plugin.compile();
         plugin
@@ -65,9 +75,9 @@ impl Plugin {
         let compiled = self.compile();
         if compiled || !had {
             self.state = None;
-            self.tree = Rc::new(Node::nothing());
+            self.trees.clear();
         }
-        self.busy = false;
+        self.settled();
     }
 
     /// True when a new machine took the old one's place.
@@ -106,8 +116,8 @@ impl Plugin {
         // it is starting over, not refreshing: what was fetched described
         // somewhere else.
         self.state = None;
-        self.tree = Rc::new(Node::nothing());
-        self.busy = false;
+        self.trees.clear();
+        self.settled();
         // The failure goes with it, and that is not tidiness: `init` is only
         // replayed while there is no error to show, so a plugin that failed for
         // want of a worktree would never try again once one is open.
@@ -123,22 +133,66 @@ impl Plugin {
     /// that changed nothing on screen, which reads as a dead button.
     pub fn settle(&mut self, state: Value) {
         self.state = Some(state);
+        self.settled();
         self.repaint();
     }
 
-    /// `view(state)`, once, outside any frame.
+    /// Something has gone out. `from` is the panel whose gesture sent it, and
+    /// `None` a first load.
+    pub fn start(&mut self, from: Option<&'static str>) {
+        self.busy = true;
+        self.from = from;
+    }
+
+    fn settled(&mut self) {
+        self.busy = false;
+        self.from = None;
+    }
+
+    /// Does this panel show a spinner where its tree was.
+    ///
+    /// **Every panel but the one the gesture came from.** A gesture moves the
+    /// state and each panel is a reading of it, so the others are stale by
+    /// construction — keeping them painted shows the detail of the row one has
+    /// just stopped looking at. The panel one clicked in is the exception, and
+    /// it is not a detail: it is what one is looking at and what one just used,
+    /// and blanking it takes away the context of one's own gesture. A first
+    /// load has no exception to make, which is right — nothing is known yet.
+    pub fn waiting_in(&self, panel: &str) -> bool {
+        self.busy && self.from != Some(panel)
+    }
+
+    /// What a panel last painted. An empty column while nothing has run yet.
+    pub fn tree_of(&self, panel: &str) -> Rc<Node> {
+        self.trees
+            .get(panel)
+            .cloned()
+            .unwrap_or_else(|| Rc::new(Node::nothing()))
+    }
+
+    /// `view(state, panel)` for every panel the plugin declares, once, outside
+    /// any frame.
+    ///
+    /// All of them and not only the one on screen: two panels of a plugin are
+    /// two readings of one state, and painting the visible one alone would
+    /// leave the other showing what the state said before the gesture. The cost
+    /// is one pure call per panel, which is the reason `view` is required to be
+    /// pure and synchronous.
     pub fn repaint(&mut self) {
-        let (Some(host), Some(state)) = (self.host.clone(), self.state.as_ref()) else {
+        let (Some(host), Some(state)) = (self.host.clone(), self.state.clone()) else {
             return;
         };
-        match host.view(state) {
-            Ok(tree) => {
-                self.tree = Rc::new(tree);
-                self.error = None;
-            }
-            Err(message) => {
-                log::warn!(target: "plugin", "{}: {message}", self.manifest.id);
-                self.error = Some(message);
+        let panels: Vec<String> = self.manifest.panels.iter().map(|p| p.id.clone()).collect();
+        for panel in panels {
+            match host.view(&state, &panel) {
+                Ok(tree) => {
+                    self.trees.insert(panel, Rc::new(tree));
+                    self.error = None;
+                }
+                Err(message) => {
+                    log::warn!(target: "plugin", "{}: {message}", self.manifest.id);
+                    self.error = Some(message);
+                }
             }
         }
     }
@@ -150,7 +204,7 @@ impl Plugin {
     pub fn fail(&mut self, message: String) {
         log::warn!(target: "plugin", "{}: {message}", self.manifest.id);
         self.error = Some(message);
-        self.busy = false;
+        self.settled();
     }
 
     /// What the script asked of the window while it ran.
@@ -173,11 +227,14 @@ mod tests {
     use crate::plugin::manifest;
 
     fn scratch(name: &str) -> std::path::PathBuf {
+        scratch_with(name, "title = \"Demo\"\n")
+    }
+
+    fn scratch_with(name: &str, manifest: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("claudhub-reload-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("demo")).expect("mkdir");
-        std::fs::write(dir.join("demo").join("plugin.toml"), "title = \"Demo\"\n")
-            .expect("manifest");
+        std::fs::write(dir.join("demo").join("plugin.toml"), manifest).expect("manifest");
         dir
     }
 
@@ -188,7 +245,7 @@ mod tests {
     const GOOD: &str = r#"
         use claudhub::*;
         pub async fn init(worktree) { Ok("bonjour") }
-        pub fn view(s) { text(s) }
+        pub fn view(s, panel) { text(s) }
     "#;
 
     /// A reload that fails **keeps the machine that worked**.
@@ -210,7 +267,7 @@ mod tests {
                 .expect("init");
         plugin.settle(state);
         assert_eq!(
-            *plugin.tree,
+            *plugin.tree_of("main"),
             Node::Text {
                 text: "bonjour".into(),
                 style: crate::plugin::view::TextStyle::Body
@@ -218,19 +275,113 @@ mod tests {
         );
 
         // Saved mid-word.
-        write_script(&root, "use claudhub::*; pub fn view(s) { text( }");
+        write_script(&root, "use claudhub::*; pub fn view(s, panel) { text( }");
         plugin.reload();
         assert!(plugin.error.is_some(), "the failure has to be said");
         assert!(plugin.host().is_some(), "the working machine stays");
         // And the state with it: repainting still gives the previous tree
         // rather than an empty panel.
         assert_eq!(
-            *plugin.tree,
+            *plugin.tree_of("main"),
             Node::Text {
                 text: "bonjour".into(),
                 style: crate::plugin::view::TextStyle::Body
             }
         );
+    }
+
+    /// **Both panels are painted, from one state, on every settling.**
+    ///
+    /// Not only the one on screen: two panels of a plugin are two readings of
+    /// the same thing, and painting the visible one alone would leave the other
+    /// showing what the state said before the gesture — which on a master/detail
+    /// plugin is the detail of the row one just stopped looking at.
+    #[test]
+    fn two_panels_read_one_state() {
+        let root = scratch_with(
+            "two-panels",
+            "title = \"Demo\"\n\n[[panel]]\nid = \"list\"\ntitle = \"L\"\n\n[[panel]]\nid = \"detail\"\ntitle = \"D\"\nplace = \"centre\"\n",
+        );
+        write_script(
+            &root,
+            r#"
+            use claudhub::*;
+            pub async fn init(worktree) { Ok("un") }
+            pub fn view(s, panel) { text(`${panel}:${s}`) }
+            pub async fn update(s, action, payload) { Ok(payload) }
+            "#,
+        );
+        let found = manifest::discover(&root);
+        let (sender, _outbox) = async_channel::unbounded();
+        let mut plugin = Plugin::load(found[0].clone(), sender);
+
+        let said = |plugin: &Plugin, panel: &str| match &*plugin.tree_of(panel) {
+            Node::Text { text, .. } => text.clone(),
+            other => panic!("expected text, got {other:?}"),
+        };
+
+        let host = plugin.host().expect("a machine");
+        let state = crate::runtime::executor::block_on(host.init(None)).expect("init");
+        plugin.settle(state);
+        assert_eq!(said(&plugin, "list"), "list:un");
+        assert_eq!(said(&plugin, "detail"), "detail:un");
+
+        // One gesture, and **both** move.
+        let state = plugin.state().expect("a state");
+        let state =
+            crate::runtime::executor::block_on(host.update(&state, "set", "deux")).expect("update");
+        plugin.settle(state);
+        assert_eq!(said(&plugin, "list"), "list:deux");
+        assert_eq!(said(&plugin, "detail"), "detail:deux");
+
+        // A panel nobody declared has nothing to say, rather than the last
+        // thing some other panel said.
+        assert_eq!(*plugin.tree_of("nowhere"), Node::nothing());
+    }
+
+    /// **Only the panel the answer will land in waits.**
+    ///
+    /// Opening an issue from the list must leave the list alone: it is what one
+    /// is looking at and what one just used, and blanking it takes away the
+    /// context of one's own gesture. A first load has no exception to make.
+    #[test]
+    fn waiting_is_shown_where_the_answer_will_land() {
+        let root = scratch_with(
+            "waiting",
+            "title = \"Demo\"\n\n[[panel]]\nid = \"list\"\ntitle = \"L\"\n\n[[panel]]\nid = \"detail\"\ntitle = \"D\"\nplace = \"centre\"\n",
+        );
+        write_script(&root, GOOD);
+        let found = manifest::discover(&root);
+        let (sender, _outbox) = async_channel::unbounded();
+        let mut plugin = Plugin::load(found[0].clone(), sender);
+        let (list, detail) = (found[0].panels[0].name, found[0].panels[1].name);
+
+        // Nothing out: nobody waits.
+        assert!(!plugin.waiting_in(list));
+        assert!(!plugin.waiting_in(detail));
+
+        // A first load: nothing is known, so both are blank.
+        plugin.start(None);
+        assert!(plugin.waiting_in(list));
+        assert!(plugin.waiting_in(detail));
+
+        let state =
+            crate::runtime::executor::block_on(plugin.host().expect("a machine").init(None))
+                .expect("init");
+        plugin.settle(state);
+        assert!(!plugin.waiting_in(list), "settling ends the wait");
+        assert!(!plugin.waiting_in(detail));
+
+        // A gesture made in the list: the list keeps its rows, the detail waits
+        // for what the click asked for.
+        plugin.start(Some(list));
+        assert!(!plugin.waiting_in(list));
+        assert!(plugin.waiting_in(detail));
+
+        // And a failure ends it as surely as an answer: a panel that spins for
+        // good says less than one that says why.
+        plugin.fail("nope".into());
+        assert!(!plugin.waiting_in(detail));
     }
 
     /// A reload that succeeds **forgets the state**: recompiling gives new
@@ -253,6 +404,6 @@ mod tests {
         plugin.reload();
         assert!(plugin.error.is_none(), "{:?}", plugin.error);
         assert!(!plugin.started(), "the state is forgotten");
-        assert_eq!(*plugin.tree, Node::nothing());
+        assert_eq!(*plugin.tree_of("main"), Node::nothing());
     }
 }

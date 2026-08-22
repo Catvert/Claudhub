@@ -21,7 +21,7 @@ use gpui::{
 use gpui_component::{
     dock::{DockPlacement, InsertTarget, PanelId},
     menu::{ContextMenuExt, PopupMenuItem},
-    v_flex, ActiveTheme,
+    v_flex, ActiveTheme, WindowExt as _,
 };
 
 use crate::terminal::{
@@ -73,6 +73,11 @@ pub struct TerminalView {
     pending_size: Option<TermSize>,
     /// True when a deferred transmission is already scheduled.
     resize_scheduled: bool,
+    /// True when the geometry has changed since the running wait last looked.
+    ///
+    /// That is what makes the wait *trailing*: it restarts as long as the hand
+    /// is still moving, so the pty is resized once, at the end.
+    resize_moved: bool,
     label: SharedString,
     /// True when this tab runs a coding agent.
     ///
@@ -166,6 +171,7 @@ impl TerminalView {
             scroll_remainder: 0.,
             pending_size: None,
             resize_scheduled: false,
+            resize_moved: false,
             label,
             agent,
         }
@@ -199,6 +205,22 @@ impl TerminalView {
         self.terminal.scroll_to_bottom();
         self.snapshot = self.terminal.snapshot();
         cx.notify();
+    }
+
+    /// Whether something is running in there — what closing has to ask.
+    ///
+    /// Two shapes, and only one of them is job control. A **shell** is busy when
+    /// a command holds the pty's foreground group (`Terminal::busy`). An
+    /// **agent's tab** has no prompt to come back to — its child *is* the
+    /// command — so it counts as busy for as long as it lives. What tells them
+    /// apart is the profile the tab was launched with, and not "we named a
+    /// program": the shell itself is named too, every tab of this window
+    /// launching the one from the settings.
+    pub fn busy(&self) -> bool {
+        if self.terminal.has_exited() {
+            return false;
+        }
+        self.agent || self.terminal.busy()
     }
 
     pub fn label(&self) -> SharedString {
@@ -271,28 +293,52 @@ impl TerminalView {
         );
     }
 
-    /// Passes the new geometry on, once the drag has settled.
+    /// Passes the new geometry on, once the drag has **stopped**.
     ///
     /// A mouse resize goes through every intermediate width. Passing them all on
     /// amounts to sending one `SIGWINCH` per frame: the program redraws every
     /// time, and since it redraws *in place*, its successive prompts pile up
     /// instead of replacing each other. So we wait for the size to settle;
     /// meanwhile, the panel clips the old grid, exactly as a window being
-    /// resized does.
+    /// resized does, and `pending_size` is what the tile paints over it.
+    ///
+    /// **The wait restarts on every change**, which is the difference between
+    /// "one resize every 150 ms while the hand moves" and "one resize when the
+    /// hand stops". It only started to matter when a dozen ptys came to depend
+    /// on a single drag — the multiplexer's grid — and it is the honest reading
+    /// of the sentence above: what is worth passing on is a geometry someone
+    /// has settled on.
+    ///
+    /// Bounded all the same (`MAX_DEFERRALS`): a size that changed forever —
+    /// an animation, a layout that never converges — would otherwise leave the
+    /// program at a geometry that has not existed for a long time, and nothing
+    /// would say why.
     fn request_size(&mut self, size: TermSize, cx: &mut Context<Self>) {
         if self.terminal.size() == size {
             self.pending_size = None;
             return;
         }
         self.pending_size = Some(size);
+        // Noted whether or not a wait is already running: it is what tells the
+        // one that is running that the hand has moved again.
+        self.resize_moved = true;
         if self.resize_scheduled {
             return;
         }
         self.resize_scheduled = true;
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(RESIZE_QUIET).await;
+            for _ in 0..MAX_DEFERRALS {
+                cx.background_executor().timer(RESIZE_QUIET).await;
+                let moved = this
+                    .update(cx, |this, _| std::mem::take(&mut this.resize_moved))
+                    .unwrap_or(false);
+                if !moved {
+                    break;
+                }
+            }
             let _ = this.update(cx, |this, cx| {
                 this.resize_scheduled = false;
+                this.resize_moved = false;
                 if let Some(size) = this.pending_size.take() {
                     this.terminal.resize(size);
                     this.snapshot = this.terminal.snapshot();
@@ -554,6 +600,14 @@ impl TerminalView {
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // **The wheel stops here**, whatever comes of it. A terminal is the
+        // only view that answers a notch with something other than a scroll —
+        // arrows in the alternate screen, a report to the program, a zoom —
+        // and the multiplexer's grid, which does scroll, sits above a dozen of
+        // them: without this, one notch over a tile would move the tile *and*
+        // the grid under it. A fraction of a line that has not added up to one
+        // yet is consumed just the same, or the leftovers would leak upward.
+        cx.stop_propagation();
         let line_height = window.line_height().max(px(1.));
         // The platform key changes the wheel's meaning: we enlarge the text
         // instead of scrolling back. The terminal handles its own scrolling, so
@@ -669,6 +723,18 @@ impl Render for TerminalView {
             .map(|line| {
                 div()
                     .h(cell_height)
+                    // **A line is never squeezed**, and this is not a
+                    // refinement: the box holds `size_full`, so as soon as the
+                    // grid has more lines than fit — which is the whole of a
+                    // shrinking resize, the pty being told only once the hand
+                    // stops, and the whole of a spawn, whose 80×24 lands in
+                    // whatever room there is — flexbox takes the height back
+                    // out of every child. The glyphs are then drawn crushed,
+                    // and it reads as the terminal scaling its own picture. A
+                    // line that keeps its height simply overflows the bottom,
+                    // which `overflow_hidden` clips: exactly what a window
+                    // being resized does.
+                    .flex_shrink_0()
                     .w_full()
                     .overflow_hidden()
                     .whitespace_nowrap()
@@ -755,6 +821,38 @@ impl Render for TerminalView {
             .child(measure)
             .child(v_flex().size_full().overflow_hidden().children(lines))
             .children(self.render_cursor(focused, cx))
+            // What the grid **will** be, while the hand is still moving.
+            //
+            // The pty is only resized once the drag stops, so what is painted
+            // underneath during that time is the old grid, clipped — which
+            // reads as a frozen terminal. This badge is the whole answer: it
+            // says the geometry is on its way and what it will be, the way
+            // every tiling window manager does. It exists because of the
+            // multiplexer, where one drag moves a dozen terminals at once, and
+            // it is just as right on a dock splitter.
+            .children(self.pending_size.map(|size| {
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .rounded(cx.theme().radius)
+                            .bg(cx.theme().popover)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .text_size(font_size)
+                            .text_color(cx.theme().popover_foreground)
+                            .child(SharedString::from(format!(
+                                "{} × {}",
+                                size.columns, size.lines
+                            ))),
+                    )
+            }))
     }
 }
 
@@ -801,6 +899,11 @@ pub fn grid_size(space: gpui::Size<Pixels>, cell: gpui::Size<Pixels>) -> (usize,
 
 /// The quiet time before a new geometry is passed to the pty.
 const RESIZE_QUIET: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// How many quiet times a size may keep moving through before it is passed on
+/// anyway. Three seconds: longer than a drag, shorter than a wait one would
+/// blame on the terminal.
+const MAX_DEFERRALS: usize = 20;
 
 /// One wheel notch is worth one point of size.
 ///
@@ -1042,6 +1145,8 @@ pub struct OpenTerminal {
     pub panels: Vec<Entity<crate::ui::panels::TerminalPanel>>,
 }
 
+impl OpenTerminal {}
+
 impl ClaudhubApp {
     /// The terminals of the worktree being looked at, in the order they opened.
     pub(super) fn terminals_of(&self, worktree: &Path) -> Vec<&OpenTerminal> {
@@ -1107,10 +1212,24 @@ impl ClaudhubApp {
         };
         let view =
             cx.new(|cx| TerminalView::attach(terminal, launch.label, launch.agent, window, cx));
+        // **A terminal opened on purpose is a terminal one wants to see.** The
+        // panel may have been hidden — from the corner button, or from a
+        // view's `…` menu —, and a pty installed behind a hidden panel is a
+        // process nobody can answer: the `+` of the status bar looked broken,
+        // the project task ran out of sight, the prompt handed to an agent
+        // landed nowhere. Only for the worktree being looked at, since it is
+        // the only one whose terminals this flag shows; and `set_panel_visible`
+        // rather than `show_terminal_panel`, which opens one when there is none
+        // — from here that is the recursion of opening the terminal we are
+        // opening. It comes **before** `install_terminal`, which hands the
+        // fresh panel the visibility it reads now.
+        if self.active.as_deref() == Some(worktree) {
+            self.set_panel_visible(crate::ui::panels::TerminalPanel::NAME, true, cx);
+        }
         self.install_terminal(worktree.to_path_buf(), view, window, cx);
     }
 
-    /// Puts a terminal's five panels into the five docks, and shows it.
+    /// Puts a terminal's faces into the docks that carry one, and shows it.
     ///
     /// Split out from `open_terminal` because the layout registry takes the
     /// same path: a terminal read back from `layout.json` is a fresh pty that
@@ -1128,10 +1247,17 @@ impl ClaudhubApp {
         // themselves — the entity is out of the table while this runs.
         let visible = self.terminal_shown(&worktree, cx);
         let mut panels = Vec::new();
-        for _ in crate::ui::workspace::Workspace::ALL {
+        for workspace in crate::ui::workspace::Workspace::ALL {
             let (app, worktree, view) = (app.clone(), worktree.clone(), view.clone());
+            // The multiplexer's face is the same panel, told two things the
+            // others are not: show yourself whatever worktree is being looked
+            // at, and say in your tab which project you belong to.
             panels.push(cx.new(|cx| {
-                crate::ui::panels::TerminalPanel::new(&app, worktree, view, visible, cx)
+                if workspace.shows_every_worktree() {
+                    crate::ui::panels::TerminalPanel::in_grid(&app, worktree, view, cx)
+                } else {
+                    crate::ui::panels::TerminalPanel::new(&app, worktree, view, visible, cx)
+                }
             }));
         }
         self.terminals.push(OpenTerminal {
@@ -1196,10 +1322,35 @@ impl ClaudhubApp {
                     })
                 })
                 .or_else(|| {
-                    // No terminal here yet: the slot under the whole centre,
-                    // which is where the default layout put the permanent panel
-                    // before terminals became panels of their own.
-                    let node = dock.layout(DockPlacement::Center)?.root().id();
+                    // The multiplexer holds nothing **but** terminals: the
+                    // first one takes the whole centre, which is where
+                    // `add_panel_view` has already put it. Splitting the empty
+                    // root would pin it into a band at the bottom with nothing
+                    // above.
+                    if workspace.shows_every_worktree() {
+                        return None;
+                    }
+                    // No terminal here yet: the slot under the screen's
+                    // **content**, which on every screen but the review is the
+                    // whole centre — and on the review is its right-hand half.
+                    //
+                    // The review's list column lives in the centre rather than
+                    // in a dock of its own, so a terminal opened under the
+                    // whole row raised the file list along with the diff, for
+                    // nothing: one reads a list beside a terminal, never above
+                    // one. Taking the last slot of a row says that in the one
+                    // rule that also gives the right answer where the centre
+                    // holds a single column.
+                    let tree = dock.layout(DockPlacement::Center)?;
+                    let node = match tree.root().kind() {
+                        gpui_component::dock::PaneRef::Split {
+                            axis: gpui::Axis::Horizontal,
+                            children,
+                            ..
+                        } => children.last().map(|child| child.id()),
+                        _ => None,
+                    }
+                    .unwrap_or_else(|| tree.root().id());
                     Some(InsertTarget::Split {
                         node,
                         placement: gpui_base::Placement::Bottom,
@@ -1288,6 +1439,55 @@ impl ClaudhubApp {
         );
     }
 
+    /// The two gestures that close a terminal: the cross, and `Ctrl+W`.
+    ///
+    /// **A command running in there is asked about**, and it is the one place
+    /// this window asks about something git cannot undo: closing sends SIGHUP,
+    /// and what dies with it is a build half done, a migration half applied, an
+    /// agent halfway through a task. Everywhere else the same tab closes without
+    /// a word — a shell at its prompt has nothing to lose.
+    ///
+    /// The dock's own removal does **not** come through here: by the time
+    /// `on_removed` fires the tab is already gone, and a cancelled dialogue
+    /// would leave a pty alive with nothing to show it.
+    pub(super) fn ask_close_terminal(
+        &mut self,
+        view: gpui::EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let busy = self
+            .terminals
+            .iter()
+            .find(|terminal| terminal.view.entity_id() == view)
+            .map(|terminal| terminal.view.clone())
+            .filter(|terminal| terminal.read(cx).busy());
+        let Some(terminal) = busy else {
+            self.close_terminal(view, window, cx);
+            return;
+        };
+        let label = terminal.read(cx).label();
+        let entity = cx.entity();
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let (entity, label) = (entity.clone(), label.clone());
+            dialog
+                .title(tr!("terminal-close-busy"))
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().text_sm().child(label))
+                        .child(div().text_xs().child(tr!("terminal-close-busy-help"))),
+                )
+                .overlay_closable(false)
+                .close_button(false)
+                .footer(crate::ui::dialogs::confirm())
+                .on_ok(move |_, window, cx| {
+                    entity.update(cx, |this, cx| this.close_terminal(view, window, cx));
+                    true
+                })
+        });
+    }
+
     /// Closes a terminal: its pty, and its panel in each of the five docks.
     ///
     /// Called by whichever panel the user closed — one screen's — and it takes
@@ -1371,7 +1571,7 @@ impl ClaudhubApp {
             .or_else(|| self.terminals_of(worktree).into_iter().next_back())
             .map(|terminal| terminal.view.entity_id());
         if let Some(view) = doomed {
-            self.close_terminal(view, window, cx);
+            self.ask_close_terminal(view, window, cx);
         }
     }
 
@@ -1524,6 +1724,26 @@ impl ClaudhubApp {
         if let Some(panel) = panel {
             crate::ui::panels::TerminalPanel::activate(&panel, window, cx);
         }
+    }
+
+    /// Goes to work in a project picked from the multiplexer.
+    ///
+    /// Three things in one gesture, and none can be dropped: the worktree
+    /// becomes the one being looked at — every dock only ever shows its own —,
+    /// the terminals are made visible again in case they had been hidden, and
+    /// the screen goes back to the last one **worked** in. Staying on the grid
+    /// would answer "go here" with the same page one was already reading.
+    pub(super) fn work_in_worktree(
+        &mut self,
+        worktree: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let back = self.worked_in;
+        self.select_worktree(worktree.to_path_buf(), window, cx);
+        self.set_panel_visible(crate::ui::panels::TerminalPanel::NAME, true, cx);
+        self.enter_workspace(back, window, cx);
+        cx.notify();
     }
 
     /// The most recent agent terminal still running on this worktree.

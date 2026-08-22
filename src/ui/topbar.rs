@@ -12,10 +12,10 @@
 
 use gpui::{div, prelude::*, px, Context, Entity, Window};
 use gpui_component::{
-    button::{Button, ButtonVariants},
+    button::{Button, ButtonGroup, ButtonVariants},
     h_flex,
     menu::{DropdownMenu, PopupMenuItem},
-    v_flex, ActiveTheme, Sizable, StyledExt, TitleBar,
+    v_flex, ActiveTheme, Disableable, Sizable, StyledExt, TitleBar,
 };
 
 use crate::runtime::Cmd;
@@ -46,7 +46,7 @@ fn plugin_toggle(app: Entity<ClaudhubApp>, name: &'static str) -> PopupMenuItem 
     toggle_row(app, name, move || {
         gpui::SharedString::from(
             crate::ui::plugin_view::by_panel(name)
-                .map(|manifest| manifest.title().to_string())
+                .map(|(_, panel)| panel.title.clone())
                 .unwrap_or_else(|| name.to_string()),
         )
     })
@@ -173,12 +173,46 @@ struct WorktreeItem {
 }
 
 impl ClaudhubApp {
+    /// The two arrows of the trail — `ui::jumps` — and the fourth and fifth
+    /// mouse buttons made visible.
+    ///
+    /// Always both, greyed when there is nowhere to go: an arrow that appears
+    /// and disappears moves everything beside it every time one follows a
+    /// link, and the pickers are what sits beside it here.
+    fn render_trail_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (back, forward) = self.can_travel();
+        h_flex()
+            .flex_shrink_0()
+            .child(
+                Button::new("trail-back")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("arrow-left"))
+                    .disabled(!back)
+                    .tooltip(tr!("editor-jump-back"))
+                    .on_click(cx.listener(|this, _, window, cx| this.jump_back(window, cx))),
+            )
+            .child(
+                Button::new("trail-forward")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("arrow-right"))
+                    .disabled(!forward)
+                    .tooltip(tr!("editor-jump-forward"))
+                    .on_click(cx.listener(|this, _, window, cx| this.jump_forward(window, cx))),
+            )
+    }
+
     pub(super) fn render_topbar(
         &mut self,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active = self.active.clone();
+        // One list, read twice — by what the group shows and by what a click
+        // means. Two lists would drift at the first addition, and the drift is
+        // silent: the button would open the screen next door.
+        let aside = crate::ui::workspace::Workspace::ASIDE;
         // The top bar **is** the window's title bar.
         //
         // `TitleBar::title_bar_options()` asks the platform not to draw one: on
@@ -206,6 +240,13 @@ impl ClaudhubApp {
                     .gap_1()
                     .items_center()
                     .child(self.render_main_menu(cx))
+                    // The trail, before the pickers: it is the one thing here
+                    // that speaks of *where one has been* rather than of what
+                    // one is looking at, and it belongs to the title bar
+                    // because it is the only chrome that crosses the screens
+                    // the trail crosses. The editor's bar keeps its own two,
+                    // on the same trail.
+                    .child(self.render_trail_buttons(cx))
                     // The two pickers that drive everything else, in the order
                     // one goes through them: the worktree, then its branch.
                     .child(self.render_worktree_picker(cx))
@@ -228,25 +269,62 @@ impl ClaudhubApp {
                     // are dock tabs. And the terminals have gone down to the
                     // status bar, at the corner of the window they open on.
                     .child(div().flex_1())
-                    // The settings, at the far right of the title bar, where an
-                    // application's settings are. They were a seventh button in
-                    // the screen picker, which is the row of what one **works**
-                    // in; going there is not work, it is changing how the rest
-                    // behaves. It stays a screen — `Alt+6` still opens it, and
-                    // the gear only lights the way in.
+                    // The two screens one does not work in, at the far right
+                    // of the title bar and in a group of their own: the
+                    // multiplexer is where one goes to see what is running
+                    // everywhere at once before leaving for the worktree it
+                    // pointed at, and the settings are where one changes how
+                    // the rest behaves. Neither is work, which is why they are
+                    // out of the screen picker — that row is the row of the
+                    // work — and a group is what says they are the same kind of
+                    // detour rather than two loose icons. They stay screens:
+                    // `Alt+6` and `Alt+7` still open them.
                     .child(
-                        Button::new("open-settings")
-                            .ghost()
+                        ButtonGroup::new("aside-nav")
+                            .compact()
                             .xsmall()
-                            .icon(icon("settings"))
-                            .tooltip(tr!("workspace-settings"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.enter_workspace(
-                                    crate::ui::workspace::Workspace::Settings,
-                                    window,
-                                    cx,
-                                );
-                            })),
+                            .children(aside.map(|workspace| {
+                                Button::new(("aside", workspace as usize))
+                                    .icon(icon(workspace.icon()))
+                                    .tooltip(tr!(workspace.label()))
+                                    // The name is written, as in the screen
+                                    // picker: an icon alone is a rebus one
+                                    // learns rather than reads. **Except the
+                                    // gear**, the one icon of this window that
+                                    // needs no gloss: it is where an
+                                    // application's settings are on every one of
+                                    // them, and the word beside it only takes
+                                    // width from the pickers.
+                                    .when(
+                                        workspace != crate::ui::workspace::Workspace::Settings,
+                                        |button| button.label(tr!(workspace.label())),
+                                    )
+                                    // Solid against outline, as in the screen
+                                    // picker: the "selected" state of an
+                                    // outlined group is only a slightly lighter
+                                    // background, invisible on half the themes.
+                                    .map(|button| {
+                                        if self.workspace == workspace {
+                                            button.primary()
+                                        } else {
+                                            button.outline()
+                                        }
+                                    })
+                            }))
+                            .on_click(cx.listener(
+                                move |this, selected: &Vec<usize>, window, cx| {
+                                    let Some(workspace) =
+                                        selected.first().and_then(|ix| aside.get(*ix).copied())
+                                    else {
+                                        return;
+                                    };
+                                    // The step is written down, as in the
+                                    // screen picker: a detour to the settings
+                                    // or to the multiplexer is exactly what one
+                                    // wants `Ctrl+O` to undo.
+                                    this.travel_to(workspace, window, cx);
+                                },
+                            )),
                     ),
             )
     }
@@ -299,7 +377,12 @@ impl ClaudhubApp {
                     crate::ui::plugin_view::on_screen(workspace.key()).fold(
                         menu,
                         |menu, manifest| {
-                            menu.item(plugin_toggle(for_views.clone(), manifest.panel))
+                            // Each **panel**, not each plugin: a master/detail
+                            // plugin has two tabs, and hiding one is a gesture
+                            // one has to be able to undo.
+                            manifest.panels.iter().fold(menu, |menu, panel| {
+                                menu.item(plugin_toggle(for_views.clone(), panel.name))
+                            })
                         },
                     )
                 })

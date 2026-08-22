@@ -21,6 +21,9 @@ pub const MANIFEST: &str = "plugin.toml";
 /// is pruned rather than left to come back as an empty frame.
 pub const PANEL_PREFIX: &str = "ClaudhubPlugin:";
 
+/// The panel a manifest means when it declares none by name.
+const LONE_PANEL: &str = "main";
+
 /// The screens a plugin may put its panel on.
 ///
 /// Named by the same keys the layout is saved under (`workspace::key`), so a
@@ -50,11 +53,67 @@ impl Capability {
     }
 }
 
-/// A plugin's declaration, as read from disk.
+/// Where a panel starts out on its screen.
+///
+/// Only where it **starts**: the dock lets one drag a panel anywhere, and what
+/// a manifest picks is the arrangement one lands on, not a constraint. Two
+/// values and not four — `left` and `centre` are what a master/detail plugin
+/// needs, and a plugin that wants to sit under the centre is asking for the
+/// terminals' place, which one reaches by dragging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Place {
+    /// The screen's list column, beside the trees and the file lists. Where a
+    /// plugin's single panel has always gone, hence the default.
+    #[default]
+    Left,
+    /// The wide half, beside the diff and the editor: what one reads rather
+    /// than what one picks from.
+    #[serde(alias = "center")]
+    Centre,
+}
+
+/// One panel a plugin declares.
+///
+/// A plugin used to have exactly one, and that shape is kept as sugar: a
+/// manifest with a top-level `title` and no `[[panel]]` declares a single panel
+/// called `main`. What the array buys is the master/detail arrangement — a list
+/// on the left, what one picked in the centre — which a single panel can only
+/// simulate by stacking the detail under the list and scrolling.
 #[derive(Debug, Clone, Deserialize)]
-pub struct Declaration {
-    /// The name shown on the tab. Not a key: a plugin's strings are its own.
+#[serde(deny_unknown_fields)]
+pub struct PanelDeclaration {
+    /// Names the panel to the script, which receives it as `view`'s second
+    /// argument. Stable: it also keys the panel in the dock's registry and in
+    /// a saved layout.
+    #[serde(default = "lone_panel")]
+    pub id: String,
+    /// The name on the tab. Not a key: a plugin's strings are its own.
     pub title: String,
+    /// A Lucide name; the plugin's own icon when this says nothing.
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub place: Place,
+}
+
+/// A plugin's declaration, as read from disk.
+///
+/// **Unknown keys are refused**, here and in a panel, and that is not
+/// strictness for its own sake: TOML gives every bare key that follows a
+/// `[[panel]]` header to that panel, so a `capabilities` written after the
+/// array simply stops being the plugin's. Nothing fails — the plugin loads,
+/// declares no capability, and is refused the first request it makes, which
+/// reads as a broken plugin rather than a misplaced line.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Declaration {
+    /// The name shown on the tab of a plugin that declares one panel, and the
+    /// plugin's own name everywhere else — the settings page, the logs.
+    pub title: String,
+    /// The panels, when there is more than the one `title` describes.
+    #[serde(default, rename = "panel")]
+    pub panels: Vec<PanelDeclaration>,
     /// The screen whose dock carries the panel.
     #[serde(default = "default_screen")]
     pub screen: String,
@@ -90,6 +149,23 @@ fn default_screen() -> String {
     "review".into()
 }
 
+fn lone_panel() -> String {
+    LONE_PANEL.into()
+}
+
+/// One panel, as the window holds it.
+#[derive(Debug, Clone)]
+pub struct PanelSpec {
+    /// What the script is handed. Unique within a plugin.
+    pub id: String,
+    /// The name in the dock's registry, `ClaudhubPlugin:<plugin>/<panel>`,
+    /// leaked once — see `Manifest::panels`.
+    pub name: &'static str,
+    pub title: String,
+    pub icon: String,
+    pub place: Place,
+}
+
 /// A plugin found on disk: its declaration, plus what only discovery knows.
 #[derive(Debug, Clone)]
 pub struct Manifest {
@@ -98,14 +174,15 @@ pub struct Manifest {
     pub id: String,
     pub dir: PathBuf,
     pub declaration: Declaration,
-    /// The panel's name in the dock's registry, leaked once.
+    /// Its panels, in declaration order — which is the order they are
+    /// registered in and the order their tabs appear in.
     ///
-    /// `BasePanel::panel_name` returns a `&'static str` and a plugin's id is
-    /// only known at run time. Leaking is what bridges the two, and it is safe
-    /// here for one reason worth stating: discovery happens once per session,
-    /// over a bounded directory, and these strings live as long as the window
-    /// does anyway.
-    pub panel: &'static str,
+    /// Each name is leaked once. `BasePanel::panel_name` returns a
+    /// `&'static str` and a plugin's id is only known at run time; leaking is
+    /// what bridges the two, and it is safe here for one reason worth stating:
+    /// discovery happens once per session, over a bounded directory, and these
+    /// strings live as long as the window does anyway.
+    pub panels: Vec<PanelSpec>,
 }
 
 impl Manifest {
@@ -115,6 +192,19 @@ impl Manifest {
 
     pub fn icon(&self) -> &str {
         self.declaration.icon.as_deref().unwrap_or("puzzle")
+    }
+
+    /// The panel this dock name belongs to, if it is one of ours.
+    pub fn panel_named(&self, name: &str) -> Option<&PanelSpec> {
+        self.panels.iter().find(|panel| panel.name == name)
+    }
+
+    /// Does this plugin own that dock name.
+    ///
+    /// What everything keyed by a panel goes through: one plugin holds one
+    /// script and one state, and its panels are several windows onto it.
+    pub fn owns(&self, name: &str) -> bool {
+        self.panel_named(name).is_some()
     }
 
     /// The script's path.
@@ -170,13 +260,69 @@ pub fn read(dir: &Path) -> Result<Option<Manifest>> {
     if !dir.join("main.rn").is_file() {
         bail!("{id}: no main.rn beside its {MANIFEST}");
     }
-    let panel: &'static str = format!("{PANEL_PREFIX}{id}").leak();
+    let panels = panels_of(&id, &declaration)?;
     Ok(Some(Manifest {
         id,
         dir: dir.to_path_buf(),
         declaration,
-        panel,
+        panels,
     }))
+}
+
+/// The one panel a declaration describes, for a manifest built in a test.
+///
+/// The same path as a real one: `panels_of` cannot fail on a declaration with
+/// no `[[panel]]` in it, since there is nothing there to clash or be named
+/// wrongly.
+#[cfg(test)]
+pub fn sole_panel(id: &str, declaration: &Declaration) -> Vec<PanelSpec> {
+    panels_of(id, declaration).expect("a declaration with no panel array")
+}
+
+/// What a manifest's panels come to.
+///
+/// A manifest that declares none has the one its `title` describes: that is the
+/// shape every plugin had before, and it is a line rather than a block for a
+/// plugin with one thing to show.
+///
+/// A duplicated id is **refused** rather than made unique: it would key two
+/// panels to the same tree, the same scroll handle and the same fields, and
+/// none of that fails — it just paints the same thing twice.
+fn panels_of(id: &str, declaration: &Declaration) -> Result<Vec<PanelSpec>> {
+    let declared = if declaration.panels.is_empty() {
+        vec![PanelDeclaration {
+            id: lone_panel(),
+            title: declaration.title.clone(),
+            icon: declaration.icon.clone(),
+            place: Place::default(),
+        }]
+    } else {
+        declaration.panels.clone()
+    };
+    let mut panels: Vec<PanelSpec> = Vec::with_capacity(declared.len());
+    for panel in declared {
+        if panel.id.is_empty() || panel.id.contains('/') {
+            bail!(
+                "{id}: `{}` is not a panel id (no slash, not empty)",
+                panel.id
+            );
+        }
+        if panels.iter().any(|kept| kept.id == panel.id) {
+            bail!("{id}: two panels called `{}`", panel.id);
+        }
+        let name: &'static str = format!("{PANEL_PREFIX}{id}/{}", panel.id).leak();
+        panels.push(PanelSpec {
+            title: panel.title,
+            icon: panel
+                .icon
+                .or_else(|| declaration.icon.clone())
+                .unwrap_or_else(|| "puzzle".into()),
+            place: panel.place,
+            id: panel.id,
+            name,
+        });
+    }
+    Ok(panels)
 }
 
 /// Every plugin under `root`, in a stable order.
@@ -278,7 +424,10 @@ mod tests {
         let found = discover(&root);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "ci");
-        assert_eq!(found[0].panel, "ClaudhubPlugin:ci");
+        assert_eq!(found[0].panels.len(), 1);
+        assert_eq!(found[0].panels[0].id, "main");
+        assert_eq!(found[0].panels[0].name, "ClaudhubPlugin:ci/main");
+        assert_eq!(found[0].panels[0].place, Place::Left);
         assert!(found[0].allows(Capability::Shell));
         assert!(!found[0].allows(Capability::Http));
     }
@@ -310,6 +459,88 @@ mod tests {
         assert_eq!(found[0].id, "ddd");
         // The default screen, when the manifest says nothing.
         assert_eq!(found[0].declaration.screen, "review");
+    }
+
+    /// A plugin lays a list on the left and what one picked in the centre.
+    ///
+    /// This is what the array buys, and it is why it exists: a single panel can
+    /// only stack the detail under the list, so choosing an error scrolls the
+    /// list one was choosing from out of sight.
+    #[test]
+    fn a_plugin_declares_a_list_and_a_detail() {
+        let root = scratch("two-panels");
+        write(
+            &root,
+            "sentry",
+            "title = \"Sentry\"\nicon = \"triangle-alert\"\n\n[[panel]]\nid = \"issues\"\ntitle = \"Erreurs\"\n\n[[panel]]\nid = \"issue\"\ntitle = \"Erreur\"\nplace = \"centre\"\nicon = \"bug\"\n",
+            Some("pub fn view(s, p){}"),
+        );
+        let manifest = &discover(&root)[0];
+        let names: Vec<_> = manifest.panels.iter().map(|p| p.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "ClaudhubPlugin:sentry/issues",
+                "ClaudhubPlugin:sentry/issue"
+            ]
+        );
+        assert_eq!(manifest.panels[0].place, Place::Left);
+        assert_eq!(manifest.panels[1].place, Place::Centre);
+        // A panel that says nothing about its icon wears the plugin's.
+        assert_eq!(manifest.panels[0].icon, "triangle-alert");
+        assert_eq!(manifest.panels[1].icon, "bug");
+        // Both are the same plugin: one script, one state, two windows onto it.
+        assert!(manifest.owns("ClaudhubPlugin:sentry/issue"));
+        assert!(!manifest.owns("ClaudhubPlugin:sentry/nowhere"));
+        assert_eq!(
+            manifest
+                .panel_named("ClaudhubPlugin:sentry/issues")
+                .map(|p| p.title.as_str()),
+            Some("Erreurs")
+        );
+    }
+
+    /// `center` reads too: the code and the prose here say `centre`, and a
+    /// manifest written by someone who does not is not a manifest to refuse.
+    #[test]
+    fn the_other_spelling_of_the_centre_is_accepted() {
+        let root = scratch("spelling");
+        write(
+            &root,
+            "x",
+            "title = \"X\"\n\n[[panel]]\ntitle = \"X\"\nplace = \"center\"\n",
+            Some("pub fn view(s, p){}"),
+        );
+        assert_eq!(discover(&root)[0].panels[0].place, Place::Centre);
+    }
+
+    /// A key written after a `[[panel]]` header belongs to that panel, and
+    /// stops being the plugin's. Refusing what a panel does not know is what
+    /// turns a silent misplacement into a line one can read.
+    #[test]
+    fn a_key_in_the_wrong_place_is_refused_rather_than_lost() {
+        let root = scratch("misplaced");
+        write(
+            &root,
+            "x",
+            "title = \"X\"\n\n[[panel]]\ntitle = \"X\"\ncapabilities = [\"http\"]\n",
+            Some("pub fn view(s, p){}"),
+        );
+        assert!(discover(&root).is_empty());
+    }
+
+    /// Two panels under one id would key the same tree, the same scroll and the
+    /// same fields — nothing fails, the panel just paints itself twice.
+    #[test]
+    fn two_panels_may_not_share_a_name() {
+        let root = scratch("clash");
+        write(
+            &root,
+            "x",
+            "title = \"X\"\n\n[[panel]]\nid = \"a\"\ntitle = \"A\"\n\n[[panel]]\nid = \"a\"\ntitle = \"B\"\n",
+            Some("pub fn view(s, p){}"),
+        );
+        assert!(discover(&root).is_empty());
     }
 
     #[test]

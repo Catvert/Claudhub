@@ -28,6 +28,24 @@ required = ["org", "token"]
 # système. Les deux dernières le gardent hors d'un fichier qu'on recopie.
 secrets = ["token"]
 
+# Deux panneaux : la liste des erreurs à gauche, celle qu'on a ouverte au
+# centre. C'est le geste de tout le reste de la fenêtre — l'arbre du projet et
+# l'éditeur, les occurrences et l'aperçu — et un seul panneau ne pouvait que
+# les empiler, si bien que choisir une erreur poussait hors de vue la liste
+# dans laquelle on choisissait.
+#
+# Les deux lisent le **même** état : c'est un script, une `init`, un `update`.
+# Ce qui les distingue est l'identifiant que `view` reçoit en second argument.
+[[panel]]
+id = "issues"
+title = "Erreurs"
+
+[[panel]]
+id = "issue"
+title = "Erreur"
+place = "centre"
+icon = "bug"
+
 [settings]
 # L'organisation appartient à la machine ; le projet appartient au dépôt, et
 # c'est `set_state` qui le retient — deux dépôts d'une même organisation n'ont

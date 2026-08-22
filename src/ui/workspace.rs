@@ -29,6 +29,7 @@ use gpui_component::{
     dock::{DockArea, DockLayout, DockPlacement},
 };
 
+use crate::plugin::manifest;
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
@@ -62,6 +63,20 @@ pub enum Workspace {
     Search,
     Db,
     Sentry,
+    /// Every terminal of the window at once, in a grid grouped by worktree.
+    ///
+    /// **A screen and not a panel**, and for the reason every other screen
+    /// exists: what one comes here for is the whole window's terminals, and no
+    /// panel can show them — a terminal is a dock panel, a panel belongs to one
+    /// dock area at a time, and the dock only ever shows the worktree being
+    /// looked at. The grid is the one view that crosses the worktrees, which is
+    /// exactly the question it answers: which of the agents I left running has
+    /// finished.
+    ///
+    /// **It is not in the screen picker**, for the same reason the settings are
+    /// not: one does not come here to work, one comes to look. It has its own
+    /// button beside the gear, at the far right of the title bar.
+    Multiplexer,
     /// The settings, and the log they let you read.
     ///
     /// **A screen and not a dialog.** They were a modal window, which is what
@@ -75,28 +90,37 @@ pub enum Workspace {
 }
 
 impl Workspace {
-    /// Its rank in `ALL`, which is how a terminal's five panels are indexed —
-    /// one per screen, in this order.
+    /// Its rank in `ALL`, which is what `Alt+1`… names — and the index of a
+    /// terminal's face for that screen, `OpenTerminal::panels` being in the
+    /// same order.
     pub fn index(self) -> usize {
         Self::ALL.iter().position(|w| *w == self).unwrap_or(0)
     }
 
-    pub const ALL: [Workspace; 6] = [
+    pub const ALL: [Workspace; 7] = [
         Workspace::Git,
         Workspace::Files,
         Workspace::Search,
         Workspace::Db,
         Workspace::Sentry,
         Workspace::Settings,
+        // **Last, and it is not an aesthetic choice**: `Alt+1` to `Alt+7` are
+        // ranks in this array, and a screen inserted in the middle would move
+        // every key after it. See `shortcuts::go_to_workspace`.
+        Workspace::Multiplexer,
     ];
 
-    /// The screens the bar offers, which is every one that is **work**.
+    /// The two screens one does not **work** in, in the order they sit at the
+    /// right of the title bar.
     ///
-    /// The settings are not among them, and it is the same reasoning that put
-    /// them last when they were: one does not go there to work, one goes there
-    /// to change how the rest behaves. They have their own gear, at the far
-    /// right of the title bar, where an application's settings are — see
-    /// `topbar::render_topbar`.
+    /// The multiplexer is where one goes to see what is running everywhere at
+    /// once before leaving for the worktree it pointed at, and the settings are
+    /// where one changes how the rest behaves. They are a button group of their
+    /// own there rather than a seventh and eighth button in the picker, which is
+    /// the row of the work — see `topbar::render_topbar`. `working` is `ALL`
+    /// less these two, so the two lists cannot drift apart.
+    pub const ASIDE: [Workspace; 2] = [Workspace::Multiplexer, Workspace::Settings];
+
     /// The screens the bar offers, in order.
     ///
     /// The settings are not among them — one does not go there to work — and
@@ -106,7 +130,7 @@ impl Workspace {
     pub fn working(cx: &App) -> Vec<Workspace> {
         Self::ALL
             .into_iter()
-            .filter(|w| *w != Workspace::Settings)
+            .filter(|w| !Self::ASIDE.contains(w))
             .filter(|w| crate::ui::plugin_view::screen_has_content(*w, cx))
             .collect()
     }
@@ -119,6 +143,17 @@ impl Workspace {
     /// and everything it used to carry itself is now one of them.
     pub fn carries_own_panels(self) -> bool {
         !matches!(self, Self::Sentry)
+    }
+
+    /// Whether this screen shows the terminals of **every** worktree.
+    ///
+    /// Only the multiplexer, and it is the whole of what makes that screen: its
+    /// dock holds the same panels as any other, but their faces there are
+    /// always visible instead of following the worktree being looked at, and
+    /// their tabs say which project they belong to — the one dock that mixes
+    /// them being the one place a tab has to.
+    pub fn shows_every_worktree(self) -> bool {
+        matches!(self, Self::Multiplexer)
     }
 
     /// The name this screen's layout is saved under.
@@ -136,6 +171,7 @@ impl Workspace {
             Self::Db => "db",
             Self::Sentry => "sentry",
             Self::Settings => "settings",
+            Self::Multiplexer => "multiplexer",
         }
     }
 
@@ -152,6 +188,7 @@ impl Workspace {
             Self::Db => "workspace-db",
             Self::Sentry => "workspace-sentry",
             Self::Settings => "workspace-settings",
+            Self::Multiplexer => "workspace-multiplexer",
         }
     }
 
@@ -165,6 +202,7 @@ impl Workspace {
             Self::Db => "database",
             Self::Sentry => "triangle-alert",
             Self::Settings => "settings",
+            Self::Multiplexer => "grid-3x3",
         }
     }
 
@@ -211,6 +249,10 @@ impl Workspace {
                 (TerminalPanel::NAME, "panel-terminal"),
             ],
             Self::Sentry => &[(TerminalPanel::NAME, "panel-terminal")],
+            // The grid holds the terminals itself: there is no terminal panel
+            // here to offer hiding, and hiding the grid would leave a screen
+            // with nothing on it.
+            Self::Multiplexer => &[],
             // The settings themselves are not offered: this screen holds them
             // and nothing else, and hiding them would leave a screen the bar
             // still points at with nothing on it.
@@ -240,20 +282,25 @@ type View = std::sync::Arc<dyn gpui_component::dock::BasePanelView>;
 ///
 /// Each screen has **its** instances, including of the two shared views: a
 /// panel belongs to only one dock at a time, and only one dock is displayed.
-/// A screen's plugin panels, in manifest order.
+/// A screen's plugin panels for one place, in manifest order.
 ///
-/// They join the screen's **natural tab group** rather than a place of their
+/// They join the screen's **existing tab groups** rather than places of their
 /// own: a plugin's panel is one more way of looking at the worktree, and a
 /// column reserved for it would cost the review its width whether a plugin is
-/// installed or not.
+/// installed or not. What `place` chooses is which of the two groups — the list
+/// column or the wide half — and that is what lets one plugin lay a list on the
+/// left and what one picked from it in the centre.
 fn plugin_views(
     workspace: Workspace,
+    place: manifest::Place,
     app: &Entity<ClaudhubApp>,
     cx: &mut Context<DockArea>,
 ) -> Vec<View> {
     crate::ui::plugin_view::on_screen(workspace.key())
-        .map(|manifest| {
-            let panel = manifest.panel;
+        .flat_map(|found| found.panels.iter())
+        .filter(|spec| spec.place == place)
+        .map(|spec| {
+            let panel = spec.name;
             gpui_component::dock::panel_handle(
                 cx.new(|cx| panels::PluginPanel::new(app, panel, cx)),
             ) as View
@@ -268,6 +315,14 @@ pub fn install_default_layout(
     window: &mut Window,
     cx: &mut Context<DockArea>,
 ) {
+    // The multiplexer holds nothing but the terminals, which dock themselves as
+    // they open: there is no default layout to install, and an empty centre is
+    // what a fresh area already is. It is also why that screen has no chrome of
+    // its own — no panel, so no tab bar above the terminals' own, and no title
+    // saying what the six other screens' button already said.
+    if workspace == Workspace::Multiplexer {
+        return;
+    }
     use gpui_component::dock::panel_handle;
     macro_rules! panel {
         ($name:ident) => {
@@ -287,12 +342,14 @@ pub fn install_default_layout(
     // `Option`, because three screens have no left column at all: the review
     // and Sentry fill the width, and the settings' form has a sidebar of pages
     // of its own.
-    // Added to whichever group of this screen holds its lists.
-    let plugins = plugin_views(workspace, app, cx);
-    macro_rules! with_plugins {
-        ($group:expr) => {{
+    // The plugin panels, split by where their manifest puts them: the list
+    // column, or the wide half beside the diff and the editor.
+    let mut listed = plugin_views(workspace, manifest::Place::Left, app, cx);
+    let mut centred = plugin_views(workspace, manifest::Place::Centre, app, cx);
+    macro_rules! with {
+        ($views:expr, $group:expr) => {{
             let mut group = $group;
-            for view in plugins {
+            for view in std::mem::take(&mut $views) {
                 group = group.panel_view(view, cx);
             }
             group
@@ -313,18 +370,21 @@ pub fn install_default_layout(
         Workspace::Git => {
             let list = DockLayout::v_split()
                 .child(
-                    with_plugins!(DockLayout::tabs()
-                        .panel_view(panel!(ChangesPanel), cx)
-                        .panel_view(panel!(BranchPanel), cx)
-                        .panel_view(panel!(HistoryPanel), cx)
-                        // Beside the history, and that is where it belongs: a
-                        // tag names a commit, and the gesture one makes after
-                        // finding the commit worth marking is right there.
-                        .panel_view(panel!(TagsPanel), cx)
-                        // Hidden while there is nothing to resolve: a permanent
-                        // tab would shift the others aside to serve one time in
-                        // a hundred.
-                        .panel_view(panel!(ConflictsPanel), cx)),
+                    with!(
+                        listed,
+                        DockLayout::tabs()
+                            .panel_view(panel!(ChangesPanel), cx)
+                            .panel_view(panel!(BranchPanel), cx)
+                            .panel_view(panel!(HistoryPanel), cx)
+                            // Beside the history, and that is where it belongs: a
+                            // tag names a commit, and the gesture one makes after
+                            // finding the commit worth marking is right there.
+                            .panel_view(panel!(TagsPanel), cx)
+                            // Hidden while there is nothing to resolve: a permanent
+                            // tab would shift the others aside to serve one time in
+                            // a hundred.
+                            .panel_view(panel!(ConflictsPanel), cx)
+                    ),
                     None,
                 )
                 .child(
@@ -334,23 +394,38 @@ pub fn install_default_layout(
             let center = DockLayout::h_split()
                 .child(list, Some(REVIEW_LIST_WIDTH))
                 .child(
-                    DockLayout::tabs().panel_view(panel!(DiffPanel), cx),
+                    with!(
+                        centred,
+                        DockLayout::tabs().panel_view(panel!(DiffPanel), cx)
+                    ),
                     Some(width - REVIEW_LIST_WIDTH),
                 );
             (None, center)
         }
         // Editing: the project tree on the left, the editor in the centre.
         Workspace::Files => {
-            let left = with_plugins!(DockLayout::tabs().panel_view(panel!(FilesPanel), cx));
-            let center = DockLayout::tabs().panel_view(panel!(EditorPanel), cx);
+            let left = with!(
+                listed,
+                DockLayout::tabs().panel_view(panel!(FilesPanel), cx)
+            );
+            let center = with!(
+                centred,
+                DockLayout::tabs().panel_view(panel!(EditorPanel), cx)
+            );
             (Some(left), center)
         }
         // The search: the results on the left, the file under the cursor in
         // the centre. The same shape as the editing screen, and for the same
         // reason — one walks a list on one side and reads on the other.
         Workspace::Search => {
-            let left = DockLayout::tabs().panel_view(panel!(SearchPanel), cx);
-            let center = DockLayout::tabs().panel_view(panel!(SearchPreviewPanel), cx);
+            let left = with!(
+                listed,
+                DockLayout::tabs().panel_view(panel!(SearchPanel), cx)
+            );
+            let center = with!(
+                centred,
+                DockLayout::tabs().panel_view(panel!(SearchPreviewPanel), cx)
+            );
             (Some(left), center)
         }
         // The databases: the schema tree on the left, the console in the
@@ -360,19 +435,30 @@ pub fn install_default_layout(
             // The history is a tab beside the tree and not a panel of its own:
             // one looks at the schema **or** at what one has already asked of
             // it, and two columns would leave the console half the screen.
-            let left = with_plugins!(DockLayout::tabs()
-                .panel_view(panel!(DbPanel), cx)
-                .panel_view(panel!(SqlHistoryPanel), cx));
-            let center = DockLayout::tabs().panel_view(panel!(ConsolePanel), cx);
+            let left = with!(
+                listed,
+                DockLayout::tabs()
+                    .panel_view(panel!(DbPanel), cx)
+                    .panel_view(panel!(SqlHistoryPanel), cx)
+            );
+            let center = with!(
+                centred,
+                DockLayout::tabs().panel_view(panel!(ConsolePanel), cx)
+            );
             (Some(left), center)
         }
         // Sentry's screen carries no panel of ours any more: Sentry is a
         // plugin, and this screen is where the plugins that watch what happens
         // outside the repository land. Empty when none does — a screen the bar
         // still points at with nothing on it, which is the honest picture.
+        // This screen has no column of ours to join, so a plugin that asks for
+        // one **gets one**: that is how a master/detail plugin lays its list on
+        // the left of a screen it is alone on. No plugin asks, no column — a
+        // sidebar that is only ever empty would be a sidebar to hide.
         Workspace::Sentry => {
-            let center = with_plugins!(DockLayout::tabs());
-            (None, center)
+            let left = (!listed.is_empty()).then(|| with!(listed, DockLayout::tabs()));
+            let center = with!(centred, DockLayout::tabs());
+            (left, center)
         }
         // The settings take the whole width: the form has a sidebar of its own,
         // and two side by side would be two lists of pages to read before
@@ -380,8 +466,10 @@ pub fn install_default_layout(
         // adjusted then checked, and what checks it is a shell.
         // No plugin lands here: `manifest::SCREENS` does not offer the
         // settings, which hold the form and nothing else.
+        // Returned above; the arm exists because the match is exhaustive.
+        Workspace::Multiplexer => return,
         Workspace::Settings => {
-            let _ = plugins;
+            let _ = (&listed, &centred);
             let center = DockLayout::tabs().panel_view(panel!(SettingsPanel), cx);
             (None, center)
         }
@@ -449,7 +537,10 @@ impl ClaudhubApp {
                 let Some(workspace) = shown.get(*index).copied() else {
                     return;
                 };
-                this.enter_workspace(workspace, window, cx);
+                // **The step is written down**: this bar is where one leaves a
+                // screen for another, and `Ctrl+O` — or the back button — is
+                // how one comes back to what one was doing there.
+                this.travel_to(workspace, window, cx);
             }))
     }
 }

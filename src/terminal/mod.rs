@@ -167,6 +167,10 @@ pub struct Terminal {
     working_directory: PathBuf,
     title: String,
     exited: bool,
+    /// The pid of what was started in the pty — a shell, or the program a
+    /// profile named. Kept for the one question a closing tab has to ask: is
+    /// anything running in there.
+    child: u32,
 }
 
 /// What is needed to start a session.
@@ -233,6 +237,10 @@ impl Terminal {
             )
         })?;
 
+        // Read before the pty is moved into the loop, which is the only chance:
+        // `EventLoop::new` takes it, and nothing hands the child back.
+        let child = pty.child().id();
+
         let event_loop = EventLoop::new(
             term.clone(),
             proxy.clone(),
@@ -258,6 +266,7 @@ impl Terminal {
             working_directory: options.working_directory.to_path_buf(),
             title: String::new(),
             exited: false,
+            child,
         })
     }
 
@@ -276,6 +285,33 @@ impl Terminal {
 
     pub fn set_title(&mut self, title: String) {
         self.title = title;
+    }
+
+    /// Whether a command is running in front of the shell right now.
+    ///
+    /// What a closing tab asks before killing the pty. A shell sitting at its
+    /// prompt **is** the pty's foreground process group; a shell running a job
+    /// has handed that group over, which is the whole of job control and the
+    /// only reading that costs nothing to take. It says nothing about a tab
+    /// whose child is not a shell — an agent's — and that half of the question
+    /// belongs to the view, which is what knows a profile was launched.
+    ///
+    /// Off Linux it always answers no: reading a foreground group is `/proc`,
+    /// and the Windows build's terminals are the one thing that stays on the
+    /// Windows side.
+    pub fn busy(&self) -> bool {
+        if self.exited {
+            return false;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::read_to_string(format!("/proc/{}/stat", self.child))
+                .ok()
+                .as_deref()
+                .is_some_and(running_command)
+        }
+        #[cfg(not(target_os = "linux"))]
+        false
     }
 
     pub fn has_exited(&self) -> bool {
@@ -488,9 +524,45 @@ impl Drop for Terminal {
     }
 }
 
+/// Whether a shell's `/proc/<pid>/stat` says a job is running in front of it.
+///
+/// The fields are read from the **last closing parenthesis** and not by
+/// splitting the line: the program name is the second field, in parentheses,
+/// and it may hold spaces and parentheses of its own — the same trap
+/// `agent::parse_cpu_ticks` pays for. After the name come state, ppid, pgrp,
+/// session, tty and `tpgid`, the foreground group of the terminal it is
+/// attached to. A shell at its prompt is that group itself; a shell running a
+/// command has handed it over, and `-1` means no terminal at all.
+fn running_command(stat: &str) -> bool {
+    let Some(rest) = stat.rfind(')').map(|at| &stat[at + 1..]) else {
+        return false;
+    };
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    let group = fields.get(2).and_then(|f| f.parse::<i32>().ok());
+    let foreground = fields.get(5).and_then(|f| f.parse::<i32>().ok());
+    match (group, foreground) {
+        (Some(group), Some(foreground)) => foreground > 0 && foreground != group,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shell's own line, then the same shell with `sleep` in front of it.
+    /// The name in parentheses holds a space and a parenthesis, which is what
+    /// splitting the line on whitespace would trip on.
+    #[test]
+    fn a_shell_is_busy_when_the_terminal_is_not_its_own() {
+        let idle = "4242 (fi(sh) one) S 4200 4242 4242 34816 4242 4194304 1 2 3 4";
+        assert!(!running_command(idle), "sitting at its prompt");
+        let running = "4242 (fi(sh) one) S 4200 4242 4242 34816 4711 4194304 1 2 3 4";
+        assert!(running_command(running), "a job in front of it");
+        let detached = "4242 (bash) S 4200 4242 4242 0 -1 4194304 1 2 3 4";
+        assert!(!running_command(detached), "no terminal at all");
+        assert!(!running_command("nonsense"));
+    }
 
     /// Runs a real program in a real pty and reads the result off the grid. It
     /// is the only test proving the whole chain — pty, input/output loop,

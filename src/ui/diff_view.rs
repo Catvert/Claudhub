@@ -831,7 +831,7 @@ impl ClaudhubApp {
     ///
     /// At least one: a view never painted has no bounds, and a page of zero
     /// lines would make a key a gesture with no effect.
-    fn page_rows(&self, cx: &App) -> usize {
+    pub(super) fn page_rows(&self, cx: &App) -> usize {
         let height = self.diff_base_handle(cx).bounds().size.height;
         let line = line_height(px(crate::ui::settings::Settings::global(cx).diff_font_size));
         ((f32::from(height) / f32::from(line)) as usize).max(1)
@@ -885,17 +885,37 @@ impl ClaudhubApp {
         });
     }
 
-    /// Selects a hunk's header and brings it to the top of the view.
+    /// Selects a hunk's header and brings it under the eye.
     ///
     /// Apart from the scrolling, `move_diff_selection`: what changes is that the
-    /// view **always** moves, see `reveal_diff_row_strict`.
+    /// view **always** moves, see `reveal_diff_hunk`.
     fn move_diff_selection_to_hunk(&mut self, target: usize, cx: &mut Context<Self>) {
         let Some(state) = self.active_review_mut() else {
             return;
         };
         state.diff_selection = Some((target, target));
-        self.reveal_diff_row_strict(target, cx);
+        self.reveal_diff_hunk(target, cx);
         cx.notify();
+    }
+
+    /// Does the hunk starting at that header fit in the view?
+    ///
+    /// It is what decides between centring the hunk and putting it at the top.
+    /// The count is in **entries**, like `page_rows`: a wrapped line takes more
+    /// than one row on screen, and the answer is only ever a choice between two
+    /// placements — being a line or two out changes nothing to which one is
+    /// right.
+    pub(super) fn hunk_fits_the_view(&self, header: usize, cx: &App) -> bool {
+        let split = crate::ui::settings::Settings::global(cx).diff_split;
+        let Some(diff) = self.active_review().and_then(|state| state.diff.as_ref()) else {
+            return true;
+        };
+        let end = diff
+            .headers(split)
+            .into_iter()
+            .find(|row| *row > header)
+            .unwrap_or_else(|| diff.len(split));
+        end.saturating_sub(header) <= self.page_rows(cx)
     }
 
     fn move_diff_selection(&mut self, anchor: usize, head: usize, cx: &mut Context<Self>) {
@@ -1178,8 +1198,36 @@ impl ClaudhubApp {
             .child(
                 div()
                     .id("diff-zoom")
+                    .relative()
                     .flex_1()
                     .min_h_0()
+                    // Everything below is derived from a width read **before**
+                    // the frame is laid out, so the frame that follows a
+                    // resize — a panel zoomed, a handle dropped — is painted at
+                    // the size the view no longer has. Nothing would repaint it:
+                    // a window only redraws on an event, and the next one is the
+                    // background sweep, two seconds later. This measures the
+                    // frame *after* layout and asks for one more when the width
+                    // has moved, which settles as soon as it stops moving.
+                    .child(
+                        gpui::canvas(
+                            {
+                                let entity = cx.entity();
+                                move |bounds: gpui::Bounds<Pixels>, window, cx| {
+                                    entity.update(cx, |this, _| {
+                                        if (bounds.size.width - this.diff_laid_out).abs() > px(0.5)
+                                        {
+                                            this.diff_laid_out = bounds.size.width;
+                                            window.request_animation_frame();
+                                        }
+                                    });
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
+                    )
                     .on_scroll_wheel(cx.listener(Self::on_diff_scroll))
                     .on_mouse_up(
                         gpui::MouseButton::Left,
@@ -1227,7 +1275,6 @@ impl ClaudhubApp {
                     .flex_shrink_0()
                     .gap_1()
                     .items_center()
-                    .child(icon("file-diff").xsmall())
                     // Going from one change to the next is the gesture of a
                     // review, and it had only the arrow keys — which belong to
                     // whoever has the focus, so to nobody after a click in a
@@ -1237,7 +1284,22 @@ impl ClaudhubApp {
                     .child(self.step_button("prev-hunk", "arrow-up", -1, false, cx))
                     .child(self.step_button("next-hunk", "arrow-down", 1, false, cx))
                     .child(self.step_button("prev-file", "arrow-left", -1, true, cx))
-                    .child(self.step_button("next-file", "arrow-right", 1, true, cx)),
+                    .child(self.step_button("next-file", "arrow-right", 1, true, cx))
+                    // The one gesture of the bar that carries its word, and it
+                    // sits with the moves rather than with the toggles on the
+                    // right: one walks the changes, something is wrong, one
+                    // opens the file where it is — the writing gesture is the
+                    // end of that walk, and among icons that all speak of
+                    // reading it is worth being read rather than guessed.
+                    .child(
+                        Button::new("diff-edit")
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("pencil"))
+                            .label(tr!("diff-edit"))
+                            .tooltip(tr!("diff-edit-tooltip"))
+                            .on_click(cx.listener(|this, _, _window, cx| this.edit_diff_file(cx))),
+                    ),
             )
             .child(
                 div()
@@ -1322,18 +1384,11 @@ impl ClaudhubApp {
                                 cx.listener(|this, _, _window, cx| this.copy_diff(false, cx)),
                             ),
                     )
-                    // The two gestures of annotated review, beside copying: they are the
-                    // three things one does with a selection of code.
-                    .child(
-                        Button::new("annotate")
-                            .ghost()
-                            .xsmall()
-                            .icon(icon("reply"))
-                            .tooltip(tr!("note-add"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.annotate_selection(window, cx)
-                            })),
-                    )
+                    // Handing a selection to the agent, beside copying it: what
+                    // one does with lines just picked out. Annotating is not
+                    // here — it is a gesture of the right click, where the
+                    // selection is, and of the notes panel that holds the
+                    // result.
                     .child(
                         Button::new("ask-agent")
                             .ghost()
@@ -1343,19 +1398,6 @@ impl ClaudhubApp {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.ask_about_selection(window, cx)
                             })),
-                    )
-                    // The one gesture of the bar that carries its word. One relights a
-                    // diff, something is wrong, and one opens the file where it is:
-                    // among six icons that all speak of reading, the one that writes is
-                    // worth being read rather than guessed.
-                    .child(
-                        Button::new("diff-edit")
-                            .ghost()
-                            .xsmall()
-                            .icon(icon("pencil"))
-                            .label(tr!("diff-edit"))
-                            .tooltip(tr!("diff-edit-tooltip"))
-                            .on_click(cx.listener(|this, _, _window, cx| this.edit_diff_file(cx))),
                     ),
             )
     }

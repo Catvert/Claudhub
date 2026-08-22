@@ -22,6 +22,8 @@
 //!   turns on. The script runs on the interface's side; only its input and
 //!   output cross the wire.
 
+use std::path::{Path, PathBuf};
+
 pub mod caps;
 pub mod install;
 pub mod manifest;
@@ -34,3 +36,63 @@ pub mod host;
 mod loaded;
 #[cfg(feature = "plugins")]
 pub use loaded::Plugin;
+
+/// A path a script named, read as a path **inside the worktree**.
+///
+/// Everywhere else in Claudhub a file is called by its path within the
+/// worktree, and each command joins the root at the last moment. A script has
+/// no reason to know that, and what it hands over comes from wherever it
+/// fetched: Sentry reports a frame as `/vendor/laravel/framework/…`, meaning
+/// "under the deployed application's root" and not "at the root of this
+/// machine". Joining that as it stands **replaces** the worktree — `Path::join`
+/// with an absolute path drops what it was joined to — and the reader answers
+/// `No such file or directory` about a path nobody wrote.
+///
+/// So the leading separator is dropped, and a `..` is **refused**: a plugin
+/// reaching outside the worktree is a plugin doing what its manifest does not
+/// say, and there is no reading of it that is what its author meant. `None`
+/// also for a path that says nothing at all.
+pub fn in_worktree(said: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in Path::new(said.trim()).components() {
+        match component {
+            Component::Normal(part) => out.push(part),
+            // A root or a `.` says where to start, and here that is settled.
+            Component::RootDir | Component::CurDir => {}
+            Component::ParentDir | Component::Prefix(_) => return None,
+        }
+    }
+    (!out.as_os_str().is_empty()).then_some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What Sentry hands over, and what nobody must be able to hand over.
+    #[test]
+    fn a_path_a_script_named_lands_inside_the_worktree() {
+        // The case that sent the panel looking at the root of the machine.
+        assert_eq!(
+            in_worktree("/vendor/laravel/framework/src/Illuminate/Pipeline/Pipeline.php"),
+            Some(PathBuf::from(
+                "vendor/laravel/framework/src/Illuminate/Pipeline/Pipeline.php"
+            ))
+        );
+        assert_eq!(
+            in_worktree("app/Models/User.php"),
+            Some(PathBuf::from("app/Models/User.php"))
+        );
+        assert_eq!(
+            in_worktree("  ./app/Http/Kernel.php  "),
+            Some(PathBuf::from("app/Http/Kernel.php"))
+        );
+        // Nothing said is nothing to open, rather than the worktree itself.
+        assert_eq!(in_worktree(""), None);
+        assert_eq!(in_worktree("/"), None);
+        // And there is no reading of these that is what the author meant.
+        assert_eq!(in_worktree("../../etc/passwd"), None);
+        assert_eq!(in_worktree("/app/../../etc/passwd"), None);
+    }
+}

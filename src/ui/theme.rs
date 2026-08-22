@@ -242,6 +242,46 @@ fn rgb(hex: u32) -> Hsla {
 /// The green and the red are GitHub's, deliberately: they are the hues a
 /// reviewer already has in their eye, and the backgrounds are pale enough for
 /// the text to stay readable in both modes.
+/// The width of one indentation level, and of the rule marking it.
+pub const INDENT: f32 = 12.;
+
+/// The vertical rules of the parent levels of a tree row.
+///
+/// It is what makes a deep tree readable: without them, at six levels of
+/// indentation — the common case on a Laravel project — nothing says any more
+/// which folder a row belongs to. Both trees of the window use them, the
+/// project explorer's and the review's: they are the same gesture, and a list
+/// that indents without ruling reads as a list of files whose names happen to
+/// start further right.
+///
+/// The colour is taken rather than read from the theme: the explorer's rows
+/// are rendered by the dozen in a virtualised list's closure, where `cx.theme()`
+/// borrows the context — it reads it once per frame and hands it over.
+pub fn indent_guides(depth: usize, guide: Hsla) -> impl IntoIterator<Item = gpui::Div> + use<> {
+    (0..depth).map(move |_| {
+        gpui::div()
+            .w(px(INDENT))
+            .h_full()
+            .flex_none()
+            .border_l_1()
+            .border_color(guide)
+    })
+}
+
+/// The colour of those rules: pale enough to read as a texture and not as a
+/// separator, they are on screen by the dozen.
+pub fn indent_guide(cx: &App) -> Hsla {
+    gpui_component::ActiveTheme::theme(cx).border.opacity(0.7)
+}
+
+/// The place of the chevron a leaf does not have.
+///
+/// Without it, a file's name and a folder's do not line up, and the indentation
+/// says nothing.
+pub fn chevron_space() -> gpui::Div {
+    gpui::div().w(px(14.)).flex_none()
+}
+
 /// The `+n` and `−m` of a volume of work, in the diff's colours.
 ///
 /// Two independent children rather than one wrapped element: the callers drop

@@ -21,11 +21,13 @@ use std::path::PathBuf;
 use gpui::{div, prelude::*, uniform_list, Context, ElementId, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
-    h_flex, v_flex, ActiveTheme, Disableable as _, Sizable as _, StyledExt as _, WindowExt as _,
+    h_flex,
+    spinner::Spinner,
+    v_flex, ActiveTheme, Disableable as _, Sizable as _, StyledExt as _, WindowExt as _,
 };
 
 use crate::plugin::host::{Effect, Request};
-use crate::plugin::manifest::{self, Manifest};
+use crate::plugin::manifest::{self, Manifest, PanelSpec};
 use crate::plugin::view::{Item, Node, TextStyle};
 use crate::plugin::Plugin;
 use crate::runtime::Cmd;
@@ -120,8 +122,15 @@ pub fn on_screen(screen: &str) -> impl Iterator<Item = &'static Manifest> {
         .filter(move |m| m.declaration.screen == screen)
 }
 
-pub fn by_panel(panel: &str) -> Option<&'static Manifest> {
-    manifests().iter().find(|m| m.panel == panel)
+/// The plugin a dock name belongs to, and which of its panels it is.
+///
+/// Two panels of one plugin share a script, a state and a set of settings; what
+/// tells them apart is only the second half of the name, which the script gets
+/// as `view`'s second argument.
+pub fn by_panel(panel: &str) -> Option<(&'static Manifest, &'static PanelSpec)> {
+    manifests()
+        .iter()
+        .find_map(|m| m.panel_named(panel).map(|spec| (m, spec)))
 }
 
 /// Is this plugin switched on. A plugin nobody has configured is **on**.
@@ -164,7 +173,7 @@ pub fn usable(manifest: &'static Manifest, cx: &gpui::App) -> bool {
 
 /// The same, from the panel's name — which is what the dock knows it by.
 pub fn panel_enabled(panel: &str, cx: &gpui::App) -> bool {
-    by_panel(panel).is_none_or(|manifest| usable(manifest, cx))
+    by_panel(panel).is_none_or(|(manifest, _)| usable(manifest, cx))
 }
 
 /// Does this screen have anything at all to show.
@@ -512,7 +521,7 @@ impl ClaudhubApp {
             worktree: root,
             path,
         });
-        self.enter_workspace(crate::ui::workspace::Workspace::Files, window, cx);
+        self.travel_to(crate::ui::workspace::Workspace::Files, window, cx);
         cx.notify();
     }
 
@@ -522,6 +531,24 @@ impl ClaudhubApp {
     /// the form must not need a recompilation of the script that uses it.
     pub(super) fn configure_plugins(&mut self, cx: &mut Context<Self>) {
         let settings = crate::ui::settings::Settings::global(cx).plugins.clone();
+        // What each plugin has remembered about the repository being looked at.
+        // **It has to be handed back**, and that is the half that was missing:
+        // `set_state` writes into the store *and* into the host's copy, so a
+        // project chosen this afternoon worked for the rest of the session and
+        // came back empty the next morning — the store had it, nobody read it.
+        // Here rather than at the write: this is the pass that hands a plugin
+        // what the window knows, and the repository changes under it too.
+        let remembered = self
+            .active
+            .as_deref()
+            .and_then(|worktree| self.main_of(worktree))
+            .and_then(|main| {
+                crate::ui::store::Store::global(cx)
+                    .repos
+                    .get(&main)
+                    .map(|repo| repo.plugin_state.clone())
+            })
+            .unwrap_or_default();
         for plugin in &self.plugins {
             let configured = settings
                 .get(&plugin.manifest.id)
@@ -530,6 +557,12 @@ impl ClaudhubApp {
             plugin
                 .shared()
                 .configure(configured.settings, configured.secrets);
+            plugin.shared().remember(
+                remembered
+                    .get(&plugin.manifest.id)
+                    .cloned()
+                    .unwrap_or_default(),
+            );
         }
     }
 
@@ -555,6 +588,11 @@ impl ClaudhubApp {
             plugin.set_worktree(worktree.as_deref());
         }
         self.plugin_deadlines.clear();
+        // What a plugin remembers is kept **per repository**, so changing
+        // worktree can change it: the pass that hands a plugin what the window
+        // knows has to run again. It is also what puts a project chosen in a
+        // previous session back under the script before `init` replays.
+        self.configure_plugins(cx);
         cx.notify();
     }
 
@@ -593,8 +631,10 @@ impl ClaudhubApp {
         }
     }
 
+    /// Which plugin a panel belongs to. Several panels answer with the same
+    /// index: one script, one state, several windows onto it.
     fn plugin_index(&self, panel: &str) -> Option<usize> {
-        self.plugins.iter().position(|p| p.manifest.panel == panel)
+        self.plugins.iter().position(|p| p.manifest.owns(panel))
     }
 
     /// Starts a plugin the first time its panel is looked at.
@@ -616,7 +656,9 @@ impl ClaudhubApp {
         let Some(host) = self.plugins[index].host() else {
             return;
         };
-        self.plugins[index].busy = true;
+        // Nobody asked for this from anywhere: it is the first load, and every
+        // panel of the plugin is blank until it lands.
+        self.plugins[index].start(None);
         let worktree = self.active.clone();
         cx.spawn_in(window, async move |this, cx| {
             let outcome = host.init(worktree.as_deref()).await;
@@ -644,7 +686,9 @@ impl ClaudhubApp {
         else {
             return;
         };
-        self.plugins[index].busy = true;
+        // The panel the gesture came from keeps what it shows; the others wait.
+        // See `Plugin::waiting_in`.
+        self.plugins[index].start(Some(panel));
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let outcome = host.update(&state, &action, &payload).await;
@@ -705,7 +749,6 @@ impl ClaudhubApp {
         let Some(index) = self.plugin_index(panel) else {
             return;
         };
-        self.plugins[index].busy = false;
         match outcome {
             Ok(state) => self.plugins[index].settle(state),
             Err(message) => self.plugins[index].fail(message),
@@ -809,11 +852,23 @@ impl ClaudhubApp {
         let Some(index) = self.plugin_index(panel) else {
             return empty_panel(tr!("plugin-missing"), cx).into_any_element();
         };
-        let title = SharedString::from(self.plugins[index].manifest.title().to_string());
-        let icon_name = self.plugins[index].manifest.icon().to_string();
+        // The panel's own title and icon, not the plugin's: a master/detail
+        // plugin's two tabs must not read the same, and the tab beside them
+        // says which is which.
+        let spec = self.plugins[index].manifest.panel_named(panel);
+        let title = SharedString::from(
+            spec.map(|spec| spec.title.clone())
+                .unwrap_or_else(|| panel.to_string()),
+        );
+        let icon_name = spec
+            .map(|spec| spec.icon.clone())
+            .unwrap_or_else(|| "puzzle".into());
+        let tree = spec
+            .map(|spec| self.plugins[index].tree_of(&spec.id))
+            .unwrap_or_else(|| std::rc::Rc::new(Node::nothing()));
         let busy = self.plugins[index].busy;
+        let waiting_here = self.plugins[index].waiting_in(panel);
         let error = self.plugins[index].error.clone();
-        let tree = self.plugins[index].tree.clone();
         let scroll = self.scroll_of(panel);
 
         let bar = h_flex()
@@ -833,11 +888,16 @@ impl ClaudhubApp {
                     .text_color(cx.theme().muted_foreground)
                     .child(title),
             )
+            // It **turns**, and that is the whole point: a static glyph beside
+            // a title reads as decoration, and the two gestures this panel is
+            // for — listing the errors, opening one — are each a round trip to
+            // a remote API that takes a second or two.
             .when(busy, |el| {
                 el.child(
-                    icon("loader-circle")
+                    Spinner::new()
                         .xsmall()
-                        .text_color(cx.theme().muted_foreground),
+                        .icon(icon("loader-circle"))
+                        .color(cx.theme().muted_foreground),
                 )
             })
             .child(
@@ -883,6 +943,12 @@ impl ClaudhubApp {
                         .child(SharedString::from(message)),
                 )
                 .into_any_element(),
+            // **Waiting is shown where the answer will land**, which is every
+            // panel but the one the gesture came from — see
+            // `Plugin::waiting_in`. Opening an issue leaves the list one
+            // clicked in exactly as it was and makes the centre wait; the bar's
+            // spinner turns on both, since it is the plugin that is busy.
+            None if waiting_here => waiting(cx).into_any_element(),
             None => {
                 // Painted before the scroll wrapper: `scrolled` takes `&mut
                 // self` too, and the two borrows would meet.
@@ -1065,8 +1131,11 @@ impl ClaudhubApp {
                 .w_full()
                 .py_4()
                 .justify_center()
-                .text_color(cx.theme().muted_foreground)
-                .child(icon("loader-circle"))
+                .child(
+                    Spinner::new()
+                        .icon(icon("loader-circle"))
+                        .color(cx.theme().muted_foreground),
+                )
                 .into_any_element(),
         }
     }
@@ -1286,6 +1355,26 @@ fn plugin_row(
             el.on_click(move |_, window, cx| on_click(window, cx))
         })
         .into_any_element()
+}
+
+/// What a panel shows while its script is waiting on something.
+///
+/// A spinner and nothing else: what a plugin is fetching has no name we know —
+/// the script asked, not us — and inventing one ("Chargement des erreurs…")
+/// would be Claudhub speaking for a plugin it does not read.
+fn waiting(cx: &Context<ClaudhubApp>) -> impl IntoElement {
+    h_flex()
+        .flex_1()
+        .min_h_0()
+        .size_full()
+        .justify_center()
+        .items_center()
+        .child(
+            Spinner::new()
+                .large()
+                .icon(icon("loader-circle"))
+                .color(cx.theme().muted_foreground),
+        )
 }
 
 fn empty_panel(message: SharedString, cx: &Context<ClaudhubApp>) -> impl IntoElement {

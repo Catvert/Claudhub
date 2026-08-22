@@ -324,6 +324,18 @@ pub fn query_context() -> KeyContext {
     context
 }
 
+/// The console's editor, when vim keys are on.
+///
+/// `ClaudhubEditorVim` alone and **not** `ClaudhubEditor`: the three keys that
+/// first name carries — following a definition, walking the trail — all name a
+/// file, and a query has none. What is wanted here is the one thing the second
+/// name buys, which is `Ctrl+R` staying redo rather than becoming refresh.
+pub fn query_editor_context() -> KeyContext {
+    let mut context = KeyContext::default();
+    context.add(EDITOR_VIM);
+    context
+}
+
 /// The context the search panel declares, vim's identifier included when the
 /// setting is on — for the reason given in `VIM_PREDICATE`: two identifiers
 /// declared at two different depths never meet in an `&&`.
@@ -600,6 +612,7 @@ table!(STANDARD, standard_bindings, false, [
     Window "alt-4" => GoToWorkspace { index: 3 }, PREDICATE, "shortcut-workspace";
     Window "alt-5" => GoToWorkspace { index: 4 }, PREDICATE, "shortcut-workspace";
     Window "alt-6" => GoToWorkspace { index: 5 }, PREDICATE, "shortcut-workspace";
+    Window "alt-7" => GoToWorkspace { index: 6 }, PREDICATE, "shortcut-workspace";
 
     // ── The worktrees ───────────────────────────────────────────────────────
     // Nine bindings and a single help line: `merge` recognises the run of digits
@@ -671,6 +684,15 @@ table!(STANDARD, standard_bindings, false, [
     Review "f12" => GoToDefinition, EDITOR_PREDICATE, "shortcut-goto-definition";
     Review "ctrl-o" => JumpBack, EDITOR_PREDICATE, "shortcut-jump-back";
     Review "ctrl-i" => JumpForward, EDITOR_PREDICATE, "shortcut-jump-forward";
+    // The same two gestures for the rest of the window, the trail having
+    // stopped being the editor's alone: it is a screen one comes back to as
+    // often as a line. `Alt` and an arrow is what every browser binds them to,
+    // it is neither a letter nor a character a field is waiting for, and no
+    // binding of gpui-component's editor claims it. The terminal is left out
+    // all the same — `WINDOW_PREDICATE` — a program running there may be
+    // reading the escape sequence Alt sends.
+    Window "alt-left" => JumpBack, WINDOW_PREDICATE, "shortcut-jump-back";
+    Window "alt-right" => JumpForward, WINDOW_PREDICATE, "shortcut-jump-forward";
 
     // ── The explorer   ───────────────────────────────────────────────────────
     Explorer "up" => ExplorerUp, EXPLORER_PREDICATE, "shortcut-explorer-up";
@@ -1075,7 +1097,9 @@ pub fn new_terminal(
     let Some(worktree) = this.active_path() else {
         return;
     };
-    this.show_terminal_panel(window, cx);
+    // No `show_terminal_panel` here: it opens one when there is none, and this
+    // gesture opens its own — the first press left two. `open_terminal` shows
+    // the panel itself.
     this.open_terminal(
         &worktree,
         crate::ui::terminal_view::Launch::shell(),

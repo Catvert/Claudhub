@@ -25,7 +25,10 @@ pub async fn init(worktree) {
     Ok(fresh(runs, ""))
 }
 
-pub fn view(s) {
+// Un seul panneau déclaré, donc `panel` vaut toujours `main` : il est là parce
+// que le contrat est le même pour tous les plugins — voir le Sentry livré à
+// côté, qui en tient deux.
+pub fn view(s, panel) {
     if s.note != "" {
         return empty(s.note);
     }

@@ -92,11 +92,22 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !matches!(page, Page::First) {
+        // A page asked for by name — "configure this plugin", "read the log" —
+        // is somewhere one has been taken, and the trail records it. `First`
+        // means the menu entry and its key, which name a screen rather than
+        // leave one: see `travel_to`. The gear of the aside group travels, like
+        // every button of the two screen pickers.
+        let travelled = !matches!(page, Page::First);
+        if travelled {
             self.settings_page = page;
             self.settings_epoch += 1;
         }
-        self.enter_workspace(crate::ui::workspace::Workspace::Settings, window, cx);
+        let workspace = crate::ui::workspace::Workspace::Settings;
+        if travelled {
+            self.travel_to(workspace, window, cx);
+        } else {
+            self.enter_workspace(workspace, window, cx);
+        }
         cx.notify();
     }
 

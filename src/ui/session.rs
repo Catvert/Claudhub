@@ -32,7 +32,7 @@ pub(super) const SELECTION_NONE: u8 = 0;
 /// is still being enumerated.
 const SELECTION_FALLBACK: u8 = 1;
 /// The worktree of the previous session.
-const SELECTION_SESSION: u8 = 2;
+pub(super) const SELECTION_SESSION: u8 = 2;
 /// The checkout `claudhub` was launched from, and every choice made by hand.
 /// Nothing displaces it — launching in a worktree opens *that* worktree.
 pub(super) const SELECTION_CHOSEN: u8 = 3;
@@ -68,6 +68,22 @@ pub(super) fn pick_worktree(
     launched.or(remembered).or(first)
 }
 
+/// Whether the session's first terminal may be opened on the worktree now
+/// shown.
+///
+/// The rule the window cannot express: a selection **weaker than the session's**
+/// is a stopgap — the first checkout of whichever repository answered first,
+/// there so the window is not empty — and a terminal opened on it is a shell in
+/// a project one never asked for. It waits for the repositories still owed an
+/// answer; when none is left, the stopgap *is* the answer.
+///
+/// `pending` counts `Cmd::OpenRepo` alone, which always answers. The launch
+/// probe is silent when the directory is not a repository, so counting it would
+/// mean waiting for ever.
+pub(super) fn session_terminal_due(rank: u8, pending: usize) -> bool {
+    rank >= SELECTION_SESSION || pending == 0
+}
+
 impl ClaudhubApp {
     /// Reopens the file that was in the editor, once its worktree is known to
     /// exist.
@@ -77,18 +93,63 @@ impl ClaudhubApp {
     /// `restoring` and simply goes away with the window: a file whose worktree
     /// has been removed is nothing to report.
     pub(super) fn restore_editing(&mut self, cx: &mut Context<Self>) {
-        let Some(open) = self.restoring.editing.clone() else {
+        if self.restore_asked {
+            return;
+        }
+        // The tabs, or the single file a state written before them named.
+        let mut queue = self.restoring.tabs.clone();
+        if queue.is_empty() {
+            queue.extend(self.restoring.editing.clone());
+        }
+        let Some(first) = queue.first().cloned() else {
             return;
         };
-        if self.restore_asked || !self.worktree_exists(&open.worktree) {
+        // They all belong to one worktree — the session files the editors of
+        // the tree it was looking at — so one existence check answers for all.
+        if !self.worktree_exists(&first.worktree) {
             return;
         }
         self.restore_asked = true;
+        self.restoring_files = true;
+        self.pending_files = queue;
+        self.read_next_file(cx);
+    }
+
+    /// Asks for the next remembered tab, or ends the restore.
+    fn read_next_file(&mut self, cx: &mut Context<Self>) {
+        if self.pending_files.is_empty() {
+            self.restoring_files = false;
+            cx.notify();
+            return;
+        }
+        let next = self.pending_files.remove(0);
         self.git.send(Cmd::ReadFile {
-            worktree: open.worktree,
-            path: open.path,
+            worktree: next.worktree,
+            path: next.path,
         });
         cx.notify();
+    }
+
+    /// One remembered tab has arrived: asks for the one after it, and brings
+    /// the tab that was on screen forward once they are all there.
+    ///
+    /// The activation is left to the end on purpose: each opening makes its own
+    /// tab the displayed one, so doing it earlier would be undone by the file
+    /// after it.
+    pub(super) fn continue_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.read_next_file(cx);
+        if self.restoring_files {
+            return;
+        }
+        let Some(open) = self.restoring.editing.clone() else {
+            return;
+        };
+        let panel = self
+            .editors(&open.worktree)
+            .and_then(|tabs| Some(tabs.open.get(tabs.index_of(&open.path)?)?.panel.clone()));
+        if let Some(panel) = panel {
+            crate::ui::panels::FilePanel::activate(&panel, window, cx);
+        }
     }
 
     /// Is this content the one the restore asked for.
@@ -99,11 +160,13 @@ impl ClaudhubApp {
     /// `layout.json`. The answer consumes the request: a second read of the
     /// same file, this time asked for by hand, gets the usual behaviour.
     pub(super) fn take_restored_editing(&mut self, worktree: &Path, path: &Path) -> bool {
-        let restored = self.restoring.editing.take();
-        // Cleared either way: a file opened by hand ends the restore, and
-        // leaving the request standing would make `persist_session` keep filing
-        // a file nobody managed to open.
-        restored.is_some_and(|open| open.worktree == worktree && open.path == path)
+        self.restoring_files
+            && self
+                .restoring
+                .tabs
+                .iter()
+                .chain(self.restoring.editing.iter())
+                .any(|open| open.worktree == worktree && open.path == path)
     }
 
     /// Reopens the SQL console on the connection it was on, with the query that
@@ -153,6 +216,24 @@ impl ClaudhubApp {
                     path: editing.path.clone(),
                 })
                 .or_else(|| self.restoring.editing.clone()),
+            // What has not been put back yet stands in for what is not there,
+            // as the worktree above does: a keystroke lands before the first
+            // file has come back, and filing an empty list there would lose
+            // every tab of the previous session.
+            tabs: self
+                .editing_root()
+                .and_then(|root| self.editors(&root))
+                .filter(|tabs| !tabs.open.is_empty())
+                .map(|tabs| {
+                    tabs.open
+                        .iter()
+                        .map(|editing| OpenFile {
+                            worktree: editing.worktree.clone(),
+                            path: editing.path.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_else(|| self.restoring.tabs.clone()),
             console: self
                 .query
                 .connection
@@ -173,6 +254,25 @@ mod tests {
 
     fn paths(list: &[&str]) -> Vec<PathBuf> {
         list.iter().map(PathBuf::from).collect()
+    }
+
+    /// The bug this rule exists for: the terminal used to open on whatever
+    /// checkout filled the window first, so on a project the session had not
+    /// asked for — and the flag then denied the remembered worktree its own.
+    #[test]
+    fn a_stopgap_selection_does_not_get_the_session_terminal() {
+        assert!(!session_terminal_due(SELECTION_FALLBACK, 2));
+        // Nothing left to answer: the stopgap is the answer.
+        assert!(session_terminal_due(SELECTION_FALLBACK, 0));
+    }
+
+    /// The remembered worktree and every gesture are final, whatever is still
+    /// being enumerated: waiting for the rest would leave a shell one has to
+    /// ask for.
+    #[test]
+    fn a_settled_selection_gets_it_at_once() {
+        assert!(session_terminal_due(SELECTION_SESSION, 3));
+        assert!(session_terminal_due(SELECTION_CHOSEN, 3));
     }
 
     #[test]
