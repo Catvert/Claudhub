@@ -3554,6 +3554,21 @@ Six points qui ne se devinent pas :
   le curseur de vim sans qu'on ait rien à synchroniser. Le découpage se compte
   en **caractères** : en octets, un fichier accentué se couperait au milieu
   d'un caractère et paniquerait.
+- **Un yank s'allume une fraction de seconde**, comme le fait
+  vim-highlightedyank. C'est le seul geste de vim qui ne change rien à
+  l'écran : sans signe, on n'est jamais sûr qu'il a pris, et on recommence. Le
+  module pur rend la plage (`Change::flash`) — et pour un **yank seulement**,
+  un `d` ayant emporté le texte qu'il s'agirait d'éclairer — ; la vue la pose
+  sur une `TextDecorationCollection`, créée une fois avec le fichier parce
+  qu'une collection suit le texte à travers ses éditions, et l'éteint par un
+  minuteur. Trois choix : la teinte est celle d'une occurrence de recherche
+  (`find::highlight_color`), déjà la couleur que cette interface pose sur du
+  code pour dire « ici » et qui suit le thème ; la marque ne touche pas à la
+  sélection, le curseur bloc étant juste là ; et elle dure trois cents
+  millisecondes et non la seconde du greffon, choisie pour un terminal où rien
+  d'autre ne bouge. Le minuteur est **remplacé** et non empilé — un `Task` gpui
+  s'annule quand on le laisse tomber —, sans quoi le premier éteindrait le
+  second yank.
 - **Le caret s'éteint hors du mode insertion**, et c'est le septième commit du
   fork (`InputState::set_cursor_hidden`). Rien de public ne le faisait : le
   style de l'éditeur — qui porte la couleur du caret — est reconstruit depuis

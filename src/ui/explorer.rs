@@ -260,6 +260,14 @@ pub struct Editing {
     /// in insert mode and coming back to another in normal mode is what a tabbed
     /// vim does anyway.
     pub vim: crate::ui::vim::Vim,
+    /// The layer a yank lights up on, created once with the file: a collection
+    /// follows the text through its edits, and asking for a new one per yank
+    /// would leave the old ones stacked up for as long as the file is open.
+    pub flash: gpui_component::input::TextDecorationCollection,
+    /// What puts the light out, held so that it can be **dropped**: a second
+    /// yank replaces the task, and dropping a gpui task cancels it — without
+    /// that, the first timer would darken the second yank.
+    pub flash_timer: Option<gpui::Task<()>>,
     /// What is on screen differs from what is on disk.
     pub dirty: bool,
 }
@@ -610,6 +618,9 @@ impl ClaudhubApp {
             cx.notify();
         })
         .detach();
+        let flash = input.update(cx, |state, cx| {
+            state.create_decorations_collection(Vec::new(), cx)
+        });
         self.editing = Some(Editing {
             worktree,
             path,
@@ -617,6 +628,8 @@ impl ClaudhubApp {
             hash: content.hash,
             dirty: false,
             vim: crate::ui::vim::Vim::default(),
+            flash,
+            flash_timer: None,
         });
         // A file that opens calls up the screen it is edited on. The gesture
         // comes from the explorer — so from that screen most of the time — but
@@ -844,6 +857,9 @@ impl ClaudhubApp {
                 if let Some(yank) = change.yank.filter(|_| clipboard) {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(yank.text));
                 }
+                if let Some(range) = change.flash {
+                    self.flash_yank(range, cx);
+                }
                 input.update(cx, |state, cx| {
                     if let Some(edit) = change.edit {
                         state.set_selected_range(edit.range, cx);
@@ -867,6 +883,45 @@ impl ClaudhubApp {
             },
         }
         cx.notify();
+    }
+
+    /// Lights up what a yank has just copied, and puts it out again.
+    ///
+    /// A yank changes nothing on screen: without a sign, one is never sure it
+    /// took, and one yanks again. It is what vim-highlightedyank exists for.
+    ///
+    /// Three things it does not do: it does not touch the selection — the block
+    /// cursor is right there and two marks fighting over one character would say
+    /// less than one —, it does not last a second like the plugin's default,
+    /// which was chosen for a terminal where nothing else moves, and it does not
+    /// hold a timer per yank: the task is **replaced**, and dropping a gpui task
+    /// cancels it.
+    fn flash_yank(&mut self, range: std::ops::Range<usize>, cx: &mut Context<Self>) {
+        let Some(editing) = self.editing.as_ref() else {
+            return;
+        };
+        let flash = editing.flash.clone();
+        // The tone of a search occurrence: it is already the colour this
+        // interface lays over code to say "here", and it follows the theme.
+        let style = gpui::HighlightStyle {
+            background_color: Some(crate::ui::find::highlight_color(false, cx)),
+            ..Default::default()
+        };
+        flash.set(
+            vec![gpui_component::input::TextDecoration::new(range, style)],
+            cx,
+        );
+        let timer = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(YANK_FLASH).await;
+            cx.update(|cx| flash.clear(cx));
+            // The editor repaints of its own accord — the collection notifies —
+            // but the panel is what holds the file, and it is what a stale
+            // frame would show.
+            let _ = this.update(cx, |_, cx| cx.notify());
+        });
+        if let Some(editing) = self.editing.as_mut() {
+            editing.flash_timer = Some(timer);
+        }
     }
 
     /// Scrolls the caret back into view when the editor will not do it itself.
@@ -1558,6 +1613,14 @@ fn editor_extent(
 /// How many lines `Ctrl+D` moves by half of, before the editor has been laid out
 /// once and can say how tall it is.
 const DEFAULT_ROWS: usize = 20;
+
+/// How long a yank stays lit.
+///
+/// Not vim-highlightedyank's second, which was chosen for a terminal where
+/// nothing else moves: here the mode pill, the dirty badge and an agent's
+/// writing are all on the same screen, and a mark that outstays the gesture
+/// reads as a state rather than as an acknowledgement.
+const YANK_FLASH: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// What does not depend on the row: colours and geometry.
 ///

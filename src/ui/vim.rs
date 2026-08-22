@@ -74,6 +74,13 @@ pub struct Change {
     /// Where vim considers the caret to be, which is the start of the selection
     /// except when the visual head is its end.
     pub head: usize,
+    /// The range a **copy** left in place, for the view to flash.
+    ///
+    /// A yank is the one gesture of vim that changes nothing on screen: without
+    /// a sign, one is never sure it took. It is what vim-highlightedyank exists
+    /// for, and it is `Some` for a yank only — a delete has taken the text away,
+    /// and there is nothing left to light up.
+    pub flash: Option<Range<usize>>,
     /// What this keystroke tore out or copied, when it did.
     ///
     /// The view is what puts it on the system clipboard, the setting being on:
@@ -141,6 +148,8 @@ pub struct Vim {
     register: Register,
     /// What the keystroke under way has taken, waiting for its `Change`.
     yanked: Option<Register>,
+    /// The range it copied without touching it, waiting for the same.
+    flashed: Option<Range<usize>>,
     prompt: Option<Prompt>,
     last_search: String,
     search_backward: bool,
@@ -439,7 +448,10 @@ impl Vim {
         self.mode = Mode::Normal;
         match operator {
             'y' => {
-                // Yanking leaves the caret at the start of what was taken.
+                // Yanking leaves the caret at the start of what was taken, and
+                // the range lit for a moment: nothing else on screen says it
+                // took.
+                self.flashed = Some(range.clone());
                 let head = clamp_to_line(text, range.start);
                 Response::Apply(self.landing(text, head))
             }
@@ -734,6 +746,7 @@ impl Vim {
             edit: None,
             selection: self.selection(text),
             head: self.head,
+            flash: self.flashed.take(),
             yank: self.yanked.take(),
         }
     }
@@ -761,6 +774,7 @@ impl Vim {
                 text: replacement,
             }),
             head,
+            flash: self.flashed.take(),
             yank: self.yanked.take(),
         }
     }
@@ -1993,6 +2007,42 @@ mod tests {
         editor.vim.set_register("X".into());
         editor.press("p");
         assert_eq!(editor.text, "oXne\n");
+    }
+
+    /// A yank is the one gesture that changes nothing on screen: the range it
+    /// took is reported so that the view can light it up. A delete has taken the
+    /// text away and has nothing left to light.
+    #[test]
+    fn a_yank_reports_what_to_flash() {
+        let mut vim = Vim::default();
+        let text = "one two\nthree\n";
+        vim.press(&key('y'), text, 0, 10);
+        let Response::Apply(change) = vim.press(&key('w'), text, 0, 10) else {
+            panic!("yw copies");
+        };
+        assert_eq!(change.flash, Some(0..4));
+
+        // A whole line, without its newline.
+        let mut vim = Vim::default();
+        vim.press(&key('y'), text, 0, 10);
+        let Response::Apply(change) = vim.press(&key('y'), text, 0, 10) else {
+            panic!("yy copies");
+        };
+        assert_eq!(change.flash, Some(0..7));
+
+        let mut vim = Vim::default();
+        vim.press(&key('d'), text, 0, 10);
+        let Response::Apply(change) = vim.press(&key('w'), text, 0, 10) else {
+            panic!("dw deletes");
+        };
+        assert_eq!(change.flash, None);
+
+        // And a motion flashes nothing at all.
+        let mut vim = Vim::default();
+        let Response::Apply(change) = vim.press(&key('l'), text, 0, 10) else {
+            panic!("a motion applies");
+        };
+        assert_eq!(change.flash, None);
     }
 
     fn key(ch: char) -> Key {
