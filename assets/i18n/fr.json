@@ -82,6 +82,7 @@
   "db-default": "défaut :",
   "db-empty": "Aucune connexion à une base de données.",
   "db-export": "Exporter le résultat en CSV",
+  "db-follow-key": "Aller à %{target}",
   "db-export-unreachable": "Ce dossier n'est pas atteignable depuis WSL",
   "db-exported": "%{n} ligne(s) écrite(s) dans %{path}",
   "db-failed": "Échec de la requête",

@@ -23,6 +23,7 @@
 //! account's rights are the only barrier that counts, and adding a second one
 //! here would forbid an `UPDATE` the user is entitled to make.
 
+pub mod link;
 pub mod mysql;
 pub mod scope;
 pub mod sqlite;

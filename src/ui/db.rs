@@ -447,7 +447,7 @@ impl ClaudhubApp {
         // The SQL console completes on what the panel has indexed: it therefore
         // benefits from the same read, without starting a second one.
         if let Ok(indexed) = &columns {
-            self.db_schema_indexed(&key, &database, indexed);
+            self.db_schema_indexed(&key, &database, indexed, cx);
         }
         let Some(position) = self.database_position(index, &database) else {
             return;

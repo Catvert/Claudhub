@@ -15,7 +15,7 @@ use anyhow::{Context as _, Result};
 use futures::TryStreamExt as _;
 use sqlx::{
     mysql::{MySqlConnectOptions, MySqlConnection, MySqlRow},
-    Column as _, ConnectOptions as _, Either, Row as _, ValueRef as _,
+    Column as _, ConnectOptions as _, Either, Row as _, TypeInfo as _, ValueRef as _,
 };
 
 use super::{bytes_to_string, Cell, Column, Connection, Database, Rows, Table};
@@ -318,10 +318,21 @@ fn cells(row: &MySqlRow) -> Vec<Cell> {
 /// text comes first: a `DECIMAL(20,4)` arrives as a string, and putting it
 /// through an `f64` would round it.
 fn value_to_cell(row: &MySqlRow, index: usize) -> Cell {
-    match row.try_get_raw(index) {
+    let decimal = match row.try_get_raw(index) {
         Ok(value) if value.is_null() => return None,
-        Ok(_) => {}
+        Ok(value) => value.type_info().name() == "DECIMAL",
         Err(_) => return Some("?".to_string()),
+    };
+    // `DECIMAL` travels as text in both protocols, but sqlx declares no
+    // `String` decoding for it — the numeric types live behind the `bigdecimal`
+    // and `rust_decimal` features. The checked path therefore refuses it, and
+    // every column of a price table read `<?>`. Its raw bytes are the digits
+    // themselves, so the unchecked decoding is exact, and it is what keeps a
+    // `DECIMAL(20,4)` from going through an `f64` and being rounded.
+    if decimal {
+        if let Ok(value) = row.try_get_unchecked::<String, _>(index) {
+            return Some(value);
+        }
     }
     if let Ok(value) = row.try_get::<String, _>(index) {
         return Some(value);

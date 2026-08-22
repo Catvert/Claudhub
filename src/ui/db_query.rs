@@ -169,6 +169,11 @@ pub struct SchemaIndex {
     pub database: Option<String>,
     /// `(table, columns)`, in schema order.
     pub tables: Vec<(String, Vec<String>)>,
+    /// The schema's foreign keys, which say which result column can be
+    /// followed. Filed beside the names rather than derived from them: it is
+    /// the same answer that fills both, and one projection each is made where
+    /// it arrives.
+    pub foreign_keys: Vec<db::link::Key>,
 }
 
 /// The keywords offered when no schema is indexed — and beside the table names
@@ -259,6 +264,12 @@ pub struct Results {
     selection: Option<Selection>,
     /// A drag is under way: the hovered cells extend the rectangle.
     dragging: bool,
+    /// What each column of the result points at, when it is a foreign key —
+    /// one entry per column, computed when the rows arrive. Never in the render
+    /// closure, which runs for every visible cell of every frame.
+    links: Vec<Option<db::link::Target>>,
+    /// The engine, which decides how the query written by a jump quotes.
+    engine: db::Engine,
     /// The application, to report a sort or a request for more to it.
     ///
     /// **Weak**, like the dock's panels: the application holds the table, and a
@@ -286,7 +297,12 @@ fn column_width(rows: &db::Rows, index: usize) -> gpui::Pixels {
 }
 
 impl Results {
-    fn new(rows: db::Rows, state: &QueryState, cx: &Context<ClaudhubApp>) -> Self {
+    fn new(
+        rows: db::Rows,
+        links: Vec<Option<db::link::Target>>,
+        state: &QueryState,
+        cx: &Context<ClaudhubApp>,
+    ) -> Self {
         let widths = (0..rows.columns.len())
             .map(|index| column_width(&rows, index))
             .collect();
@@ -300,6 +316,12 @@ impl Results {
             loading: false,
             selection: None,
             dragging: false,
+            links,
+            engine: state
+                .connection
+                .as_ref()
+                .map(|connection| connection.engine)
+                .unwrap_or_default(),
             app: Some(cx.weak_entity()),
         }
     }
@@ -409,6 +431,16 @@ impl Results {
         let mut out = db::tsv_line(self.rows.columns.iter().map(|name| Some(name.as_str())));
         out.push_str(&db::tsv_line(cells.iter().map(|cell| cell.as_deref())));
         Some(out)
+    }
+
+    /// What a cell follows: the row its value names in another table.
+    ///
+    /// A `NULL` names nothing, and a column that is not a key names nothing
+    /// either — in both cases there is no entry to offer rather than one that
+    /// would answer with an empty result.
+    fn link(&self, row: usize, column: usize) -> Option<(&db::link::Target, &String)> {
+        let target = self.links.get(column)?.as_ref()?;
+        Some((target, self.cell(row, column)?))
     }
 
     fn cell(&self, row: usize, column: usize) -> Option<&String> {
@@ -537,6 +569,11 @@ impl TableDelegate for Results {
         let selected = self
             .selection
             .is_some_and(|selection| selection.contains(row, column));
+        // A foreign key is tinted, as it is in the schema tree, and that tint is
+        // the whole of what says it can be followed: the gesture is a
+        // system-key click, like going to a definition in the editor, and a
+        // colour is what makes it discoverable without a hint on every row.
+        let key = self.link(row, column).is_some();
         div()
             .size_full()
             .px_2()
@@ -547,6 +584,7 @@ impl TableDelegate for Results {
             .when(null, |el| {
                 el.text_color(cx.theme().muted_foreground).italic()
             })
+            .when(key, |el| el.text_color(cx.theme().info))
             .when(selected, |el| el.bg(cx.theme().selection))
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -560,6 +598,21 @@ impl TableDelegate for Results {
                     table
                         .delegate_mut()
                         .press(row, column, event.modifiers.shift);
+                    if event.modifiers.secondary() {
+                        // Deferred **with the window**: we are inside an
+                        // `update` on the table, and the jump replaces its
+                        // delegate — the panic `report` already exists for. The
+                        // window is needed all the same, the query being put
+                        // into the editor's state.
+                        if let Some(app) = table.delegate().app.clone() {
+                            window.defer(cx, move |window, cx| {
+                                app.update(cx, |this, cx| {
+                                    this.follow_db_key(row, column, window, cx);
+                                })
+                                .ok();
+                            });
+                        }
+                    }
                     cx.notify();
                 }),
             )
@@ -618,8 +671,40 @@ impl TableDelegate for Results {
             return menu;
         };
         let selected = self.selection.is_some();
-        let (copy, headers, line, all, export) =
-            (app.clone(), app.clone(), app.clone(), app.clone(), app);
+        // The cell aimed at is the selection's cursor: a right click outside the
+        // selection has just put it there, and inside a block it is the last
+        // cell clicked. A jump is about one value, never about a rectangle.
+        let jump = self
+            .selection
+            .map(|selection| selection.cursor)
+            .filter(|(clicked, _)| *clicked == row)
+            .and_then(|(row, column)| {
+                let (target, value) = self.link(row, column)?;
+                Some((
+                    target.label(),
+                    db::link::select_row(self.engine, target, value),
+                ))
+            });
+        let (copy, headers, line, all, export) = (
+            app.clone(),
+            app.clone(),
+            app.clone(),
+            app.clone(),
+            app.clone(),
+        );
+        let menu = match jump {
+            Some((label, sql)) => menu
+                .item(
+                    PopupMenuItem::new(tr!("db-follow-key", { target: label }))
+                        .icon(icon("arrow-right"))
+                        .on_click(move |_, window, cx| {
+                            app.update(cx, |this, cx| this.run_db_sql(sql.clone(), window, cx))
+                                .ok();
+                        }),
+                )
+                .separator(),
+            None => menu,
+        };
         menu.item(
             PopupMenuItem::new(tr!("db-copy-selection"))
                 .icon(icon("copy"))
@@ -805,6 +890,7 @@ impl ClaudhubApp {
         key: &str,
         database: &str,
         columns: &BTreeMap<String, Vec<db::Column>>,
+        cx: &mut Context<Self>,
     ) {
         let Some(connection) = self.query.connection.as_ref() else {
             return;
@@ -830,6 +916,52 @@ impl ClaudhubApp {
                 )
             })
             .collect();
+        index.foreign_keys = db::link::keys_of(columns);
+        drop(index);
+        // A result shown before the index arrived carries no key yet. The links
+        // are recomputed rather than the table refreshed: `refresh` would put
+        // the scrolling back to the top, and what changes here is only what the
+        // cells are painted with.
+        let columns = self.db_table.read(cx).delegate().rows.columns.clone();
+        let links = self.db_links(&columns);
+        self.db_table.update(cx, |state, cx| {
+            state.delegate_mut().links = links;
+            cx.notify();
+        });
+    }
+
+    /// Follows the foreign key a cell carries.
+    ///
+    /// The gesture is the system-key click and the menu entry, and both end in
+    /// `run_db_sql` — two ways of making one gesture that did not land in the
+    /// same place would be one too many.
+    pub(super) fn follow_db_key(
+        &mut self,
+        row: usize,
+        column: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let results = self.db_table.read(cx).delegate();
+        let sql = results
+            .link(row, column)
+            .map(|(target, value)| db::link::select_row(results.engine, target, value));
+        if let Some(sql) = sql {
+            self.run_db_sql(sql, window, cx);
+        }
+    }
+
+    /// Puts a query into the editor and runs it.
+    ///
+    /// It is what opening a table from the tree does, and following a key does
+    /// the same: the text is what one goes on to adjust, and the previous query
+    /// is one row up in the history panel — which is what makes this
+    /// overwriting bearable.
+    pub(super) fn run_db_sql(&mut self, sql: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.db_query_input.update(cx, |state, cx| {
+            state.set_value(sql, window, cx);
+        });
+        self.run_db_query(cx);
     }
 
     /// Runs whatever is in the editor.
@@ -991,11 +1123,25 @@ impl ClaudhubApp {
     /// lose the widths just adjusted with the mouse and would put the scrolling
     /// back to the top in the middle of paging.
     fn set_db_rows(&mut self, rows: db::Rows, cx: &mut Context<Self>) {
-        let results = Results::new(rows, &self.query, cx);
+        let links = self.db_links(&rows.columns);
+        let results = Results::new(rows, links, &self.query, cx);
         self.db_table.update(cx, |state, cx| {
             *state.delegate_mut() = results;
             state.refresh(cx);
         });
+    }
+
+    /// Which of a result's columns can be followed.
+    ///
+    /// Empty as long as the schema has not been indexed — the answer comes
+    /// several seconds after the console opens, and `db_schema_indexed` asks
+    /// again then.
+    fn db_links(&self, columns: &[String]) -> Vec<Option<db::link::Target>> {
+        let Some(sql) = self.query.sent.as_deref() else {
+            return vec![None; columns.len()];
+        };
+        let index = self.db_schema.borrow();
+        db::link::targets(sql, columns, &index.foreign_keys)
     }
 
     /// Appends a page under the ones being looked at.

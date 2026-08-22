@@ -102,6 +102,7 @@ src/
   db/           bases de données — `sqlx`, asynchrone, testable sans gpui
     mod.rs      connexions, schémas, résultats ; le choix du moteur
     scope.rs    quelles bases appartiennent au worktree regardé — motifs
+    link.rs     suivre une clé étrangère : la table d'une colonne, le littéral
     sqlite.rs   en lecture seule, schéma lu par les pragmas
     mysql.rs    MySQL et MariaDB, par `information_schema`
   logging.rs    `env_logger` sur stderr, et un anneau de deux mille lignes
@@ -3202,6 +3203,15 @@ couramment le mot. Les confondre se paie trois fois : la grille les affiche
 pareil, l'export CSV écrit `NULL` là où un champ vide est attendu, et la copie
 sort un mot qui ne veut plus rien dire une fois collée ailleurs.
 
+**Un `DECIMAL` se décode sans vérification de type, et c'est le seul.** Les
+types numériques de `sqlx` vivent derrière les caractéristiques `bigdecimal` et
+`rust_decimal`, que Claudhub n'active pas : sans elles, aucun décodage vers
+`String` n'est déclaré pour `DECIMAL`, la voie vérifiée le refuse, et une table
+de prix s'affichait entièrement en `<?>`. Or la valeur voyage en **texte** dans
+les deux protocoles — ses octets bruts sont les chiffres eux-mêmes —, si bien
+que `try_get_unchecked` est ici exact. C'est aussi ce qui empêche un
+`DECIMAL(20,4)` de passer par un `f64`, qui l'arrondirait.
+
 **Une connexion par requête, jamais gardée.** Un panneau qui tient une
 connexion ouverte sur un serveur qu'on n'interroge plus occupe un descripteur
 et un processus côté serveur, et découvre la coupure du réseau au pire moment.
@@ -3361,6 +3371,37 @@ Neuf points :
   clic — et un clic dans la grille **prend le focus**, sans quoi le `Ctrl+C`
   qui suit partirait à qui l'avait et `ClaudhubQuery` ne serait pas dans la
   pile de contextes.
+- **Une clé étrangère se suit jusqu'à sa ligne.** Une cellule qui en porte une
+  est teintée comme l'est la colonne dans l'arbre du schéma, et le clic avec la
+  touche système y va — c'est le geste d'« aller à la définition » de l'éditeur,
+  et la teinte est tout ce qui le rend découvrable. Le clic droit porte la même
+  entrée, nommée par sa cible (« Aller à `users.id` »), et les deux finissent
+  dans le même `run_db_sql` : la requête est posée dans l'éditeur et lancée,
+  exactement comme l'ouverture d'une table depuis l'arbre. Ce qu'on écrasait est
+  une ligne plus haut dans le panneau « Historique », et c'est ce qui rend cet
+  écrasement supportable. Quatre points, tous dans `db::link`, pur et testé :
+  - **Le moteur ne dit pas de quelle table vient une colonne de résultat.** Le
+    protocole MySQL porte bien un `org_table` dans ses définitions de colonnes,
+    mais `sqlx` n'en garde que le nom, le rang et le type. La provenance se lit
+    donc dans la **requête** — les tables qu'elle nomme après `FROM` et `JOIN` —
+    croisée avec les clés étrangères du schéma indexé. C'est exact pour le
+    `SELECT * FROM t` qu'écrit l'ouverture d'une table, et honnête ailleurs :
+    quand deux des tables nommées portent la même colonne vers deux cibles
+    différentes, **rien n'est offert** plutôt que la mauvaise ligne.
+  - **Le balayage n'est pas un parseur**, mais il saute les chaînes, les
+    identifiants cités et les commentaires : un `FROM` écrit dans une chaîne
+    nommerait sinon une table qui n'existe pas.
+  - **Un nombre part nu, le reste est cité.** SQLite compare un `INTEGER` à
+    `'42'` par type avant de le faire par valeur et ne trouve rien : une clé
+    citée rendrait un résultat vide sans rien dire. L'apostrophe est doublée, et
+    l'antislash aussi sur MySQL, qui le lit comme une échappement là où SQLite
+    ne le fait pas.
+  - **Les liens sont calculés à l'arrivée des lignes**, jamais au rendu, et
+    recalculés quand l'index du schéma arrive — il vient plusieurs secondes
+    après l'ouverture de la console, et un résultat affiché avant lui n'aurait
+    aucune clé. C'est un recalcul et non un `refresh`, qui remettrait le
+    défilement en haut.
+
 - **Le presse-papiers prend des tabulations, le fichier des virgules.** Un
   presse-papiers se **colle** — dans une grille de tableur, dans un message —
   où la tabulation garde les colonnes et où la virgule ne fait qu'une seule
