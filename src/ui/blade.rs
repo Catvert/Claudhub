@@ -148,8 +148,9 @@ fn apply(styled: &[(Range<usize>, HighlightStyle)], target: &mut LineStyles) {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct State {
     comment: bool,
-    /// The quote that will close the script value being read.
-    script: Option<char>,
+    /// The quote that will close the attribute value being read, and the
+    /// language of what is inside it.
+    value: Option<(char, Scope)>,
 }
 
 /// Cuts a line into Blade ranges, each with the style name it deserves. The
@@ -174,18 +175,18 @@ fn scan(line: &str, state: &mut State) -> Vec<(Range<usize>, Scope)> {
         }
     }
 
-    if let Some(quote) = state.script {
+    if let Some((quote, scope)) = state.value {
         match line.find(quote) {
             Some(end) => {
                 if end > 0 {
-                    out.push((0..end, Scope::Script));
+                    out.push((0..end, scope));
                 }
-                state.script = None;
+                state.value = None;
                 i = end + quote.len_utf8();
             }
             None => {
                 if !line.is_empty() {
-                    out.push((0..line.len(), Scope::Script));
+                    out.push((0..line.len(), scope));
                 }
                 return out;
             }
@@ -359,8 +360,10 @@ fn echo(
     }
 }
 
-/// An Alpine attribute and its value: `@click.prevent="open = !open"`,
-/// `x-data="{ tab: 1 }"`, `x-effect="…"`. Returns the length consumed.
+/// An attribute whose value is not text but code, and the language it is in:
+/// `@click.prevent="open = !open"`, `x-data="{ tab: 1 }"` and `x-on:click="…"`
+/// hold **JavaScript**, `:label="__('…')"` holds **PHP**. Returns the length
+/// consumed.
 ///
 /// **For an `@` name, it is the `=` that tells it from a directive**, and
 /// nothing else: `@click` and `@if` have exactly the same shape, and only an
@@ -369,15 +372,18 @@ fn echo(
 /// it *removed* the attribute colour the HTML grammar had given it, `apply`
 /// replacing what it covers.
 ///
-/// The value is marked `Script` so it can be handed to the JavaScript grammar,
-/// and an unclosed quote is left open in `state`: an `x-effect` running over two
-/// lines is how anyone writes one.
+/// The value is marked with its language so it can be handed to the right
+/// grammar, and an unclosed quote is left open in `state`: an `x-effect` running
+/// over two lines is how anyone writes one.
 ///
-/// What is deliberately left out is `:name="…"`. On a component tag it is a
-/// Blade prop, so PHP; on an ordinary tag it is Alpine's `x-bind`, so
-/// JavaScript. Telling them apart means knowing which tag is open, which this
-/// line-by-line scanner does not — and colouring PHP as JavaScript is worse than
-/// leaving a string a string.
+/// **`:name="…"` is read as PHP, and that is a convention, not a deduction.**
+/// The shorthand is ambiguous by construction: on a component tag it is a Blade
+/// prop, on an ordinary tag it is Alpine's `x-bind`. Telling them apart means
+/// knowing which tag is open, which this line-by-line scanner does not. Blade
+/// wins because Alpine has a spelling that says so — `x-bind:class` — and a
+/// project that uses it has nothing ambiguous left; one that writes `:class` for
+/// Alpine gets a PHP reading of a JavaScript expression, which comes back
+/// looking like the string it was, `fragment` colouring nothing it cannot read.
 fn binding(
     rest: &str,
     line: &str,
@@ -389,12 +395,17 @@ fn binding(
         return None;
     }
     let event = rest.starts_with('@');
-    if !event && !rest.starts_with("x-") {
+    // Which language the value is in, decided by the prefix alone.
+    let inside = if event || rest.starts_with("x-") {
+        Scope::Script
+    } else if rest.starts_with(':') {
+        Scope::Expression
+    } else {
         return None;
-    }
+    };
     // The modifiers are part of the name — `@click.prevent.stop` is one
     // attribute — and so is the `:` of `x-on:click`.
-    let head = usize::from(event);
+    let head = usize::from(event || inside == Scope::Expression);
     let name = rest[head..]
         .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':')))
         .unwrap_or(rest.len() - head);
@@ -414,15 +425,15 @@ fn binding(
     match rest[i..].find(quote) {
         Some(end) => {
             if end > 0 {
-                out.push((at + i..at + i + end, Scope::Script));
+                out.push((at + i..at + i + end, inside));
             }
             Some(i + end + quote.len_utf8())
         }
         None => {
             if i < rest.len() {
-                out.push((at + i..at + rest.len(), Scope::Script));
+                out.push((at + i..at + rest.len(), inside));
             }
-            state.script = Some(quote);
+            state.value = Some((quote, inside));
             Some(rest.len())
         }
     }
@@ -558,8 +569,13 @@ impl Tint {
         // `highlight::prologue`, one level down.
         let (before, after) = match scope {
             // Without an opening tag, the PHP grammar reads the fragment as
-            // HTML text and not one colour comes out.
-            Scope::Expression => ("<?php ", ""),
+            // HTML text and not one colour comes out. And without the
+            // semicolon, a fragment that is a bare expression — `true`, an enum
+            // case, anything a `:prop` holds — is not a statement, so the parse
+            // is an `ERROR` node and the query matches nothing inside it. The
+            // one character is the difference between a coloured value and a
+            // grey one.
+            Scope::Expression => ("<?php ", ";"),
             // `x-data="{ tab: 1 }"` is an expression, and a JavaScript program
             // beginning with a brace is a *block*: `tab:` would be a label. The
             // parentheses are what make it the object it is. Anything else is
@@ -623,11 +639,19 @@ fn styled(
 
 /// One fragment's styles, in the containing text's offsets, **with no holes**.
 ///
-/// The grammar's colours, and the scope's underneath wherever it says nothing: a
-/// grammar names a keyword and a string, not the space between them, and leaving
-/// those grey would pick a value apart instead of colouring it. It is also what
-/// makes the whole thing safe to try — a fragment its grammar cannot read comes
-/// back looking exactly as it did before.
+/// It is all or nothing, and the two cases are what makes the attempt safe:
+///
+/// - **The grammar said something**, so the fragment is code and reads as code.
+///   What it did not name — an identifier, an operator, a space — takes the
+///   plain text colour, exactly as it would in a file of that language. Leaving
+///   those bytes the value's own colour was what made `id = $wire.` and
+///   `prevEditId !==` come back green in the middle of coloured JavaScript: the
+///   string colour spread over everything the grammar had no word for, and the
+///   value read as a string with a few keywords in it.
+/// - **It said nothing at all** — an expression it cannot parse, a value that is
+///   one bare identifier — and the fragment keeps the single colour it had. Not
+///   trying is exactly what happened before, so nothing can look worse than it
+///   did.
 fn fragment(
     tint: &mut Tint,
     scope: Scope,
@@ -636,18 +660,23 @@ fn fragment(
     fallback: HighlightStyle,
     resolver: &dyn HighlightStyleResolver,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
-    let mut out = Vec::new();
+    let inner = tint.of(scope, &text[range.clone()], resolver);
+    if inner.is_empty() {
+        return vec![(range.clone(), fallback)];
+    }
+    let plain = HighlightStyle::default();
+    let mut out = Vec::with_capacity(inner.len() * 2 + 1);
     let mut at = range.start;
-    for (inner, style) in tint.of(scope, &text[range.clone()], resolver) {
-        let (start, end) = (range.start + inner.start, range.start + inner.end);
+    for (piece, style) in inner {
+        let (start, end) = (range.start + piece.start, range.start + piece.end);
         if start > at {
-            out.push((at..start, fallback));
+            out.push((at..start, plain));
         }
         out.push((start..end, style));
         at = end;
     }
     if at < range.end {
-        out.push((at..range.end, fallback));
+        out.push((at..range.end, plain));
     }
     out
 }
@@ -1081,32 +1110,118 @@ mod tests {
         );
     }
 
-    /// A value whose grammar says nothing about a byte keeps the colour it had:
-    /// `data` in `data.schemeCode` is a plain identifier, which no theme here
-    /// names, and it must not come out as a hole in the middle of a value.
+    /// Once a value is read as code it reads as code whole: what the grammar
+    /// names is coloured, the rest is plain text — never the value's own colour,
+    /// which spread over every identifier and made JavaScript look like a string
+    /// with keywords in it.
     #[test]
-    fn a_fragment_never_comes_back_with_a_hole() {
+    fn a_value_read_as_code_leaves_no_colour_on_the_rest() {
         crate::ui::highlight::register_languages();
-        let source = "<x-input x-model=\"data.schemeCode\" />\n";
+        let source = "<x-input x-model=\"data.schemeCode\" x-on:click=\"go('x')\" />\n";
         let theme = HighlightTheme::default_dark();
         let mut highlighter = BladeHighlighter::new();
         highlighter.refresh(source);
         let styles = highlighter.styles(&(0..source.len()), &*theme);
 
-        let value = source
-            .find("data.schemeCode")
-            .expect("the fixture holds it");
-        for at in value..value + "data.schemeCode".len() {
-            let style = styles
+        let colour = |what: &str| {
+            let at = source.find(what).expect("the fixture holds it");
+            styles
                 .iter()
                 .find(|(r, _)| r.start <= at && at < r.end)
-                .expect("every byte is covered");
-            assert!(
-                style.1.color.is_some(),
-                "{:?} has no colour",
-                &source[at..at + 1]
-            );
-        }
+                .expect("every byte is covered")
+                .1
+                .color
+        };
+        assert!(colour("schemeCode").is_some(), "a property is named");
+        assert!(colour("data").is_none(), "an identifier is not");
+        assert!(colour("'x'").is_some(), "a string is");
+        // And the value's own colour is nowhere in it any more.
+        let string_colour = Scope::Script.resolve(&*theme).and_then(|s| s.color);
+        assert!(string_colour.is_some() && colour("data") != string_colour);
+    }
+
+    /// The shorthand `:name="…"` is Blade, by convention: Alpine has a spelling
+    /// that says otherwise, and it is the one to use.
+    #[test]
+    fn the_shorthand_binding_is_php_and_x_bind_is_javascript() {
+        crate::ui::highlight::register_languages();
+        let source =
+            "<x-dialog :items=\"$invoice->lines\" x-bind:class=\"{ open: tab === 1 }\" />\n";
+        let theme = HighlightTheme::default_dark();
+        let mut highlighter = BladeHighlighter::new();
+        highlighter.refresh(source);
+        let styles = highlighter.styles(&(0..source.len()), &*theme);
+
+        let colour = |what: &str| {
+            let at = source.find(what).expect("the fixture holds it");
+            styles
+                .iter()
+                .find(|(r, _)| r.start <= at && at < r.end)
+                .expect("every byte is covered")
+                .1
+                .color
+        };
+        // PHP: an arrow reads a property, and `$invoice` is a plain variable.
+        assert!(colour("lines").is_some() && colour("$invoice").is_none());
+        // JavaScript, on the other side of the same tag.
+        assert!(colour("1").is_some(), "a number in an x-bind expression");
+        // Neither is the string colour the value had before.
+        let string_colour = Scope::Script.resolve(&*theme).and_then(|s| s.color);
+        assert!(colour("lines") != string_colour);
+    }
+
+    /// What a `:prop` holds is most often a bare expression — a boolean, an
+    /// enum case — and a bare expression is not a statement: the parse is an
+    /// `ERROR` and the query matches nothing inside it. Hence the semicolon
+    /// `Tint::of` appends, and hence this test.
+    #[test]
+    fn a_bare_expression_is_coloured_like_the_code_it_is() {
+        crate::ui::highlight::register_languages();
+        let source = "<x-btn :fullHeight=\"true\" :color=\"ActionColor::Success\" />\n";
+        let theme = HighlightTheme::default_dark();
+        let mut highlighter = BladeHighlighter::new();
+        highlighter.refresh(source);
+        let styles = highlighter.styles(&(0..source.len()), &*theme);
+
+        let colour = |what: &str| {
+            let at = source.find(what).expect("the fixture holds it");
+            styles
+                .iter()
+                .find(|(r, _)| r.start <= at && at < r.end)
+                .expect("every byte is covered")
+                .1
+                .color
+        };
+        let flat = Scope::Expression.resolve(&*theme).and_then(|s| s.color);
+        assert!(colour("true").is_some() && colour("true") != flat);
+        assert!(colour("Success").is_some() && colour("Success") != flat);
+        assert!(
+            colour("ActionColor") != colour("Success"),
+            "a class is not a case"
+        );
+    }
+
+    /// A value its grammar cannot read keeps the single colour it had: not
+    /// trying is what happened before, so nothing can look worse than it did.
+    #[test]
+    fn a_value_that_says_nothing_is_left_as_it_was() {
+        crate::ui::highlight::register_languages();
+        let source = "<div x-show=\"open\">\n";
+        let theme = HighlightTheme::default_dark();
+        let mut highlighter = BladeHighlighter::new();
+        highlighter.refresh(source);
+        let styles = highlighter.styles(&(0..source.len()), &*theme);
+
+        let at = source.find("open").expect("the fixture holds it");
+        let style = styles
+            .iter()
+            .find(|(r, _)| r.start <= at && at < r.end)
+            .expect("every byte is covered");
+        assert_eq!(
+            style.1.color,
+            Scope::Script.resolve(&*theme).and_then(|s| s.color),
+            "a bare identifier is no reason to bleach the value"
+        );
     }
 
     /// An `x-effect` over two lines is how anyone writes one, and the second
@@ -1117,7 +1232,11 @@ mod tests {
         let first = "<div x-effect=\"const id = 1;";
         let found = scan(first, &mut state);
         assert_eq!(covered(first, &found), [("const id = 1;", Scope::Script)]);
-        assert_eq!(state.script, Some('"'), "the value stays open");
+        assert_eq!(
+            state.value,
+            Some(('"', Scope::Script)),
+            "the value stays open, and stays JavaScript"
+        );
 
         let second = "if (id) { go(); }\">";
         let found = scan(second, &mut state);
@@ -1125,7 +1244,7 @@ mod tests {
             covered(second, &found),
             [("if (id) { go(); }", Scope::Script)]
         );
-        assert_eq!(state.script, None, "and closes");
+        assert_eq!(state.value, None, "and closes");
     }
 
     /// The contract `InputHighlighter` states and nothing checks. A run out of

@@ -170,6 +170,10 @@ src/
     conflicts.rs    les conflits et le garde-fou d'une opération à mi-chemin
     worktree_ops.rs création guidée, tâches du projet, intégration
     store.rs        ce qu'on retient par worktree : base, replis, notes
+    session.rs      où l'on en était : le worktree, le fichier ouvert, la
+                    console — et la règle, testée, du worktree qui s'ouvre
+    dialogs.rs      les deux boutons d'un dialogue, que gpui-component ne
+                    peint que pour un `AlertDialog`
     notes.rs        le modèle des notes, leur ancrage et leur prompt
     notes_view.rs   les gestes de la relecture annotée et son panneau
     vault.rs        les notes, le suivi de relecture et la liste de tâches
@@ -178,6 +182,8 @@ src/
                     l'éditeur, les diagnostics, et le bouton « LSP »
     find.rs         la recherche d'un panneau, et son routage
     motion.rs       le lissage de la molette, sans rien de gpui dedans
+    vim.rs          les modes de vim de l'éditeur : motions, opérateurs,
+                    registres — sans rien de gpui dedans
     scroll.rs       la barre de défilement d'un panneau, et son lissage
     shortcuts.rs    les actions, leurs touches, et l'aide qui en sort
     shortcuts_view.rs  la fenêtre d'aide, en deux colonnes
@@ -983,6 +989,10 @@ fichier **bascule sur cet écran-là** : le geste vient de l'explorateur, qui y
 vit, mais aussi d'une ligne de diff, et y répondre en silence sur l'écran d'à
 côté serait un fichier ouvert que personne ne voit.
 
+**Les modes de vim s'y appliquent**, quand le réglage est allumé : c'est le
+seul endroit de la fenêtre où il y a du texte à éditer, et ce sont des modes et
+non des liaisons — voir « Les modes de vim dans l'éditeur ».
+
 L'éditeur externe se déclare par une commande avec `{path}` et `{line}`
 (`code -g {path}:{line}`, `phpstorm --line {line} {path}`,
 `zed {path}:{line}`). Il est lancé **détaché**, ses sorties jetées : un éditeur
@@ -1311,7 +1321,8 @@ Quatre points :
 Les réglages disent comment Claudhub s'affiche ; le magasin
 (`store::StateStore`, `<config>/state.json`) dit où l'on en est — la base à
 laquelle on compare *ce* worktree, les dossiers qu'on y a repliés, le prochain
-numéro de note. Deux fichiers et non un seul : le premier se modifie à la
+numéro de note, et où l'on en était en fermant (voir « Où l'on en était »).
+Deux fichiers et non un seul : le premier se modifie à la
 main, le second compterait quelques centaines de lignes par dépôt et n'y
 survivrait pas.
 
@@ -2140,7 +2151,7 @@ liste n'est pas virtualisée, un `mx_1` sur la ligne suffit.
 du dock, `Tab`, a un rayon **codé en dur à zéro** et rien dans le thème ne
 l'atteint ; `Tab::with_variant` et `TabBar::with_variant` existent pourtant,
 c'est seulement le panneau d'onglets du dock qui ne les transmettait pas. D'où
-le **fork** (voir `Cargo.toml`) : six commits au-dessus de leur `main` — le
+le **fork** (voir `Cargo.toml`) : sept commits au-dessus de leur `main` — le
 `TabVariant` que `DockSkin` fait passer jusqu'au `TabBar` ; les coins en boîte
 bordée du bandeau réservés au variant classique, dont ils épousent les
 rectangles ; le groupe lu comme une carte hors variant classique — cadre
@@ -2159,6 +2170,11 @@ par-dessus un texte qui n'avait plus l'air sélectionné — sur le seul geste p
 lequel la sélection est justement conservée, comme le dit leur propre `on_blur`.
 Elle est désormais peinte dans le ton atténué déjà calculé pour les occurrences
 de recherche, la sélection inactive que dessine tout éditeur.
+
+Un septième, qui n'en parle pas non plus : **un contrôle peut cacher son caret
+sans se désactiver** (`set_cursor_hidden`). C'est ce que demande un éditeur
+modal, dont le curseur bloc est une sélection d'un caractère — voir « Les modes
+de vim dans l'éditeur ».
 
 Les commits ont vocation à partir en PR, et le fork à disparaître avec elle.
 
@@ -3055,6 +3071,64 @@ un worktree doit ouvrir *ce* worktree. Le worktree retenu est le plus profond
 dont le chemin est un préfixe de celui demandé, faute de quoi un worktree
 imbriqué dans un autre serait attribué au mauvais.
 
+Mais `opened_at` ne dit pas à lui seul « lancé ici » : un dépôt mémorisé demande
+sa propre racine, et revient donc lui aussi avec un checkout. Trois candidats se
+départagent par un **rang** (`session::pick_worktree`, libre et testé) : le
+checkout qui contient le dossier de lancement l'emporte toujours, puis le
+worktree de la session précédente, puis le premier de la liste. Le rang est ce
+qui rend l'ordre des réponses sans importance — les dépôts sont énumérés par le
+worker qui finit le premier, et sans lui le worktree mémorisé gagnait ou perdait
+selon le jour. `select_worktree` pose le rang le plus fort, celui d'un choix à
+la main, et `repo_opened` le rabaisse juste après pour les sélections qu'il fait
+lui-même.
+
+Corollaire : la sélection a lieu **même quand le dépôt était déjà ouvert**. Le
+dépôt d'où l'on lance est presque toujours un dépôt mémorisé, donc déjà ouvert
+quand `OpenIfRepo` répond — et cette réponse-là est la seule qui nomme le
+checkout profond où l'on se tient plutôt que le dépôt principal. Le reste de
+l'ouverture, lui, ne se refait pas.
+
+### Où l'on en était
+
+Les réglages disent comment Claudhub s'affiche, `layout.json` où sont les
+panneaux et sur quel écran on était, le magasin ce à quoi un worktree se
+compare. Aucun ne disait ce qu'on **faisait** : rouvrir demandait de retrouver
+le dépôt, le worktree, le fichier, et de retaper la requête qui était prête à
+partir. `store::Session`, écrit par `ui::session`, garde ces trois-là.
+
+**On remet ce qu'on avait choisi, jamais ce qu'on avait obtenu.** Le worktree
+sélectionné, le fichier ouvert dans l'éditeur, la connexion de la console et le
+texte de sa requête — mais pas de diff, pas de grille de résultats, pas de
+statut : tout cela revient de lui-même des lectures que la sélection déclenche,
+et un `SELECT` rejoué au démarrage est une requête vers un serveur que personne
+n'a demandé à joindre.
+
+Cinq points qui ne se devinent pas :
+
+- **La connexion est nommée par sa clé** (`db::Connection::key`) et non
+  recopiée : elle est décrite dans les réglages, une copie ici vieillirait au
+  premier changement, et la clé ne porte pas le mot de passe. Une connexion
+  supprimée ne revient simplement pas.
+- **Rouvrir n'est pas un geste.** Ouvrir un fichier bascule sur l'écran
+  « Édition », ouvrir une console sur celui des bases — voir « Les
+  sous-applications ». Ici il n'y a pas de geste, et l'écran qui revient est
+  celui de `layout.json` : `take_restored_editing` est ce qui distingue les deux,
+  et `reopen_db_console` est `start_db_console` sans ses deux effets de bord.
+- **L'écriture se fait aux gestes, pas à la fermeture.** Une fenêtre se ferme
+  aussi par un plantage ou une session qui s'achève, et un état écrit seulement
+  en sortant est un état qu'on perd les jours où il aurait servi. Le texte de la
+  requête part donc à chaque frappe, la demi-seconde différée du magasin faisant
+  le reste.
+- **Ce qui n'est pas encore remis tient lieu de ce qui n'est pas là.** La
+  première frappe arrive avant qu'un dépôt ait répondu : sans ce repli,
+  `persist_session` écrirait un worktree vide et effacerait celui qu'on est en
+  train de rendre.
+- **La demande de relecture du fichier ne part qu'une fois**
+  (`restore_asked`). Chaque dépôt qui s'ouvre demande si le fichier mémorisé est
+  l'un des siens, et une fenêtre à quatre dépôts lirait sinon quatre fois le même
+  fichier. Ce qui ne trouve jamais son worktree reste là et s'en va avec la
+  fenêtre : un fichier dont le worktree a été supprimé n'a rien à signaler.
+
 ### La base de la revue de branche
 
 La base **par défaut** vient de git — `origin/HEAD`, puis `init.defaultBranch`,
@@ -3159,19 +3233,44 @@ par une accolade — `x-data="{ tab: 1 }"` est une *expression*, et un programme
 JavaScript qui commence par une accolade est un **bloc**, où `tab:` serait une
 étiquette.
 
-Cinq points, et les trois derniers sont ce qui rend la chose payable :
+Sept points, et les trois derniers sont ce qui rend la chose payable :
 
-- **Les couleurs de la grammaire, et celle du rôle en dessous.** Une grammaire
-  nomme un mot-clé et une chaîne, pas l'espace entre les deux : laisser ces
-  octets-là en gris découperait la valeur au lieu de la colorer. C'est aussi ce
-  qui rend l'essai sans risque — un fragment que sa grammaire ne sait pas lire
-  revient exactement comme il était. Le cas courant est `data.schemeCode`, où
-  `data` est un identifiant que nos thèmes ne nomment pas.
-- **Ce qui est délibérément laissé de côté : `:name="…"`.** Sur une balise de
-  composant c'est une propriété Blade, donc du PHP ; sur une balise ordinaire
-  c'est le `x-bind` d'Alpine, donc du JavaScript. Les départager demande de
-  savoir quelle balise est ouverte, ce qu'un scanner ligne à ligne ne sait pas —
-  et colorer du PHP en JavaScript est pire que laisser une chaîne en chaîne.
+- **C'est tout ou rien, et les deux cas sont ce qui rend l'essai sans risque.**
+  Si la grammaire a dit quelque chose, le fragment est du code et se lit comme
+  du code : ce qu'elle n'a pas nommé — un identifiant, un opérateur, une
+  espace — prend la couleur du texte ordinaire, exactement comme dans un fichier
+  de cette langue-là. Laisser ces octets à la couleur de la valeur est ce qui
+  faisait revenir `id = $wire.` et `prevEditId !==` en vert au milieu d'un
+  JavaScript coloré : la couleur de chaîne s'étalait sur tout ce que la
+  grammaire n'avait pas de mot pour nommer, et la valeur se lisait comme une
+  chaîne avec des mots-clés dedans. Si elle n'a **rien** dit — une expression
+  qu'elle ne sait pas lire, une valeur qui n'est qu'un identifiant nu —, le
+  fragment garde la couleur unique qu'il avait ; ne pas essayer est exactement
+  ce qui se passait avant, donc rien ne peut être pire qu'avant.
+- **Un fragment PHP reçoit un point-virgule.** Sans lui, une expression nue —
+  `true`, un cas d'énumération, à peu près tout ce qu'un `:prop` porte — n'est
+  pas une instruction : l'analyse rend un nœud `ERROR` et la requête ne trouve
+  rien dedans. Ce caractère-là est toute la différence entre une valeur colorée
+  et une valeur grise.
+- **La requête PHP livrée ne nomme pas un cas d'énumération**, et c'est réparé
+  au-dessus d'elle (`highlight::PHP_CONSTANTS`, concaténé comme l'est déjà
+  l'injection HTML). Elle ne nomme une constante que capitalisée — `Foo::BAR` —,
+  ce qui était toute la convention à l'époque où elle a été écrite ;
+  `ActionColor::Success` ne correspondait à **rien**, ni d'un côté ni de
+  l'autre du `::`, dans un dépôt où les énumérations sont partout. Le nœud ne
+  porte pas de noms de champs, d'où l'ancre : le premier nom est la classe, le
+  second ce qu'on y lit. Cela vaut pour tout le PHP du dépôt, vues comprises,
+  pas seulement pour les fragments.
+- **`:name="…"` est lu comme du PHP, et c'est une convention, pas une
+  déduction.** Le raccourci est ambigu par construction : sur une balise de
+  composant c'est une propriété Blade, sur une balise ordinaire c'est le
+  `x-bind` d'Alpine. Les départager demande de savoir quelle balise est ouverte,
+  ce qu'un scanner ligne à ligne ne sait pas. Blade l'emporte parce qu'Alpine a
+  une orthographe qui le dit — `x-bind:class` —, et qu'un projet qui l'emploie
+  n'a plus rien d'ambigu ; un projet qui écrit `:class` pour Alpine obtient une
+  lecture PHP d'une expression JavaScript, qui revient telle qu'elle était,
+  `fragment` ne colorant rien de ce qu'il ne sait pas lire. `wire:` n'est touché
+  ni dans un sens ni dans l'autre.
 - **Une valeur peut tenir sur deux lignes**, et `x-effect="…"` sur deux lignes
   est la façon normale d'en écrire un. C'est la seconde chose que `blade::State`
   reporte d'une ligne à l'autre, à côté du commentaire ouvert.
@@ -3505,11 +3604,14 @@ cherche dans cette liste, pas la touche.
 ### Le mode vim
 
 Désactivé par défaut, et il faut que ça le reste : ses liaisons sont des
-**lettres nues**. Ce n'est pas un mode d'édition — il n'y a rien à éditer dans
-un diff, et l'éditeur intégré appartient à gpui-component — mais la main gauche
-sur la rangée de repos pour relire : `j`/`k` d'un **bloc modifié** au suivant,
-`h`/`l` d'un fichier à l'autre, `gg`/`G`, `Ctrl+D`/`Ctrl+U`, `y` pour copier,
-`/` puis `n`/`N` pour chercher.
+**lettres nues**. Un seul réglage (`Settings::vim_mode`) allume deux mécanismes
+qui n'ont rien en commun, et les confondre est la façon la plus sûre de ne
+comprendre ni l'un ni l'autre.
+
+**Hors de l'éditeur, ce sont des liaisons**, et une liaison ne connaît pas de
+mode : la main gauche sur la rangée de repos pour relire — `j`/`k` d'un **bloc
+modifié** au suivant, `h`/`l` d'un fichier à l'autre, `gg`/`G`,
+`Ctrl+D`/`Ctrl+U`, `y` pour copier, `/` puis `n`/`N` pour chercher.
 
 `j`/`k` suivent les flèches nues et non la ligne : relire, c'est aller d'une
 modification à la suivante, et les lignes de contexte entre deux blocs n'ont
@@ -3518,6 +3620,10 @@ exactement comme `secondary-up`/`down` à côté : nu pour le geste qu'on fait
 mille fois, modifié pour celui qu'on fait quand quelque chose cloche.
 `]c`/`[c`, la convention de vim-gitgutter, restent à côté ; l'aide réunit les
 deux façons sur une ligne.
+
+**Dans l'éditeur, ce sont des modes** (`ui::vim`) : là, il y a du texte à
+éditer, et `d` veut dire deux choses selon l'endroit où l'on en est. Voir « Les
+modes de vim dans l'éditeur ».
 
 **Le réglage n'ajoute pas de liaisons, il allume un contexte.** `bind_keys`
 s'appelle une fois au démarrage ; les liaisons vim sont donc posées
@@ -3531,6 +3637,116 @@ déclaré sur le même nœud que l'identifiant avec lequel il se combine.**
 niveau de la pile de contextes, si bien que `ClaudhubExplorer && ClaudhubVim`
 ne se rencontre jamais quand l'un est sur l'arbre et l'autre sur la racine.
 D'où `explorer_context(vim)` en plus de `context(vim)`.
+
+### Les modes de vim dans l'éditeur
+
+`ui::vim` est la machine modale de l'éditeur intégré : les modes, les motions,
+les opérateurs, les registres. **Elle ne connaît aucun type de gpui** — elle
+reçoit le texte et le curseur, elle rend l'édition à appliquer —, comme
+`motion.rs` et `notes.rs` devant leurs vues, et c'est ce qui la rend testable :
+vingt-six tests décrivent ce que fait chaque touche.
+
+C'est un **sous-ensemble**, et c'en est un exprès : ce qu'une main tape sans y
+penser. `hjkl`, `w`/`b`/`e` (et leurs majuscules), `0`/`^`/`$`, `gg`/`G`,
+`f`/`F`/`t`/`T`, `Ctrl+D`/`Ctrl+U`/`Ctrl+F`/`Ctrl+B` ; `d`, `c`, `y` avec leur
+motion, doublés, avec un compte ou avec un **objet de texte** ; `x`, `X`, `s`,
+`S`, `D`, `C`, `Y`, `r`, `J`, `p`, `P`, `o`, `O`, `i`, `a`, `I`, `A` ; `v`,
+`V`, `Esc` ; `u` ; `/`, `?`, `n`, `N` ; et `:w`, `:q`, `:wq`, `:42`. Ce qui n'y
+est pas est ce qu'un éditeur fait déjà mieux (les registres nommés, les macros,
+les marques) ou ce que Claudhub a ailleurs.
+
+**Les objets de texte** — `iw`/`aw`, `i(`/`a(` et leurs frères pour `{`, `[`,
+`<`, `i"`/`a"` pour les trois guillemets — valent après un opérateur et en mode
+visuel, jamais seuls : `i` et `a` sont d'abord les deux façons d'entrer en
+insertion, et c'est le contexte qui décide. Trois choses s'y jouent :
+
+- **Un objet de mot ne traverse pas un saut de ligne.** `daw` sur le dernier
+  mot d'une ligne prendrait sinon la suivante et son indentation. `aw` prend
+  les blancs qui **suivent**, ou ceux qui précèdent quand il n'y en a pas
+  après — c'est la règle de vim, et c'est ce qui fait qu'effacer un mot au
+  milieu d'une phrase ne laisse pas deux espaces.
+- **Les paires se comptent par imbrication**, dans les deux sens : `di(` depuis
+  l'intérieur d'un appel qui en contient un autre prend le bon. Le curseur
+  posé **sur** un des deux délimiteurs désigne cette paire-là.
+- **Les guillemets d'une ligne s'apparient dans l'ordre** — le deuxième ferme
+  le premier, le quatrième le troisième. C'est la seule lecture qui n'ait
+  besoin de savoir ni ce qu'est une échappement ni ce qu'est un commentaire, et
+  c'est celle de vim ; le prix est qu'un `\"` au milieu d'une chaîne décale
+  l'appariement, ce qui se voit tout de suite et se corrige d'un `u`.
+
+Six points qui ne se devinent pas :
+
+- **L'écoute est en phase de capture, sur un ancêtre de l'éditeur**, et cette
+  place *est* le mécanisme. Un écouteur de touche s'exécute **après** les
+  liaisons — ce qui laisse `Ctrl+S` et `Alt+2` à la fenêtre — mais **avant** que
+  la plateforme ne livre le caractère au champ qui a le focus. Consommer
+  l'événement est donc ce qui empêche un `d` nu d'être tapé dans le fichier ; le
+  laisser passer est ce qui fait du mode insertion un éditeur ordinaire. Rien
+  n'est posé quand le réglage est éteint.
+- **Le caractère lu est celui que la frappe a *produit*** (`key_char`), pas la
+  touche sur laquelle on a appuyé : c'est ce qui met `$`, `^` et `0` là où il
+  faut sur un clavier AZERTY, où ils sont décalés ou dans la rangée des
+  chiffres.
+- **Le curseur bloc est une sélection d'un caractère.** L'éditeur ne dessine
+  qu'un trait ; le bloc de vim est rendu en sélectionnant le caractère sous le
+  curseur, ce qui a un second effet heureux — la position de vim se relit
+  ensuite dans `selected_range().start`, si bien qu'un clic de souris déplace
+  le curseur de vim sans qu'on ait rien à synchroniser. Le découpage se compte
+  en **caractères** : en octets, un fichier accentué se couperait au milieu
+  d'un caractère et paniquerait.
+- **Un yank s'allume une fraction de seconde**, comme le fait
+  vim-highlightedyank. C'est le seul geste de vim qui ne change rien à
+  l'écran : sans signe, on n'est jamais sûr qu'il a pris, et on recommence. Le
+  module pur rend la plage (`Change::flash`) — et pour un **yank seulement**,
+  un `d` ayant emporté le texte qu'il s'agirait d'éclairer — ; la vue la pose
+  sur une `TextDecorationCollection`, créée une fois avec le fichier parce
+  qu'une collection suit le texte à travers ses éditions, et l'éteint par un
+  minuteur. Trois choix : la teinte est celle d'une occurrence de recherche
+  (`find::highlight_color`), déjà la couleur que cette interface pose sur du
+  code pour dire « ici » et qui suit le thème ; la marque ne touche pas à la
+  sélection, le curseur bloc étant juste là ; et elle dure trois cents
+  millisecondes et non la seconde du greffon, choisie pour un terminal où rien
+  d'autre ne bouge. Le minuteur est **remplacé** et non empilé — un `Task` gpui
+  s'annule quand on le laisse tomber —, sans quoi le premier éteindrait le
+  second yank.
+- **Le caret s'éteint hors du mode insertion**, et c'est le septième commit du
+  fork (`InputState::set_cursor_hidden`). Rien de public ne le faisait : le
+  style de l'éditeur — qui porte la couleur du caret — est reconstruit depuis
+  le thème à **chaque** rendu, si bien qu'un caret transparent posé par nous ne
+  survivrait pas à la frame suivante, et `disabled`, qui le cache, grise le
+  texte et le fond avec. Le clignotement est arrêté avec lui plutôt que laissé
+  à tourner derrière un caret que personne ne peint : un clignotement est un
+  rendu de la fenêtre deux fois par seconde tant que le champ a le focus —
+  c'est le raisonnement du curseur du terminal. La consigne est **relue à
+  chaque rendu**, comme `TerminalView::sync_font` : le mode change sous les
+  touches et le réglage sous le formulaire, l'appel est idempotent, et c'est ce
+  qui rend le caret dès qu'on éteint le mode.
+- **`u` et `Ctrl+R` sont rendus à l'éditeur**, qui est le seul à savoir ce
+  qu'était la dernière transaction — d'où `Command::Undo`, une action que la
+  vue redispatche. `Ctrl+R` ne nous parvient d'ailleurs jamais : la fenêtre en
+  fait un rafraîchissement, et le rétablissement se fait donc par le `Ctrl+Y`
+  de l'éditeur.
+- **Le défilement est repris à la main quand la tête remonte.**
+  `set_selected_range` défile vers la **fin** de ce qu'on lui donne, ce qui est
+  le curseur en mode normal mais le mauvais bout d'une sélection étendue vers
+  le haut : `V` puis `k` sortirait du panneau sans que la vue suive.
+- **Le registre est interne, sauf réglage.** `Settings::vim_clipboard` — éteint
+  par défaut, comme vim — fait passer `y`, `d`, `x` et `p` par le presse-papiers
+  du système, ce qui est le `unnamedplus` de vim. Le module pur n'a évidemment
+  pas de presse-papiers : il **dit** ce qu'il vient d'arracher (`Change::yank`)
+  et **accepte** qu'on lui pose un registre (`set_register`), et c'est la vue
+  qui fait la navette. Deux détails s'y paient : le presse-papiers n'est lu
+  qu'au moment où un `p` arrive et non à chaque frappe — une lecture est un
+  aller-retour au serveur d'affichage —, et le drapeau « lignes entières », qui
+  n'existe pas dans un presse-papiers, se relit sur le saut de ligne final.
+- **`w` a l'exception de vim** : `dw` sur le dernier mot d'une ligne s'arrête
+  au bout de la ligne au lieu d'avaler le saut de ligne et l'indentation de la
+  suivante. C'est la seule irrégularité de la grammaire, et elle est dans
+  l'opérateur, pas dans la motion.
+
+Le mode courant et ce qui est en train d'être tapé — la ligne `/`, les touches
+d'une commande incomplète — s'affichent dans la **barre du fichier**, là où
+l'œil est déjà, et non dans la barre d'état à l'autre bout de la fenêtre.
 
 ### Ce qui tient lieu de système d'extension
 
@@ -3580,6 +3796,15 @@ Elles viennent d'Aviary, et les enfreindre produit des bugs silencieux.
   `on_click` — est libre, l'emprunt étant rendu à ce moment-là. Les autres
   fermetures de ce dépôt reçoivent `_cx` pour cette raison ; celle des
   raccourcis ne s'en sert que pour lire le thème, qui est un global.
+- **Un `Dialog` ne peint pas ses boutons.** `on_ok` et `on_cancel` n'installent
+  que les rappels d'Entrée et d'Échap : la rangée OK/Annuler n'est rendue que
+  par un `AlertDialog`, qui ne prend ni champ de saisie, ni liste de questions,
+  ni extrait de code — c'est-à-dire aucune des confirmations de cette fenêtre.
+  Avec `close_button(false)` et `overlay_closable(false)`, un dialogue auquel on
+  ne sait pas répondre est un dialogue dont on ne sort pas. `ui::dialogs::confirm`
+  rend donc le pied de page, et ses boutons **dispatchent les mêmes actions que
+  les touches** (`Confirm`, `Cancel`) : les deux chemins finissent dans le même
+  `on_ok`, comme les boutons et les flèches de la barre du diff.
 - **`key_context` prend un identifiant, pas un prédicat.** Passer
   `"Claudhub && !Dialog"` à `key_context` fait boucler le parseur et déborder la
   pile au premier rendu. L'expression va dans le troisième argument de

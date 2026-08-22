@@ -256,6 +256,18 @@ pub struct Editing {
     /// Digest of the content read, which makes it possible to refuse to
     /// overwrite an agent's work.
     pub hash: u64,
+    /// The modal state, when vim keys are on. One per open file: leaving a file
+    /// in insert mode and coming back to another in normal mode is what a tabbed
+    /// vim does anyway.
+    pub vim: crate::ui::vim::Vim,
+    /// The layer a yank lights up on, created once with the file: a collection
+    /// follows the text through its edits, and asking for a new one per yank
+    /// would leave the old ones stacked up for as long as the file is open.
+    pub flash: gpui_component::input::TextDecorationCollection,
+    /// What puts the light out, held so that it can be **dropped**: a second
+    /// yank replaces the task, and dropping a gpui task cancels it — without
+    /// that, the first timer would darken the second yank.
+    pub flash_timer: Option<gpui::Task<()>>,
     /// What is on screen differs from what is on disk.
     pub dirty: bool,
     /// A change is already on its way to the language server.
@@ -580,6 +592,7 @@ impl ClaudhubApp {
     ) {
         // The language follows from the extension, as for a diff's highlighting:
         // it is the same table, PHP included.
+        let restored = self.take_restored_editing(&worktree, &path);
         let language = crate::ui::highlight::language_for_path(&path).unwrap_or("text");
         let input = cx.new(|cx| {
             // `EditorState` and not `InputState`: the input rework split the
@@ -617,6 +630,9 @@ impl ClaudhubApp {
         if let Some(previous) = self.editing.take() {
             self.lsp_editor_closed(previous.worktree, previous.path);
         }
+        let flash = input.update(cx, |state, cx| {
+            state.create_decorations_collection(Vec::new(), cx)
+        });
         self.editing = Some(Editing {
             worktree,
             path,
@@ -624,6 +640,9 @@ impl ClaudhubApp {
             hash: content.hash,
             dirty: false,
             lsp_pending: false,
+            vim: crate::ui::vim::Vim::default(),
+            flash,
+            flash_timer: None,
         });
         // Starts the server this file's language asks for, opens the document
         // and posts the providers — all of it a no-op when the button is off.
@@ -632,8 +651,14 @@ impl ClaudhubApp {
         // comes from the explorer — so from that screen most of the time — but
         // also from a diff line, and answering it silently on the screen next
         // door would be an opened file nobody sees.
-        self.enter_workspace(crate::ui::workspace::Workspace::Files, window, cx);
-        self.set_panel_visible(crate::ui::panels::EditorPanel::NAME, true, cx);
+        //
+        // Unless it is the previous session being put back: there is no gesture
+        // then, and the screen that comes back is the one `layout.json` carries.
+        if !restored {
+            self.enter_workspace(crate::ui::workspace::Workspace::Files, window, cx);
+            self.set_panel_visible(crate::ui::panels::EditorPanel::NAME, true, cx);
+        }
+        self.persist_session(cx);
         cx.notify();
     }
 
@@ -672,6 +697,7 @@ impl ClaudhubApp {
             let (worktree, path) = (editing.worktree.clone(), editing.path.clone());
             self.editing = None;
             self.lsp_editor_closed(worktree, path);
+            self.persist_session(cx);
             cx.notify();
             return;
         }
@@ -689,11 +715,13 @@ impl ClaudhubApp {
                 )
                 .overlay_closable(false)
                 .close_button(false)
+                .footer(super::dialogs::confirm())
                 .on_ok(move |_, _window, cx| {
                     entity.update(cx, |this, cx| {
                         if let Some(previous) = this.editing.take() {
                             this.lsp_editor_closed(previous.worktree, previous.path);
                         }
+                        this.persist_session(cx);
                         cx.notify();
                     });
                     true
@@ -764,6 +792,194 @@ impl ClaudhubApp {
             explorer.state = Listing::Idle;
         }
         cx.notify();
+    }
+
+    // — The vim keys ————————————————————————————————————————————
+
+    /// One keystroke, when vim keys are on and the built-in editor has the
+    /// focus.
+    ///
+    /// It is listened for in the **capture** phase, on an ancestor of the
+    /// editor, and that placement is the whole mechanism. A key listener runs
+    /// *after* the bindings have had their turn — which is what leaves `Ctrl+S`
+    /// and `Alt+2` to the window — but *before* the platform hands the character
+    /// to the focused input handler. Consuming the event is therefore what keeps
+    /// a bare `d` from being typed into the file; letting it through is what
+    /// makes insert mode an ordinary editor again.
+    fn vim_key(&mut self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::ui::vim::{Command, Response};
+
+        if !Settings::global(cx).vim_mode || self.editing.is_none() {
+            return;
+        }
+        let keystroke = &event.keystroke;
+        let modifiers = keystroke.modifiers;
+        // Alt belongs to the window — it is how one changes screen — and a
+        // function key has nothing vim wants.
+        if modifiers.alt || modifiers.function {
+            return;
+        }
+        let ctrl = modifiers.control || modifiers.platform;
+        // The character the keystroke **produced**, and not the key it was
+        // pressed on: that is what puts `$`, `^` and `0` where they belong on an
+        // AZERTY keyboard, where they are shifted or in the digit row.
+        let ch = keystroke
+            .key_char
+            .as_deref()
+            .filter(|_| !ctrl)
+            .and_then(|typed| {
+                let mut chars = typed.chars();
+                let ch = chars.next()?;
+                (chars.next().is_none() && !ch.is_control()).then_some(ch)
+            });
+        let key = crate::ui::vim::Key {
+            ch,
+            name: keystroke.key.clone(),
+            ctrl,
+        };
+
+        let Some(input) = self.editing.as_ref().map(|editing| editing.input.clone()) else {
+            return;
+        };
+        let (text, cursor, rows) = {
+            let state = input.read(cx);
+            let rows = state
+                .visible_row_range()
+                .map(|rows| rows.len())
+                .unwrap_or(DEFAULT_ROWS)
+                .max(2);
+            (
+                state.value().to_string(),
+                state.selected_range().start,
+                rows,
+            )
+        };
+        // The clipboard is read **when a paste is about to happen**, and not at
+        // every keystroke: a read is a round trip to the display server, and
+        // pasting is the only gesture that consumes a register.
+        let clipboard = Settings::global(cx).vim_clipboard;
+        let pasting = clipboard && matches!(key.ch, Some('p') | Some('P'));
+        let pasted = pasting
+            .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
+            .flatten();
+        let Some(editing) = self.editing.as_mut() else {
+            return;
+        };
+        if let Some(text) = pasted {
+            editing.vim.set_register(text);
+        }
+        let response = editing.vim.press(&key, &text, cursor, rows);
+        if matches!(response, Response::Ignored) {
+            return;
+        }
+        // Everything else is ours: the key must not reach the file.
+        cx.stop_propagation();
+        match response {
+            Response::Ignored | Response::Consumed => {}
+            Response::Apply(change) => {
+                if let Some(yank) = change.yank.filter(|_| clipboard) {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(yank.text));
+                }
+                if let Some(range) = change.flash {
+                    self.flash_yank(range, cx);
+                }
+                input.update(cx, |state, cx| {
+                    if let Some(edit) = change.edit {
+                        state.set_selected_range(edit.range, cx);
+                        state.replace(edit.text, window, cx);
+                    }
+                    state.set_selected_range(change.selection, cx);
+                });
+                self.reveal_vim_head(&input, change.head, cx);
+            }
+            Response::Command(command) => match command {
+                // Undo and redo belong to the editor, which is the only one that
+                // knows what the last transaction was.
+                Command::Undo => window.dispatch_action(Box::new(gpui_component::input::Undo), cx),
+                Command::Redo => window.dispatch_action(Box::new(gpui_component::input::Redo), cx),
+                Command::Save => self.save_file(cx),
+                Command::Close => self.close_editor(window, cx),
+                Command::SaveAndClose => {
+                    self.save_file(cx);
+                    self.close_editor(window, cx);
+                }
+            },
+        }
+        cx.notify();
+    }
+
+    /// Lights up what a yank has just copied, and puts it out again.
+    ///
+    /// A yank changes nothing on screen: without a sign, one is never sure it
+    /// took, and one yanks again. It is what vim-highlightedyank exists for.
+    ///
+    /// Three things it does not do: it does not touch the selection — the block
+    /// cursor is right there and two marks fighting over one character would say
+    /// less than one —, it does not last a second like the plugin's default,
+    /// which was chosen for a terminal where nothing else moves, and it does not
+    /// hold a timer per yank: the task is **replaced**, and dropping a gpui task
+    /// cancels it.
+    fn flash_yank(&mut self, range: std::ops::Range<usize>, cx: &mut Context<Self>) {
+        let Some(editing) = self.editing.as_ref() else {
+            return;
+        };
+        let flash = editing.flash.clone();
+        // The tone of a search occurrence: it is already the colour this
+        // interface lays over code to say "here", and it follows the theme.
+        let style = gpui::HighlightStyle {
+            background_color: Some(crate::ui::find::highlight_color(false, cx)),
+            ..Default::default()
+        };
+        flash.set(
+            vec![gpui_component::input::TextDecoration::new(range, style)],
+            cx,
+        );
+        let timer = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(YANK_FLASH).await;
+            cx.update(|cx| flash.clear(cx));
+            // The editor repaints of its own accord — the collection notifies —
+            // but the panel is what holds the file, and it is what a stale
+            // frame would show.
+            let _ = this.update(cx, |_, cx| cx.notify());
+        });
+        if let Some(editing) = self.editing.as_mut() {
+            editing.flash_timer = Some(timer);
+        }
+    }
+
+    /// Scrolls the caret back into view when the editor will not do it itself.
+    ///
+    /// `set_selected_range` scrolls to the **end** of what it is given, which is
+    /// where the caret is in normal mode but the wrong end of a selection grown
+    /// upwards: `V` then `k` would walk off the top of the panel without the
+    /// view ever following.
+    fn reveal_vim_head(
+        &mut self,
+        input: &Entity<EditorState>,
+        head: usize,
+        cx: &mut Context<Self>,
+    ) {
+        input.update(cx, |state, cx| {
+            let (Some(rows), Some(line_height)) = (state.visible_row_range(), state.line_height())
+            else {
+                return;
+            };
+            let row = state.value()[..head.min(state.value().len())]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count();
+            if rows.contains(&row) {
+                return;
+            }
+            let first = if row < rows.start {
+                row
+            } else {
+                row.saturating_sub(rows.len().saturating_sub(1))
+            };
+            // The input's scroll handle counts downwards as negative.
+            let offset = state.scroll_offset();
+            state.set_scroll_offset(gpui::point(offset.x, -(line_height * first as f32)), cx);
+        });
     }
 
     // — The panel  ——————————————————————————————————————————————
@@ -1099,6 +1315,7 @@ impl ClaudhubApp {
                 )
                 .overlay_closable(false)
                 .close_button(false)
+                .footer(super::dialogs::confirm())
                 .on_ok(move |_, _window, cx| {
                     entity.update(cx, |this, cx| {
                         this.file_op(files::Op::Delete { path: path.clone() }, cx)
@@ -1165,6 +1382,15 @@ impl ClaudhubApp {
     ) -> Option<impl IntoElement> {
         let editing = self.editing.as_ref()?;
         let (path, dirty, input) = (editing.path.clone(), editing.dirty, editing.input.clone());
+        let vim = Settings::global(cx).vim_mode;
+        let mode = editing.vim.mode();
+        // The `/` line being typed, or the keys of a command not complete yet:
+        // vim shows both, and they are the only thing that says why the next key
+        // will not do what it usually does.
+        let hint = editing
+            .vim
+            .prompt()
+            .unwrap_or_else(|| editing.vim.pending().to_string());
         // The smoothing advances by one frame, as the diff's does. The offset
         // is written back through `InputState`, which is the only way in: the
         // editor has no `ScrollHandle` of its own to hand out.
@@ -1175,6 +1401,16 @@ impl ClaudhubApp {
         {
             input.update(cx, |state, cx| state.set_scroll_offset(next, cx));
         }
+        // **The caret goes away outside insert mode.** The block cursor is a
+        // selection of one character, and the editor's own caret would blink on
+        // top of it: two cursors on one character say less than one. Reread at
+        // every frame and not set once, like `TerminalView::sync_font`, because
+        // the mode changes under the keys and the setting under the form; the
+        // call is idempotent, and it is what makes turning vim mode off give the
+        // caret back without anything else to do.
+        input.update(cx, |state, cx| {
+            state.set_cursor_hidden(vim && mode != crate::ui::vim::Mode::Insert, cx);
+        });
         let entity = cx.entity();
         let mono = cx.theme().mono_font_family.clone();
         // The editor is code, like the diff on the screen next door: same
@@ -1204,6 +1440,10 @@ impl ClaudhubApp {
                                 .font_family(mono.clone())
                                 .child(label),
                         )
+                        // The mode, where the eye already is: on the file's
+                        // own bar, and not in the window's status bar at the
+                        // other end of the screen.
+                        .when(vim, |el| el.child(self.render_vim_mode(mode, &hint, cx)))
                         // A badge and not an asterisk in the title: the title is
                         // already a truncated path, and one more character at the
                         // end goes unseen.
@@ -1248,6 +1488,15 @@ impl ClaudhubApp {
                         .relative()
                         .flex_1()
                         .min_h_0()
+                        // The capture phase, on an ancestor of the editor: see
+                        // `vim_key`. Installed only when the mode is on, so that
+                        // nothing stands between the keyboard and the input
+                        // otherwise.
+                        .when(vim, |el| {
+                            el.capture_key_down(cx.listener(|this, event, window, cx| {
+                                this.vim_key(event, window, cx)
+                            }))
+                        })
                         .child(
                             Editor::new(&input)
                                 .font_family(mono)
@@ -1298,6 +1547,42 @@ impl ClaudhubApp {
                         ),
                 ),
         )
+    }
+
+    /// The mode pill, and what is being typed towards a command.
+    fn render_vim_mode(
+        &self,
+        mode: crate::ui::vim::Mode,
+        hint: &str,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let colour = match mode {
+            crate::ui::vim::Mode::Insert => cx.theme().success,
+            crate::ui::vim::Mode::Normal => cx.theme().muted_foreground,
+            _ => cx.theme().warning,
+        };
+        h_flex()
+            .gap_1()
+            .items_center()
+            .child(
+                div()
+                    .px_1p5()
+                    .rounded(cx.theme().radius)
+                    .text_xs()
+                    .border_1()
+                    .border_color(colour)
+                    .text_color(colour)
+                    .child(tr!(mode.key())),
+            )
+            .when(!hint.is_empty(), |el| {
+                el.child(
+                    div()
+                        .text_xs()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .text_color(cx.theme().muted_foreground)
+                        .child(SharedString::from(hint.to_string())),
+                )
+            })
     }
 }
 
@@ -1391,6 +1676,18 @@ fn editor_extent(
     };
     (offset, gpui::point(px(0.), travel))
 }
+
+/// How many lines `Ctrl+D` moves by half of, before the editor has been laid out
+/// once and can say how tall it is.
+const DEFAULT_ROWS: usize = 20;
+
+/// How long a yank stays lit.
+///
+/// Not vim-highlightedyank's second, which was chosen for a terminal where
+/// nothing else moves: here the mode pill, the dirty badge and an agent's
+/// writing are all on the same screen, and a mark that outstays the gesture
+/// reads as a state rather than as an acknowledgement.
+const YANK_FLASH: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// What does not depend on the row: colours and geometry.
 ///

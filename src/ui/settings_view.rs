@@ -717,25 +717,40 @@ fn terminal_page(
 
 /// The keyboard.
 ///
-/// One page for a single setting, and that is accepted: vim mode changes the
-/// meaning of half the keys, and it is the first place one goes looking for it.
-/// The reminder about `F1` is there because help you cannot find is not help.
+/// A short page, and that is accepted: vim mode changes the meaning of half the
+/// keys, and it is the first place one goes looking for it. The reminder about
+/// `F1` is there because help you cannot find is not help.
 fn keyboard_page() -> SettingPage {
     SettingPage::new(tr!("settings-page-keyboard"))
         .group(
-            SettingGroup::new().title(tr!("settings-group-vim")).item(
-                SettingItem::new(
-                    tr!("settings-vim-mode"),
-                    SettingField::switch(
-                        |cx: &App| Settings::global(cx).vim_mode,
-                        |value: bool, cx: &mut App| {
-                            Settings::update_global(cx, |s| s.vim_mode = value)
-                        },
+            SettingGroup::new()
+                .title(tr!("settings-group-vim"))
+                .item(
+                    SettingItem::new(
+                        tr!("settings-vim-mode"),
+                        SettingField::switch(
+                            |cx: &App| Settings::global(cx).vim_mode,
+                            |value: bool, cx: &mut App| {
+                                Settings::update_global(cx, |s| s.vim_mode = value)
+                            },
+                        )
+                        .default_value(false),
                     )
-                    .default_value(false),
+                    .description(tr!("settings-vim-mode-help")),
                 )
-                .description(tr!("settings-vim-mode-help")),
-            ),
+                .item(
+                    SettingItem::new(
+                        tr!("settings-vim-clipboard"),
+                        SettingField::switch(
+                            |cx: &App| Settings::global(cx).vim_clipboard,
+                            |value: bool, cx: &mut App| {
+                                Settings::update_global(cx, |s| s.vim_clipboard = value)
+                            },
+                        )
+                        .default_value(false),
+                    )
+                    .description(tr!("settings-vim-clipboard-help")),
+                ),
         )
         .group(
             SettingGroup::new()

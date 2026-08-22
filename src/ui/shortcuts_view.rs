@@ -71,6 +71,7 @@ impl ClaudhubApp {
                             )
                         }),
                 )
+                .footer(super::dialogs::close())
         });
     }
 }

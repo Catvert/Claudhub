@@ -402,6 +402,16 @@ pub struct Settings {
     /// elsewhere. It is not an editing mode — there is nothing to edit in a diff
     /// — but the left hand on the home row for reviewing.
     pub vim_mode: bool,
+    /// Yank and paste through the **system** clipboard rather than vim's own
+    /// register.
+    ///
+    /// Off by default, which is vim's own default: `y` there fills a register
+    /// nothing else can see, and someone who wants `y` here and `Ctrl+V` in the
+    /// browser is asking for `unnamedplus`. It is a setting and not a decision
+    /// because both answers are right — one keeps the clipboard for what one put
+    /// in it deliberately, the other saves a gesture.
+    #[serde(default)]
+    pub vim_clipboard: bool,
     /// Where the review notes are written, one Markdown file per note.
     ///
     /// Empty: `<config>/notes`. The field exists to point at a vault — Obsidian,
@@ -489,6 +499,7 @@ impl Default for Settings {
             sentry_token: String::new(),
             sentry_query: String::new(),
             vim_mode: false,
+            vim_clipboard: false,
             notes_dir: String::new(),
             wsl_distro: String::new(),
             hidden_panels: Vec::new(),

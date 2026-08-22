@@ -163,6 +163,7 @@ impl ClaudhubApp {
                 )
                 .overlay_closable(false)
                 .close_button(false)
+                .footer(super::dialogs::confirm())
                 .on_ok(move |_, _window, cx| {
                     let body = input.read(cx).value().to_string();
                     on_ok.update(cx, |this, cx| this.save_note(body, cx));
@@ -591,6 +592,7 @@ impl ClaudhubApp {
                 )
                 .overlay_closable(false)
                 .close_button(false)
+                .footer(super::dialogs::confirm())
                 .on_ok(move |_, window, cx| {
                     let text = input.read(cx).value().to_string();
                     entity.update(cx, |this, cx| {

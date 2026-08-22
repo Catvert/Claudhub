@@ -728,6 +728,34 @@ impl ClaudhubApp {
         // table opened elsewhere.
         self.enter_workspace(crate::ui::workspace::Workspace::Db, window, cx);
         self.set_panel_visible(crate::ui::panels::ConsolePanel::NAME, true, cx);
+        self.persist_session(cx);
+        cx.notify();
+    }
+
+    /// Puts the console back where the previous session left it.
+    ///
+    /// Everything `start_db_console` does apart from its two side effects: it
+    /// neither calls up the databases screen nor unhides the panel. Restoring
+    /// is not a gesture — the screen that comes back is the one `layout.json`
+    /// carries, and a console hidden when quitting must stay hidden.
+    ///
+    /// The query is put in the editor and **not sent**: what one comes back to
+    /// is the text one was writing, and replaying a `SELECT` nobody asked for
+    /// is a query against a server one did not ask to reach.
+    pub(super) fn reopen_db_console(
+        &mut self,
+        connection: db::Connection,
+        database: Option<String>,
+        query: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.query.connection = Some(connection.clone());
+        self.query.database = database.clone();
+        self.db_query_input.update(cx, |state, cx| {
+            state.set_value(query, window, cx);
+        });
+        self.index_db_schema(&connection, database.as_deref(), cx);
         cx.notify();
     }
 
@@ -735,6 +763,7 @@ impl ClaudhubApp {
     pub(super) fn close_db_console(&mut self, cx: &mut Context<Self>) {
         self.query = QueryState::default();
         self.set_db_rows(db::Rows::default(), cx);
+        self.persist_session(cx);
         cx.notify();
     }
 
