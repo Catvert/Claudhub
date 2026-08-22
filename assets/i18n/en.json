@@ -233,6 +233,7 @@
   "settings-plugin-remove": "Uninstall",
   "settings-plugin-remove-help": "The folder is erased from the disk, with whatever was written in it. git does not get it back.",
   "settings-plugin-install": "Install",
+  "settings-plugin-secret-help": "the value, $VARIABLE, or keyring:name",
   "settings-plugin-url": "git repository address",
   "settings-plugin-name": "Folder name",
   "settings-plugin-handmade": "placed by hand",

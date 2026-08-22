@@ -43,7 +43,7 @@ ui = [
 # script tourne du côté de l'interface, seules ses entrées-sorties traversent
 # le fil. `claudhub-server` porte donc les capacités — ce sont des données que
 # le cœur exécute — et jamais Rune.
-plugins = ["dep:rune"]
+plugins = ["dep:rune", "dep:keyring"]
 
 [dependencies]
 # UI : gpui (le framework de Zed) et gpui-component (dock, listes virtualisées,
@@ -168,6 +168,13 @@ lsp-types = { version = "0.97", optional = true, features = ["proposed"] }
 # `http(…).await`. Rhai ne sait pas faire d'asynchrone du tout ; Lua le ferait
 # à la main avec des coroutines.
 rune = { version = "0.14", optional = true }
+
+# Le trousseau du système, pour qu'un jeton n'ait pas à vivre en clair dans
+# `settings.json`. Sous la feature `plugins`, donc **côté interface** et jamais
+# dans le serveur musl : un trousseau appartient à une session de bureau, qui
+# est du côté Windows quand les workers tournent dans WSL — et le sortir du
+# cœur évite du même coup une dépendance D-Bus dans un binaire statique.
+keyring = { version = "4", optional = true }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -2271,7 +2271,14 @@ fn plugin_row(
                     .unwrap_or_default();
                 let input = cx.new(|cx| {
                     InputState::new(window, cx)
-                        .placeholder(SharedString::from(name.clone()))
+                        // The placeholder says the three forms: a secret is the
+                        // one field here whose *shape* carries a decision about
+                        // where it lives, and nothing else on this page would
+                        // say so.
+                        .placeholder(SharedString::from(format!(
+                            "{name} — {}",
+                            tr!("settings-plugin-secret-help")
+                        )))
                         .default_value(current)
                         .masked(true)
                 });

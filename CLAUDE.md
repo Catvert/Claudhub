@@ -4553,6 +4553,42 @@ voyage en `Secret`, dont le `Debug` masque la valeur — une `Cmd` se journalise
 un secret non. Les valeurs vivent dans les réglages (`Settings::plugins`),
 jamais dans le manifeste, qui est un fichier qu'on recopie.
 
+**Et une valeur dit elle-même où elle vit**, en trois formes qui répondent à
+trois questions différentes :
+
+- **le jeton en clair**, dans `settings.json`. Écrit en `0600` par
+  `write_private`, qui répare aussi un fichier laissé plus permissif par une
+  version antérieure. Cela protège des autres comptes de la machine, pas de ce
+  qui tourne sous le vôtre — ce qui inclut les agents que Claudhub lance.
+  **Sous Windows il n'y a pas d'équivalent** : `write_private` y retombe sur une
+  écriture nue, et c'est justement la plateforme où `settings.json` reste du
+  côté Windows.
+- **`$NOM`**, lu dans l'environnement **du worker**, parce que c'est là que
+  tourne le processus qui fait la requête. Sous Windows, c'est donc
+  l'environnement de la distribution WSL et non celui de Windows.
+- **`keyring:compte`** ou `keyring:service/compte`, lu dans le trousseau du
+  système — Secret Service, Keychain, Credential Manager. Résolu **côté
+  interface** et non dans le worker, et c'est le seul des trois qui change de
+  côté : un trousseau appartient à une session de bureau, qui est celle de
+  Windows quand les workers vivent dans WSL, et le chercher là-bas reviendrait à
+  demander un bus de session à une distribution headless. C'est aussi ce qui
+  garde `keyring` — donc zbus — hors du binaire musl du serveur. Le service vaut
+  `claudhub` par défaut ; le nommer est ce qui permet de lire une entrée qu'un
+  autre programme a créée.
+
+La lecture du trousseau est **mise en cache** après la première : ouvrir un
+trousseau peut demander à l'utilisateur de le déverrouiller, et un panneau qui
+interroge à chaque geste redemanderait sans fin. Le cache est vidé dès que les
+réglages changent. Un échec est **journalisé** et non rendu en secret vide : le
+placeholder resterait alors dans l'en-tête, la requête serait refusée par
+« aucun secret », et on chercherait au mauvais endroit.
+
+Ce qui **n'existe pas**, et il vaut mieux le savoir : un seul secret par appel
+HTTP — `Cap::Http` en porte un, ce que rien n'a encore réclamé. Un secret par
+dépôt, en revanche, marche déjà sans rien ajouter : le script **nomme** son
+secret au moment de l'appel, et ce nom peut venir de `state()`, qui est par
+dépôt.
+
 **Le plugin livré s'appelle « CI »** et lit les exécutions de GitHub Actions par
 `gh`, avec un bouton qui confie le journal d'un échec à l'agent. Il est là pour
 être lu autant que pour marcher, et comme les thèmes son dossier est **réécrit à

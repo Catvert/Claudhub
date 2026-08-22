@@ -106,6 +106,9 @@ pub struct Shared {
     /// Refreshed by the application, exactly like the settings: the host holds
     /// no store of its own, and cannot — a store is a gpui global.
     state: Mutex<BTreeMap<String, String>>,
+    /// What the system keyring has already answered, by the declaration that
+    /// asked for it. Opening a keyring can ask the user to unlock it.
+    keyring: Mutex<BTreeMap<String, String>>,
     allowed: Vec<Capability>,
     outbox: async_channel::Sender<Request>,
     pending: Mutex<HashMap<u64, async_channel::Sender<Result<String, String>>>>,
@@ -121,6 +124,7 @@ impl Shared {
             settings: Mutex::new(manifest.declaration.settings.clone()),
             secrets: Mutex::new(BTreeMap::new()),
             state: Mutex::new(BTreeMap::new()),
+            keyring: Mutex::new(BTreeMap::new()),
             allowed: manifest.declaration.capabilities.clone(),
             outbox,
             pending: Mutex::new(HashMap::new()),
@@ -143,6 +147,8 @@ impl Shared {
             current.insert(key, value);
         }
         *self.secrets.lock().expect("secrets lock") = secrets;
+        // A token corrected in the form must not be answered from a cache.
+        self.keyring.lock().expect("keyring lock").clear();
     }
 
     /// What the repository being looked at has remembered of this plugin.
@@ -180,13 +186,57 @@ impl Shared {
         self.effects.lock().expect("effects lock").push(effect);
     }
 
+    /// The value behind a declared secret's name.
+    ///
+    /// Three forms, and they answer three different questions about where a
+    /// token should live:
+    ///
+    /// - the value itself, in `settings.json` — written `0600`, and in clear;
+    /// - `$NAME`, read from the environment **of the worker**, because that is
+    ///   where the process that makes the request runs;
+    /// - `keyring:…`, read from the system keyring **here**, because a keyring
+    ///   belongs to a desktop session — which is the Windows side when the
+    ///   workers live in WSL. Resolving it in the worker would look for a
+    ///   session bus that a headless distribution does not have.
     fn secret(&self, name: &str) -> Option<Secret> {
-        self.secrets
+        let value = self
+            .secrets
             .lock()
             .expect("secrets lock")
             .get(name)
             .filter(|value| !value.trim().is_empty())
-            .map(|value| Secret(value.clone()))
+            .cloned()?;
+        let Some(entry) = KeyringEntry::parse(&value) else {
+            return Some(Secret(value));
+        };
+        // Cached after the first read: opening a keyring can ask the user to
+        // unlock it, and a panel that fetches on every gesture would ask again
+        // and again. Cleared whenever the settings change.
+        if let Some(hit) = self
+            .keyring
+            .lock()
+            .expect("keyring lock")
+            .get(&value)
+            .cloned()
+        {
+            return Some(Secret(hit));
+        }
+        match entry.read() {
+            Ok(found) => {
+                self.keyring
+                    .lock()
+                    .expect("keyring lock")
+                    .insert(value, found.clone());
+                Some(Secret(found))
+            }
+            Err(e) => {
+                // Said and not silently empty: an unresolved placeholder makes
+                // the request be refused with "no secret", which would send one
+                // looking at the wrong thing.
+                log::warn!(target: "plugin", "{}: {} — {e}", self.id, entry.describe());
+                None
+            }
+        }
     }
 
     /// Sends a capability out and waits for its answer.
@@ -216,6 +266,51 @@ impl Shared {
         rx.recv()
             .await
             .unwrap_or_else(|_| Err("the request was abandoned".into()))
+    }
+}
+
+/// A secret kept in the system keyring rather than in a settings file.
+///
+/// Written `keyring:account` or `keyring:service/account`. The service defaults
+/// to `claudhub`, which is what one wants nine times out of ten — and naming it
+/// is what lets a plugin read an entry some other program created.
+#[derive(Debug, PartialEq, Eq)]
+pub struct KeyringEntry {
+    service: String,
+    account: String,
+}
+
+impl KeyringEntry {
+    const PREFIX: &'static str = "keyring:";
+    const DEFAULT_SERVICE: &'static str = "claudhub";
+
+    /// `None` when the value is not a keyring reference at all.
+    pub fn parse(value: &str) -> Option<Self> {
+        let rest = value.trim().strip_prefix(Self::PREFIX)?.trim();
+        if rest.is_empty() {
+            return None;
+        }
+        Some(match rest.split_once('/') {
+            Some((service, account)) if !service.is_empty() && !account.is_empty() => Self {
+                service: service.to_string(),
+                account: account.to_string(),
+            },
+            // A lone slash on either side is a typo, not a service: what is
+            // there is taken as the account under the default service, which is
+            // what the writer meant.
+            _ => Self {
+                service: Self::DEFAULT_SERVICE.to_string(),
+                account: rest.trim_matches('/').to_string(),
+            },
+        })
+    }
+
+    pub fn describe(&self) -> String {
+        format!("keyring {}/{}", self.service, self.account)
+    }
+
+    fn read(&self) -> Result<String, keyring::Error> {
+        keyring::Entry::new(&self.service, &self.account)?.get_password()
     }
 }
 
@@ -1017,6 +1112,34 @@ mod tests {
         );
         let message = outcome.expect_err("the request was swept away");
         assert!(message.contains("reloaded"), "{message}");
+    }
+
+    /// A secret's three forms, read off the value alone.
+    ///
+    /// The parsing is what a test can hold: reading a keyring needs a desktop
+    /// session, which no test has and which CI certainly does not.
+    #[test]
+    fn a_secret_says_where_it_lives() {
+        use super::KeyringEntry;
+        // A plain value is a plain value: nothing is parsed out of it.
+        assert_eq!(KeyringEntry::parse("sntrys_hunter2"), None);
+        assert_eq!(KeyringEntry::parse("$SENTRY_TOKEN"), None);
+        // `keyring:` with nothing behind it names nothing, and must not become
+        // an entry with an empty account.
+        assert_eq!(KeyringEntry::parse("keyring:"), None);
+        assert_eq!(KeyringEntry::parse("keyring:   "), None);
+
+        let default = KeyringEntry::parse("keyring:sentry").expect("an account");
+        assert_eq!(default.describe(), "keyring claudhub/sentry");
+        let named = KeyringEntry::parse("keyring:com.acme.tools/sentry").expect("both");
+        assert_eq!(named.describe(), "keyring com.acme.tools/sentry");
+        // A lone slash is a typo, not a service: what is there is the account.
+        assert_eq!(
+            KeyringEntry::parse("keyring:/sentry")
+                .expect("an account")
+                .describe(),
+            "keyring claudhub/sentry"
+        );
     }
 
     /// The settings a manifest declares reach the script, and the ones the user

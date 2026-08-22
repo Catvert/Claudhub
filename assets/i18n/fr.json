@@ -233,6 +233,7 @@
   "settings-plugin-remove": "Désinstaller",
   "settings-plugin-remove-help": "Le dossier est effacé du disque, avec ce qu'on y a écrit. git ne le rattrape pas.",
   "settings-plugin-install": "Installer",
+  "settings-plugin-secret-help": "la valeur, $VARIABLE, ou keyring:nom",
   "settings-plugin-url": "Adresse du dépôt git",
   "settings-plugin-name": "Nom du dossier",
   "settings-plugin-handmade": "posé à la main",

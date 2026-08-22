@@ -16,9 +16,10 @@ icon = "triangle-alert"
 capabilities = ["http"]
 
 # Le jeton est nommé par le script et **jamais lu par lui** : c'est le worker
-# qui le substitue, dans un en-tête qui porte `{secret}`. Sa valeur peut être le
-# jeton lui-même, ou `$SENTRY_TOKEN` — une variable d'environnement lue là où
-# tourne le worker, ce qui la garde hors d'un fichier de réglages qu'on recopie.
+# qui le substitue, dans un en-tête qui porte `{secret}`. Trois formes, dans la
+# page « Plugins » : le jeton lui-même ; `$SENTRY_TOKEN`, lu dans
+# l'environnement du worker ; ou `keyring:sentry`, lu dans le trousseau du
+# système. Les deux dernières le gardent hors d'un fichier qu'on recopie.
 secrets = ["token"]
 
 [settings]
