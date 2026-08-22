@@ -97,6 +97,10 @@ pub enum Command {
     Save,
     Close,
     SaveAndClose,
+    /// `gd`. It is a command and not a motion: where it lands is not something
+    /// the text can be read for — a language server has to be asked, and it may
+    /// answer with another file.
+    GoToDefinition,
 }
 
 /// The answer to one keystroke.
@@ -498,6 +502,18 @@ impl Vim {
             }
             let replacement: String = std::iter::repeat_n(rest[1], n).collect();
             return Response::Apply(self.edit(text, self.head..end, replacement, self.head));
+        }
+        // `g` is a prefix, and the motion parser has already taken the only
+        // motion it opens (`gg`): what reaches here is a command.
+        if ch == 'g' && self.mode == Mode::Normal {
+            if rest.len() < 2 {
+                return Response::Consumed;
+            }
+            self.pending.clear();
+            return match rest[1] {
+                'd' => Response::Command(Command::GoToDefinition),
+                _ => Response::Consumed,
+            };
         }
         self.pending.clear();
         if self.mode != Mode::Normal {
@@ -1844,6 +1860,26 @@ mod tests {
             vim.press(&enter(), text, 0, 10),
             Response::Apply(_)
         ));
+    }
+
+    /// `gg` is a motion and `gd` a command: the same first key, and the parser
+    /// must not settle on either before the second one arrives.
+    #[test]
+    fn the_g_prefix_tells_a_motion_from_a_jump() {
+        let text = "one\ntwo\n";
+        let mut vim = Vim::default();
+        assert_eq!(vim.press(&key('g'), text, 4, 10), Response::Consumed);
+        assert_eq!(
+            vim.press(&key('d'), text, 4, 10),
+            Response::Command(Command::GoToDefinition)
+        );
+        // And the motion still works, `gd` having cleared what was pending.
+        let mut vim = Vim::default();
+        vim.press(&key('g'), text, 4, 10);
+        let Response::Apply(change) = vim.press(&key('g'), text, 4, 10) else {
+            panic!("gg goes to the first line");
+        };
+        assert_eq!(change.head, 0);
     }
 
     #[test]

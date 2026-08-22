@@ -80,6 +80,9 @@ actions!(
         ExplorerHome,
         ExplorerEnd,
         ExplorerOpen,
+        GoToDefinition,
+        JumpBack,
+        JumpForward,
         DbUp,
         DbDown,
         DbLeft,
@@ -237,6 +240,22 @@ const EXPLORER_PREDICATE: &str = "ClaudhubExplorer";
 /// The same in vim mode. `ClaudhubVim` has to be declared **by the tree itself**
 /// and not by the root: see `VIM_PREDICATE`.
 const VIM_EXPLORER_PREDICATE: &str = "ClaudhubExplorer && ClaudhubVim";
+
+/// The context the built-in editor declares.
+///
+/// It exists for three keys that are navigation and not text — following a
+/// definition, and walking the trail back and forth — and it is what keeps them
+/// off the commit message field and the search boxes, which are `Input` too.
+/// They are declared here rather than in `ui::vim` so that they answer whether
+/// vim mode is on or not: a binding runs **before** the capture-phase listener
+/// vim keys go through, so there is one path and not two.
+const EDITOR_PREDICATE: &str = "ClaudhubEditor";
+
+pub fn editor_context() -> KeyContext {
+    let mut context = KeyContext::default();
+    context.add("ClaudhubEditor");
+    context
+}
 
 /// The context the databases tree declares.
 ///
@@ -581,6 +600,16 @@ table!(STANDARD, standard_bindings, false, [
     // and Ctrl+W deletes a word.
     Review "secondary-s" => SaveFile, WINDOW_PREDICATE, "shortcut-save";
     Review "secondary-w" => CloseEditor, WINDOW_PREDICATE, "shortcut-close-editor";
+
+    // ── The editor ──────────────────────────────────────────────────────────
+    // `F12` and not a letter with the system key: the editor is an `Input`, and
+    // every single letter there is a character somebody is typing. `Ctrl+O` and
+    // `Ctrl+I` are vim's, and they are bound here rather than in the modal
+    // machine so that they work with the mode off as well — the buttons on the
+    // bar are the same two gestures for whoever does not know them.
+    Review "f12" => GoToDefinition, EDITOR_PREDICATE, "shortcut-goto-definition";
+    Review "ctrl-o" => JumpBack, EDITOR_PREDICATE, "shortcut-jump-back";
+    Review "ctrl-i" => JumpForward, EDITOR_PREDICATE, "shortcut-jump-forward";
 
     // ── The explorer   ───────────────────────────────────────────────────────
     Explorer "up" => ExplorerUp, EXPLORER_PREDICATE, "shortcut-explorer-up";
@@ -1256,6 +1285,33 @@ pub fn explorer_open(
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.activate_project_cursor(cx);
+}
+
+pub fn goto_definition(
+    this: &mut ClaudhubApp,
+    _: &GoToDefinition,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.goto_definition(cx);
+}
+
+pub fn jump_back(
+    this: &mut ClaudhubApp,
+    _: &JumpBack,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.jump_back(cx);
+}
+
+pub fn jump_forward(
+    this: &mut ClaudhubApp,
+    _: &JumpForward,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.jump_forward(cx);
 }
 
 pub fn db_up(
