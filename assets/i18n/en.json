@@ -542,7 +542,7 @@
   "watch-windows-filesystem": "Repository on a Windows drive: no automatic refresh",
   "workspace-db": "Databases",
   "workspace-files": "Editing",
-  "workspace-review": "Review",
+  "workspace-git": "Git",
   "workspace-sentry": "Sentry",
   "workspace-settings": "Settings",
   "worktree-asking": "The project is preparing its questions…",

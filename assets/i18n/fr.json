@@ -542,7 +542,7 @@
   "watch-windows-filesystem": "Dépôt sur un disque Windows : rafraîchissement automatique inactif",
   "workspace-db": "Bases de données",
   "workspace-files": "Édition",
-  "workspace-review": "Revue",
+  "workspace-git": "Git",
   "workspace-sentry": "Sentry",
   "workspace-settings": "Réglages",
   "worktree-asking": "Le projet prépare ses questions…",

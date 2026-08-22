@@ -49,7 +49,7 @@ const REVIEW_LIST_WIDTH: gpui::Pixels = px(420.);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Workspace {
     #[default]
-    Review,
+    Git,
     Files,
     Db,
     Sentry,
@@ -73,7 +73,7 @@ impl Workspace {
     }
 
     pub const ALL: [Workspace; 5] = [
-        Workspace::Review,
+        Workspace::Git,
         Workspace::Files,
         Workspace::Db,
         Workspace::Sentry,
@@ -100,7 +100,10 @@ impl Workspace {
     /// middle would otherwise read back the neighbour's layout.
     pub fn key(self) -> &'static str {
         match self {
-            Self::Review => "review",
+            // "review" and not "git": the key is what a saved layout is read
+            // back by, and renaming the screen must not lose where its panels
+            // were. That is the whole point of it being a name of its own.
+            Self::Git => "review",
             Self::Files => "files",
             Self::Db => "db",
             Self::Sentry => "sentry",
@@ -115,7 +118,7 @@ impl Workspace {
     /// The i18n key of the name, the one in the tooltip.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Review => "workspace-review",
+            Self::Git => "workspace-git",
             Self::Files => "workspace-files",
             Self::Db => "workspace-db",
             Self::Sentry => "workspace-sentry",
@@ -127,7 +130,7 @@ impl Workspace {
     /// called: it is what you aim at, the name only comes in the tooltip.
     pub fn icon(self) -> &'static str {
         match self {
-            Self::Review => "file-diff",
+            Self::Git => "file-diff",
             Self::Files => "file-code",
             Self::Db => "database",
             Self::Sentry => "triangle-alert",
@@ -152,7 +155,7 @@ impl Workspace {
     pub fn views(self) -> &'static [(&'static str, &'static str)] {
         use panels::*;
         match self {
-            Self::Review => &[
+            Self::Git => &[
                 (NotesPanel::NAME, "panel-notes"),
                 (ChangesPanel::NAME, "range-working"),
                 (BranchPanel::NAME, "range-branch"),
@@ -242,7 +245,7 @@ pub fn install_default_layout(
         // what is left to do, what one had to say — and that is read *while*
         // choosing a file, not instead of. A tab hid it behind a click, which
         // is exactly how a to-do list stops being kept.
-        Workspace::Review => {
+        Workspace::Git => {
             let list = DockLayout::v_split()
                 .child(
                     DockLayout::tabs()

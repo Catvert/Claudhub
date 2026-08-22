@@ -2498,8 +2498,13 @@ qu'ils partageaient une seule fenêtre, chacun payait la place des trois
 autres — huit onglets au centre dont on n'en regarde jamais que deux, et un
 panneau central qui changeait de nature selon le dernier geste.
 
-Il y a donc cinq **écrans** (`ui::workspace::Workspace`) : Revue, Édition,
-Bases, Sentry, Réglages. On passe de l'un à l'autre par la barre d'état, ou
+Il y a donc cinq **écrans** (`ui::workspace::Workspace`) : Git, Édition,
+Bases, Sentry, Réglages. Le premier s'appelle « Git » et non « Revue » : il
+porte le diff, mais aussi l'historique, les branches, les conflits et le commit
+— tout ce qu'on fait avec git —, et « Revue » nommait le seul de ses panneaux
+qu'on voit en premier. Sa clé de disposition, elle, reste `review` : c'est ce
+par quoi une disposition enregistrée se relit, et renommer un écran ne doit pas
+perdre la place de ses panneaux. On passe de l'un à l'autre par la barre d'état, ou
 par `Alt+1` à `Alt+6`.
 
 **Les Réglages ne sont pas dans cette barre-là**, et c'est la conclusion de ce
