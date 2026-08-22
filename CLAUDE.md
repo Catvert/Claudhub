@@ -3019,19 +3019,44 @@ par une accolade — `x-data="{ tab: 1 }"` est une *expression*, et un programme
 JavaScript qui commence par une accolade est un **bloc**, où `tab:` serait une
 étiquette.
 
-Cinq points, et les trois derniers sont ce qui rend la chose payable :
+Sept points, et les trois derniers sont ce qui rend la chose payable :
 
-- **Les couleurs de la grammaire, et celle du rôle en dessous.** Une grammaire
-  nomme un mot-clé et une chaîne, pas l'espace entre les deux : laisser ces
-  octets-là en gris découperait la valeur au lieu de la colorer. C'est aussi ce
-  qui rend l'essai sans risque — un fragment que sa grammaire ne sait pas lire
-  revient exactement comme il était. Le cas courant est `data.schemeCode`, où
-  `data` est un identifiant que nos thèmes ne nomment pas.
-- **Ce qui est délibérément laissé de côté : `:name="…"`.** Sur une balise de
-  composant c'est une propriété Blade, donc du PHP ; sur une balise ordinaire
-  c'est le `x-bind` d'Alpine, donc du JavaScript. Les départager demande de
-  savoir quelle balise est ouverte, ce qu'un scanner ligne à ligne ne sait pas —
-  et colorer du PHP en JavaScript est pire que laisser une chaîne en chaîne.
+- **C'est tout ou rien, et les deux cas sont ce qui rend l'essai sans risque.**
+  Si la grammaire a dit quelque chose, le fragment est du code et se lit comme
+  du code : ce qu'elle n'a pas nommé — un identifiant, un opérateur, une
+  espace — prend la couleur du texte ordinaire, exactement comme dans un fichier
+  de cette langue-là. Laisser ces octets à la couleur de la valeur est ce qui
+  faisait revenir `id = $wire.` et `prevEditId !==` en vert au milieu d'un
+  JavaScript coloré : la couleur de chaîne s'étalait sur tout ce que la
+  grammaire n'avait pas de mot pour nommer, et la valeur se lisait comme une
+  chaîne avec des mots-clés dedans. Si elle n'a **rien** dit — une expression
+  qu'elle ne sait pas lire, une valeur qui n'est qu'un identifiant nu —, le
+  fragment garde la couleur unique qu'il avait ; ne pas essayer est exactement
+  ce qui se passait avant, donc rien ne peut être pire qu'avant.
+- **Un fragment PHP reçoit un point-virgule.** Sans lui, une expression nue —
+  `true`, un cas d'énumération, à peu près tout ce qu'un `:prop` porte — n'est
+  pas une instruction : l'analyse rend un nœud `ERROR` et la requête ne trouve
+  rien dedans. Ce caractère-là est toute la différence entre une valeur colorée
+  et une valeur grise.
+- **La requête PHP livrée ne nomme pas un cas d'énumération**, et c'est réparé
+  au-dessus d'elle (`highlight::PHP_CONSTANTS`, concaténé comme l'est déjà
+  l'injection HTML). Elle ne nomme une constante que capitalisée — `Foo::BAR` —,
+  ce qui était toute la convention à l'époque où elle a été écrite ;
+  `ActionColor::Success` ne correspondait à **rien**, ni d'un côté ni de
+  l'autre du `::`, dans un dépôt où les énumérations sont partout. Le nœud ne
+  porte pas de noms de champs, d'où l'ancre : le premier nom est la classe, le
+  second ce qu'on y lit. Cela vaut pour tout le PHP du dépôt, vues comprises,
+  pas seulement pour les fragments.
+- **`:name="…"` est lu comme du PHP, et c'est une convention, pas une
+  déduction.** Le raccourci est ambigu par construction : sur une balise de
+  composant c'est une propriété Blade, sur une balise ordinaire c'est le
+  `x-bind` d'Alpine. Les départager demande de savoir quelle balise est ouverte,
+  ce qu'un scanner ligne à ligne ne sait pas. Blade l'emporte parce qu'Alpine a
+  une orthographe qui le dit — `x-bind:class` —, et qu'un projet qui l'emploie
+  n'a plus rien d'ambigu ; un projet qui écrit `:class` pour Alpine obtient une
+  lecture PHP d'une expression JavaScript, qui revient telle qu'elle était,
+  `fragment` ne colorant rien de ce qu'il ne sait pas lire. `wire:` n'est touché
+  ni dans un sens ni dans l'autre.
 - **Une valeur peut tenir sur deux lignes**, et `x-effect="…"` sur deux lignes
   est la façon normale d'en écrire un. C'est la seconde chose que `blade::State`
   reporte d'une ligne à l'autre, à côté du commentaire ouvert.

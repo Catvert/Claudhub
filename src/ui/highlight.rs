@@ -44,11 +44,12 @@ pub fn register_languages() {
     // strings: without them, a Blade file or a view would only have colours in
     // its `<?php` tags.
     let injections = format!("{}\n{HTML_INJECTION}", tree_sitter_php::INJECTIONS_QUERY);
+    let highlights = format!("{}\n{PHP_CONSTANTS}", tree_sitter_php::HIGHLIGHTS_QUERY);
     let php = LanguageConfig::new(
         "php",
         tree_sitter_php::LANGUAGE_PHP.into(),
         vec!["html".into(), "sql".into()],
-        tree_sitter_php::HIGHLIGHTS_QUERY,
+        &highlights,
         &injections,
         "",
     );
@@ -70,6 +71,21 @@ pub fn register_languages() {
     );
     LanguageRegistry::singleton().register("nix", &nix);
 }
+
+/// A class constant, and with it every enum case.
+///
+/// The grammar's own query names a constant only when it is written in capitals
+/// (`Foo::BAR`), which was the whole convention when it was written. An enum
+/// case is not: `ActionColor::Success` matched nothing at all — neither half —
+/// and came out grey in the middle of coloured code, in a codebase where enums
+/// are everywhere. The node carries no field names, hence the anchor: the first
+/// name is the class, the second is what is read from it.
+const PHP_CONSTANTS: &str = r#"
+(class_constant_access_expression
+  (name) @type
+  .
+  (name) @constant)
+"#;
 
 /// The HTML injection, written here because the crate does not ship it.
 ///
@@ -693,6 +709,34 @@ mod php_tests {
         assert!(
             !styles.line(0, 1).is_empty() && !styles.line(0, 4).is_empty(),
             "and the markers keep their directive colour"
+        );
+    }
+
+    /// An enum case is not an all-caps constant, and the grammar's own query
+    /// only names those. This is ordinary PHP, not a view: the pattern serves
+    /// every diff of the codebase.
+    #[test]
+    fn an_enum_case_is_coloured() {
+        register_languages();
+        let diff = hunk_of("$colour = ActionColor::Success;");
+        let styles = DiffHighlights::compute(
+            Path::new("app/Models/Action.php"),
+            &diff,
+            &HighlightTheme::default_dark(),
+        );
+        let line = &diff.hunks[0].lines[0].text;
+        let named = |what: &str| {
+            let at = line.find(what).expect("the fixture holds it");
+            styles
+                .line(0, 0)
+                .iter()
+                .find(|(range, _)| range.start <= at && at < range.end)
+                .and_then(|(_, style)| style.color)
+        };
+        assert!(named("Success").is_some(), "the case has no colour");
+        assert!(
+            named("ActionColor").is_some() && named("ActionColor") != named("Success"),
+            "the class it is read from is not the case"
         );
     }
 
