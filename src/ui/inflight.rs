@@ -59,9 +59,14 @@ impl InFlight {
     }
 
     /// Is this operation under way? What a button reads to turn.
+    ///
+    /// Scanned rather than looked up: building the key would copy a path, and
+    /// this is read several times per frame for a set that holds a handful of
+    /// entries at most — one per write a hand has started.
     pub fn is_running(&self, worktree: Option<&Path>, action: Action) -> bool {
         self.running
-            .contains(&(worktree.map(Path::to_path_buf), action))
+            .iter()
+            .any(|(path, running)| *running == action && path.as_deref() == worktree)
     }
 
     pub fn is_empty(&self) -> bool {

@@ -562,7 +562,11 @@ pub struct ClaudhubApp {
     ///
     /// Keyed by worktree and not by repository, unlike `wt.toml`: a justfile is
     /// a file of the checkout, and a branch is free to add a recipe.
-    pub(super) just_recipes: HashMap<PathBuf, Option<crate::just::Snapshot>>,
+    ///
+    /// Behind an `Rc`: the run button's menu needs the recipes in a `'static`
+    /// closure, and copying the list on every frame of the bar is what that
+    /// used to cost.
+    pub(super) just_recipes: HashMap<PathBuf, Option<std::rc::Rc<crate::just::Snapshot>>>,
     /// What `wt` knows about each worktree: started or not, its addresses.
     pub(super) wt_states: HashMap<PathBuf, crate::runtime::protocol::WtWorktree>,
     /// The guided creation under way.
@@ -1695,11 +1699,30 @@ impl ClaudhubApp {
             .update(cx, |input, cx| input.set_value(text, window, cx));
     }
 
-    fn file_changed(&mut self, path: &Path, cx: &mut Context<Self>) {
+    /// The two directories `file_changed` weighs a path against.
+    ///
+    /// Resolved once for a batch of paths: both are joins and lookups, and a
+    /// single write in a busy worktree brings dozens of paths at a time.
+    fn watched_dirs(&self, cx: &App) -> (Option<PathBuf>, Option<PathBuf>) {
+        let plugins = crate::ui::plugin_view::plugins_dir();
+        let vault = self
+            .active
+            .clone()
+            .and_then(|active| self.notes_dir(&active, cx));
+        (plugins, vault)
+    }
+
+    fn file_changed(
+        &mut self,
+        path: &Path,
+        dirs: &(Option<PathBuf>, Option<PathBuf>),
+        cx: &mut Context<Self>,
+    ) {
+        let (plugins, vault) = dirs;
         // Before the worktree guard: a plugin's directory is not in a worktree,
         // and its script has to be picked up whether or not one is open.
-        if let Some(dir) = crate::ui::plugin_view::plugins_dir() {
-            if path.starts_with(&dir) {
+        if let Some(dir) = plugins {
+            if path.starts_with(dir) {
                 self.reload_plugins(cx);
                 return;
             }
@@ -1709,7 +1732,7 @@ impl ClaudhubApp {
         };
         // The vault is not inside the worktree, and what changes there is not
         // read with `git status`: it is the folder itself that has to be re-read.
-        if let Some(vault) = self.notes_dir(&active, cx) {
+        if let Some(vault) = vault.clone() {
             if path.starts_with(&vault) {
                 self.git.send(Cmd::ReadNotes {
                     worktree: active,
@@ -1809,7 +1832,8 @@ impl ClaudhubApp {
                 self.wt_projects.insert(main, project);
             }
             Evt::JustRecipes { worktree, recipes } => {
-                self.just_recipes.insert(worktree, recipes);
+                self.just_recipes
+                    .insert(worktree, recipes.map(std::rc::Rc::new));
             }
             Evt::WtQuestions {
                 main,
@@ -1892,8 +1916,9 @@ impl ClaudhubApp {
                 content,
             } => self.preview_arrived(worktree, path, content, cx),
             Evt::FilesChanged { paths } => {
+                let dirs = self.watched_dirs(cx);
                 for path in paths {
-                    self.file_changed(&path, cx);
+                    self.file_changed(&path, &dirs, cx);
                 }
             }
             // The vault has been written: it exists, so it can be watched.
@@ -2102,7 +2127,11 @@ impl ClaudhubApp {
         self.pending_status.remove(&worktree);
         let base = self.default_base_for(&worktree);
         self.ensure_review(&worktree, cx);
-        let state = self.review.entry(worktree.clone()).or_default();
+        // `ensure_review` has just put it there, so no key is copied to look it
+        // up.
+        let Some(state) = self.review.get_mut(&worktree) else {
+            return;
+        };
         state.status = status;
         state.rows_changed();
         if state.base.is_none() {
@@ -2316,17 +2345,10 @@ impl ClaudhubApp {
                 input.set_value("", window, cx);
             });
         }
-        // The bar keeps one line and the balloon takes the rest: a `git pull`
-        // answers with a file per line, and poured into a bar one line high
-        // that text does not truncate — it wraps over the window. See
-        // `ui::notify`.
-        let text = match crate::ui::notify::headline(&output) {
-            Some(line) => SharedString::from(line),
-            None => tr!(action.success_key()),
-        };
-        self.toast = Some(Toast { text, error: false });
-        self.notify(
-            crate::ui::notify::notice(action, &output, crate::ui::notify::Level::Success),
+        self.report(
+            action,
+            &output,
+            crate::ui::notify::Level::Success,
             window,
             cx,
         );
@@ -2376,18 +2398,45 @@ impl ClaudhubApp {
                 self.project_files_failed(worktree);
             }
         }
-        let text = match crate::ui::notify::headline(&message) {
-            Some(line) => SharedString::from(line),
-            None => tr!(action.success_key()),
-        };
-        self.toast = Some(Toast { text, error: true });
-        // A failure always gets one: the bar is overwritten by the next message
-        // that goes through it, and this is what one comes back to read.
-        self.notify(
-            crate::ui::notify::notice(action, &message, crate::ui::notify::Level::Error),
+        // A failure always gets a balloon: the bar is overwritten by the next
+        // message that goes through it, and the balloon is what one comes back
+        // to read.
+        self.report(
+            action,
+            &message,
+            crate::ui::notify::Level::Error,
             window,
             cx,
         );
+    }
+
+    /// The one line of the status bar and the balloon beside it, for an outcome
+    /// of either sign.
+    ///
+    /// The fallback is `success_key()` on both paths — it was so before this was
+    /// one function — which reads as the name of what was attempted; the level
+    /// is what says how it went.
+    fn report(
+        &mut self,
+        action: Action,
+        output: &str,
+        level: crate::ui::notify::Level,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The bar keeps one line and the balloon takes the rest: a `git pull`
+        // answers with a file per line, and poured into a bar one line high
+        // that text does not truncate — it wraps over the window. See
+        // `ui::notify`.
+        let text = match crate::ui::notify::headline(output) {
+            Some(line) => SharedString::from(line),
+            None => tr!(action.success_key()),
+        };
+        self.toast = Some(Toast {
+            text,
+            error: matches!(level, crate::ui::notify::Level::Error),
+        });
+        self.notify(crate::ui::notify::notice(action, output, level), window, cx);
     }
 
     /// Puts an outcome on screen as a balloon, if it earned one.
@@ -2750,12 +2799,6 @@ impl ClaudhubApp {
             return;
         };
         state.selected = Some(path.clone());
-        // Opening a file is leaving the merge: the centre shows one or the
-        // other, and what one has just clicked is what one wants to see.
-        self.merging = None;
-        let Some(state) = self.review.get_mut(&worktree) else {
-            return;
-        };
         // The previous diff is cleared at once: keeping another file's for the
         // length of the read would give the impression that the click did
         // nothing, and then that the content changes by itself.
@@ -2770,6 +2813,11 @@ impl ClaudhubApp {
             .files
             .iter()
             .any(|f| f.path == path && f.is_untracked());
+        // Opening a file is leaving the merge: the centre shows one or the
+        // other, and what one has just clicked is what one wants to see. After
+        // the state above and not before, so that one lookup serves for all of
+        // it — nothing between the two reads either.
+        self.merging = None;
         self.git.send(Cmd::LoadFileDiff {
             worktree,
             range: range.clone(),
@@ -2899,9 +2947,7 @@ impl ClaudhubApp {
             .pending_files
             .retain(|range| !matches!(range, DiffRange::Branch { .. }));
         // The branch history depends on the same base.
-        if let Some(state) = self.review.get_mut(&worktree) {
-            state.history = None;
-        }
+        state.history = None;
         self.persist_review(&worktree, cx);
         cx.notify();
     }

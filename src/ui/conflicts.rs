@@ -44,6 +44,15 @@ impl ClaudhubApp {
             .unwrap_or_default()
     }
 
+    /// Is there one at all, without building the list.
+    ///
+    /// Read on every notification of the application — the panel's tab appears
+    /// and disappears with it — where the paths themselves are not wanted.
+    pub(super) fn has_conflicts(&self) -> bool {
+        self.active_review()
+            .is_some_and(|state| state.status.conflicted().next().is_some())
+    }
+
     pub(super) fn resolve_conflict(&mut self, path: PathBuf, ours: bool, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;

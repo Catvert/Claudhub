@@ -280,11 +280,11 @@ impl ClaudhubApp {
             .clone()
             .or_else(|| self.restoring.worktree.clone());
         let repo = worktree.as_deref().and_then(|path| self.main_of(path));
-        Store::update_global(cx, |store| store.session.worktree = worktree.clone());
         // No worktree, or one whose repository is not open: there is nowhere to
         // file a place, and inventing an entry would leave a row the purge
         // cannot judge.
-        let (Some(worktree), Some(repo)) = (worktree, repo) else {
+        let (Some(here), Some(repo)) = (worktree.clone(), repo) else {
+            Store::update_global_if(cx, |store| set_worktree(store, worktree));
             return;
         };
         // A place is only written once its own has been put back: until then
@@ -294,10 +294,9 @@ impl ClaudhubApp {
         // swap itself nor while the files are still on their way. A keystroke in
         // the query editor lands well before the last of them, and an empty tab
         // list written then would lose every one of them.
-        if self.settling
-            || self.restoring_files
-            || self.settled.as_deref() != Some(worktree.as_path())
+        if self.settling || self.restoring_files || self.settled.as_deref() != Some(here.as_path())
         {
+            Store::update_global_if(cx, |store| set_worktree(store, worktree));
             return;
         }
         let place = Place {
@@ -333,10 +332,33 @@ impl ClaudhubApp {
                     query: self.db_query_input.read(cx).value().to_string(),
                 }),
         };
-        Store::update_global(cx, |store| {
-            store.worktree_mut(&worktree, &repo).place = place;
+        // One write for both: this runs on every keystroke of the query editor,
+        // and each `update_global` used to copy the whole state to find out
+        // whether anything had moved.
+        Store::update_global_if(cx, |store| {
+            let mut changed = set_worktree(store, worktree);
+            // A checkout seen for the first time — or one whose repository
+            // `worktree_mut` is about to fill in — is a change in itself, place
+            // or no place: without this its row would only reach the disk on
+            // the next gesture.
+            changed |= store.worktree(&here).is_none_or(|state| state.repo != repo);
+            let state = store.worktree_mut(&here, &repo);
+            if state.place != place {
+                state.place = place;
+                changed = true;
+            }
+            changed
         });
     }
+}
+
+/// Files which worktree the window is on, and says whether that moved.
+fn set_worktree(store: &mut Store, worktree: Option<PathBuf>) -> bool {
+    if store.session.worktree == worktree {
+        return false;
+    }
+    store.session.worktree = worktree;
+    true
 }
 
 #[cfg(test)]
