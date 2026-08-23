@@ -796,10 +796,23 @@ impl ClaudhubApp {
         });
     }
 
-    pub(super) fn apply_hunk(&mut self, patch: String, cx: &mut Context<Self>) {
+    /// Stages one hunk of the displayed diff.
+    ///
+    /// The patch is rebuilt here and not kept beside the diff: recomposing the
+    /// whole file as patches cost a copy of it on every diff that arrives, for
+    /// a click that happens once in a while — and the click has the state to
+    /// hand, which the render's closure did not.
+    pub(super) fn stage_hunk(&mut self, hunk: usize, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
         };
+        let Some(diff) = self.active_review().and_then(|state| state.diff.clone()) else {
+            return;
+        };
+        let Some(hunk) = diff.file.hunks.get(hunk) else {
+            return;
+        };
+        let patch = crate::git::diff::hunk_patch(&diff.path, None, hunk, false);
         self.git.send(Cmd::ApplyHunk {
             worktree,
             patch,
