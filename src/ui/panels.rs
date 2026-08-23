@@ -249,9 +249,7 @@ pub fn register(app: &Entity<ClaudhubApp>, cx: &mut App) {
         )* };
     }
     declare! {
-        HistoryPanel => "ClaudhubHistory",
         ConflictsPanel => "ClaudhubConflicts",
-        EditorPanel => "ClaudhubEditor",
     }
     register_generated(app, cx);
     // The plugins' panels. One type, one instance per plugin, named after its
@@ -390,8 +388,21 @@ pub(super) fn dock_panel_at(
     );
 }
 
+/// Every panel whose whole shape is "a title, a render, a pane".
+///
+/// Two optional pieces, each of which used to be a hand-written copy of this
+/// body: `visible:` names the method that decides whether the tab is there,
+/// when it is not simply "not hidden"; `prepare:` names what the panel asks
+/// the application for on its first paint. Everything else — the registry
+/// entry included — comes from this one list.
 macro_rules! panels {
-    ($($name:ident => ($id:literal, $title:literal, $render:ident, $pane:ident)),* $(,)?) => { $(
+    // Whether the tab is on screen: the flag, or the method a panel names.
+    (@shown $app:expr, $id:literal) => { $app.panel_visible($id) };
+    (@shown $app:expr, $id:literal, $visible:ident) => { $app.$visible() };
+
+    ($($name:ident => ($id:literal, $title:literal, $render:ident, $pane:ident
+        $(, visible: $visible:ident)?
+        $(, prepare: $prepare:ident)?)),* $(,)?) => { $(
         pub struct $name {
             app: WeakEntity<ClaudhubApp>,
             focus: FocusHandle,
@@ -409,7 +420,7 @@ macro_rules! panels {
                 // the state at the moment it was built: it is `ClaudhubApp`
                 // that changes, not the panel.
                 cx.observe(app, |this: &mut Self, app, cx| {
-                    let visible = app.read(cx).panel_visible(Self::NAME);
+                    let visible = panels!(@shown app.read(cx), $id $(, $visible)?);
                     if this.visible != visible {
                         this.visible = visible;
                         // It is the area that re-reads its tabs' visibility:
@@ -481,7 +492,10 @@ macro_rules! panels {
                 let Some(app) = self.app.upgrade() else {
                     return div().into_any_element();
                 };
-                let content = app.update(cx, |app, cx| app.$render(window, cx).into_any_element());
+                let content = app.update(cx, |app, cx| {
+                    $( app.$prepare(cx); )?
+                    app.$render(window, cx).into_any_element()
+                });
                 pane_root(&app, Pane::$pane, content, cx).into_any_element()
             }
         }
@@ -524,91 +538,20 @@ panels! {
     DiffPanel => ("ClaudhubDiff", "panel-diff", render_diff, Diff),
     ConsolePanel => ("ClaudhubConsole", "panel-sql", render_console_panel, Console),
     SettingsPanel => ("ClaudhubSettings", "panel-settings", render_settings_panel, Settings),
-}
-
-/// The centre of the editing screen when **nothing** is open.
-///
-/// One panel and no more: every open file is a `FilePanel` of its own, and a
-/// tab group needs something to hold when there is none — a dock with an empty
-/// centre has nowhere to drop the first file. It says what to do, and steps
-/// aside as soon as a file arrives, the way the conflicts panel appears only
-/// when there is something to conflict about.
-pub struct EditorPanel {
-    app: WeakEntity<ClaudhubApp>,
-    focus: FocusHandle,
-    visible: bool,
-}
-
-impl EditorPanel {
-    pub const NAME: &'static str = "ClaudhubEditor";
-
-    pub fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
-        cx.observe(app, |this: &mut Self, app, cx| {
-            let visible = app.read(cx).empty_editor_visible();
-            if this.visible != visible {
-                this.visible = visible;
-                cx.emit(PanelEvent::LayoutChanged);
-            }
-            cx.notify();
-        })
-        .detach();
-        Self {
-            app: app.downgrade(),
-            focus: cx.focus_handle(),
-            visible: visible_at_startup(Self::NAME, cx),
-        }
-    }
-}
-
-impl Focusable for EditorPanel {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
-    }
-}
-
-impl EventEmitter<PanelEvent> for EditorPanel {}
-
-impl BasePanel for EditorPanel {
-    fn panel_name(&self) -> &'static str {
-        Self::NAME
-    }
-    fn closable(&self, _: &App) -> bool {
-        false
-    }
-    fn visible(&self, _: &App) -> bool {
-        self.visible
-    }
-}
-
-impl Panel for EditorPanel {
-    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        tr!("panel-editor")
-    }
-
-    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
-        zoom_in_toolbar()
-    }
-
-    fn dropdown_menu(
-        &mut self,
-        menu: PopupMenu,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> PopupMenu {
-        hide_view(&self.app, Self::NAME, menu)
-    }
-}
-
-impl Render for EditorPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(app) = self.app.upgrade() else {
-            return div().into_any_element();
-        };
-        let content = app.update(cx, |app, cx| {
-            app.render_editor_panel(window, cx).into_any_element()
-        });
-        pane_root(&app, Pane::Editor, content, cx).into_any_element()
-    }
+    // The history needs loading the first time it is looked at.
+    //
+    // Doing it at render time rather than at construction is what avoids a
+    // `git log` on a tab nobody will open; `ensure_history` only asks once,
+    // otherwise every frame would restart the command.
+    HistoryPanel => ("ClaudhubHistory", "panel-history", render_history, History, prepare: ensure_history),
+    // The centre of the editing screen when **nothing** is open.
+    //
+    // One panel and no more: every open file is a `FilePanel` of its own, and
+    // a tab group needs something to hold when there is none — a dock with an
+    // empty centre has nowhere to drop the first file. It says what to do, and
+    // steps aside as soon as a file arrives, the way the conflicts panel
+    // appears only when there is something to conflict about.
+    EditorPanel => ("ClaudhubEditor", "panel-editor", render_editor_panel, Editor, visible: empty_editor_visible),
 }
 
 /// One open file, as the dock shows it.
@@ -1362,90 +1305,6 @@ impl Render for TerminalPanel {
         // No `pane_root`: the terminals have no search of their own, `Ctrl+F`
         // there belonging to the program that runs.
         pane_frame(self.view.clone(), cx).into_any_element()
-    }
-}
-
-/// The history needs loading the first time it is looked at.
-///
-/// Doing it at render time rather than at construction is what avoids a `git
-/// log` on a tab nobody will open; `ensure_history` only asks once, otherwise
-/// every frame would restart the command.
-pub struct HistoryPanel {
-    app: WeakEntity<ClaudhubApp>,
-    focus: FocusHandle,
-    visible: bool,
-}
-
-impl HistoryPanel {
-    pub const NAME: &'static str = "ClaudhubHistory";
-
-    pub fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
-        cx.observe(app, |this: &mut Self, app, cx| {
-            let visible = app.read(cx).panel_visible(Self::NAME);
-            if this.visible != visible {
-                this.visible = visible;
-                cx.emit(PanelEvent::LayoutChanged);
-            }
-            cx.notify();
-        })
-        .detach();
-        Self {
-            app: app.downgrade(),
-            focus: cx.focus_handle(),
-            visible: visible_at_startup(Self::NAME, cx),
-        }
-    }
-}
-
-impl Focusable for HistoryPanel {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
-    }
-}
-
-impl EventEmitter<PanelEvent> for HistoryPanel {}
-
-impl BasePanel for HistoryPanel {
-    fn panel_name(&self) -> &'static str {
-        Self::NAME
-    }
-    fn closable(&self, _: &App) -> bool {
-        false
-    }
-    fn visible(&self, _: &App) -> bool {
-        self.visible
-    }
-}
-
-impl Panel for HistoryPanel {
-    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        tr!("panel-history")
-    }
-
-    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
-        zoom_in_toolbar()
-    }
-
-    fn dropdown_menu(
-        &mut self,
-        menu: PopupMenu,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> PopupMenu {
-        hide_view(&self.app, Self::NAME, menu)
-    }
-}
-
-impl Render for HistoryPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(app) = self.app.upgrade() else {
-            return div().into_any_element();
-        };
-        let content = app.update(cx, |app, cx| {
-            app.ensure_history(cx);
-            app.render_history(window, cx).into_any_element()
-        });
-        pane_root(&app, Pane::History, content, cx).into_any_element()
     }
 }
 
