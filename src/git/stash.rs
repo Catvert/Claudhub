@@ -71,7 +71,9 @@ pub fn list(main: &Path) -> Result<Vec<Stash>> {
 fn parse(raw: &str) -> Vec<Stash> {
     let fields: Vec<&str> = raw.split('\0').collect();
     fields
-        .chunks_exact(5)
+        .as_chunks::<5>()
+        .0
+        .iter()
         .enumerate()
         .filter_map(|(index, entry)| {
             let name = entry[0].trim();
