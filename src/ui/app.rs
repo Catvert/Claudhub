@@ -2645,6 +2645,10 @@ impl ClaudhubApp {
         // Every worktree has its base: the selector has to show this one, not
         // the one of the worktree just left.
         self.refresh_base_choices(window, cx);
+        // The database scope names the checkout (`db::scope::Vars`), so the
+        // rows it keeps and the count of what it hides both belong to the
+        // worktree being shown — and both are read from the last rebuild.
+        self.db_rebuild(cx);
         self.selection_rank = rank;
         self.ensure_session_terminal(window, cx);
         // Where the work stood here: the screen, the console, and — on the

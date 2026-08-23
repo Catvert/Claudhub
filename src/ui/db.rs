@@ -137,7 +137,10 @@ pub struct DbState {
     pub connections: Vec<ConnectionState>,
     /// The displayed rows, rebuilt on every state change, never at render time:
     /// `uniform_list`'s closure runs for every visible row on every frame.
-    pub entries: Vec<Entry>,
+    ///
+    /// Behind an `Rc` because the list's closure needs to own them: cloning the
+    /// vector at render time is one copy of ten thousand entries per frame.
+    pub entries: Rc<Vec<Entry>>,
     /// The search query `entries` was built for.
     pub query: String,
     /// The row under the cursor, by index into `entries`.
@@ -155,17 +158,20 @@ pub struct DbState {
     /// In memory and not in the settings: it is a reading posture, like the
     /// journal's level, that changes several times while looking for something.
     pub scoped: bool,
+    /// How many databases the scope is hiding, as of the last rebuild.
+    pub hidden: usize,
 }
 
 impl Default for DbState {
     fn default() -> Self {
         Self {
             connections: Vec::new(),
-            entries: Vec::new(),
+            entries: Rc::new(Vec::new()),
             query: String::new(),
             cursor: None,
             indexing: HashSet::new(),
             scoped: true,
+            hidden: 0,
         }
     }
 }
@@ -540,8 +546,9 @@ impl ClaudhubApp {
     ///
     /// The bar says it: a filter that removes seventy-eight databases without a
     /// word reads as a broken connection, and the whole point of a scope is that
-    /// one knows it is on.
-    pub(super) fn db_hidden_count(&self) -> usize {
+    /// one knows it is on. Read from `DbState::hidden`, which `db_rebuild`
+    /// fills — this walk is not for a render.
+    fn db_hidden_count(&self) -> usize {
         (0..self.db.connections.len())
             .map(|connection| {
                 let patterns = self.db_scope(connection);
@@ -575,11 +582,16 @@ impl ClaudhubApp {
             .cursor
             .and_then(|index| self.db.entries.get(index).cloned());
         let query = self.db.query.clone();
-        self.db.entries = if query.trim().is_empty() {
+        self.db.entries = Rc::new(if query.trim().is_empty() {
             self.db_expanded_entries()
         } else {
             self.db_filtered_entries(&query)
-        };
+        });
+        // What the scope hides is counted here and not in the bar: the count
+        // expands the patterns and lowercases them against every database, and
+        // the bar is drawn on every frame. It is the same reading as the rows,
+        // so what invalidates one invalidates the other.
+        self.db.hidden = self.db_hidden_count();
         self.db.cursor = previous
             .and_then(|entry| self.db.entries.iter().position(|other| *other == entry))
             .or_else(|| {
@@ -1089,7 +1101,7 @@ impl ClaudhubApp {
                 .into_any_element();
         }
 
-        let entries = Rc::new(self.db.entries.clone());
+        let entries = self.db.entries.clone();
         let look = Look::of(cx);
         let cursor = self.db.cursor;
         let entity = cx.entity();
@@ -1197,7 +1209,7 @@ impl ClaudhubApp {
             return None;
         }
         let scoped = self.db.scoped;
-        let hidden = self.db_hidden_count();
+        let hidden = self.db.hidden;
         Some(
             h_flex()
                 .gap_1()
@@ -1328,7 +1340,7 @@ fn render_row(
             .into_any_element();
     }
 
-    let Some((glyph, tint, name, detail, tooltip)) = describe(app, &entry, look) else {
+    let Some((glyph, tint, name, detail, has_tooltip)) = describe(app, &entry, look) else {
         return div().into_any_element();
     };
     let expanded = app.db_expanded(&entry);
@@ -1380,19 +1392,29 @@ fn render_row(
                     .child(detail),
             )
         })
-        .when_some(tooltip, |el, tooltip| {
+        // **The tooltip's text is written inside the closure**, which gpui calls
+        // when the pointer stops on the row — not for every visible row on every
+        // frame. It is a `format!`, a `join` and, for a table, a row count and a
+        // size to spell out; done at render time it was fifty of them a frame,
+        // for one that is ever read.
+        .when(has_tooltip, |el| {
+            let (tip, for_tip) = (entity.clone(), entry.clone());
             el.tooltip(move |window, cx| {
-                gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+                let text = tooltip_of(tip.read(cx), &for_tip).unwrap_or_default();
+                gpui_component::tooltip::Tooltip::new(text).build(window, cx)
             })
         })
         .context_menu(move |popup, _window, _cx| row_menu(popup, &menu, &for_menu))
         .into_any_element()
 }
 
-/// A row's icon, tint, name, detail and tooltip.
+/// A row's icon, tint, name, detail, and whether it has a tooltip.
 ///
 /// A single function for all four levels: they are the same four things, and
-/// separating them would make the same layout four times.
+/// separating them would make the same layout four times. The last is a
+/// **yes-or-no** and not the text: what a tooltip says is written by
+/// `tooltip_of`, once the pointer has stopped — the two go together, and a
+/// level that gains a tooltip has to say so in both.
 #[allow(clippy::type_complexity)]
 fn describe(
     app: &ClaudhubApp,
@@ -1403,7 +1425,7 @@ fn describe(
     gpui::Hsla,
     SharedString,
     Option<SharedString>,
-    Option<SharedString>,
+    bool,
 )> {
     match *entry {
         Entry::Connection { connection } => {
@@ -1422,14 +1444,7 @@ fn describe(
                 tint,
                 state.config.label().into(),
                 Some(state.config.detail().into()),
-                Some(
-                    format!(
-                        "{} · {}",
-                        state.config.engine.label(),
-                        state.config.detail()
-                    )
-                    .into(),
-                ),
+                true,
             ))
         }
         Entry::Database {
@@ -1437,15 +1452,12 @@ fn describe(
             database,
         } => {
             let state = app.database_at(connection, database)?;
-            let mut parts = Vec::new();
-            parts.extend(state.info.charset.clone());
-            parts.extend(state.info.collation.clone());
             Some((
                 "database",
                 look.muted,
                 state.info.name.clone().into(),
                 None,
-                (!parts.is_empty()).then(|| parts.join(" · ").into()),
+                state.info.charset.is_some() || state.info.collation.is_some(),
             ))
         }
         Entry::Table {
@@ -1455,17 +1467,6 @@ fn describe(
         } => {
             let state = app.table_at(connection, database, table)?;
             let info = &state.info;
-            let mut parts = Vec::new();
-            if info.view {
-                parts.push(tr!("db-view").to_string());
-            }
-            parts.extend(info.engine.clone());
-            if let Some(rows) = info.rows {
-                parts.push(format!("~{} {}", db::count(rows), tr!("db-rows")));
-            }
-            parts.extend(info.bytes.map(db::size));
-            parts.extend(info.collation.clone());
-            parts.extend(info.comment.clone());
             Some((
                 if info.view { "eye" } else { "table" },
                 look.muted,
@@ -1473,7 +1474,12 @@ fn describe(
                 info.rows.map(|rows| {
                     SharedString::from(format!("{} {}", db::count(rows), tr!("db-rows")))
                 }),
-                (!parts.is_empty()).then(|| parts.join(" · ").into()),
+                info.view
+                    || info.engine.is_some()
+                    || info.rows.is_some()
+                    || info.bytes.is_some()
+                    || info.collation.is_some()
+                    || info.comment.is_some(),
             ))
         }
         Entry::Column {
@@ -1494,6 +1500,73 @@ fn describe(
             } else {
                 ("columns-2", look.muted)
             };
+            Some((
+                glyph,
+                tint,
+                info.name.clone().into(),
+                Some(info.data_type.clone().into()),
+                true,
+            ))
+        }
+        Entry::Status { .. } => None,
+    }
+}
+
+/// What a row's tooltip says: everything the line has no room for.
+///
+/// Called when the pointer stops on the row, never at render time — see the
+/// closure in `render_row`. `describe` says which rows have one, and that
+/// answer must agree with the `None`s here.
+fn tooltip_of(app: &ClaudhubApp, entry: &Entry) -> Option<SharedString> {
+    match *entry {
+        Entry::Connection { connection } => {
+            let state = app.connection_at(connection)?;
+            Some(
+                format!(
+                    "{} · {}",
+                    state.config.engine.label(),
+                    state.config.detail()
+                )
+                .into(),
+            )
+        }
+        Entry::Database {
+            connection,
+            database,
+        } => {
+            let state = app.database_at(connection, database)?;
+            let mut parts = Vec::new();
+            parts.extend(state.info.charset.clone());
+            parts.extend(state.info.collation.clone());
+            (!parts.is_empty()).then(|| parts.join(" · ").into())
+        }
+        Entry::Table {
+            connection,
+            database,
+            table,
+        } => {
+            let info = &app.table_at(connection, database, table)?.info;
+            let mut parts = Vec::new();
+            if info.view {
+                parts.push(tr!("db-view").to_string());
+            }
+            parts.extend(info.engine.clone());
+            if let Some(rows) = info.rows {
+                parts.push(format!("~{} {}", db::count(rows), tr!("db-rows")));
+            }
+            parts.extend(info.bytes.map(db::size));
+            parts.extend(info.collation.clone());
+            parts.extend(info.comment.clone());
+            (!parts.is_empty()).then(|| parts.join(" · ").into())
+        }
+        Entry::Column {
+            connection,
+            database,
+            table,
+            column,
+        } => {
+            let state = app.table_at(connection, database, table)?;
+            let info = state.columns.ready()?.get(column)?;
             let mut parts = vec![info.data_type.clone()];
             parts.push(
                 if info.nullable {
@@ -1521,13 +1594,7 @@ fn describe(
             parts.extend(info.charset.clone());
             parts.extend(info.collation.clone());
             parts.extend(info.comment.clone());
-            Some((
-                glyph,
-                tint,
-                info.name.clone().into(),
-                Some(info.data_type.clone().into()),
-                Some(parts.join(" · ").into()),
-            ))
+            Some(parts.join(" · ").into())
         }
         Entry::Status { .. } => None,
     }
