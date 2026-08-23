@@ -1394,6 +1394,137 @@ impl ClaudhubApp {
         }
     }
 
+    /// Lets the language server forget the document being left.
+    ///
+    /// One session per worktree holds **one** open document — the tab being
+    /// read — so arriving in a file closes the one that was there, exactly as
+    /// before tabs existed. Switching tabs does the same, in `show_file`.
+    pub(super) fn close_previous_document(&mut self, worktree: &Path, opening: &Path) {
+        let Some(previous) = self
+            .editings
+            .get(worktree)
+            .and_then(|tabs| tabs.active())
+            .map(|editing| (editing.worktree.clone(), editing.path.clone()))
+        else {
+            return;
+        };
+        if previous.1 != opening {
+            self.lsp_editor_closed(previous.0, previous.1);
+        }
+    }
+
+    /// The panel an arriving tab is painted in, and the tab it replaces.
+    ///
+    /// The tab of a file already open is **reused**, its content rebound:
+    /// reopening the same file is what a save-and-reread does, and a second tab
+    /// on one file is the one thing a tab bar must never grow. Such a tab is
+    /// also brought to the front — `open_file_tab` says it for a tab it
+    /// creates, and a reused one had nobody to say it, so the group went on
+    /// showing whatever was there, which reads as a click that did nothing.
+    ///
+    /// Only when a gesture asked for the file, which is what a pending landing
+    /// on this very file means: a reread — a save, an agent's write, the
+    /// watcher — must not pull the group away from the tab being read.
+    ///
+    /// Room is made by the caller (`make_tab_room`) — and not always: a tab the
+    /// session is putting back takes the place it already had.
+    pub(super) fn tab_panel(
+        &mut self,
+        worktree: &Path,
+        path: &Path,
+        input: &Entity<EditorState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Option<usize>, Entity<crate::ui::panels::FilePanel>) {
+        let reopened = self
+            .editings
+            .get(worktree)
+            .and_then(|tabs| tabs.index_of(path));
+        let asked = self.asked_for(worktree, path).is_some();
+        let panel = match reopened {
+            Some(ix) => {
+                let panel = self.editings[worktree].open[ix].panel.clone();
+                let fresh = input.clone();
+                panel.update(cx, |panel, cx| panel.rebind(fresh, cx));
+                if asked {
+                    crate::ui::panels::FilePanel::activate(&panel, window, cx);
+                }
+                panel
+            }
+            None => self.open_file_tab(worktree, path, input.clone(), window, cx),
+        };
+        (reopened, panel)
+    }
+
+    /// Files a freshly built tab, and makes it the one being read.
+    pub(super) fn place_tab(&mut self, worktree: &Path, reopened: Option<usize>, editing: Editing) {
+        let tabs = self.editings.entry(worktree.to_path_buf()).or_default();
+        match reopened {
+            Some(ix) => {
+                tabs.open[ix] = editing;
+                tabs.active = ix;
+            }
+            None => {
+                tabs.open.push(editing);
+                tabs.active = tabs.open.len() - 1;
+            }
+        }
+    }
+
+    /// What every arrival does once its tab holds something: the caret asked
+    /// for, the step in the trail, the screen it is read on, and the session.
+    ///
+    /// The pending landing that names another file is stale — one asked for a
+    /// second file before the first arrived — and is dropped, not put back:
+    /// what it pointed at is not what is on screen. `caret` is false for a
+    /// picture, which has nowhere to put one; the trail still records the
+    /// place, which is the file itself.
+    pub(super) fn finish_tab(
+        &mut self,
+        worktree: &Path,
+        path: &Path,
+        restored: bool,
+        caret: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pending) = self.landing.take() {
+            if (pending.worktree.as_path(), pending.path.as_path()) == (worktree, path) {
+                let offset = pending
+                    .landing
+                    .filter(|_| caret)
+                    .and_then(|landing| self.land(&landing, window, cx))
+                    .unwrap_or(0);
+                if let Some(from) = pending.from {
+                    self.jumps.entry(worktree.to_path_buf()).or_default().jump(
+                        from,
+                        crate::ui::jumps::Place::Editor(crate::ui::jumps::Spot::new(
+                            path.to_path_buf(),
+                            offset,
+                        )),
+                    );
+                }
+            }
+        }
+        // A file that opens calls up the screen it is edited on. The gesture
+        // comes from the explorer — so from that screen most of the time — but
+        // also from a diff line, and answering it silently on the screen next
+        // door would be an opened file nobody sees.
+        //
+        // Unless it is a place being put back — the previous session's, or the
+        // one this worktree was left in: there is no gesture then, and the
+        // screen that comes back is the place's own, set a step earlier.
+        if !restored {
+            self.enter_workspace(crate::ui::workspace::Workspace::Files, window, cx);
+            self.set_panel_visible(crate::ui::panels::EditorPanel::NAME, true, cx);
+        } else {
+            // The next remembered tab, one at a time: see `read_next_file`.
+            self.continue_restore(window, cx);
+        }
+        self.persist_session(cx);
+        cx.notify();
+    }
+
     /// Receives a content and installs the editor.
     pub(super) fn file_content_arrived(
         &mut self,
@@ -1464,51 +1595,11 @@ impl ClaudhubApp {
             cx.notify();
         })
         .detach();
-        // The server must forget the document we are leaving. One session per
-        // worktree holds **one** open document — the tab being read — so
-        // arriving in a file closes the one that was there, exactly as before
-        // tabs existed. Switching tabs does the same, in `show_file`.
-        if let Some(previous) = self
-            .editings
-            .get(&worktree)
-            .and_then(|tabs| tabs.active())
-            .map(|editing| (editing.worktree.clone(), editing.path.clone()))
-        {
-            if previous.1 != path {
-                self.lsp_editor_closed(previous.0, previous.1);
-            }
-        }
+        // The server must forget the document we are leaving.
+        self.close_previous_document(&worktree, &path);
         let host = crate::ui::surface::VimHost::new(&input, cx);
-        let opened = (worktree.clone(), path.clone());
-        // The tab of a file already open is **reused**, its content replaced:
-        // reopening the same file is what a save-and-reread does, and a second
-        // tab on one file is the one thing a tab bar must never grow.
-        let reopened = self
-            .editings
-            .get(&worktree)
-            .and_then(|tabs| tabs.index_of(&path));
-        // A file already open is asked for again — from the tree, from a diff
-        // line — and its tab has to come to the front. `open_file_tab` says it
-        // for a tab it creates; a reused one had nobody to say it, and the
-        // group went on showing whatever was there, which reads as a click that
-        // did nothing.
-        //
-        // Only when a gesture asked for the file, which is what a pending
-        // landing on this very file means: a reread — a save, an agent's write,
-        // the watcher — must not pull the group away from the tab being read.
         let asked = self.asked_for(&worktree, &path).is_some();
-        let panel = match reopened {
-            Some(ix) => {
-                let panel = self.editings[&worktree].open[ix].panel.clone();
-                let fresh = input.clone();
-                panel.update(cx, |panel, cx| panel.rebind(fresh, cx));
-                if asked {
-                    crate::ui::panels::FilePanel::activate(&panel, window, cx);
-                }
-                panel
-            }
-            None => self.open_file_tab(&worktree, &path, input.clone(), window, cx),
-        };
+        let (reopened, panel) = self.tab_panel(&worktree, &path, &input, window, cx);
         // The base a reread had is kept as a stand-in while the fresh one is on
         // its way: saving does not move `HEAD`, so it is almost always the same
         // answer, and dropping it would blank the gutter on every save.
@@ -1539,17 +1630,7 @@ impl ClaudhubApp {
                 || ephemeral,
             used: self.touch_tab(),
         };
-        let tabs = self.editings.entry(worktree.clone()).or_default();
-        match reopened {
-            Some(ix) => {
-                tabs.open[ix] = editing;
-                tabs.active = ix;
-            }
-            None => {
-                tabs.open.push(editing);
-                tabs.active = tabs.open.len() - 1;
-            }
-        }
+        self.place_tab(&worktree, reopened, editing);
         // Starts the server this file's language asks for, opens the document
         // and posts the providers — all of it a no-op when the button is off.
         self.lsp_sync_editor(window, cx);
@@ -1558,44 +1639,9 @@ impl ClaudhubApp {
         // may have moved `HEAD` under the file.
         self.ask_file_base(&worktree, &path);
         self.recompute_hunks(&worktree, &path, cx);
-        // The caret the opening was asked for, and the step in the trail that
-        // goes with it. A pending that names another file is stale — one asked
-        // for a second file before the first arrived — and is dropped, not put
-        // back: what it pointed at is not what is on screen.
-        if let Some(pending) = self.landing.take() {
-            if (pending.worktree.as_path(), pending.path.as_path()) == (&*opened.0, &*opened.1) {
-                let offset = pending
-                    .landing
-                    .and_then(|landing| self.land(&landing, window, cx))
-                    .unwrap_or(0);
-                if let Some(from) = pending.from {
-                    self.jumps.entry(opened.0.clone()).or_default().jump(
-                        from,
-                        crate::ui::jumps::Place::Editor(crate::ui::jumps::Spot::new(
-                            opened.1.clone(),
-                            offset,
-                        )),
-                    );
-                }
-            }
-        }
-        // A file that opens calls up the screen it is edited on. The gesture
-        // comes from the explorer — so from that screen most of the time — but
-        // also from a diff line, and answering it silently on the screen next
-        // door would be an opened file nobody sees.
-        //
-        // Unless it is a place being put back — the previous session's, or the
-        // one this worktree was left in: there is no gesture then, and the screen
-        // that comes back is the place's own, set a step earlier.
-        if !restored {
-            self.enter_workspace(crate::ui::workspace::Workspace::Files, window, cx);
-            self.set_panel_visible(crate::ui::panels::EditorPanel::NAME, true, cx);
-        } else {
-            // The next remembered tab, one at a time: see `read_next_file`.
-            self.continue_restore(window, cx);
-        }
-        self.persist_session(cx);
-        cx.notify();
+        // The caret the opening was asked for, the screen it is read on, and
+        // the session: see `finish_tab`.
+        self.finish_tab(&worktree, &path, restored, true, window, cx);
     }
 
     /// `Ctrl+S`: writes what has been typed.
@@ -2855,6 +2901,74 @@ impl ClaudhubApp {
             })
     }
 
+    /// The file's own bar: what is open, whether it is unsaved, and the four
+    /// gestures that act on the file rather than on its text.
+    ///
+    /// A method of its own because `render_editor` is the whole panel — the
+    /// bar, the hunk band, the modal harness and the wheel — and a bar is the
+    /// piece of it that has nothing to do with any of the others.
+    fn render_editor_bar(
+        &mut self,
+        path: &Path,
+        dirty: bool,
+        mono: SharedString,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let label = SharedString::from(path.display().to_string());
+        let for_external = path.to_path_buf();
+        h_flex()
+            .h(crate::ui::theme::bar_height(cx))
+            .w_full()
+            .px_2()
+            .gap_2()
+            .items_center()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(icon("file-text").xsmall())
+            .child(
+                div()
+                    .flex_1()
+                    .truncate()
+                    .text_sm()
+                    .font_family(mono.clone())
+                    .child(label),
+            )
+            // A badge and not an asterisk in the title: the title is
+            // already a truncated path, and one more character at the
+            // end goes unseen.
+            .when(dirty, |el| {
+                el.child(div().size(px(7.)).rounded_full().bg(cx.theme().warning))
+            })
+            .children(self.render_jump_buttons(cx))
+            .children(self.render_lsp_button(cx))
+            .child(
+                Button::new("editor-external")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("external-link"))
+                    .tooltip(tr!("editor-external"))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.open_externally(for_external.clone(), 1, cx);
+                    })),
+            )
+            .child(
+                Button::new("editor-save")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("save"))
+                    .tooltip(tr!("editor-save"))
+                    .on_click(cx.listener(|this, _, _window, cx| this.save_file(cx))),
+            )
+            .child(
+                Button::new("editor-close")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("x"))
+                    .tooltip(tr!("editor-close"))
+                    .on_click(cx.listener(|this, _, window, cx| this.close_editor(window, cx))),
+            )
+    }
+
     pub(super) fn render_editor(
         &mut self,
         window: &mut Window,
@@ -2910,8 +3024,6 @@ impl ClaudhubApp {
         // family, same size. Without saying so it inherits the interface's
         // proportional font, where an indentation no longer lines up.
         let code_size = px(crate::ui::settings::Settings::global(cx).diff_font_size);
-        let label = SharedString::from(path.display().to_string());
-        let for_external = path.clone();
         // What the gutter's strip was clicked to show. A band under the file
         // bar and **not a popover on the line**: the editor's lines come and go
         // with the scroll, so an anchor on one is an anchor that the first
@@ -2931,63 +3043,7 @@ impl ClaudhubApp {
         Some(
             v_flex()
                 .size_full()
-                .child(
-                    h_flex()
-                        .h(crate::ui::theme::bar_height(cx))
-                        .w_full()
-                        .px_2()
-                        .gap_2()
-                        .items_center()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .child(icon("file-text").xsmall())
-                        .child(
-                            div()
-                                .flex_1()
-                                .truncate()
-                                .text_sm()
-                                .font_family(mono.clone())
-                                .child(label),
-                        )
-                        // A badge and not an asterisk in the title: the title is
-                        // already a truncated path, and one more character at the
-                        // end goes unseen.
-                        .when(dirty, |el| {
-                            el.child(div().size(px(7.)).rounded_full().bg(cx.theme().warning))
-                        })
-                        .children(self.render_jump_buttons(cx))
-                        .children(self.render_lsp_button(cx))
-                        .child(
-                            Button::new("editor-external")
-                                .ghost()
-                                .xsmall()
-                                .icon(icon("external-link"))
-                                .tooltip(tr!("editor-external"))
-                                .on_click(cx.listener(move |this, _, _window, cx| {
-                                    this.open_externally(for_external.clone(), 1, cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("editor-save")
-                                .ghost()
-                                .xsmall()
-                                .icon(icon("save"))
-                                .tooltip(tr!("editor-save"))
-                                .on_click(cx.listener(|this, _, _window, cx| this.save_file(cx))),
-                        )
-                        .child(
-                            Button::new("editor-close")
-                                .ghost()
-                                .xsmall()
-                                .icon(icon("x"))
-                                .tooltip(tr!("editor-close"))
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| {
-                                        this.close_editor(window, cx)
-                                    }),
-                                ),
-                        ),
-                )
+                .child(self.render_editor_bar(&path, dirty, mono.clone(), cx))
                 .when_some(peek, |el, (row, kind, old)| {
                     el.child(self.render_hunk_peek(row, kind, old, code_size, cx))
                 })
