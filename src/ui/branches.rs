@@ -301,14 +301,26 @@ impl ClaudhubApp {
 
     /// Checks an existing branch out into a fresh worktree.
     ///
-    /// The folder takes the branch's name, slashes becoming dashes:
-    /// `origin/feat/x` cannot be a folder name.
+    /// **Through `wt` when the project has a `wt.toml`**: the creation dialog
+    /// opens on the branch, the folder suggested, and the project's copies,
+    /// ports, `post_new` and questions follow as for any creation. This gesture
+    /// used to go straight to git, and the worktree it made — under the
+    /// project's root, so taken for one `wt` knew — had none of that, with
+    /// nothing to say so.
+    ///
+    /// Without a project, the bare git add: the folder takes the branch's
+    /// name, slashes becoming dashes — `origin/feat/x` cannot be a folder name.
     pub(super) fn worktree_from_branch(
         &mut self,
         main: PathBuf,
         branch: String,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.wt_project(&main).is_some() {
+            self.setup_worktree(main, Some(branch), window, cx);
+            return;
+        }
         let local = branch
             .strip_prefix("origin/")
             .unwrap_or(&branch)

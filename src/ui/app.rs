@@ -1931,6 +1931,13 @@ impl ClaudhubApp {
             } => {
                 self.wt_links.insert(worktree, Some(endpoints));
             }
+            Evt::WtProgress {
+                main,
+                slug,
+                op,
+                line,
+                warning,
+            } => self.wt_progress(&main, &slug, op, line, warning, cx),
 
             // — Sentry ————————————————————————————————————————————
 
@@ -2432,6 +2439,8 @@ impl ClaudhubApp {
             window,
             cx,
         );
+        // A `wt` console closes on success; the balloon above keeps the result.
+        self.wt_operation_ended(action, true, window, cx);
         // The integration has succeeded: what is left is to decide the fate of
         // the worktree and its branch, which `wt` deliberately keeps.
         if action == Action::Integrate {
@@ -2488,6 +2497,8 @@ impl ClaudhubApp {
             window,
             cx,
         );
+        // A `wt` console stays on failure, with the steps that led to the error.
+        self.wt_operation_ended(action, false, window, cx);
     }
 
     /// An outcome, of either sign, as a balloon.

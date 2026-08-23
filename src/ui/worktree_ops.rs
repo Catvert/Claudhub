@@ -66,7 +66,10 @@ fn choice_line(choice: &wt::Choice) -> String {
 pub enum WtTarget {
     /// `wt new`: nothing is checked out yet, so there is no worktree to name.
     Create {
-        /// The branch's starting point, when starting from an existing branch.
+        /// An existing branch to check out; `None` is a new branch, named by
+        /// the project's template.
+        branch: Option<String>,
+        /// Where a new branch starts; `None` is the main repository's HEAD.
         from: Option<String>,
     },
     /// `wt up`: the answers become the `--set`s of the start.
@@ -93,6 +96,67 @@ impl WtTarget {
     }
 }
 
+/// The first page of a creation: which branch, where it starts, what folder.
+///
+/// It is the page `wt`'s own interface shows as three — branch, base, slug —
+/// and the same three decisions, in the same order. The branch list is the one
+/// the top bar's picker shows, read from the repository on every frame: the
+/// page opens before the branches have been re-read, and a list frozen at
+/// construction would miss the one just fetched.
+pub struct Setup {
+    /// The branch chosen; `None` is "a new branch".
+    pub branch: Option<String>,
+    /// Where a new branch starts; `None` is the main repository's HEAD.
+    pub from: Option<String>,
+    /// The folder name. A field and not a string, for the reason every field of
+    /// this dialog is one: recreated per frame, it would lose the caret on the
+    /// first keystroke.
+    pub slug: Entity<InputState>,
+    /// The search fields of the two branch lists, shown past [`FILTER_ABOVE`].
+    pub branch_filter: Entity<InputState>,
+    pub base_filter: Entity<InputState>,
+    /// Why the page would not submit, said under the field rather than in a
+    /// balloon the next frame hides.
+    pub error: Option<SharedString>,
+}
+
+/// The console of an operation under way: what `wt` says, as it says it.
+///
+/// Plain data on the application, read by the dialog's render: a `new` clones
+/// databases for minutes, and the lines are what stands between the user and a
+/// spinner. Kept on success only until the dialog closes; on failure it stays,
+/// because the steps that led to the error are the one account there is of it.
+pub struct Console {
+    pub op: wt::Op,
+    /// Each line, and whether it was a warning.
+    pub lines: Vec<(String, bool)>,
+    /// The operation ended badly: the dialog stays, with a close button.
+    pub failed: bool,
+    /// Follows the tail, as a terminal does.
+    pub scroll: gpui::ScrollHandle,
+}
+
+impl Console {
+    fn new(op: wt::Op) -> Self {
+        Self {
+            op,
+            lines: Vec::new(),
+            failed: false,
+            scroll: gpui::ScrollHandle::new(),
+        }
+    }
+}
+
+/// Where the dialog is.
+pub enum Stage {
+    /// The first page of a creation.
+    Setup(Setup),
+    /// The project's questions, one page per round.
+    Questions,
+    /// The operation runs, and the dialog is its console.
+    Running(Console),
+}
+
 /// A project's questions, between the gesture and the command it ends in.
 ///
 /// It lives on the application and not in the dialog: the questions arrive
@@ -102,6 +166,7 @@ pub struct WtPrompt {
     pub main: PathBuf,
     pub slug: String,
     pub target: WtTarget,
+    pub stage: Stage,
     /// Shared and not owned: a menu's closure needs the choices of the question
     /// it belongs to, and it is rebuilt on every frame of the dialog — eighty
     /// tenants cloned three strings each, sixty times a second.
@@ -118,6 +183,50 @@ pub struct WtPrompt {
     /// worker seeds them for a `wt up`, so what comes back is not what went out.
     pub round: u64,
 }
+
+impl WtPrompt {
+    /// A dialog at its first stage, with nothing asked yet.
+    fn new(main: PathBuf, slug: String, target: WtTarget, stage: Stage) -> Self {
+        Self {
+            main,
+            slug,
+            target,
+            stage,
+            questions: Rc::new(Vec::new()),
+            answers: BTreeMap::new(),
+            inputs: BTreeMap::new(),
+            filters: BTreeMap::new(),
+            asking: false,
+            round: 0,
+        }
+    }
+}
+
+/// The `Done` or `Failed` that closes a `wt` operation carries an `Action`,
+/// and the console an `Op`: which action ends which console. `Worktree` is
+/// shared by `new` and `rm` — and by the bare git gestures, which never open a
+/// console, so the match is read on the console's side only.
+fn op_of(action: Action) -> Option<&'static [wt::Op]> {
+    match action {
+        Action::Worktree => Some(&[wt::Op::New, wt::Op::Remove][..]),
+        Action::WtUp => Some(&[wt::Op::Up][..]),
+        Action::WtDown => Some(&[wt::Op::Down][..]),
+        _ => None,
+    }
+}
+
+/// The inverse: the action a console's operation is started under, which is
+/// what `start` puts in flight and what `Done` will echo.
+fn action_of(op: wt::Op) -> Action {
+    match op {
+        wt::Op::New | wt::Op::Remove => Action::Worktree,
+        wt::Op::Up => Action::WtUp,
+        wt::Op::Down => Action::WtDown,
+    }
+}
+
+/// The row of the branch list that stands for "a new branch".
+const NEW_BRANCH: &str = "";
 
 /// What an entry does when it is chosen.
 ///
@@ -298,10 +407,13 @@ impl ClaudhubApp {
 
     // — Create ————————————————————————————————————————————————
 
-    /// Starts the guided creation of a worktree.
+    /// Starts the guided creation of a worktree, the folder already named.
     ///
-    /// Without a `wt.toml`, we fall back to the bare git add: a repository with
-    /// no configuration must still be able to gain a worktree.
+    /// The way in for a repository with no `wt.toml`, where the text dialog
+    /// asks the one thing there is to ask; a project goes through
+    /// [`Self::setup_worktree`], which asks the rest first. Without a project,
+    /// we fall back to the bare git add: a repository with no configuration
+    /// must still be able to gain a worktree.
     pub(super) fn start_worktree(
         &mut self,
         main: PathBuf,
@@ -314,21 +426,159 @@ impl ClaudhubApp {
         if slug.is_empty() {
             return;
         }
-        let Some(project) = self.wt_project(&main).cloned() else {
+        if self.wt_project(&main).is_none() {
             self.add_worktree_without_wt(&main, &slug, from.as_deref(), cx);
             return;
+        }
+        let target = WtTarget::Create { branch: None, from };
+        self.creation = Some(WtPrompt::new(main, slug, target, Stage::Questions));
+        self.open_creation_dialog(window, cx);
+        self.after_setup(window, cx);
+    }
+
+    /// Opens the creation dialog on its first page: the branch, where it
+    /// starts, the folder — what `wt`'s own interface asks before the project's
+    /// questions, and what Claudhub used to decide alone, always a new
+    /// `wt/<name>` off HEAD.
+    ///
+    /// `branch` is the picker's "worktree from this branch": the page opens on
+    /// it, with its slug suggested, and the rest of the creation is the same
+    /// road — which is the point. That gesture used to go straight to git, and
+    /// a worktree made that way had no ports, no copies, no `post_new`, and was
+    /// then taken for one `wt` knew, since it sat under the project's root.
+    pub(super) fn setup_worktree(
+        &mut self,
+        main: PathBuf,
+        branch: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let suggested = branch.as_deref().map(wt::suggest_slug).unwrap_or_default();
+        let slug = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(tr!("worktree-new-placeholder"))
+                .default_value(suggested)
+        });
+        let mut filter = |cx: &mut Context<Self>| {
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("worktree-filter-branches")))
         };
-        if !project.has_new_prompts {
-            self.git.send(Cmd::WtCreate {
-                main,
-                slug,
-                from,
-                answers: BTreeMap::new(),
-            });
+        let setup = Setup {
+            branch,
+            from: None,
+            slug: slug.clone(),
+            branch_filter: filter(cx),
+            base_filter: filter(cx),
+            error: None,
+        };
+        let target = WtTarget::Create {
+            branch: None,
+            from: None,
+        };
+        self.creation = Some(WtPrompt::new(
+            main.clone(),
+            String::new(),
+            target,
+            Stage::Setup(setup),
+        ));
+        // The list is re-read rather than trusted: a branch fetched since the
+        // last reading is exactly the one this page is opened for.
+        self.git.send(Cmd::LoadBranches { main });
+        self.open_creation_dialog(window, cx);
+        crate::ui::dialogs::focus_field(&slug, window, cx);
+        cx.notify();
+    }
+
+    /// The first page is answered: the folder is checked, and the project's
+    /// questions come next — or the creation itself, when it asks none.
+    fn submit_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(creation) = self.creation.as_mut() else {
+            return;
+        };
+        let Stage::Setup(setup) = &mut creation.stage else {
+            return;
+        };
+        let slug = setup.slug.read(cx).value().trim().to_string();
+        // Said in the dialog and not in a balloon: the field is right there,
+        // and the rule — lowercase, digits, dashes — is the one thing to read
+        // before typing again.
+        if !wt::slug_is_valid(&slug) {
+            setup.error = Some(tr!("worktree-slug-invalid"));
             cx.notify();
             return;
         }
-        self.ask_wt(main, slug, WtTarget::Create { from }, window, cx);
+        creation.slug = slug;
+        creation.target = WtTarget::Create {
+            branch: setup.branch.clone(),
+            from: setup.from.clone(),
+        };
+        creation.stage = Stage::Questions;
+        self.after_setup(window, cx);
+    }
+
+    /// After the folder is known: the project's questions, if it asks any, or
+    /// the creation itself.
+    fn after_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(main) = self.creation.as_ref().map(|creation| creation.main.clone()) else {
+            return;
+        };
+        let asks = self
+            .wt_project(&main)
+            .is_some_and(|project| project.has_new_prompts);
+        if !asks {
+            self.run_wt_target(window, cx);
+            return;
+        }
+        let Some(creation) = self.creation.as_mut() else {
+            return;
+        };
+        creation.asking = true;
+        creation.round = 0;
+        self.git.send(Cmd::WtQuestions {
+            main: creation.main.clone(),
+            slug: creation.slug.clone(),
+            answers: BTreeMap::new(),
+            phase: wt::Phase::New,
+            task: None,
+            round: 0,
+        });
+        cx.notify();
+    }
+
+    /// Chooses the branch of the first page, and suggests its folder.
+    ///
+    /// The suggestion **replaces** what the field holds: that is what a
+    /// suggestion is, and the field stays editable afterwards. A branch already
+    /// checked out elsewhere cannot be chosen — git refuses two checkouts of
+    /// one branch, and the row says so instead of letting the creation fail.
+    fn choose_setup_branch(
+        &mut self,
+        branch: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(creation) = self.creation.as_mut() else {
+            return;
+        };
+        let Stage::Setup(setup) = &mut creation.stage else {
+            return;
+        };
+        let suggested = branch.as_deref().map(wt::suggest_slug).unwrap_or_default();
+        setup.branch = branch;
+        setup.error = None;
+        setup
+            .slug
+            .update(cx, |state, cx| state.set_value(suggested, window, cx));
+        cx.notify();
+    }
+
+    fn choose_setup_base(&mut self, from: String, cx: &mut Context<Self>) {
+        let Some(creation) = self.creation.as_mut() else {
+            return;
+        };
+        if let Stage::Setup(setup) = &mut creation.stage {
+            setup.from = Some(from);
+            cx.notify();
+        }
     }
 
     /// Opens the question dialog and asks for the first round.
@@ -345,17 +595,9 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         let (phase, task) = (target.phase(), target.task());
-        self.creation = Some(WtPrompt {
-            main: main.clone(),
-            slug: slug.clone(),
-            target,
-            questions: Rc::new(Vec::new()),
-            answers: BTreeMap::new(),
-            inputs: BTreeMap::new(),
-            filters: BTreeMap::new(),
-            asking: true,
-            round: 0,
-        });
+        let mut prompt = WtPrompt::new(main.clone(), slug.clone(), target, Stage::Questions);
+        prompt.asking = true;
+        self.creation = Some(prompt);
         self.git.send(Cmd::WtQuestions {
             main,
             slug,
@@ -366,6 +608,34 @@ impl ClaudhubApp {
         });
         self.open_creation_dialog(window, cx);
         cx.notify();
+    }
+
+    /// Opens the dialog straight on its console, for an operation that asks
+    /// nothing: `down`, `rm`, and an `up` whose project has no question.
+    fn run_in_console(
+        &mut self,
+        main: PathBuf,
+        slug: String,
+        op: wt::Op,
+        cmd: Cmd,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let action = action_of(op);
+        // The target is only read for the phase of a question round, which a
+        // console never asks for; `Create` is the neutral one.
+        let target = WtTarget::Create {
+            branch: None,
+            from: None,
+        };
+        self.creation = Some(WtPrompt::new(
+            main,
+            slug,
+            target,
+            Stage::Running(Console::new(op)),
+        ));
+        self.open_creation_dialog(window, cx);
+        self.start(None, action, cmd, cx);
     }
 
     /// The bare git add, for a repository with no `wt.toml`.
@@ -517,26 +787,29 @@ impl ClaudhubApp {
     }
 
     /// The project has nothing left to ask: run what the questions were for.
+    ///
+    /// A creation and a start **keep the dialog**, which becomes their console:
+    /// both run the project's hooks, and what the hooks say is what the next
+    /// minutes are made of. A task goes to a terminal, and the dialog closes.
     fn run_wt_target(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(prompt) = self.creation.take() else {
+        let Some(creation) = self.creation.as_mut() else {
             return;
         };
-        window.close_all_dialogs(cx);
-        let WtPrompt {
-            main,
-            slug,
-            target,
-            answers,
-            ..
-        } = prompt;
-        match target {
-            WtTarget::Create { from } => {
+        let (main, slug, answers) = (
+            creation.main.clone(),
+            creation.slug.clone(),
+            std::mem::take(&mut creation.answers),
+        );
+        match creation.target.clone() {
+            WtTarget::Create { branch, from } => {
+                creation.stage = Stage::Running(Console::new(wt::Op::New));
                 self.start(
                     None,
                     Action::Worktree,
                     Cmd::WtCreate {
                         main,
                         slug,
+                        branch,
                         from,
                         answers,
                     },
@@ -544,6 +817,7 @@ impl ClaudhubApp {
                 );
             }
             WtTarget::Up { worktree } => {
+                creation.stage = Stage::Running(Console::new(wt::Op::Up));
                 self.flight.set_wt_target(worktree);
                 self.start(
                     None,
@@ -557,6 +831,8 @@ impl ClaudhubApp {
                 );
             }
             WtTarget::Task { worktree, task } => {
+                self.creation = None;
+                window.close_all_dialogs(cx);
                 self.git.send(Cmd::WtTask {
                     main,
                     worktree,
@@ -567,6 +843,76 @@ impl ClaudhubApp {
                 cx.notify();
             }
         }
+    }
+
+    /// One line of a `wt` operation, as the worker relays it.
+    ///
+    /// Filed only in the console it belongs to: the operation is named by its
+    /// repository, its folder and its kind, and a line of a `down` finishing
+    /// late has no business in the console of the `up` opened after it. A
+    /// console one has hidden, or never opened, drops the line — the journal
+    /// has it.
+    pub(super) fn wt_progress(
+        &mut self,
+        main: &Path,
+        slug: &str,
+        op: wt::Op,
+        line: String,
+        warning: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(creation) = self.creation.as_mut() else {
+            return;
+        };
+        if creation.main != main || creation.slug != slug {
+            return;
+        }
+        let Stage::Running(console) = &mut creation.stage else {
+            return;
+        };
+        if console.op != op {
+            return;
+        }
+        console.lines.push((line, warning));
+        // The tail, as a terminal shows it: the line that matters is the one
+        // just said, and a list that stays on its first lines hides it.
+        console.scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
+    /// A `wt` operation has ended: the console closes on success, the balloon
+    /// saying the rest; it stays on failure, with what was said before the
+    /// error and a button to close it.
+    ///
+    /// Read on the **console's** side: `Action::Worktree` is also the bare git
+    /// gestures, which never open one, and a success that finds no console
+    /// does nothing.
+    pub(super) fn wt_operation_ended(
+        &mut self,
+        action: Action,
+        ok: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ops) = op_of(action) else {
+            return;
+        };
+        let Some(creation) = self.creation.as_mut() else {
+            return;
+        };
+        let Stage::Running(console) = &mut creation.stage else {
+            return;
+        };
+        if !ops.contains(&console.op) {
+            return;
+        }
+        if ok {
+            self.creation = None;
+            window.close_all_dialogs(cx);
+        } else {
+            console.failed = true;
+        }
+        cx.notify();
     }
 
     /// Confirms the current page and asks for the next.
@@ -605,52 +951,109 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    /// Enter, or the OK button, at whatever stage the dialog is.
+    ///
+    /// Returns whether the dialog closes: it stays through the pages and while
+    /// the operation runs, and the one Enter that closes it is the one on a
+    /// console — hiding a running one, or dismissing a failed one.
+    fn confirm_creation(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(creation) = self.creation.as_ref() else {
+            return true;
+        };
+        match &creation.stage {
+            Stage::Setup(_) => {
+                self.submit_setup(window, cx);
+                false
+            }
+            Stage::Questions => {
+                // A page that is still being fetched has nothing to confirm:
+                // Enter would send the previous answers a second time.
+                if !creation.asking {
+                    self.submit_answers(cx);
+                }
+                false
+            }
+            Stage::Running(_) => {
+                self.creation = None;
+                true
+            }
+        }
+    }
+
     /// The creation dialog.
     ///
     /// It redraws on every frame from `Creation`: the questions arrive after it
-    /// opens, and content frozen at construction would stay empty.
+    /// opens, and content frozen at construction would stay empty. The title
+    /// and the buttons too — the same dialog is a form, then a console.
     fn open_creation_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let entity = cx.entity();
-        // The title says which gesture the questions belong to: the same dialog
-        // now serves three, and "New worktree" above the tenants of a `wt up`
-        // would be a plain lie.
-        let title = match self.creation.as_ref().map(|prompt| &prompt.target) {
-            Some(WtTarget::Up { .. }) => tr!("worktree-up-title"),
-            Some(WtTarget::Task { task, .. }) => SharedString::from(task.clone()),
-            _ => tr!("worktree-new-title"),
-        };
         window.open_dialog(cx, move |dialog, _window, _cx| {
             let entity = entity.clone();
-            let cancel = entity.clone();
-            dialog
-                .title(title.clone())
-                .child(
-                    div()
-                        .w(px(520.))
-                        .child(entity.clone().update(_cx, |this, cx| {
-                            this.render_creation_body(cx).into_any_element()
-                        })),
+            let (ok, cancel) = (entity.clone(), entity.clone());
+            let (title, footer, body) = entity.update(_cx, |this, cx| {
+                (
+                    this.creation_title(),
+                    this.creation_footer(),
+                    this.render_creation_body(cx).into_any_element(),
                 )
+            });
+            dialog
+                .title(title)
+                .child(div().w(px(520.)).child(body))
                 .overlay_closable(false)
                 .close_button(false)
-                .footer(super::dialogs::confirm())
-                .on_ok(move |_, _window, cx| {
-                    entity.update(cx, |this, cx| this.submit_answers(cx));
-                    // The dialog stays open: the next page shows in it, and it is
-                    // the absence of a new question that closes it.
-                    false
+                .footer(footer)
+                .on_ok(move |_, window, cx| {
+                    ok.update(cx, |this, cx| this.confirm_creation(window, cx))
                 })
                 .on_cancel(move |_, _window, cx| {
+                    // Escape on a console hides it; the operation goes on, and
+                    // the balloon says how it ended.
                     cancel.update(cx, |this, _| this.creation = None);
                     true
                 })
         });
     }
 
+    /// The title says which gesture the dialog belongs to: the same dialog
+    /// serves five, and "New worktree" above the tenants of a `wt up` would be
+    /// a plain lie.
+    fn creation_title(&self) -> SharedString {
+        let Some(creation) = self.creation.as_ref() else {
+            return tr!("worktree-new-title");
+        };
+        match (&creation.stage, &creation.target) {
+            (Stage::Running(console), _) => match console.op {
+                wt::Op::New => tr!("worktree-new-title"),
+                wt::Op::Up => tr!("worktree-up-title"),
+                wt::Op::Down => tr!("worktree-down-title"),
+                wt::Op::Remove => tr!("worktree-remove-wt-title"),
+            },
+            (_, WtTarget::Up { .. }) => tr!("worktree-up-title"),
+            (_, WtTarget::Task { task, .. }) => SharedString::from(task.clone()),
+            (_, WtTarget::Create { .. }) => tr!("worktree-new-title"),
+        }
+    }
+
+    /// The buttons: cancel and OK through the pages, one button on a console —
+    /// "hide" while it runs, "close" once it has failed.
+    fn creation_footer(&self) -> gpui_component::dialog::DialogFooter {
+        match self.creation.as_ref().map(|creation| &creation.stage) {
+            Some(Stage::Running(console)) if console.failed => super::dialogs::close(),
+            Some(Stage::Running(_)) => super::dialogs::only(tr!("worktree-console-hide")),
+            _ => super::dialogs::confirm(),
+        }
+    }
+
     fn render_creation_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(creation) = self.creation.as_ref() else {
             return div().into_any_element();
         };
+        match &creation.stage {
+            Stage::Setup(_) => return self.render_setup(cx).into_any_element(),
+            Stage::Running(_) => return self.render_console(cx).into_any_element(),
+            Stage::Questions => {}
+        }
         if creation.asking {
             return div()
                 .p_4()
@@ -716,6 +1119,276 @@ impl ClaudhubApp {
                     .child(SharedString::from(creation.slug.clone())),
             )
             .children(rows)
+            .into_any_element()
+    }
+
+    /// The first page: the branch, where it starts, the folder.
+    fn render_setup(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(creation) = self.creation.as_ref() else {
+            return div().into_any_element();
+        };
+        let Stage::Setup(setup) = &creation.stage else {
+            return div().into_any_element();
+        };
+        // Borrowed, not copied: this runs on every frame of the dialog, and a
+        // repository has a hundred branches carrying a subject each.
+        let branches: &[crate::git::Branch] = self
+            .repos
+            .iter()
+            .find(|repo| repo.main == creation.main)
+            .map(|repo| repo.branches.as_slice())
+            .unwrap_or_default();
+        let head = branches
+            .iter()
+            .find(|branch| branch.is_head)
+            .map(|branch| branch.name.clone());
+        let danger = cx.theme().danger;
+
+        let mut page = v_flex().gap_3();
+
+        // Which branch. "New" first, then the list the top bar's picker shows,
+        // a branch already checked out greyed and saying where.
+        page = page.child(
+            v_flex()
+                .gap_1()
+                .child(div().text_sm().child(tr!("worktree-setup-branch")))
+                .child(self.render_branch_list(
+                    "wt-setup-branch",
+                    branches,
+                    &setup.branch_filter,
+                    Some(setup.branch.as_deref().unwrap_or(NEW_BRANCH)),
+                    true,
+                    head.as_deref(),
+                    |this, name, window, cx| {
+                        let branch = (name != NEW_BRANCH).then(|| name.to_string());
+                        this.choose_setup_branch(branch, window, cx);
+                    },
+                    cx,
+                )),
+        );
+
+        // Where a new branch starts: every branch, HEAD first chosen. Only for
+        // a new one — an existing branch starts where it is.
+        if setup.branch.is_none() && !branches.is_empty() {
+            let selected = setup.from.clone().or_else(|| head.clone());
+            page = page.child(
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().child(tr!("worktree-setup-base")))
+                    .child(self.render_branch_list(
+                        "wt-setup-base",
+                        branches,
+                        &setup.base_filter,
+                        selected.as_deref(),
+                        false,
+                        head.as_deref(),
+                        |this, name, _window, cx| this.choose_setup_base(name.to_string(), cx),
+                        cx,
+                    )),
+            );
+        }
+
+        page = page.child(
+            v_flex()
+                .gap_1()
+                .child(div().text_sm().child(tr!("worktree-setup-slug")))
+                .child(Input::new(&setup.slug).small())
+                .when_some(setup.error.clone(), |el, error| {
+                    el.child(div().text_xs().text_color(danger).child(error))
+                }),
+        );
+        page.into_any_element()
+    }
+
+    /// A list of branches to pick one from, with a search field past
+    /// [`FILTER_ABOVE`] and a bounded height — the shape of a long multiple
+    /// choice, for the same reason: a repository has a hundred branches, and a
+    /// hundred rows with no way to narrow them is a list one scrolls past.
+    ///
+    /// `with_new` puts "a new branch" first and greys the branches already
+    /// checked out; a base list has neither — a branch checked out elsewhere is
+    /// a perfectly good start point.
+    #[allow(clippy::too_many_arguments)]
+    fn render_branch_list(
+        &self,
+        id: &'static str,
+        branches: &[crate::git::Branch],
+        filter: &Entity<InputState>,
+        selected: Option<&str>,
+        with_new: bool,
+        head: Option<&str>,
+        choose: impl Fn(&mut Self, &str, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let choose = Rc::new(choose);
+        let needle = filter.read(cx).value().to_string();
+        let long = branches.len() > FILTER_ABOVE;
+        let muted = cx.theme().muted_foreground;
+        let accent = cx.theme().accent;
+        let radius = cx.theme().radius;
+
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        let row = |index: usize,
+                   name: String,
+                   label: SharedString,
+                   detail: SharedString,
+                   taken: bool,
+                   cx: &mut Context<Self>| {
+            let is_selected = selected == Some(name.as_str());
+            let entity = cx.entity();
+            let choose = choose.clone();
+            h_flex()
+                .id(SharedString::from(format!("{id}-{index}")))
+                .w_full()
+                .px_2()
+                .py_1()
+                .gap_2()
+                .items_baseline()
+                .rounded(radius)
+                .when(!taken, |el| {
+                    el.cursor_pointer()
+                        .hover(|s| s.bg(accent.opacity(0.5)))
+                        .on_click(move |_, window, cx| {
+                            let name = name.clone();
+                            entity.update(cx, |this, cx| choose(this, &name, window, cx));
+                        })
+                })
+                .when(is_selected, |el| el.bg(accent))
+                .when(taken, |el| el.opacity(0.5))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_sm()
+                        .when(is_selected, |el| el.font_semibold())
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(detail),
+                )
+                .into_any_element()
+        };
+        if with_new {
+            rows.push(row(
+                0,
+                NEW_BRANCH.to_string(),
+                tr!("worktree-setup-new-branch"),
+                tr!("worktree-setup-new-branch-hint"),
+                false,
+                cx,
+            ));
+        }
+        for (index, entry) in crate::ui::branches::rows_for(branches, &needle)
+            .into_iter()
+            .enumerate()
+        {
+            match entry {
+                crate::ui::branches::Row::Group(kind) => rows.push(
+                    div()
+                        .px_2()
+                        .pt_1()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(match kind {
+                            crate::git::BranchKind::Local => tr!("branches-local"),
+                            crate::git::BranchKind::Remote => tr!("branches-remote"),
+                        })
+                        .into_any_element(),
+                ),
+                crate::ui::branches::Row::Branch(branch) => {
+                    let taken = with_new && branch.taken();
+                    let detail = match (&branch.taken_by, head == Some(branch.name.as_str())) {
+                        (Some(path), _) if taken => tr!("worktree-setup-taken", {
+                            path: path.display().to_string()
+                        }),
+                        (_, true) => SharedString::from(format!(
+                            "{} · {}",
+                            tr!("worktree-setup-head"),
+                            branch.detail
+                        )),
+                        _ => SharedString::from(branch.detail.clone()),
+                    };
+                    rows.push(row(
+                        index + 1,
+                        branch.name.clone(),
+                        SharedString::from(branch.name.clone()),
+                        detail,
+                        taken,
+                        cx,
+                    ));
+                }
+            }
+        }
+
+        v_flex()
+            .gap_1()
+            .when(long, |el| el.child(div().child(Input::new(filter).small())))
+            .child(
+                div()
+                    .id(SharedString::from(id))
+                    .max_h(px(200.))
+                    .overflow_y_scroll()
+                    .child(v_flex().gap_px().children(rows)),
+            )
+    }
+
+    /// The console: every line the operation has said, warnings in colour, the
+    /// tail kept in view, and the error's place at the bottom when it failed.
+    fn render_console(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(creation) = self.creation.as_ref() else {
+            return div().into_any_element();
+        };
+        let Stage::Running(console) = &creation.stage else {
+            return div().into_any_element();
+        };
+        let (muted, warning, danger) = (
+            cx.theme().muted_foreground,
+            cx.theme().warning,
+            cx.theme().danger,
+        );
+        let mono = cx.theme().mono_font_family.clone();
+        let lines = console.lines.iter().map(|(line, warn)| {
+            div()
+                .text_xs()
+                .font_family(mono.clone())
+                .when(*warn, |el| el.text_color(warning))
+                .child(SharedString::from(line.clone()))
+        });
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .text_xs()
+                    .text_color(muted)
+                    .when(!console.failed, |el| {
+                        el.child(icon("loader-circle").xsmall())
+                            .child(tr!("worktree-console-running"))
+                    })
+                    .when(console.failed, |el| {
+                        el.text_color(danger).child(tr!("worktree-console-failed"))
+                    })
+                    .child(div().flex_1())
+                    .child(SharedString::from(creation.slug.clone())),
+            )
+            .child(
+                div()
+                    .id("wt-console")
+                    .max_h(px(320.))
+                    .min_h(px(80.))
+                    .overflow_y_scroll()
+                    .track_scroll(&console.scroll)
+                    .p_2()
+                    .rounded(cx.theme().radius)
+                    .bg(cx.theme().muted.opacity(0.3))
+                    .child(v_flex().gap_px().children(lines)),
+            )
             .into_any_element()
     }
 
@@ -903,8 +1576,21 @@ impl ClaudhubApp {
             );
         }
 
+        // Nothing chosen is said, not refused: `wt` accepts an empty answer and
+        // the project decides what it means — on Acetics, no tenant mounted —
+        // but it is the answer one gives by mistake, by confirming a page one
+        // has not read.
+        let warning = cx.theme().warning;
         v_flex()
             .gap_1()
+            .when(chosen.is_empty(), |el| {
+                el.child(
+                    div()
+                        .text_xs()
+                        .text_color(warning)
+                        .child(tr!("worktree-multi-empty")),
+                )
+            })
             .when_some(filter.cloned(), |el, input| {
                 el.child(
                     h_flex()
@@ -962,32 +1648,51 @@ impl ClaudhubApp {
             return;
         }
         // Starting a project brings up containers and waits for them: tens of
-        // seconds during which the only thing that says anything is happening is
-        // this dot.
+        // seconds, which the console shows as they go.
         self.flight.set_wt_target(worktree.to_path_buf());
         let cmd = Cmd::WtUp {
-            main,
-            slug,
+            main: main.clone(),
+            slug: slug.clone(),
             answers: BTreeMap::new(),
         };
-        self.start(None, Action::WtUp, cmd, cx);
+        self.run_in_console(main, slug, wt::Op::Up, cmd, window, cx);
     }
 
-    pub(super) fn wt_down(&mut self, main: PathBuf, worktree: &Path, cx: &mut Context<Self>) {
+    pub(super) fn wt_down(
+        &mut self,
+        main: PathBuf,
+        worktree: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(slug) = self.wt_slug(&main, worktree) else {
             return;
         };
         self.flight.set_wt_target(worktree.to_path_buf());
-        self.start(None, Action::WtDown, Cmd::WtDown { main, slug }, cx);
+        let cmd = Cmd::WtDown {
+            main: main.clone(),
+            slug: slug.clone(),
+        };
+        self.run_in_console(main, slug, wt::Op::Down, cmd, window, cx);
     }
 
-    pub(super) fn wt_remove(&mut self, main: PathBuf, worktree: &Path, cx: &mut Context<Self>) {
+    pub(super) fn wt_remove(
+        &mut self,
+        main: PathBuf,
+        worktree: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(slug) = self.wt_slug(&main, worktree) else {
             return;
         };
         // `worktrees_changed` answers without naming a checkout — the one that
         // was removed no longer exists — so the key is the bare action.
-        self.start(None, Action::Worktree, Cmd::WtRemove { main, slug }, cx);
+        let cmd = Cmd::WtRemove {
+            main: main.clone(),
+            slug: slug.clone(),
+        };
+        self.run_in_console(main, slug, wt::Op::Remove, cmd, window, cx);
     }
 
     // — `just` ————————————————————————————————————————————————
@@ -1250,14 +1955,20 @@ impl ClaudhubApp {
                 .overlay_closable(false)
                 .close_button(false)
                 .footer(super::dialogs::confirm())
-                .on_ok(move |_, _window, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.wt_remove(main.clone(), &worktree, cx);
+                .on_ok(move |_, window, cx| {
+                    entity.update(cx, |this, _cx| {
                         this.git.send(Cmd::DeleteBranch {
                             main: main.clone(),
                             name: branch.clone(),
                             force: false,
                         });
+                    });
+                    // The removal opens its console, and it opens **after**
+                    // this dialog has closed: `true` closes the topmost one,
+                    // which would be the console if it were opened here.
+                    let (entity, main, worktree) = (entity.clone(), main.clone(), worktree.clone());
+                    window.defer(cx, move |window, cx| {
+                        entity.update(cx, |this, cx| this.wt_remove(main, &worktree, window, cx));
                     });
                     true
                 })
@@ -1408,7 +2119,7 @@ impl ClaudhubApp {
                 "wt-down",
                 "circle-stop",
                 tr!("worktree-down"),
-                move |app, _window, cx| app.wt_down(main.clone(), &target, cx),
+                move |app, window, cx| app.wt_down(main.clone(), &target, window, cx),
             );
             actions.push(if first { action.group() } else { action });
             first = false;
@@ -1419,7 +2130,7 @@ impl ClaudhubApp {
                 "wt-remove",
                 "trash-2",
                 tr!("worktree-remove"),
-                move |app, _window, cx| app.wt_remove(main.clone(), &target, cx),
+                move |app, window, cx| app.wt_remove(main.clone(), &target, window, cx),
             );
             actions.push(if first { action.group() } else { action });
         }
@@ -1720,6 +2431,13 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A project asks what `wt`'s own interface asks — the branch, its
+        // start, the folder, then its questions. Without one there is only a
+        // name to ask for, and the bare git add is enough.
+        if self.wt_project(&main).is_some() {
+            self.setup_worktree(main, None, window, cx);
+            return;
+        }
         self.open_text_dialog(
             tr!("worktree-new-title"),
             tr!("worktree-new-placeholder"),
@@ -1768,5 +2486,24 @@ impl ClaudhubApp {
                     true
                 })
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A console is opened under an action and closed by the `Done` that
+    /// echoes it: the two tables must agree, or a console would never close —
+    /// the silent kind of failure, a dialog that stays.
+    #[test]
+    fn a_consoles_action_closes_its_operation() {
+        for op in [wt::Op::New, wt::Op::Up, wt::Op::Down, wt::Op::Remove] {
+            let ops = op_of(action_of(op)).unwrap_or_default();
+            assert!(ops.contains(&op), "{op:?}");
+        }
+        // The bare git gestures share `Worktree` with `new` and `rm`, and a
+        // `Commit` never ends a console.
+        assert!(op_of(Action::Commit).is_none());
     }
 }

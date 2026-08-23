@@ -28,7 +28,7 @@ use anyhow::Result;
 // prefix removes the ambiguity for the reader as much as for the compiler.
 use ::wt::config::{Ask, Project, PromptKind};
 use ::wt::ops::App;
-use ::wt::{state, tmpl, util};
+use ::wt::{ops, state, tmpl, util};
 
 /// When the questions are asked.
 ///
@@ -154,6 +154,55 @@ impl Launch {
 pub struct Endpoint {
     pub url: String,
     pub label: String,
+}
+
+/// The four operations `wt` keeps books for, and the only ones whose progress
+/// is streamed: each runs the project's hooks, and a hook is measured in
+/// minutes.
+///
+/// On the wire and in the console's title both: the view names the operation
+/// by it, and the worker tags every line it relays with it, so that a line of
+/// a `down` that finishes late cannot land in the console of the `up` opened
+/// after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Op {
+    New,
+    Up,
+    Down,
+    Remove,
+}
+
+impl Op {
+    /// The word `wt`'s own command line uses, for the journal.
+    fn name(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Up => "up",
+            Self::Down => "down",
+            Self::Remove => "rm",
+        }
+    }
+}
+
+/// What the worker says about an operation as it goes: one line, and whether
+/// it is a warning. `Sync`, because the line is handed over from the thread
+/// that drains `wt`'s channel, not from the one running the operation.
+pub type Progress<'a> = &'a (dyn Fn(String, bool) + Sync);
+
+/// The folder name suggested for a branch: `wt`'s own rule, so that the
+/// interface and the command line suggest the same thing for `origin/feat/X`.
+///
+/// The remote prefix goes first: `origin-feat-x` is not the slug anyone
+/// wants, and it is what the terminal interface strips too.
+pub fn suggest_slug(branch: &str) -> String {
+    ops::slugify(branch.trim_start_matches("origin/"))
+}
+
+/// Whether `wt` will accept this folder name: lowercase letters, digits and
+/// dashes, neither first nor last. The rule is `wt`'s and read from it rather
+/// than copied — `cmd_new` checks it again, and two rules drift.
+pub fn slug_is_valid(slug: &str) -> bool {
+    ops::validate_slug(slug).is_ok()
 }
 
 /// A repository's project, or `None` if it has no `wt.toml`.
@@ -297,25 +346,35 @@ pub fn questions(
 
 /// Creates a worktree with everything the project asks for: the branch
 /// following its template, the folders, the copies, the ports, then `post_new`.
+///
+/// `branch` is an existing branch to check out — or a name imposed on the new
+/// one — and `from` where a *new* branch starts; both `None` is what the bare
+/// "New worktree" gesture has always meant, a `wt/<slug>` off the main
+/// repository's HEAD. The pair is `cmd_new`'s own contract, handed through
+/// untouched.
 pub fn create(
     main: &Path,
     slug: &str,
+    branch: Option<&str>,
     from: Option<&str>,
     answers: &BTreeMap<String, String>,
+    progress: Progress,
 ) -> Result<(PathBuf, String)> {
     let app = app(main).ok_or_else(|| anyhow::anyhow!("this repository has no wt.toml"))?;
     let sets = sets(answers);
-    let (output, result) = capturing(&app, &format!("new {slug}"), |app| {
-        app.cmd_new(slug, None, from, &sets)
+    let (output, result) = capturing(&app, Op::New, slug, progress, |app| {
+        app.cmd_new(slug, branch, from, &sets)
     });
     result?;
     Ok((app.dir(slug), output))
 }
 
-pub fn remove(main: &Path, slug: &str) -> Result<String> {
+pub fn remove(main: &Path, slug: &str, progress: Progress) -> Result<String> {
     let app = app(main).ok_or_else(|| anyhow::anyhow!("this repository has no wt.toml"))?;
     // `yes`: confirmation is the view's business, and it has already asked.
-    let (output, result) = capturing(&app, &format!("rm {slug}"), |app| app.cmd_rm(slug, true));
+    let (output, result) = capturing(&app, Op::Remove, slug, progress, |app| {
+        app.cmd_rm(slug, true)
+    });
     result?;
     Ok(output)
 }
@@ -325,17 +384,22 @@ pub fn remove(main: &Path, slug: &str) -> Result<String> {
 /// They are `--set`s, and `wt` merges them into what it had remembered: a start
 /// with no answers repeats the previous one, which is exactly what happens when
 /// the project asks nothing.
-pub fn up(main: &Path, slug: &str, answers: &BTreeMap<String, String>) -> Result<String> {
+pub fn up(
+    main: &Path,
+    slug: &str,
+    answers: &BTreeMap<String, String>,
+    progress: Progress,
+) -> Result<String> {
     let app = app(main).ok_or_else(|| anyhow::anyhow!("this repository has no wt.toml"))?;
     let sets = sets(answers);
-    let (output, result) = capturing(&app, &format!("up {slug}"), |app| app.cmd_up(slug, &sets));
+    let (output, result) = capturing(&app, Op::Up, slug, progress, |app| app.cmd_up(slug, &sets));
     result?;
     Ok(output)
 }
 
-pub fn down(main: &Path, slug: &str) -> Result<String> {
+pub fn down(main: &Path, slug: &str, progress: Progress) -> Result<String> {
     let app = app(main).ok_or_else(|| anyhow::anyhow!("this repository has no wt.toml"))?;
-    let (output, result) = capturing(&app, &format!("down {slug}"), |app| app.cmd_down(slug));
+    let (output, result) = capturing(&app, Op::Down, slug, progress, |app| app.cmd_down(slug));
     result?;
     Ok(output)
 }
@@ -603,7 +667,7 @@ fn sets(answers: &BTreeMap<String, String>) -> Vec<String> {
         .collect()
 }
 
-/// Runs an operation while collecting what it says, and files all of it in the
+/// Runs an operation while relaying what it says, and files all of it in the
 /// journal.
 ///
 /// `set_sink` exists for that: without it the messages would go to a graphical
@@ -611,44 +675,67 @@ fn sets(answers: &BTreeMap<String, String>) -> Vec<String> {
 /// notification text — the one `wt` wrote, and not a rewording that would only
 /// add approximations.
 ///
-/// **Only the last line is returned, but every one is logged.** A `wt new`
-/// narrates its whole sequence — the branch, the folders, the copies, the ports,
-/// then whatever `post_new` prints — and that narration is the only account
-/// there is of what a project's hooks did. Keeping the last line for the status
-/// bar and dropping the rest meant a three-minute `composer install` left one
-/// sentence behind it; a failure halfway through left nothing at all, the error
-/// being carried by the `Result` and the steps that led to it by nobody.
-fn capturing<T>(app: &App, what: &str, run: impl FnOnce(&App) -> Result<T>) -> (String, Result<T>) {
+/// **Every line goes out as it is said, and the last one is returned.** A
+/// `wt new` narrates its whole sequence — the branch, the folders, the copies,
+/// the ports, then whatever `post_new` prints — and that narration is the only
+/// account there is of what a project's hooks did. It used to be drained once
+/// the operation had returned: a three-minute `composer install` was a spinner,
+/// and a failure halfway through left one sentence of error and nothing of the
+/// steps that led to it. So the channel is drained **while** the operation
+/// runs, by a thread of its own — the operation holds this one — and each line
+/// is handed to `progress` the moment it arrives. The last line is still what
+/// the caller gets: the balloon shows one, and it is the result one wants to
+/// read there, not the first step.
+fn capturing<T>(
+    app: &App,
+    op: Op,
+    slug: &str,
+    progress: Progress,
+    run: impl FnOnce(&App) -> Result<T>,
+) -> (String, Result<T>) {
+    let what = format!("{} {slug}", op.name());
     let started = std::time::Instant::now();
     log::info!("wt {what}…");
     let (tx, rx) = std::sync::mpsc::channel();
     app.set_sink(Some(tx));
-    let result = run(app);
-    // The sink is released before draining the channel: while it holds the
-    // sender, `try_iter` would never see the end.
-    app.set_sink(None);
-    let mut last = String::new();
-    for msg in rx.try_iter() {
-        let (line, warning) = match msg {
-            util::Msg::Warn(m) => (m, true),
-            util::Msg::Info(m) | util::Msg::Ok(m) | util::Msg::Out(m) => (m, false),
-            // `Done` carries no text of its own: it marks the end of a step.
-            util::Msg::Done(_) => continue,
-        };
-        if warning {
-            log::warn!("wt {what}: {line}");
-        } else {
-            log::info!("wt {what}: {line}");
-        }
-        last = line;
-    }
+    let (last, result) = std::thread::scope(|scope| {
+        // The receiver moves into the drain: `Receiver` is not `Sync`, and it
+        // is the drain's alone anyway.
+        let what = &what;
+        let drain = scope.spawn(move || {
+            let mut last = String::new();
+            // `recv` and not `try_iter`: the loop ends when the last sender is
+            // dropped, which is the `set_sink(None)` below.
+            while let Ok(msg) = rx.recv() {
+                let (line, warning) = match msg {
+                    util::Msg::Warn(m) => (m, true),
+                    util::Msg::Info(m) | util::Msg::Ok(m) | util::Msg::Out(m) => (m, false),
+                    // `Done` carries no text of its own: it marks the end of a
+                    // step.
+                    util::Msg::Done(_) => continue,
+                };
+                if warning {
+                    log::warn!("wt {what}: {line}");
+                } else {
+                    log::info!("wt {what}: {line}");
+                }
+                last.clone_from(&line);
+                progress(line, warning);
+            }
+            last
+        });
+        let result = run(app);
+        // The sink is released before joining the drain: while it holds the
+        // sender, the channel never ends.
+        app.set_sink(None);
+        let last = drain.join().unwrap_or_default();
+        (last, result)
+    });
     let elapsed = crate::logging::ms(started.elapsed());
     match &result {
         Ok(_) => log::info!("wt {what} — done in {elapsed}"),
         Err(e) => log::warn!("wt {what} — failed after {elapsed}: {e:#}"),
     }
-    // The last line only for the caller: the status bar shows just one, and it
-    // is the result one wants to read there, not the first step.
     (last, result)
 }
 
@@ -714,6 +801,30 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// The slug suggested for a branch is `wt`'s own, remote prefix dropped:
+    /// the command line and the window must agree on the folder a branch gets.
+    #[test]
+    fn a_branch_suggests_the_slug_wt_would() {
+        assert_eq!(
+            suggest_slug("origin/feature/Refonte_Devis"),
+            "feature-refonte-devis"
+        );
+        assert_eq!(suggest_slug("fix-42"), "fix-42");
+        assert_eq!(suggest_slug(""), "");
+    }
+
+    /// The folder rule is read from `wt` and not copied: what the dialog lets
+    /// through is what `cmd_new` will accept.
+    #[test]
+    fn a_slug_is_lowercase_digits_and_inner_dashes() {
+        for ok in ["demo", "fix-42", "a1"] {
+            assert!(slug_is_valid(ok), "{ok}");
+        }
+        for bad in ["", "Demo", "-a", "a-", "a b", "a/b", "\u{e9}"] {
+            assert!(!slug_is_valid(bad), "{bad}");
+        }
     }
 
     #[test]
