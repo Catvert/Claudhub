@@ -179,6 +179,7 @@ impl ClaudhubApp {
         let editing = super::explorer::Editing {
             worktree: worktree.clone(),
             path: path.clone(),
+            scroll_key: crate::ui::surface::Surface::file_scroll_key(&path),
             input,
             hash: 0,
             dirty: false,
@@ -193,6 +194,7 @@ impl ClaudhubApp {
             // it would feed is not drawn.
             base_asked: true,
             hunks: std::rc::Rc::default(),
+            last_line: 0,
             hunk_open: None,
             preview: Some(preview),
             ephemeral,

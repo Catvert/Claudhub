@@ -2092,6 +2092,9 @@ impl ClaudhubApp {
         if settled {
             self.merging = None;
         }
+        // The tree's rows read the status by path: filed once here rather than
+        // at every frame of the panel.
+        self.index_file_status(&worktree);
         let state = self.review.entry(worktree.clone()).or_default();
         // The lists depend on the status: a file just staged must not stay
         // displayed on the wrong side. We **ask for them again** without

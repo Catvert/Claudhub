@@ -413,6 +413,17 @@ mod tests {
         assert_eq!(labels(&entries, &paths), vec!["vendor/", "  autoload.php"]);
     }
 
+    /// And that holds of a search too: a directory whose contents have arrived
+    /// is still a directory, so a subset told otherwise would draw `vendor/`
+    /// both as the folder its files make and as a leaf of its own.
+    #[test]
+    fn a_search_draws_a_read_directory_once() {
+        let paths = paths(&["vendor", "vendor/autoload.php"]);
+        let entries = Tree::subset(&paths, &[0, 1], &paths_of(&["vendor"]))
+            .rows(Folds::OpenBut(&HashSet::new()));
+        assert_eq!(labels(&entries, &paths), vec!["vendor/", "  autoload.php"]);
+    }
+
     /// The tree is held from one fold to the next, and folding it must give
     /// exactly what building it afresh would. This is what a `target/` of a
     /// hundred thousand files buys: twenty milliseconds once instead of on

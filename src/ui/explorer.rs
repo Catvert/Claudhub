@@ -242,6 +242,13 @@ pub struct Explorer {
     /// itself. Cleared as soon as the drag names another one, so that the
     /// timer that opens it can tell "still there" from "gone".
     pub drag_hover: Option<PathBuf>,
+    /// What git says about each file, ready to be looked up by a row.
+    ///
+    /// Built when a status arrives (`index_file_status`) and not at render:
+    /// the panel renders at every frame, and a map of a hundred `PathBuf` keys
+    /// built sixty times a second is a map nobody asked for. Behind an `Rc`
+    /// because the render hands it to a virtualised list's closure.
+    pub status: Rc<std::collections::HashMap<PathBuf, crate::git::StatusCode>>,
 }
 
 impl Default for Explorer {
@@ -262,6 +269,7 @@ impl Default for Explorer {
             query: String::new(),
             cursor: None,
             drag_hover: None,
+            status: Rc::default(),
         }
     }
 }
@@ -354,7 +362,12 @@ impl Explorer {
                 .filter(|(_, path)| crate::ui::find::matches(&self.query, &path.to_string_lossy()))
                 .map(|(index, _)| index)
                 .collect();
-            tree::Tree::subset(&self.files, &keep, &self.unexplored)
+            // `dirs` and not `unexplored`, as `set_files` builds the whole
+            // tree: a directory whose contents have arrived leaves the
+            // unexplored list, and telling the subset that it is a file draws
+            // it twice — once as the folder its children make, once as a leaf
+            // of its own.
+            tree::Tree::subset(&self.files, &keep, &self.dirs)
                 .rows(tree::Folds::OpenBut(&std::collections::HashSet::new()))
         };
         self.dimmed = Rc::new(rows.iter().map(|entry| self.is_ignored(entry)).collect());
@@ -462,6 +475,14 @@ pub enum Landing {
     Position { line: u32, character: u32 },
 }
 
+/// The index of a buffer's last line, as `hunks::Hunk::covers` counts them.
+///
+/// `split('\n')` and never `lines()`: a final newline is a line of its own —
+/// the ruling `ui::hunks` already makes.
+fn last_line(text: &str) -> usize {
+    text.split('\n').count().saturating_sub(1)
+}
+
 /// A landing resolved against the text it lands in.
 ///
 /// The offset is clamped: a trail entry is a byte offset in a file that may
@@ -563,6 +584,10 @@ pub struct Editing {
     /// normal mode is what a tabbed vim does anyway. It is the same type the SQL
     /// console holds; see `ui::surface`.
     pub host: crate::ui::surface::VimHost,
+    /// The key this file's wheel smoothing is filed under, built once with the
+    /// tab: `Surface::file_scroll_key` formats the path, and the smoothing asks
+    /// for its key at every frame it advances.
+    pub scroll_key: SharedString,
     /// A caret waiting for the editor to be measured before it can be revealed.
     ///
     /// A file opened by a jump installs a brand-new `EditorState`, which has
@@ -596,6 +621,12 @@ pub struct Editing {
     /// than derived at render: the render closure runs every frame and this
     /// walks the whole file.
     pub hunks: Rc<Vec<crate::ui::hunks::Hunk>>,
+    /// The index of the buffer's last line, as `hunks::Hunk::covers` counts
+    /// them. Written with `hunks`, by the one place that recomputes them: it
+    /// was read back by splitting a copy of the whole text, three times over —
+    /// once per keystroke for the marks, and once per frame for an open
+    /// popover.
+    pub last_line: usize,
     /// The picture this tab shows, when what was opened is one to look at
     /// rather than to edit. `None` for a file, and that is what every gesture
     /// reads to know which of the two a tab holds — see `ui::preview`.
@@ -729,6 +760,39 @@ impl ClaudhubApp {
         // inside `vendor/` is read again on the next frame — a chevron that
         // shuts under the hand on every `git add` is worse than the reads it
         // saves. See `ensure_project_files`.
+    }
+
+    /// Files the status by path, for the tree to colour its rows.
+    ///
+    /// Called when a status arrives, which is the only thing that changes the
+    /// answer — the tree itself may not have been asked for yet, and an
+    /// explorer built here starts idle like any other.
+    pub(super) fn index_file_status(&mut self, worktree: &Path) {
+        let status = self
+            .review
+            .get(worktree)
+            .map(|state| {
+                state
+                    .status
+                    .files
+                    .iter()
+                    .map(|file| {
+                        let code = if file.is_untracked() {
+                            crate::git::StatusCode::Untracked
+                        } else if !matches!(file.worktree, crate::git::StatusCode::Unmodified) {
+                            file.worktree
+                        } else {
+                            file.index
+                        };
+                        (file.path.clone(), code)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.explorers
+            .entry(worktree.to_path_buf())
+            .or_default()
+            .status = Rc::new(status);
     }
 
     /// Reads the excluded directories that are open and whose contents are
@@ -1452,6 +1516,7 @@ impl ClaudhubApp {
         let editing = Editing {
             worktree: worktree.clone(),
             path: path.clone(),
+            scroll_key: crate::ui::surface::Surface::file_scroll_key(&path),
             input,
             hash: content.hash,
             dirty: false,
@@ -1463,6 +1528,7 @@ impl ClaudhubApp {
             base,
             base_asked: false,
             hunks: Rc::default(),
+            last_line: 0,
             hunk_open: None,
             preview: None,
             // A reread keeps what the tab was: saving a file looked at does not
@@ -1684,12 +1750,12 @@ impl ClaudhubApp {
         // No base means no marks rather than "every line is new": a file git
         // does not track is not a file one has changed, and painting it green
         // from top to bottom says something the gutter does not mean.
-        let now = editing.input.read(cx).value().to_string();
+        let now = editing.input.read(cx).value();
         let hunks = match &editing.base {
             Some(base) => crate::ui::hunks::compare(base, &now),
             None => Vec::new(),
         };
-        let last = now.split('\n').count().saturating_sub(1);
+        let last = last_line(&now);
         let Some(editing) = self
             .editings
             .get_mut(worktree)
@@ -1705,6 +1771,7 @@ impl ClaudhubApp {
             }
         }
         editing.hunks = Rc::new(hunks);
+        editing.last_line = last;
         self.install_gutter_marks(worktree, path, cx);
         cx.notify();
     }
@@ -1738,13 +1805,9 @@ impl ClaudhubApp {
             input.update(cx, |state, cx| state.set_gutter_marks(None, cx));
             return;
         }
-        let last = editing
-            .input
-            .read(cx)
-            .value()
-            .split('\n')
-            .count()
-            .saturating_sub(1);
+        // Written by `recompute_hunks`, which is the only thing that changes
+        // what the marks answer.
+        let last = editing.last_line;
         let app = cx.entity().downgrade();
         let (worktree, path) = (worktree.to_path_buf(), path.to_path_buf());
         let render: gpui_component::input::GutterMarkRenderer = Rc::new(move |row| {
@@ -1820,8 +1883,8 @@ impl ClaudhubApp {
             return;
         };
         let input = editing.input.clone();
-        let text = input.read(cx).value().to_string();
-        let last = text.split('\n').count().saturating_sub(1);
+        let text = input.read(cx).value();
+        let last = editing.last_line;
         let Some(hunk) = editing
             .hunks
             .iter()
@@ -2306,31 +2369,10 @@ impl ClaudhubApp {
         let files = explorer.files.clone();
         let cursor = explorer.cursor.clone();
         let count = rows.len();
-        // The git status is already here: showing it costs only one lookup per
-        // visible row, and it is what makes the difference between a file list
-        // and a project explorer.
-        let status: Rc<std::collections::HashMap<PathBuf, crate::git::StatusCode>> = Rc::new(
-            self.review
-                .get(&worktree)
-                .map(|state| {
-                    state
-                        .status
-                        .files
-                        .iter()
-                        .map(|file| {
-                            let code = if file.is_untracked() {
-                                crate::git::StatusCode::Untracked
-                            } else if !matches!(file.worktree, crate::git::StatusCode::Unmodified) {
-                                file.worktree
-                            } else {
-                                file.index
-                            };
-                            (file.path.clone(), code)
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-        );
+        // The git status is already filed by path (`index_file_status`):
+        // showing it costs only one lookup per visible row, and it is what
+        // makes the difference between a file list and a project explorer.
+        let status = explorer.status.clone();
         let open = self.editing().map(|editing| editing.path.clone());
         let entity = cx.entity();
         let look = Look::of(cx);
@@ -2875,9 +2917,13 @@ impl ClaudhubApp {
         // made for an annotated row.
         let peek = self.editing().and_then(|editing| {
             let row = editing.hunk_open?;
-            let text = editing.input.read(cx).value().to_string();
-            let last = text.split('\n').count().saturating_sub(1);
-            let hunk = editing.hunks.iter().find(|hunk| hunk.covers(row, last))?;
+            // `last_line` and not a fresh count: this runs at every frame for
+            // as long as the band is open, and the buffer's line count is
+            // written with the hunks it is read against.
+            let hunk = editing
+                .hunks
+                .iter()
+                .find(|hunk| hunk.covers(row, editing.last_line))?;
             Some((row, hunk.kind(), hunk.old.join("\n")))
         });
         Some(

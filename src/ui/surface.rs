@@ -54,15 +54,16 @@ pub(super) enum Surface {
 }
 
 impl Surface {
-    /// The key its wheel smoothing is filed under, as `ui::scroll` keys the
-    /// others. One key per surface and not one for all: they scroll
+    /// The key a file's wheel smoothing is filed under, as `ui::scroll` keys
+    /// the others. One key per surface and not one for all: they scroll
     /// independently, and a shared motion hands one panel's destination to the
     /// other.
-    fn scroll_key(&self) -> SharedString {
-        match self {
-            Surface::File(path) => format!("editor-scroll:{}", path.display()).into(),
-            Surface::Query => "query-scroll".into(),
-        }
+    ///
+    /// Built **once**, when the file opens (`Editing::scroll_key`): it is asked
+    /// for at every frame of a smoothed scroll, and formatting a path is an
+    /// allocation a frame has no reason to make.
+    pub(super) fn file_scroll_key(path: &std::path::Path) -> SharedString {
+        format!("editor-scroll:{}", path.display()).into()
     }
 
     /// Whether it is a file, which four vim commands ask before naming one.
@@ -111,8 +112,16 @@ pub(super) struct VimHost {
     ///
     /// `find_all` walks the whole file, which is a keystroke's worth of work and
     /// not a frame's: it is redone when the pattern changes and when the text
-    /// does, and never otherwise.
-    pub matches_at: Option<(String, usize, usize)>,
+    /// does, and never otherwise. **The caret is deliberately not in this key**:
+    /// it moves at every `j`, and the search does not have to be run again to
+    /// find out which occurrence one has landed on — that is `matches_lit`.
+    pub matches_at: Option<(String, usize)>,
+    /// Where the occurrences are, kept from one frame to the next so that a
+    /// caret moving over them costs a comparison and not a walk of the file.
+    pub matches_found: Vec<std::ops::Range<usize>>,
+    /// Which of `matches_found` was painted as the current one, so that a caret
+    /// that moves without changing the answer repaints nothing.
+    pub matches_lit: Option<usize>,
     /// The mode, selection, head and text length the cursor was last painted
     /// for.
     ///
@@ -174,6 +183,8 @@ impl VimHost {
             selection,
             matches,
             matches_at: None,
+            matches_found: Vec::new(),
+            matches_lit: None,
             cursor_at: None,
             absorb_selection: false,
             selection_at: None,
@@ -196,11 +207,13 @@ pub(super) enum Place {
 }
 
 /// The line a byte offset falls on, counted from zero.
-pub(super) fn line_at(text: &str, offset: usize) -> usize {
-    text[..offset.min(text.len())]
-        .bytes()
-        .filter(|byte| *byte == b'\n')
-        .count()
+///
+/// Read off the **rope**, which is what the editor holds: `value()` copies the
+/// whole text to count newlines in it, and this is asked after every motion and
+/// at every frame a reveal is waiting for a measurement.
+pub(super) fn line_at(text: &gpui_component::input::Rope, offset: usize) -> usize {
+    use gpui_component::input::RopeExt;
+    text.offset_to_position(offset.min(text.len())).line as usize
 }
 
 /// How many lines `Ctrl+D` moves by half of, before the surface has been laid
@@ -226,6 +239,21 @@ impl ClaudhubApp {
         match surface {
             Surface::File(path) => self.editing_at(path).map(|editing| editing.input.clone()),
             Surface::Query => Some(self.db_query_input.clone()),
+        }
+    }
+
+    /// The key a surface's wheel smoothing is filed under.
+    ///
+    /// Held on the `Editing` for a file, so that a smoothed scroll does not
+    /// format a path at every frame; a file whose tab has just gone answers by
+    /// the same rule, since the key it names has gone with it.
+    fn scroll_key(&self, surface: &Surface) -> SharedString {
+        match surface {
+            Surface::File(path) => self
+                .editing_at(path)
+                .map(|editing| editing.scroll_key.clone())
+                .unwrap_or_else(|| Surface::file_scroll_key(path)),
+            Surface::Query => SharedString::new_static("query-scroll"),
         }
     }
 
@@ -395,7 +423,7 @@ impl ClaudhubApp {
                 .map(|range| (range.start_line, range.end_line))
                 .collect();
             (
-                state.value().to_string(),
+                state.value(),
                 state.selected_range().start,
                 rows,
                 folds,
@@ -664,8 +692,8 @@ impl ClaudhubApp {
     /// the focus is what `n` and `N` need in order to stay where they are.
     ///
     /// The occurrence under the caret is lit brighter, which costs nothing —
-    /// the caret is ours to move, so "the current one" is a comparison and not
-    /// a state to keep.
+    /// "the current one" is a position in the occurrences already found, and a
+    /// caret that moves without changing it repaints nothing.
     pub(super) fn sync_search_matches(
         &mut self,
         surface: &Surface,
@@ -692,36 +720,56 @@ impl ClaudhubApp {
         if bar {
             pattern = "";
         }
-        let at = (pattern.to_string(), len, caret);
-        if host.matches_at.as_ref() == Some(&at) {
+        let at = (pattern.to_string(), len);
+        // The walk of the file, and only when the question has changed. What
+        // invalidates it: the pattern, and the text it was run over.
+        let searched = host.matches_at.as_ref() != Some(&at);
+        if searched {
+            let ranges = match pattern.is_empty() {
+                true => Vec::new(),
+                // Byte offsets, and a comparison character by character: the
+                // same reckoning `Ctrl+F` makes, and the same function.
+                false => crate::ui::find::find_all(pattern, &input.read(cx).value()),
+            };
+            if let Some(host) = self.surface_host_mut(surface) {
+                host.matches_at = Some(at);
+                host.matches_found = ranges;
+            }
+        }
+        let Some(host) = self.surface_host(surface) else {
+            return;
+        };
+        // Which occurrence the caret is in: the only thing a bare motion
+        // changes, and it is a comparison over what has already been found.
+        let current = host
+            .matches_found
+            .iter()
+            .position(|range| range.contains(&caret));
+        if !searched && host.matches_lit == current {
             return;
         }
-        let ranges = match pattern.is_empty() {
-            true => Vec::new(),
-            // Byte offsets, and a comparison character by character: the same
-            // reckoning `Ctrl+F` makes, and the same function.
-            false => crate::ui::find::find_all(pattern, &input.read(cx).value()),
-        };
-        let (lit, current) = (
+        let (lit, bright) = (
             crate::ui::find::highlight_color(false, cx),
             crate::ui::find::highlight_color(true, cx),
         );
-        layer.set(
-            ranges
-                .into_iter()
-                .map(|range| {
-                    let here = range.contains(&caret);
-                    let style = gpui::HighlightStyle {
-                        background_color: Some(if here { current } else { lit }),
-                        ..Default::default()
-                    };
-                    gpui_component::input::TextDecoration::new(range, style)
-                })
-                .collect(),
-            cx,
-        );
+        let decorations: Vec<_> = host
+            .matches_found
+            .iter()
+            .enumerate()
+            .map(|(index, range)| {
+                let style = gpui::HighlightStyle {
+                    background_color: Some(match Some(index) == current {
+                        true => bright,
+                        false => lit,
+                    }),
+                    ..Default::default()
+                };
+                gpui_component::input::TextDecoration::new(range.clone(), style)
+            })
+            .collect();
+        layer.set(decorations, cx);
         if let Some(host) = self.surface_host_mut(surface) {
-            host.matches_at = Some(at);
+            host.matches_lit = current;
         }
     }
 
@@ -835,7 +883,7 @@ impl ClaudhubApp {
         }
         let caret = {
             let state = input.read(cx);
-            line_at(&state.value(), state.selected_range().start)
+            line_at(state.text(), state.selected_range().start)
         };
         let next = match op {
             Fold::Close | Fold::Open | Fold::Toggle => {
@@ -911,7 +959,7 @@ impl ClaudhubApp {
             else {
                 return false;
             };
-            let row = line_at(&state.value(), head);
+            let row = line_at(state.text(), head);
             let span = rows.len().max(1);
             let first = match place {
                 // A line already in view stays where it is: a motion that moves
@@ -945,8 +993,9 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         let (offset, max) = editor_extent(input, cx);
+        let key = self.scroll_key(surface);
         if let Some(next) = self
-            .owned_motion(surface.scroll_key(), crate::ui::motion::Axes::Vertical)
+            .owned_motion(key, crate::ui::motion::Axes::Vertical)
             .advance_at(offset, max, window)
         {
             input.update(cx, |state, cx| state.set_scroll_offset(next, cx));
@@ -1011,6 +1060,7 @@ impl ClaudhubApp {
         let Some(input) = self.surface_input(surface) else {
             return;
         };
+        let key = self.scroll_key(surface);
         let (offset, max) = editor_extent(&input, cx);
         // The editor's own line height and not the ambient one: it is what its
         // handler would have used, and three lines apart make a visible
@@ -1026,7 +1076,7 @@ impl ClaudhubApp {
             // A zoom during a smoothed scroll: the destination was computed on
             // lines that no longer have the same height. Nothing to give back —
             // the event was consumed before the editor could scroll on it.
-            self.owned_motion(surface.scroll_key(), crate::ui::motion::Axes::Vertical)
+            self.owned_motion(key, crate::ui::motion::Axes::Vertical)
                 .cancel();
             let steps = crate::ui::terminal_view::zoom_steps(delta.y);
             if steps != 0. {
@@ -1045,12 +1095,12 @@ impl ClaudhubApp {
             // A trackpad is already gradual, and attached to the finger:
             // smoothing it would add lag to a direct gesture.
             gpui::ScrollDelta::Pixels(_) => {
-                self.owned_motion(surface.scroll_key(), crate::ui::motion::Axes::Vertical)
+                self.owned_motion(key, crate::ui::motion::Axes::Vertical)
                     .cancel();
                 gpui::point(offset.x, offset.y + delta.y)
             }
             gpui::ScrollDelta::Lines(_) => self
-                .owned_motion(surface.scroll_key(), crate::ui::motion::Axes::Vertical)
+                .owned_motion(key, crate::ui::motion::Axes::Vertical)
                 .push(offset, delta, max),
         };
         input.update(cx, |state, cx| state.set_scroll_offset(next, cx));
