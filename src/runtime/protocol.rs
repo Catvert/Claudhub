@@ -262,6 +262,62 @@ pub enum Cmd {
         name: Option<String>,
     },
 
+    /// The repository's stashes. Keyed by the **main** repository: `refs/stash`
+    /// lives in the common `.git`, and the list read from a linked worktree is
+    /// the list of the main one, to the entry.
+    LoadStashes {
+        main: PathBuf,
+    },
+    /// Puts the checkout's changes aside.
+    ///
+    /// A checkout's gesture and not a repository's, unlike the read above: what
+    /// it takes off the table is *this* working tree.
+    StashPush {
+        worktree: WorktreeId,
+        message: Option<String>,
+        /// Take the files git does not know yet. Without it they stay on the
+        /// disk, which is the surprise everyone has had once.
+        untracked: bool,
+        /// Leave what was staged staged.
+        keep_index: bool,
+    },
+    /// Restores a stash into the checkout, keeping it (`pop: false`) or taking
+    /// it off the stack.
+    ///
+    /// `hash` is the commit the panel was showing, and the whole reason the
+    /// gesture is safe: `stash@{1}` becomes `stash@{0}` the moment anything
+    /// drops the entry above it, and git takes nothing but the name.
+    StashRestore {
+        worktree: WorktreeId,
+        name: String,
+        hash: String,
+        pop: bool,
+        /// Restore what was staged as staged.
+        index: bool,
+    },
+    /// Throws one stash away. `hash` guards the name, as above.
+    StashDrop {
+        worktree: WorktreeId,
+        name: String,
+        hash: String,
+    },
+    /// Creates a branch at the commit the stash was made on and restores it
+    /// there — git's own way out of a stash that no longer fits the tree.
+    StashBranch {
+        worktree: WorktreeId,
+        name: String,
+        hash: String,
+        branch: String,
+    },
+    /// Empties the stack. Destructive, and confirmed by the caller.
+    ///
+    /// Sent from a checkout like the other four, though the stack it empties
+    /// belongs to the repository: `refs/stash` is shared, and any of its
+    /// worktrees is as good a place to run the command from.
+    StashClear {
+        worktree: WorktreeId,
+    },
+
     /// Integrates `from` into the checkout's branch.
     ///
     /// `no_ff` forces a merge commit: that is what keeps a trace of the agent's
@@ -771,6 +827,12 @@ impl Cmd {
             Self::DeleteTag { .. } => "DeleteTag",
             Self::DeleteRemoteTag { .. } => "DeleteRemoteTag",
             Self::PushTag { .. } => "PushTag",
+            Self::LoadStashes { .. } => "LoadStashes",
+            Self::StashPush { .. } => "StashPush",
+            Self::StashRestore { .. } => "StashRestore",
+            Self::StashDrop { .. } => "StashDrop",
+            Self::StashBranch { .. } => "StashBranch",
+            Self::StashClear { .. } => "StashClear",
             Self::Merge { .. } => "Merge",
             Self::Integrate { .. } => "Integrate",
             Self::Rebase { .. } => "Rebase",
@@ -886,6 +948,11 @@ pub enum Evt {
     RemoteTags {
         main: PathBuf,
         names: Vec<String>,
+    },
+    /// The repository's stashes, by main repository — the shared `refs/stash`.
+    Stashes {
+        main: PathBuf,
+        stashes: Vec<crate::git::Stash>,
     },
     Summaries {
         summaries: Vec<(WorktreeId, Summary)>,
@@ -1255,6 +1322,11 @@ pub enum Action {
     /// Pushing a tag, or removing one from the remote: the network's cost, and
     /// its own message.
     PushTag,
+    /// Anything done to the stash: putting work aside, restoring it, dropping
+    /// it. One action for the six commands, because what the bar has to say is
+    /// the same — and the balloon shows git's own account, which is where the
+    /// difference actually is.
+    Stash,
     Worktree,
     Diff,
     History,
@@ -1278,7 +1350,7 @@ pub enum Action {
 impl Action {
     /// The i18n key of the message shown on success.
     /// Every action, for the tests that check each has its messages.
-    pub const ALL: [Action; 32] = [
+    pub const ALL: [Action; 33] = [
         Action::Refresh,
         Action::Stage,
         Action::Unstage,
@@ -1294,6 +1366,7 @@ impl Action {
         Action::Branch,
         Action::Tag,
         Action::PushTag,
+        Action::Stash,
         Action::Worktree,
         Action::Diff,
         Action::History,
@@ -1330,6 +1403,7 @@ impl Action {
             Self::Push => "running-push",
             Self::Tag => "running-tag",
             Self::PushTag => "running-push-tag",
+            Self::Stash => "running-stash",
             Self::Checkout => "running-checkout",
             Self::Merge => "running-merge",
             Self::Integrate => "running-integrate",
@@ -1360,6 +1434,7 @@ impl Action {
             Self::Branch => "action-branch-ok",
             Self::Tag => "action-tag-ok",
             Self::PushTag => "action-push-tag-ok",
+            Self::Stash => "action-stash-ok",
             Self::Worktree => "action-worktree-ok",
             Self::Diff => "action-diff-ok",
             Self::History => "action-history-ok",

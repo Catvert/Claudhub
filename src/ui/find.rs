@@ -45,6 +45,9 @@ pub enum Pane {
     /// The repository's tags. It filters: the list's order is ours — by date of
     /// tag — and nothing in it links one row to the next.
     Tags,
+    /// The work put aside. It filters, for the tags' reason: the order is the
+    /// stack's, and nothing in it links one row to the next.
+    Stashes,
     Notes,
     Conflicts,
     Diff,

@@ -51,6 +51,7 @@ mod shortcuts;
 mod shortcuts_view;
 mod sql_history;
 mod sql_history_view;
+mod stashes;
 mod store;
 mod surface;
 mod tags;

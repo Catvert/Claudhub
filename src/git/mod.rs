@@ -18,6 +18,7 @@ pub mod diff;
 pub mod history;
 pub mod repo;
 pub mod search;
+pub mod stash;
 pub mod status;
 pub mod tags;
 
@@ -26,6 +27,7 @@ pub use diff::{DiffFile, DiffLine, DiffLineKind, FileDiff, Hunk, Range as DiffRa
 pub use history::{Commit, GraphRow, LogRange};
 pub use repo::{Pending, Repo, Stages, Worktree};
 pub use search::Query as SearchQuery;
+pub use stash::Stash;
 pub use status::{FileStatus, Status, StatusCode, Summary};
 pub use tags::Tag;
 

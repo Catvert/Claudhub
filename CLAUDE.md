@@ -105,6 +105,7 @@ src/
     diff.rs     `--numstat` et diff unifié → fichiers, hunks, lignes
     history.rs  `git log` → commits, et la disposition du graphe
     tags.rs     les tags : lecture, création, publication, suppression
+    stash.rs    la pile des remisages : la lire, y poser, en reprendre
     search.rs   `git grep` : les arguments, le parsage, les plafonds
   agent.rs      les agents dans `/proc`, et le suivi qui dit lesquels travaillent
   runtime/      les workers
@@ -130,6 +131,7 @@ src/
     diff_view.rs    la vue de diff, virtualisée
     history_view.rs l'historique et son graphe peint
     tags.rs         le panneau des tags, et les quatre gestes sur un tag
+    stashes.rs      le panneau des remisages, et les gestes sur un remisage
     highlight.rs    coloration tree-sitter d'un diff
     blade.rs        les vues Blade : surcouche du diff, coloriseur de l'éditeur
     panels.rs       les panneaux du dock, leur macro et leur registre
@@ -565,6 +567,15 @@ se lisant sur la **capacité** ; ajouter un nom au vocabulaire peut casser un
 plugin installé (`use claudhub::*`) ; les secrets ne passent pas par le script,
 c'est le **worker** qui substitue. Le trousseau est l'endroit par défaut,
 résolu **côté interface** — un trousseau appartient à une session de bureau.
+
+**Les remisages** (`git/stash.rs`, `ui/stashes.rs`) — `refs/stash` vit dans le
+`.git` commun : la pile est **celle du dépôt**, la même vue de tous les
+worktrees, d'où une liste rangée sous le dépôt principal comme celle des tags.
+Et `stash@{0}` est une **position**, que le terminal d'à côté décale : chaque
+geste porte l'empreinte que la ligne montrait, et la couche git refuse dès que
+le nom ne la désigne plus — git n'accepte le nom que sous cette forme (`drop`
+sur une empreinte est refusé). Un `pop` qui **conflit** est un échec qui a
+changé le worktree : le statut se relit dans les deux branches.
 
 **Les notes** (`notes.rs`, `vault.rs`) — une note retient des **numéros de
 ligne**, un côté et l'**extrait** : `diff_selection` est invalidé par chaque

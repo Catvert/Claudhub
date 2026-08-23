@@ -145,7 +145,10 @@ impl ClaudhubApp {
     }
 
     /// The main repository the panel is about.
-    fn active_main(&self) -> Option<PathBuf> {
+    ///
+    /// Shared with the stashes panel: both list refs that live in the common
+    /// `.git` and are the same seen from every worktree.
+    pub(super) fn active_main(&self) -> Option<PathBuf> {
         self.main_of(self.active.as_deref()?)
     }
 

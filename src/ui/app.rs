@@ -53,7 +53,7 @@ use crate::ui::terminal_view::OpenTerminal;
 // 19: the SQL history did the same on the databases screen, and it is the same
 // bargain — the only lever there is throws away every screen's arrangement,
 // which is dear, and without it the new default is one nobody would ever see.
-const LAYOUT_VERSION: usize = 21;
+const LAYOUT_VERSION: usize = 22;
 
 /// The saved layouts, one per screen.
 ///
@@ -739,6 +739,11 @@ pub struct ClaudhubApp {
     /// in the shared `.git` and are the same seen from every worktree.
     pub(super) tags: HashMap<PathBuf, crate::ui::tags::TagsState>,
     pub(super) tags_scroll: gpui::UniformListScrollHandle,
+    /// What is known of each repository's stashes, by main repository:
+    /// `refs/stash` lives in the shared `.git` and is the same seen from every
+    /// worktree.
+    pub(super) stashes: HashMap<PathBuf, crate::ui::stashes::StashesState>,
+    pub(super) stashes_scroll: gpui::UniformListScrollHandle,
     /// Every query run, per worktree, and the reach the panel is showing.
     ///
     /// In the application and not in a global: only the history panel reads it,
@@ -1152,6 +1157,8 @@ impl ClaudhubApp {
             // own, a few hundred kilobytes at most, and nothing else writes it.
             tags: HashMap::new(),
             tags_scroll: gpui::UniformListScrollHandle::new(),
+            stashes: HashMap::new(),
+            stashes_scroll: gpui::UniformListScrollHandle::new(),
             sql_history: crate::ui::sql_history::History::load(),
             sql_history_reach: Default::default(),
             sql_history_scroll: gpui_component::VirtualListScrollHandle::new(),
@@ -1849,6 +1856,7 @@ impl ClaudhubApp {
             } => self.branches_arrived(main, branches, default_base, window, cx),
             Evt::Tags { main, tags } => self.tags_arrived(main, tags, cx),
             Evt::RemoteTags { main, names } => self.remote_tags_arrived(main, names, cx),
+            Evt::Stashes { main, stashes } => self.stashes_arrived(main, stashes, cx),
 
             // — Writes ————————————————————————————————————————————
             Evt::Done {

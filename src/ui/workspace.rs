@@ -231,6 +231,7 @@ impl Workspace {
                 (BranchPanel::NAME, "range-branch"),
                 (HistoryPanel::NAME, "panel-history"),
                 (TagsPanel::NAME, "panel-tags"),
+                (StashesPanel::NAME, "panel-stashes"),
                 (DiffPanel::NAME, "panel-diff"),
                 (TerminalPanel::NAME, "panel-terminal"),
             ],
@@ -418,6 +419,10 @@ pub fn install_default_layout(
                             // tag names a commit, and the gesture one makes after
                             // finding the commit worth marking is right there.
                             .panel_view(panel!(TagsPanel), cx)
+                            // And the stashes beside them: the three answer
+                            // "what happened", where the tabs above choose the
+                            // file being read.
+                            .panel_view(panel!(StashesPanel), cx)
                     ),
                     Some(third),
                 );

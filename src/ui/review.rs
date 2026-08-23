@@ -88,8 +88,6 @@ struct DirRow {
     /// True when the whole subtree has already been reviewed — that is what
     /// makes a click on a folder a review of everything it contains.
     reviewed: bool,
-    added: usize,
-    removed: usize,
 }
 
 #[derive(Clone)]
@@ -522,6 +520,20 @@ impl ClaudhubApp {
                         }
                     })),
             )
+            // Beside the three that talk to the remote, and before the rule:
+            // putting the changes aside is a gesture one makes *about this
+            // list*, and the panel that shows them is where it is made. The
+            // stack itself is read in the "Stashes" tab.
+            .child(
+                Button::new("stash")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("archive"))
+                    .tooltip(tr!("stash-new"))
+                    .loading(self.active_running(Action::Stash))
+                    .disabled(!has_active)
+                    .on_click(cx.listener(|this, _, window, cx| this.prompt_stash(window, cx))),
+            )
             .child(Divider::vertical().h(px(12.)))
             .child(self.tree_toggle(cx))
     }
@@ -844,9 +856,7 @@ fn render_row(
 ) -> gpui::AnyElement {
     match rows.get(index) {
         Some(Row::Group(group)) => render_group(group, index, worktree, entity, cx),
-        Some(Row::Dir(dir)) => {
-            render_dir(dir, index, worktree, range, colors, checkable, entity, cx)
-        }
+        Some(Row::Dir(dir)) => render_dir(dir, index, worktree, range, checkable, entity, cx),
         Some(Row::File(file)) => render_file(
             file, index, worktree, range, selected, colors, checkable, tree, entity, cx,
         ),
@@ -854,15 +864,14 @@ fn render_row(
     }
 }
 
-/// A folder: the chevron, the box that stages everything it contains, and the
-/// total of its lines.
+/// A folder: the chevron, the box that stages everything it contains, and how
+/// many files it holds.
 #[allow(clippy::too_many_arguments)]
 fn render_dir(
     row: &DirRow,
     index: usize,
     worktree: &Rc<PathBuf>,
     range: &Rc<DiffRange>,
-    colors: &DiffColors,
     checkable: bool,
     entity: &gpui::Entity<ClaudhubApp>,
     cx: &mut gpui::App,
@@ -948,7 +957,11 @@ fn render_dir(
                 .text_color(cx.theme().muted_foreground)
                 .child(count.to_string()),
         )
-        .children(crate::ui::theme::volume(row.added, row.removed, colors))
+        // The count of files, and **not** the volume of lines. A folder summing
+        // `+142 −4` sits in the same column as the `+65 −2` of the file under
+        // it, in the same colours, and reads as a fourth file rather than as
+        // the total of the three: what a folder answers is how many there are
+        // to go through, and the lines are read file by file.
         .child(render_reviewed(
             ("reviewed-dir", index),
             row.reviewed,
@@ -1415,8 +1428,8 @@ fn flush(block: &mut Vec<FileRow>, collapsed: &HashSet<PathBuf>, out: &mut Vec<R
                 leaves,
             } => {
                 // A folder's aggregates cover its **whole** subtree, collapsed
-                // part included: it is what the checkbox stages, and what the
-                // volume announces.
+                // part included: it is what the checkbox stages and what the
+                // tick marks reviewed.
                 let inside: Vec<&FileRow> = leaves.iter().map(|index| &files[*index]).collect();
                 out.push(Row::Dir(DirRow {
                     path: Rc::new(path),
@@ -1429,8 +1442,6 @@ fn flush(block: &mut Vec<FileRow>, collapsed: &HashSet<PathBuf>, out: &mut Vec<R
                         .collect(),
                     staged: inside.iter().all(|file| file.staged),
                     reviewed: inside.iter().all(|file| file.reviewed),
-                    added: inside.iter().map(|file| file.added).sum(),
-                    removed: inside.iter().map(|file| file.removed).sum(),
                 }));
             }
             crate::ui::tree::Entry::Leaf { index, depth } => {
@@ -1626,7 +1637,6 @@ mod tests {
         };
         assert!(dir.collapsed);
         assert_eq!(dir.paths.len(), 2);
-        assert_eq!(dir.added, 2);
     }
 
     #[test]

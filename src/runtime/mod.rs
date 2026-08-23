@@ -23,7 +23,7 @@ pub mod wire;
 
 pub use protocol::{Action, Cmd, Evt, Secret, WorktreeId};
 
-use crate::git::{branch, diff, history, repo, status, tags, DiffRange, LogRange};
+use crate::git::{branch, diff, history, repo, stash, status, tags, DiffRange, LogRange};
 
 /// Workers dedicated to reads: status, diffs, branches, and the local writes,
 /// all of which are measured in milliseconds.
@@ -588,6 +588,10 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
             }],
             Err(e) => vec![fail(Some(worktree), Action::PushTag, e)],
         },
+        Cmd::LoadStashes { main } => match stash::list(&main) {
+            Ok(stashes) => vec![Evt::Stashes { main, stashes }],
+            Err(e) => vec![fail(None, Action::Stash, e)],
+        },
 
         // — Writes ——————————————————————————————————————————————————————
         Cmd::Stage { worktree, paths } => write_then_refresh(worktree, Action::Stage, |dir| {
@@ -731,6 +735,37 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
                 Some(name) => tags::push(dir, name),
                 None => tags::push_all(dir),
             })
+        }
+        Cmd::StashPush {
+            worktree,
+            message,
+            untracked,
+            keep_index,
+        } => stash_written(worktree, |dir| {
+            stash::push(dir, message.as_deref(), untracked, keep_index)
+        }),
+        Cmd::StashRestore {
+            worktree,
+            name,
+            hash,
+            pop,
+            index,
+        } => stash_written(worktree, |dir| {
+            stash::restore(dir, &name, &hash, pop, index)
+        }),
+        Cmd::StashDrop {
+            worktree,
+            name,
+            hash,
+        } => stash_written(worktree, |dir| stash::drop(dir, &name, &hash)),
+        Cmd::StashBranch {
+            worktree,
+            name,
+            hash,
+            branch,
+        } => stash_written(worktree, |dir| stash::branch(dir, &name, &hash, &branch)),
+        Cmd::StashClear { worktree } => {
+            stash_written(worktree, |dir| stash::clear(dir).map(|_| String::new()))
         }
         Cmd::Merge {
             worktree,
@@ -1407,7 +1442,33 @@ fn tag_written(
     }
 }
 
-/// The main repository a checkout belongs to, which is what keys the tag list.
+/// Every stash write is followed by a re-read of **both** the status and the
+/// stack — and of both **whether it succeeded or not**.
+///
+/// That last part is what sets this apart from `write_then_refresh`. A
+/// `git stash pop` that conflicts writes the conflict markers into the files,
+/// leaves the stash where it was and exits non-zero: the gesture failed and the
+/// working tree changed all the same. Refreshing only on success would leave
+/// the review panel showing the tree as it was before, which is the one state
+/// it certainly is not in.
+fn stash_written(worktree: PathBuf, op: impl FnOnce(&Path) -> Result<String>) -> Vec<Evt> {
+    let outcome = op(&worktree);
+    let main = main_of(&worktree);
+    let mut evts = vec![match outcome {
+        Ok(output) => done(Some(worktree.clone()), Action::Stash, output),
+        Err(e) => fail(Some(worktree.clone()), Action::Stash, e),
+    }];
+    if let Ok(stashes) = stash::list(&worktree) {
+        evts.push(Evt::Stashes { main, stashes });
+    }
+    if let Ok(status) = status::status(&worktree) {
+        evts.push(Evt::Status { worktree, status });
+    }
+    evts
+}
+
+/// The main repository a checkout belongs to, which is what keys the tag and
+/// stash lists.
 ///
 /// Tags live in the shared `.git`: they are the same seen from every worktree,
 /// and filing them under the checkout they were read from would make one list
