@@ -132,53 +132,17 @@ impl ClaudhubApp {
         // The document the language server was holding is dropped: arriving in
         // a file closes the one that was there, and an image is an arrival like
         // any other.
-        if let Some(previous) = self
-            .editings
-            .get(&worktree)
-            .and_then(|tabs| tabs.active())
-            .map(|editing| (editing.worktree.clone(), editing.path.clone()))
-        {
-            if previous.1 != path {
-                self.lsp_editor_closed(previous.0, previous.1);
-            }
-        }
+        self.close_previous_document(&worktree, &path);
         let host = crate::ui::surface::VimHost::new(&input, cx);
         // A picture is looked at more than anything else in a tree: it takes
         // the preview tab like a file, and by the same rule.
         let ephemeral = self.asked_for(&worktree, &path).unwrap_or(false);
         self.make_tab_room(&worktree, &path, ephemeral, window, cx);
-        let reopened = self
-            .editings
-            .get(&worktree)
-            .and_then(|tabs| tabs.index_of(&path));
-        // A file already open is asked for again — from the tree, from a diff
-        // line — and its tab has to come to the front. `open_file_tab` says it
-        // for a tab it creates; a reused one had nobody to say it, and the
-        // group went on showing whatever was there, which reads as a click that
-        // did nothing.
-        //
-        // Only when a gesture asked for the file, which is what a pending
-        // landing on this very file means: a reread — a save, an agent's write,
-        // the watcher — must not pull the group away from the tab being read.
-        let asked = self
-            .landing
-            .as_ref()
-            .is_some_and(|pending| (&*pending.worktree, &*pending.path) == (&*worktree, &*path));
-        let panel = match reopened {
-            Some(ix) => {
-                let panel = self.editings[&worktree].open[ix].panel.clone();
-                let fresh = input.clone();
-                panel.update(cx, |panel, cx| panel.rebind(fresh, cx));
-                if asked {
-                    crate::ui::panels::FilePanel::activate(&panel, window, cx);
-                }
-                panel
-            }
-            None => self.open_file_tab(&worktree, &path, input.clone(), window, cx),
-        };
+        let (reopened, panel) = self.tab_panel(&worktree, &path, &input, window, cx);
         let editing = super::explorer::Editing {
             worktree: worktree.clone(),
             path: path.clone(),
+            scroll_key: crate::ui::surface::Surface::file_scroll_key(&path),
             input,
             hash: 0,
             dirty: false,
@@ -193,47 +157,17 @@ impl ClaudhubApp {
             // it would feed is not drawn.
             base_asked: true,
             hunks: std::rc::Rc::default(),
+            last_line: 0,
             hunk_open: None,
             preview: Some(preview),
             ephemeral,
             used: self.touch_tab(),
         };
-        let tabs = self.editings.entry(worktree.clone()).or_default();
-        match reopened {
-            Some(ix) => {
-                tabs.open[ix] = editing;
-                tabs.active = ix;
-            }
-            None => {
-                tabs.open.push(editing);
-                tabs.active = tabs.open.len() - 1;
-            }
-        }
-        // A jump that landed on an image has nowhere to put a caret; the trail
-        // still records the place, which is the file itself. The pending is
-        // dropped either way — left behind, it would land on the next file to
-        // arrive.
-        if let Some(pending) = self.landing.take() {
-            if (pending.worktree.as_path(), pending.path.as_path()) == (&*worktree, &*path) {
-                if let Some(from) = pending.from {
-                    self.jumps.entry(worktree.clone()).or_default().jump(
-                        from,
-                        crate::ui::jumps::Place::Editor(crate::ui::jumps::Spot::new(
-                            path.clone(),
-                            0,
-                        )),
-                    );
-                }
-            }
-        }
-        if !restored {
-            self.enter_workspace(crate::ui::workspace::Workspace::Files, window, cx);
-            self.set_panel_visible(crate::ui::panels::EditorPanel::NAME, true, cx);
-        } else {
-            self.continue_restore(window, cx);
-        }
-        self.persist_session(cx);
-        cx.notify();
+        self.place_tab(&worktree, reopened, editing);
+        // A jump that landed on an image has nowhere to put a caret — hence the
+        // `false` — but the trail still records the place, which is the file
+        // itself. See `finish_tab`.
+        self.finish_tab(&worktree, &path, restored, false, window, cx);
     }
 
     /// Fitted to the panel, or at its own size. The button says which.

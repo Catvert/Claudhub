@@ -2123,6 +2123,9 @@ impl ClaudhubApp {
         if settled {
             self.merging = None;
         }
+        // The tree's rows read the status by path: filed once here rather than
+        // at every frame of the panel.
+        self.index_file_status(&worktree);
         let state = self.review.entry(worktree.clone()).or_default();
         // The lists depend on the status: a file just staged must not stay
         // displayed on the wrong side. We **ask for them again** without
@@ -3771,7 +3774,7 @@ impl ClaudhubApp {
         }
         self.active
             .as_deref()
-            .is_some_and(|worktree| !self.terminals_of(worktree).is_empty())
+            .is_some_and(|worktree| self.terminals_of(worktree).next().is_some())
     }
 
     /// Whether *this* worktree's terminals are on screen.
@@ -3863,7 +3866,7 @@ impl ClaudhubApp {
         // that does nothing, which is how one concludes it is broken.
         let empty = worktree
             .as_deref()
-            .is_some_and(|worktree| self.terminals_of(worktree).is_empty());
+            .is_some_and(|worktree| self.terminals_of(worktree).next().is_none());
         if empty {
             self.set_panel_visible(super::panels::TerminalPanel::NAME, true, cx);
         } else {

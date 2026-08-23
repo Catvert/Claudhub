@@ -375,18 +375,26 @@ static BY_SUFFIX: &[(&str, FileLook)] = &[
 /// variants (`.eslintrc`, `.eslintrc.json`, `eslint.config.js`), then the
 /// **extension**.
 pub fn look_of(path: &Path) -> FileLook {
+    // Lowercased only when it has to be: this runs for every visible row of
+    // the tree, at every frame, and most file names are lowercase already.
     let name = path
         .file_name()
-        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .map(|n| n.to_string_lossy())
         .unwrap_or_default();
+    let name = match name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        true => std::borrow::Cow::Owned(name.to_ascii_lowercase()),
+        false => name,
+    };
 
-    if let Ok(index) = BY_NAME.binary_search_by_key(&name.as_str(), |(key, _)| key) {
+    if let Ok(index) = BY_NAME.binary_search_by_key(&&*name, |(key, _)| key) {
         return BY_NAME[index].1;
     }
-    if let Some((_, look)) = BY_PREFIX
-        .iter()
-        .find(|(prefix, _)| name == *prefix || name.starts_with(&format!("{prefix}.")))
-    {
+    // `strip_prefix` and not a formatted `"{prefix}."`: ten allocations per
+    // row per frame, for a comparison that needs none.
+    if let Some((_, look)) = BY_PREFIX.iter().find(|(prefix, _)| {
+        name.strip_prefix(*prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+    }) {
         return *look;
     }
     // The double extensions: it is the first that carries the meaning, and

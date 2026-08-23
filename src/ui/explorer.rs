@@ -242,6 +242,13 @@ pub struct Explorer {
     /// itself. Cleared as soon as the drag names another one, so that the
     /// timer that opens it can tell "still there" from "gone".
     pub drag_hover: Option<PathBuf>,
+    /// What git says about each file, ready to be looked up by a row.
+    ///
+    /// Built when a status arrives (`index_file_status`) and not at render:
+    /// the panel renders at every frame, and a map of a hundred `PathBuf` keys
+    /// built sixty times a second is a map nobody asked for. Behind an `Rc`
+    /// because the render hands it to a virtualised list's closure.
+    pub status: Rc<std::collections::HashMap<PathBuf, crate::git::StatusCode>>,
 }
 
 impl Default for Explorer {
@@ -262,6 +269,7 @@ impl Default for Explorer {
             query: String::new(),
             cursor: None,
             drag_hover: None,
+            status: Rc::default(),
         }
     }
 }
@@ -354,7 +362,12 @@ impl Explorer {
                 .filter(|(_, path)| crate::ui::find::matches(&self.query, &path.to_string_lossy()))
                 .map(|(index, _)| index)
                 .collect();
-            tree::Tree::subset(&self.files, &keep, &self.unexplored)
+            // `dirs` and not `unexplored`, as `set_files` builds the whole
+            // tree: a directory whose contents have arrived leaves the
+            // unexplored list, and telling the subset that it is a file draws
+            // it twice — once as the folder its children make, once as a leaf
+            // of its own.
+            tree::Tree::subset(&self.files, &keep, &self.dirs)
                 .rows(tree::Folds::OpenBut(&std::collections::HashSet::new()))
         };
         self.dimmed = Rc::new(rows.iter().map(|entry| self.is_ignored(entry)).collect());
@@ -462,6 +475,14 @@ pub enum Landing {
     Position { line: u32, character: u32 },
 }
 
+/// The index of a buffer's last line, as `hunks::Hunk::covers` counts them.
+///
+/// `split('\n')` and never `lines()`: a final newline is a line of its own —
+/// the ruling `ui::hunks` already makes.
+fn last_line(text: &str) -> usize {
+    text.split('\n').count().saturating_sub(1)
+}
+
 /// A landing resolved against the text it lands in.
 ///
 /// The offset is clamped: a trail entry is a byte offset in a file that may
@@ -563,6 +584,10 @@ pub struct Editing {
     /// normal mode is what a tabbed vim does anyway. It is the same type the SQL
     /// console holds; see `ui::surface`.
     pub host: crate::ui::surface::VimHost,
+    /// The key this file's wheel smoothing is filed under, built once with the
+    /// tab: `Surface::file_scroll_key` formats the path, and the smoothing asks
+    /// for its key at every frame it advances.
+    pub scroll_key: SharedString,
     /// A caret waiting for the editor to be measured before it can be revealed.
     ///
     /// A file opened by a jump installs a brand-new `EditorState`, which has
@@ -596,6 +621,12 @@ pub struct Editing {
     /// than derived at render: the render closure runs every frame and this
     /// walks the whole file.
     pub hunks: Rc<Vec<crate::ui::hunks::Hunk>>,
+    /// The index of the buffer's last line, as `hunks::Hunk::covers` counts
+    /// them. Written with `hunks`, by the one place that recomputes them: it
+    /// was read back by splitting a copy of the whole text, three times over —
+    /// once per keystroke for the marks, and once per frame for an open
+    /// popover.
+    pub last_line: usize,
     /// The picture this tab shows, when what was opened is one to look at
     /// rather than to edit. `None` for a file, and that is what every gesture
     /// reads to know which of the two a tab holds — see `ui::preview`.
@@ -729,6 +760,39 @@ impl ClaudhubApp {
         // inside `vendor/` is read again on the next frame — a chevron that
         // shuts under the hand on every `git add` is worse than the reads it
         // saves. See `ensure_project_files`.
+    }
+
+    /// Files the status by path, for the tree to colour its rows.
+    ///
+    /// Called when a status arrives, which is the only thing that changes the
+    /// answer — the tree itself may not have been asked for yet, and an
+    /// explorer built here starts idle like any other.
+    pub(super) fn index_file_status(&mut self, worktree: &Path) {
+        let status = self
+            .review
+            .get(worktree)
+            .map(|state| {
+                state
+                    .status
+                    .files
+                    .iter()
+                    .map(|file| {
+                        let code = if file.is_untracked() {
+                            crate::git::StatusCode::Untracked
+                        } else if !matches!(file.worktree, crate::git::StatusCode::Unmodified) {
+                            file.worktree
+                        } else {
+                            file.index
+                        };
+                        (file.path.clone(), code)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.explorers
+            .entry(worktree.to_path_buf())
+            .or_default()
+            .status = Rc::new(status);
     }
 
     /// Reads the excluded directories that are open and whose contents are
@@ -1330,6 +1394,137 @@ impl ClaudhubApp {
         }
     }
 
+    /// Lets the language server forget the document being left.
+    ///
+    /// One session per worktree holds **one** open document — the tab being
+    /// read — so arriving in a file closes the one that was there, exactly as
+    /// before tabs existed. Switching tabs does the same, in `show_file`.
+    pub(super) fn close_previous_document(&mut self, worktree: &Path, opening: &Path) {
+        let Some(previous) = self
+            .editings
+            .get(worktree)
+            .and_then(|tabs| tabs.active())
+            .map(|editing| (editing.worktree.clone(), editing.path.clone()))
+        else {
+            return;
+        };
+        if previous.1 != opening {
+            self.lsp_editor_closed(previous.0, previous.1);
+        }
+    }
+
+    /// The panel an arriving tab is painted in, and the tab it replaces.
+    ///
+    /// The tab of a file already open is **reused**, its content rebound:
+    /// reopening the same file is what a save-and-reread does, and a second tab
+    /// on one file is the one thing a tab bar must never grow. Such a tab is
+    /// also brought to the front — `open_file_tab` says it for a tab it
+    /// creates, and a reused one had nobody to say it, so the group went on
+    /// showing whatever was there, which reads as a click that did nothing.
+    ///
+    /// Only when a gesture asked for the file, which is what a pending landing
+    /// on this very file means: a reread — a save, an agent's write, the
+    /// watcher — must not pull the group away from the tab being read.
+    ///
+    /// Room is made by the caller (`make_tab_room`) — and not always: a tab the
+    /// session is putting back takes the place it already had.
+    pub(super) fn tab_panel(
+        &mut self,
+        worktree: &Path,
+        path: &Path,
+        input: &Entity<EditorState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Option<usize>, Entity<crate::ui::panels::FilePanel>) {
+        let reopened = self
+            .editings
+            .get(worktree)
+            .and_then(|tabs| tabs.index_of(path));
+        let asked = self.asked_for(worktree, path).is_some();
+        let panel = match reopened {
+            Some(ix) => {
+                let panel = self.editings[worktree].open[ix].panel.clone();
+                let fresh = input.clone();
+                panel.update(cx, |panel, cx| panel.rebind(fresh, cx));
+                if asked {
+                    crate::ui::panels::FilePanel::activate(&panel, window, cx);
+                }
+                panel
+            }
+            None => self.open_file_tab(worktree, path, input.clone(), window, cx),
+        };
+        (reopened, panel)
+    }
+
+    /// Files a freshly built tab, and makes it the one being read.
+    pub(super) fn place_tab(&mut self, worktree: &Path, reopened: Option<usize>, editing: Editing) {
+        let tabs = self.editings.entry(worktree.to_path_buf()).or_default();
+        match reopened {
+            Some(ix) => {
+                tabs.open[ix] = editing;
+                tabs.active = ix;
+            }
+            None => {
+                tabs.open.push(editing);
+                tabs.active = tabs.open.len() - 1;
+            }
+        }
+    }
+
+    /// What every arrival does once its tab holds something: the caret asked
+    /// for, the step in the trail, the screen it is read on, and the session.
+    ///
+    /// The pending landing that names another file is stale — one asked for a
+    /// second file before the first arrived — and is dropped, not put back:
+    /// what it pointed at is not what is on screen. `caret` is false for a
+    /// picture, which has nowhere to put one; the trail still records the
+    /// place, which is the file itself.
+    pub(super) fn finish_tab(
+        &mut self,
+        worktree: &Path,
+        path: &Path,
+        restored: bool,
+        caret: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pending) = self.landing.take() {
+            if (pending.worktree.as_path(), pending.path.as_path()) == (worktree, path) {
+                let offset = pending
+                    .landing
+                    .filter(|_| caret)
+                    .and_then(|landing| self.land(&landing, window, cx))
+                    .unwrap_or(0);
+                if let Some(from) = pending.from {
+                    self.jumps.entry(worktree.to_path_buf()).or_default().jump(
+                        from,
+                        crate::ui::jumps::Place::Editor(crate::ui::jumps::Spot::new(
+                            path.to_path_buf(),
+                            offset,
+                        )),
+                    );
+                }
+            }
+        }
+        // A file that opens calls up the screen it is edited on. The gesture
+        // comes from the explorer — so from that screen most of the time — but
+        // also from a diff line, and answering it silently on the screen next
+        // door would be an opened file nobody sees.
+        //
+        // Unless it is a place being put back — the previous session's, or the
+        // one this worktree was left in: there is no gesture then, and the
+        // screen that comes back is the place's own, set a step earlier.
+        if !restored {
+            self.enter_workspace(crate::ui::workspace::Workspace::Files, window, cx);
+            self.set_panel_visible(crate::ui::panels::EditorPanel::NAME, true, cx);
+        } else {
+            // The next remembered tab, one at a time: see `read_next_file`.
+            self.continue_restore(window, cx);
+        }
+        self.persist_session(cx);
+        cx.notify();
+    }
+
     /// Receives a content and installs the editor.
     pub(super) fn file_content_arrived(
         &mut self,
@@ -1400,51 +1595,11 @@ impl ClaudhubApp {
             cx.notify();
         })
         .detach();
-        // The server must forget the document we are leaving. One session per
-        // worktree holds **one** open document — the tab being read — so
-        // arriving in a file closes the one that was there, exactly as before
-        // tabs existed. Switching tabs does the same, in `show_file`.
-        if let Some(previous) = self
-            .editings
-            .get(&worktree)
-            .and_then(|tabs| tabs.active())
-            .map(|editing| (editing.worktree.clone(), editing.path.clone()))
-        {
-            if previous.1 != path {
-                self.lsp_editor_closed(previous.0, previous.1);
-            }
-        }
+        // The server must forget the document we are leaving.
+        self.close_previous_document(&worktree, &path);
         let host = crate::ui::surface::VimHost::new(&input, cx);
-        let opened = (worktree.clone(), path.clone());
-        // The tab of a file already open is **reused**, its content replaced:
-        // reopening the same file is what a save-and-reread does, and a second
-        // tab on one file is the one thing a tab bar must never grow.
-        let reopened = self
-            .editings
-            .get(&worktree)
-            .and_then(|tabs| tabs.index_of(&path));
-        // A file already open is asked for again — from the tree, from a diff
-        // line — and its tab has to come to the front. `open_file_tab` says it
-        // for a tab it creates; a reused one had nobody to say it, and the
-        // group went on showing whatever was there, which reads as a click that
-        // did nothing.
-        //
-        // Only when a gesture asked for the file, which is what a pending
-        // landing on this very file means: a reread — a save, an agent's write,
-        // the watcher — must not pull the group away from the tab being read.
         let asked = self.asked_for(&worktree, &path).is_some();
-        let panel = match reopened {
-            Some(ix) => {
-                let panel = self.editings[&worktree].open[ix].panel.clone();
-                let fresh = input.clone();
-                panel.update(cx, |panel, cx| panel.rebind(fresh, cx));
-                if asked {
-                    crate::ui::panels::FilePanel::activate(&panel, window, cx);
-                }
-                panel
-            }
-            None => self.open_file_tab(&worktree, &path, input.clone(), window, cx),
-        };
+        let (reopened, panel) = self.tab_panel(&worktree, &path, &input, window, cx);
         // The base a reread had is kept as a stand-in while the fresh one is on
         // its way: saving does not move `HEAD`, so it is almost always the same
         // answer, and dropping it would blank the gutter on every save.
@@ -1452,6 +1607,7 @@ impl ClaudhubApp {
         let editing = Editing {
             worktree: worktree.clone(),
             path: path.clone(),
+            scroll_key: crate::ui::surface::Surface::file_scroll_key(&path),
             input,
             hash: content.hash,
             dirty: false,
@@ -1463,6 +1619,7 @@ impl ClaudhubApp {
             base,
             base_asked: false,
             hunks: Rc::default(),
+            last_line: 0,
             hunk_open: None,
             preview: None,
             // A reread keeps what the tab was: saving a file looked at does not
@@ -1473,17 +1630,7 @@ impl ClaudhubApp {
                 || ephemeral,
             used: self.touch_tab(),
         };
-        let tabs = self.editings.entry(worktree.clone()).or_default();
-        match reopened {
-            Some(ix) => {
-                tabs.open[ix] = editing;
-                tabs.active = ix;
-            }
-            None => {
-                tabs.open.push(editing);
-                tabs.active = tabs.open.len() - 1;
-            }
-        }
+        self.place_tab(&worktree, reopened, editing);
         // Starts the server this file's language asks for, opens the document
         // and posts the providers — all of it a no-op when the button is off.
         self.lsp_sync_editor(window, cx);
@@ -1492,44 +1639,9 @@ impl ClaudhubApp {
         // may have moved `HEAD` under the file.
         self.ask_file_base(&worktree, &path);
         self.recompute_hunks(&worktree, &path, cx);
-        // The caret the opening was asked for, and the step in the trail that
-        // goes with it. A pending that names another file is stale — one asked
-        // for a second file before the first arrived — and is dropped, not put
-        // back: what it pointed at is not what is on screen.
-        if let Some(pending) = self.landing.take() {
-            if (pending.worktree.as_path(), pending.path.as_path()) == (&*opened.0, &*opened.1) {
-                let offset = pending
-                    .landing
-                    .and_then(|landing| self.land(&landing, window, cx))
-                    .unwrap_or(0);
-                if let Some(from) = pending.from {
-                    self.jumps.entry(opened.0.clone()).or_default().jump(
-                        from,
-                        crate::ui::jumps::Place::Editor(crate::ui::jumps::Spot::new(
-                            opened.1.clone(),
-                            offset,
-                        )),
-                    );
-                }
-            }
-        }
-        // A file that opens calls up the screen it is edited on. The gesture
-        // comes from the explorer — so from that screen most of the time — but
-        // also from a diff line, and answering it silently on the screen next
-        // door would be an opened file nobody sees.
-        //
-        // Unless it is a place being put back — the previous session's, or the
-        // one this worktree was left in: there is no gesture then, and the screen
-        // that comes back is the place's own, set a step earlier.
-        if !restored {
-            self.enter_workspace(crate::ui::workspace::Workspace::Files, window, cx);
-            self.set_panel_visible(crate::ui::panels::EditorPanel::NAME, true, cx);
-        } else {
-            // The next remembered tab, one at a time: see `read_next_file`.
-            self.continue_restore(window, cx);
-        }
-        self.persist_session(cx);
-        cx.notify();
+        // The caret the opening was asked for, the screen it is read on, and
+        // the session: see `finish_tab`.
+        self.finish_tab(&worktree, &path, restored, true, window, cx);
     }
 
     /// `Ctrl+S`: writes what has been typed.
@@ -1684,12 +1796,12 @@ impl ClaudhubApp {
         // No base means no marks rather than "every line is new": a file git
         // does not track is not a file one has changed, and painting it green
         // from top to bottom says something the gutter does not mean.
-        let now = editing.input.read(cx).value().to_string();
+        let now = editing.input.read(cx).value();
         let hunks = match &editing.base {
             Some(base) => crate::ui::hunks::compare(base, &now),
             None => Vec::new(),
         };
-        let last = now.split('\n').count().saturating_sub(1);
+        let last = last_line(&now);
         let Some(editing) = self
             .editings
             .get_mut(worktree)
@@ -1705,6 +1817,7 @@ impl ClaudhubApp {
             }
         }
         editing.hunks = Rc::new(hunks);
+        editing.last_line = last;
         self.install_gutter_marks(worktree, path, cx);
         cx.notify();
     }
@@ -1738,13 +1851,9 @@ impl ClaudhubApp {
             input.update(cx, |state, cx| state.set_gutter_marks(None, cx));
             return;
         }
-        let last = editing
-            .input
-            .read(cx)
-            .value()
-            .split('\n')
-            .count()
-            .saturating_sub(1);
+        // Written by `recompute_hunks`, which is the only thing that changes
+        // what the marks answer.
+        let last = editing.last_line;
         let app = cx.entity().downgrade();
         let (worktree, path) = (worktree.to_path_buf(), path.to_path_buf());
         let render: gpui_component::input::GutterMarkRenderer = Rc::new(move |row| {
@@ -1820,8 +1929,8 @@ impl ClaudhubApp {
             return;
         };
         let input = editing.input.clone();
-        let text = input.read(cx).value().to_string();
-        let last = text.split('\n').count().saturating_sub(1);
+        let text = input.read(cx).value();
+        let last = editing.last_line;
         let Some(hunk) = editing
             .hunks
             .iter()
@@ -2306,31 +2415,10 @@ impl ClaudhubApp {
         let files = explorer.files.clone();
         let cursor = explorer.cursor.clone();
         let count = rows.len();
-        // The git status is already here: showing it costs only one lookup per
-        // visible row, and it is what makes the difference between a file list
-        // and a project explorer.
-        let status: Rc<std::collections::HashMap<PathBuf, crate::git::StatusCode>> = Rc::new(
-            self.review
-                .get(&worktree)
-                .map(|state| {
-                    state
-                        .status
-                        .files
-                        .iter()
-                        .map(|file| {
-                            let code = if file.is_untracked() {
-                                crate::git::StatusCode::Untracked
-                            } else if !matches!(file.worktree, crate::git::StatusCode::Unmodified) {
-                                file.worktree
-                            } else {
-                                file.index
-                            };
-                            (file.path.clone(), code)
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-        );
+        // The git status is already filed by path (`index_file_status`):
+        // showing it costs only one lookup per visible row, and it is what
+        // makes the difference between a file list and a project explorer.
+        let status = explorer.status.clone();
         let open = self.editing().map(|editing| editing.path.clone());
         let entity = cx.entity();
         let look = Look::of(cx);
@@ -2688,8 +2776,11 @@ impl ClaudhubApp {
     fn render_lsp_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         use crate::ui::lsp::Status;
         let editing = self.editing()?;
-        let servers = self.lsp_servers(&editing.worktree, cx);
-        crate::lsp::pick(&servers, &editing.path)?;
+        // Whether there is a server for this file, without cloning the list of
+        // them at every frame: see `lsp_serves`.
+        if !self.lsp_serves(&editing.worktree, &editing.path, cx) {
+            return None;
+        }
         let on = self.lsp_enabled(&editing.worktree);
         let session = self.lsp_session(&editing.worktree);
         let status = session.map(|session| session.status.clone());
@@ -2810,6 +2901,74 @@ impl ClaudhubApp {
             })
     }
 
+    /// The file's own bar: what is open, whether it is unsaved, and the four
+    /// gestures that act on the file rather than on its text.
+    ///
+    /// A method of its own because `render_editor` is the whole panel — the
+    /// bar, the hunk band, the modal harness and the wheel — and a bar is the
+    /// piece of it that has nothing to do with any of the others.
+    fn render_editor_bar(
+        &mut self,
+        path: &Path,
+        dirty: bool,
+        mono: SharedString,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let label = SharedString::from(path.display().to_string());
+        let for_external = path.to_path_buf();
+        h_flex()
+            .h(crate::ui::theme::bar_height(cx))
+            .w_full()
+            .px_2()
+            .gap_2()
+            .items_center()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(icon("file-text").xsmall())
+            .child(
+                div()
+                    .flex_1()
+                    .truncate()
+                    .text_sm()
+                    .font_family(mono.clone())
+                    .child(label),
+            )
+            // A badge and not an asterisk in the title: the title is
+            // already a truncated path, and one more character at the
+            // end goes unseen.
+            .when(dirty, |el| {
+                el.child(div().size(px(7.)).rounded_full().bg(cx.theme().warning))
+            })
+            .children(self.render_jump_buttons(cx))
+            .children(self.render_lsp_button(cx))
+            .child(
+                Button::new("editor-external")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("external-link"))
+                    .tooltip(tr!("editor-external"))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.open_externally(for_external.clone(), 1, cx);
+                    })),
+            )
+            .child(
+                Button::new("editor-save")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("save"))
+                    .tooltip(tr!("editor-save"))
+                    .on_click(cx.listener(|this, _, _window, cx| this.save_file(cx))),
+            )
+            .child(
+                Button::new("editor-close")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("x"))
+                    .tooltip(tr!("editor-close"))
+                    .on_click(cx.listener(|this, _, window, cx| this.close_editor(window, cx))),
+            )
+    }
+
     pub(super) fn render_editor(
         &mut self,
         window: &mut Window,
@@ -2860,14 +3019,11 @@ impl ClaudhubApp {
         // The occurrences of the last search, lit as `Ctrl+F` lights them:
         // see `sync_search_matches`.
         self.sync_search_matches(&surface, vim, cx);
-        let entity = cx.entity();
         let mono = cx.theme().mono_font_family.clone();
         // The editor is code, like the diff on the screen next door: same
         // family, same size. Without saying so it inherits the interface's
         // proportional font, where an indentation no longer lines up.
         let code_size = px(crate::ui::settings::Settings::global(cx).diff_font_size);
-        let label = SharedString::from(path.display().to_string());
-        let for_external = path.clone();
         // What the gutter's strip was clicked to show. A band under the file
         // bar and **not a popover on the line**: the editor's lines come and go
         // with the scroll, so an anchor on one is an anchor that the first
@@ -2875,71 +3031,19 @@ impl ClaudhubApp {
         // made for an annotated row.
         let peek = self.editing().and_then(|editing| {
             let row = editing.hunk_open?;
-            let text = editing.input.read(cx).value().to_string();
-            let last = text.split('\n').count().saturating_sub(1);
-            let hunk = editing.hunks.iter().find(|hunk| hunk.covers(row, last))?;
+            // `last_line` and not a fresh count: this runs at every frame for
+            // as long as the band is open, and the buffer's line count is
+            // written with the hunks it is read against.
+            let hunk = editing
+                .hunks
+                .iter()
+                .find(|hunk| hunk.covers(row, editing.last_line))?;
             Some((row, hunk.kind(), hunk.old.join("\n")))
         });
         Some(
             v_flex()
                 .size_full()
-                .child(
-                    h_flex()
-                        .h(crate::ui::theme::bar_height(cx))
-                        .w_full()
-                        .px_2()
-                        .gap_2()
-                        .items_center()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .child(icon("file-text").xsmall())
-                        .child(
-                            div()
-                                .flex_1()
-                                .truncate()
-                                .text_sm()
-                                .font_family(mono.clone())
-                                .child(label),
-                        )
-                        // A badge and not an asterisk in the title: the title is
-                        // already a truncated path, and one more character at the
-                        // end goes unseen.
-                        .when(dirty, |el| {
-                            el.child(div().size(px(7.)).rounded_full().bg(cx.theme().warning))
-                        })
-                        .children(self.render_jump_buttons(cx))
-                        .children(self.render_lsp_button(cx))
-                        .child(
-                            Button::new("editor-external")
-                                .ghost()
-                                .xsmall()
-                                .icon(icon("external-link"))
-                                .tooltip(tr!("editor-external"))
-                                .on_click(cx.listener(move |this, _, _window, cx| {
-                                    this.open_externally(for_external.clone(), 1, cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("editor-save")
-                                .ghost()
-                                .xsmall()
-                                .icon(icon("save"))
-                                .tooltip(tr!("editor-save"))
-                                .on_click(cx.listener(|this, _, _window, cx| this.save_file(cx))),
-                        )
-                        .child(
-                            Button::new("editor-close")
-                                .ghost()
-                                .xsmall()
-                                .icon(icon("x"))
-                                .tooltip(tr!("editor-close"))
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| {
-                                        this.close_editor(window, cx)
-                                    }),
-                                ),
-                        ),
-                )
+                .child(self.render_editor_bar(&path, dirty, mono.clone(), cx))
                 .when_some(peek, |el, (row, kind, old)| {
                     el.child(self.render_hunk_peek(row, kind, old, code_size, cx))
                 })
@@ -2967,62 +3071,12 @@ impl ClaudhubApp {
                                 this.on_surface_definition_click(&surface, event, window, cx)
                             })
                         })
-                        // The capture phase, on an ancestor of the editor: see
-                        // `vim_key`. Installed only when the mode is on, so that
-                        // nothing stands between the keyboard and the input
-                        // otherwise.
-                        .when(vim, |el| {
-                            el.capture_key_down({
-                                let surface = surface.clone();
-                                cx.listener(move |this, event, window, cx| {
-                                    this.vim_key(&surface, event, window, cx)
-                                })
-                            })
-                            // `Ctrl+V` is a binding of the input's before it is
-                            // a keystroke: see `vim_paste`.
-                            .capture_action({
-                                let surface = surface.clone();
-                                cx.listener(
-                                    move |this, _: &gpui_component::input::Paste, window, cx| {
-                                        if this.vim_paste(&surface, window, cx) {
-                                            cx.stop_propagation();
-                                        }
-                                    },
-                                )
-                            })
-                            // And so are `Enter` and `Backspace`, which is why
-                            // a `:` line could be typed and never run: see
-                            // `vim_named_key`. A modified `Enter` is left
-                            // alone — it is somebody else's.
-                            .capture_action({
-                                let surface = surface.clone();
-                                cx.listener(
-                                    move |this,
-                                          action: &gpui_component::input::Enter,
-                                          window,
-                                          cx| {
-                                        if action.secondary || action.shift {
-                                            return;
-                                        }
-                                        if this.vim_named_key(&surface, "enter", window, cx) {
-                                            cx.stop_propagation();
-                                        }
-                                    },
-                                )
-                            })
-                            .capture_action({
-                                let surface = surface.clone();
-                                cx.listener(
-                                    move |this,
-                                          _: &gpui_component::input::Backspace,
-                                          window,
-                                          cx| {
-                                        if this.vim_named_key(&surface, "backspace", window, cx) {
-                                            cx.stop_propagation();
-                                        }
-                                    },
-                                )
-                            })
+                        // The four keys vim takes before the editor sees
+                        // them, installed only when the mode is on: see
+                        // `surface::vim_capture`.
+                        .map(|el| match vim {
+                            true => crate::ui::surface::vim_capture(el, surface.clone(), cx),
+                            false => el,
                         })
                         .child(
                             // **No card of its own.** `Input` paints a
@@ -3050,38 +3104,9 @@ impl ClaudhubApp {
                                 .line_height(crate::ui::diff_view::line_height(code_size))
                                 .h_full(),
                         )
-                        // **The wheel is taken before the editor sees it.**
-                        // `InputState::on_scroll_wheel` scrolls and then calls
-                        // `stop_propagation` as soon as the offset moved: a
-                        // listener on the ancestor — the diff's arrangement —
-                        // was never called, except at the very top and bottom.
-                        // Nothing smoothed anything, and `Ctrl`+wheel zoomed
-                        // while the editor went on scrolling underneath. A
-                        // window mouse listener in the **capture** phase runs
-                        // first, and consuming the event there leaves the whole
-                        // movement to us.
-                        .child(
-                            gpui::canvas(
-                                |_, _, _| (),
-                                move |bounds: gpui::Bounds<Pixels>, _, window, _cx| {
-                                    window.on_mouse_event(
-                                        move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
-                                            if phase != gpui::DispatchPhase::Capture
-                                                || !bounds.contains(&event.position)
-                                            {
-                                                return;
-                                            }
-                                            cx.stop_propagation();
-                                            entity.update(cx, |this, cx| {
-                                                this.on_surface_scroll(&surface, event, window, cx)
-                                            });
-                                        },
-                                    );
-                                },
-                            )
-                            .absolute()
-                            .inset_0(),
-                        ),
+                        // The wheel, taken before the editor sees it: see
+                        // `surface::wheel_capture`.
+                        .child(crate::ui::surface::wheel_capture(surface, cx)),
                 )
                 // vim's status line, at the foot of the file it belongs to: the
                 // mode, and the `:` or `/` line being written. See

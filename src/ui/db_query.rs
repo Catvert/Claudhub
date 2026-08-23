@@ -1357,7 +1357,6 @@ impl ClaudhubApp {
         self.sync_search_matches(&Surface::Query, vim, cx);
         let bar = self.render_console_bar(cx);
         let results = self.render_db_results(window, cx);
-        let entity = cx.entity();
         // SQL is code: same family, same size as the diff and the file editor,
         // and the line height said explicitly — `Input`'s rem-based default is
         // deaf to the text size (see the file editor, `explorer.rs`).
@@ -1390,73 +1389,17 @@ impl ClaudhubApp {
                                     .overflow_hidden()
                                     .border_b_1()
                                     .border_color(border)
-                                    // The capture phase, on an ancestor of the
-                                    // editor: see `ClaudhubApp::vim_key`.
-                                    // Installed only when the mode is on, so
-                                    // that nothing stands between the keyboard
-                                    // and the input otherwise.
-                                    .when(vim, |el| {
-                                        el.key_context(
-                                            crate::ui::shortcuts::query_editor_context(),
-                                        )
-                                        .capture_key_down(cx.listener(
-                                            |this, event, window, cx| {
-                                                this.vim_key(&Surface::Query, event, window, cx)
-                                            },
-                                        ))
-                                        // `Ctrl+V` is a binding of the input's
-                                        // before it is a keystroke: see
-                                        // `vim_paste`.
-                                        .capture_action(cx.listener(
-                                            |this,
-                                             _: &gpui_component::input::Paste,
-                                             window,
-                                             cx| {
-                                                if this.vim_paste(&Surface::Query, window, cx) {
-                                                    cx.stop_propagation();
-                                                }
-                                            },
-                                        ))
-                                        // And so are `Enter` and `Backspace`,
-                                        // without which a `/` line could be
-                                        // typed and never run: see
-                                        // `vim_named_key`. `Ctrl+Enter` is the
-                                        // query's own key and passes through.
-                                        .capture_action(cx.listener(
-                                            |this,
-                                             action: &gpui_component::input::Enter,
-                                             window,
-                                             cx| {
-                                                if action.secondary || action.shift {
-                                                    return;
-                                                }
-                                                let taken = this.vim_named_key(
-                                                    &Surface::Query,
-                                                    "enter",
-                                                    window,
-                                                    cx,
-                                                );
-                                                if taken {
-                                                    cx.stop_propagation();
-                                                }
-                                            },
-                                        ))
-                                        .capture_action(cx.listener(
-                                            |this,
-                                             _: &gpui_component::input::Backspace,
-                                             window,
-                                             cx| {
-                                                let taken = this.vim_named_key(
-                                                    &Surface::Query,
-                                                    "backspace",
-                                                    window,
-                                                    cx,
-                                                );
-                                                if taken {
-                                                    cx.stop_propagation();
-                                                }
-                                            },
-                                        ))
+                                    // The four keys vim takes before the
+                                    // editor sees them, installed only when the
+                                    // mode is on: see `surface::vim_capture`.
+                                    .map(|el| match vim {
+                                        true => {
+                                            let el = el.key_context(
+                                                crate::ui::shortcuts::query_editor_context(),
+                                            );
+                                            crate::ui::surface::vim_capture(el, Surface::Query, cx)
+                                        }
+                                        false => el,
                                     })
                                     .child(
                                         // No card of its own: see the file
@@ -1474,47 +1417,9 @@ impl ClaudhubApp {
                                             ))
                                             .h_full(),
                                     )
-                                    // **The wheel is taken before the editor
-                                    // sees it.** `InputState::on_scroll_wheel`
-                                    // consumes the event as soon as the offset
-                                    // moved, so a listener on an ancestor is
-                                    // never called: a window mouse listener in
-                                    // the **capture** phase runs first, and
-                                    // consuming it there leaves the whole
-                                    // movement to us.
-                                    .child(
-                                        gpui::canvas(
-                                            |_, _, _| (),
-                                            move |bounds: gpui::Bounds<gpui::Pixels>,
-                                                  _,
-                                                  window,
-                                                  _cx| {
-                                                window.on_mouse_event(
-                                                    move |event: &gpui::ScrollWheelEvent,
-                                                          phase,
-                                                          window,
-                                                          cx| {
-                                                        if phase != gpui::DispatchPhase::Capture
-                                                            || !bounds.contains(&event.position)
-                                                        {
-                                                            return;
-                                                        }
-                                                        cx.stop_propagation();
-                                                        entity.update(cx, |this, cx| {
-                                                            this.on_surface_scroll(
-                                                                &Surface::Query,
-                                                                event,
-                                                                window,
-                                                                cx,
-                                                            )
-                                                        });
-                                                    },
-                                                );
-                                            },
-                                        )
-                                        .absolute()
-                                        .inset_0(),
-                                    ),
+                                    // The wheel, taken before the editor sees
+                                    // it: see `surface::wheel_capture`.
+                                    .child(crate::ui::surface::wheel_capture(Surface::Query, cx)),
                             ),
                     )
                     .child(resizable_panel().child(results)),
