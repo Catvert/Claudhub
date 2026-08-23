@@ -3429,6 +3429,20 @@ impl ClaudhubApp {
         )
     }
 
+    /// The active checkout's agent — the badge, then a rule, or nothing at
+    /// all: a bar that says "no agent" all day long says nothing.
+    fn render_agent_indicator(&self, cx: &gpui::App) -> Option<impl IntoElement> {
+        let agent = self.agents.get(self.active.as_deref()?)?;
+        Some(
+            gpui_component::h_flex()
+                .flex_none()
+                .gap_2()
+                .items_center()
+                .child(crate::ui::topbar::agent_badge(agent, cx))
+                .child(Divider::vertical().h(px(12.))),
+        )
+    }
+
     fn render_status_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         // On a Windows drive mounted by WSL, watching reports nothing: saying so
         // is the only way to tell "nothing has changed" from "Claudhub no longer
@@ -3463,6 +3477,11 @@ impl ClaudhubApp {
             // where they are a button one clicks rather than a word one reads.
             .child(self.render_workspace_nav(cx))
             .child(Divider::vertical().h(px(12.)))
+            // The active checkout's agent, right after the screens: the dot
+            // says a Claude works (or waits) in what the window is looking at,
+            // read out of the corner of the eye. The rest of the fleet stays
+            // in the worktree picker and on the pins.
+            .children(self.render_agent_indicator(cx))
             // What is running right now, before what has finished: a menu entry
             // closes on the click, so an integration, a rebase or a `wt rm` has
             // no button of its own to turn, and this line is the only thing
