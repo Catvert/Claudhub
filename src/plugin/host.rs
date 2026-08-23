@@ -434,8 +434,9 @@ fn maybe(text: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Builds the module a script sees. Done once per plugin: its closures capture
-/// that plugin's `Shared`, and a reload keeps them.
+/// Builds the module a script sees. Done once per plugin — see [`Compiler`],
+/// which holds it: its closures capture that plugin's `Shared`, and a reload
+/// keeps them.
 ///
 /// **Every text argument is a `Ref<str>` and never a `String`**, and this is
 /// the one thing here that cannot be guessed. Rune passes an argument by
@@ -983,6 +984,35 @@ fn to_rune(value: &serde_json::Value) -> Result<Value, rune::alloc::Error> {
     })
 }
 
+/// The Rune context a plugin compiles against.
+///
+/// **One per plugin, kept across reloads.**
+/// `Context::with_default_modules` assembles Rune's whole standard library and
+/// `runtime()` derives the table a machine runs on; the claudhub module's
+/// closures capture *that* plugin's `Shared`, which a reload keeps — so the
+/// context is the plugin's, and it does not have to be built again when the
+/// script is saved. It used to be, on every keystroke of a hot reload.
+pub struct Compiler {
+    context: Context,
+    runtime: Arc<RuntimeContext>,
+}
+
+impl Compiler {
+    pub fn new(shared: &Arc<Shared>) -> Result<Self, String> {
+        let mut context =
+            Context::with_default_modules().map_err(|e| format!("Rune's standard library: {e}"))?;
+        context
+            .install(module(shared).map_err(|e| format!("the claudhub module: {e}"))?)
+            .map_err(|e| format!("the claudhub module: {e}"))?;
+        let runtime = Arc::new(
+            context
+                .runtime()
+                .map_err(|e| format!("Rune's runtime: {e}"))?,
+        );
+        Ok(Self { context, runtime })
+    }
+}
+
 /// A loaded plugin's Rune side.
 pub struct Host {
     shared: Arc<Shared>,
@@ -993,34 +1023,32 @@ pub struct Host {
 impl Host {
     /// Compiles a script. The error is already the one to show: Rune's
     /// diagnostics, rendered, which name the line.
-    pub fn load(manifest: &Manifest, shared: Arc<Shared>) -> Result<Self, String> {
+    pub fn load(
+        manifest: &Manifest,
+        shared: Arc<Shared>,
+        compiler: &Compiler,
+    ) -> Result<Self, String> {
         let source = std::fs::read_to_string(manifest.entry())
             .map_err(|e| format!("{}: {e}", manifest.entry().display()))?;
-        Self::from_source(manifest.id.clone(), &source, shared)
+        Self::from_source(manifest.id.clone(), &source, shared, compiler)
     }
 
     /// The same, from a string. **This is what makes the host testable**: the
     /// whole loop plays out in memory, with no file and no process, on the
     /// model of the language client's `Session::run`.
-    pub fn from_source(name: String, source: &str, shared: Arc<Shared>) -> Result<Self, String> {
-        let mut context =
-            Context::with_default_modules().map_err(|e| format!("Rune's standard library: {e}"))?;
-        context
-            .install(module(&shared).map_err(|e| format!("the claudhub module: {e}"))?)
-            .map_err(|e| format!("the claudhub module: {e}"))?;
-        let runtime = Arc::new(
-            context
-                .runtime()
-                .map_err(|e| format!("Rune's runtime: {e}"))?,
-        );
-
+    pub fn from_source(
+        name: String,
+        source: &str,
+        shared: Arc<Shared>,
+        compiler: &Compiler,
+    ) -> Result<Self, String> {
         let mut sources = Sources::new();
         sources
             .insert(Source::new(name, source).map_err(|e| format!("{e}"))?)
             .map_err(|e| format!("{e}"))?;
         let mut diagnostics = Diagnostics::new();
         let built = rune::prepare(&mut sources)
-            .with_context(&context)
+            .with_context(&compiler.context)
             .with_diagnostics(&mut diagnostics)
             .build();
         let unit = match built {
@@ -1029,7 +1057,7 @@ impl Host {
         };
         Ok(Self {
             shared,
-            runtime,
+            runtime: compiler.runtime.clone(),
             unit: Arc::new(unit),
         })
     }
@@ -1196,7 +1224,8 @@ mod tests_support {
         };
         let shared = Shared::new(&manifest, tx);
         shared.set_worktree(Some(PathBuf::from("/p/site")));
-        let host = Host::from_source(manifest.id.clone(), source, shared.clone())?;
+        let compiler = Compiler::new(&shared)?;
+        let host = Host::from_source(manifest.id.clone(), source, shared.clone(), &compiler)?;
 
         let answer: Arc<Mutex<Answer>> =
             Arc::new(Mutex::new(Box::new(|_| Err("nothing was expected".into()))));

@@ -7,13 +7,17 @@ use std::sync::Arc;
 
 use rune::Value;
 
-use crate::plugin::host::{Effect, Host, Request, Shared};
+use crate::plugin::host::{Compiler, Effect, Host, Request, Shared};
 use crate::plugin::manifest::Manifest;
 use crate::plugin::view::Node;
 
 pub struct Plugin {
     pub manifest: Manifest,
     shared: Arc<Shared>,
+    /// What the script compiles against, built once and kept across reloads:
+    /// Rune's standard library and the claudhub module do not change when a
+    /// file is saved. See `host::Compiler`.
+    compiler: Option<Compiler>,
     /// Behind an `Rc` so a task can hold it across an `await` without holding
     /// a borrow of the application. There is one machine and one script; the
     /// `Rc` is about lifetimes, not about sharing.
@@ -45,9 +49,17 @@ impl Plugin {
     /// the panel exists, and it says why it is empty.
     pub fn load(manifest: Manifest, outbox: async_channel::Sender<Request>) -> Self {
         let shared = Shared::new(&manifest, outbox);
+        let compiler = match Compiler::new(&shared) {
+            Ok(compiler) => Some(compiler),
+            Err(message) => {
+                log::warn!(target: "plugin", "{}: {message}", manifest.id);
+                None
+            }
+        };
         let mut plugin = Self {
             manifest,
             shared,
+            compiler,
             host: None,
             error: None,
             state: None,
@@ -82,7 +94,13 @@ impl Plugin {
 
     /// True when a new machine took the old one's place.
     fn compile(&mut self) -> bool {
-        match Host::load(&self.manifest, self.shared.clone()) {
+        let loaded = match &self.compiler {
+            Some(compiler) => Host::load(&self.manifest, self.shared.clone(), compiler),
+            // Rune's own standard library did not come up. Nothing will
+            // compile, and the panel says so like any other failure.
+            None => Err("Rune's context could not be built".to_string()),
+        };
+        match loaded {
             Ok(host) => {
                 self.host = Some(Rc::new(host));
                 self.error = None;
