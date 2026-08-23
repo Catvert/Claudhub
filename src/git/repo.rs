@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use super::{git, git_ok, git_opt, git_reporting, split_nul};
+use super::{git, git_blob, git_ok, git_opt, git_reporting, split_nul};
 
 /// A repository as Claudhub sees it: the main repository and its linked
 /// worktrees.
@@ -180,6 +180,22 @@ pub fn clean(dir: &Path, paths: &[PathBuf]) -> Result<()> {
     git(dir, &args).map(|_| ())
 }
 
+/// What `HEAD` holds for a path, or `None` when it holds nothing.
+///
+/// `None` covers the two cases the editor's gutter treats alike — a file git
+/// does not track, and one added since the last commit — and it is a normal
+/// answer, not a failure, hence `git_opt`. The path is given relative to the
+/// worktree because that is how the revision syntax names it: `HEAD:` walks the
+/// tree, and an absolute path is not in it.
+///
+/// `--textconv` is deliberately absent: a smudge filter would hand back
+/// something that is not what the file's bytes were, and the gutter compares
+/// bytes.
+pub fn head_blob(dir: &Path, path: &Path) -> Option<String> {
+    let path = path.to_str()?;
+    git_opt(dir, &["show", &format!("HEAD:./{path}")])
+}
+
 /// Applies (`reverse = false`) or undoes (`reverse = true`) a patch on the
 /// index: that is how an isolated hunk is staged, git having no API for "add
 /// that piece".
@@ -271,7 +287,28 @@ pub fn push(dir: &Path, force_with_lease: bool) -> Result<String> {
     git_reporting(dir, &args)
 }
 
+/// Moves HEAD onto a branch, whatever form the picker showed it in.
+///
+/// **A remote-tracking name is not a branch**, and that is the whole of this
+/// function: `git switch origin/feat` fails outright — the ref is not something
+/// HEAD may point at. What clicking `origin/feat` means is the local branch that
+/// follows it, which `--track` creates and which may already exist under the
+/// short name. Only what is left over goes to git as it was typed.
 pub fn checkout(dir: &Path, branch: &str) -> Result<()> {
+    if super::branch::local_exists(dir, branch) {
+        return git(dir, &["switch", branch]).map(|_| ());
+    }
+    // A local name may itself contain a slash (`wt/essai`), which is why the
+    // local is looked for first: the split below is only reached by a name no
+    // local carries.
+    if let Some((_, short)) = branch.split_once('/') {
+        if super::branch::local_exists(dir, short) {
+            return git(dir, &["switch", short]).map(|_| ());
+        }
+        if super::branch::remote_exists(dir, branch) {
+            return git(dir, &["switch", "--track", branch]).map(|_| ());
+        }
+    }
     git(dir, &["switch", branch]).map(|_| ())
 }
 
@@ -284,6 +321,71 @@ pub fn create_branch(dir: &Path, name: &str, from: Option<&str>) -> Result<()> {
 pub fn delete_branch(main: &Path, name: &str, force: bool) -> Result<()> {
     let flag = if force { "-D" } else { "-d" };
     git(main, &["branch", flag, name]).map(|_| ())
+}
+
+/// Renames a branch, checked out or not.
+///
+/// `-m` and not `-M`: git refuses a name already taken, and overwriting someone
+/// else's branch is not what a rename dialog is asking to do.
+pub fn rename_branch(main: &Path, from: &str, to: &str) -> Result<()> {
+    git(main, &["branch", "-m", from, to]).map(|_| ())
+}
+
+/// Removes a branch from `origin`, leaving the local one alone.
+///
+/// The full `refs/heads/` form: a tag and a branch may bear the same name, and
+/// a bare name leaves git to guess which of the two is meant.
+pub fn delete_remote_branch(main: &Path, name: &str) -> Result<String> {
+    let short = super::branch::short_name(name);
+    git_reporting(
+        main,
+        &["push", "origin", "--delete", &format!("refs/heads/{short}")],
+    )
+}
+
+/// Publishes one branch, which need not be the one HEAD is on.
+///
+/// The refspec is written out (`<b>:<b>`) rather than left to `push origin <b>`:
+/// the short form pushes *the branch called `b` on the remote*, which is the
+/// same thing here and not the same thing under a `push.default` of someone
+/// else's choosing. `--set-upstream` covers the first push of a branch Claudhub
+/// created, whose remote counterpart does not exist yet.
+pub fn push_branch(main: &Path, branch: &str, force_with_lease: bool) -> Result<String> {
+    let mut args: Vec<String> = vec![
+        "push".into(),
+        "--set-upstream".into(),
+        "origin".into(),
+        format!("{branch}:{branch}"),
+    ];
+    if force_with_lease {
+        args.push("--force-with-lease".into());
+    }
+    git_reporting(main, &args)
+}
+
+/// Brings a branch up to date with its upstream, without leaving the branch one
+/// is on.
+///
+/// Two commands and not one, and which of the two applies is not a preference:
+/// **git refuses to fetch into a branch that is checked out somewhere**, so a
+/// branch held by a worktree is updated from inside it — `pull --ff-only`, the
+/// same fast-forward-or-refuse rule as the button — and every other branch by
+/// the refspec form, which moves the ref without a working tree at all.
+///
+/// Fast-forward in both halves: a branch nobody is standing on cannot be given
+/// a merge commit by a menu entry, and a divergence is a decision.
+pub fn update_branch(main: &Path, branch: &str) -> Result<String> {
+    let upstream = super::branch::upstream_of(main, branch)
+        .ok_or_else(|| anyhow!("{branch} has no upstream to update from"))?;
+    if let Some(dir) = super::branch::checked_out_at(main, branch) {
+        return pull(&dir);
+    }
+    let (remote, remote_branch) = super::branch::split_remote(&upstream)
+        .ok_or_else(|| anyhow!("{upstream} does not name a remote"))?;
+    git_reporting(
+        main,
+        &["fetch", remote, &format!("{remote_branch}:{branch}")],
+    )
 }
 
 /// A git operation in progress, leaving the repository half-finished.
@@ -389,6 +491,60 @@ pub fn resume(dir: &Path) -> Result<String> {
     git(dir, &[kind.command(), "--continue"])
 }
 
+/// The three versions of a conflicted file, as the index holds them.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Stages {
+    /// The common ancestor. Empty when there is none — a file both sides
+    /// created, which conflicts as a whole and is none the worse for being
+    /// compared against nothing.
+    pub base: String,
+    /// Ours, in the user's sense.
+    pub ours: String,
+    pub theirs: String,
+}
+
+/// Reads the three stages an unmerged file has in the index.
+///
+/// `:1:`, `:2:` and `:3:` are the ancestor, ours and theirs — and stages 2 and
+/// 3 **swap over during a rebase** for the same reason `--ours` does: git
+/// replays our commits on top of theirs, so the checkout is theirs and the
+/// commit being applied is ours. The swap happens here, once, and the view
+/// speaks of "ours" in the user's sense throughout.
+///
+/// A missing stage 2 or 3 is a conflict of a different kind — one side deleted
+/// the file — and refusing it is the honest answer: there is no third column to
+/// paint, and the two buttons of the conflicts panel already settle it.
+pub fn stages(dir: &Path, path: &Path) -> Result<Stages> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| anyhow!("this path is not valid UTF-8"))?;
+    let read = |stage: u8| git_blob(dir, &["show", &format!(":{stage}:./{path}")]);
+    let swapped = matches!(pending(dir), Some(Pending::Rebase));
+    let (mine, yours) = if swapped { (3, 2) } else { (2, 3) };
+    Ok(Stages {
+        // No ancestor is not an error: two branches that each created the file
+        // have nothing in common, and the merge reads that as a conflict over
+        // the whole file, which is what it is.
+        base: read(1).unwrap_or_default(),
+        ours: read(mine).context("this side of the conflict has no content")?,
+        theirs: read(yours).context("this side of the conflict has no content")?,
+    })
+}
+
+/// Writes a merged file and stages it, which is what marks it resolved.
+///
+/// Unconditional, where every other write of this program carries the digest of
+/// what was read: what is on disk is the version git wrote with markers through
+/// it, and overwriting it is the whole gesture.
+pub fn resolve_with(dir: &Path, path: &Path, content: &str) -> Result<()> {
+    let full = dir.join(path);
+    if let Some(parent) = full.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(&full, content).with_context(|| format!("writing {}", full.display()))?;
+    stage(dir, std::slice::from_ref(&path.to_path_buf()))
+}
+
 /// Resolves a conflict by keeping one of the two versions.
 ///
 /// `git checkout`'s `--ours` and `--theirs` name, during a merge, the current
@@ -430,16 +586,42 @@ pub fn resolve(dir: &Path, path: &Path, ours: bool) -> Result<()> {
 /// put in the journal: `ls-files --ignored needs some exclude pattern`. The
 /// union therefore takes one call for each half.
 pub fn list_files(dir: &Path, ignored: bool) -> Result<Files> {
-    let mut files = list_of(dir, &["--cached", "--others", "--exclude-standard"])?;
-    let excluded = if ignored {
-        let excluded = list_of(dir, &["--others", "--ignored", "--exclude-standard"])?;
+    let mut files: Vec<PathBuf> = list_of(dir, &["--cached", "--others", "--exclude-standard"])?
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect();
+    let (excluded, dirs) = if ignored {
+        // `--directory` is what makes this affordable: git stops at a folder it
+        // excludes whole rather than walking it. On a Laravel checkout that is
+        // five hundred and twenty entries instead of a hundred and fifty-four
+        // thousand, ten milliseconds instead of a second — and the tree that
+        // comes out of it has nine thousand nodes instead of a hundred and
+        // sixty. What it costs is that a directory's contents are unknown until
+        // someone opens it; see `Files::dirs`.
+        let excluded = list_of(
+            dir,
+            &[
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--directory",
+                // An excluded directory with nothing in it has nothing to show.
+                "--no-empty-directory",
+            ],
+        )?;
+        let dirs = excluded
+            .iter()
+            .filter(|entry| entry.dir)
+            .map(|entry| entry.path.clone())
+            .collect();
+        let excluded: Vec<PathBuf> = excluded.into_iter().map(|entry| entry.path).collect();
         files.extend(excluded.iter().cloned());
         // Two lists, each sorted, are not a sorted list — and the tree is built
         // from the order git gives.
         files.sort_unstable();
-        excluded
+        (excluded, dirs)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     // `--cached --others` may return the same path twice; the list being sorted,
     // a local dedup is enough.
@@ -447,6 +629,7 @@ pub fn list_files(dir: &Path, ignored: bool) -> Result<Files> {
     Ok(Files {
         all: files,
         ignored: excluded,
+        dirs,
     })
 }
 
@@ -461,13 +644,34 @@ pub fn list_files(dir: &Path, ignored: bool) -> Result<Files> {
 pub struct Files {
     pub all: Vec<PathBuf>,
     pub ignored: Vec<PathBuf>,
+    /// Those of `ignored` that are **directories git stopped at**, and whose
+    /// contents are therefore unknown. Sorted, and a subset of `ignored`.
+    ///
+    /// They are named rather than left to be guessed: a path with nothing under
+    /// it is a file as far as a tree built from paths can tell, and `vendor/`
+    /// would draw itself as one.
+    pub dirs: Vec<PathBuf>,
 }
 
-fn list_of(dir: &Path, flags: &[&str]) -> Result<Vec<PathBuf>> {
+/// One entry of `ls-files`, and whether git wrote it as a directory.
+struct Listed {
+    path: PathBuf,
+    dir: bool,
+}
+
+fn list_of(dir: &Path, flags: &[&str]) -> Result<Vec<Listed>> {
     let mut args: Vec<&str> = vec!["ls-files", "-z"];
     args.extend_from_slice(flags);
     let out = git(dir, &args)?;
-    Ok(split_nul(&out).map(PathBuf::from).collect())
+    // The trailing slash is how `--directory` says "and I did not look inside".
+    // It has to be read off the text: `PathBuf` drops it, and `vendor/` and
+    // `vendor` are the same path once parsed.
+    Ok(split_nul(&out)
+        .map(|text| Listed {
+            dir: text.ends_with('/'),
+            path: PathBuf::from(text.trim_end_matches('/')),
+        })
+        .collect())
 }
 
 /// True if the checkout has uncommitted changes, tracked or not.
@@ -596,10 +800,23 @@ mod tests {
         );
 
         let all = list_files(&root, true).unwrap();
+        // git stops at the directory it excludes whole, and says so by the
+        // trailing slash — a hundred and fifty thousand entries become five
+        // hundred on a real checkout. What is inside is nobody's business
+        // until a chevron asks; see `files::read_dir`.
         assert!(
-            all.all.contains(&PathBuf::from("vendor/pkg/big.php")),
-            "the ignored files: {all:?}"
+            all.all.contains(&PathBuf::from("vendor")),
+            "the ignored directory, not what is under it: {all:?}"
         );
+        assert!(
+            // `starts_with` compares components, so `vendor` starts with
+            // `vendor/`: what is asked here is that nothing goes *deeper*.
+            !all.all
+                .iter()
+                .any(|p| p.starts_with("vendor") && p != Path::new("vendor")),
+            "and nothing under it: {all:?}"
+        );
+        assert_eq!(all.dirs, vec![PathBuf::from("vendor")]);
         // And everything the plain listing had is still there.
         for path in &plain.all {
             assert!(
@@ -610,7 +827,7 @@ mod tests {
         }
         // The excluded ones are named apart, and are a subset of the whole: it
         // is that list the explorer binary-searches to know what to grey.
-        assert!(all.ignored.contains(&PathBuf::from("vendor/pkg/big.php")));
+        assert!(all.ignored.contains(&PathBuf::from("vendor")));
         for path in &all.ignored {
             assert!(
                 all.all.contains(path),

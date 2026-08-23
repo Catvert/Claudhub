@@ -28,7 +28,7 @@ use gpui_component::{
 
 use crate::plugin::host::{Effect, Request};
 use crate::plugin::manifest::{self, Manifest, PanelSpec};
-use crate::plugin::view::{Item, Node, TextStyle};
+use crate::plugin::view::{Item, Node, Pair, TextStyle, Tone};
 use crate::plugin::Plugin;
 use crate::runtime::Cmd;
 use crate::tr;
@@ -783,16 +783,40 @@ impl ClaudhubApp {
                 // exactly what a Sentry frame does — a plugin's "open this
                 // line" is the same gesture.
                 Effect::Open { path, line } => {
-                    if crate::ui::settings::Settings::global(cx)
+                    if !crate::ui::settings::Settings::global(cx)
                         .external_editor
                         .trim()
                         .is_empty()
                     {
-                        self.open_in_editor(path, cx);
-                    } else {
                         self.open_externally(path, line, cx);
+                        continue;
+                    }
+                    // **At the line, not at the top of the file.** A frame
+                    // names a line, and opening the file at its first one
+                    // leaves the reader to find by hand what the trace had
+                    // just told them — a Laravel controller is eight hundred
+                    // lines. It goes through `jump_to`, so the trail knows
+                    // where one came from: this is exactly the search
+                    // results' gesture, and it is the one that needed
+                    // `Ctrl+O` most, the panel one leaves being on another
+                    // screen.
+                    match line.checked_sub(1) {
+                        Some(line) => self.jump_to(
+                            path,
+                            crate::ui::explorer::Landing::Position {
+                                line: u32::try_from(line).unwrap_or(u32::MAX),
+                                character: 0,
+                            },
+                            window,
+                            cx,
+                        ),
+                        // Nothing said is the file itself, which is what a
+                        // plugin opening a file rather than a place means.
+                        None => self.open_in_editor(path, cx),
                     }
                 }
+                Effect::OpenUrl(url) => cx.open_url(&url),
+                Effect::Copy(text) => cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)),
                 Effect::Notify(text) => self.announce(SharedString::from(text), cx),
                 // The worktree does not exist yet: the prompt is **held** and
                 // delivered when the worktree list comes back, which is the
@@ -952,13 +976,36 @@ impl ClaudhubApp {
             None => {
                 // Painted before the scroll wrapper: `scrolled` takes `&mut
                 // self` too, and the two borrows would meet.
-                let painted = self.render_plugin_node(panel, &tree, window, cx);
+                self.colour_plugin_code(&tree, cx);
+                let painted = self.render_plugin_node(panel, &mut 0, &tree, window, cx);
+                // **A tree that fills does not get the panel's scroll.** The
+                // filled child takes what is left and scrolls itself, so
+                // wrapping the lot in a second scrolling box would put two
+                // bars on one gesture and leave a band of nothing under the
+                // list. What stays above it is a header, and a header does not
+                // scroll.
+                if fills(&tree) {
+                    return v_flex()
+                        .size_full()
+                        .child(bar)
+                        .child(v_flex().flex_1().min_h_0().p_1().child(painted))
+                        .into_any_element();
+                }
                 div()
                     .flex_1()
                     .min_h_0()
                     .child(
                         self.scrolled(
-                            "plugin-scroll",
+                            // **One key per panel, not one for all of them.**
+                            // The key names the bar *and* keys the smoothing,
+                            // and a master/detail plugin puts two panels on
+                            // screen at once: sharing it made each frame
+                            // advance one motion from two renders, against two
+                            // different offsets, so the detail either jumped
+                            // back where the list was or did not move at all.
+                            // It is the rule `ui::surface` already pays for the
+                            // two code surfaces.
+                            SharedString::from(format!("plugin-scroll/{panel}")),
                             &scroll,
                             crate::ui::motion::Axes::Vertical,
                             window,
@@ -988,10 +1035,20 @@ impl ClaudhubApp {
     fn render_plugin_node(
         &mut self,
         panel: &'static str,
+        seq: &mut usize,
         node: &Node,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        // **A number per node, and it is what makes the ids unique.** gpui
+        // keys a stateful element by its id among its siblings, and every code
+        // block used to be called `plugin-code`: the second one silently took
+        // the first one's scroll offset, so a stack trace's ten excerpts all
+        // scrolled together. The walk is depth-first and the tree is rebuilt
+        // identically between gestures, so the number is stable across frames —
+        // which is what an id has to be.
+        *seq += 1;
+        let rank = *seq;
         match node {
             Node::Column(children) => v_flex()
                 .w_full()
@@ -999,7 +1056,7 @@ impl ClaudhubApp {
                 .children(
                     children
                         .iter()
-                        .map(|child| self.render_plugin_node(panel, child, window, cx)),
+                        .map(|child| self.render_plugin_node(panel, seq, child, window, cx)),
                 )
                 .into_any_element(),
             Node::Row(children) => h_flex()
@@ -1009,12 +1066,22 @@ impl ClaudhubApp {
                 .children(
                     children
                         .iter()
-                        .map(|child| self.render_plugin_node(panel, child, window, cx)),
+                        .map(|child| self.render_plugin_node(panel, seq, child, window, cx)),
                 )
                 .into_any_element(),
-            Node::Section { title, body } => {
+            Node::Section {
+                title,
+                body,
+                folded: starts_folded,
+            } => {
                 let key = format!("{panel}/{title}");
-                let folded = self.plugin_folded.contains(&key);
+                // **What is kept is the exception, not the state.** The script
+                // says which way a section starts — a distribution one glances
+                // at once belongs behind its title, a trace does not — and the
+                // panel remembers only the sections one has since turned the
+                // other way. It is `tree::Folds`' polarity, and it keeps the
+                // set small for the same reason.
+                let folded = *starts_folded != self.plugin_folded.contains(&key);
                 let header = h_flex()
                     .id(SharedString::from(key.clone()))
                     .w_full()
@@ -1044,8 +1111,9 @@ impl ClaudhubApp {
                     .child(header)
                     .when(!folded, |el| {
                         el.children(
-                            body.iter()
-                                .map(|child| self.render_plugin_node(panel, child, window, cx)),
+                            body.iter().map(|child| {
+                                self.render_plugin_node(panel, seq, child, window, cx)
+                            }),
                         )
                     })
                     .into_any_element()
@@ -1068,28 +1136,103 @@ impl ClaudhubApp {
                 }
                 .into_any_element()
             }
-            // The language is carried and not yet used: colouring an excerpt
-            // means going through `ui::highlight`, which wants a whole
-            // buffer's worth of context to say anything useful. The field is
-            // there so a plugin written today keeps meaning what it says.
-            Node::Code { text, .. } => div()
-                .id("plugin-code")
+            Node::Code {
+                text,
+                language,
+                start_line,
+                mark,
+            } => self.render_plugin_code(rank, text, language.as_deref(), *start_line, *mark, cx),
+            Node::Badge { text, tone } => badge(text, *tone, cx).into_any_element(),
+            Node::Callout { text, tone } => {
+                let colour = tone_colour(*tone, cx);
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_start()
+                    // A rule and not a filled block: what this says is *how* to
+                    // read the sentence, and a full background would make it
+                    // shout louder than the title above it.
+                    .child(div().w(gpui::px(2.)).self_stretch().min_h_4().bg(colour))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .text_color(colour)
+                            .child(SharedString::from(text.clone())),
+                    )
+                    .into_any_element()
+            }
+            Node::Fields { rows } => render_fields(rows, cx).into_any_element(),
+            Node::Meter {
+                label,
+                value,
+                percent,
+            } => render_meter(label, value, *percent, cx).into_any_element(),
+            Node::Fill(inner) => {
+                // The list is asked for in fill mode rather than wrapped: a
+                // height given to the wrapper would not reach past the fixed
+                // one the list gives itself.
+                let painted = match inner.as_ref() {
+                    Node::List {
+                        id,
+                        items,
+                        selected,
+                        on_select,
+                    } => self.render_plugin_list(
+                        panel,
+                        id,
+                        items,
+                        *selected,
+                        on_select.as_ref(),
+                        true,
+                        window,
+                        cx,
+                    ),
+                    other => self.render_plugin_node(panel, seq, other, window, cx),
+                };
+                div()
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .child(painted)
+                    .into_any_element()
+            }
+            Node::Divider => div()
                 .w_full()
-                .overflow_x_scroll()
-                .p_2()
-                .rounded(cx.theme().radius)
-                .bg(cx.theme().secondary)
-                .font_family(cx.theme().mono_font_family.clone())
-                .text_xs()
-                .whitespace_nowrap()
-                .child(SharedString::from(text.clone()))
+                .h(gpui::px(1.))
+                .my_1()
+                .bg(cx.theme().border)
                 .into_any_element(),
+            Node::Link {
+                label,
+                url,
+                icon: name,
+            } => {
+                let target = url.clone();
+                Button::new(("plugin-link", rank))
+                    .ghost()
+                    .small()
+                    .label(SharedString::from(label.clone()))
+                    .when_some(name.clone(), |button, name| button.icon(icon(&name)))
+                    .on_click(move |_, _window, cx| cx.open_url(&target))
+                    .into_any_element()
+            }
             Node::List {
                 id,
                 items,
                 selected,
                 on_select,
-            } => self.render_plugin_list(panel, id, items, *selected, on_select.as_ref(), cx),
+            } => self.render_plugin_list(
+                panel,
+                id,
+                items,
+                *selected,
+                on_select.as_ref(),
+                false,
+                window,
+                cx,
+            ),
             field @ Node::Field { .. } => self.render_plugin_field(panel, field, window, cx),
             Node::Button {
                 label,
@@ -1099,7 +1242,7 @@ impl ClaudhubApp {
                 primary,
             } => {
                 let handler = on_click.clone();
-                Button::new(SharedString::from(format!("{panel}/{label}")))
+                Button::new(SharedString::from(format!("{panel}/{rank}/{label}")))
                     .small()
                     .label(SharedString::from(label.clone()))
                     .when_some(name.clone(), |button, name| button.icon(icon(&name)))
@@ -1138,6 +1281,119 @@ impl ClaudhubApp {
                 )
                 .into_any_element(),
         }
+    }
+
+    /// Colours every excerpt of a tree, once, outside the walk that paints it.
+    ///
+    /// **Never in the render closure**, which is the whole module's rule:
+    /// parsing costs milliseconds and a panel repaints on every frame. It is
+    /// keyed by the text, so a tree rebuilt identically after a gesture finds
+    /// its colours again and pays nothing.
+    ///
+    /// The theme is the **witness**: a palette change is signalled to nobody —
+    /// the lesson `ui::blade`'s editor cache already learned — and colours
+    /// captured under the old one would stay until the next fetch.
+    fn colour_plugin_code(&mut self, tree: &Node, cx: &mut Context<Self>) {
+        let theme = cx.theme().highlight_theme.clone();
+        match &self.plugin_code.theme {
+            Some(seen) if std::sync::Arc::ptr_eq(seen, &theme) => {}
+            _ => {
+                self.plugin_code.by_text.clear();
+                self.plugin_code.theme = Some(theme.clone());
+            }
+        }
+        let mut wanted = Vec::new();
+        collect_code(tree, &mut wanted);
+        for (language, text) in wanted {
+            let key = code_key(&language, &text);
+            if self.plugin_code.by_text.contains_key(&key) {
+                continue;
+            }
+            let styles =
+                crate::ui::highlight::DocumentHighlights::for_language(&language, &text, &theme);
+            self.plugin_code
+                .by_text
+                .insert(key, std::rc::Rc::new(styles));
+        }
+        // A panel one has scrolled through a long trace may hold a hundred
+        // excerpts; a plugin fetching in a loop would grow this without end.
+        // The cap is generous and the eviction total: what a tree needs is put
+        // back on the next frame, and a re-parse of what is on screen is what
+        // an arrival already costs.
+        if self.plugin_code.by_text.len() > MAX_CODE_CACHE {
+            self.plugin_code.by_text.clear();
+        }
+    }
+
+    /// An excerpt: numbered, coloured, and with the line the trace named picked
+    /// out.
+    ///
+    /// The numbers are a column of their own rather than part of the text: a
+    /// text carrying them cannot be copied without them, and copying an excerpt
+    /// to paste it into a file is what one does with it.
+    fn render_plugin_code(
+        &mut self,
+        rank: usize,
+        text: &str,
+        language: Option<&str>,
+        start_line: Option<usize>,
+        mark: Option<usize>,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        let styles = language
+            .map(|language| code_key(language, text))
+            .and_then(|key| self.plugin_code.by_text.get(&key).cloned());
+        let theme = cx.theme().clone();
+        let marked = theme.accent.opacity(0.6);
+        let gutter = theme.muted_foreground.opacity(0.7);
+        let width = start_line
+            .map(|first| format!("{}", first + text.lines().count()).len())
+            .unwrap_or(0);
+        let lines = text.lines().enumerate().map(|(index, line)| {
+            let number = start_line.map(|first| first + index);
+            let here = matches!((number, mark), (Some(n), Some(m)) if n == m);
+            h_flex()
+                .w_full()
+                .when(here, |el| el.bg(marked))
+                .when_some(number, |el, number| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .px_2()
+                            .text_color(if here { theme.foreground } else { gutter })
+                            .child(SharedString::from(format!("{number:>width$}"))),
+                    )
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .pr_2()
+                        .when(number.is_none(), |el| el.pl_2())
+                        .child(match styles.as_ref() {
+                            // The offsets are in **bytes** and the ranges
+                            // sorted and disjoint — `with_highlights` checks
+                            // neither, and gets both wrong in silence.
+                            Some(styles) => {
+                                gpui::StyledText::new(SharedString::from(line.to_string()))
+                                    .with_highlights(styles.line(index).to_vec())
+                                    .into_any_element()
+                            }
+                            None => SharedString::from(line.to_string()).into_any_element(),
+                        }),
+                )
+        });
+        div()
+            .id(("plugin-code", rank))
+            .w_full()
+            .overflow_x_scroll()
+            .py_1()
+            .rounded(cx.theme().radius)
+            .bg(cx.theme().secondary)
+            .font_family(cx.theme().mono_font_family.clone())
+            .text_xs()
+            .whitespace_nowrap()
+            .child(v_flex().min_w_full().children(lines))
+            .into_any_element()
     }
 
     /// A line of text a plugin can be typed into.
@@ -1208,13 +1464,24 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// A list, virtualised.
+    /// A list, virtualised, with its bar and its wheel smoothing.
     ///
     /// `uniform_list` and an explicit row height, like every other list of this
     /// window: it finds the visible range by a division instead of walking a
     /// vector of sizes, and a virtualised list reserves exactly the height it
     /// is told — a row taller than announced covers the next one instead of
     /// pushing it down. That is why an item is two storeys at most.
+    ///
+    /// **It carries a bar and a smoothed wheel like every other list here**, and
+    /// it had neither: a virtualised list says nothing about where one is, and
+    /// a notch of three rows applied whole is the one place in this window
+    /// where the wheel did not glide. The handle is the window's, kept under
+    /// the panel's and the list's names together — two plugins asking for
+    /// `issues` are two lists.
+    ///
+    /// `fill` says the list is what the panel is for: it takes the height that
+    /// is left instead of the sixteen rows a list in a column has to guess at.
+    #[allow(clippy::too_many_arguments)]
     fn render_plugin_list(
         &mut self,
         panel: &'static str,
@@ -1222,6 +1489,8 @@ impl ClaudhubApp {
         items: &[Item],
         selected: Option<usize>,
         on_select: Option<&crate::plugin::view::Handler>,
+        fill: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         if items.is_empty() {
@@ -1238,55 +1507,243 @@ impl ClaudhubApp {
         // Sixteen rows at most before the panel's own scroll takes over: a list
         // inside a scrolling column has no height of its own to grow into, and
         // one that took the whole panel would push everything under it out of
-        // reach.
+        // reach. A filled list has no such problem — it *is* what is left.
         let shown = count.min(16);
+        let key = format!("{panel}/{id}");
+        let handle = self.plugin_lists.entry(key.clone()).or_default().clone();
         let action = on_select.map(|handler| handler.action.clone());
         let entity = cx.entity();
         let theme = cx.theme().clone();
-        let element_id = ElementId::Name(SharedString::from(format!("{panel}/{id}")));
+        let element_id = ElementId::Name(SharedString::from(key.clone()));
+        let list = uniform_list(element_id, count, move |range, _window, cx| {
+            let mut painted = Vec::new();
+            for index in range {
+                let Some(item) = rows.get(index) else {
+                    continue;
+                };
+                painted.push(plugin_row(
+                    index,
+                    item,
+                    selected == Some(index),
+                    height,
+                    &theme,
+                    action.clone().map(|action| {
+                        let entity = entity.clone();
+                        move |window: &mut Window, cx: &mut gpui::App| {
+                            entity.update(cx, |this, cx| {
+                                this.plugin_gesture(
+                                    panel,
+                                    action.clone(),
+                                    index.to_string(),
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }
+                    }),
+                    cx,
+                ));
+            }
+            painted
+        })
+        .track_scroll(&handle)
+        .size_full();
+        let scrolled = self.scrolled(
+            SharedString::from(format!("plugin-list/{key}")),
+            &handle,
+            crate::ui::motion::Axes::Vertical,
+            window,
+            list,
+            cx,
+        );
         div()
             .w_full()
-            .h(height * shown as f32)
-            .child(
-                uniform_list(element_id, count, move |range, _window, cx| {
-                    let mut painted = Vec::new();
-                    for index in range {
-                        let Some(item) = rows.get(index) else {
-                            continue;
-                        };
-                        painted.push(plugin_row(
-                            index,
-                            item,
-                            selected == Some(index),
-                            height,
-                            &theme,
-                            action.clone().map(|action| {
-                                let entity = entity.clone();
-                                move |window: &mut Window, cx: &mut gpui::App| {
-                                    entity.update(cx, |this, cx| {
-                                        this.plugin_gesture(
-                                            panel,
-                                            action.clone(),
-                                            index.to_string(),
-                                            window,
-                                            cx,
-                                        );
-                                    });
-                                }
-                            }),
-                            cx,
-                        ));
-                    }
-                    painted
-                })
-                .size_full()
-                // The inset belongs to the **list**: `uniform_list` computes its
-                // items' size itself and ignores their margins, so a row can
-                // only carry its radius.
-                .px_1(),
-            )
+            .map(|el| {
+                if fill {
+                    el.flex_1().min_h_0()
+                } else {
+                    el.h(height * shown as f32)
+                }
+            })
+            .child(scrolled)
             .into_any_element()
     }
+}
+
+/// How many excerpts are kept coloured before the lot is dropped.
+const MAX_CODE_CACHE: usize = 256;
+
+/// The colouring of the excerpts a plugin draws, and the palette it was done
+/// under.
+#[derive(Default)]
+pub struct CodeStyles {
+    by_text: std::collections::HashMap<u64, std::rc::Rc<crate::ui::highlight::DocumentHighlights>>,
+    theme: Option<std::sync::Arc<gpui_component::highlighter::HighlightTheme>>,
+}
+
+/// A key for one excerpt. The text itself, hashed: two frames of the same file
+/// quote different lines, and a path would not tell them apart.
+fn code_key(language: &str, text: &str) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    language.hash(&mut hasher);
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Does this tree hand its remaining height to one of its blocks.
+///
+/// Only the root column's own children are looked at: a `Fill` buried inside a
+/// section is a section that grows, not a panel that stops scrolling, and the
+/// two would fight over the same pixels.
+fn fills(tree: &Node) -> bool {
+    match tree {
+        Node::Fill(_) => true,
+        Node::Column(children) => children.iter().any(|child| matches!(child, Node::Fill(_))),
+        _ => false,
+    }
+}
+
+/// Every excerpt of a tree that names a language. One that does not is left
+/// plain: guessing a grammar from the text is how a shell transcript ends up
+/// painted as Rust.
+fn collect_code(node: &Node, out: &mut Vec<(String, String)>) {
+    match node {
+        Node::Code {
+            text,
+            language: Some(language),
+            ..
+        } => out.push((language.clone(), text.clone())),
+        Node::Column(children) | Node::Row(children) => {
+            for child in children {
+                collect_code(child, out);
+            }
+        }
+        // A folded section too: folding is a reading posture, and unfolding
+        // must not be a gesture one waits for a parse behind.
+        Node::Section { body, .. } => {
+            for child in body {
+                collect_code(child, out);
+            }
+        }
+        Node::Fill(inner) => collect_code(inner, out),
+        _ => {}
+    }
+}
+
+/// The colour a tone reads in. Named by the theme and never by us: a palette
+/// says what an error looks like, and half of them are not red.
+fn tone_colour(tone: Tone, cx: &gpui::App) -> gpui::Hsla {
+    match tone {
+        Tone::Neutral => cx.theme().muted_foreground,
+        Tone::Info => cx.theme().info,
+        Tone::Success => cx.theme().success,
+        Tone::Warning => cx.theme().warning,
+        Tone::Danger => cx.theme().danger,
+    }
+}
+
+/// A pill. Tinted on its own background rather than filled: a row of five
+/// filled badges is a row of five things shouting, and what a badge does is
+/// qualify the line it sits on.
+fn badge(text: &str, tone: Tone, cx: &gpui::App) -> impl IntoElement {
+    let colour = tone_colour(tone, cx);
+    div()
+        .flex_none()
+        .px_1p5()
+        .rounded(cx.theme().radius)
+        .bg(colour.opacity(0.15))
+        .text_xs()
+        .text_color(colour)
+        .whitespace_nowrap()
+        .child(SharedString::from(text.to_string()))
+}
+
+/// A two-column table of names and values.
+///
+/// The names take a fixed share and the values the rest, which is the whole
+/// point: eight values that line up are read at a glance, and eight that do not
+/// are eight sentences.
+fn render_fields(rows: &[Pair], cx: &gpui::App) -> impl IntoElement {
+    let theme = cx.theme().clone();
+    v_flex()
+        .w_full()
+        .rounded(theme.radius)
+        .bg(theme.secondary.opacity(0.5))
+        .children(rows.iter().enumerate().map(|(index, row)| {
+            h_flex()
+                .w_full()
+                .px_2()
+                .py_0p5()
+                .gap_2()
+                .items_start()
+                // A rule between the lines and not around them: the block is
+                // already a block, and a grid of boxes would be a spreadsheet.
+                .when(index > 0, |el| el.border_t_1().border_color(theme.border))
+                .child(
+                    div()
+                        .w(gpui::relative(0.34))
+                        .flex_none()
+                        .truncate()
+                        .text_xs()
+                        .font_family(theme.mono_font_family.clone())
+                        .text_color(theme.muted_foreground)
+                        .child(SharedString::from(row.key.clone())),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .font_family(theme.mono_font_family.clone())
+                        .text_color(tone_colour(row.tone, cx))
+                        .child(SharedString::from(row.value.clone())),
+                )
+        }))
+}
+
+/// A proportion: a label, a bar, and the value.
+///
+/// The bar is the reason this is a node and not a row of two texts — "22%" and
+/// "100%" side by side are two numbers, and two bars are a comparison.
+fn render_meter(label: &str, value: &str, percent: u8, cx: &gpui::App) -> impl IntoElement {
+    let theme = cx.theme().clone();
+    h_flex()
+        .w_full()
+        .px_1()
+        .gap_2()
+        .items_center()
+        .text_xs()
+        .child(
+            div()
+                .w(gpui::relative(0.3))
+                .flex_none()
+                .truncate()
+                .text_color(theme.muted_foreground)
+                .child(SharedString::from(label.to_string())),
+        )
+        .child(
+            div()
+                .flex_none()
+                .w(gpui::relative(0.25))
+                .h(gpui::px(6.))
+                .rounded(theme.radius)
+                .bg(theme.secondary)
+                .child(
+                    div()
+                        .h_full()
+                        .w(gpui::relative(f32::from(percent) / 100.))
+                        .rounded(theme.radius)
+                        .bg(theme.primary),
+                ),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(SharedString::from(value.to_string())),
+        )
 }
 
 /// One row of a plugin's list: a pill, never a band.
@@ -1305,9 +1762,9 @@ fn plugin_row(
         .id(("plugin-row", index))
         .h(height)
         .w_full()
-        .px_2()
+        .pl_2()
+        .pr(crate::ui::theme::scroll_gutter())
         .justify_center()
-        .rounded(theme.radius)
         .when(clickable, |el| el.cursor_pointer())
         .when(selected, |el| el.bg(theme.accent))
         .when(clickable && !selected, |el| {

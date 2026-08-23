@@ -845,6 +845,14 @@ impl ClaudhubApp {
     /// a file — the same arrow carries on into the next, entering it from the
     /// end it came from.
     pub(super) fn step_diff_hunk(&mut self, delta: isize, cx: &mut Context<Self>) {
+        // The three-pane merge takes this place, so it takes the gesture with
+        // it: what "the next change" means there is the next conflict, and
+        // having to reach for a different key on a screen that looks the same
+        // is the kind of thing one learns twice and remembers neither time.
+        if self.merging_shown() {
+            self.merge_step(delta, cx);
+            return;
+        }
         let split = crate::ui::settings::Settings::global(cx).diff_split;
         let headers = self
             .active_review()
@@ -1017,6 +1025,13 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // A conflicted file opened from the conflicts panel takes this place
+        // instead of a diff: what a diff of an unmerged file shows is the
+        // markers git wrote through it, which is the one thing nobody needs to
+        // read.
+        if let Some(merge) = self.render_merge(cx) {
+            return merge;
+        }
         // The hits are recomputed here rather than in every place the query can
         // change from: comparing one string per frame is the price of having
         // nobody to notify.
@@ -2211,7 +2226,7 @@ fn centered_message(text: SharedString, cx: &mut gpui::App) -> gpui::AnyElement 
         .into_any_element()
 }
 
-fn hint(text: SharedString, cx: &mut gpui::App) -> impl IntoElement {
+pub(super) fn hint(text: SharedString, cx: &mut gpui::App) -> impl IntoElement {
     div()
         .p_3()
         .text_sm()

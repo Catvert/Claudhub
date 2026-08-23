@@ -43,6 +43,43 @@ impl Handler {
     }
 }
 
+/// How something reads on the severity scale.
+///
+/// Five tones and not a colour: a plugin says what a value *means* — an error,
+/// a warning, something that went well — and the theme says what that looks
+/// like. It is the rule [`TextStyle`] already follows one notch lower.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Tone {
+    #[default]
+    Neutral,
+    Info,
+    Success,
+    Warning,
+    Danger,
+}
+
+impl Tone {
+    /// What a script names it. Anything else is `Neutral`, which is what an
+    /// unknown severity should read as rather than an error.
+    pub fn named(name: &str) -> Self {
+        match name.trim() {
+            "info" => Self::Info,
+            "success" | "ok" => Self::Success,
+            "warning" | "warn" => Self::Warning,
+            "danger" | "error" | "fatal" => Self::Danger,
+            _ => Self::Neutral,
+        }
+    }
+}
+
+/// One line of a [`Node::Fields`] table: a name, its value, and how it reads.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Pair {
+    pub key: String,
+    pub value: String,
+    pub tone: Tone,
+}
+
 /// How a piece of text reads. Four roles and not a style sheet: a plugin says
 /// what a string *is*, the theme says what it looks like.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -76,11 +113,20 @@ pub struct Item {
 pub enum Node {
     Column(Vec<Node>),
     Row(Vec<Node>),
-    /// A collapsible block with its title. The fold is the panel's business,
-    /// not the script's: it is a reading posture, like the notes panel's.
+    /// A collapsible block with its title.
+    ///
+    /// **Which way it starts is the script's, whether it is folded now is the
+    /// panel's.** A fold is a reading posture — it changes several times in a
+    /// session and is not persisted — but where it starts is a statement about
+    /// the content: a distribution one glances at once belongs behind its
+    /// title, a stack trace does not. The panel therefore keeps the sections
+    /// that differ from what the script asked for, which is `tree::Folds`'
+    /// polarity one floor up: remembering the exception keeps the set small.
     Section {
         title: String,
         body: Vec<Node>,
+        /// Folded until someone opens it.
+        folded: bool,
     },
     Text {
         text: String,
@@ -88,9 +134,17 @@ pub enum Node {
     },
     /// An excerpt, coloured by the same table that colours the diffs when the
     /// language is known.
+    ///
+    /// `start_line` numbers it — a stack frame's excerpt without its numbers is
+    /// a block one has to count through to find the line the trace named — and
+    /// `mark` is that line, painted the way a diff paints the row one is on.
+    /// Both are **absolute** line numbers, one-based, as every tool that quotes
+    /// a file writes them.
     Code {
         text: String,
         language: Option<String>,
+        start_line: Option<usize>,
+        mark: Option<usize>,
     },
     List {
         /// Stable across renders: it keys the scroll handle, and a new id on
@@ -126,6 +180,57 @@ pub enum Node {
         disabled: bool,
         /// Solid rather than outlined: the one gesture the panel is for.
         primary: bool,
+    },
+    /// A pill: a level, a count, a status. Inline, in its tone's colour.
+    Badge {
+        text: String,
+        tone: Tone,
+    },
+    /// A sentence behind a coloured rule — the shape a message takes when it is
+    /// the thing the panel is about, not a line among others.
+    Callout {
+        text: String,
+        tone: Tone,
+    },
+    /// A table of names and values, laid out in two columns.
+    ///
+    /// It is the one shape a `Row` of `Text` could not give: the values line up
+    /// with each other, which is what makes eight of them readable at a glance
+    /// rather than eight sentences.
+    Fields {
+        rows: Vec<Pair>,
+    },
+    /// A proportion, drawn: a label, a bar, and the value it stands for.
+    ///
+    /// **A whole percent and not a float**, so the tree stays comparable — the
+    /// whole vocabulary is `Eq`, which is what lets a plugin's rendering be
+    /// asserted in a test.
+    Meter {
+        label: String,
+        value: String,
+        percent: u8,
+    },
+    /// A rule between two blocks.
+    Divider,
+    /// The child takes whatever height is left.
+    ///
+    /// **It is what makes a list a list panel rather than a block in a column.**
+    /// Without it, a list has to be given a height in advance, and sixteen rows
+    /// was the number picked: past that it scrolled inside a column that
+    /// scrolled too — two scrollbars for one gesture, neither of them the
+    /// panel's — and under it the panel ended in a band of nothing. Said by the
+    /// script and not guessed by the panel: a plugin knows which of its blocks
+    /// is the one being read, and there is no reading of a tree that says it.
+    Fill(Box<Node>),
+    /// Something outside, opened by the system's browser.
+    ///
+    /// A `Button` could not do it: its gesture goes back to the script, and a
+    /// script has no way to reach a browser — which is why the first version of
+    /// the Sentry plugin had a permalink button that did nothing at all.
+    Link {
+        label: String,
+        url: String,
+        icon: Option<String>,
     },
     /// The empty state, with the same shape as everywhere else in the window.
     Empty {
@@ -172,6 +277,40 @@ mod tests {
             Node::Code {
                 text: "fn main() {}".into(),
                 language: Some("rust".into()),
+                start_line: Some(12),
+                mark: Some(13),
+            },
+            Node::Fields {
+                rows: vec![Pair {
+                    key: "level".into(),
+                    value: "error".into(),
+                    tone: Tone::Danger,
+                }],
+            },
+            Node::Meter {
+                label: "production".into(),
+                value: "100%".into(),
+                percent: 100,
+            },
+            Node::Badge {
+                text: "error".into(),
+                tone: Tone::Danger,
+            },
+            Node::Callout {
+                text: "File does not exist".into(),
+                tone: Tone::Danger,
+            },
+            Node::Divider,
+            Node::Section {
+                title: "Répartition".into(),
+                body: vec![Node::Divider],
+                folded: true,
+            },
+            Node::Fill(Box::new(Node::Divider)),
+            Node::Link {
+                label: "Sentry".into(),
+                url: "https://sentry.io/…".into(),
+                icon: Some("external-link".into()),
             },
             Node::Field {
                 id: "project".into(),

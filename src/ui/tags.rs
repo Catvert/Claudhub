@@ -479,10 +479,6 @@ impl ClaudhubApp {
                                 .collect::<Vec<_>>()
                         })
                         .size_full()
-                        // The inset belongs to the list: a margin on a
-                        // `uniform_list` entry is ignored, the list computing
-                        // its items' size itself.
-                        .px_1()
                         .track_scroll(&scroll.clone()),
                         cx,
                     ),
@@ -576,7 +572,6 @@ impl ClaudhubApp {
 #[derive(Clone, Copy)]
 struct Look {
     row: gpui::Pixels,
-    radius: gpui::Pixels,
     muted: gpui::Hsla,
     accent: gpui::Hsla,
     warning: gpui::Hsla,
@@ -588,7 +583,6 @@ impl Look {
         Self {
             // Two storeys: the tag, then the commit it marks.
             row: crate::ui::theme::row_height(cx) * 2.,
-            radius: cx.theme().radius,
             muted: cx.theme().muted_foreground,
             accent: cx.theme().accent,
             warning: cx.theme().warning,
@@ -617,10 +611,10 @@ fn render_tag(
         .id(("tag-row", index))
         .h(look.row)
         .w_full()
-        .px_1p5()
+        .pl_1p5()
+        .pr(crate::ui::theme::scroll_gutter())
         .py_0p5()
         .justify_center()
-        .rounded(look.radius)
         .cursor_pointer()
         .hover(|s| s.bg(look.accent.opacity(0.4)))
         .on_click(move |_, _window, cx| {

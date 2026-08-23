@@ -728,6 +728,10 @@ impl ClaudhubApp {
                             .id("notes-list")
                             .size_full()
                             .overflow_y_scroll()
+                            // See `theme::scroll_gutter`: the bar is over the
+                            // content, and a section's gestures are on its
+                            // right.
+                            .pr(crate::ui::theme::scroll_gutter())
                             .track_scroll(&notes_scroll)
                             .child(todo)
                             .child(journal)

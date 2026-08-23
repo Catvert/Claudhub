@@ -56,7 +56,11 @@ pub fn connect(argv: &[String]) -> anyhow::Result<(Handle, async_channel::Receiv
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("empty server target"))?;
 
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    // The server is a console program launched by a windowed one: without this
+    // it would come with a console window of its own.
+    crate::wsl::no_console(&mut command);
+    let mut child = command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

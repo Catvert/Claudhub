@@ -199,6 +199,24 @@ pub fn row_height(cx: &App) -> Pixels {
     scaled(cx, 1.9, px(22.))
 }
 
+/// What a row keeps free on its right, for the scrollbar.
+///
+/// The bar is painted **over** the content and not beside it — see
+/// `ui::scroll` — so a row that runs to the panel's edge runs under it, and
+/// what sits at the end of a row is precisely what one reads at a glance: the
+/// review tick, the status letter, the `+n −m`. The band itself still crosses
+/// the whole panel; it is what it *carries* that stops here.
+///
+/// Reserved whether the bar is there or not. It only shows when there is
+/// something to scroll, so a padding that came with it would slide every row's
+/// contents sideways the day a list grows one line too long — and back again
+/// when a file is staged.
+///
+/// The width is the component's own, not a number of ours: the bar is theirs.
+pub fn scroll_gutter() -> Pixels {
+    gpui_component::scroll::Scrollbar::width()
+}
+
 /// The height of a header bar: tabs, panel titles.
 pub fn bar_height(cx: &App) -> Pixels {
     scaled(cx, 2.2, px(26.))

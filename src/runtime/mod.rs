@@ -56,8 +56,19 @@ fn is_network(cmd: &Cmd) -> bool {
             // are.
             | Cmd::PushTag { .. }
             | Cmd::CreateTag { push: true, .. }
+            // And a commit that pushes, for the same reason: the pair is one
+            // command so that nothing can reorder it, and where it goes is
+            // decided by the half that costs seconds.
+            | Cmd::Commit { push: true, .. }
             | Cmd::DeleteRemoteTag { .. }
             | Cmd::LoadRemoteTags { .. }
+            // A branch published, one removed from the remote, one brought up
+            // to its upstream: three round trips, and they belong where the
+            // round trips are. A **rename** does not — it moves a local ref and
+            // costs a millisecond.
+            | Cmd::PushBranch { .. }
+            | Cmd::DeleteRemoteBranch { .. }
+            | Cmd::UpdateBranch { .. }
     )
 }
 
@@ -607,16 +618,37 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
             message,
             amend,
             all,
-        } => write_then_refresh(worktree, Action::Commit, |dir| {
-            repo::commit(
-                dir,
-                repo::CommitOptions {
-                    message: &message,
-                    amend,
-                    all,
-                },
-            )
-        }),
+            push,
+        } => write_then_refresh(
+            worktree,
+            if push {
+                Action::CommitPush
+            } else {
+                Action::Commit
+            },
+            |dir| {
+                let committed = repo::commit(
+                    dir,
+                    repo::CommitOptions {
+                        message: &message,
+                        amend,
+                        all,
+                    },
+                )?;
+                // Committed then pushed, in that order and in one command: the
+                // tags' precedent. What the report says is what git wrote about
+                // the push — the round trip is the half one waited for, and the
+                // commit's own line is already in the history that follows.
+                if !push {
+                    return Ok(committed);
+                }
+                let pushed = repo::push(dir, false)?;
+                Ok(match pushed.trim().is_empty() {
+                    true => committed,
+                    false => pushed,
+                })
+            },
+        ),
         Cmd::SuggestMessage { worktree, command } => {
             match crate::commit_msg::suggest(&worktree, &command) {
                 Ok(message) => vec![Evt::CommitMessage { worktree, message }],
@@ -646,7 +678,25 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
         } => write_then_refresh(worktree, Action::Branch, |dir| {
             repo::create_branch(dir, &name, from.as_deref()).map(|_| String::new())
         }),
-        Cmd::DeleteBranch { main, name, force } => delete_branch(main, name, force),
+        Cmd::DeleteBranch { main, name, force } => branch_written(main, Action::Branch, |main| {
+            repo::delete_branch(main, &name, force).map(|_| String::new())
+        }),
+        Cmd::RenameBranch { main, from, to } => branch_written(main, Action::Branch, |main| {
+            repo::rename_branch(main, &from, &to).map(|_| String::new())
+        }),
+        Cmd::DeleteRemoteBranch { main, name } => branch_written(main, Action::Branch, |main| {
+            repo::delete_remote_branch(main, &name)
+        }),
+        Cmd::PushBranch {
+            main,
+            branch,
+            force_with_lease,
+        } => branch_written(main, Action::Push, |main| {
+            repo::push_branch(main, &branch, force_with_lease)
+        }),
+        Cmd::UpdateBranch { main, branch } => branch_written(main, Action::Pull, |main| {
+            repo::update_branch(main, &branch)
+        }),
         Cmd::CreateTag {
             worktree,
             name,
@@ -707,6 +757,21 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
             ours,
         } => write_then_refresh(worktree, Action::Resolve, |dir| {
             repo::resolve(dir, &path, ours).map(|_| String::new())
+        }),
+        Cmd::ReadMerge { worktree, path } => {
+            let result = repo::stages(&worktree, &path).map_err(|e| format!("{e:#}"));
+            vec![Evt::MergeStages {
+                worktree,
+                path,
+                result,
+            }]
+        }
+        Cmd::ResolveWith {
+            worktree,
+            path,
+            content,
+        } => write_then_refresh(worktree, Action::Resolve, |dir| {
+            repo::resolve_with(dir, &path, &content).map(|_| String::new())
         }),
 
         // — Plugins —————————————————————————————————————————————————————
@@ -823,9 +888,18 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
                 worktree,
                 files: listing.all,
                 ignored: listing.ignored,
+                dirs: listing.dirs,
             }],
             Err(e) => vec![fail(Some(worktree), Action::Read, e)],
         },
+        Cmd::ReadDir { worktree, dir } => {
+            let result = crate::files::read_dir(&worktree, &dir).map_err(|e| e.to_string());
+            vec![Evt::DirListed {
+                worktree,
+                dir,
+                result,
+            }]
+        }
         Cmd::ReadFile { worktree, path } => match crate::files::read(&worktree, &path) {
             Ok(content) => vec![Evt::FileContent {
                 worktree,
@@ -834,6 +908,16 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
             }],
             Err(e) => vec![fail(Some(worktree), Action::Read, e)],
         },
+        // A file git does not track has no base, and that is an answer rather
+        // than a failure: nothing is wrong, every line of it is simply new.
+        Cmd::ReadFileBase { worktree, path } => {
+            let text = repo::head_blob(&worktree, &path);
+            vec![Evt::FileBase {
+                worktree,
+                path,
+                text,
+            }]
+        }
         Cmd::WriteFile {
             worktree,
             path,
@@ -1031,10 +1115,21 @@ fn branches_evt(main: PathBuf, branches: Vec<crate::git::Branch>) -> Evt {
 
 /// Deletes a branch and re-reads the list: the panel shows it, and nothing else
 /// would tell it the branch has gone.
-fn delete_branch(main: PathBuf, name: String, force: bool) -> Vec<Evt> {
-    match repo::delete_branch(&main, &name, force) {
-        Ok(()) => {
-            let mut evts = vec![done(None, Action::Branch, String::new())];
+/// A write that touches a repository's refs, followed by a fresh branch list.
+///
+/// The counterpart of `write_then_refresh` one floor up: what these commands
+/// change is not a worktree's status but the list the picker shows, and a list
+/// that still carries the branch one has just deleted is the one thing this menu
+/// must not do. No worktree is named — a branch belongs to the repository, and
+/// the one being written to is often held by a checkout the window never opened.
+fn branch_written(
+    main: PathBuf,
+    action: Action,
+    f: impl FnOnce(&Path) -> anyhow::Result<String>,
+) -> Vec<Evt> {
+    match f(&main) {
+        Ok(output) => {
+            let mut evts = vec![done(None, action, output)];
             evts.extend(
                 branch::list(&main)
                     .ok()
@@ -1042,7 +1137,7 @@ fn delete_branch(main: PathBuf, name: String, force: bool) -> Vec<Evt> {
             );
             evts
         }
-        Err(e) => vec![fail(None, Action::Branch, e)],
+        Err(e) => vec![fail(None, action, e)],
     }
 }
 
@@ -1377,6 +1472,53 @@ mod tests {
         );
     }
 
+    /// The six branch operations, sorted by what they cost and not by the fact
+    /// that they all say "branch".
+    ///
+    /// Three of them talk to a remote and three do not, and putting a rename
+    /// behind a `push` would make a keystroke wait on a network round trip. The
+    /// mistake is silent — a misrouted command never fails, it waits.
+    #[test]
+    fn a_branch_operation_goes_where_its_cost_is() {
+        let main = worktree();
+        for local in [
+            Cmd::CreateBranch {
+                worktree: worktree(),
+                name: "feat".into(),
+                from: None,
+            },
+            Cmd::DeleteBranch {
+                main: main.clone(),
+                name: "feat".into(),
+                force: false,
+            },
+            Cmd::RenameBranch {
+                main: main.clone(),
+                from: "feat".into(),
+                to: "feat-2".into(),
+            },
+        ] {
+            assert_eq!(queue_of(&local), Queue::Reads, "{}", local.name());
+        }
+        for remote in [
+            Cmd::PushBranch {
+                main: main.clone(),
+                branch: "feat".into(),
+                force_with_lease: false,
+            },
+            Cmd::DeleteRemoteBranch {
+                main: main.clone(),
+                name: "feat".into(),
+            },
+            Cmd::UpdateBranch {
+                main: main.clone(),
+                branch: "feat".into(),
+            },
+        ] {
+            assert_eq!(queue_of(&remote), Queue::Network, "{}", remote.name());
+        }
+    }
+
     /// A tag creation is local and instant; pushing one is a round trip. The
     /// two go into two different queues, and that is exactly why a creation
     /// that also pushes is **one** command: nothing orders two queues, and the
@@ -1441,6 +1583,42 @@ mod tests {
             queue_of(&Cmd::ReadPreview {
                 worktree: worktree(),
                 path: "src/main.rs".into(),
+            }),
+            Queue::Reads
+        );
+    }
+
+    /// The editor's gutter waits on this one: a `git show` of a single blob is
+    /// a read, and putting it anywhere slower would leave the change strip
+    /// blank behind a fetch.
+    #[test]
+    fn the_editors_base_is_a_read() {
+        assert_eq!(
+            queue_of(&Cmd::ReadFileBase {
+                worktree: worktree(),
+                path: "src/main.rs".into(),
+            }),
+            Queue::Reads
+        );
+    }
+
+    /// The three-pane merge waits on both of these, and a frame waits on the
+    /// merge: reading the three stages is three `git show` of one blob each, and
+    /// writing the outcome is a local write like any other.
+    #[test]
+    fn a_merge_is_read_and_written_on_the_reads_queue() {
+        assert_eq!(
+            queue_of(&Cmd::ReadMerge {
+                worktree: worktree(),
+                path: "src/main.rs".into(),
+            }),
+            Queue::Reads
+        );
+        assert_eq!(
+            queue_of(&Cmd::ResolveWith {
+                worktree: worktree(),
+                path: "src/main.rs".into(),
+                content: String::new(),
             }),
             Queue::Reads
         );

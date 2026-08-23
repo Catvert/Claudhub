@@ -14,8 +14,8 @@
 //! layout is done outside that borrow.
 
 use gpui::{
-    div, prelude::*, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    IntoElement, Render, WeakEntity, Window,
+    canvas, div, point, prelude::*, App, AppContext, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, Hsla, IntoElement, PathBuilder, Pixels, Render, WeakEntity, Window,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::dock::{BasePanel, Panel, PanelControl, PanelEvent};
@@ -45,11 +45,100 @@ use crate::ui::settings::Settings;
 /// panel must therefore go through it: one that skips it has square corners,
 /// and nothing points that out.
 fn pane_frame(content: impl IntoElement, cx: &App) -> gpui::Div {
+    let radius = cx.theme().radius_lg;
+    let outside = crate::ui::theme::gutter(cx);
     div()
         .size_full()
-        .rounded_b(cx.theme().radius_lg)
+        .relative()
+        .rounded_b(radius)
         .bg(cx.theme().background)
         .child(content)
+        // And the corners are cut back **over** the content, for the same
+        // rectangular mask: this background has the last word only over what is
+        // painted before it. A panel whose content fills its own surface —
+        // the editor paints an opaque quad the height of the panel under its
+        // line numbers, the result grid one per row — brought the square corner
+        // back, and no rounding of ours can reach inside a child.
+        .child(corner_cut(radius, true, outside))
+        .child(corner_cut(radius, false, outside))
+}
+
+/// The sliver a rounded corner leaves out, painted in the colour behind the
+/// card.
+///
+/// A **path** and not a small square of that colour: a square would also cover
+/// what falls inside the corner — the last centimetre of a scrollbar's travel
+/// on the right, the gutter's own colour on the left — and would only be right
+/// where the two happen to be the same. What is painted is exactly the outside
+/// of the quarter circle, so the card looks cut rather than patched.
+///
+/// The quarter is a cubic Bézier at the usual constant: an elliptical arc would
+/// say the same thing with two flags whose meaning depends on which way the y
+/// axis runs.
+fn corner_cut(radius: Pixels, left: bool, colour: Hsla) -> impl IntoElement {
+    /// What makes a cubic Bézier a quarter circle, to within a thousandth.
+    const KAPPA: f32 = 0.5523;
+
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let (x, y) = (bounds.origin.x, bounds.origin.y);
+            let (r, k) = (radius, radius * KAPPA);
+            let mut path = PathBuilder::fill();
+            if left {
+                // The panel's corner is at the bottom left of this box, and the
+                // rounding is centred on its top-right.
+                path.move_to(point(x, y));
+                path.line_to(point(x, y + r));
+                path.line_to(point(x + r, y + r));
+                path.cubic_bezier_to(point(x, y), point(x + r - k, y + r), point(x, y + k));
+            } else {
+                path.move_to(point(x + r, y));
+                path.line_to(point(x + r, y + r));
+                path.line_to(point(x, y + r));
+                path.cubic_bezier_to(point(x + r, y), point(x + k, y + r), point(x + r, y + k));
+            }
+            if let Ok(path) = path.build() {
+                window.paint_path(path, colour);
+            }
+        },
+    )
+    .absolute()
+    .bottom_0()
+    .map(|el| if left { el.left_0() } else { el.right_0() })
+    .w(radius)
+    .h(radius)
+}
+
+/// Closing a tab with the wheel button.
+///
+/// The gesture of every browser and every editor, and the only one that closes
+/// a tab without aiming at a cross the size of a full stop — which is what one
+/// wants when six terminals have to go.
+///
+/// **`on_aux_click` and not `on_mouse_down`**: a click is a press *and* a
+/// release on the same tab, so a wheel button pressed by mistake is taken back
+/// by letting go somewhere else — a middle button has no other way to be
+/// cancelled, having no drag. And the event carries its button, which is what
+/// this listener needs: gpui sends it every click that is not the left one, the
+/// right one included, and the right one belongs to the rename menu.
+///
+/// The click is **consumed**: the tab under it would otherwise bring forward
+/// the panel it is about to close, exactly as it does under the cross.
+fn close_on_middle_click<E: gpui::StatefulInteractiveElement>(
+    tab: E,
+    close: impl Fn(&mut Window, &mut App) + 'static,
+) -> E {
+    tab.on_aux_click(move |event, window, cx| {
+        let gpui::ClickEvent::Mouse(mouse) = event else {
+            return;
+        };
+        if mouse.up.button != gpui::MouseButton::Middle {
+            return;
+        }
+        cx.stop_propagation();
+        close(window, cx);
+    })
 }
 
 /// The same, while recording the panel just **touched**: that is what gives
@@ -663,7 +752,21 @@ impl Panel for FilePanel {
             })
             .unwrap_or(false);
         let app = self.app.clone();
-        gpui_component::h_flex()
+        // The same closing as the cross's, and it has to be: the wheel button is
+        // the other way of making the same gesture.
+        let closing = {
+            let (app, root, path) = (app.clone(), root.clone(), path.clone());
+            move |window: &mut Window, cx: &mut App| {
+                let Some(app) = app.upgrade() else {
+                    return;
+                };
+                let (root, path) = (root.clone(), path.clone());
+                window.defer(cx, move |window, cx| {
+                    app.update(cx, |app, cx| app.close_file(root, path, window, cx));
+                });
+            }
+        };
+        let tab = gpui_component::h_flex()
             .id(("file-tab", self.input.entity_id()))
             .gap_1()
             .items_center()
@@ -691,7 +794,8 @@ impl Panel for FilePanel {
                             app.update(cx, |app, cx| app.close_file(root, path, window, cx));
                         });
                     }),
-            )
+            );
+        close_on_middle_click(tab, closing)
     }
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {
@@ -1138,10 +1242,31 @@ impl Panel for TerminalPanel {
         let mine = self.worktree.clone();
         let go = app.clone();
         let in_grid = self.in_grid;
-        gpui_component::h_flex()
-            .id(("terminal-tab", id))
-            .gap_1()
-            .items_center()
+        // The wheel button closes, like the cross — the confirmation included:
+        // what dies with a terminal is a build half done, and the question does
+        // not depend on which gesture asked.
+        let closing = {
+            let app = app.clone();
+            move |window: &mut Window, cx: &mut App| {
+                let Some(app) = app.upgrade() else {
+                    return;
+                };
+                window.defer(cx, move |window, cx| {
+                    app.update(cx, |app, cx| app.ask_close_terminal(id, window, cx));
+                });
+            }
+        };
+        // The listener goes on the row itself and before the menu wraps it: a
+        // context menu is not an interactive element, and there is nothing to
+        // hang a click on once it has.
+        let tab = close_on_middle_click(
+            gpui_component::h_flex()
+                .id(("terminal-tab", id))
+                .gap_1()
+                .items_center(),
+            closing,
+        );
+        tab
             // Renaming is a right click and not a double click: a double click
             // on a tab bar already means "zoom this group" everywhere else, and
             // the tab under this element consumes the plain click to select.

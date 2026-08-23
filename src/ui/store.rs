@@ -68,6 +68,8 @@ pub struct WorktreeState {
     /// would free its number, and a note already sent to the agent is referred
     /// to there by a number that would then mean another one.
     pub next_note: u64,
+    /// Where the work stood in this checkout.
+    pub place: Place,
 }
 
 /// The file open in the built-in editor, and the checkout it belongs to.
@@ -98,12 +100,50 @@ pub struct OpenConsole {
     pub query: String,
 }
 
+/// Where the work stood in one checkout.
+///
+/// **What one had chosen, never what one had obtained**: the screen, the tabs,
+/// the console's connection and the text of its query — no diff, no result
+/// grid, no status. A `SELECT` replayed on arrival is a query against a server
+/// nobody asked to reach, and everything else comes back on its own from the
+/// reads the selection already triggers.
+///
+/// It lives **per worktree** because that is what it describes: the file open in
+/// the editor is one of that checkout's files, and the screen one was on says
+/// what one was doing *there*. A single global place meant that going to another
+/// project to check one thing and coming back cost the file, the screen and the
+/// query — four gestures to get back to a state nobody had left on purpose.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Place {
+    /// The screen being looked at, by `Workspace::key`.
+    ///
+    /// **Only a screen one works in**: the settings and the multiplexer are
+    /// detours, and coming back to a project should not put one back in the
+    /// detour one took while leaving it. It is the rule `worked_in` follows.
+    pub screen: Option<String>,
+    /// The file that was **on screen**, among the tabs. Kept apart from the
+    /// list so that a state written before tabs existed still opens what it
+    /// named, and so that reopening knows which tab to bring forward.
+    pub editing: Option<OpenFile>,
+    /// Every file the editor had open, in tab order.
+    pub tabs: Vec<OpenFile>,
+    pub console: Option<OpenConsole>,
+}
+
+impl Place {
+    /// Nothing worth putting back.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// What the window was showing when it was closed.
 ///
-/// Not the settings and not `layout.json`: the screen and the panels' places
-/// are the window's geometry, this is where the work was. It goes with the
-/// rest of the store because it is state, and because it is written by the
-/// same deferred save.
+/// One field now: **which worktree**. The rest of where one was moved into that
+/// worktree's own entry the day places became per checkout — see [`Place`] —
+/// and what stays here is precisely what is not about any one of them: which of
+/// the twelve the window opens on.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Session {
@@ -111,14 +151,14 @@ pub struct Session {
     /// over the checkout `claudhub` was launched from — see
     /// `ClaudhubApp::repo_opened`.
     pub worktree: Option<PathBuf>,
-    /// The file that was **on screen**, among the tabs. Kept apart from the
-    /// list so that a state written before tabs existed still opens what it
-    /// named, and so that reopening knows which tab to bring forward.
-    pub editing: Option<OpenFile>,
-    /// Every file the editor had open, in tab order.
-    #[serde(default)]
-    pub tabs: Vec<OpenFile>,
-    pub console: Option<OpenConsole>,
+    /// **Legacy**: where the work stood, back when there was one place for the
+    /// whole window. Poured into its worktree's entry once, then cleared —
+    /// the path `migrate_sentry` and the notes' recovery already take.
+    ///
+    /// Flattened, so a `state.json` written before this change is read without
+    /// a migration of its shape: the three keys were at this level already.
+    #[serde(flatten)]
+    pub place: Place,
 }
 
 /// What survives a restart for a repository, worktrees taken together.
@@ -150,13 +190,48 @@ pub struct Store {
     pub repos: HashMap<PathBuf, RepoState>,
     /// Where one was, all repositories taken together.
     pub session: Session,
+    /// The checkouts pinned to the top bar, in the order they were pinned.
+    ///
+    /// Here and not in the settings, for the reason this file exists: a pin is
+    /// where one is working this week, not a preference one writes by hand. And
+    /// a flat list across every repository, because that is what the row in the
+    /// bar is — one goes from a checkout of one project to a checkout of
+    /// another, which is the switch the pins exist to make one click.
+    ///
+    /// A path that no repository claims is kept and simply not painted: a
+    /// repository one has not opened yet is not a repository whose pins should
+    /// be forgotten. What `forget_missing` drops is a checkout git has just
+    /// said is gone.
+    pub pinned: Vec<PathBuf>,
 }
 
 impl Store {
     pub fn load() -> Self {
         let mut store = Self::read();
         store.migrate_sentry();
+        store.migrate_place();
         store
+    }
+
+    /// The window's one place becomes its worktree's.
+    ///
+    /// The same path as a fresh write, like `migrate_sentry`: the field is
+    /// poured into the entry and cleared, so it happens once, and a worktree
+    /// that already has a place of its own keeps it. An entry created here
+    /// carries no repository, which the purge reads as "not mine to forget" —
+    /// the very rule that protects a state written before that field existed.
+    fn migrate_place(&mut self) {
+        if self.session.place.is_empty() {
+            return;
+        }
+        let place = std::mem::take(&mut self.session.place);
+        let Some(worktree) = self.session.worktree.clone() else {
+            return;
+        };
+        let state = self.worktrees.entry(worktree).or_default();
+        if state.place.is_empty() {
+            state.place = place;
+        }
     }
 
     /// The Sentry project of each repository becomes the Sentry **plugin**'s.
@@ -236,9 +311,34 @@ impl Store {
     /// written before the `repo` field existed, whose repository is empty — are
     /// left untouched: a dead entry is better than an erased note.
     pub fn forget_missing(&mut self, repo: &Path, alive: &[PathBuf]) {
+        let mut gone = Vec::new();
         self.worktrees.retain(|path, state| {
-            state.repo.as_os_str().is_empty() || state.repo != repo || alive.contains(path)
+            let keep =
+                state.repo.as_os_str().is_empty() || state.repo != repo || alive.contains(path);
+            if !keep {
+                gone.push(path.clone());
+            }
+            keep
         });
+        // A pin on a checkout that no longer exists goes with it. It is the one
+        // moment we know for sure, and the pin carries no repository of its own
+        // to be judged on later.
+        self.pinned.retain(|path| !gone.contains(path));
+    }
+
+    pub fn is_pinned(&self, path: &Path) -> bool {
+        self.pinned.iter().any(|pinned| pinned == path)
+    }
+
+    /// Pins a checkout, or unpins it. A new pin goes **last**: the row is read
+    /// left to right, and a pin that pushed the others along would move the
+    /// button one was aiming at.
+    pub fn toggle_pin(&mut self, path: &Path) {
+        if let Some(ix) = self.pinned.iter().position(|pinned| pinned == path) {
+            self.pinned.remove(ix);
+        } else {
+            self.pinned.push(path.to_path_buf());
+        }
     }
 }
 
@@ -326,39 +426,97 @@ mod tests {
         assert_eq!(store.session, Session::default());
     }
 
-    #[test]
-    fn a_session_survives_the_round_trip() {
-        let store = Store {
-            session: Session {
-                worktree: Some(PathBuf::from("/r/wt/a")),
-                editing: Some(OpenFile {
+    fn a_place() -> Place {
+        Place {
+            screen: Some("db".into()),
+            editing: Some(OpenFile {
+                worktree: PathBuf::from("/r/wt/a"),
+                path: PathBuf::from("app/Models/User.php"),
+            }),
+            tabs: vec![
+                OpenFile {
+                    worktree: PathBuf::from("/r/wt/a"),
+                    path: PathBuf::from("routes/web.php"),
+                },
+                OpenFile {
                     worktree: PathBuf::from("/r/wt/a"),
                     path: PathBuf::from("app/Models/User.php"),
-                }),
-                tabs: vec![
-                    OpenFile {
-                        worktree: PathBuf::from("/r/wt/a"),
-                        path: PathBuf::from("routes/web.php"),
-                    },
-                    OpenFile {
-                        worktree: PathBuf::from("/r/wt/a"),
-                        path: PathBuf::from("app/Models/User.php"),
-                    },
-                ],
-                console: Some(OpenConsole {
-                    connection: "mysql:root@localhost:3306/".into(),
-                    database: Some("shop".into()),
-                    query: "SELECT * FROM users".into(),
-                }),
+                },
+            ],
+            console: Some(OpenConsole {
+                connection: "mysql:root@localhost:3306/".into(),
+                database: Some("shop".into()),
+                query: "SELECT * FROM users".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_place_survives_the_round_trip() {
+        let mut store = Store {
+            session: Session {
+                worktree: Some(PathBuf::from("/r/wt/a")),
+                ..Default::default()
             },
             ..Default::default()
         };
+        store
+            .worktree_mut(Path::new("/r/wt/a"), Path::new("/r"))
+            .place = a_place();
         let text = serde_json::to_string(&store).unwrap();
         let back: Store = serde_json::from_str(&text).unwrap();
-        assert_eq!(back.session, store.session);
+        assert_eq!(
+            back.worktree(Path::new("/r/wt/a")).unwrap().place,
+            a_place()
+        );
+        assert_eq!(back.session.worktree, store.session.worktree);
         // The password is nowhere in it: a connection is named by its key, and
         // described in the settings.
         assert!(!text.contains("password"));
+    }
+
+    /// A `state.json` from before places were per worktree carries the three
+    /// keys at the session's level, and the flatten reads them there: the
+    /// migration then pours them into the worktree the session names, once.
+    #[test]
+    fn a_window_wide_place_moves_into_its_worktree() {
+        let text = r#"{
+            "worktrees": {"/r/wt/a": {"repo": "/r", "base": "dev"}},
+            "session": {
+                "worktree": "/r/wt/a",
+                "editing": {"worktree": "/r/wt/a", "path": "routes/web.php"},
+                "tabs": [{"worktree": "/r/wt/a", "path": "routes/web.php"}]
+            }
+        }"#;
+        let mut store: Store = serde_json::from_str(text).unwrap();
+        store.migrate_place();
+        let state = store.worktree(Path::new("/r/wt/a")).unwrap();
+        assert_eq!(state.place.tabs.len(), 1);
+        assert_eq!(
+            state.base.as_deref(),
+            Some("dev"),
+            "nothing else is touched"
+        );
+        // Emptied, so a second run finds nothing to pour and a place edited
+        // since is not overwritten by a copy of the old one.
+        assert!(store.session.place.is_empty());
+        assert_eq!(store.session.worktree, Some(PathBuf::from("/r/wt/a")));
+    }
+
+    /// A place with no worktree to file it under is dropped rather than left
+    /// where a second migration would find it.
+    #[test]
+    fn a_place_without_a_worktree_goes_nowhere() {
+        let mut store = Store {
+            session: Session {
+                worktree: None,
+                place: a_place(),
+            },
+            ..Default::default()
+        };
+        store.migrate_place();
+        assert!(store.session.place.is_empty());
+        assert!(store.worktrees.is_empty());
     }
 
     #[test]
@@ -398,5 +556,39 @@ mod tests {
         assert!(store.worktree(Path::new("/r/b")).is_none());
         assert!(store.worktree(Path::new("/other/a")).is_some());
         assert!(store.worktree(Path::new("/legacy")).is_some());
+    }
+
+    #[test]
+    fn a_pin_goes_last_and_toggles_off() {
+        let mut store = Store::default();
+        store.toggle_pin(Path::new("/r/a"));
+        store.toggle_pin(Path::new("/r/b"));
+        assert_eq!(
+            store.pinned,
+            vec![PathBuf::from("/r/a"), PathBuf::from("/r/b")]
+        );
+        store.toggle_pin(Path::new("/r/a"));
+        assert_eq!(store.pinned, vec![PathBuf::from("/r/b")]);
+        assert!(!store.is_pinned(Path::new("/r/a")));
+    }
+
+    /// A pin follows the checkout it names: git says it is gone, the button
+    /// goes. What belongs to a repository nobody has enumerated stays — the
+    /// rule the notes already follow.
+    #[test]
+    fn purging_takes_the_pins_of_what_it_forgets() {
+        let mut store = Store::default();
+        store.worktree_mut(Path::new("/r/a"), Path::new("/r")).base = Some("dev".into());
+        store.worktree_mut(Path::new("/r/b"), Path::new("/r")).base = Some("dev".into());
+        store.toggle_pin(Path::new("/r/a"));
+        store.toggle_pin(Path::new("/r/b"));
+        store.toggle_pin(Path::new("/elsewhere/c"));
+
+        store.forget_missing(Path::new("/r"), &[PathBuf::from("/r/a")]);
+
+        assert_eq!(
+            store.pinned,
+            vec![PathBuf::from("/r/a"), PathBuf::from("/elsewhere/c")]
+        );
     }
 }

@@ -24,7 +24,7 @@ pub mod tags;
 pub use branch::{Branch, BranchKind, Upstream};
 pub use diff::{DiffFile, DiffLine, DiffLineKind, FileDiff, Hunk, Range as DiffRange};
 pub use history::{Commit, GraphRow, LogRange};
-pub use repo::{Pending, Repo, Worktree};
+pub use repo::{Pending, Repo, Stages, Worktree};
 pub use search::Query as SearchQuery;
 pub use status::{FileStatus, Status, StatusCode, Summary};
 pub use tags::Tag;
@@ -211,6 +211,28 @@ pub(crate) fn git_reporting<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<S
     }
     output.push_str(stdout.trim_end());
     Ok(output)
+}
+
+/// Runs git and returns its output **byte for byte**.
+///
+/// For what is a *file* and not an answer: the stages of a conflicted file,
+/// which are read to be merged and written back to disk. `git` strips the
+/// trailing newlines, which is right for the output of a command and wrong for
+/// a blob — the newline it eats is a change nobody made, and it would land in
+/// the file being resolved.
+///
+/// Invalid UTF-8 is an error rather than a lossy conversion: a binary file has
+/// nothing to show in three columns, and replacing its bytes with question
+/// marks would resolve it into something no one wrote.
+pub(crate) fn git_blob<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<String> {
+    let started = Instant::now();
+    let out = run(dir, args)?;
+    report(dir, args, started.elapsed(), &out);
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!("git {}: {}", describe(args), stderr.trim());
+    }
+    String::from_utf8(out.stdout).context("this file is binary")
 }
 
 /// The same, but failure counts as `None`: for optional reads (an upstream

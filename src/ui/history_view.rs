@@ -355,7 +355,7 @@ fn render_commit(
         .w_full()
         .items_center()
         .gap_2()
-        .pr_2()
+        .pr(crate::ui::theme::scroll_gutter())
         // A history row fits on one line: without this, a slightly long sha or
         // author name wraps, exceeds the height the virtualised list reserved
         // and covers the commit's summary.

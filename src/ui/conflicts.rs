@@ -5,10 +5,11 @@
 //! change list fills with files you never touched. While it lasts, the status
 //! bar says so and offers a way out.
 //!
-//! **A three-pane view is not promised here.** The three per-file actions —
-//! keep ours, keep theirs, open in the editor — fit in little code and cover
-//! what one does in the vast majority of cases; a merge by hand happens in the
-//! editor, which already knows how.
+//! **Clicking a file opens the three-pane view** (`ui::merge_view`); the two
+//! buttons on its row settle the cases that need no reading at all — a file one
+//! has already decided about as a whole — and stay the only way out of the
+//! conflicts three columns cannot show: a binary file, and a file one side
+//! deleted.
 
 use std::path::PathBuf;
 
@@ -98,7 +99,6 @@ impl ClaudhubApp {
             .into_iter()
             .filter(|path| crate::ui::find::matches(&query, &path.to_string_lossy()))
             .collect();
-        let range = crate::git::DiffRange::Working;
         let selected = self
             .active_review()
             .and_then(|state| state.selected.clone());
@@ -151,7 +151,7 @@ impl ClaudhubApp {
             .enumerate()
             .map(|(index, path)| {
                 let is_open = selected.as_deref() == Some(path.as_path());
-                self.render_conflict_row(index, path, range.clone(), is_open, mono.clone(), cx)
+                self.render_conflict_row(index, path, is_open, mono.clone(), cx)
             })
             .collect();
 
@@ -170,6 +170,10 @@ impl ClaudhubApp {
                             .id("conflict-list")
                             .size_full()
                             .overflow_y_scroll()
+                            // The bar is painted over the content: what a row
+                            // carries on its right — here the two buttons that
+                            // settle a file — would sit under it.
+                            .pr(crate::ui::theme::scroll_gutter())
                             .track_scroll(&list_scroll)
                             .children(rows),
                         cx,
@@ -183,7 +187,6 @@ impl ClaudhubApp {
         &mut self,
         index: usize,
         path: PathBuf,
-        range: crate::git::DiffRange,
         is_open: bool,
         mono: SharedString,
         cx: &mut Context<Self>,
@@ -206,11 +209,11 @@ impl ClaudhubApp {
                     .font_family(mono)
                     .truncate()
                     .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _window, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         let Some(worktree) = this.active.clone() else {
                             return;
                         };
-                        this.open_file(worktree, for_open.clone(), range.clone(), cx);
+                        this.open_merge(worktree, for_open.clone(), window, cx);
                     }))
                     .child(label),
             )

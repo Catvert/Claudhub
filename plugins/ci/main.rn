@@ -35,7 +35,7 @@ pub fn view(s, panel) {
 
     let rows = [];
     for run in s.runs {
-        rows.push(item(run.title, run.workflow, badge(run), glyph(run)));
+        rows.push(item(run.title, run.workflow, tally(run), glyph(run)));
     }
 
     let body = [
@@ -131,7 +131,7 @@ fn parse(out) {
     runs
 }
 
-fn badge(run) {
+fn tally(run) {
     if run.conclusion == "" {
         run.status
     } else {

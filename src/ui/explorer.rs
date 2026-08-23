@@ -48,6 +48,94 @@ use crate::ui::surface::{Place, Surface};
 use crate::ui::theme::status_color;
 use crate::ui::tree;
 
+/// How long a drag has to stay on a closed folder before it opens.
+///
+/// Long enough that crossing the tree on the way somewhere else costs nothing,
+/// short enough that staying reads as asking. It is the delay every file
+/// manager uses, and it is not a setting.
+const DRAG_HOVER: std::time::Duration = std::time::Duration::from_millis(600);
+
+/// A row of the tree being dragged.
+///
+/// The payload of an internal drag, and the ghost that follows the pointer: a
+/// drag's value must be a type of its own — that is what a drop listener reads
+/// to know the drag is one of ours and not the desktop's files.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DraggedEntry {
+    /// Relative to the worktree, folder or file.
+    pub path: PathBuf,
+}
+
+impl gpui::Render for DraggedEntry {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let name = self
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        h_flex()
+            .px_2()
+            .py_0p5()
+            .gap_1()
+            .rounded(cx.theme().radius)
+            .bg(cx.theme().popover)
+            .border_1()
+            .border_color(cx.theme().border)
+            .text_xs()
+            .child(SharedString::from(name))
+    }
+}
+
+/// The move a drop is asking for, when there is one to make.
+///
+/// `None` for the three gestures that mean nothing and that a file manager
+/// swallows silently: dropping something back where it already is, dropping a
+/// folder on itself, and dropping it into one of its own children — the last
+/// one being the only one that would do damage.
+fn move_within(from: &Path, to: &Path) -> Option<files::Op> {
+    if from == to || to.starts_with(from) {
+        return None;
+    }
+    Some(files::Op::Rename {
+        from: from.to_path_buf(),
+        to: to.to_path_buf(),
+    })
+}
+
+/// One flag per file: does `.gitignore` leave it out?
+///
+/// Both lists come sorted from git — the second is a subset of the first — so
+/// one pass answers for every file. What used to be here was a binary search
+/// per leaf **and per folder that carries it**, which on a checkout with a
+/// `target/` is a hundred thousand path comparisons for a single chevron.
+///
+/// An unsorted list would only mean some rows are not greyed: the walk stops
+/// naming what it has passed, and nothing else reads these flags.
+fn excluded_flags(files: &[PathBuf], ignored: &[PathBuf]) -> Vec<bool> {
+    if ignored.is_empty() {
+        return Vec::new();
+    }
+    let mut rest = ignored.iter().peekable();
+    let mut flags = Vec::with_capacity(files.len());
+    for path in files {
+        while rest.peek().is_some_and(|other| *other < path) {
+            rest.next();
+        }
+        flags.push(rest.peek() == Some(&path));
+    }
+    flags
+}
+
+/// The folder a row hands a drop to: a folder takes it, a file gives it to the
+/// one it lives in. The worktree's root is the empty path.
+fn drop_dir(path: &Path, is_dir: bool) -> PathBuf {
+    if is_dir {
+        path.to_path_buf()
+    } else {
+        path.parent().unwrap_or(Path::new("")).to_path_buf()
+    }
+}
+
 /// Where the reading of a worktree's file list stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Listing {
@@ -66,7 +154,20 @@ pub enum Listing {
 pub struct Explorer {
     /// The flat list, as git returns it: it is the reference, and the tree is
     /// only a display of it.
-    pub files: Vec<PathBuf>,
+    ///
+    /// Behind an `Rc` because the render hands it to the closure of a
+    /// virtualised list: a clone of a hundred thousand `PathBuf` — what a
+    /// checkout with a `target/` weighs — is three milliseconds **per frame**,
+    /// wheel animation included.
+    pub files: Rc<Vec<PathBuf>>,
+    /// The tree those paths make, folds left out.
+    ///
+    /// Held from one fold to the next, and this is the whole answer to a
+    /// `target/` that took a fifth of a second to open: building it costs some
+    /// twenty milliseconds on a hundred thousand paths, and **a collapse
+    /// changes none of it** — only which rows come out of it, which is a walk
+    /// of what is visible.
+    tree: tree::Tree,
     /// The displayed tree, rebuilt on every collapse and never in a render.
     pub rows: Rc<Vec<tree::Entry>>,
     /// The folders the user opened.
@@ -90,18 +191,43 @@ pub struct Explorer {
     pub state: Listing,
     /// Were the ignored files asked for, so we know when to re-read.
     pub ignored: bool,
-    /// The subset of `files` that `.gitignore` excludes, sorted as git gave it.
+    /// One flag per file, saying whether `.gitignore` leaves it out.
     ///
-    /// Kept apart and searched, rather than folded into `files` as a pair: it
-    /// is empty on a project that ignores nothing, and the rows it dims are
-    /// worked out once per rebuild, never in a render.
-    pub ignored_files: Vec<PathBuf>,
+    /// A flag and not the sorted list git gave, which used to be searched: a
+    /// directory is dimmed only when **everything** under it is ignored, so the
+    /// walk visits every leaf of every folder on screen — a hundred thousand
+    /// path comparisons on a checkout with a `target/`, two tenths of a second
+    /// for one chevron. Read once when the list arrives, at the cost of one
+    /// pass over two sorted lists.
+    excluded: Vec<bool>,
+    /// The excluded paths, sorted, as `excluded` was computed from.
+    ///
+    /// Kept rather than deduced back from the flags: opening a folder shifts
+    /// every index after it, and a flag read by index would then name another
+    /// file. Five hundred entries on a Laravel checkout, since git stops at a
+    /// directory it excludes whole.
+    ignored_paths: Vec<PathBuf>,
+    /// The paths that name a **directory**, sorted.
+    ///
+    /// What the tree needs to draw a chevron on `vendor/` rather than a file
+    /// icon: a path with nothing under it is a file as far as a tree built from
+    /// paths can tell. A directory stays here once it has been read, or it
+    /// would be drawn twice.
+    dirs: Vec<PathBuf>,
+    /// Those of `dirs` nobody has looked inside yet, sorted.
+    ///
+    /// What says which folder a chevron has to go and read. A folder leaves
+    /// this list the moment its contents arrive; a fresh listing puts every
+    /// one of them back, git having stopped at each again.
+    unexplored: Vec<PathBuf>,
+    /// The reads under way, so that a chevron pressed twice, or a rebuild
+    /// arriving while one is in flight, does not send a second command.
+    reading: std::collections::HashSet<PathBuf>,
     /// One flag per row of `rows`, saying whether it is dimmed.
     ///
-    /// Computed with the tree and not at paint time: a leaf costs a binary
-    /// search, but a directory is dimmed only if **everything** under it is
-    /// ignored, and `vendor/` carries thirty thousand leaves. That is a price
-    /// a gesture can pay and a frame cannot.
+    /// Computed with the tree and not at paint time: a directory is dimmed only
+    /// if **everything** under it is ignored, and `vendor/` carries thirty
+    /// thousand leaves. That is a price a gesture can pay and a frame cannot.
     pub dimmed: Rc<Vec<bool>>,
     /// The search `rows` was built for. Compared at render time: that is the
     /// price of having nobody to notify when it changes.
@@ -112,45 +238,125 @@ pub struct Explorer {
     /// every search keystroke and on every re-read of the list, and an index
     /// there would name a different row from one time to the next.
     pub cursor: Option<PathBuf>,
+    /// The folder a drag is hovering over, and which is about to open by
+    /// itself. Cleared as soon as the drag names another one, so that the
+    /// timer that opens it can tell "still there" from "gone".
+    pub drag_hover: Option<PathBuf>,
 }
 
 impl Default for Explorer {
     fn default() -> Self {
         Self {
-            files: Vec::new(),
+            files: Rc::new(Vec::new()),
+            tree: tree::Tree::default(),
             rows: Rc::new(Vec::new()),
             expanded: std::collections::HashSet::new(),
             state: Listing::Idle,
             ignored: false,
-            ignored_files: Vec::new(),
+            excluded: Vec::new(),
+            ignored_paths: Vec::new(),
+            dirs: Vec::new(),
+            unexplored: Vec::new(),
+            reading: std::collections::HashSet::new(),
             dimmed: Rc::new(Vec::new()),
             query: String::new(),
             cursor: None,
+            drag_hover: None,
         }
     }
 }
 
 impl Explorer {
+    /// The list git has just given, and what of it is ignored.
+    ///
+    /// The one door in: the tree and the exclusion flags are read from the
+    /// paths, and holding a list they do not match is what would make a row
+    /// open the wrong file.
+    fn set_files(
+        &mut self,
+        files: Vec<PathBuf>,
+        ignored: Vec<PathBuf>,
+        dirs: Vec<PathBuf>,
+        unexplored: Vec<PathBuf>,
+    ) {
+        self.excluded = excluded_flags(&files, &ignored);
+        self.ignored_paths = ignored;
+        self.dirs = dirs;
+        self.unexplored = unexplored;
+        self.tree = tree::Tree::with_dirs(&files, &self.dirs);
+        self.files = Rc::new(files);
+        self.rebuild();
+    }
+
+    /// What one level of an excluded directory holds, folded into the lists.
+    ///
+    /// Everything under a directory git stopped at is excluded by construction
+    /// — git never descends into one — so what arrives goes into both lists at
+    /// once, and the folders arrive unexplored in their turn.
+    ///
+    /// Merged and re-sorted rather than appended: `excluded_flags` walks two
+    /// sorted lists in step, and a tail out of order silently stops greying
+    /// everything past it. The directory itself stays in both — it is a row of
+    /// the tree, and the index that says the whole of it is excluded.
+    fn add_dir(&mut self, dir: &Path, dirs: Vec<PathBuf>, files: Vec<PathBuf>) {
+        self.reading.remove(dir);
+        let Ok(at) = self
+            .unexplored
+            .binary_search_by(|known| known.as_path().cmp(dir))
+        else {
+            // Read twice, or the list was replaced while this was in flight.
+            return;
+        };
+        self.unexplored.remove(at);
+
+        let mut unexplored = std::mem::take(&mut self.unexplored);
+        unexplored.extend(dirs.iter().cloned());
+        unexplored.sort_unstable();
+        // `dir` stays: what leaves is the not-yet-read list, never the list of
+        // what is a directory.
+        let mut known = std::mem::take(&mut self.dirs);
+        known.extend(dirs.iter().cloned());
+        known.sort_unstable();
+        known.dedup();
+
+        let arrived = || dirs.iter().chain(files.iter()).cloned();
+        let mut all = Rc::try_unwrap(std::mem::take(&mut self.files))
+            .unwrap_or_else(|shared| (*shared).clone());
+        all.extend(arrived());
+        all.sort_unstable();
+        all.dedup();
+
+        let mut ignored = std::mem::take(&mut self.ignored_paths);
+        ignored.extend(arrived());
+        ignored.sort_unstable();
+        ignored.dedup();
+
+        self.set_files(all, ignored, known, unexplored);
+    }
+
+    /// The rows to display, given the folds and the search.
+    ///
+    /// Note what is **not** here: the tree itself. A collapse changes which
+    /// rows come out of it and nothing else, and rebuilding it on every chevron
+    /// is what made a `target/` of a hundred thousand files take a fifth of a
+    /// second to open.
     fn rebuild(&mut self) {
-        // During a search, collapses are ignored and the tree is reduced to what
-        // matches: a file found in a closed folder would not be visible, and the
-        // search would look as if it had found nothing.
-        let keep: Option<Vec<usize>> = (!self.query.trim().is_empty()).then(|| {
-            self.files
+        let rows = if self.query.trim().is_empty() {
+            self.tree.rows(tree::Folds::ShutBut(&self.expanded))
+        } else {
+            // During a search, collapses are ignored and the tree is reduced to
+            // what matches: a file found in a closed folder would not be
+            // visible, and the search would look as if it had found nothing.
+            let keep: Vec<usize> = self
+                .files
                 .iter()
                 .enumerate()
                 .filter(|(_, path)| crate::ui::find::matches(&self.query, &path.to_string_lossy()))
                 .map(|(index, _)| index)
-                .collect()
-        });
-        // During a search everything is open, whatever was folded.
-        let all = std::collections::HashSet::new();
-        let folds = if keep.is_some() {
-            tree::Folds::OpenBut(&all)
-        } else {
-            tree::Folds::ShutBut(&self.expanded)
+                .collect();
+            tree::Tree::subset(&self.files, &keep, &self.unexplored)
+                .rows(tree::Folds::OpenBut(&std::collections::HashSet::new()))
         };
-        let rows = tree::build_subset(&self.files, keep.as_deref(), folds);
         self.dimmed = Rc::new(rows.iter().map(|entry| self.is_ignored(entry)).collect());
         self.rows = Rc::new(rows);
     }
@@ -161,32 +367,32 @@ impl Explorer {
     /// `vendor/` is, `app/` with one ignored log file in it is not. Anything
     /// else would grey out a folder holding code one is looking for.
     fn is_ignored(&self, entry: &tree::Entry) -> bool {
-        if self.ignored_files.is_empty() {
+        if self.excluded.is_empty() {
             return false;
         }
-        let excluded = |path: &PathBuf| self.ignored_files.binary_search(path).is_ok();
+        let excluded = |index: &usize| self.excluded.get(*index).copied().unwrap_or(false);
         match entry {
-            tree::Entry::Leaf { index, .. } => self.files.get(*index).is_some_and(excluded),
-            tree::Entry::Dir { leaves, .. } => {
-                !leaves.is_empty()
-                    && leaves
-                        .iter()
-                        .all(|index| self.files.get(*index).is_some_and(excluded))
-            }
+            tree::Entry::Leaf { index, .. } => excluded(index),
+            tree::Entry::Dir { leaves, .. } => !leaves.is_empty() && leaves.iter().all(excluded),
         }
     }
 
     /// A displayed entry's path, folder or file.
-    fn path_at(&self, index: usize) -> Option<PathBuf> {
+    fn path_at(&self, index: usize) -> Option<&Path> {
         match self.rows.get(index)? {
-            tree::Entry::Dir { path, .. } => Some(path.clone()),
-            tree::Entry::Leaf { index, .. } => self.files.get(*index).cloned(),
+            tree::Entry::Dir { path, .. } => Some(path.as_path()),
+            tree::Entry::Leaf { index, .. } => self.files.get(*index).map(PathBuf::as_path),
         }
     }
 
     /// Where a path sits in the displayed list, if it is still there.
+    ///
+    /// A walk, and it has to stay one — the rows are what the eye follows, so
+    /// the answer is a position in them. What it must not do is **allocate**:
+    /// it is called on every arrow key, and a `PathBuf` per row is a hundred
+    /// thousand allocations for one keystroke.
     fn row_of(&self, wanted: &Path) -> Option<usize> {
-        (0..self.rows.len()).find(|index| self.path_at(*index).as_deref() == Some(wanted))
+        (0..self.rows.len()).find(|index| self.path_at(*index) == Some(wanted))
     }
 
     fn is_dir(&self, index: usize) -> bool {
@@ -221,7 +427,8 @@ impl Explorer {
     fn expand_under(&mut self, root: &Path) {
         // Every folder under the root, and not only the visible ones: what a
         // closed folder hides has to be open too once it is reopened.
-        for path in &self.files {
+        let files = self.files.clone();
+        for path in files.iter() {
             if !path.starts_with(root) {
                 continue;
             }
@@ -309,6 +516,10 @@ impl Editors {
         self.open.iter().position(|editing| editing.path == path)
     }
 
+    pub fn by_path(&self, path: &Path) -> Option<&Editing> {
+        self.open.get(self.index_of(path)?)
+    }
+
     pub fn by_path_mut(&mut self, path: &Path) -> Option<&mut Editing> {
         let ix = self.index_of(path)?;
         self.open.get_mut(ix)
@@ -353,6 +564,20 @@ pub struct Editing {
     /// — by the cross, by `Ctrl+W`, by the worktree going away — is what takes
     /// the file down.
     pub panel: Entity<crate::ui::panels::FilePanel>,
+    /// What `HEAD` holds for this file, and what the gutter compares against.
+    /// `None` until the answer arrives, and for a file git does not track.
+    pub base: Option<String>,
+    /// Whether the base has been asked for, so that a file with no base does
+    /// not ask again on every keystroke.
+    pub base_asked: bool,
+    /// The gutter's marks, recomputed whenever the buffer changes. Held rather
+    /// than derived at render: the render closure runs every frame and this
+    /// walks the whole file.
+    pub hunks: Rc<Vec<crate::ui::hunks::Hunk>>,
+    /// The hunk whose popover is open, named by the buffer line it was opened
+    /// from. A line and not an index: the list is rebuilt on every keystroke,
+    /// and an index into the old one names a different hunk in the new one.
+    pub hunk_open: Option<usize>,
 }
 
 impl ClaudhubApp {
@@ -375,6 +600,20 @@ impl ClaudhubApp {
     pub(super) fn editing_mut(&mut self) -> Option<&mut Editing> {
         let root = self.editing_root()?;
         self.editings.get_mut(&root)?.active_mut()
+    }
+
+    /// One named open file, whichever tab is displayed.
+    ///
+    /// What a **gesture** on a code surface reaches, where `editing()` is what
+    /// the rest of the window means by "the file being edited". The two part
+    /// company as soon as two files are on screen at once — see `ui::surface`.
+    pub(super) fn editing_at(&self, path: &Path) -> Option<&Editing> {
+        self.editings.get(&self.editing_root()?)?.by_path(path)
+    }
+
+    pub(super) fn editing_at_mut(&mut self, path: &Path) -> Option<&mut Editing> {
+        let root = self.editing_root()?;
+        self.editings.get_mut(&root)?.by_path_mut(path)
     }
 
     /// The files this worktree holds open, in tab order.
@@ -415,19 +654,30 @@ impl ClaudhubApp {
         };
         let ignored = Settings::global(cx).show_ignored_files;
         let explorer = self.explorers.entry(worktree.clone()).or_default();
-        match explorer.state {
+        let due = match explorer.state {
             // Waiting for an answer: asking again would only queue a second
             // command behind the first.
-            Listing::Loading => return,
+            Listing::Loading => false,
             // Already answered for the setting in force. A failure is not
             // retried either, until something invalidates it — a toggle, a file
             // operation, a refresh.
-            Listing::Ready | Listing::Failed if explorer.ignored == ignored => return,
-            _ => {}
+            Listing::Ready | Listing::Failed if explorer.ignored == ignored => false,
+            _ => true,
+        };
+        if due {
+            explorer.state = Listing::Loading;
+            explorer.ignored = ignored;
+            self.git.send(Cmd::ListFiles {
+                worktree: worktree.clone(),
+                ignored,
+            });
         }
-        explorer.state = Listing::Loading;
-        explorer.ignored = ignored;
-        self.git.send(Cmd::ListFiles { worktree, ignored });
+        // Here and not in each gesture that opens a folder: five of them do —
+        // the chevron, the right arrow, a drag that lingers, a drop, a restored
+        // session — and the one that gets forgotten is a chevron that opens on
+        // nothing. It walks `expanded`, the handful of folders opened by hand,
+        // and `reading` keeps a frame from asking twice.
+        self.read_open_dirs(&worktree);
     }
 
     pub(super) fn project_files_arrived(
@@ -435,12 +685,72 @@ impl ClaudhubApp {
         worktree: PathBuf,
         files: Vec<PathBuf>,
         ignored: Vec<PathBuf>,
+        dirs: Vec<PathBuf>,
     ) {
         let explorer = self.explorers.entry(worktree).or_default();
         explorer.state = Listing::Ready;
-        explorer.files = files;
-        explorer.ignored_files = ignored;
-        explorer.rebuild();
+        explorer.set_files(files, ignored, dirs.clone(), dirs);
+        // A fresh listing puts every directory back to unread, so what was open
+        // inside `vendor/` is read again on the next frame — a chevron that
+        // shuts under the hand on every `git add` is worse than the reads it
+        // saves. See `ensure_project_files`.
+    }
+
+    /// Reads the excluded directories that are open and whose contents are
+    /// unknown.
+    ///
+    /// Called from the render, where the panel already asks for its list: five
+    /// gestures open a folder, and one place answers for all of them. It also
+    /// covers a listing that has just replaced everything the chevrons had
+    /// read, and a restored session — what `expanded` remembers is asked for
+    /// again. It walks `expanded`, the handful of folders opened by hand, never
+    /// the tree.
+    fn read_open_dirs(&mut self, worktree: &Path) {
+        let Some(explorer) = self.explorers.get_mut(worktree) else {
+            return;
+        };
+        let due: Vec<PathBuf> = explorer
+            .expanded
+            .iter()
+            .filter(|path| {
+                explorer
+                    .unexplored
+                    .binary_search_by(|known| known.as_path().cmp(path))
+                    .is_ok()
+                    && !explorer.reading.contains(*path)
+            })
+            .cloned()
+            .collect();
+        for dir in due {
+            explorer.reading.insert(dir.clone());
+            self.git.send(Cmd::ReadDir {
+                worktree: worktree.to_path_buf(),
+                dir,
+            });
+        }
+    }
+
+    /// One level of an excluded directory has arrived.
+    pub(super) fn dir_listed(
+        &mut self,
+        worktree: PathBuf,
+        dir: PathBuf,
+        result: Result<(Vec<PathBuf>, Vec<PathBuf>), String>,
+    ) {
+        let Some(explorer) = self.explorers.get_mut(&worktree) else {
+            return;
+        };
+        match result {
+            Ok((dirs, files)) => explorer.add_dir(&dir, dirs, files),
+            Err(_) => {
+                // The folder is gone, or is not readable. It keeps its chevron
+                // and stays empty rather than vanishing: what git listed is
+                // still what git listed, and the failure is already in the log.
+                explorer.reading.remove(&dir);
+                explorer.expanded.remove(&dir);
+                explorer.rebuild();
+            }
+        }
     }
 
     /// git refused to list the files.
@@ -508,7 +818,7 @@ impl ClaudhubApp {
             None if delta > 0 => 0,
             None => count as isize - 1,
         } as usize;
-        explorer.cursor = explorer.path_at(next);
+        explorer.cursor = explorer.path_at(next).map(Path::to_path_buf);
         self.reveal_cursor();
         cx.notify();
     }
@@ -522,7 +832,9 @@ impl ClaudhubApp {
         if count == 0 {
             return;
         }
-        explorer.cursor = explorer.path_at(if last { count - 1 } else { 0 });
+        explorer.cursor = explorer
+            .path_at(if last { count - 1 } else { 0 })
+            .map(Path::to_path_buf);
         self.reveal_cursor();
         cx.notify();
     }
@@ -681,8 +993,7 @@ impl ClaudhubApp {
         // filter the one we have, which has never seen the ignored files.
         if let Some(explorer) = self.explorer() {
             explorer.state = Listing::Idle;
-            explorer.files.clear();
-            explorer.rebuild();
+            explorer.set_files(Vec::new(), Vec::new(), Vec::new(), Vec::new());
         }
         cx.notify();
     }
@@ -941,6 +1252,11 @@ impl ClaudhubApp {
                 editing.dirty = true;
             }
             this.lsp_editor_changed(&owner, cx);
+            // The gutter answers while one types, which is the whole point of
+            // comparing against the buffer rather than against the file on
+            // disk. It costs a walk of the document per keystroke — the same
+            // order as the highlighter's, and far below a frame.
+            this.recompute_hunks(&owner, &edited, cx);
             cx.notify();
         })
         .detach();
@@ -976,6 +1292,10 @@ impl ClaudhubApp {
             }
             None => self.open_file_tab(&worktree, &path, input.clone(), window, cx),
         };
+        // The base a reread had is kept as a stand-in while the fresh one is on
+        // its way: saving does not move `HEAD`, so it is almost always the same
+        // answer, and dropping it would blank the gutter on every save.
+        let base = reopened.and_then(|ix| self.editings[&worktree].open[ix].base.clone());
         let editing = Editing {
             worktree: worktree.clone(),
             path: path.clone(),
@@ -987,6 +1307,10 @@ impl ClaudhubApp {
             reveal_tries: 0,
             host,
             panel,
+            base,
+            base_asked: false,
+            hunks: Rc::default(),
+            hunk_open: None,
         };
         let tabs = self.editings.entry(worktree.clone()).or_default();
         match reopened {
@@ -1002,6 +1326,11 @@ impl ClaudhubApp {
         // Starts the server this file's language asks for, opens the document
         // and posts the providers — all of it a no-op when the button is off.
         self.lsp_sync_editor(window, cx);
+        // What the gutter marks against. Asked for on every read and not only
+        // on the first: a save is a reread, and between two of them a commit
+        // may have moved `HEAD` under the file.
+        self.ask_file_base(&worktree, &path);
+        self.recompute_hunks(&worktree, &path, cx);
         // The caret the opening was asked for, and the step in the trail that
         // goes with it. A pending that names another file is stale — one asked
         // for a second file before the first arrived — and is dropped, not put
@@ -1028,8 +1357,9 @@ impl ClaudhubApp {
         // also from a diff line, and answering it silently on the screen next
         // door would be an opened file nobody sees.
         //
-        // Unless it is the previous session being put back: there is no gesture
-        // then, and the screen that comes back is the one `layout.json` carries.
+        // Unless it is a place being put back — the previous session's, or the
+        // one this worktree was left in: there is no gesture then, and the screen
+        // that comes back is the place's own, set a step earlier.
         if !restored {
             self.enter_workspace(crate::ui::workspace::Workspace::Files, window, cx);
             self.set_panel_visible(crate::ui::panels::EditorPanel::NAME, true, cx);
@@ -1065,6 +1395,247 @@ impl ClaudhubApp {
         // PHPantom does with PHPStan — has no other way of knowing.
         self.lsp_editor_saved();
         cx.notify();
+    }
+
+    // — The gutter's change marks ————————————————————————————————
+
+    /// Asks git what `HEAD` holds for a file, once per outstanding question.
+    pub(super) fn ask_file_base(&mut self, worktree: &Path, path: &Path) {
+        let Some(editing) = self
+            .editings
+            .get_mut(worktree)
+            .and_then(|tabs| tabs.by_path_mut(path))
+        else {
+            return;
+        };
+        if editing.base_asked {
+            return;
+        }
+        editing.base_asked = true;
+        self.git.send(Cmd::ReadFileBase {
+            worktree: worktree.to_path_buf(),
+            path: path.to_path_buf(),
+        });
+    }
+
+    /// Asks again what `HEAD` holds, for every file open in a worktree.
+    ///
+    /// `None` means every worktree: a few operations answer without naming one,
+    /// and there are never more than a handful of tabs.
+    pub(super) fn refresh_editor_bases(&mut self, worktree: Option<&Path>) {
+        let asking: Vec<(PathBuf, PathBuf)> = self
+            .editings
+            .iter()
+            .filter(|(root, _)| worktree.is_none_or(|only| only == root.as_path()))
+            .flat_map(|(root, tabs)| {
+                tabs.open
+                    .iter()
+                    .map(move |editing| (root.clone(), editing.path.clone()))
+            })
+            .collect();
+        for (root, path) in asking {
+            self.ask_file_base(&root, &path);
+        }
+    }
+
+    /// What `HEAD` holds for a file has come back.
+    pub(super) fn file_base_arrived(
+        &mut self,
+        worktree: PathBuf,
+        path: PathBuf,
+        text: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editing) = self
+            .editings
+            .get_mut(&worktree)
+            .and_then(|tabs| tabs.by_path_mut(&path))
+        else {
+            return;
+        };
+        editing.base_asked = false;
+        editing.base = text;
+        self.recompute_hunks(&worktree, &path, cx);
+    }
+
+    /// Recomputes a file's gutter marks from its base and its live buffer.
+    ///
+    /// Held on the `Editing` rather than worked out at render: the render
+    /// closure runs every frame, and this walks the document. It runs on every
+    /// keystroke instead, which is a few hundred times less often.
+    pub(super) fn recompute_hunks(&mut self, worktree: &Path, path: &Path, cx: &mut Context<Self>) {
+        let Some(editing) = self
+            .editings
+            .get(worktree)
+            .and_then(|tabs| tabs.by_path(path))
+        else {
+            return;
+        };
+        // No base means no marks rather than "every line is new": a file git
+        // does not track is not a file one has changed, and painting it green
+        // from top to bottom says something the gutter does not mean.
+        let now = editing.input.read(cx).value().to_string();
+        let hunks = match &editing.base {
+            Some(base) => crate::ui::hunks::compare(base, &now),
+            None => Vec::new(),
+        };
+        let last = now.split('\n').count().saturating_sub(1);
+        let Some(editing) = self
+            .editings
+            .get_mut(worktree)
+            .and_then(|tabs| tabs.by_path_mut(path))
+        else {
+            return;
+        };
+        // A popover open on a line the edit has just taken away has nothing
+        // left to show; one whose line still carries a hunk stays.
+        if let Some(row) = editing.hunk_open {
+            if !hunks.iter().any(|hunk| hunk.covers(row, last)) {
+                editing.hunk_open = None;
+            }
+        }
+        editing.hunks = Rc::new(hunks);
+        self.install_gutter_marks(worktree, path, cx);
+        cx.notify();
+    }
+
+    /// Hands the editor the closure that draws its change strip.
+    ///
+    /// Reinstalled rather than reread: the renderer the element calls takes a
+    /// line and nothing else — no `App` to look anything up in — so everything
+    /// it answers with has to be captured. That is affordable because it is
+    /// only ever redone on a gesture (an edit, a click), never on a frame.
+    ///
+    /// The colours are the exception, read inside the canvas at paint time: a
+    /// theme change is signalled to nobody, and a strip captured in the old
+    /// palette would sit there in the wrong colour until the next keystroke.
+    fn install_gutter_marks(&mut self, worktree: &Path, path: &Path, cx: &mut Context<Self>) {
+        let Some(editing) = self
+            .editings
+            .get(worktree)
+            .and_then(|tabs| tabs.by_path(path))
+        else {
+            return;
+        };
+        let input = editing.input.clone();
+        let hunks = editing.hunks.clone();
+        // A file with no base has no renderer at all, and one that has a base
+        // keeps its own even with nothing to mark: the strip lives in a margin
+        // the gutter already had, so installing it costs no width, and taking
+        // it off and putting it back on either side of an edit would be work
+        // for nothing.
+        if editing.base.is_none() {
+            input.update(cx, |state, cx| state.set_gutter_marks(None, cx));
+            return;
+        }
+        let last = editing
+            .input
+            .read(cx)
+            .value()
+            .split('\n')
+            .count()
+            .saturating_sub(1);
+        let app = cx.entity().downgrade();
+        let (worktree, path) = (worktree.to_path_buf(), path.to_path_buf());
+        let render: gpui_component::input::GutterMarkRenderer = Rc::new(move |row| {
+            let kind = hunks.iter().find(|hunk| hunk.covers(row, last))?.kind();
+            let (worktree, path, app) = (worktree.clone(), path.clone(), app.clone());
+            Some(
+                div()
+                    .id(("claudhub-hunk", row))
+                    .size_full()
+                    // The canvas below is absolute, and an absolute child needs
+                    // a positioned parent or it anchors to something further up
+                    // than this strip.
+                    .relative()
+                    .cursor_pointer()
+                    .child(
+                        gpui::canvas(
+                            |_, _, _| {},
+                            move |bounds, _, window, cx| paint_hunk_mark(kind, bounds, window, cx),
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                    .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                        // The strip belongs to the gutter, and the gutter is
+                        // not the text: without this the click would also land
+                        // in the editor and move the caret.
+                        cx.stop_propagation();
+                        app.update(cx, |this, cx| this.open_hunk(&worktree, &path, row, cx))
+                            .ok();
+                    })
+                    .into_any_element(),
+            )
+        });
+        input.update(cx, |state, cx| state.set_gutter_marks(Some(render), cx));
+    }
+
+    /// Shows — or hides again — what a hunk replaced.
+    fn open_hunk(&mut self, worktree: &Path, path: &Path, row: usize, cx: &mut Context<Self>) {
+        if let Some(editing) = self
+            .editings
+            .get_mut(worktree)
+            .and_then(|tabs| tabs.by_path_mut(path))
+        {
+            // Clicking the strip a second time on the same line puts it away:
+            // the marker is the only thing there is to click, so it has to be
+            // the way back out too.
+            editing.hunk_open = (editing.hunk_open != Some(row)).then_some(row);
+        }
+        self.install_gutter_marks(worktree, path, cx);
+        cx.notify();
+    }
+
+    /// Puts a hunk's old lines back, as an ordinary edit.
+    ///
+    /// An edit and not a `git apply`: the buffer may hold unsaved work, git
+    /// only ever sees the file on disk, and `apply_patch` writes to the index
+    /// anyway. Going through the editor means the rollback lands in the same
+    /// transaction log as everything else — `u` takes it back, and the file is
+    /// left dirty for the save the user will make.
+    pub(super) fn rollback_hunk(
+        &mut self,
+        worktree: PathBuf,
+        path: PathBuf,
+        row: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editing) = self
+            .editings
+            .get(&worktree)
+            .and_then(|tabs| tabs.by_path(&path))
+        else {
+            return;
+        };
+        let input = editing.input.clone();
+        let text = input.read(cx).value().to_string();
+        let last = text.split('\n').count().saturating_sub(1);
+        let Some(hunk) = editing
+            .hunks
+            .iter()
+            .find(|hunk| hunk.covers(row, last))
+            .cloned()
+        else {
+            return;
+        };
+        let (span, replacement) = crate::ui::hunks::rollback(&text, &hunk);
+        input.update(cx, |state, cx| {
+            state.set_selected_range(span.clone(), cx);
+            state.replace(replacement, window, cx);
+            // Where the restored lines begin, so the caret is at what just
+            // came back rather than at the end of it.
+            state.set_selected_range(span.start..span.start, cx);
+        });
+        if let Some(editing) = self
+            .editings
+            .get_mut(&worktree)
+            .and_then(|tabs| tabs.by_path_mut(&path))
+        {
+            editing.hunk_open = None;
+        }
+        self.recompute_hunks(&worktree, &path, cx);
     }
 
     /// Opens a tab for a file, and puts it in the editing screen's dock.
@@ -1349,6 +1920,119 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    // — Dragging into the tree ————————————————————————————————
+
+    /// Files dropped on the tree from the desktop's file manager.
+    ///
+    /// A **copy**, and never a move: what the drop names belongs to somewhere
+    /// else — a download, an export from a design tool — and one gesture of the
+    /// hand has no business emptying the folder it came from. The exception is
+    /// a path that is already inside this worktree, dropped in from a file
+    /// manager opened on the project: there the gesture reads as the one the
+    /// tree makes on its own, and it moves.
+    pub(super) fn drop_external(
+        &mut self,
+        dir: PathBuf,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        for source in paths {
+            // On Windows the drop enters from *this* world while the workers
+            // are in the distribution: the path changes worlds here, like the
+            // target of a CSV export. What the distribution cannot reach — a
+            // network share — is refused rather than copied nowhere.
+            let source = if cfg!(windows) {
+                match crate::wslpath::for_server(&source) {
+                    Some(path) => path,
+                    None => {
+                        self.announce(tr!("files-drop-unreachable"), cx);
+                        continue;
+                    }
+                }
+            } else {
+                source
+            };
+            let Some(to) = files::drop_target(&dir, &source) else {
+                continue;
+            };
+            let op = match source.strip_prefix(&worktree) {
+                Ok(inside) => match move_within(inside, &to) {
+                    Some(op) => op,
+                    None => continue,
+                },
+                Err(_) => files::Op::Import { from: source, to },
+            };
+            self.land_drop(&dir, op, cx);
+        }
+    }
+
+    /// A row dragged from the tree and dropped on a folder of the same tree.
+    pub(super) fn drop_entry(&mut self, from: PathBuf, dir: PathBuf, cx: &mut Context<Self>) {
+        let Some(to) = files::drop_target(&dir, &from) else {
+            return;
+        };
+        let Some(op) = move_within(&from, &to) else {
+            return;
+        };
+        self.land_drop(&dir, op, cx);
+    }
+
+    /// Sends the operation, and opens the folder it lands in.
+    ///
+    /// Opening it is the whole answer to "where did it go": the list is re-read
+    /// a git command later, and a file that lands in a closed folder lands
+    /// nowhere as far as the eye is concerned. The cursor follows for the same
+    /// reason.
+    fn land_drop(&mut self, dir: &Path, op: files::Op, cx: &mut Context<Self>) {
+        let landing = op.target().to_path_buf();
+        self.file_op(op, cx);
+        if let Some(explorer) = self.explorer() {
+            explorer.reveal(&landing);
+            explorer.expanded.insert(dir.to_path_buf());
+            explorer.cursor = Some(landing);
+            explorer.drag_hover = None;
+            explorer.rebuild();
+        }
+    }
+
+    /// A drag hovering over a closed folder opens it.
+    ///
+    /// The gesture of every file manager: one drags towards a folder that is
+    /// not open, and staying on it is how one asks to go in. It is deferred —
+    /// a drag crosses a dozen rows on its way — and the deferral is what makes
+    /// crossing free.
+    pub(super) fn hover_drop_dir(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(explorer) = self.explorer() else {
+            return;
+        };
+        if explorer.drag_hover.as_deref() == Some(path.as_path()) {
+            return; // the same folder, one mouse move later
+        }
+        explorer.drag_hover = Some(path.clone());
+        if explorer.expanded.contains(&path) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(DRAG_HOVER).await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(explorer) = this.explorer() else {
+                    return;
+                };
+                if explorer.drag_hover.as_deref() != Some(path.as_path()) {
+                    return; // the hand moved on
+                }
+                if explorer.expanded.insert(path) {
+                    explorer.rebuild();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     // — The panel  ——————————————————————————————————————————————
 
     pub(super) fn render_files(
@@ -1384,7 +2068,7 @@ impl ClaudhubApp {
         let state = explorer.state;
         let rows = explorer.rows.clone();
         let dimmed = explorer.dimmed.clone();
-        let files = Rc::new(explorer.files.clone());
+        let files = explorer.files.clone();
         let cursor = explorer.cursor.clone();
         let count = rows.len();
         // The git status is already here: showing it costs only one lookup per
@@ -1415,6 +2099,7 @@ impl ClaudhubApp {
         let open = self.editing().map(|editing| editing.path.clone());
         let entity = cx.entity();
         let look = Look::of(cx);
+        let edge = cx.theme().primary;
 
         // Nothing to show, and nothing under way: it is an empty project or a
         // search with no result. During the first `ls-files`, the list stays
@@ -1451,6 +2136,33 @@ impl ClaudhubApp {
                     .track_focus(&focus)
                     .flex_1()
                     .min_h_0()
+                    // The panel itself is a drop target, for the worktree's
+                    // root: a project whose root holds three files leaves most
+                    // of the column empty, and aiming at a row there would be
+                    // aiming at nothing. The border is always reserved —
+                    // one that appears would move every row one pixel.
+                    .border_1()
+                    .border_color(gpui::transparent_black())
+                    .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| {
+                        style.border_color(edge)
+                    })
+                    .drag_over::<DraggedEntry>(move |style, _, _, _| style.border_color(edge))
+                    .on_drop({
+                        let entity = entity.clone();
+                        move |paths: &gpui::ExternalPaths, _window, cx| {
+                            let paths = paths.paths().to_vec();
+                            entity.update(cx, |this, cx| {
+                                this.drop_external(PathBuf::new(), paths, cx)
+                            });
+                        }
+                    })
+                    .on_drop({
+                        let entity = entity.clone();
+                        move |entry: &DraggedEntry, _window, cx| {
+                            let from = entry.path.clone();
+                            entity.update(cx, |this, cx| this.drop_entry(from, PathBuf::new(), cx));
+                        }
+                    })
                     .child(
                         self.scrolled(
                             "project-files-bar",
@@ -1476,9 +2188,6 @@ impl ClaudhubApp {
                                     .collect::<Vec<_>>()
                             })
                             .size_full()
-                            // See `review.rs`: the inset belongs to the list, a
-                            // margin on a `uniform_list` entry being ignored.
-                            .px_1()
                             .track_scroll(&scroll.clone()),
                             cx,
                         ),
@@ -1774,6 +2483,98 @@ impl ClaudhubApp {
         )
     }
 
+    /// The band that shows what a hunk replaced, and puts it back.
+    ///
+    /// The old lines are shown as code — same family and size as the editor
+    /// under it — because that is what they are, and reading them in the
+    /// interface's proportional font would misalign every indentation. It
+    /// scrolls rather than grows: a hunk can be two hundred lines long, and a
+    /// band that pushed the editor off the bottom of the panel would take the
+    /// file away to show a piece of it.
+    fn render_hunk_peek(
+        &self,
+        row: usize,
+        kind: crate::ui::hunks::Kind,
+        old: String,
+        code_size: Pixels,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        use crate::ui::hunks::Kind;
+        let mono = cx.theme().mono_font_family.clone();
+        let diff = crate::ui::theme::DiffColors::of(cx);
+        let (title, tint) = match kind {
+            Kind::Added => (tr!("editor-hunk-added"), diff.added_fg),
+            Kind::Removed => (tr!("editor-hunk-removed"), diff.removed_fg),
+            Kind::Changed => (tr!("editor-hunk-changed"), cx.theme().primary),
+        };
+        v_flex()
+            .w_full()
+            // The editor beside it is `flex_1`, so without this the band is
+            // what a column short of room takes the room from — and a band
+            // squeezed to nothing is a band whose buttons cannot be pressed.
+            .flex_shrink_0()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
+            .child(
+                h_flex()
+                    .h(crate::ui::theme::bar_height(cx))
+                    .w_full()
+                    .px_2()
+                    .gap_2()
+                    .items_center()
+                    .child(div().w(HUNK_MARK_WIDTH).h_4().bg(tint))
+                    .child(div().text_xs().child(title))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("editor-hunk-rollback")
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("undo-2"))
+                            .label(tr!("editor-hunk-rollback"))
+                            .tooltip(tr!("editor-hunk-rollback-help"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let Some((worktree, path)) =
+                                    this.editing().map(|e| (e.worktree.clone(), e.path.clone()))
+                                else {
+                                    return;
+                                };
+                                this.rollback_hunk(worktree, path, row, window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("editor-hunk-close")
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("x"))
+                            .tooltip(tr!("editor-close"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let Some((worktree, path)) =
+                                    this.editing().map(|e| (e.worktree.clone(), e.path.clone()))
+                                else {
+                                    return;
+                                };
+                                this.open_hunk(&worktree, &path, row, cx);
+                            })),
+                    ),
+            )
+            .when(!old.is_empty(), |el| {
+                el.child(
+                    div()
+                        .id("editor-hunk-old")
+                        .max_h(px(160.))
+                        .w_full()
+                        .px_2()
+                        .pb_1()
+                        .overflow_y_scroll()
+                        .font_family(mono)
+                        .text_size(code_size)
+                        .bg(diff.removed_bg)
+                        .child(old),
+                )
+            })
+    }
+
     pub(super) fn render_editor(
         &mut self,
         window: &mut Window,
@@ -1786,13 +2587,15 @@ impl ClaudhubApp {
         // The `/` line being typed, or the keys of a command not complete yet:
         // vim shows both, and they are the only thing that says why the next key
         // will not do what it usually does.
-        let hint = editing
-            .host
-            .vim
-            .prompt()
-            .unwrap_or_else(|| editing.host.vim.pending().to_string());
+        let prompt = editing.host.vim.prompt();
+        let pending = editing.host.vim.pending().to_string();
+        // The surface is named by the file this panel holds, and not by "the
+        // file being edited": the dock can show two of them at once, and the
+        // active tab then alternates between them from frame to frame. See
+        // `ui::surface`.
+        let surface = Surface::File(path.clone());
         // The smoothing advances by one frame, as the diff's does.
-        self.advance_surface_scroll(Surface::File, &input, window, cx);
+        self.advance_surface_scroll(&surface, &input, window, cx);
         // The caret a jump left waiting for a measurement. The first frame of a
         // freshly opened file has none; asking for another is what gets the
         // view to the symbol instead of leaving it at the top of the file, and
@@ -1818,7 +2621,10 @@ impl ClaudhubApp {
         // the mode changes under the keys and the setting under the form, the
         // calls are idempotent, and it is what makes turning vim mode off give
         // the caret back without anything else to do.
-        self.sync_block_cursor(Surface::File, vim, cx);
+        self.sync_block_cursor(&surface, vim, cx);
+        // The occurrences of the last search, lit as `Ctrl+F` lights them:
+        // see `sync_search_matches`.
+        self.sync_search_matches(&surface, vim, cx);
         let entity = cx.entity();
         let mono = cx.theme().mono_font_family.clone();
         // The editor is code, like the diff on the screen next door: same
@@ -1827,6 +2633,18 @@ impl ClaudhubApp {
         let code_size = px(crate::ui::settings::Settings::global(cx).diff_font_size);
         let label = SharedString::from(path.display().to_string());
         let for_external = path.clone();
+        // What the gutter's strip was clicked to show. A band under the file
+        // bar and **not a popover on the line**: the editor's lines come and go
+        // with the scroll, so an anchor on one is an anchor that the first
+        // wheel notch carries off screen — the ruling `notes_view` already
+        // made for an annotated row.
+        let peek = self.editing().and_then(|editing| {
+            let row = editing.hunk_open?;
+            let text = editing.input.read(cx).value().to_string();
+            let last = text.split('\n').count().saturating_sub(1);
+            let hunk = editing.hunks.iter().find(|hunk| hunk.covers(row, last))?;
+            Some((row, hunk.kind(), hunk.old.join("\n")))
+        });
         Some(
             v_flex()
                 .size_full()
@@ -1848,10 +2666,6 @@ impl ClaudhubApp {
                                 .font_family(mono.clone())
                                 .child(label),
                         )
-                        // The mode, where the eye already is: on the file's
-                        // own bar, and not in the window's status bar at the
-                        // other end of the screen.
-                        .when(vim, |el| el.child(self.render_vim_mode(mode, &hint, cx)))
                         // A badge and not an asterisk in the title: the title is
                         // already a truncated path, and one more character at the
                         // end goes unseen.
@@ -1891,6 +2705,9 @@ impl ClaudhubApp {
                                 ),
                         ),
                 )
+                .when_some(peek, |el, (row, kind, old)| {
+                    el.child(self.render_hunk_peek(row, kind, old, code_size, cx))
+                })
                 .child(
                     div()
                         .id("editor-zoom")
@@ -1905,18 +2722,57 @@ impl ClaudhubApp {
                         // nothing stands between the keyboard and the input
                         // otherwise.
                         .when(vim, |el| {
-                            el.capture_key_down(cx.listener(|this, event, window, cx| {
-                                this.vim_key(Surface::File, event, window, cx)
-                            }))
+                            el.capture_key_down({
+                                let surface = surface.clone();
+                                cx.listener(move |this, event, window, cx| {
+                                    this.vim_key(&surface, event, window, cx)
+                                })
+                            })
                             // `Ctrl+V` is a binding of the input's before it is
                             // a keystroke: see `vim_paste`.
-                            .capture_action(cx.listener(
-                                |this, _: &gpui_component::input::Paste, window, cx| {
-                                    if this.vim_paste(Surface::File, window, cx) {
-                                        cx.stop_propagation();
-                                    }
-                                },
-                            ))
+                            .capture_action({
+                                let surface = surface.clone();
+                                cx.listener(
+                                    move |this, _: &gpui_component::input::Paste, window, cx| {
+                                        if this.vim_paste(&surface, window, cx) {
+                                            cx.stop_propagation();
+                                        }
+                                    },
+                                )
+                            })
+                            // And so are `Enter` and `Backspace`, which is why
+                            // a `:` line could be typed and never run: see
+                            // `vim_named_key`. A modified `Enter` is left
+                            // alone — it is somebody else's.
+                            .capture_action({
+                                let surface = surface.clone();
+                                cx.listener(
+                                    move |this,
+                                          action: &gpui_component::input::Enter,
+                                          window,
+                                          cx| {
+                                        if action.secondary || action.shift {
+                                            return;
+                                        }
+                                        if this.vim_named_key(&surface, "enter", window, cx) {
+                                            cx.stop_propagation();
+                                        }
+                                    },
+                                )
+                            })
+                            .capture_action({
+                                let surface = surface.clone();
+                                cx.listener(
+                                    move |this,
+                                          _: &gpui_component::input::Backspace,
+                                          window,
+                                          cx| {
+                                        if this.vim_named_key(&surface, "backspace", window, cx) {
+                                            cx.stop_propagation();
+                                        }
+                                    },
+                                )
+                            })
                         })
                         .child(
                             // **No card of its own.** `Input` paints a
@@ -1967,12 +2823,7 @@ impl ClaudhubApp {
                                             }
                                             cx.stop_propagation();
                                             entity.update(cx, |this, cx| {
-                                                this.on_surface_scroll(
-                                                    Surface::File,
-                                                    event,
-                                                    window,
-                                                    cx,
-                                                )
+                                                this.on_surface_scroll(&surface, event, window, cx)
                                             });
                                         },
                                     );
@@ -1981,7 +2832,13 @@ impl ClaudhubApp {
                             .absolute()
                             .inset_0(),
                         ),
-                ),
+                )
+                // vim's status line, at the foot of the file it belongs to: the
+                // mode, and the `:` or `/` line being written. See
+                // `render_vim_status`.
+                .when(vim, |el| {
+                    el.child(self.render_vim_status(mode, prompt, &pending, cx))
+                }),
         )
     }
 }
@@ -1993,11 +2850,10 @@ impl ClaudhubApp {
 /// `cx.theme()` borrows the context.
 struct Look {
     height: Pixels,
-    /// A row's background radius. A hovered or open row is a pill laid in the
-    /// list, not a band crossing it.
-    radius: Pixels,
     muted: gpui::Hsla,
     accent: gpui::Hsla,
+    /// The colour of the folder a drop is about to land in.
+    drop: gpui::Hsla,
     /// The vertical rule of one indentation level.
     guide: gpui::Hsla,
     folder: gpui::Hsla,
@@ -2007,9 +2863,11 @@ impl Look {
     fn of(cx: &gpui::App) -> Self {
         Self {
             height: crate::ui::theme::row_height(cx),
-            radius: cx.theme().radius,
             muted: cx.theme().muted_foreground,
             accent: cx.theme().accent,
+            // Not the accent again: a drop target has to be told apart from the
+            // row one happens to be over, and the two are on screen together.
+            drop: cx.theme().primary.opacity(0.35),
             // Pale enough to read as a texture and not as a separator: these
             // rules are on screen by the dozen.
             guide: crate::ui::theme::indent_guide(cx),
@@ -2054,9 +2912,12 @@ fn render_row(
             h_flex()
                 .id(("dir", index))
                 .h(look.height)
-                .rounded(look.radius)
+                // The band crosses the panel, whatever the name is long: it says
+                // which row one is on, and a pill drawn around the text says
+                // instead where the text ends.
+                .w_full()
                 .pl_1()
-                .pr_2()
+                .pr(crate::ui::theme::scroll_gutter())
                 .items_center()
                 .cursor_pointer()
                 .when(at_cursor, |el| el.bg(look.accent.opacity(0.5)))
@@ -2067,6 +2928,8 @@ fn render_row(
                         this.toggle_project_dir(for_click.clone(), cx);
                     });
                 })
+                .map(|el| accepts_drops(el, &entity, &path, true, look))
+                .map(|el| draggable(el, &path))
                 .children(crate::ui::theme::indent_guides(*depth, look.guide))
                 .child(
                     icon(if *collapsed {
@@ -2113,9 +2976,9 @@ fn render_row(
             h_flex()
                 .id(("file", index))
                 .h(look.height)
-                .rounded(look.radius)
+                .w_full()
                 .pl_1()
-                .pr_2()
+                .pr(crate::ui::theme::scroll_gutter())
                 .items_center()
                 .cursor_pointer()
                 // Open and under the cursor are two things: one browses the tree
@@ -2130,6 +2993,12 @@ fn render_row(
                         this.open_in_editor(for_open.clone(), cx);
                     });
                 })
+                // A file takes a drop too, and hands it to the folder it lives
+                // in: aiming at a folder's own line, in a list where a folder
+                // holding thirty files is one row in thirty, is a precision
+                // nobody should have to have.
+                .map(|el| accepts_drops(el, entity, &path, false, look))
+                .map(|el| draggable(el, &path))
                 .children(crate::ui::theme::indent_guides(*depth, look.guide))
                 .child(crate::ui::theme::chevron_space())
                 .child(crate::ui::file_icons::file_icon(&path, cx))
@@ -2155,6 +3024,75 @@ fn render_row(
                 .into_any_element()
         }
     }
+}
+
+/// Makes a row somewhere a drag can land.
+///
+/// Two drags at once, and the same row takes both: the desktop's files — gpui
+/// turns a platform drop into an `ExternalPaths` drag, so a file manager's drop
+/// is read with the very same listeners — and a row of this same tree.
+fn accepts_drops(
+    row: gpui::Stateful<gpui::Div>,
+    entity: &Entity<ClaudhubApp>,
+    path: &Path,
+    is_dir: bool,
+    look: &Look,
+) -> gpui::Stateful<gpui::Div> {
+    let dir = drop_dir(path, is_dir);
+    let colour = look.drop;
+    let (dropping, moving) = (entity.clone(), entity.clone());
+    let (outside, inside) = (entity.clone(), entity.clone());
+    let (for_drop, for_move) = (dir.clone(), dir);
+    let (from_outside, from_inside) = (path.to_path_buf(), path.to_path_buf());
+    row.drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.bg(colour))
+        .drag_over::<DraggedEntry>(move |style, _, _, _| style.bg(colour))
+        .on_drop(move |paths: &gpui::ExternalPaths, _window, cx| {
+            let paths = paths.paths().to_vec();
+            dropping.update(cx, |this, cx| {
+                this.drop_external(for_drop.clone(), paths, cx)
+            });
+        })
+        .on_drop(move |entry: &DraggedEntry, _window, cx| {
+            let from = entry.path.clone();
+            moving.update(cx, |this, cx| this.drop_entry(from, for_move.clone(), cx));
+        })
+        // A folder opens when a drag stays on it. The bounds are checked here
+        // and not by gpui: `on_drag_move` fires on **every** mouse move of the
+        // drag, wherever it is, so without this every row of the panel would
+        // claim to be the one under the hand.
+        .when(is_dir, |row| {
+            row.on_drag_move(
+                move |event: &gpui::DragMoveEvent<gpui::ExternalPaths>, _, cx| {
+                    if event.bounds.contains(&event.event.position) {
+                        let path = from_outside.clone();
+                        outside.update(cx, |this, cx| this.hover_drop_dir(path, cx));
+                    }
+                },
+            )
+            .on_drag_move(move |event: &gpui::DragMoveEvent<DraggedEntry>, _, cx| {
+                if event.bounds.contains(&event.event.position) {
+                    let path = from_inside.clone();
+                    inside.update(cx, |this, cx| this.hover_drop_dir(path, cx));
+                }
+            })
+        })
+}
+
+/// Makes a row something one can pick up.
+///
+/// The ghost is the row's own name in a small card: the platform draws nothing
+/// for an internal drag, and a drag with nothing following the pointer reads as
+/// a click that did not take.
+fn draggable(row: gpui::Stateful<gpui::Div>, path: &Path) -> gpui::Stateful<gpui::Div> {
+    row.on_drag(
+        DraggedEntry {
+            path: path.to_path_buf(),
+        },
+        |entry, _offset, _window, cx| {
+            let entry = entry.clone();
+            cx.new(|_| entry)
+        },
+    )
 }
 
 /// A folder's menu: create inside it, and unfold or collapse it wholesale.
@@ -2280,4 +3218,111 @@ fn file_menu(
                 delete.update(cx, |this, cx| this.confirm_delete(p5.clone(), window, cx));
             }),
     )
+}
+
+/// The width of the change strip, inside the column the gutter gives it.
+const HUNK_MARK_WIDTH: Pixels = px(3.);
+
+/// What the strip leaves between itself and the first character.
+///
+/// The strip's column is the gutter's own right margin, so drawing at its very
+/// edge puts the filet against the text — it then reads as a rule the line is
+/// written on rather than as a mark beside it. Backing off a few pixels gives
+/// it air on the right and, since it moves left inside a margin that was empty
+/// anyway, closes a little of the gap on the other side at the same time.
+const HUNK_MARK_GAP: Pixels = px(4.);
+
+/// Paints one line's change mark, beside the text.
+///
+/// A quad and not a glyph: the strip is a shape, and asking the text system for
+/// one would put it on the font's baseline rather than on the line's edge. The
+/// colours are read here, at paint time, so a theme change is picked up without
+/// anything having to say that it happened.
+fn paint_hunk_mark(
+    kind: crate::ui::hunks::Kind,
+    bounds: gpui::Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    use crate::ui::hunks::Kind;
+    let diff = crate::ui::theme::DiffColors::of(cx);
+    let colour = match kind {
+        Kind::Added => diff.added_fg,
+        Kind::Removed => diff.removed_fg,
+        Kind::Changed => gpui_component::ActiveTheme::theme(cx).primary,
+    };
+    // A deletion has no lines of its own, so it cannot have the full height:
+    // it is drawn as a stub on the boundary it sits on, which is what says
+    // "between these two lines" rather than "this line".
+    let (width, height) = match kind {
+        Kind::Removed => (HUNK_MARK_WIDTH * 2., px(3.)),
+        _ => (HUNK_MARK_WIDTH, bounds.size.height),
+    };
+    let rect = gpui::Bounds::new(
+        gpui::point(
+            bounds.origin.x + bounds.size.width - width - HUNK_MARK_GAP,
+            bounds.origin.y,
+        ),
+        gpui::size(width, height),
+    );
+    window.paint_quad(gpui::fill(rect, colour));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a drop on a row asks for. This is the whole decision of dragging
+    /// inside the tree, and the only part of it that can be wrong in silence:
+    /// a folder dropped into its own child would move a tree into itself.
+    #[test]
+    fn a_row_hands_a_drop_to_its_folder() {
+        assert_eq!(drop_dir(Path::new("src/ui"), true), PathBuf::from("src/ui"));
+        assert_eq!(
+            drop_dir(Path::new("src/main.rs"), false),
+            PathBuf::from("src")
+        );
+        // A file of the root gives the root, which is the empty path.
+        assert_eq!(drop_dir(Path::new("README.md"), false), PathBuf::new());
+    }
+
+    /// The greying of what `.gitignore` leaves out, read in one pass over two
+    /// sorted lists. It is the flag a folder's whole subtree is tested against,
+    /// so what it must not do is miss one.
+    #[test]
+    fn what_git_ignores_is_flagged_in_one_pass() {
+        let files: Vec<PathBuf> = ["README.md", "src/main.rs", "target/a.rs", "target/b.rs"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let ignored: Vec<PathBuf> = ["target/a.rs", "target/b.rs"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        assert_eq!(
+            excluded_flags(&files, &ignored),
+            vec![false, false, true, true]
+        );
+        // Nothing ignored is no flags at all, which is also what says "nothing
+        // to grey": the panel never asked for them.
+        assert!(excluded_flags(&files, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_move_that_means_nothing_is_not_one() {
+        let from = Path::new("src/ui/tree.rs");
+        assert_eq!(
+            move_within(from, Path::new("src/tree.rs")),
+            Some(files::Op::Rename {
+                from: from.to_path_buf(),
+                to: PathBuf::from("src/tree.rs"),
+            })
+        );
+        // Back where it already is.
+        assert_eq!(move_within(from, from), None);
+        // A folder into itself, and into one of its own children.
+        let dir = Path::new("src/ui");
+        assert_eq!(move_within(dir, dir), None);
+        assert_eq!(move_within(dir, Path::new("src/ui/ui")), None);
+    }
 }

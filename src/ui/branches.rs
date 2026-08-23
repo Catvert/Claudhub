@@ -11,12 +11,13 @@
 
 use std::path::PathBuf;
 
-use gpui::{Context, Window};
+use gpui::{prelude::*, Context, Window};
 
 use crate::git::{Branch, BranchKind};
 use crate::runtime::Cmd;
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
+use gpui_component::WindowExt as _;
 
 /// One row of the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +36,11 @@ pub(super) struct BranchRow {
     pub(super) detail: String,
     pub(super) ahead: usize,
     pub(super) behind: usize,
+    /// It declares an upstream. Not the same question as "is it behind": a
+    /// branch level with its remote has one and shows no count, and it is the
+    /// upstream — not the divergence — that says whether there is anything to
+    /// update from or to delete over there.
+    pub(super) tracked: bool,
     /// Worktree that already holds it. Git refuses two checkouts of the same
     /// branch: saying so beforehand beats an error.
     pub(super) taken_by: Option<PathBuf>,
@@ -67,6 +73,7 @@ pub(super) fn rows_for(branches: &[Branch], filter: &str) -> Vec<Row> {
                     detail: detail(branch),
                     ahead: branch.upstream.as_ref().map(|up| up.ahead).unwrap_or(0),
                     behind: branch.upstream.as_ref().map(|up| up.behind).unwrap_or(0),
+                    tracked: branch.upstream.is_some(),
                     taken_by: branch.checked_out_at.clone(),
                 })
             })
@@ -117,6 +124,179 @@ impl ClaudhubApp {
                 cx.notify();
             },
         );
+    }
+
+    /// A new branch starting from another one, which the picker names.
+    ///
+    /// `Cmd::CreateBranch` with a start point **switches onto it**, which is
+    /// what "new branch from" means everywhere else: one does not create a
+    /// branch in order to stay where one was.
+    pub(super) fn prompt_new_branch_from(
+        &mut self,
+        from: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The name is suggested and stays editable: `origin/feat` gives `feat`,
+        // which is the branch one meant nine times out of ten.
+        let suggestion = crate::git::branch::short_name(&from).to_string();
+        self.open_text_dialog_with(
+            tr!("branch-new-from", { name: from.clone() }),
+            tr!("branch-new-placeholder"),
+            suggestion,
+            window,
+            cx,
+            move |this, name, _window, cx| {
+                let name = name.trim().to_string();
+                if name.is_empty() {
+                    return;
+                }
+                let Some(worktree) = this.active.clone() else {
+                    return;
+                };
+                this.start(
+                    Some(worktree.clone()),
+                    crate::runtime::Action::Branch,
+                    Cmd::CreateBranch {
+                        worktree,
+                        name,
+                        from: Some(from.clone()),
+                    },
+                    cx,
+                );
+            },
+        );
+    }
+
+    /// Renames a branch, checked out or not.
+    ///
+    /// The field opens on the current name rather than empty: a rename is nearly
+    /// always an edit of two characters, and retyping `feature/PROJ-1234` is
+    /// what makes the gesture go unused.
+    pub(super) fn prompt_rename_branch(
+        &mut self,
+        from: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_text_dialog_with(
+            tr!("branch-rename"),
+            tr!("branch-new-placeholder"),
+            from.clone(),
+            window,
+            cx,
+            move |this, to, _window, cx| {
+                let to = to.trim().to_string();
+                if to.is_empty() || to == from {
+                    return;
+                }
+                let Some(main) = this.active.clone().and_then(|w| this.main_of(&w)) else {
+                    return;
+                };
+                this.start(
+                    None,
+                    crate::runtime::Action::Branch,
+                    Cmd::RenameBranch {
+                        main,
+                        from: from.clone(),
+                        to,
+                    },
+                    cx,
+                );
+            },
+        );
+    }
+
+    /// Removes a local branch, once confirmed.
+    ///
+    /// `-d` and never `-D`: git refuses a branch whose commits are nowhere else,
+    /// and that refusal is the only net there is — nothing brings the commits
+    /// back afterwards. The dialog says so, so that the error, when it comes,
+    /// is one the user was warned of rather than one they have to interpret.
+    pub(super) fn confirm_delete_branch(
+        &mut self,
+        branch: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.confirm_branch(
+            tr!("branch-delete-title", { name: branch.clone() }),
+            tr!("branch-delete-help"),
+            move |main| Cmd::DeleteBranch {
+                main,
+                name: branch.clone(),
+                force: false,
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Removes a branch from `origin`, once confirmed.
+    pub(super) fn confirm_delete_remote_branch(
+        &mut self,
+        branch: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.confirm_branch(
+            tr!("branch-delete-remote-title", { name: branch.clone() }),
+            tr!("branch-delete-remote-help"),
+            move |main| Cmd::DeleteRemoteBranch {
+                main,
+                name: branch.clone(),
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// The shape both deletions share: a title, a sentence saying what it costs,
+    /// and the command built once the repository is known.
+    fn confirm_branch(
+        &mut self,
+        title: gpui::SharedString,
+        help: gpui::SharedString,
+        cmd: impl Fn(PathBuf) -> Cmd + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entity = cx.entity();
+        let cmd = std::rc::Rc::new(cmd);
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let (entity, cmd) = (entity.clone(), cmd.clone());
+            dialog
+                .title(title.clone())
+                .child(gpui::div().text_sm().child(help.clone()))
+                .overlay_closable(false)
+                .close_button(false)
+                .footer(crate::ui::dialogs::confirm())
+                .on_ok(move |_, _window, cx| {
+                    entity.update(cx, |this, cx| {
+                        let Some(main) = this.active.clone().and_then(|w| this.main_of(&w)) else {
+                            return;
+                        };
+                        this.start(None, crate::runtime::Action::Branch, cmd(main), cx);
+                    });
+                    true
+                })
+        });
+    }
+
+    /// Compares the current worktree against another branch.
+    ///
+    /// It sets the review's base and goes to the Git screen — which is all
+    /// "compare with" is here: the branch review *is* that comparison, and it
+    /// keeps the base one chose, per worktree. The step is written on the trail
+    /// like every other change of screen made with the mouse.
+    pub(super) fn compare_against(
+        &mut self,
+        base: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_base(base, cx);
+        self.travel_to(crate::ui::workspace::Workspace::Git, window, cx);
     }
 
     /// Checks an existing branch out into a fresh worktree.

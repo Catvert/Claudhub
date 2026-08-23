@@ -274,8 +274,25 @@ fn run(distro: &str, script: &str) -> Result<String> {
     Ok(decode(&out.stdout))
 }
 
+/// Keeps a child from opening a console window of its own.
+///
+/// It only matters because the interface is a windowed program (`main.rs`): a
+/// process with no console to inherit gets Windows to **create one** for every
+/// console child, and `wsl.exe` is a console program. Without this, the window
+/// removed from the launch came back as one flash per command.
+pub fn no_console(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 fn wsl() -> Command {
     let mut cmd = Command::new("wsl.exe");
+    no_console(&mut cmd);
     // Since WSL 0.64 this variable makes `wsl.exe` output UTF-8; without it,
     // `--list` answers in UTF-16, hence `decode`'s fallback.
     cmd.env("WSL_UTF8", "1");

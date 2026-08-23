@@ -834,9 +834,28 @@ pub fn document_styles(text: &str, theme: &HighlightTheme) -> Vec<(Range<usize>,
     if text.is_empty() || text.len() > MAX_BYTES {
         return Vec::new();
     }
-    let mut highlighter = BladeHighlighter::new();
-    highlighter.refresh(text);
-    InputHighlighter::styles(&highlighter, &(0..text.len()), theme)
+    BladeHighlighter::new().document_styles(text, theme)
+}
+
+impl BladeHighlighter {
+    /// The same, on a highlighter one keeps between documents.
+    ///
+    /// `new` compiles the PHP queries — tens of milliseconds — and a search
+    /// list holds up to `git::search::MAX_HITS` lines, each of them its own
+    /// little document. Rebuilding the grammar for every one of them is the
+    /// grammar-per-language rule of `HitHighlights` broken one level down, and
+    /// it is a minute of frozen window rather than a slow list.
+    pub fn document_styles(
+        &mut self,
+        text: &str,
+        theme: &HighlightTheme,
+    ) -> Vec<(Range<usize>, HighlightStyle)> {
+        if text.is_empty() || text.len() > MAX_BYTES {
+            return Vec::new();
+        }
+        self.refresh(text);
+        InputHighlighter::styles(self, &(0..text.len()), theme)
+    }
 }
 
 impl InputHighlighter for BladeHighlighter {

@@ -44,6 +44,7 @@ impl Mode {
 /// `ch` is the character the keystroke **produced** and not the key it was
 /// pressed on: that is what makes `$`, `^` and `0` land where they should on an
 /// AZERTY keyboard, where they are shifted or in the numeric row.
+#[derive(Clone)]
 pub struct Key {
     pub ch: Option<char>,
     /// The name of a key that produces no character: `escape`, `enter`,
@@ -191,12 +192,54 @@ pub struct Vim {
     prompt: Option<Prompt>,
     last_search: String,
     search_backward: bool,
+    /// Whether the occurrences are lit. vim's `hlsearch`, put out by `Esc` in
+    /// normal mode — the gesture every configuration binds `:nohlsearch` to.
+    hlsearch: bool,
     /// A blockwise insertion under way, waiting for the `Esc` that repeats it
     /// down the other rows.
     block_insert: Option<BlockInsert>,
     /// The folds the editor holds shut, given afresh at every keystroke: the
     /// gutter icons close them too, so this is read and never remembered.
     folds: Vec<crate::ui::folds::Range>,
+    /// The last `f`, `F`, `t` or `T`, for `;` and `,` to do again.
+    last_find: Option<Find>,
+    /// The keys of the change under way, kept until it is known whether it
+    /// changes anything: a count, an operator and its motion are three
+    /// keystrokes and one command.
+    recording: Vec<Key>,
+    /// Where an insertion began and how long the text was then.
+    ///
+    /// The pair `BlockInsert` keeps, for the same reason and read the same way:
+    /// together they tell a plain forward insertion from one that has been
+    /// clicked away from or backspaced through — the case this gives up on
+    /// rather than replay something nobody typed.
+    insert_at: Option<(usize, usize)>,
+    /// What `.` plays again.
+    last_change: Option<Repeat>,
+    /// Whether `.` is playing. Nothing is recorded while it does — a repeat is
+    /// not a new change, and recording it would make `.` its own last change.
+    replaying: bool,
+    /// Whether the visual selection came from the mouse rather than from keys.
+    ///
+    /// What `.` plays is keystrokes, and there are none that describe a drag:
+    /// filing `d` alone would give a repeat that waits for a motion and does
+    /// nothing. The change before it stays what `.` plays — the same ruling as
+    /// an insertion that was clicked away from: never invent the half that was
+    /// not typed.
+    adopted: bool,
+}
+
+/// The last change, as `.` needs it to happen again.
+///
+/// The keys are the command **up to** insert mode, and the text is what was
+/// typed once there: those are two different things, and recording the second
+/// as keystrokes would replay the letters without what the editor did with them
+/// — an auto-indent, a completion, a bracket closed for you.
+#[derive(Clone)]
+struct Repeat {
+    keys: Vec<Key>,
+    /// What was typed in insert mode, when the command went there.
+    insert: Option<String>,
 }
 
 /// What `I`, `A` and `c` set up in blockwise visual mode: one types on the top
@@ -231,6 +274,62 @@ impl Vim {
         self.mode
     }
 
+    /// The end of the selection that is being moved — where the block cursor
+    /// goes in a visual mode, which the editor's own caret says nothing about.
+    pub fn head(&self) -> usize {
+        self.head
+    }
+
+    /// Takes on a selection made outside vim: the mouse, `Ctrl+A`, a shifted
+    /// arrow the input binds for itself.
+    ///
+    /// Without it a dragged selection was highlighted and vim knew nothing of
+    /// it: the mode stayed normal, the block cursor sat at the **start** of what
+    /// had been selected — normal mode reads the caret off the editor, and the
+    /// editor's caret is the range's start — and `c`, `d` or `y` then operated
+    /// on the one character under it. A selection on screen that the next
+    /// operator ignores is the one thing a modal editor must not show.
+    ///
+    /// It is always **characterwise**: a mouse selects a run of text, and coming
+    /// back into `V` or `Ctrl+V` would cover more than what is lit.
+    ///
+    /// The head is the end the mouse was dragging, which is what tells a
+    /// selection grown rightwards from one grown leftwards — `o`, `h` and `l`
+    /// carry on from the right end afterwards. Vim's head is **inclusive**,
+    /// where the editor's range is not: the last character is the head, not the
+    /// offset past it.
+    pub fn adopt(&mut self, text: &str, range: Range<usize>, reversed: bool) {
+        if self.mode == Mode::Insert {
+            return;
+        }
+        self.pending.clear();
+        // A desired column left over from an earlier `$` would make the next
+        // `j` reach the end of the line rather than the column being pointed at.
+        self.column = None;
+        let (start, end) = (range.start.min(text.len()), range.end.min(text.len()));
+        if start >= end {
+            // A plain click: the caret is the editor's again, which is what
+            // normal mode already assumes.
+            self.mode = Mode::Normal;
+            self.head = start;
+            self.anchor = start;
+            self.adopted = false;
+            return;
+        }
+        let last = prev_boundary(text, end);
+        let (anchor, head) = if reversed {
+            (last, start)
+        } else {
+            (start, last)
+        };
+        self.anchor = anchor;
+        self.head = head;
+        self.mode = Mode::Visual;
+        // The keys typed before the drag are not part of what follows it.
+        self.recording.clear();
+        self.adopted = true;
+    }
+
     /// Hands vim the register to paste from.
     ///
     /// It is how the system clipboard gets in when the setting asks for it. The
@@ -242,6 +341,34 @@ impl Vim {
             linewise: text.ends_with('\n'),
             text,
         };
+    }
+
+    /// The pattern whose occurrences are to be lit, `None` when there are none
+    /// to light or `Esc` has put them out.
+    ///
+    /// vim's `hlsearch`, and the half of `/` that was missing: a search that
+    /// only moves the caret makes one press `n` to find out whether there was
+    /// anything else. The view paints them on a layer of its own rather than
+    /// opening the editor's own search panel, which **takes the focus** — and
+    /// the focus is what `n` and `N` need to stay where they are.
+    pub fn highlights(&self) -> Option<&str> {
+        (self.hlsearch && !self.last_search.is_empty()).then_some(self.last_search.as_str())
+    }
+
+    /// The pattern `n` and `N` walk, as `Ctrl+F` left it.
+    ///
+    /// Pushed in before a keystroke the way the register and the folds are: the
+    /// editor's own search bar writes to the same place, and one pattern told
+    /// twice is two patterns that drift apart. Taking it from there is what
+    /// makes `n` carry on a search typed into the bar — and, the other way
+    /// round, what makes `Ctrl+F` open on what `/` was looking for.
+    pub fn set_search(&mut self, query: &str) {
+        if query.is_empty() || query == self.last_search {
+            return;
+        }
+        self.last_search = query.to_string();
+        self.search_backward = false;
+        self.hlsearch = true;
     }
 
     /// Hands vim what the editor currently holds folded shut.
@@ -271,7 +398,163 @@ impl Vim {
     ///
     /// `rows` is the height of the viewport in lines, which is what `Ctrl+D` and
     /// `Ctrl+U` move by half of.
+    ///
+    /// It is a wrapper around `answer`, which does the work: what is added here
+    /// is the note-taking `.` needs, and `.` itself — the one key that is not a
+    /// command of its own but a command played again.
     pub fn press(&mut self, key: &Key, text: &str, cursor: usize, rows: usize) -> Response {
+        if self.replaying {
+            return self.answer(key, text, cursor, rows);
+        }
+        // `.` is normal mode's alone, and only when nothing is half-typed: after
+        // `d` or `f` it is the character being waited for, and in a `/` line it
+        // is a full stop.
+        if self.mode == Mode::Normal
+            && self.pending.is_empty()
+            && self.prompt.is_none()
+            && key.ch == Some('.')
+            && !key.ctrl
+        {
+            return self.repeat(text, cursor, rows);
+        }
+        let was = self.mode;
+        // While insert mode is being recorded the keys are text, and text is not
+        // read key by key: see `note_change`.
+        if self.insert_at.is_none() {
+            self.recording.push(key.clone());
+        }
+        let response = self.answer(key, text, cursor, rows);
+        self.note_change(was, text, cursor, &response);
+        response
+    }
+
+    /// Files what the keystroke just answered amounts to.
+    ///
+    /// A change is rarely one key: `3dw` is four, `cwfoo` and its `Esc` are six,
+    /// and what `.` has to play again is all of them. They are kept as they come
+    /// and thrown away as soon as the command turns out to change nothing — a
+    /// motion, a mode, a scroll.
+    fn note_change(&mut self, was: Mode, text: &str, cursor: usize, response: &Response) {
+        // Going into insert mode: the keys so far **are** the command, and
+        // everything after them is text.
+        if was != Mode::Insert && self.mode == Mode::Insert {
+            let Response::Apply(change) = response else {
+                self.recording.clear();
+                return;
+            };
+            let len = match &change.edit {
+                Some(edit) => text.len() - (edit.range.end - edit.range.start) + edit.text.len(),
+                None => text.len(),
+            };
+            self.insert_at = Some((change.head, len));
+            return;
+        }
+        // Coming out of it: what was typed is what lies between where the
+        // insertion began and where the caret is now. Deduced and not recorded,
+        // which is the only way to get what the editor added of its own accord.
+        if was == Mode::Insert && self.mode != Mode::Insert {
+            let taken = self.insert_at.take();
+            let keys = std::mem::take(&mut self.recording);
+            let Some((start, len)) = taken else { return };
+            if cursor < start || text.len() != len + (cursor - start) {
+                // Clicked away from, or backspaced past its start: nothing is
+                // filed rather than a command whose text half is a guess. The
+                // change before it stays what `.` plays.
+                return;
+            }
+            if self.adopted {
+                self.adopted = false;
+                return;
+            }
+            if let Some(typed) = text.get(start..cursor) {
+                self.last_change = Some(Repeat {
+                    keys,
+                    insert: Some(typed.to_string()),
+                });
+            }
+            return;
+        }
+        if self.mode == Mode::Insert {
+            return; // still typing
+        }
+        if matches!(response, Response::Apply(change) if change.edit.is_some()) {
+            let keys = std::mem::take(&mut self.recording);
+            if !std::mem::take(&mut self.adopted) {
+                self.last_change = Some(Repeat { keys, insert: None });
+            }
+        } else if self.pending.is_empty() && self.mode == Mode::Normal {
+            // Nothing changed, nothing is half-typed and no mode is being held
+            // open: whatever was being recorded was a motion, and a motion is
+            // not what `.` plays. A visual mode **is** held open — `Ctrl+V j I`
+            // is three keys and one command — so its keys stay.
+            self.recording.clear();
+            self.adopted = false;
+        }
+    }
+
+    /// `.`: the last change, again, where the caret is now.
+    ///
+    /// The keys are played back through `answer` on a **copy** of the text, each
+    /// one’s edit applied to it, and what the view is handed at the end is a
+    /// single `Edit`: the shortest one that turns the text into the copy. That
+    /// is what keeps `.` one transaction — one `u` undoes it — where replaying
+    /// six keystrokes into the editor would be six.
+    fn repeat(&mut self, text: &str, cursor: usize, rows: usize) -> Response {
+        let Some(last) = self.last_change.clone() else {
+            return Response::Consumed;
+        };
+        self.replaying = true;
+        let mut buffer = text.to_string();
+        let mut caret = cursor.min(buffer.len());
+        let mut yank = None;
+        let mut flash = Vec::new();
+        let mut play = |vim: &mut Self, key: &Key, buffer: &mut String, caret: &mut usize| {
+            if let Response::Apply(change) = vim.answer(key, buffer, *caret, rows) {
+                if let Some(edit) = &change.edit {
+                    *buffer = apply_edit(buffer, edit);
+                }
+                *caret = change.head.min(buffer.len());
+                yank = change.yank.or(yank.take());
+                if !change.flash.is_empty() {
+                    flash = change.flash;
+                }
+            }
+        };
+        for key in &last.keys {
+            play(self, key, &mut buffer, &mut caret);
+        }
+        if let Some(typed) = last.insert.filter(|_| self.mode == Mode::Insert) {
+            buffer.insert_str(caret, &typed);
+            caret += typed.len();
+            // The `Esc` of the original, and not a mode set by hand: it is what
+            // steps the caret back onto the last character typed, and what
+            // repeats a blockwise insertion down its other rows.
+            let escape = Key {
+                ch: None,
+                name: "escape".into(),
+                ctrl: false,
+            };
+            play(self, &escape, &mut buffer, &mut caret);
+        }
+        self.replaying = false;
+        if self.mode == Mode::Insert {
+            // The command went somewhere its text half could not follow: normal
+            // mode is where `.` leaves one, never a mode nobody asked for.
+            self.mode = Mode::Normal;
+        }
+        self.pending.clear();
+        self.head = caret.min(buffer.len());
+        Response::Apply(Change {
+            edit: minimal_edit(text, &buffer),
+            selection: self.selection(&buffer),
+            head: self.head,
+            flash,
+            yank,
+        })
+    }
+
+    /// One keystroke, answered — everything `press` does not do itself.
+    fn answer(&mut self, key: &Key, text: &str, cursor: usize, rows: usize) -> Response {
         if self.mode == Mode::Normal {
             // The caret is the editor's in normal mode: a click moves it, and
             // vim has to start from where the eye is.
@@ -302,6 +585,19 @@ impl Vim {
             if key.is("escape") {
                 return self.escape(text);
             }
+            // The two keys of normal mode that produce no character. They are
+            // claimed here for a reason beyond completeness: the editor binds
+            // both, and a `backspace` left to it **deletes** — the one keystroke
+            // of normal mode that would destroy text nobody asked it to.
+            if key.is("enter") {
+                let below = move_lines(text, self.head, 1, Some(0));
+                return self.motion_to(text, first_non_blank(text, below));
+            }
+            if key.is("backspace") {
+                // vim's `Backspace` steps back over a line break, where `h`
+                // stops at the start of the line.
+                return self.motion_to(text, prev_boundary(text, self.head));
+            }
             return Response::Ignored;
         };
         self.pending.push(ch);
@@ -312,6 +608,10 @@ impl Vim {
     /// the selection.
     fn escape(&mut self, text: &str) -> Response {
         self.pending.clear();
+        // `:nohlsearch`, which is what every vim configuration binds `Esc` to:
+        // the occurrences of the last search have been read, and leaving them
+        // lit turns a search into a state.
+        self.hlsearch = false;
         if self.mode == Mode::Normal {
             return Response::Consumed;
         }
@@ -389,6 +689,7 @@ impl Vim {
             self.last_search = prompt.text;
             self.search_backward = prompt.kind == '?';
         }
+        self.hlsearch = true;
         self.search(text, false)
     }
 
@@ -1256,9 +1557,31 @@ impl Vim {
                     kind: Kind::Linewise,
                 });
             }
-            Motion::Find { ch, till, backward } => {
+            Motion::Find(find) => {
                 self.column = None;
-                let found = find_in_line(text, head, ch, till, backward, count)?;
+                self.last_find = Some(find);
+                let found = find_in_line(text, head, find.ch, find.till, find.backward, count)?;
+                if find.backward {
+                    Target::exclusive(found)
+                } else {
+                    Target::inclusive(found)
+                }
+            }
+            Motion::FindAgain(reverse) => {
+                self.column = None;
+                let find = self.last_find?;
+                let backward = find.backward != reverse;
+                // A `t` played again would not move: the caret is already one
+                // character short of the one it was told to stop before, and
+                // "up to the next one" is where it already stands. vim steps
+                // over that character first, and that is what makes `;` walk
+                // down a line rather than sit on it.
+                let from = match (find.till, backward) {
+                    (true, false) => next_boundary(text, head),
+                    (true, true) => prev_boundary_in(text, head, start_of_line(text, head)),
+                    _ => head,
+                };
+                let found = find_in_line(text, from, find.ch, find.till, backward, count)?;
                 if backward {
                     Target::exclusive(found)
                 } else {
@@ -1298,6 +1621,16 @@ impl Target {
     }
 }
 
+/// A character search within the line: what `f`, `F`, `t` and `T` describe, and
+/// what `;` and `,` play again.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Find {
+    ch: char,
+    /// `t` and `T`: stop one character short of it.
+    till: bool,
+    backward: bool,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Motion {
     Left,
@@ -1315,11 +1648,9 @@ enum Motion {
     GoToLine(Option<usize>),
     /// `gg`.
     FirstLine,
-    Find {
-        ch: char,
-        till: bool,
-        backward: bool,
-    },
+    Find(Find),
+    /// `;` and `,`: the last find again, the flag turning it round.
+    FindAgain(bool),
 }
 
 enum Parsed {
@@ -1361,6 +1692,8 @@ fn parse_motion(keys: &[char]) -> Parsed {
         '^' => Parsed::Motion(Motion::FirstNonBlank),
         '$' => Parsed::Motion(Motion::LineEnd),
         'G' => Parsed::Motion(Motion::GoToLine(None)),
+        ';' => Parsed::Motion(Motion::FindAgain(false)),
+        ',' => Parsed::Motion(Motion::FindAgain(true)),
         'g' => {
             if keys.len() < 2 {
                 return Parsed::Incomplete;
@@ -1374,11 +1707,11 @@ fn parse_motion(keys: &[char]) -> Parsed {
             if keys.len() < 2 {
                 return Parsed::Incomplete;
             }
-            Parsed::Motion(Motion::Find {
+            Parsed::Motion(Motion::Find(Find {
                 ch: keys[1],
                 till: c == 't' || c == 'T',
                 backward: c == 'F' || c == 'T',
-            })
+            }))
         }
         _ => Parsed::None,
     }
@@ -1594,6 +1927,45 @@ fn splice(text: &str, cuts: &[(Range<usize>, String)]) -> Edit {
 }
 
 /// The text an edit leaves behind.
+/// The shortest replacement that turns `before` into `after`.
+///
+/// What `.` hands the view: a repeat is several edits chained on a copy of the
+/// text, and the view applies **one**. Common prefix and common suffix, which is
+/// the same reckoning `lsp::sync` makes for a document change — and for the same
+/// reason: a range that covers the whole file is an undo step that swallows the
+/// file, a scroll position lost and, in the editor, a transaction the size of
+/// the buffer.
+///
+/// The boundaries are walked back onto **characters**: two texts can share a
+/// prefix that ends in the middle of an accented one, and a range that cuts a
+/// character in half panics on the slice.
+fn minimal_edit(before: &str, after: &str) -> Option<Edit> {
+    if before == after {
+        return None;
+    }
+    let mut start = 0;
+    let ceiling = before.len().min(after.len());
+    while start < ceiling && before.as_bytes()[start] == after.as_bytes()[start] {
+        start += 1;
+    }
+    while start > 0 && !(before.is_char_boundary(start) && after.is_char_boundary(start)) {
+        start -= 1;
+    }
+    let (mut end, mut tail) = (before.len(), after.len());
+    while end > start && tail > start && before.as_bytes()[end - 1] == after.as_bytes()[tail - 1] {
+        end -= 1;
+        tail -= 1;
+    }
+    while end < before.len() && !(before.is_char_boundary(end) && after.is_char_boundary(tail)) {
+        end += 1;
+        tail += 1;
+    }
+    Some(Edit {
+        range: start..end,
+        text: after[start..tail].to_string(),
+    })
+}
+
 fn apply_edit(text: &str, edit: &Edit) -> String {
     let mut out = String::with_capacity(text.len() + edit.text.len());
     out.push_str(&text[..edit.range.start]);
@@ -1973,6 +2345,16 @@ mod tests {
                 };
                 self.apply(&key);
             }
+            self
+        }
+
+        /// A selection made with the mouse: the editor holds it, and vim is
+        /// told about it the way the surface tells it — the range, and which
+        /// end was being dragged. The caret it leaves behind is the range's
+        /// start, which is what `selected_range().start` answers.
+        fn drag(&mut self, range: Range<usize>, reversed: bool) -> &mut Self {
+            self.vim.adopt(&self.text, range.clone(), reversed);
+            self.cursor = range.start;
             self
         }
 
@@ -2753,6 +3135,359 @@ tail
             name: name.into(),
             ctrl: true,
         }
+    }
+
+    /// `Enter` in normal mode goes down a line, to its first non-blank — vim's
+    /// `+`. It is claimed rather than left to the editor, which would open a
+    /// line in a mode that does not type.
+    #[test]
+    fn enter_goes_down_a_line() {
+        let mut editor = Editor::new("one\n    two\nthree\n");
+        editor.press("\n");
+        assert_eq!(editor.text, "one\n    two\nthree\n", "nothing was typed");
+        assert_eq!(editor.cursor, 8, "the `t` of two");
+    }
+
+    /// `Backspace` steps back over a line break, where `h` stops at the start of
+    /// the line — and above all it does **not** delete: the editor binds that
+    /// key, and left to it, normal mode destroyed text.
+    #[test]
+    fn backspace_steps_back_without_deleting() {
+        let mut editor = Editor::new("ab\ncd\n");
+        editor.press("j");
+        assert_eq!(editor.cursor, 3);
+        let key = Key {
+            ch: None,
+            name: "backspace".into(),
+            ctrl: false,
+        };
+        editor.apply(&key);
+        assert_eq!(editor.text, "ab\ncd\n");
+        assert_eq!(editor.cursor, 1, "the last character of the line above");
+    }
+
+    /// `;` walks the line on the last `f`, and `,` walks it back: without them
+    /// a search within the line is worth typing once, which is not what it is
+    /// for.
+    #[test]
+    fn a_find_is_walked_with_semicolons() {
+        let mut editor = Editor::new("a.b.c.d\n");
+        editor.press("f.");
+        assert_eq!(editor.cursor, 1);
+        editor.press(";");
+        assert_eq!(editor.cursor, 3);
+        editor.press(";");
+        assert_eq!(editor.cursor, 5);
+        editor.press(",");
+        assert_eq!(editor.cursor, 3);
+    }
+
+    /// A `t` played again steps over the character it stopped short of: the
+    /// caret is already where "up to the next one" would leave it, so a repeat
+    /// that did not step first would sit still.
+    #[test]
+    fn a_till_played_again_gets_past_its_character() {
+        let mut editor = Editor::new("a.b.c.d\n");
+        editor.press("t.");
+        assert_eq!(editor.cursor, 0);
+        editor.press(";");
+        assert_eq!(editor.cursor, 2);
+        editor.press(";");
+        assert_eq!(editor.cursor, 4);
+        editor.press(",");
+        assert_eq!(
+            editor.cursor, 2,
+            "it steps over the one just behind it, too"
+        );
+    }
+
+    /// An operator takes `;` as it takes any motion: `d;` deletes up to the next
+    /// occurrence, count and all.
+    #[test]
+    fn an_operator_can_aim_with_a_semicolon() {
+        let mut editor = Editor::new("a.b.c.d\n");
+        editor.press("f.");
+        editor.press("d;");
+        assert_eq!(editor.text, "ac.d\n", "`;` is inclusive, as `f` is");
+    }
+
+    /// `/` and `n`: the search line is typed, and `Enter` runs it.
+    #[test]
+    fn a_search_line_is_typed_and_run() {
+        let mut editor = Editor::new("one two\nthree two\n");
+        editor.press("/two\n");
+        assert_eq!(editor.cursor, 4);
+        editor.press("n");
+        assert_eq!(editor.cursor, 14);
+        editor.press("N");
+        assert_eq!(editor.cursor, 4);
+    }
+
+    /// The occurrences stay lit after a search, and `Esc` puts them out: a
+    /// search that only moved the caret left one pressing `n` to find out
+    /// whether there was anything else.
+    #[test]
+    fn a_search_lights_what_it_found() {
+        let mut editor = Editor::new("one two\nthree two\n");
+        assert_eq!(editor.vim.highlights(), None);
+        editor.press("/two\n");
+        assert_eq!(editor.vim.highlights(), Some("two"));
+        editor.press("\x1b");
+        assert_eq!(editor.vim.highlights(), None, "`Esc` is `:nohlsearch`");
+        // The pattern is not forgotten with the light: `n` still walks it.
+        editor.press("n");
+        assert_eq!(editor.cursor, 14);
+    }
+
+    /// One pattern for both searches: what was typed into `Ctrl+F` is what `n`
+    /// carries on, without anything being typed twice.
+    #[test]
+    fn the_bar_and_the_slash_share_one_pattern() {
+        let mut editor = Editor::new("one two\nthree two\n");
+        editor.vim.set_search("two");
+        assert_eq!(editor.vim.highlights(), Some("two"));
+        editor.press("n");
+        assert_eq!(editor.cursor, 4);
+        editor.press("n");
+        assert_eq!(editor.cursor, 14);
+    }
+
+    /// What is being typed on a `/` or `:` line is what the bar shows, and it is
+    /// the only thing that says why the next key does nothing else.
+    #[test]
+    fn the_line_being_typed_is_readable() {
+        let mut editor = Editor::new("one\n");
+        editor.press("/on");
+        assert_eq!(editor.vim.prompt().as_deref(), Some("/on"));
+        editor.press("\x1b");
+        assert_eq!(editor.vim.prompt(), None);
+    }
+
+    /// `:w`, `:wq` and `:q` are asked of the application: vim has no file to
+    /// write and no tab to close.
+    #[test]
+    fn the_colon_line_asks_the_application() {
+        let mut editor = Editor::new("one\n");
+        for (line, wanted) in [
+            (":w\n", Command::Save),
+            (":q!\n", Command::Close),
+            (":wq\n", Command::SaveAndClose),
+            (":x\n", Command::SaveAndClose),
+        ] {
+            let mut response = Response::Consumed;
+            for ch in line.chars() {
+                let key = match ch {
+                    '\n' => enter(),
+                    c => key(c),
+                };
+                response = editor.vim.press(&key, &editor.text, editor.cursor, 10);
+            }
+            assert_eq!(response, Response::Command(wanted), "{line:?}");
+        }
+    }
+
+    /// `:42` is `42G`: a line number is the one thing a colon line answers
+    /// itself.
+    #[test]
+    fn a_colon_line_number_goes_to_it() {
+        let mut editor = Editor::new("one\ntwo\nthree\n");
+        editor.press(":3\n");
+        assert_eq!(line_index(&editor.text, editor.cursor), 2);
+    }
+
+    /// `.` plays the last change again, where the caret is now — the key that
+    /// makes an operator worth typing once.
+    #[test]
+    fn the_last_change_happens_again() {
+        let mut editor = Editor::new("one two three four\n");
+        editor.press("dw");
+        assert_eq!(editor.text, "two three four\n");
+        editor.press(".");
+        assert_eq!(editor.text, "three four\n");
+    }
+
+    /// A repeat is not itself a change: `.` twice is the command twice, and not
+    /// the second `.` playing the first.
+    #[test]
+    fn a_repeat_is_not_what_gets_repeated() {
+        let mut editor = Editor::new("abcdef\n");
+        editor.press("x..");
+        assert_eq!(editor.text, "def\n");
+    }
+
+    /// What was typed in insert mode goes with the command: `cw` is the half one
+    /// sees, and the word one typed is the other.
+    #[test]
+    fn a_change_carries_what_was_typed() {
+        let mut editor = Editor::new("aa\nbb\n");
+        editor.press("cwyes\x1b");
+        assert_eq!(editor.text, "yes\nbb\n");
+        editor.press("j0.");
+        assert_eq!(editor.text, "yes\nyes\n");
+    }
+
+    /// An insertion that opens a line is played whole — the line it opens as
+    /// much as what goes on it.
+    #[test]
+    fn an_opened_line_is_played_whole() {
+        let mut editor = Editor::new("one\ntwo\n");
+        editor.press("oand\x1b");
+        assert_eq!(editor.text, "one\nand\ntwo\n");
+        editor.press(".");
+        assert_eq!(editor.text, "one\nand\nand\ntwo\n");
+    }
+
+    /// Moving about does not disturb what `.` holds: only a command that
+    /// changed the text becomes the last change.
+    #[test]
+    fn a_motion_is_not_a_change() {
+        let mut editor = Editor::new("aaa bbb ccc\n");
+        editor.press("x");
+        editor.press("ww");
+        editor.press(".");
+        assert_eq!(editor.text, "aa bbb cc\n");
+    }
+
+    /// One `Edit` and not the six keystrokes it took: that is what makes a
+    /// repeat a single transaction, and what keeps `u` from having to be pressed
+    /// as many times as one typed.
+    #[test]
+    fn a_repeat_is_one_edit() {
+        let mut editor = Editor::new("aa\nbb\n");
+        editor.press("cwyes\x1b");
+        editor.press("j0");
+        let key = key('.');
+        let response = editor.vim.press(&key, &editor.text, editor.cursor, 10);
+        let Response::Apply(change) = response else {
+            panic!("a repeat applies");
+        };
+        let edit = change.edit.expect("something changed");
+        assert_eq!(&editor.text[edit.range.clone()], "bb");
+        assert_eq!(edit.text, "yes");
+    }
+
+    /// In insert mode a full stop is a full stop: `.` is a command of normal
+    /// mode alone, and the interception has to know it.
+    #[test]
+    fn a_full_stop_is_typed_where_it_belongs() {
+        let mut editor = Editor::new("");
+        editor.press("ione. two.\x1b");
+        assert_eq!(editor.text, "one. two.");
+    }
+
+    /// Nothing has changed yet: `.` is taken and does nothing, rather than
+    /// answering with an edit of nothing at all.
+    #[test]
+    fn a_repeat_with_nothing_to_repeat_is_quiet() {
+        let mut editor = Editor::new("one\n");
+        editor.press(".");
+        assert_eq!(editor.text, "one\n");
+        assert_eq!(editor.cursor, 0);
+    }
+
+    /// A blockwise insertion replays whole, its `Esc` included: that `Esc` is
+    /// what writes the typing down the other rows, so a repeat that set the mode
+    /// by hand would play the top line and none of the rest.
+    #[test]
+    fn a_rectangle_replays_with_its_escape() {
+        let mut editor = Editor::new("aa\nbb\ncc\ndd\n");
+        editor.control("v").press("jI-\x1b");
+        assert_eq!(editor.text, "-aa\n-bb\ncc\ndd\n");
+        editor.press("jj0.");
+        assert_eq!(editor.text, "-aa\n-bb\n-cc\n-dd\n");
+    }
+
+    /// A keyed visual selection replays as the keys it was made of: `v`, its
+    /// motion and its operator are one command.
+    #[test]
+    fn a_visual_command_replays_as_its_keys() {
+        let mut editor = Editor::new("abcd\nefgh\n");
+        editor.press("vld");
+        assert_eq!(editor.text, "cd\nefgh\n");
+        editor.press("j0.");
+        assert_eq!(editor.text, "cd\ngh\n");
+    }
+
+    /// A change made on a **dragged** selection is not what `.` plays: there are
+    /// no keystrokes that describe a drag, and `d` on its own would be a repeat
+    /// that waits for a motion. What was filed before it stays.
+    #[test]
+    fn a_dragged_change_is_not_filed() {
+        let mut editor = Editor::new("aaa bbb ccc\n");
+        editor.press("x");
+        editor.drag(2..5, false);
+        editor.press("d");
+        assert_eq!(editor.text, "aab ccc\n");
+        editor.press(".");
+        assert_eq!(editor.text, "aa ccc\n", "the `x` before it");
+    }
+
+    /// A selection made with the mouse is a visual selection: without that,
+    /// what was lit on screen and what the next operator took were two
+    /// different things — the mode stayed normal, the caret sat at the start of
+    /// the range, and `d` deleted the one character under it.
+    #[test]
+    fn a_dragged_selection_is_a_visual_selection() {
+        let mut editor = Editor::new("one two three\n");
+        editor.drag(4..7, false);
+        assert_eq!(editor.mode(), Mode::Visual);
+        editor.press("d");
+        assert_eq!(editor.text, "one  three\n");
+        assert_eq!(editor.mode(), Mode::Normal);
+    }
+
+    /// `c` on a dragged selection replaces it and leaves insert mode behind,
+    /// which is the gesture one reaches for after selecting with the mouse.
+    #[test]
+    fn a_dragged_selection_can_be_changed() {
+        let mut editor = Editor::new("one two three\n");
+        editor.drag(4..7, false);
+        editor.press("c");
+        assert_eq!(editor.mode(), Mode::Insert);
+        assert_eq!(editor.text, "one  three\n");
+        editor.press("six");
+        assert_eq!(editor.text, "one six three\n");
+    }
+
+    /// The head is the end that was being dragged: the block cursor goes there,
+    /// and it is what `o`, `h` and `l` carry on from. A selection grown
+    /// leftwards has it at the **start**.
+    #[test]
+    fn the_dragged_end_is_the_head() {
+        let mut editor = Editor::new("one two three\n");
+        editor.drag(4..7, false);
+        assert_eq!(editor.vim.head(), 6, "the last character of the range");
+        editor.drag(4..7, true);
+        assert_eq!(editor.vim.head(), 4);
+        // `o` swaps the ends, and the range it covers does not move.
+        editor.press("o");
+        assert_eq!(editor.vim.head(), 6);
+        editor.press("d");
+        assert_eq!(editor.text, "one  three\n");
+    }
+
+    /// A plain click selects nothing, and nothing is what visual mode covers:
+    /// it puts the surface back in normal mode rather than leaving a selection
+    /// on screen that has already gone.
+    #[test]
+    fn a_click_leaves_visual_mode() {
+        let mut editor = Editor::new("one two three\n");
+        editor.drag(4..7, false);
+        editor.drag(9..9, false);
+        assert_eq!(editor.mode(), Mode::Normal);
+        editor.press("x");
+        assert_eq!(editor.text, "one two tree\n");
+    }
+
+    /// Insert mode keeps the mouse to itself: selecting a word to type over it
+    /// is what every editor does, and vim has no visual mode to go to from
+    /// there.
+    #[test]
+    fn insert_mode_keeps_its_own_selection() {
+        let mut editor = Editor::new("one two three\n");
+        editor.press("i");
+        editor.drag(4..7, false);
+        assert_eq!(editor.mode(), Mode::Insert);
     }
 
     fn key(ch: char) -> Key {

@@ -8,12 +8,14 @@
 //! **The engine does not say which table a result column comes from.** MySQL's
 //! protocol carries `org_table` in its column definitions, but sqlx keeps only
 //! the name, the ordinal and the type. The source is therefore read from the
-//! **query**: the tables it names after `FROM` and `JOIN`, matched against the
-//! schema's foreign keys. That is exact for `SELECT * FROM t`, which is what
-//! opening a table from the tree writes, and honest elsewhere — where two of
-//! the named tables carry the same column name towards two different targets,
-//! nothing is offered rather than something wrong.
+//! **query** — `db::sql`, the same scan the console completes with: the tables
+//! it names after `FROM` and `JOIN`, matched against the schema's foreign keys.
+//! That is exact for `SELECT * FROM t`, which is what opening a table from the
+//! tree writes, and honest elsewhere — where two of the named tables carry the
+//! same column name towards two different targets, nothing is offered rather
+//! than something wrong.
 
+use super::sql::{eq, tables_in};
 use super::Engine;
 
 /// A foreign key of the indexed schema.
@@ -146,119 +148,6 @@ fn is_number(value: &str) -> bool {
         })
 }
 
-/// Identifiers compare without case: both engines answer to `Users` and
-/// `users`, and a schema written in one and a query typed in the other must
-/// still meet.
-fn eq(left: &str, right: &str) -> bool {
-    left.eq_ignore_ascii_case(right)
-}
-
-/// The tables a query names, after `FROM` and each kind of `JOIN`.
-///
-/// A rough scan and not a parser: strings, quoted identifiers and comments are
-/// skipped so that a `FROM` written inside one is not read as a clause, and
-/// what follows a `(` — a subquery — names no table of ours. An alias is simply
-/// the word after, which is not read.
-pub fn tables_in(sql: &str) -> Vec<String> {
-    let mut tables: Vec<String> = Vec::new();
-    let mut words = Words::new(sql);
-    let mut expect = false;
-    while let Some(word) = words.next_word() {
-        if expect {
-            expect = false;
-            if let Some(name) = table_name(&word) {
-                if !tables.iter().any(|table| eq(table.as_str(), &name)) {
-                    tables.push(name);
-                }
-            }
-            continue;
-        }
-        expect = word.eq_ignore_ascii_case("from") || word.eq_ignore_ascii_case("join");
-    }
-    tables
-}
-
-/// `db.users` names `users`: what the schema index files is the bare name.
-/// A subquery, an opening parenthesis or a keyword names nothing.
-fn table_name(word: &str) -> Option<String> {
-    let name = word.rsplit('.').next().unwrap_or(word).trim();
-    let usable = !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '$');
-    usable.then(|| name.to_string())
-}
-
-/// A query's words, with strings, comments and quoted identifiers set aside.
-struct Words<'a> {
-    rest: &'a str,
-}
-
-impl<'a> Words<'a> {
-    fn new(sql: &'a str) -> Self {
-        Self { rest: sql }
-    }
-
-    /// Reads what follows a `.`, and keeps the last part.
-    fn qualified(&mut self, word: String) -> String {
-        let mut word = word;
-        while let Some(rest) = self.rest.strip_prefix('.') {
-            self.rest = rest;
-            match self.next_word() {
-                Some(next) => word = next,
-                None => break,
-            }
-        }
-        word
-    }
-
-    fn next_word(&mut self) -> Option<String> {
-        loop {
-            self.rest = self.rest.trim_start();
-            let mut chars = self.rest.chars();
-            let first = chars.next()?;
-            let after = chars.as_str();
-            match first {
-                // A line comment, a block comment: nothing of ours in there.
-                '-' if after.starts_with('-') => {
-                    self.rest = after.split_once('\n').map(|(_, rest)| rest).unwrap_or("");
-                }
-                '/' if after.starts_with('*') => {
-                    self.rest = after.split_once("*/").map(|(_, rest)| rest).unwrap_or("");
-                }
-                '\'' | '"' | '`' => {
-                    let Some((word, rest)) = after.split_once(first) else {
-                        self.rest = "";
-                        return Some(String::new());
-                    };
-                    self.rest = rest;
-                    // A quoted identifier is a word: `FROM "users"` names one.
-                    // `` `db`.`posts` `` is one too, and it is its last part
-                    // that names the table — the same reading `table_name` does
-                    // of an unquoted `db.posts`.
-                    return Some(self.qualified(word.to_string()));
-                }
-                _ if first.is_alphanumeric() || first == '_' || first == '$' || first == '.' => {
-                    let end = self
-                        .rest
-                        .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$' || c == '.'))
-                        .unwrap_or(self.rest.len());
-                    let (word, rest) = self.rest.split_at(end);
-                    self.rest = rest;
-                    return Some(word.to_string());
-                }
-                // Anything else — a comma, a parenthesis, an operator — is a
-                // separator, and it breaks a `FROM` from what would have
-                // followed it.
-                _ => {
-                    self.rest = after;
-                    return Some(first.to_string());
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,36 +179,6 @@ mod tests {
                 },
             },
         ]
-    }
-
-    #[test]
-    fn a_plain_select_names_its_table() {
-        assert_eq!(tables_in("SELECT * FROM posts;"), vec!["posts"]);
-        assert_eq!(tables_in("select * from `db`.`posts` p"), vec!["posts"]);
-        assert_eq!(
-            tables_in("SELECT * FROM posts JOIN users ON users.id = posts.user_id"),
-            vec!["posts", "users"]
-        );
-    }
-
-    #[test]
-    fn a_from_inside_a_string_or_a_comment_names_nothing() {
-        assert_eq!(
-            tables_in("SELECT 'from nowhere' FROM posts -- from elsewhere"),
-            vec!["posts"]
-        );
-        assert_eq!(
-            tables_in("SELECT * /* from there */ FROM posts"),
-            vec!["posts"]
-        );
-    }
-
-    #[test]
-    fn a_subquery_is_not_a_table() {
-        assert_eq!(
-            tables_in("SELECT * FROM (SELECT * FROM posts) AS p"),
-            vec!["posts"]
-        );
     }
 
     #[test]

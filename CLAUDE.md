@@ -81,7 +81,9 @@ src/
   db/           bases de données — `sqlx`, asynchrone, testable sans gpui
     mod.rs      connexions, schémas, résultats ; le choix du moteur
     scope.rs    quelles bases appartiennent au worktree regardé — motifs
+    sql.rs      lire une requête comme du texte : ses tables, leurs alias, la clause
     link.rs     suivre une clé étrangère : la table d'une colonne, le littéral
+    complete.rs ce que la console propose en tapant — classé, jamais deviné
     sqlite.rs   en lecture seule, schéma lu par les pragmas
     mysql.rs    MySQL et MariaDB, par `information_schema`
   logging.rs    `env_logger` sur stderr, et un anneau de 2000 lignes en mémoire
@@ -134,7 +136,9 @@ src/
     tags.rs         le panneau des tags, et les quatre gestes sur un tag
     highlight.rs    coloration tree-sitter d'un diff
     blade.rs        les vues Blade : surcouche du diff, coloriseur de l'éditeur
-    branches.rs     ce que le sélecteur de branches liste — sans panneau
+    branches.rs     ce que le sélecteur de branches liste, et les gestes sur une
+    branch_picker.rs   le sélecteur de branches : le filtre, la liste, les actions
+    worktree_picker.rs le sélecteur de worktrees : le filtre, la liste, les actions
     review.rs / terminal_view.rs
     server.rs       la mise en route du serveur WSL
     settings.rs     les réglages et leur global
@@ -160,6 +164,9 @@ src/
     lsp.rs          le pont vers le serveur de langage
     jumps.rs        la piste : d'où l'on vient, où l'on repart — pur
     folds.rs        quels replis un niveau de repli ferme — pur
+    hunks.rs        la gouttière de l'éditeur, et la comparaison de lignes — pur
+    merge.rs        la fusion à trois voies : ce que chaque côté a fait — pur
+    merge_view.rs   les trois colonnes, et le clic qui tranche
     plugin_view.rs  peint l'arbre d'un plugin, et tient son script en vie
     find.rs         la recherche d'un panneau, et son routage
     motion.rs       le lissage de la molette — pur
@@ -283,14 +290,23 @@ dans l'**entrée standard** d'un `cat` lancé là-bas — ni partage réseau, ni
 - **Le script d'installation n'a pas un seul guillemet**, délibérément : la ligne
   traverse `CreateProcess` puis la reconstruction d'`argv` par `wsl.exe`. Un test
   le verrouille.
+- **L'exécutable est un programme *fenêtré*** (`windows_subsystem = "windows"`,
+  `main.rs`) : par défaut un binaire Rust est un programme de console, et
+  Windows ouvrait une fenêtre noire à côté de l'interface, y déversait
+  `env_logger`, et la fermer tuait l'application. Ce qu'elle montrait est ce à
+  quoi sert la page « Journal ». Corollaire immédiat : un processus sans console
+  à hériter en fait **créer une** à chaque enfant de console, et `wsl.exe` en
+  est un — d'où `wsl::no_console` (`CREATE_NO_WINDOW`), sur le manche à
+  `wsl.exe` comme sur le lancement du serveur. Sans lui, la fenêtre retirée du
+  démarrage revenait en un clignotement par commande.
 - **`wsl.exe --list` répond en UTF-16** avant `WSL_UTF8` ; `wsl::decode` gère les
   deux.
 
 **Le fil ne transporte que des chemins Linux**, et la traduction n'existe qu'aux
-quatre endroits où un chemin change de monde : le sélecteur de dossier (en
+cinq endroits où un chemin change de monde : le sélecteur de dossier (en
 refusant le dépôt d'une *autre* distribution), le coffre de notes, la cible d'un
-export CSV, et les deux retours (ouverture du coffre, chemin d'un export annoncé)
-qui refont le chemin inverse. `wslpath` est pur et testé sous Linux.
+export CSV, ce qu'un glissement dépose dans l'explorateur, et les deux retours
+(ouverture du coffre, chemin d'un export annoncé) qui refont le chemin inverse. `wslpath` est pur et testé sous Linux.
 
 **Les mêmes réglages, deux mondes.** `settings.json` et `state.json` restent côté
 Windows — c'est l'état de cette fenêtre — mais contiennent des chemins Linux. La
@@ -499,6 +515,27 @@ nouveau apparaît comme une seule entrée qu'on ne peut ni lire ni indexer, et u
 worktree d'agent en crée. La suppression passe par `git clean` et non
 `remove_file` : il refuse ce qui est suivi.
 
+### Valider, et pousser dans le même geste
+
+Deux boutons sous le champ de message, celui de PhpStorm : « Valider », et
+« Valider et pousser ».
+
+- **Un drapeau et non deux commandes** (`Cmd::Commit { push }`), le précédent
+  étant `CreateTag` : le commit est local et le push est un aller-retour, donc
+  les deux partiraient dans **deux files** que rien n'ordonne — le push pouvant
+  alors devancer le commit et envoyer la branche telle qu'elle était.
+  `queue_of` lit le drapeau, et la paire voyage dans la file réseau.
+- **Une action à elle** (`Action::CommitPush`) : c'est ce qui fait tourner le
+  bouton qui a été pressé et non son voisin, et ce qui permet à la barre d'état
+  de dire lequel des deux gestes tourne.
+- **Ce qui est rapporté est le compte rendu du push**, quand il en écrit un :
+  c'est la moitié qu'on a attendue, et la ligne du commit est déjà dans
+  l'historique qui suit.
+- **Deux boutons et non un menu sur le premier** : les deux gestes se font une
+  douzaine de fois par jour, et cacher l'un derrière un chevron coûterait un
+  clic à celui qui finit le travail. Le second est en contour — ce qu'il ajoute
+  est un aller-retour, et le fond plein revient au geste qui vaut toujours.
+
 ### Proposer un message de commit
 
 Le bouton donne le diff indexé à un agent et met sa réponse dans le champ.
@@ -533,15 +570,83 @@ disparaître le bouton.
 répertoires ouverts un par un coûteraient un appel système chacun pour arriver
 aux sept cents qui portent du code.
 
+**Et git s'arrête au dossier qu'il exclut en entier** (`--directory
+--no-empty-directory`, le second appel) : sans cela un Laravel rendait **cent
+cinquante-quatre mille** chemins ignorés pour huit mille utiles, soit une
+seconde de commande — et l'arbre s'ouvrant **replié**, on payait tout cela pour
+peindre une dizaine de lignes. C'est cinq cent vingt entrées, dont soixante-neuf
+dossiers, et dix millisecondes. Les trois coûts chiffrés plus bas suivent :
+l'arbre passe de cent soixante mille nœuds à neuf mille, `dimmed` n'a plus
+trente mille feuilles à visiter sous `vendor/`, et la recherche de fichiers —
+qui rebâtit un arbre à chaque frappe — cesse d'être le point « pas optimisé et
+qui se sait ».
+
+Ce que ça demande, et ce que ça ne demande pas :
+
+- **Un chemin sans rien dessous est un fichier**, pour un arbre bâti de chemins.
+  `vendor/` se peignait donc avec une icône de fichier : `git::Files::dirs` dit
+  lesquels sont des dossiers, et `tree::Tree::with_dirs` en fait un nœud qui
+  **porte son propre indice** — c'est le seul que `vendor/` ait, et griser un
+  dossier demande si tout ce qu'il porte est exclu. Le slash final se lit sur le
+  **texte** : `PathBuf` le jette, et `vendor` et `vendor/` sont le même chemin
+  une fois analysés.
+- **Un dossier reste dans cette liste une fois lu**, sans quoi il se dessine
+  deux fois — la ligne du dossier que ses fichiers font, et la ligne du fichier
+  qu'il paraît être. Ce qui en sort est l'autre liste, `unexplored`, celle qui
+  dit ce qu'un chevron a encore à aller chercher.
+- **Le contenu se lit par un `readdir` et non par git** (`files::read_dir`), et
+  c'est **exact** : git ne descend jamais dans un dossier exclu — le lui
+  redemander répond `vendor/` —, donc rien n'y peut être réinclus. Deux
+  millisecondes pour les sept cents entrées d'un `node_modules/`. La règle du
+  paragraphe précédent n'est pas enfreinte : ce qu'elle interdit est de
+  **parcourir** quarante mille répertoires pour trouver les sept cents qui
+  portent du code, pas de lire un niveau, à un geste, là où git a renoncé.
+- **Ce qui est ouvert et inconnu se fait lire** (`read_open_dirs`) : un chevron
+  et une liste qui vient de tout remplacer sont la même question. Un `git add`
+  ne referme donc pas le `vendor/` qu'on lisait, et une session reprise
+  redemande ce que `expanded` retenait. Le balayage parcourt `expanded` — la
+  poignée de dossiers ouverts à la main —, jamais l'arbre.
+- **Rien ne surveille là-dedans** : la règle des quarante mille répertoires vaut
+  ici plus qu'ailleurs, et un `composer install` se voit en repliant.
+- **Les deux listes se refont triées à chaque arrivée**, jamais complétées par
+  la fin : `excluded_flags` parcourt deux listes triées de front, et une queue
+  hors d'ordre cesse **en silence** de griser tout ce qui la suit. Les exclus
+  sont donc **gardés** (`ignored_paths`) et non redéduits des drapeaux — une
+  insertion décale tous les indices d'après.
+
 **`ui::tree` ne connaît que des chemins et rend des indices.** Deux listes s'en
 servent — la revue et l'explorateur — et elles n'affichent pas la même chose.
 Rendre des indices n'est pas un détail : la même feuille apparaît dans le
 sous-arbre de chacun de ses parents, et un explorateur de quarante mille fichiers
 ferait des centaines de milliers de clones de `PathBuf` par reconstruction.
 
-**L'arbre de l'explorateur est construit une fois**, à l'arrivée de la liste et à
-chaque repli, rangé derrière un `Rc`. La liste de revue se reconstruit au rendu :
-quelques centaines d'entrées le permettent, des dizaines de milliers non.
+**L'arbre de l'explorateur est construit une fois**, à l'arrivée de la liste, et
+rangé derrière un `Rc`. La liste de revue se reconstruit au rendu : quelques
+centaines d'entrées le permettent, des dizaines de milliers non.
+
+**Construire l'arbre et le plier sont deux gestes** (`tree::Tree::new` et
+`Tree::rows`), et les confondre coûtait un cinquième de seconde par chevron.
+Ce dépôt en donne la mesure : `target/` porte **cent treize mille** fichiers
+ignorés, et ouvrir un dossier refaisait tout le travail que la liste n'avait pas
+changé. Trois coûts, mesurés sur cette liste :
+
+- **L'arbre lui-même, vingt millisecondes** — un nœud de `BTreeMap` par
+  dossier. Un repli ne change rien de cet arbre, seulement les lignes qui en
+  sortent : `rows` coûte 0,1 ms replié, 2,5 ms tout ouvert.
+- **Le gris de ce que `.gitignore` écarte, deux cents millisecondes.** Un
+  dossier n'est gris que si **tout** ce qu'il porte l'est, donc le calcul visite
+  chaque feuille de chaque dossier affiché — et chaque visite était une
+  **recherche binaire dans une liste de chemins**. C'est désormais un drapeau
+  par fichier (`excluded_flags`, une passe sur deux listes triées, à l'arrivée
+  de la liste) : 0,2 ms.
+- **La liste plate, trois millisecondes par frame** : le rendu la donnait à la
+  fermeture de la liste virtualisée en la **clonant**. Un `Rc`.
+
+Le reste suit la même règle : `row_of` — appelé à chaque flèche — parcourt les
+lignes sans allouer, là où il en clonait un `PathBuf` par ligne. Ce qui n'est pas
+optimisé et se sait : chaque frappe dans la recherche de fichiers rebâtit un
+arbre du sous-ensemble, soit une vingtaine de millisecondes sur une liste
+pareille.
 
 **Il se parcourt au clavier** (contexte `ClaudhubExplorer`, que
 `NAVIGATION_PREDICATE` exclut). Corollaire : un clic dans la liste de revue
@@ -572,16 +677,67 @@ déplier ici » et « tout replier ici » ont échangé leurs corps.
 
 **Ce que `.gitignore` écarte est montré, mais en gris** — la convention de
 PhpStorm, et la seule chose qui empêche `vendor/` de se lire comme une partie du
-projet. `Settings::show_ignored_files` est vrai par défaut ; le prix est que la
-liste change d'ordre de grandeur. Trois points : **git dit lesquels** (`--ignored`
-est un *filtre*, d'où les deux appels de `repo::list_files`, la seconde liste
-triée et interrogée par recherche binaire) ; **un dossier n'est gris que si tout
-ce qu'il porte l'est** ; **le calcul se fait à la reconstruction, jamais au
-rendu** (`Explorer::dimmed`), un dossier demandant de vérifier toutes ses
-feuilles et `vendor/` en portant trente mille.
+projet. `Settings::show_ignored_files` est vrai par défaut. Trois points : **git
+dit lesquels** (`--ignored` est un *filtre*, d'où les deux appels de
+`repo::list_files`, la seconde liste triée et interrogée par recherche binaire) ;
+**un dossier n'est gris que si tout ce qu'il porte l'est** — ce qu'un dossier
+que personne n'a ouvert répond par son seul indice ; **le calcul se fait à la
+reconstruction, jamais au rendu** (`Explorer::dimmed`), un dossier demandant de
+vérifier toutes ses feuilles.
 
 Les chemins sont **ramenés dans le worktree** (`files::inside`) avant toute
 opération : un `../` saisi dans un dialogue de renommage en sortirait.
+
+**Une ligne est un bandeau et non une pastille** — voir « Le grain de
+l'interface », la règle vaut pour toutes les listes de la fenêtre, et c'est ici
+qu'elle a été comprise : une colonne étroite de noms de longueurs très inégales,
+où un fond qui s'arrête au bout du nom se lit comme le nom qui est sélectionné
+plutôt que comme la **ligne** où l'on est — celle sur laquelle le clic droit, la
+coche et le dépôt vont agir.
+
+### Faire glisser dans l'arbre
+
+Deux glissements, une seule mécanique : gpui traduit le dépôt d'un fichier venu
+du bureau en un **glissement interne** portant des `ExternalPaths`, si bien que
+les fichiers de l'explorateur de Windows ou de Linux et une ligne de notre arbre
+se reçoivent avec les mêmes écouteurs (`accepts_drops`).
+
+- **Ce qui vient du dehors est une copie, jamais un déplacement**
+  (`files::Op::Import`) : le fichier déposé appartient à quelqu'un d'autre — un
+  téléchargement, l'export d'un outil de dessin — et un geste de la main n'a pas
+  à vider le dossier d'où il vient. L'exception est un chemin **déjà dans ce
+  worktree**, déposé depuis un gestionnaire de fichiers ouvert sur le projet :
+  là, le geste est celui que l'arbre fait tout seul, et il déplace.
+- **Rien n'est jamais écrasé** : un dépôt sur un nom qui existe est **refusé** et
+  le dit. Ce que la main désigne en une seconde peut être une heure de travail,
+  et renommer est à un clic droit.
+- **Un déplacement est un `Op::Rename`** : c'est ce que déplacer *est*, et cela
+  n'a rien coûté au protocole. Ce que `move_within` refuse — pur et testé — est
+  ce qui ne veut rien dire : reposer une chose où elle est, et faire entrer un
+  dossier dans lui-même ou dans l'un de ses enfants, seul des trois à faire des
+  dégâts.
+- **Une ligne de fichier accepte un dépôt et le remet à son dossier**
+  (`drop_dir`) : viser la ligne propre d'un dossier, dans une liste où un dossier
+  de trente fichiers est une ligne sur trente-et-une, est une précision que
+  personne ne devrait avoir à avoir. Le panneau entier en accepte un aussi, pour
+  la **racine** : un projet dont la racine porte trois fichiers laisse la colonne
+  vide, et y viser une ligne serait viser rien. Son cadre est **toujours
+  réservé** — une bordure qui apparaît décalerait toutes les lignes d'un pixel.
+- **Un dossier fermé s'ouvre quand le glissement s'attarde dessus**
+  (`DRAG_HOVER`, 600 ms) : c'est le geste de tout gestionnaire de fichiers, et le
+  différé est ce qui rend la traversée gratuite. Le piège est que `on_drag_move`
+  se déclenche à **chaque** mouvement de la souris, où qu'elle soit — sans le
+  test des bornes, chaque ligne du panneau se croirait sous la main.
+- **La couleur d'une cible n'est pas celle du survol** : les deux sont à l'écran
+  en même temps, et un `drag_over` est appliqué **après** le `hover` comme après
+  le fond de la ligne ouverte.
+- **Le fantôme est peint par nous** (`DraggedEntry`, qui est à la fois la charge
+  et la vue) : la plateforme ne dessine rien pour un glissement interne, et un
+  glissement que rien ne suit se lit comme un clic qui n'a pas pris.
+- **Le chemin déposé change de monde** comme la cible d'un export CSV : sous
+  Windows il vient de *cette* machine et les workers sont dans la distribution.
+  Ce que la distribution ne peut pas atteindre est refusé et dit — c'est la
+  cinquième frontière de `wslpath`.
 
 ### L'icône d'un fichier
 
@@ -870,6 +1026,73 @@ split. Un panneau et non six — un fichier ne se lit que sur l'écran « Éditi
   serait celui des onglets. Celui qu'on regardait est ramené devant **à la fin**,
   chaque ouverture faisant du sien l'onglet affiché.
 
+### Ce que la gouttière de l'éditeur marque
+
+Une bande dans la gouttière dit ce qui a bougé depuis `HEAD` — verte pour un
+ajout, bleue pour une modification, un moignon sur la frontière pour une
+suppression —, et un clic ouvre ce qui était là avec de quoi le rétablir. C'est
+le geste de PhpStorm, et il vaut d'abord pour ce qu'il évite : ouvrir l'écran
+Git pour savoir si la ligne qu'on relit est de soi.
+
+**Elle répond pendant qu'on tape, et c'est ce qui décide de tout le reste.**
+`git diff` compare le fichier **sur le disque**, or le tampon qui compte est
+celui sous le curseur. Le texte de base est donc lu une fois
+(`repo::head_blob`, `git show HEAD:./<chemin>`) et la comparaison refaite **en
+mémoire** à chaque frappe — `ui::hunks`, pur et testé, du même ordre de coût que
+la coloration et très en dessous d'une frame.
+
+- **Une différence de lignes écrite ici, sans crate** : la comparaison est
+  *patience* — s'ancrer sur les lignes qui n'apparaissent qu'une fois de chaque
+  côté, recommencer entre les ancres. Un script d'édition glouton est libre
+  d'apparier l'accolade fermante d'une fonction avec celle de la suivante, et la
+  marque enjambe alors deux choses qui n'ont rien à voir. Là où **rien n'est
+  unique** — une pile d'accolades, un tableau de lignes jumelles —, le passage
+  entier fait **un** hunk : c'est moins fin, et au moins c'est vrai.
+- **Le saut de ligne final est une ligne** (`split('\n')`, jamais `lines()`) :
+  sinon ajouter la newline manquante ne se verrait nulle part.
+- **Sans base, aucune marque** — et non « tout est neuf » : un fichier que git
+  ne suit pas n'est pas un fichier qu'on a modifié, et le peindre en vert du
+  haut en bas dit autre chose que ce que la gouttière veut dire.
+- **La bande vit dans la marge que la gouttière avait déjà**, et ne lui coûte
+  aucune largeur. Une colonne à elle éloignait le texte des numéros de dix
+  pixels de plus — par-dessus les dix-huit de la colonne de repli, ça se lit
+  comme une erreur —, et la réserver ou non selon qu'il y a des marques aurait
+  fait glisser le document à la frappe qui annule la dernière modification. Son
+  bord droit est celui de la gouttière, donc la bande touche quand même le
+  premier caractère.
+- **Le renderer est reposé, pas relu** : celui que l'élément appelle ne reçoit
+  qu'une ligne — aucun `App` où aller chercher quoi que ce soit —, donc tout ce
+  qu'il répond est **capturé**. C'est payable parce que ça ne se refait qu'à un
+  geste (une édition, un clic), jamais à une frame. Les couleurs font exception
+  et se lisent dans le `canvas` au moment de peindre : un changement de thème
+  n'est signalé à personne, et une bande capturée dans l'ancienne palette y
+  resterait jusqu'à la frappe suivante.
+- **La base est redemandée quand une écriture git aboutit** (`action_done`), pas
+  à chaque rafraîchissement de statut : un commit déplace `HEAD` sous les
+  fichiers ouverts et les marques doivent se taire, mais un statut arrive à
+  chaque fichier que le surveillant voit bouger et cela coûterait un `git show`
+  par onglet.
+- **Ce qu'un clic ouvre est un bandeau, pas un popover ancré à la ligne** : les
+  lignes de l'éditeur vont et viennent avec le défilement, donc une ancre sur
+  l'une est une ancre que le premier cran de molette emporte — c'est la décision
+  déjà prise pour une ligne annotée (voir « Annoter une relecture »). Le
+  bandeau défile au lieu de grandir : un hunk peut faire deux cents lignes, et
+  pousser l'éditeur hors du panneau reviendrait à retirer le fichier pour en
+  montrer un morceau.
+- **Le rétablissement est une édition, pas un `git apply`** : le tampon porte du
+  travail non enregistré, git ne voit que le disque, et `repo::apply_patch`
+  écrit de toute façon dans l'**index**. Passer par l'éditeur met le geste dans
+  le même journal de transactions que le reste — `u` le reprend — et laisse le
+  fichier modifié pour l'enregistrement qu'on fera.
+- **Ce qui se teste est la plage d'octets**, et c'est là que ça se trompe en
+  silence : rejouer tous les hunks à l'envers doit rendre la base au saut de
+  ligne près. La newline appartient à la ligne qui la précède, sauf pour un
+  passage qui atteint la fin du fichier, où il n'y en a pas après — un span
+  faux d'une newline emporte une ligne voisine.
+
+Ce que ça a coûté au fork : le quatorzième commit, la gouttière n'ayant aucun
+crochet applicatif (voir « Le grain de l'interface »).
+
 L'éditeur externe se déclare par une commande avec `{path}` et `{line}`. Il est
 lancé **détaché**, ses sorties jetées : un éditeur graphique ne rend la main
 qu'à sa fermeture.
@@ -1118,7 +1341,8 @@ replie et se peint par-dessus la fenêtre.
 
 Les réglages disent comment Claudhub s'affiche ; le magasin (`store::StateStore`,
 `<config>/state.json`) dit où l'on en est — la base de comparaison d'un worktree,
-ses replis, le prochain numéro de note, où l'on en était en fermant. Deux fichiers
+ses replis, le prochain numéro de note, les worktrees épinglés, où l'on en était
+en fermant. Deux fichiers
 et non un : le premier se modifie à la main, le second compterait des centaines
 de lignes par dépôt.
 
@@ -1204,6 +1428,34 @@ Le jour où le coût se verrait, la sortie serait le crate `grep`, pas le progra
   qui est juste pour ce qui coûte une milliseconde et faux pour une seconde.
 - **Sous deux caractères, rien ne part tout seul.** `Enter` cherche quand même —
   un geste a le droit de coûter cher.
+- **Une sélection faite dans une surface de code part avec le raccourci**
+  (`open_search`, `search::seed`), comme dans PhpStorm : on surligne un appel, on
+  demande où il est fait ailleurs, et retaper ce qui est déjà sous le curseur est
+  le geste que le raccourci existe pour épargner. La recherche **part** — un
+  champ portant une question au-dessus d'une liste qui en répond une autre est
+  l'état que l'amortissement passe son temps à éviter — mais le caret **reste
+  dans le champ**, son texte sélectionné : le geste demandait les résultats, pas
+  que la liste prenne le clavier. Quatre points :
+  - **La sélection se lit avant de changer d'écran** : `enter_workspace` déplace
+    le focus, et c'est le focus qui dit dans quelle surface la main était.
+  - **La surface est celle qui a le focus**, pas « le fichier qu'on édite » : le
+    dock en montre deux dès qu'on ouvre un split, et la console SQL en est une
+    aussi. À défaut, l'écran où l'on est.
+  - **Le mode de vim décide de ce que « sélectionné » veut dire**, et c'est le
+    piège : le mode **normal** laisse en permanence dans l'éditeur une plage
+    d'**un caractère** — le curseur bloc est écrit comme une sélection
+    (`vim::block`) —, si bien que lire la plage seule amorcerait chaque
+    recherche avec la lettre sous le caret. Le mode normal est donc refusé,
+    le mode **bloc** est demandé à vim (un rectangle est une plage par ligne,
+    que l'éditeur ne sait pas tenir) et tout le reste — les modes visuels,
+    l'insertion, et toute sélection faite à la souris, vim allumé ou non — est
+    la plage de l'éditeur. Le mode ne veut rien dire quand `vim_mode` est
+    éteint : rien ne conduit la machine et elle dit « normal » par-dessus une
+    sélection de souris.
+  - **Trois refus** (`search::seed`, pur et testé) : rien de sélectionné, plus
+    d'une ligne (`git grep` cherche *dans* une ligne, donc un terme à deux
+    lignes ne peut que ne rien trouver), et plus long que `MAX_SEED` — refusé et
+    non tronqué, une requête coupée étant une requête que personne n'a demandée.
 - **Seule une recherche demandée prend le focus** : les réponses qui arrivent
   pendant la frappe doivent laisser le caret où il est.
 - **La liste prend le focus quand les résultats arrivent** — `InputState` lie les
@@ -1225,6 +1477,35 @@ Le jour où le coût se verrait, la sortie serait le crate `grep`, pas le progra
 `highlight::DocumentHighlights` calcule les styles **une fois**, à l'arrivée du
 contenu, et les découpe par ligne. Une vue Blade passe par
 `blade::document_styles`.
+
+**Et la liste des occurrences est colorée elle aussi**
+(`highlight::HitHighlights`), comme PhpStorm : ce qu'on lit dans cette colonne
+est du code, et une colonne de gris ne dit pas si l'occurrence est dans un
+commentaire, une chaîne ou un appel. Quatre points :
+
+- **Une ligne est parsée seule**, et non jointe aux autres du même fichier :
+  ce qui l'entoure n'est pas là, et l'occurrence suivante peut être quatre cents
+  lignes plus bas. Un guillemet non refermé sur l'une colorerait sinon en chaîne
+  toutes celles d'en dessous. Une grammaire tree-sitter se relève d'un fragment
+  mal formé ; c'est ce qui rend l'approximation payable, et le coût est borné par
+  `search::MAX_HITS`.
+- **Une grammaire par langage, gardée d'un fichier à l'autre** :
+  `SyntaxHighlighter::new` compile les requêtes — des dizaines de millisecondes —
+  et une recherche qui touche cent fichiers la paierait cent fois. **Blade est
+  de la règle**, et c'est là qu'elle a été enfreinte : `blade::document_styles`
+  bâtissait un `BladeHighlighter` — donc une grammaire PHP — par appel, soit
+  **une par ligne** et non une par fichier. Deux mille occurrences dans des vues
+  coûtaient une minute de fenêtre gelée, la seule panne de ce genre : tout est
+  coloré juste, rien n'échoue, et cela ne se voit qu'à l'horloge. D'où
+  `BladeHighlighter::document_styles`, qui prend un highlighter qu'on garde, et
+  un test qui borne le temps d'une liste pleine.
+- **Le prologue vaut ici aussi** : sans `<?php`, une ligne de PHP est du texte
+  HTML et rien ne sort. Ses propres lignes ne comptent pas dans les décalages.
+- **Les décalages décrivent le texte *rogné*** — la ligne est affichée sans son
+  indentation de tête, faute de quoi une occurrence à six niveaux ne montrerait
+  qu'une colonne de rien. Décalés de l'indentation, les styles peindraient le
+  mauvais mot. L'occurrence est surlignée **par-dessus** (`highlight::overlay`),
+  comme dans l'aperçu.
 
 Ce que la v1 ne fait pas : elle ne cherche que dans le worktree affiché, et il n'y
 a pas de remplacement — écrire dans des fichiers que personne n'a ouverts est ce
@@ -1498,23 +1779,183 @@ n'ont donc plus de colonne de gauche.
 
 - **Le nom du dépôt précède celui du worktree**, en gris : deux worktrees appelés
   `main` dans deux dépôts est le cas courant.
-- **La colonne d'icône est celle du menu** (`PopupMenuItem::icon` + `checked`),
-  pas une colonne à nous : la coche y remplace l'icône sur la ligne courante.
-- **La liste est un instantané pris à l'ouverture du menu** : `dropdown_menu`
-  reconstruit ses entrées à chaque fermeture, mais les fermetures de rendu d'une
-  entrée tournent à chaque frame tant que le menu est ouvert, et y relire
-  l'application ferait un emprunt par ligne et par image.
-- **Un bouton dans une ligne de menu consomme son clic**, sinon il fermerait le
-  menu qu'on parcourt. Les en-têtes qui les portent sont `disabled`.
-- **Les dépôts introuvables sont en bas**, avec ce que git a répondu : c'est le
-  seul endroit d'où on peut les retirer.
-- **Le sélecteur de branche liste `branches::rows_for`**, la fonction que le
-  panneau utilisait. Une branche déjà déployée ailleurs est **grisée et dit chez
-  qui** — git refuse deux extractions.
-- **Ce qui manque, et c'est assumé : la recherche.** Un `PopupMenu` n'a pas de
-  champ de filtre ; la liste défile.
-- **Le menu du worktree devient un bouton** (`…`) : un clic droit a besoin d'une
-  ligne où atterrir, et il n'y en a plus.
+- **Le menu du worktree reste un bouton** (`…`) : un clic droit a besoin d'une
+  ligne où atterrir, et il n'y en a plus dans la barre.
+
+### Les deux sélecteurs
+
+Ce sont les deux gestes les plus fréquents de la fenêtre, et ils ont longtemps
+été des `PopupMenu`. Cette forme avait un plafond, et il tenait en deux faits :
+
+- **un menu n'a pas de champ de filtre** — un dépôt à deux cents branches se
+  fait défiler, pas chercher ;
+- **un sous-menu dans un menu qui défile est rogné par le défilement dont il a
+  besoin.** gpui capture le masque de contenu d'un `deferred` au prépaint, si
+  bien que le popup ouvert depuis une ligne est coupé au bord de la fenêtre de
+  défilement. Le commentaire est dans gpui-component même. C'est ce qui gardait
+  le sélecteur de branches à deux gestes là où celui de PhpStorm en a douze.
+
+Ce sont donc deux popovers à nous (`ui::branch_picker`, `ui::worktree_picker`),
+**en deux temps** — la forme du popup de branches de PhpStorm, et pour la même
+raison : le second temps **remplace** le premier dans la même surface, si bien
+que rien n'est jamais imbriqué et que rien ne peut être rogné.
+
+- **Le premier temps est la liste filtrée.** Un clic sur une ligne fait le geste
+  courant — basculer sur la branche, choisir le worktree —, qui doit rester à un
+  clic. Le `…` du bout de ligne ouvre le second temps.
+- **Le second temps est la liste des actions**, chacune avec son nom écrit.
+- **Le `…` est peint sur toutes les lignes**, pas sur la survolée : un contrôle
+  qui apparaît sous le pointeur déplace ce qui est à côté, et ce qui est à côté
+  ici est le compte qu'on était en train de lire.
+- **Une action indisponible reste affichée, grisée.** Ce qu'on veut savoir en
+  arrivant là est *pourquoi* un geste ne se fait pas — la branche est déployée
+  ailleurs, elle n'a pas d'amont —, et une ligne absente ne dit rien.
+
+**Pourquoi le contenu du popover est une entité et non un élément.** La
+fermeture de `Popover::content` tourne **dans** `ClaudhubApp::render` : y lire
+l'entité racine est la panique documentée plus bas. Le contenu est donc
+l'entité du sélecteur, et le `render` d'une vue enfant a lieu **après** que la
+fermeture du parent a rendu la main — la règle dont vivent les panneaux du dock.
+C'est ce qui permet aux sélecteurs de relire l'application à chaque image, donc
+de ne jamais montrer une liste périmée.
+
+- **Les flèches sont prises en phase de capture** sur un ancêtre du champ : un
+  `InputState` d'une ligne lie Haut et Bas aux extrémités de son texte, et
+  laissées remonter elles n'atteindraient jamais la liste. Échap n'est pas
+  touché — il appartient au popover, qui est ce qu'on s'attend à voir fermer.
+  Le curseur **enjambe les en-têtes** de groupe et **boucle**.
+- **Ouvrir remet le premier temps et vide le filtre** (`on_open_change`, un clic
+  et non un rendu) : un filtre resté de la fois d'avant se lit comme un dépôt
+  qui aurait perdu ses branches.
+- **Les couleurs sont lues une fois** (`Look`) et passées à la fermeture de la
+  liste virtualisée, qui tourne pour chaque ligne visible à chaque image.
+- **Un en-tête n'a pas la hauteur d'une entrée**, d'où `v_virtual_list` et non
+  `uniform_list` — la bascule du repli du diff et de la vue de fusion, pour la
+  même raison. Un en-tête est une règle qui porte un nom, pas une ligne de
+  liste ; une entrée fait deux lignes de texte et presque rien autour. Une liste
+  dont chaque entrée est deux fois trop haute en montre quatre là où elle en
+  montrait sept, et ce qu'on vient y faire est comparer.
+- **Les groupes se replient, et c'est la ligne entière qui replie** : un chevron
+  fait huit pixels, et ce qu'on vise est le groupe. Fermer les distantes est ce
+  qu'on fait d'un dépôt dont `origin` porte cent branches que personne n'a
+  déployées. **L'en-tête reste** quand le groupe est fermé — cet en-tête *est* le
+  repli, et le retirer ne laisserait pas de retour. Le repli ne survit pas à la
+  fenêtre : c'est une posture de lecture, pas une préférence. Et **un filtre
+  ignore les replis**, la règle de toute liste repliable ici : une requête qui a
+  trouvé quelque chose et n'affiche rien se lit comme une requête qui n'a rien
+  trouvé.
+- **Les entrées sont en retrait sous leur en-tête**, de la largeur du chevron :
+  une colonne plate sous un titre se lit comme une liste qui a un titre au-dessus
+  d'elle, pas comme les branches de ce groupe ou les checkouts de ce dépôt.
+- **Les dépôts introuvables sont en bas** de la liste des worktrees, avec ce que
+  git a répondu : c'est le seul endroit d'où on peut les retirer. Ils
+  disparaissent dès qu'on filtre — ils n'ont ni branche ni nom sur quoi chercher,
+  et les cacher derrière une requête les rendrait irretirables.
+- **Une branche déjà déployée ailleurs est grisée et dit chez qui** — git refuse
+  deux extractions.
+
+**Ce qu'on peut demander d'une branche**, dans l'ordre du second temps : basculer
+dessus, une nouvelle branche depuis celle-ci, un worktree depuis celle-ci,
+comparer avec la branche courante, fusionner dedans, rebaser la courante dessus,
+mettre à jour depuis l'amont, publier, renommer, supprimer, supprimer sur
+`origin`. Quatre d'entre elles ont demandé des commandes qui n'existaient pas —
+`RenameBranch`, `PushBranch`, `UpdateBranch`, `DeleteRemoteBranch` —, et aucune
+n'a demandé une `Action` de plus : renommer est une écriture de branche
+(`Action::Branch`), publier est un `Push`, mettre à jour est un `Pull`, et ces
+messages disent déjà la bonne chose.
+
+- **Ce qui parle à un distant part dans la file réseau**, le reste dans les
+  lectures : un renommage déplace une référence locale et coûte une
+  milliseconde, et le faire attendre derrière un `push` est la panne qu'on ne
+  diagnostique pas. Un test verrouille les six.
+- **`branch_written` est le `write_then_refresh` de cet étage** : ce que ces
+  commandes changent n'est pas le statut d'un worktree mais la liste que le
+  sélecteur affiche, et une liste qui porte encore la branche qu'on vient de
+  supprimer est la seule chose que ce menu ne doit pas faire. Aucun worktree
+  n'est nommé — une branche appartient au dépôt, et celle qu'on écrit est
+  souvent tenue par un checkout que la fenêtre n'a jamais ouvert.
+- **Un nom distant n'est pas une branche**, et c'est tout `repo::checkout` :
+  `git switch origin/feat` échoue, la référence n'étant pas quelque chose que
+  HEAD puisse viser. Ce que cliquer `origin/feat` veut dire est la branche
+  locale qui la suit, que `--track` crée et qui existe peut-être déjà sous le
+  nom court. Le local est cherché **en premier** : un nom local porte lui aussi
+  des barres obliques (`wt/essai`).
+- **Mettre à jour est deux commandes et non une**, et laquelle s'applique n'est
+  pas une préférence : **git refuse de fetcher dans une branche déployée**, donc
+  une branche tenue par un worktree se met à jour depuis l'intérieur
+  (`pull --ff-only`) et toute autre par le refspec (`fetch origin b:b`), qui
+  déplace la référence sans arbre de travail. Fast-forward des deux côtés : une
+  branche sur laquelle personne ne se tient ne reçoit pas un commit de fusion
+  d'une entrée de menu.
+- **`split_remote` est pur et testé** : il décide le refspec, et une coupe fausse
+  y va chercher ce qui existe sous un autre nom.
+- **« Comparer » pose la base de la revue et va sur l'écran Git** : la revue de
+  branche *est* cette comparaison, et elle garde la base choisie, par worktree.
+
+**Ce qu'on peut demander d'un worktree** est `ClaudhubApp::worktree_actions`,
+**une table lue deux fois** : le `…` de la barre la plie en `PopupMenu`, le
+second temps du sélecteur la peint en lignes. Deux listes auraient divergé au
+premier ajout, et la divergence est du genre silencieux — il manquerait à l'un
+des deux menus une entrée dont personne ne remarque l'absence. Elle porte ce
+qu'une ligne offrait (mettre à jour, intégrer, `wt up`/`down`/`rm`, les tâches du
+projet, retirer le dépôt) et ce qu'une ligne ne pouvait pas offrir : travailler
+ici, copier le chemin, ouvrir le dossier. **Et une entrée qui ne parle pas du
+worktree mais de la fenêtre** : l'épingler.
+
+### Les worktrees épinglés
+
+Un popover est la bonne forme pour douze checkouts qu'on parcourt ; c'est la
+mauvaise pour les deux ou trois entre lesquels on fait l'aller-retour toute la
+journée. Une **épingle** dit lesquels, et ceux-là deviennent un `ButtonGroup`
+dans la barre du haut : un clic au lieu d'un popover et d'un filtre.
+
+Ils sont **devant le sélecteur de worktree** et non derrière — après les deux
+flèches de la piste, avant les deux sélecteurs. Une épingle est le plus court
+chemin vers le geste que le sélecteur fait, et ce qu'on met devant est ce vers
+quoi la main va d'abord ; le sélecteur reste juste derrière, pour les checkouts
+qu'on n'a pas épinglés.
+
+- **L'épingle est une entrée de `worktree_actions`**, pas un geste à part : la
+  table est déjà lue deux fois — le `…` de la barre et le second temps du
+  sélecteur — et une épingle posée ailleurs aurait manqué à l'un des deux.
+  L'entrée dit « épingler » ou « retirer » selon l'état, d'où le `&App` que la
+  table prend désormais.
+- **La liste vit dans le magasin** (`Store::pinned`), pas dans les réglages :
+  c'est où l'on travaille cette semaine, pas une préférence qu'on écrit à la
+  main. Et **une liste plate, tous dépôts confondus** — c'est ce que la rangée
+  *est*, le passage du checkout d'un projet à celui d'un autre.
+- **Une nouvelle épingle va en dernier** : la rangée se lit de gauche à droite,
+  et une épingle qui pousserait les autres déplacerait le bouton qu'on visait.
+- **Une épingle que personne ne réclame est gardée et non peinte** : un dépôt
+  qu'on n'a pas encore ouvert n'est pas un dépôt dont les épingles s'oublient —
+  la règle des notes du magasin. Ce que `forget_missing` retire est un checkout
+  dont git vient de dire qu'il n'est plus là, et l'épingle part avec lui : elle
+  ne porte pas de dépôt à elle sur quoi être jugée plus tard.
+- **Plein contre contour**, la polarité de la fenêtre : l'état « sélectionné »
+  d'un groupe en contour est un fond à quelques pour cent du sien.
+- **Rien n'est peint quand rien n'est épinglé** : un groupe vide prendrait aux
+  sélecteurs la largeur qu'il faut pour dire qu'une fonction existe.
+- **Le nom du dépôt précède celui du checkout et se fond quand il le répète**
+  (`project_label`, celui du multiplexeur) : deux worktrees appelés `main` dans
+  deux dépôts est le cas pour lequel la mention existe.
+- **Un bouton porte l'agent et le `+n −m`**, les deux choses qu'on regarde avant
+  de basculer et les deux que porte déjà la ligne du sélecteur. Elles viennent
+  du **balayage de fond**, donc une épingle dit d'un checkout qu'on n'a pas
+  ouvert ce qu'elle dit des autres : l'agent toutes les deux secondes, le volume
+  un relevé sur cinq. La pastille est **sans le nom du programme**
+  (`topbar::agent_dot`) — le bouton dit déjà quel checkout c'est, et les noms
+  prendraient à la rangée la largeur qu'elle a à donner ; la ligne du sélecteur
+  a la place et les dit.
+- **L'épingle se pose depuis la ligne du sélecteur**, où un bouton est peint sur
+  **toutes** les lignes, épinglées ou non — la règle du `…` d'à côté. C'est la
+  même bascule que l'entrée de `worktree_actions`, sortie là où l'œil est déjà :
+  on décide d'épingler en parcourant la liste, pas après avoir ouvert un menu
+  sur une ligne. Et **le popover reste ouvert**, seul geste de ce panneau qui ne
+  le ferme pas : épingler n'est pas aller quelque part.
+
+`Ctrl+1` à `Ctrl+9` **ne suivent pas les épingles** : elles désignent les
+worktrees dans l'ordre affiché, et une touche dont le sens changerait selon
+qu'on a épinglé quelque chose n'est mémorisable dans aucun des deux états.
 
 **La barre du haut *est* la barre de titre de la fenêtre**
 (`gpui_component::TitleBar`). Ce n'est pas un raffinement :
@@ -1575,6 +2016,19 @@ jamais celle du haut.
 **Tout panneau passe par `panels::pane_frame`**, pas seulement ceux que la macro
 `panels!` fabrique : c'est lui qui peint le fond arrondi du bas.
 
+**Et qui redécoupe les deux coins du bas, par-dessus le contenu**
+(`panels::corner_cut`). Le fond arrondi n'a le dernier mot que sur ce qui est
+peint **avant** lui : un panneau dont le contenu peint sa propre surface
+ramenait le coin carré — l'éditeur remplit un rectangle opaque de la hauteur du
+panneau sous ses numéros de ligne, la table de résultats un par ligne —, et
+aucun arrondi ne peut atteindre l'intérieur d'un enfant. Ce qu'on peint est le
+**dehors exact du quart de cercle**, dans la couleur de la gouttière, et non un
+petit carré de cette couleur : un carré couvrirait aussi ce qui tombe *dedans* —
+le dernier centimètre de course d'une barre de défilement à droite — et ne
+vaudrait que là où les deux couleurs se trouvent égales. Le quart est une
+Bézier cubique au kappa usuel : un arc elliptique dirait la même chose avec deux
+drapeaux dont le sens dépend du sens de l'axe y.
+
 **La vue racine rembourre le dock**, des mêmes quatre pixels que le fork met
 entre les cartes — mais **huit sur les côtés**, et c'est la règle et non un
 oubli : la barre de titre et la barre d'état se ferment chacune par une bordure,
@@ -1588,14 +2042,40 @@ paraissaient égaux nulle part.
 partir de zéro, donc l'extinction de la poignée vient **après** elle. C'est pour
 écrire dans ce global que `gpui-base` est une dépendance directe.
 
-**Une ligne de liste est une pastille, pas une bande.** Piège :
-**`uniform_list` ignore les marges de ses entrées**, dont il calcule la taille. Le
-retrait appartient donc à la **liste** (`.px_1()`), et l'entrée ne porte que son
-rayon.
+**Une ligne de liste est un bandeau, pas une pastille.** Ce qu'une ligne
+sélectionnée désigne est la **ligne**, pas son texte : c'est sur elle que le clic
+droit, la case à cocher, la coche de relecture et le dépôt d'un fichier vont
+agir. Un fond qui s'arrête au bout du nom dit autre chose — et il le dit
+différemment d'une ligne à l'autre, la longueur des noms étant ce qui varie le
+plus dans une colonne. D'où `w_full` sur l'entrée, **aucun rayon**, et pas de
+`px_1` sur la liste : c'est ce que peignent PhpStorm, VS Code et tout ce qui
+montre une liste de fichiers. Les huit listes de la fenêtre le font — arbre du
+projet, revue et index, arbre des bases, tags, historique SQL, résultats de
+recherche, historique git, liste d'un plugin — et l'entrée porte alors son propre
+retrait horizontal, `uniform_list` **ignorant les marges de ses entrées**, dont
+il calcule la taille.
+
+Deux exceptions, et elles disent la règle : une **pastille** dans un dialogue
+(le choix d'un `[[prompt]]` de `wt`), qui est une carte et non une colonne ; et
+tout ce qui n'est pas une ligne de liste — badges, mentions, extraits — qui garde
+son rayon.
+
+**Et le bandeau va sous la barre de défilement, ce qu'il porte non**
+(`theme::scroll_gutter`). La barre est peinte **par-dessus** le contenu et non à
+côté — voir « Les barres de défilement » —, donc une ligne qui va jusqu'au bord
+passe dessous, et ce qui vit au bout d'une ligne est précisément ce qu'on lit
+d'un coup d'œil : la coche de relecture, la lettre du statut, le `+n −m`. Le
+fond, lui, traverse : c'est lui qui dit sur quelle ligne on est. La gouttière est
+**toujours réservée**, la barre ne se peignant que lorsqu'il y a de quoi
+défiler : un rembourrage qui arriverait avec elle décalerait le bout de chaque
+ligne le jour où la liste gagne un élément — et le rendrait le jour où l'on en
+indexe un. La largeur est celle du composant (`Scrollbar::width`), pas un nombre
+à nous. Les panneaux qui défilent d'un bloc — conflits, notes — la portent sur
+leur conteneur, n'ayant pas de lignes à qui la donner.
 
 **Les onglets sont des pastilles** (`TabVariant::Segmented`) : le variant par
 défaut du dock a un rayon **codé en dur à zéro**. D'où le **fork** (voir
-`Cargo.toml`), treize commits au-dessus de leur `main` :
+`Cargo.toml`), seize commits au-dessus de leur `main` :
 
 1. le `TabVariant` que `DockSkin` fait passer jusqu'au `TabBar` ;
 2. les coins en boîte bordée réservés au variant classique ;
@@ -1637,6 +2117,38 @@ défaut du dock a un rayon **codé en dur à zéro**. D'où le **fork** (voir
     et en release un groupe dont l'indice actif a glissé en silence. Le refus
     est aussi ce que doit faire un dépôt qui ne peut pas atterrir : l'onglet
     revient d'où il vient.
+14. **une application peut marquer la gouttière** (`set_gutter_marks`) : elle
+    est peinte **dans** l'élément, et les deux crochets qu'elle avait — le
+    renderer de chevron, le fond — pendent à `InputEditorStyle`, que
+    `Input::render` reconstruit depuis le thème **à chaque frame**. Ce qu'une
+    application y écrivait avait disparu à la suivante, si bien qu'une bande de
+    modifications n'avait nulle part où vivre. D'où un renderer posé sur
+    l'**état**, appelé une fois par ligne **tampon** visible, dont les éléments
+    sont disposés au bord droit de la gouttière — dans la **marge** qui sépare
+    déjà les numéros du texte, et non dans une colonne à eux : celle-ci
+    éloignait le texte des numéros que quelque chose soit marqué ou non. Le
+    parcours est celui des numéros de ligne, et il le faut : `offset_y`
+    s'accumule depuis les `wrapped_lines` de chaque ligne, donc une marque
+    tombe où tombe son numéro — la déduire de l'indice dériverait dès qu'une
+    ligne se replie, en silence et seulement dans les fichiers assez longs pour
+    le faire.
+15. **le seul panneau d'une zone latérale se déplace quand même** : `alone` se
+    lisait par arbre, et chaque zone d'une aire est le sien, si bien qu'un
+    panneau seul à gauche se déclarait le dernier du dock — ni déplaçable, ni
+    fermable. Ce que le drapeau garde est qu'on ne vide pas le dock, et le dock
+    est l'aire entière : il se compte donc une fois sur le centre et toutes les
+    zones, puis descend inchangé — être déplaçable est un fait sur l'aire, pas
+    sur le nombre de voisins qu'une division donnée porte. Deux tests, un par
+    moitié de la règle.
+16. **et la zone qu'il laisse cesse d'être peinte** : un dock garde sa taille et
+    son arbre une fois vidé, si bien que le cadre réservait encore la largeur de
+    la colonne autour d'un groupe qui ne portait plus rien — une bande morte le
+    long du bord. Vider une zone latérale *est* la fermer, ce que le commit
+    précédent suppose déjà, et la question était déjà répondue : `is_empty`
+    demande si quelque chose y serait dessiné. `render_dock` la pose à son tour,
+    donc la poignée de redimensionnement s'en va avec le cadre — il n'y a plus
+    rien à redimensionner — et masquer le dernier panneau visible d'une zone dit
+    désormais la même chose.
 
 Les commits ont vocation à partir en PR.
 
@@ -1694,6 +2206,17 @@ icône seule est un rébus qu'on apprend au lieu de le lire —, l'engrenage non
 c'est la seule icône de la fenêtre qui n'a pas besoin d'être glosée, les réglages
 étant derrière un engrenage dans toutes les applications, et le mot ne ferait
 qu'y prendre de la largeur aux sélecteurs. Les deux gardent leur infobulle.
+
+**Et les deux sont des bascules** : pressé une seconde fois, l'un ou l'autre rend
+le dernier écran de **travail** (`ClaudhubApp::worked_in`), celui-là même où
+« travailler ici » renvoie un terminal — tout ce qui quitte le détour passe par
+la même porte. C'est ce que ces deux écrans sont : un détour — qu'est-ce qui
+tourne, comment le reste se comporte —, et un détour se reprend par le bouton
+qui l'a ouvert. Une seule réponse pour le groupe, et jamais un écran où l'on ne
+peut pas travailler, ces deux-là ne s'inscrivant jamais dans `worked_in`. Le
+clavier reste dehors comme partout ailleurs : `Alt+6` et `Alt+7` se défont en
+pressant la touche d'où l'on vient. Le retour **s'inscrit sur la piste**, comme
+l'aller.
 
 **Les boutons portent leur nom** : six icônes en rang sont un rébus qu'on apprend
 au lieu de le lire, et une infobulle est un nom qu'il faut aller demander.
@@ -1819,15 +2342,32 @@ Six pièges, tous rencontrés :
 - **Un panneau sans pile parente est verrouillé** (`is_locked`) : tout panneau
   doit être enveloppé, fût-ce dans une division d'un seul élément.
 - **`toggle_dock` ne notifie pas l'aire**, seulement le dock intérieur.
-- **Le dernier panneau d'une zone ne se déplace pas** (`is_last_panel`) : c'est
-  pourquoi les terminaux vivent dans le centre, sous la revue, et non dans une
-  zone d'accueil. Leur disparition passe par `Panel::visible`.
+- **Le dernier panneau de l'*aire* ne se déplace pas** (`is_last_panel`) : ce
+  qu'il garde, c'est qu'on ne vide pas le dock, et le dock est l'aire entière.
+  Longtemps le drapeau se lisait **par arbre**, or chaque zone est le sien : un
+  panneau seul dans la zone de gauche se croyait le dernier qui soit et ne
+  pouvait ni se déplacer ni se fermer — sur l'écran de recherche, la liste des
+  résultats était clouée à gauche sans moyen de la mettre à côté de l'aperçu.
+  Emmener le seul panneau d'une zone latérale vers le centre vide cette zone,
+  ce qui *est* la fermer, et il reste où le reposer — le centre. **Et la zone
+  vidée n'est plus peinte du tout** (seizième commit) : cadre, largeur réservée
+  et poignée de redimensionnement partent avec le dernier panneau, sans quoi il
+  reste une bande morte le long du bord. La disparition d'un panneau passe par
+  `Panel::visible`.
 - **Les tailles d'une division se donnent toutes** (voir ci-dessus).
 - **L'état se relit au moment d'écrire**, pas à l'appel : l'ouverture d'une zone
   est différée d'une frame.
 - **Le zoom d'un panneau est un bouton, pas une entrée de menu**
   (`zoom_in_toolbar`). Le bouton `…` reste affiché malgré tout —
   `TabPanel::render_toolbar` le pose sans condition —, d'où l'entrée qu'il porte.
+- **Le repli d'une zone est éteint** (`set_toggle_button_visible(false)`) : le
+  dock pose, dans la barre du groupe le plus proche de chaque bord, un bouton
+  qui replie la zone voisine — et c'est le seul chrome de la fenêtre qui dise
+  quelque chose de faux. Nos panneaux ne sont pas un meuble fixé au bord d'un
+  écran, ce sont des onglets qu'on glisse où l'on veut ; « replier la zone de
+  gauche » nomme donc un rangement que personne n'a fait, et ce que le bouton
+  masquait ne revenait que par un bouton posé sur la barre d'un **autre**
+  groupe. Le réglage vient du fork, il n'a rien coûté de plus.
 
 **L'écran Git s'ouvre sur « Modifications », quel que soit l'onglet qu'on
 regardait en fermant** (`app::open_on`, appelé à la lecture de `layout.json`) :
@@ -1911,6 +2451,19 @@ la rangée d'onglets, ce qui permet de glisser un terminal dans un split.
 - **La croix est peinte par `Panel::title`**, la peau du dock ne dessinant aucun
   bouton de fermeture par onglet. Le clic est **consommé**, sans quoi la croix
   commencerait par amener au premier plan ce qu'elle s'apprête à fermer.
+- **Le bouton de la molette ferme aussi** (`close_on_middle_click`, les onglets
+  de fichier et de terminal) : c'est le geste de tout navigateur et de tout
+  éditeur, et le seul qui ferme sans viser une croix grande comme un point. Un
+  `on_aux_click` et non un `on_mouse_down` — un clic est une pression **et** un
+  relâchement sur le même onglet, donc une molette pressée par erreur se reprend
+  en lâchant ailleurs, ce qu'un bouton du milieu n'a aucun autre moyen de faire,
+  n'ayant pas de glissement. C'est aussi ce qui porte le bouton : gpui envoie à
+  cet écouteur **tous** les clics qui ne sont pas le gauche, le droit compris, et
+  le droit appartient au menu de renommage. Il se pose sur la rangée **avant**
+  que le menu contextuel ne l'enveloppe : un `ContextMenu` n'est pas un élément
+  interactif, et il n'y a plus rien où accrocher un clic une fois qu'il est
+  passé. Un terminal occupé pose sa question comme sous la croix — ce qui meurt
+  avec ne dépend pas du geste qui l'a demandé.
 - **Fermer un onglet tue le pty et ses autres faces** ; la fermeture est
   **différée**, `on_removed` étant appelé depuis l'édition du dock lui-même.
 - **Une commande qui tourne se fait confirmer** (`ask_close_terminal`) : fermer
@@ -2066,9 +2619,9 @@ qu'il est propre et positionné sur la base : la vue ne connaît l'état d'un
 checkout que s'il a été ouvert. Une fois la fusion faite, Claudhub propose de
 retirer le worktree et sa branche — `wt` conserve délibérément la branche.
 
-Le panneau « Conflits » n'apparaît que quand il y a de quoi le remplir. **Une vue
-à trois volets n'est pas promise** : garder la nôtre, garder la leur, marquer
-résolu, et l'éditeur pour le reste.
+Le panneau « Conflits » n'apparaît que quand il y a de quoi le remplir. Ses deux
+boutons — garder la nôtre, garder la leur — tranchent un fichier d'un geste ;
+cliquer son nom ouvre les trois volets, ci-dessous.
 
 **`wt` est une dépendance, pas un sous-processus** : le dépôt est le nôtre, et
 parser la sortie de sa CLI — alignée, colorée, traduite — reviendrait à lire ce
@@ -2115,6 +2668,117 @@ de cloner les mauvaises bases.
 
 Le relevé de `[status] up` et de `[open]` est une commande shell par worktree :
 **file de fond uniquement**.
+
+### Trancher un conflit à trois volets
+
+Ce qu'un conflit coûte n'est pas de le corriger, c'est de le lire. Git laisse le
+fichier avec ses marqueurs en travers, et un marqueur dit **ce qui n'est pas
+d'accord** sans jamais dire ce que chaque côté a *fait*. D'où trois colonnes —
+la nôtre, le résultat, la leur — et une décision qui est un clic dans la
+gouttière entre deux colonnes — ou du texte tapé dans la colonne du milieu, là
+où aucun côté ne convient. C'est le geste de PhpStorm, au centre de l'écran Git,
+**à la place du diff** : le diff d'un fichier non fusionné ne montre que les
+marqueurs.
+
+La colonne du milieu **s'écrit** : ce qui suit dit comment, et pourquoi c'est
+par bloc.
+
+**« Smart » n'est pas un réglage, c'est ce que la comparaison rend.** Le fichier
+est relu depuis l'index — `:1:`, `:2:`, `:3:` (`repo::stages`) — et comparé deux
+fois, la base contre la nôtre et la base contre la leur. Ce que les deux
+laissent tranquille est stable ; ce qu'**un seul** côté a touché est pris sans
+rien demander ; ce que les deux ont touché différemment est un conflit, et c'est
+la seule chose que la vue demande. Un fichier où git a écrit vingt marqueurs se
+réduit à trois décisions.
+
+- **La comparaison est celle de la gouttière** (`hunks::regions`, patience),
+  d'où l'extraction du primitif : deux appels ici, un là-bas, un seul
+  algorithme. Le savoir vit dans `ui::merge`, pur et testé.
+- **Ce que rend l'algorithme est ce que rend git**, jusqu'aux découpages qui
+  paraissent trop grossiers : deux modifications sur des lignes **voisines** ne
+  sont séparées par aucune ligne dont les trois versions conviennent, donc elles
+  ne font qu'un conflit — et git en écrit une seule paire de marqueurs. Une vue
+  qui les séparerait proposerait une décision que git n'honorera pas.
+- **Un côté pris est un bouton allumé, et deux boutons font « les deux »**,
+  dans l'ordre où on les a pressés. C'est une bascule et non un choix exclusif :
+  deux fonctions ajoutées au même endroit se gardent toutes les deux, et se
+  dépresser est la façon de revenir en arrière.
+- **Tant qu'un conflit n'a pas de réponse, la colonne du milieu ne montre
+  rien** : y afficher l'un des deux côtés se lirait comme une décision déjà
+  prise. Le fond rouge s'éteint dès qu'un côté est pris.
+- **La colonne du milieu s'écrit, et elle s'écrit par bloc.** Deux boutons
+  répondent à presque tout ; ce à quoi ils ne répondent pas est le cas où les
+  deux côtés ont ajouté quelque chose à la **même** ligne, où aucune
+  combinaison de « prendre ce côté » n'écrit ce que le fichier veut. Un
+  `EditorState` s'ouvre alors **dans** le bloc — double-clic sur le résultat, ou
+  le bouton de la barre — amorcé de ce que la colonne disait, et ce qu'on y tape
+  est une réponse comme les autres : un conflit qui porte du texte est tranché.
+  - **Par bloc et non un tampon sur tout le fichier**, et c'est ce qui rend la
+    chose possible : trois colonnes alignées et un éditeur vivant sur toute la
+    hauteur ne peuvent pas s'accorder ligne à ligne — replis, retours à la
+    ligne, défilement propre. Un bloc, lui, n'a qu'une hauteur, et la vue la
+    connaît.
+  - **D'où `v_virtual_list` et non `uniform_list`** : le bloc en cours d'édition
+    est **une** entrée, aussi haute qu'il le faut, quand les autres sont des
+    lignes. Un éditeur est un élément, il ne se découpe pas sur les lignes qu'il
+    couvre. C'est la même bascule que le repli du diff, pour la même raison.
+  - **L'entrée est aussi haute que le plus grand des trois** — les deux côtés et
+    ce qui est tapé : une hauteur trop courte fait peindre l'entrée suivante
+    par-dessus les dernières lignes de l'éditeur. Elle grandit donc à la frappe,
+    les lignes étant reconstruites à chaque changement (un parcours du fichier
+    par frappe, l'ordre de la gouttière, très en dessous d'une frame).
+  - **Les boutons et l'éditeur sont deux façons de répondre à la même
+    question** : presser un côté **jette** ce qui a été tapé et referme
+    l'éditeur. Deux réponses pour un bloc, dont une invisible, est l'état dans
+    lequel on résout un fichier qu'on n'a pas lu.
+  - **Vider l'éditeur, c'est ne rien prendre**, et non prendre une ligne vide :
+    un document se découpe sur les sauts de ligne, donc `""` serait une ligne
+    blanche dans le fichier. C'est ainsi qu'on laisse tomber un passage dont les
+    deux versions sont à jeter.
+  - **N'importe quel bloc s'écrit**, pas seulement un conflit : une fusion
+    automatique avec laquelle on n'est pas d'accord est précisément ce qu'une
+    colonne éditable sert à corriger. Une gomme la rend au calcul.
+  - Et l'éditeur externe reste, pour ce qui se finit ailleurs : le disque porte
+    encore les marqueurs, qui sont ce qu'on lit pour ça.
+- **Ce qui reste à trancher est écrit**, dans la barre, en mots et pas seulement
+  en couleur — « 3 conflits à trancher », puis « 5 conflits réglés » sur fond de
+  succès quand il n'en reste aucun. Un fichier laissé à moitié est un fichier
+  qu'on écrit sans l'avoir fini de lire, et « Résoudre » reste éteint tant qu'il
+  en reste un.
+- **On passe d'un conflit à l'autre**, et par les mêmes touches qu'ailleurs :
+  la vue ayant pris la place du diff, `step_diff_hunk` — les flèches, `j`/`k`,
+  `]c`/`[c` — y va de conflit en conflit, en **bouclant** (ce qu'on parcourt est
+  une poignée d'endroits dans un fichier, et une flèche qui cesse de répondre au
+  dernier se lit comme cassée). Deux boutons la doublent dans la barre, et un
+  troisième va au prochain **non tranché** — « le premier encore ouvert » et non
+  « le suivant vers le bas », la liste qu'on parcourt étant une liste qui
+  raccourcit. Un filet dans la marge dit où l'on est.
+- **Rien n'est écrit avant qu'on le demande** : « Résoudre » écrit le résultat
+  et l'indexe d'un seul geste (`repo::resolve_with`), et le bouton est éteint
+  tant qu'un conflit attend. L'écriture est inconditionnelle, seule de ce
+  programme : ce qui est sur le disque est la version aux marqueurs, et
+  l'écraser est tout le geste.
+- **Les stages 2 et 3 s'inversent pendant un rebase**, comme `--ours` : la
+  traduction se fait dans la couche git, une fois, et la vue parle de « la
+  nôtre » au sens de l'utilisateur d'un bout à l'autre.
+- **Ce qui n'a pas trois colonnes est refusé et le dit** : un fichier binaire —
+  `git_blob` rend une erreur plutôt qu'une conversion approximative, dont les
+  octets finiraient dans le fichier résolu — et un conflit où un côté a
+  **supprimé** le fichier. Les deux boutons de la ligne restent la sortie.
+- **Le blob se lit octet pour octet** (`git_blob`) : `git` rogne les sauts de
+  ligne finaux, ce qui est juste pour la sortie d'une commande et faux pour un
+  fichier — le saut mangé serait une modification que personne n'a faite, et il
+  atterrirait dans le fichier résolu.
+- **La vue s'ouvre sur le premier conflit**, pas en haut du fichier, et une
+  flèche y ramène : c'est « le premier encore ouvert » et non « le suivant vers
+  le bas », la liste qu'on parcourt étant une liste qui raccourcit.
+- **Un conflit réglé ailleurs referme la vue** (`status_arrived`) : les deux
+  boutons de la ligne, un abandon, un `git checkout` dans le terminal d'à côté —
+  ce qui resterait à l'écran serait l'index tel qu'il était, et chaque bouton
+  agirait sur un conflit terminé.
+- **Pas de défilement horizontal** : trois colonnes se partagent une largeur,
+  donc chacune est étroite et une ligne trop longue est coupée. Ce qu'on lit ici
+  est quel côté prendre, pas la fin d'une ligne.
 
 ### L'exécuteur asynchrone
 
@@ -2282,9 +2946,11 @@ défilement en haut.
 - **Tout geste de la table repart vers l'application en différé**
   (`Results::report`, référence **faible**) : la table appelle son délégué au
   milieu d'un `update` sur elle-même, et l'application répond en le remplaçant.
-- **Le fournisseur de complétions filtre lui-même** : la liste de gpui-component
-  affiche ce qu'on lui rend. Le remplacement est donné en clair (`text_edit`), la
-  plage de repli englobant le `users.` d'une colonne qualifiée.
+- **Le fournisseur de complétions filtre et classe lui-même** : la liste de
+  gpui-component affiche ce qu'on lui rend, dans l'ordre où on le rend, sans rien
+  écarter. Le remplacement est donné en clair (`text_edit`), la plage de repli
+  englobant le `users.` d'une colonne qualifiée. Voir « Ce que la console
+  propose ».
 - **`Ctrl+Entrée` est la touche de la requête**, et la console déclare son
   contexte (`ClaudhubQuery`) que la liaison du commit exclut explicitement.
   `COPY_PREDICATE` exclut la console, et `QUERY_COPY_PREDICATE` les champs.
@@ -2292,11 +2958,74 @@ défilement en haut.
 **Aucun cache de schéma sur le disque** : le magasin fait un kilo-octet et se lit
 à la main, et un schéma indexé pèserait mille fois plus.
 
+### Ce que la console propose
+
+`db::complete`, pur et testé, décide ; `SqlCompletions` traduit en
+`CompletionItem` et ne décide de rien. Le savoir qui le nourrit est celui des
+liens de la grille, monté d'un cran : **`db::sql` lit la requête** — les tables
+qu'elle nomme après `FROM` et `JOIN`, l'alias qu'elle leur donne, et ce que le
+curseur attend là où il est. Un balayage grossier et non un analyseur, comme
+`link` l'assumait déjà : chaînes, identifiants cités et commentaires écartés,
+une sous-requête ne nomme rien.
+
+- **La requête est lue, pas seulement le mot qu'on tape.** Un schéma Laravel de
+  trois cents tables porte des milliers de noms de colonnes, et une liste coupée
+  à cinquante **avant** d'être classée est la façon dont la colonne qu'on
+  cherchait n'apparaît jamais. Les colonnes des tables que la requête nomme
+  passent donc devant, et la coupe vient après le classement.
+- **Classer, pas restreindre** : une requête à moitié tapée n'a pas encore de
+  `FROM`, et écarter ce qui n'appartient pas à la clause retirerait ce vers quoi
+  on va. Seul un qualifieur explicite restreint — `u.` ne propose que les
+  colonnes de cette table-là, et **rien du tout** s'il ne nomme rien plutôt que
+  tout le schéma sous un nom qu'il n'a pas.
+- **Un alias répond là où le nom de table répond** : on écrit `u.` bien plus
+  souvent que `users.`. C'est l'autre moitié de `sources_in`, dont `link`
+  profite au passage.
+- **Le mot qu'on est en train de taper n'est pas un alias**, et c'est le piège
+  qui ne se voit pas : dans `FROM users j`, le `j` d'un `JOIN` qu'on commence
+  nommerait la table `j`, et toute condition proposée depuis là serait écrite
+  contre un nom qui ne survivra pas à la frappe suivante. L'identifiant entier
+  est retiré du texte que le balayage lit, la moitié après le curseur comprise.
+- **Un nom que deux tables de la requête portent sort qualifié** (`u.id`) : un
+  `id` nu dans une jointure est ce que le moteur refuse comme ambigu, donc le
+  compléter tel quel écrirait une requête qui ne tourne pas. Le libellé reste le
+  nom nu — c'est lui que le préfixe filtre — et la mention grise dit d'où il
+  vient.
+- **La jointure s'écrit toute seule à partir d'une clé étrangère.**
+  `SchemaIndex::foreign_keys` est déjà indexé pour les liens de la grille, et
+  c'est le geste qui vaut le détour. **Trois formes, une par endroit où le
+  curseur peut être**, et chacune commence par le mot qu'on y taperait, si bien
+  que le préfixe les filtre comme le reste : `ON …` après un `JOIN` dont la
+  table est nommée, `posts ON …` après un `JOIN` nu, et `JOIN posts ON …`
+  ailleurs. La table jointe est écrite à gauche de la condition, quel que soit
+  le côté qui porte la clé : c'est celle qu'on ajoute, et l'œil lit la condition
+  depuis elle.
+- **Un préfixe passe toujours devant une sous-séquence** (`crat` trouvant
+  `created_at`), et **une seule lettre ne cherche que des préfixes** : toute
+  chaîne est une sous-séquence d'une lettre, et la liste ne dirait plus rien. Le
+  tri est stable, donc l'ordre du schéma survit à l'intérieur d'un rang.
+- **La comparaison est en octets, insensible à la casse ASCII**, jamais par
+  `to_lowercase()` : il change la longueur en octets de certains caractères,
+  et c'est ainsi qu'un décalage tombe au milieu d'un caractère.
+- **Aucun `filter_text` n'est renvoyé** : le menu du fork souligne sa
+  **longueur** depuis le début du libellé, si bien que le remplir — ce que LSP
+  demande — souligne chaque entrée en entier. Laissé vide, le souligné vaut la
+  longueur du mot tapé, qui est ce qu'un match par préfixe revendique.
+
+Ce qui n'y est pas : la complétion d'une **valeur** (`WHERE status = '…'`), qui
+demanderait un aller-retour vers le serveur à chaque frappe.
+
 **L'historique des requêtes** vit dans un fichier à lui
 (`<config>/sql_history.json`) : le magasin se réécrit en entier toutes les
 demi-secondes pendant qu'on tape. Il est sérialisé dans le thread d'interface et
-**écrit en fond**. C'est un **onglet à côté de l'arbre**, pas un popover : on
-écrit une requête **pendant** qu'on le regarde.
+**écrit en fond**. C'est le **tiers du bas de la colonne**, comme les notes sur
+l'écran de revue et pour la même raison : il ne dit pas ce qu'il y a à
+interroger, il dit où l'on en est — ce qui a déjà été demandé et ce que ça a
+répondu —, et cela se lit **pendant** qu'on écrit la requête suivante. Derrière
+un onglet, il était à un clic du schéma, si bien qu'on n'y allait qu'après avoir
+retapé ce qui s'y trouvait déjà. Une rangée et non une seconde colonne : la
+console garde toute la largeur qu'elle avait, ce qui était la raison de
+l'onglet.
 
 - **La même requête rejouée ne fait pas une seconde ligne** : la ligne remonte,
   compte un passage (`×4`) et **prend le résultat frais**. Les blancs sont
@@ -2339,22 +3068,60 @@ session précédente, puis le premier. Le rang rend l'ordre des réponses sans
 importance. Corollaire : la sélection a lieu **même quand le dépôt était déjà
 ouvert**, cette réponse étant la seule qui nomme le checkout profond.
 
-**Où l'on en était** (`store::Session`, écrit par `ui::session`) : le worktree,
-le fichier ouvert, la connexion de la console et le texte de sa requête. **On
+**Où l'on en était** (`store::Place`, écrit par `ui::session`) : l'écran, les
+onglets de fichiers, la connexion de la console et le texte de sa requête. **On
 remet ce qu'on avait choisi, jamais ce qu'on avait obtenu** — pas de diff, pas de
-grille, un `SELECT` rejoué au démarrage étant une requête vers un serveur que
+grille, un `SELECT` rejoué à l'arrivée étant une requête vers un serveur que
 personne n'a demandé à joindre.
 
+**Et c'est par worktree**, ce qui est l'autre moitié de la même idée : aller
+voir une chose dans un autre projet et revenir coûtait le fichier, l'écran et la
+requête — quatre gestes pour retrouver un état que personne n'avait quitté
+exprès. `store::Session` ne garde plus que **quel** worktree, ce qui est
+précisément ce qui n'appartient à aucun d'eux. `layout.json` garde la place des
+panneaux — c'est la géométrie de la *fenêtre*, la même sur tous les projets — et
+l'écran sur lequel elle s'ouvre, qui est ce qui répond avant qu'aucun dépôt ne
+l'ait fait.
+
+Trois moments, et ils ne sont pas les mêmes (`settle_place`) :
+
+- **L'écran et la console** se remettent à chaque arrivée : il y en a un
+  exemplaire pour toute la fenêtre, donc le worktree qu'on quitte vient d'écrire
+  par-dessus. La console est **vidée** avant d'être remise — laisser la requête
+  du projet précédent sous le curseur est la seule chose qu'une place par
+  worktree ne doit pas faire.
+- **Les onglets** ne se remettent qu'à la **première** arrivée : le panneau d'un
+  fichier se masque tout seul quand la racine d'édition change et revient avec
+  elle — la réponse des terminaux —, si bien qu'un worktree déjà visité a encore
+  ses fichiers, là où on les a laissés.
+- **Rien du tout tant que la sélection est un bouche-trou** : le temps que les
+  dépôts répondent, la fenêtre montre le premier checkout de celui qui a répondu
+  en premier, et y rejouer une place ouvrirait des fichiers dans un projet que la
+  session n'a jamais demandé. C'est `session_terminal_due`, la règle que le
+  premier terminal suit déjà — d'où les **deux** points d'appel : le geste, et le
+  moment où le dernier dépôt répond.
+
 - **La connexion est nommée par sa clé**, pas recopiée.
-- **Rouvrir n'est pas un geste** : l'écran qui revient est celui de
-  `layout.json`, d'où `take_restored_editing` et `reopen_db_console`
+- **Rouvrir n'est pas un geste** : l'écran qui revient est celui de la place,
+  posé un cran plus tôt, d'où `take_restored_editing` et `reopen_db_console`
   (`start_db_console` sans ses deux effets de bord).
 - **L'écriture se fait aux gestes, pas à la fermeture** : une fenêtre se ferme
-  aussi par un plantage.
-- **Ce qui n'est pas encore remis tient lieu de ce qui n'est pas là** : sans ce
-  repli, la première frappe écrirait un worktree vide.
-- **La demande de relecture du fichier ne part qu'une fois** (`restore_asked`) :
-  chaque dépôt qui s'ouvre demande si le fichier mémorisé est l'un des siens.
+  aussi par un plantage. Changer d'écran en est un.
+- **Rien ne s'écrit pendant qu'une place se remet** (`settling`), ni tant que les
+  fichiers sont en route (`restoring_files`) : les trois moitiés se remplacent
+  l'une après l'autre — `enter_workspace` écrit, et c'est la première —, et une
+  frappe dans l'éditeur de requête atterrit bien avant le dernier fichier. Une
+  liste d'onglets vide écrite là les perdrait tous.
+- **Seul un écran de travail est retenu** : les réglages et le multiplexeur sont
+  des détours, et revenir sur un projet ne doit pas remettre dans le détour qu'on
+  a pris en le quittant. C'est la règle de `worked_in`. Un écran devenu vide —
+  le seul plugin qu'il portait a été désinstallé — n'est pas non plus un écran où
+  revenir.
+- **La place de la fenêtre entière devient celle de son worktree** : `state.json`
+  écrit avant ce changement porte ses trois clés au niveau de la session, que le
+  `flatten` relit là, et `migrate_place` les verse une fois dans l'entrée — le
+  chemin de `migrate_sentry` et de la reprise des notes. L'entrée créée ainsi ne
+  porte pas de dépôt, ce que la purge lit comme « pas à moi d'oublier ».
 
 **La base de la revue** vient de git — `origin/HEAD`, puis `init.defaultBranch`,
 puis les noms usuels *qui existent vraiment* (`branch::default_base`) — jamais
@@ -2488,11 +3255,43 @@ passes**.
 
 `alacritty_terminal` fournit le parseur VTE, la grille, l'historique et le pty.
 Claudhub écrit `keys::key_bytes` et `snapshot::capture`. Le rendu est du texte —
-un `StyledText` par ligne — et non un canevas : une police à chasse fixe suffit à
-aligner les colonnes.
+des `StyledText` — et non un canevas : gpui garde le façonnage, les ligatures et
+les écritures complexes qu'un rendu cellule par cellule aurait fallu réécrire.
 
 Le verrou de la grille est partagé avec la boucle d'E/S : **ne jamais dessiner
 sous ce verrou**, d'où l'instantané.
+
+**Mais une police à chasse fixe ne suffit pas à aligner les colonnes**, et c'est
+le piège que ce rendu a payé : un caractère que la police n'a pas est dessiné par
+celle sur laquelle le système se rabat, dont l'avance n'a aucune raison de faire
+une cellule. Façonné au milieu d'un run, il pousse tout ce qui le suit — le
+sablier de l'agent parcourt quatre dingbats que le sous-ensemble d'Iosevka laisse
+dehors, et la ligne de statut entière se décalait gauche-droite à chaque image.
+
+- **Chaque run est posé à sa colonne** (`line_boxes`), en absolu, et non mis bout
+  à bout : un run ne peut plus décaler son voisin, et le curseur — déjà peint à
+  `colonne × largeur` — retrouve le texte qu'il désigne.
+- **Un caractère mesuré hors grille reçoit une case à lui** (`chunks`), large
+  d'une cellule, qui rogne ce qui dépasse. `TextSystem::advance` résout le glyphe
+  dans **cette** police et échoue quand elle ne l'a pas : cet échec *est* la
+  question. La réponse est mise en cache — la grille visible est parcourue à
+  chaque image —, et `sync_font` la vide.
+- **Le fond appartient à la case et non au run** : un rectangle couvre alors
+  exactement les cellules qu'il doit, quelle que soit la largeur du glyphe.
+- **Un caractère large est un run à lui seul** (`snapshot::capture`), et c'est ce
+  qui rend la largeur d'un run lisible dans son texte : partout ailleurs une
+  colonne est un caractère, donc la vue découpe caractère par caractère sans
+  table de largeurs. Ce qui échappe à la règle — des signes combinants — épingle
+  le run **en un bloc** : son intérieur peut glisser, ce qui le suit non.
+- **Le sous-ensemble des polices porte désormais les symboles et les dingbats**
+  (`tools/subset_fonts.py`, `.ttf` régénérés) : l'épinglage tient la grille,
+  avoir le glyphe est ce qui le rend joli. Iosevka les dessine tous à une
+  cellule ; le prix est un mégaoctet et demi de plus.
+- **Le retrait des blancs de fin est une coupe en octets sur un compte en
+  cellules** : elle se ramène dans le run avant de compter, sinon un run tombé
+  entièrement après la coupe se retire les octets du voisin — une espace
+  inversée sur une ligne par ailleurs vide mettait la coupe à zéro, et le
+  compte débordait par en dessous.
 
 **La molette n'a pas le même sens selon l'écran.** Dans l'écran secondaire — un
 agent, `less`, `vim` — il n'y a pas d'historique : elle se traduit en flèches,
@@ -2654,17 +3453,26 @@ tout ce qui l'entoure était **soudé à `Editing`**, l'état d'un fichier ouver
 bien que la console n'avait ni modes, ni curseur bloc, ni molette lissée, ni
 zoom. `ui::surface` est ce harnais monté d'un cran.
 
-- **Une surface se nomme, elle ne se possède pas** (`Surface::File` /
+- **Une surface se nomme, elle ne se possède pas** (`Surface::File(chemin)` /
   `Surface::Query`) : l'état reste où il vivait — celui d'un fichier dans son
   `Editing`, celui de la console dans `ClaudhubApp` —, et chaque méthode prend le
   nom et va le chercher. Le tenir derrière une entité commune aurait demandé de
   sortir l'éditeur d'un fichier de l'onglet qui le porte.
+- **Et un fichier se nomme par son chemin, pas par « l'onglet actif »** : le
+  dock en montre deux à la fois dès qu'on ouvre un split, `show_file` tourne une
+  fois par panneau et par frame, si bien que l'onglet actif **alterne** entre
+  les deux sans qu'on ait touché à rien. Un cran de molette atterrissait alors
+  sur celui qui avait été peint en dernier, et le lissage — rangé sous une clé
+  unique — était avancé depuis les rendus des **deux** panneaux : une seule
+  motion poussait deux éditeurs, ce qui se lit comme deux fichiers qui défilent
+  ensemble. D'où `editing_at`, ce qu'un **geste** atteint, là où `editing()`
+  reste ce que le reste de la fenêtre appelle « le fichier qu'on édite ».
 - **Le harnais est un `VimHost`** : la machine vim et les trois couches de
   décoration, créées **une fois** avec la surface et dans l'ordre qui décide qui
   gagne là où elles se recouvrent.
-- **Deux clés de lissage et non une** : les deux surfaces défilent
-  indépendamment, et une motion partagée donnerait à l'une la destination de
-  l'autre.
+- **Une clé de lissage par surface et non une pour toutes** — le fichier la tire
+  de son chemin : elles défilent indépendamment, et une motion partagée donne à
+  l'une la destination de l'autre.
 - **La console n'a pas les commandes qui nomment un fichier.** `:w`, `:q` et `gd`
   sont celles de l'éditeur — une requête n'a ni chemin où écrire, ni onglet à
   fermer, ni définition à suivre. Elles sont **laissées tomber** plutôt que
@@ -2710,6 +3518,33 @@ commentaire.
   nu d'être tapé ; le laisser passer fait du mode insertion un éditeur ordinaire.
 - **Le caractère lu est celui que la frappe a *produit*** (`key_char`), pas la
   touche : c'est ce qui met `$`, `^` et `0` là où il faut sur un AZERTY.
+- **Une sélection faite à la souris est une sélection visuelle** (`Vim::adopt`).
+  Rien n'annonce un glissement : la sélection de la souris et la nôtre arrivent
+  par la même porte, `selected_range()`. Ce qui les distingue est ce que vim a
+  **écrit en dernier**, relu depuis l'éditeur (`VimHost::selection_at`) — relu et
+  non retenu du `Change`, l'éditeur ramenant une plage aux frontières de
+  caractère. Sans cela ce qui était surligné et ce que l'opérateur suivant
+  prenait étaient deux choses différentes : le mode restait normal, le curseur
+  bloc se posait au **début** de la plage — le mode normal lit le caret de
+  l'éditeur, et le caret d'une sélection est son début —, et `c`, `d` ou `y`
+  agissaient sur le caractère qui était dessous. Quatre points :
+  - **Toujours *charwise*** : la souris désigne un morceau de texte, et revenir
+    dans `V` ou `Ctrl+V` couvrirait plus que ce qui est allumé.
+  - **La tête est le bout qu'on tirait**, lu dans `EditorState::cursor` — la
+    seule chose qui distingue une sélection grandie vers la droite d'une grandie
+    vers la gauche, et ce dont `o`, `h` et `l` repartent. La tête de vim est
+    **inclusive**, la plage de l'éditeur non.
+  - **Une plage vide rend le mode normal** : un clic simple, et une sélection
+    laissée à l'écran alors qu'elle n'y est plus.
+  - **Le mode insertion garde la souris pour lui** : sélectionner un mot pour
+    taper par-dessus est ce que fait tout éditeur.
+  Le tout vit dans `sync_block_cursor`, qui tourne déjà à chaque frame pour la
+  même raison — un clic déplace le caret sans nous le dire —, et le texte n'y
+  est copié qu'une fois. Deux exceptions le traversent : `u` et `Ctrl+R`, qui
+  sont **différés** par gpui et **remettent la sélection de la transaction
+  défaite** — une sélection que vim n'a pas écrite et que la frame suivante
+  prendrait pour une main, d'où `absorb_selection`. Et la console SQL l'a par la
+  même porte que le reste du harnais.
 - **Le curseur bloc est peint par nous.** Il a d'abord été la **sélection** du
   caractère sous le curseur, et c'était faux deux fois : une sélection ne s'écrit
   qu'à une frappe, donc un fichier qui vient de s'ouvrir n'avait aucun curseur ;
@@ -2717,8 +3552,11 @@ commentaire.
   décoration est peinte **par-dessus** la sélection et dans nos couleurs. Le
   découpage se compte en **caractères**.
 - **Le bloc se redemande à chaque frame, et se recalcule rarement** :
-  `Editing::cursor_at` retient le mode, le caret et la longueur du texte pour
-  lesquels il a été calculé, `value()` recopiant le fichier entier.
+  `VimHost::cursor_at` retient le mode, la sélection, la tête et la longueur du
+  texte pour lesquels il a été calculé, `value()` recopiant le fichier entier.
+  La tête y est pour son propre compte : `o` échange les deux bouts d'une
+  sélection visuelle sans changer la plage, et le bloc doit changer de bout
+  avec elle.
 - **Le curseur dit le mode par sa couleur** (`vim_mode_colour`), table partagée
   avec la pastille de la barre du fichier. Le glyphe prend celle des deux
   extrémités du thème qui **contraste** (`ink_on`).
@@ -2760,6 +3598,87 @@ commentaire.
   chaque frappe** : la gouttière en ferme aussi, `zc` n'est pas la seule voie. Les
   autres motions n'en tiennent pas compte, à dessein : `G`, `gg` et une recherche
   nomment la ligne qu'on veut.
+- **`Enter` et `Backspace` sont des liaisons de l'éditeur, pas des frappes** :
+  une liaison passe **avant** l'écouteur en phase de capture, exactement comme
+  `Ctrl+V`, et l'action est donc attrapée sur le même ancêtre en capture
+  (`vim_named_key`). Sans cela une ligne `:w` ou `/foo` se tapait et ne
+  s'exécutait **jamais** — la seule panne où tout paraît marcher jusqu'au geste
+  qui compte — et `Backspace` en mode normal **supprimait**, la seule frappe
+  d'un éditeur modal qui ne doit rien détruire. En mode insertion les deux
+  passent. Un `Enter` modifié est laissé à qui il appartient : `Ctrl+Entrée` est
+  la touche de la requête.
+- **La ligne de statut est au *pied* de l'éditeur**, comme dans vim, et c'est le
+  seul endroit où le mode se dit désormais. Le placement n'est pas une révérence
+  à l'habitude : une ligne `:` est une ligne qu'on **écrit**, et une ligne qu'on
+  écrit en haut d'un panneau — au-dessus du fichier, à côté de son chemin et de
+  ses boutons — ne se lit pas comme telle, elle se lit comme une étiquette. La
+  pastille a donc quitté la barre du haut : deux endroits qui disent la même
+  chose en font un de trop, et ce qui dit le mode là où l'œil est reste la
+  **couleur du curseur bloc**. Le `pending` est à droite, où vim le met, et la
+  ligne en cours de frappe **prend la place** du mode — tant qu'on écrit une
+  commande, ce qu'on écrit est tout ce qu'il y a à dire.
+- **`/` et `Ctrl+F` cherchent la même chose.** Deux gestes pour une question,
+  et deux moteurs qui s'ignorent en font deux réponses : on tapait un motif dans
+  la barre, `n` ne le connaissait pas ; on tapait `/motif`, rien ne s'allumait.
+  Le motif est donc **partagé** — poussé dans vim avant chaque frappe
+  (`Vim::set_search`, comme le registre et les replis), et reposé dans la
+  session de l'éditeur après (`set_search_query`). Trois conséquences :
+  - **`n` continue une recherche tapée dans la barre**, même refermée, et
+    `Ctrl+F` s'ouvre sur ce que `/` cherchait.
+  - **Les occurrences restent allumées** (`hlsearch`), et `Échap` les éteint —
+    le `:nohlsearch` que toute configuration vim lie à cette touche. Une
+    recherche qui ne fait que déplacer le caret oblige à presser `n` pour
+    savoir s'il y avait autre chose, alors que la réponse est à l'écran depuis
+    le début.
+  - **Elles sont peintes par nous**, sur une quatrième couche de décoration, et
+    non en ouvrant le panneau de recherche de l'éditeur : l'ouvrir **prend le
+    focus**, et le focus est ce dont `n` et `N` ont besoin pour rester où ils
+    sont. La couleur est celle d'une occurrence de `Ctrl+F` (`find::
+    highlight_color`) et le calcul est le sien (`find::find_all`, en octets).
+    Celle **sous le caret** est allumée plus vif, ce qui ne coûte rien — le
+    caret est à nous, donc « l'occurrence courante » est une comparaison et non
+    un état à tenir. La couche s'éteint tant que la barre est ouverte : deux
+    couches de la même couleur sur les mêmes mots font une troisième couleur.
+  Le parcours n'est refait qu'au changement de motif ou de texte, jamais à la
+  frame.
+- **`;` et `,` rejouent le dernier `f`, `F`, `t` ou `T`** : une recherche dans
+  la ligne qui ne vaut qu'une fois n'est pas ce à quoi elle sert. Ce sont des
+  **motions** et non des commandes — elles vivent dans `parse_motion`, donc `d;`
+  et `3;` marchent sans rien de plus. Le piège est le `t` : le caret est déjà
+  posé une case avant le caractère qu'on lui a dit de ne pas franchir, si bien
+  que « jusqu'au prochain » est exactement là où il se trouve — un rejeu qui ne
+  commencerait pas par enjamber ce caractère resterait sur place. `,` a le même
+  piège à l'envers.
+- **`.` rejoue la dernière modification**, et c'est ce qui rend un opérateur
+  payant à taper une fois. Ce qui s'enregistre n'est pas une touche mais une
+  **commande** : `3dw` en fait quatre, `cwfoo` et son `Esc` six, et le tampon se
+  vide dès que ce qui s'y trouvait s'avère ne rien changer — une motion, un
+  changement de mode, un défilement. Six points :
+  - **Le texte tapé en insertion est *déduit*, pas enregistré** : à l'entrée on
+    retient où l'insertion commence et la longueur du texte, à l'`Esc` on lit ce
+    qu'il y a entre les deux — la paire de `BlockInsert`, lue comme elle. C'est
+    la seule façon d'emporter ce que l'éditeur a ajouté de lui-même :
+    l'auto-indentation, une complétion, une paire de délimiteurs fermée pour
+    vous. Rejouer les lettres les redemanderait une seconde fois.
+  - **Un rejeu est *une* édition** : les touches sont rejouées sur une **copie**
+    du texte, et ce que la vue reçoit est la plus courte édition qui mène de
+    l'un à l'autre (`minimal_edit`, préfixe et suffixe communs — le calcul de
+    `lsp::sync`). Sans quoi un `.` serait autant de transactions que de frappes,
+    et `u` autant de pressions.
+  - **L'`Esc` du rejeu est un vrai `Esc`** et non un mode posé à la main : c'est
+    lui qui recule le caret sur le dernier caractère tapé, et lui qui répète une
+    insertion en bloc sur les autres lignes — `Ctrl+V j I` est trois touches et
+    une commande, d'où le tampon qu'un mode visuel garde ouvert.
+  - **Un `.` ne s'enregistre pas lui-même**, sans quoi il serait sa propre
+    dernière modification.
+  - **Rien ne s'invente** : une insertion qu'on a quittée à la souris ou
+    rebroussée en arrière ne se dépose pas, et une modification faite sur une
+    **sélection de souris** non plus — il n'existe aucune frappe qui décrive un
+    glissement, et déposer `d` seul donnerait un rejeu qui attend une motion et
+    ne fait rien. C'est la modification d'avant qui reste.
+  - **En insertion, un point est un point** : `.` appartient au seul mode
+    normal, et l'interception le sait — comme elle sait qu'après `d` ou `f`
+    c'est le caractère attendu, et dans une ligne `/` un point.
 - **`u` et `Ctrl+R` sont rendus à l'éditeur**, seul à savoir ce qu'était la
   dernière transaction (`Command::Undo`).
 - **Le défilement est repris à la main quand la tête remonte** :
@@ -2858,13 +3777,81 @@ unique ne pouvait que les empiler.
   D'où `deny_unknown_fields` sur les deux déclarations.
 
 **Le vocabulaire de vue est borné exprès** : colonne, rangée, section repliable,
-texte en quatre rôles, extrait de code, liste, bouton, champ de saisie, état
-vide, roue. Assez pour un maître/détail, délibérément pas assez pour être un
-second framework. `List` passe par `uniform_list` à `theme::row_height`, donc une
+texte en quatre rôles, extrait de code, liste, bouton, lien, champ de saisie,
+pastille, encart, table de deux colonnes, barre de proportion, filet, remplissage,
+état vide, roue. Assez pour un maître/détail, délibérément pas assez pour être un second
+framework. `List` passe par `uniform_list` à `theme::row_height`, donc une
 entrée fait deux étages au plus.
 
-Un `Code` porte le nom de son langage et n'est **pas encore coloré** : passer par
-`ui::highlight` demande le contexte d'un fichier entier.
+**Cinq de ces noms sont venus de Sentry, et aucun ne parle de Sentry** — c'est
+le même portillon que la première fois. Une erreur ne se diagnostique pas d'une
+trace seule : ce qui la rend lisible est ce qu'il y a autour — depuis quand,
+combien de fois, sur quelle release, ce qui s'est passé la seconde d'avant —, et
+aucune de ces cinq choses ne se disait avec un texte et une rangée.
+
+- **`Badge` et `Callout` portent un `Tone`**, cinq niveaux de gravité et **pas
+  une couleur** : un plugin dit ce qu'une valeur *veut dire*, le thème dit à quoi
+  ça ressemble. C'est la règle que `TextStyle` suit déjà un cran plus bas. Un
+  ton inconnu vaut `Neutral` — une gravité qu'on ne connaît pas n'est pas une
+  erreur de script.
+- **`Fields` est la seule forme qu'une rangée de textes ne donnait pas** : les
+  valeurs s'alignent entre elles, et c'est ce qui rend huit d'entre elles
+  lisibles d'un coup d'œil plutôt que huit phrases.
+- **`Meter` porte un pourcentage entier** et non un flottant, pour que l'arbre
+  reste comparable : tout le vocabulaire est `Eq`, et c'est ce qui permet
+  d'écrire le rendu d'un plugin dans un test.
+- **`Fill` est ce qui fait d'une liste un panneau de liste** et non un bloc dans
+  une colonne. Sans lui, une liste doit se donner une hauteur d'avance, et seize
+  lignes était le nombre choisi : au-delà elle défilait **dans** une colonne qui
+  défilait aussi — deux barres pour un geste, dont aucune n'était celle du
+  panneau —, et en deçà le panneau finissait sur une bande de rien. C'est le
+  **script** qui le dit et non le panneau qui le devine : un plugin sait lequel
+  de ses blocs est celui qu'on lit, et aucune lecture de l'arbre ne le dit. Un
+  arbre qui remplit ne reçoit **pas** le défilement du panneau : ce qui est
+  au-dessus est un en-tête, et un en-tête ne défile pas. Seuls les enfants
+  directs de la colonne racine comptent — un `Fill` enfoui dans une section est
+  une section qui grandit, et les deux se disputeraient les mêmes pixels.
+- **Une liste porte sa barre et sa molette lissée**, comme les huit autres de la
+  fenêtre, et elle n'avait ni l'une ni l'autre : une liste virtualisée ne dit
+  rien d'elle-même, et un cran de trois lignes appliqué d'un coup était le seul
+  endroit de la fenêtre où la molette ne glissait pas. La poignée appartient à
+  la **fenêtre** — `ClaudhubApp::plugin_lists`, rangée sous le panneau *et*
+  l'identifiant de la liste —, pour la raison qui fait vivre là l'`InputState`
+  d'un champ : un arbre se reconstruit à chaque geste, et une poignée créée là
+  remettrait la liste en haut à chaque fois.
+- **Une section dit dans quel sens elle s'ouvre, le panneau retient
+  l'exception.** Le repli est une posture de lecture — il change plusieurs fois
+  dans une session et ne se persiste pas —, mais *où il commence* est une
+  affirmation sur le contenu : une répartition qu'on regarde une fois appartient
+  derrière son titre, une trace non. Ce que `plugin_folded` garde est donc ce
+  qui **diffère** de ce que le script a demandé, la polarité de `tree::Folds` un
+  étage plus haut, et c'est ce qui garde l'ensemble petit.
+- **`Link` n'est pas un bouton** : le geste d'un bouton repart au script, et un
+  script n'a aucune capacité qui atteigne un navigateur. C'est ce qui rendait
+  mort le « Ouvrir dans Sentry » de la première version — un bouton dont
+  l'action était vide, donc désactivé, donc un bouton qui ne fait rien.
+
+**Un `Code` est coloré**, quand il nomme son langage, et il porte de quoi être
+numéroté (`start_line`) et de quoi marquer la ligne dont on parle (`mark`).
+
+- **Le texte part nu, les numéros sont une colonne du panneau** : un texte qui
+  les porte ne se copie pas sans eux, et coller un extrait dans un fichier est ce
+  qu'on en fait. Le prompt qui part à l'agent, lui, les remet — il arrive sans
+  gouttière, et « la ligne 46 » se compterait à la main.
+- **La coloration se fait à l'arrivée de l'arbre, jamais au rendu**
+  (`ClaudhubApp::colour_plugin_code`) : c'est la règle de tout le module, et
+  parser coûte des millisecondes là où un panneau se repeint à chaque frame. Le
+  cache est **indexé par le texte** — deux cadres du même fichier citent des
+  lignes différentes, et un chemin ne les distinguerait pas — et le thème en est
+  le **témoin** : un changement de palette n'est signalé à personne, la leçon que
+  le cache de `ui::blade` a déjà payée.
+- **Un extrait est un fragment** : ce qui le précède n'est pas là, exactement
+  comme une ligne de résultat de recherche, et c'est la reprise d'erreur d'une
+  grammaire qui rend l'analyse isolée payable (`DocumentHighlights::for_language`).
+  Le prologue PHP vaut ici aussi, et ses lignes ne comptent pas dans les
+  décalages.
+- **Un langage qu'on ne nomme pas reste gris** : deviner d'après le texte est
+  ce qui fait peindre une transcription de shell en Rust.
 
 **Un champ de saisie en fait partie**, et il a failli ne pas en être. Il avait été
 écarté au motif qu'un `InputState` doit vivre d'une frame à l'autre et qu'un arbre
@@ -2874,8 +3861,9 @@ rien : ce n'est pas l'arbre qui le possède mais la **fenêtre**, par
 **amorce** le champ sans le suivre ensuite.
 
 **Ajouter un nom au vocabulaire peut casser un plugin installé** : un script fait
-`use claudhub::*`, si bien que chaque fonction réserve son nom. C'est arrivé trois
-fois — `text`, `state`, `field` — et cela ne se corrige pas, cela se sait. Ce qui
+`use claudhub::*`, si bien que chaque fonction réserve son nom. C'est arrivé
+quatre fois — `text`, `state`, `field`, et `badge`, qui était le helper du plugin
+CI — et cela ne se corrige pas, cela se sait. Ce qui
 rend la chose supportable : Rune **le dit** en nommant les deux définitions,
 l'erreur s'affiche dans le panneau, et une compilation ratée garde la machine qui
 marchait.
@@ -2935,6 +3923,25 @@ cherchant dans une liste dont nous tenons l'ordre.
   `/vendor/laravel/…`. Joint tel quel, un chemin absolu **remplace** la racine, et
   le panneau répondait « No such file or directory » d'un chemin que personne
   n'avait écrit. Le séparateur est retiré, et un `..` est **refusé**.
+- **Une clé de défilement par panneau, et non une pour tous.** La clé nomme la
+  barre **et** le lissage, et un plugin maître/détail met deux panneaux à
+  l'écran en même temps : partagée, chaque frame avançait une seule motion
+  depuis deux rendus et contre deux offsets différents, si bien que le détail
+  ou bien sautait là où la liste en était, ou bien ne bougeait pas du tout —
+  c'est ce dernier qu'on voyait. La règle est celle que `ui::surface` paie déjà
+  pour ses deux surfaces de code.
+- **Un identifiant par nœud, tiré de son rang dans le parcours.** gpui clé un
+  élément à état par son identifiant parmi ses frères, et tous les extraits de
+  code s'appelaient `plugin-code` : le second prenait en silence le défilement
+  du premier, et les dix extraits d'une trace défilaient ensemble. Le parcours
+  est en profondeur d'abord et l'arbre est reconstruit à l'identique entre deux
+  gestes, donc le rang est stable d'une frame à l'autre — ce qu'un identifiant
+  doit être.
+- **Ouvrir un fichier atterrit sur la ligne** (`jump_to`, `Landing::Position`),
+  et non en haut : un cadre nomme une ligne, et l'ouvrir au début du fichier
+  laisse chercher à la main ce que la trace venait de dire. C'est le geste des
+  résultats de recherche, et c'est celui qui avait le plus besoin de la piste —
+  le panneau qu'on quitte est sur un autre écran.
 - **Ce qui attend se voit, et ça tourne.** La roue est celle de gpui-component :
   un glyphe posé à côté d'un titre se lit comme une décoration, et c'est ce
   qu'était l'ancienne, ce dépôt n'ayant aucune animation par ailleurs.
@@ -3003,6 +4010,36 @@ l'erreur ; la pile entière part au prompt mais le code des seules frames
 un client qui n'en lit qu'une affichant une trace vide sur la moitié des projets ;
 et **l'événement d'une issue se lit par une liste**, `events/latest/` ayant quitté
 l'API et répondant 404 — la route est org-scopée et il faut `full=true`.
+
+**Ce qu'un clic sur une erreur demande est deux allers-retours** : l'événement,
+qui décrit *cette* occurrence, et `issues/{id}/tags/`, qui décrit **toutes** les
+autres. Le second est le seul renseignement de la page qui dise si le bug est
+partout ou chez un seul, et son échec ne vaut que « pas de barres » — la trace,
+elle, est arrivée.
+
+- **La trace est renversée** : l'ordre de Sentry est celui de l'appel, et ce
+  qu'on vient chercher est la ligne qui a levé. Elle est reconstruite plutôt que
+  parcourue à rebours — la longueur d'un `Vec` de Rune est **non signée**, et
+  `len() - 1` sur une pile vide déborde par en dessous au lieu de rendre `-1`.
+  Le même piège fait échouer une comparaison entre un rang tiré de `len()` et le
+  `-1` de « rien de choisi » : les compteurs sont donc écrits à la main.
+- **Le filtre porte sur la liste qu'on a, pas sur la requête** : la requête est
+  un réglage, et une frappe ne doit pas coûter un aller-retour. Corollaire : ce
+  qu'un clic rend est un indice dans la liste **affichée**, quand ce que l'état
+  retient est le rang dans la liste **entière** — sans quoi effacer le filtre
+  ouvrirait une autre erreur que celle qu'on lisait.
+- **Le numéro court est un bouton et non une ligne de texte** : `ACETICS-4Q` est
+  la référence qu'on emporte ailleurs — un nom de branche, un message de commit,
+  un message à quelqu'un —, et un panneau de plugin n'a pas de sélection de texte
+  où aller la prendre à la main. D'où `Effect::Copy`, la cinquième chose qu'un
+  script demande à Claudhub de faire chez lui.
+- **La répartition s'ouvre repliée** : sept tags dépliés poussent la trace hors
+  de l'écran, qui est ce qu'on est venu lire.
+- **Le fil d'Ariane est ce que la trace ne porte pas** : une requête, un SQL, un
+  log. Les douze derniers, dans l'ordre où ils se sont produits.
+- **`now()` et `epoch()` sont les deux seules choses que l'hôte devait** : lire
+  l'horloge, et lire une date ISO-8601. « Il y a cinq heures » s'écrit dans le
+  script, qui est ce qui parle une langue.
 
 **Un `init` qui échoue supprime la vue entière**, donc tout ce qui aurait permis
 de s'en sortir : un script rattrape ce qu'il sait montrer et le range dans son
@@ -3138,7 +4175,8 @@ liste plausible mais fausse.
 
 Le même motif partout : la décision vit dans un module **pur**, devant la vue qui
 la peint — `notes.rs`, `sql_history.rs`, `inflight.rs`, `vim.rs`, `motion.rs`,
-`jumps.rs`, `folds.rs`, `notify.rs`, `search.rs`, `db/scope.rs`, `db/link.rs`.
+`jumps.rs`, `folds.rs`, `notify.rs`, `search.rs`, `db/scope.rs`, `db/link.rs`,
+`db/sql.rs`, `db/complete.rs`.
 
 `watch::tests::a_real_write_reaches_the_receiver` est le seul test qui touche le
 système de fichiers ; il prouve la chaîne complète de la surveillance.

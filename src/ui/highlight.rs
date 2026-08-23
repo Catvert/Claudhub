@@ -16,6 +16,7 @@
 //! render: `SyntaxHighlighter::new` compiles the grammar's queries, which has no
 //! business happening inside a frame.
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
 
@@ -26,6 +27,7 @@ use gpui_component::highlighter::{
 use gpui_component::input::Rope;
 
 use super::blade;
+use crate::git::search::Results;
 use crate::git::{DiffLineKind, FileDiff};
 
 /// Registers the grammars gpui-component does not embed.
@@ -356,6 +358,32 @@ impl DocumentHighlights {
     /// generated file of two megabytes would cost a parse for a page of it.
     pub const MAX_BYTES: usize = 512 * 1024;
 
+    /// The same, for a fragment that has no file around it.
+    ///
+    /// A plugin's excerpt is named by its language and not by a path — it was
+    /// fetched, not read — and it is a **fragment**: what precedes it is not
+    /// there, exactly as for a search hit, and a grammar's error recovery is
+    /// what makes parsing it on its own worth doing.
+    pub fn for_language(language: &str, text: &str, theme: &HighlightTheme) -> Self {
+        if text.len() > Self::MAX_BYTES {
+            return Self::default();
+        }
+        let mut highlighter = SyntaxHighlighter::new(language);
+        // The prologue for the same reason as everywhere else: without `<?php`
+        // a PHP fragment is read as HTML text and comes back with no colours at
+        // all — and a stack frame is very often PHP.
+        let head = prologue(language, text);
+        let whole = format!("{head}{text}");
+        highlighter.update(None, &Rope::from_str(&whole), None);
+        let styles = highlighter.styles(&(0..whole.len()), theme);
+        let mut lines = cut_into_lines(&whole, &styles);
+        // The prologue is one line, and it is not one of the excerpt's: its
+        // own lines do not count in the offsets the panel paints against.
+        let dropped = head.lines().count();
+        lines.drain(..dropped.min(lines.len()));
+        Self { lines }
+    }
+
     pub fn compute(path: &Path, text: &str, theme: &HighlightTheme) -> Self {
         if text.len() > Self::MAX_BYTES {
             return Self::default();
@@ -376,6 +404,101 @@ impl DocumentHighlights {
             lines: cut_into_lines(text, &styles),
         }
     }
+}
+
+/// The colouring of a search's result list, indexed `[file][hit]`.
+///
+/// A hit is **one line torn out of a file**, which is a harder fragment than a
+/// hunk: what precedes it is not there, and the next hit may be four hundred
+/// lines further down. They are therefore *not* joined into a pseudo-document
+/// the way a hunk's two sides are — one unbalanced quote would then colour every
+/// hit under it as a string, for a whole file at a time. Each line is parsed
+/// **on its own**, which is what a grammar's error recovery is for, and the
+/// price is bounded by `git::search::MAX_HITS`.
+///
+/// **One grammar per language, reused across files**: `SyntaxHighlighter::new`
+/// compiles the queries — tens of milliseconds for JavaScript — and a search
+/// touching a hundred files would otherwise pay it a hundred times.
+///
+/// Computed on arrival and never in a render, the rule of the whole module: the
+/// list is virtualised, and its closure runs for every visible row of every
+/// frame.
+#[derive(Default)]
+pub struct HitHighlights {
+    files: Vec<Vec<LineStyles>>,
+}
+
+impl HitHighlights {
+    /// A hit's styles, as byte offsets relative to the **trimmed** text — which
+    /// is what the row shows, its leading indentation dropped so that a hit six
+    /// levels deep is not a column of nothing.
+    pub fn line(&self, file: usize, hit: usize) -> &[(Range<usize>, HighlightStyle)] {
+        self.files
+            .get(file)
+            .and_then(|file| file.get(hit))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn compute(results: &Results, theme: &HighlightTheme) -> Self {
+        let mut grammars: HashMap<&'static str, SyntaxHighlighter> = HashMap::new();
+        // Blade's own highlighter is kept for exactly the same reason as the
+        // map above — it carries a PHP grammar, and building one costs tens of
+        // milliseconds. A list of two thousand view lines paid it two thousand
+        // times, which is a minute of frozen window.
+        let mut blade_grammar: Option<blade::BladeHighlighter> = None;
+        let files = results
+            .files
+            .iter()
+            .map(|file| {
+                // A Blade view is HTML and directives before it is PHP, here as
+                // everywhere else.
+                let blade = blade::is_blade(&file.path);
+                let language = language_for_path(&file.path);
+                if !blade && language.is_none() {
+                    return vec![LineStyles::new(); file.hits.len()];
+                }
+                file.hits
+                    .iter()
+                    .map(|hit| {
+                        let text = hit.text.trim_start();
+                        if text.is_empty() {
+                            return LineStyles::new();
+                        }
+                        if blade {
+                            let styles = blade_grammar
+                                .get_or_insert_with(blade::BladeHighlighter::new)
+                                .document_styles(text, theme);
+                            return nth_line(text, &styles, 0);
+                        }
+                        let Some(language) = language else {
+                            return LineStyles::new();
+                        };
+                        let highlighter = grammars
+                            .entry(language)
+                            .or_insert_with(|| SyntaxHighlighter::new(language));
+                        // The line first receives what its grammar needs to
+                        // recognise it: without `<?php`, PHP reads the whole
+                        // fragment as HTML text and not one colour comes out.
+                        let prologue = prologue(language, text);
+                        let full = format!("{prologue}{text}");
+                        highlighter.update(None, &Rope::from_str(&full), None);
+                        let styles = highlighter.styles(&(0..full.len()), theme);
+                        nth_line(&full, &styles, prologue.matches('\n').count())
+                    })
+                    .collect()
+            })
+            .collect();
+        Self { files }
+    }
+}
+
+/// One line of a coloured fragment, the prologue's own lines skipped.
+fn nth_line(text: &str, styles: &[(Range<usize>, HighlightStyle)], skip: usize) -> LineStyles {
+    cut_into_lines(text, styles)
+        .into_iter()
+        .nth(skip)
+        .unwrap_or_default()
 }
 
 /// Redistributes a document's styles onto its lines.
@@ -609,6 +732,7 @@ mod tests {
 
     use super::*;
     use crate::git::{DiffLine, Hunk};
+    use std::path::PathBuf;
 
     fn line(kind: DiffLineKind, text: &str) -> DiffLine {
         DiffLine {
@@ -630,6 +754,72 @@ mod tests {
             binary: false,
             empty: false,
         }
+    }
+
+    /// A hit is a line on its own, and that is the whole risk: what colours a
+    /// line has to survive having no file around it, and its offsets have to
+    /// describe the **trimmed** text the row shows — off by the indentation, a
+    /// style paints the wrong word.
+    #[test]
+    fn a_torn_out_line_is_coloured_on_its_own() {
+        register_languages();
+        let results = crate::git::search::Results {
+            files: vec![
+                crate::git::search::FileHits {
+                    path: PathBuf::from("src/x.rs"),
+                    hits: vec![crate::git::search::Hit {
+                        line: 12,
+                        text: "        let value = 1;".into(),
+                    }],
+                    capped: false,
+                },
+                // PHP without its opening tag: the prologue is what makes this
+                // one anything but plain text.
+                crate::git::search::FileHits {
+                    path: PathBuf::from("app/User.php"),
+                    hits: vec![crate::git::search::Hit {
+                        line: 3,
+                        text: "    return $this->name;".into(),
+                    }],
+                    capped: false,
+                },
+                // No grammar: bare text rather than a wrong colouring.
+                crate::git::search::FileHits {
+                    path: PathBuf::from("data.bin"),
+                    hits: vec![crate::git::search::Hit {
+                        line: 1,
+                        text: "let value = 1;".into(),
+                    }],
+                    capped: false,
+                },
+            ],
+            total: 3,
+            truncated: false,
+        };
+        let hits = HitHighlights::compute(&results, &HighlightTheme::default_dark());
+
+        let rust = hits.line(0, 0);
+        assert!(!rust.is_empty(), "a Rust line gets styles");
+        let trimmed = "let value = 1;";
+        assert!(
+            rust.iter().all(|(range, _)| range.end <= trimmed.len()),
+            "offsets describe the trimmed text: {rust:?}"
+        );
+        // `let` is a keyword, and it is the first thing on the line.
+        assert_eq!(rust[0].0, 0..3);
+
+        assert!(!hits.line(1, 0).is_empty(), "PHP gets its prologue");
+        assert!(
+            hits.line(1, 0)
+                .iter()
+                .all(|(range, _)| range.end <= "return $this->name;".len()),
+            "the prologue is not counted in the offsets"
+        );
+
+        assert!(hits.line(2, 0).is_empty(), "no grammar, no styles");
+        // Out of bounds is an empty slice and not a panic: the list is rebuilt
+        // from results that may already have been replaced.
+        assert!(hits.line(9, 0).is_empty());
     }
 
     #[test]
@@ -719,6 +909,38 @@ mod tests {
 
 #[cfg(test)]
 mod php_tests {
+    /// **A fragment with no file around it still gets its colours, and its
+    /// offsets still describe the fragment.**
+    ///
+    /// A plugin's excerpt is ten lines torn out of a deployed file: it is named
+    /// by its language, never by a path, and PHP needs a `<?php` in front of it
+    /// or its grammar reads the lot as HTML text. That prologue is a line, and
+    /// a line that stayed in would shift every style down by one — silently,
+    /// since a colouring that is wrong is a colouring all the same.
+    #[test]
+    fn an_excerpt_is_coloured_where_it_actually_is() {
+        crate::ui::highlight::register_languages();
+        let theme = HighlightTheme::default_dark();
+        let excerpt = "    public function store(Request $request)\n    {\n        return $request->quote->total;\n    }";
+        let styles = DocumentHighlights::for_language("php", excerpt, &theme);
+
+        let first = styles.line(0);
+        assert!(!first.is_empty(), "a PHP fragment with no tag gets styles");
+        // The offsets are the fragment's own: `public` is where it is on the
+        // first line, not five bytes further along.
+        let (range, _) = &first[0];
+        assert!(
+            range.start >= 4 && range.end <= excerpt.lines().next().unwrap().len(),
+            "{first:?}"
+        );
+        assert!(!styles.line(2).is_empty(), "and so is the third line");
+        // A language nobody knows is left plain rather than guessed at.
+        assert!(
+            DocumentHighlights::for_language("brainfuck", excerpt, &theme)
+                .line(0)
+                .is_empty()
+        );
+    }
 
     fn hunk_of(source: &str) -> FileDiff {
         FileDiff {
@@ -1042,6 +1264,50 @@ mod php_tests {
         assert!(
             !highlights.line(0, 1).is_empty(),
             "la grammaire PHP n'est pas prise en compte"
+        );
+    }
+}
+
+#[cfg(test)]
+mod grammar_reuse {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// A full list of Blade hits stays in the tens of milliseconds.
+    ///
+    /// This is a **timing** test, which nothing else here is, and the bound is
+    /// deliberately a hundred times the real cost: what it locks is not a
+    /// performance but the grammar cache. Building a `BladeHighlighter` per hit
+    /// compiles the PHP queries per hit — a minute of frozen window for one
+    /// search — and it breaks nothing, colours everything correctly, and shows
+    /// up nowhere but on the clock.
+    #[test]
+    fn a_full_blade_list_does_not_rebuild_its_grammar() {
+        let results = Results {
+            files: (0..100)
+                .map(|f| crate::git::search::FileHits {
+                    path: PathBuf::from(format!("resources/views/page{f}.blade.php")),
+                    hits: (0..(crate::git::search::MAX_HITS / 100))
+                        .map(|i| crate::git::search::Hit {
+                            line: i as u32 + 1,
+                            text: "    <x-layout.app :title=\"$title\">@if($a) {{ $b }} @endif"
+                                .into(),
+                        })
+                        .collect(),
+                    capped: false,
+                })
+                .collect(),
+            total: crate::git::search::MAX_HITS,
+            truncated: false,
+        };
+        let started = std::time::Instant::now();
+        let hits = HitHighlights::compute(&results, &HighlightTheme::default_dark());
+        let elapsed = started.elapsed();
+        assert!(!hits.line(0, 0).is_empty(), "a Blade line gets styles");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "{} Blade hits took {elapsed:?}: the grammar is being rebuilt",
+            crate::git::search::MAX_HITS,
         );
     }
 }

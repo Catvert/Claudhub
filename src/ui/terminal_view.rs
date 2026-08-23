@@ -5,10 +5,18 @@
 //! worktree, changing worktree changes group, and closing a worktree closes what
 //! was running in it.
 //!
-//! The rendering is text, not a canvas: each grid line becomes a `StyledText`
-//! whose style runs come from the snapshot. A fixed-pitch font is then enough to
-//! line the columns up, and gpui takes care of shaping, ligatures and complex
-//! scripts — which a cell-by-cell renderer would have had to reimplement.
+//! The rendering is text, not a canvas: a grid line becomes `StyledText`, whose
+//! style runs come from the snapshot, and gpui takes care of shaping, ligatures
+//! and complex scripts — which a cell-by-cell renderer would have had to
+//! reimplement.
+//!
+//! But a fixed-pitch font is **not** enough to line the columns up: a character
+//! the font does not carry is drawn by whatever the system falls back to, whose
+//! advance has no reason to be a cell wide. Shaped inside a run, it pushes
+//! everything to its right — an agent's spinner cycles through four dingbats
+//! Iosevka's subset leaves out, and the whole status line jittered left and
+//! right once a frame. Each run is therefore **pinned to its column**, and a
+//! character measured off the grid is given a box of its own.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -25,7 +33,7 @@ use gpui_component::{
 };
 
 use crate::terminal::{
-    key_bytes, mouse, Paint, SelectionKind, Side, Snapshot, Spawn, TermSize, Terminal,
+    key_bytes, mouse, Paint, Segment, SelectionKind, Side, Snapshot, Spawn, TermSize, Terminal,
     TerminalEvent, ViewportPosition,
 };
 use crate::tr;
@@ -58,6 +66,14 @@ pub struct TerminalView {
     /// A cell's geometry, measured on the effective font. It serves to translate
     /// a mouse position back into a line and a column.
     cell: gpui::Size<Pixels>,
+    /// Which characters the terminal font places on the grid.
+    ///
+    /// `advance` resolves a glyph in **that** font and fails when it has none,
+    /// which is exactly the question: a character it cannot draw is a character
+    /// some other font will, at its own width. The answer is cached because the
+    /// visible grid is walked at every frame; `sync_font` empties it, coverage
+    /// being a property of the family.
+    on_grid: HashMap<char, bool>,
     /// True between button press and release: that is what tells a selection
     /// drag from a plain hover.
     selecting: bool,
@@ -166,6 +182,7 @@ impl TerminalView {
             font_family,
             bounds: Bounds::default(),
             cell: gpui::size(px(8.), px(16.)),
+            on_grid: HashMap::new(),
             selecting: false,
             mouse_cell: None,
             scroll_remainder: 0.,
@@ -248,10 +265,45 @@ impl TerminalView {
         self.font_size = font_size;
         self.font_family = SharedString::from(font_family.to_string());
         self.bounds = Bounds::default();
+        self.on_grid.clear();
     }
 
     pub fn has_exited(&self) -> bool {
         self.terminal.has_exited()
+    }
+
+    /// Measures the characters on screen that have not been measured yet.
+    ///
+    /// One walk of the visible grid per frame, one measurement per character
+    /// ever. `advance` resolves the glyph in **this** font and fails when it
+    /// has none: that failure is the answer we are after, since what the font
+    /// misses is drawn by another one, at another width.
+    fn learn_glyphs(&mut self, window: &Window) {
+        let unknown: Vec<char> = self
+            .snapshot
+            .lines
+            .iter()
+            .flat_map(|line| line.text.chars())
+            .filter(|ch| !self.on_grid.contains_key(ch))
+            .collect();
+        if unknown.is_empty() {
+            return;
+        }
+        let font_id = window.text_system().resolve_font(&gpui::Font {
+            family: self.font_family.clone(),
+            features: Default::default(),
+            weight: Default::default(),
+            style: Default::default(),
+            fallbacks: None,
+        });
+        let width = f32::from(self.cell.width);
+        for ch in unknown {
+            let on_grid = window
+                .text_system()
+                .advance(font_id, self.font_size, ch)
+                .is_ok_and(|advance| (f32::from(advance.width) - width).abs() <= 0.01);
+            self.on_grid.insert(ch, on_grid);
+        }
     }
 
     /// Recomputes the grid for the available room.
@@ -689,6 +741,7 @@ impl Render for TerminalView {
         let focused = self.focus.is_focused(window);
         let default_fg = cx.theme().foreground;
         self.sync_font(cx);
+        self.learn_glyphs(window);
         let font_size = self.font_size;
         let font_family = self.font_family.clone();
         let entity = cx.entity();
@@ -715,14 +768,18 @@ impl Render for TerminalView {
         // showed after shrinking then reopening the panel — the geometry is
         // measured after layout, so the grid stays too wide for one frame, and
         // the wrapping that follows throws everything out of line.
-        let cell_height = self.cell.height;
+        let cell = self.cell;
+        let on_grid = &self.on_grid;
         let lines: Vec<_> = self
             .snapshot
             .lines
             .iter()
             .map(|line| {
                 div()
-                    .h(cell_height)
+                    .h(cell.height)
+                    // The runs are placed at their column, so the box they sit
+                    // in is the origin they are measured from.
+                    .relative()
                     // **A line is never squeezed**, and this is not a
                     // refinement: the box holds `size_full`, so as soon as the
                     // grid has more lines than fit — which is the whole of a
@@ -738,7 +795,14 @@ impl Render for TerminalView {
                     .w_full()
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .child(styled_line(line, &font_family, default_fg, selection_bg))
+                    .children(line_boxes(
+                        line,
+                        on_grid,
+                        cell,
+                        &font_family,
+                        default_fg,
+                        selection_bg,
+                    ))
             })
             .collect();
 
@@ -920,58 +984,149 @@ pub fn zoom_steps(delta_y: Pixels) -> f32 {
     }
 }
 
-/// Converts a snapshot line into styled text.
-fn styled_line(
+/// A piece of a run that can be shaped in one go.
+///
+/// A run is cut wherever a character is not on the grid, so that one is drawn
+/// on its own cell and cannot push its neighbours.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Chunk {
+    col: usize,
+    cells: usize,
+    /// Byte range in the line's text.
+    start: usize,
+    end: usize,
+}
+
+/// Cuts a run into the pieces the view paints.
+///
+/// The rule needs no width table: a run's characters are its columns — a wide
+/// character is a run of its own (`terminal::snapshot`). What escapes that is a
+/// character carrying combining marks, and there the whole run is pinned as one
+/// piece: its inside may drift, the runs after it may not.
+fn chunks(
     line: &crate::terminal::Line,
+    seg: &Segment,
+    on_grid: &HashMap<char, bool>,
+) -> Vec<Chunk> {
+    let text = &line.text[seg.start..seg.end];
+    let whole = Chunk {
+        col: seg.col,
+        cells: seg.cells,
+        start: seg.start,
+        end: seg.end,
+    };
+    if seg.cells != text.chars().count() {
+        return vec![whole];
+    }
+
+    let mut out: Vec<Chunk> = Vec::new();
+    let mut open: Option<Chunk> = None;
+    for (col, (offset, ch)) in (seg.col..).zip(text.char_indices()) {
+        let start = seg.start + offset;
+        let end = start + ch.len_utf8();
+        // An unmeasured character is taken as on the grid: it is the answer for
+        // everything the font carries, and the wrong guess only costs what it
+        // costs today.
+        if on_grid.get(&ch).copied().unwrap_or(true) {
+            match open.as_mut() {
+                Some(chunk) => {
+                    chunk.end = end;
+                    chunk.cells += 1;
+                }
+                None => {
+                    open = Some(Chunk {
+                        col,
+                        cells: 1,
+                        start,
+                        end,
+                    })
+                }
+            }
+        } else {
+            out.extend(open.take());
+            out.push(Chunk {
+                col,
+                cells: 1,
+                start,
+                end,
+            });
+        }
+    }
+    out.extend(open.take());
+    out
+}
+
+/// Converts a snapshot line into the boxes that draw it.
+///
+/// One box per chunk, **placed at its column** rather than laid end to end.
+/// The background is the box's and no longer the run's: a rectangle then
+/// covers exactly the cells it is meant to, whatever the glyph inside measures.
+fn line_boxes(
+    line: &crate::terminal::Line,
+    on_grid: &HashMap<char, bool>,
+    cell: gpui::Size<Pixels>,
     family: &SharedString,
     default_fg: Hsla,
     selection_bg: Hsla,
-) -> StyledText {
-    let text = SharedString::from(line.text.clone());
-    let mut runs: Vec<TextRun> = Vec::with_capacity(line.segments.len());
+) -> Vec<gpui::Div> {
+    let mut out = Vec::new();
     for seg in &line.segments {
-        let len = seg.end.saturating_sub(seg.start);
-        if len == 0 {
-            continue;
+        let background = if seg.selected {
+            // The selection wins over the cell's background colour, otherwise
+            // it would vanish on a coloured line.
+            Some(selection_bg)
+        } else {
+            match seg.bg {
+                // The default background is the window's: painting nothing
+                // avoids one rectangle per cell.
+                Paint::Default => None,
+                Paint::Rgb(r, g, b) => Some(rgb(r, g, b)),
+            }
+        };
+        for chunk in chunks(line, seg, on_grid) {
+            let text = SharedString::from(line.text[chunk.start..chunk.end].to_string());
+            let run = TextRun {
+                len: text.len(),
+                font: gpui::Font {
+                    family: family.clone(),
+                    features: Default::default(),
+                    weight: if seg.bold {
+                        gpui::FontWeight::BOLD
+                    } else {
+                        gpui::FontWeight::NORMAL
+                    },
+                    style: if seg.italic {
+                        gpui::FontStyle::Italic
+                    } else {
+                        gpui::FontStyle::Normal
+                    },
+                    fallbacks: None,
+                },
+                color: match seg.fg {
+                    Paint::Default => default_fg,
+                    Paint::Rgb(r, g, b) => rgb(r, g, b),
+                },
+                background_color: None,
+                underline: seg.underline.then(gpui::UnderlineStyle::default),
+                strikethrough: seg.strikethrough.then(gpui::StrikethroughStyle::default),
+            };
+            out.push(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(cell.width * chunk.col as f32)
+                    .w(cell.width * chunk.cells as f32)
+                    .h(cell.height)
+                    // A fallback glyph wider than its cell is clipped rather
+                    // than allowed to cover its neighbour.
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .when_some(background, |el, bg| el.bg(bg))
+                    .child(StyledText::new(text).with_runs(vec![run])),
+            );
         }
-        runs.push(TextRun {
-            len,
-            font: gpui::Font {
-                family: family.clone(),
-                features: Default::default(),
-                weight: if seg.bold {
-                    gpui::FontWeight::BOLD
-                } else {
-                    gpui::FontWeight::NORMAL
-                },
-                style: if seg.italic {
-                    gpui::FontStyle::Italic
-                } else {
-                    gpui::FontStyle::Normal
-                },
-                fallbacks: None,
-            },
-            color: match seg.fg {
-                Paint::Default => default_fg,
-                Paint::Rgb(r, g, b) => rgb(r, g, b),
-            },
-            background_color: if seg.selected {
-                // The selection wins over the cell's background colour,
-                // otherwise it would vanish on a coloured line.
-                Some(selection_bg)
-            } else {
-                match seg.bg {
-                    // The default background is the window's: painting nothing
-                    // avoids one rectangle per cell.
-                    Paint::Default => None,
-                    Paint::Rgb(r, g, b) => Some(rgb(r, g, b)),
-                }
-            },
-            underline: seg.underline.then(gpui::UnderlineStyle::default),
-            strikethrough: seg.strikethrough.then(gpui::StrikethroughStyle::default),
-        });
     }
-    StyledText::new(text).with_runs(runs)
+    out
 }
 
 /// Translates a pixel offset from the render area's corner into cell
@@ -1830,6 +1985,66 @@ mod tests {
 
     fn cell() -> gpui::Size<Pixels> {
         gpui::size(px(8.), px(16.))
+    }
+
+    fn run(text: &str, col: usize, cells: usize) -> (crate::terminal::Line, Segment) {
+        let line = crate::terminal::Line {
+            text: text.to_string(),
+            segments: Vec::new(),
+        };
+        let seg = Segment {
+            start: 0,
+            end: line.text.len(),
+            col,
+            cells,
+            fg: Paint::Default,
+            bg: Paint::Default,
+            bold: false,
+            italic: false,
+            underline: false,
+            strikethrough: false,
+            hidden: false,
+            inverse: false,
+            selected: false,
+        };
+        (line, seg)
+    }
+
+    /// The reported flicker: an agent's spinner cycles through dingbats the
+    /// font does not carry, and each frame shifted the whole status line.
+    #[test]
+    fn a_character_off_the_grid_is_cut_out_of_its_run() {
+        let (line, seg) = run("\u{2733} Fiddling", 4, 10);
+        let on_grid = HashMap::from([('\u{2733}', false)]);
+        let cut: Vec<(usize, usize, &str)> = chunks(&line, &seg, &on_grid)
+            .iter()
+            .map(|c| (c.col, c.cells, &line.text[c.start..c.end]))
+            .collect();
+        assert_eq!(
+            cut,
+            [(4, 1, "\u{2733}"), (5, 9, " Fiddling")],
+            "the dingbat gets a cell of its own, and what follows starts where \
+             the grid says"
+        );
+    }
+
+    #[test]
+    fn a_run_the_font_carries_is_shaped_in_one_go() {
+        let (line, seg) = run("hello", 7, 5);
+        let cut = chunks(&line, &seg, &HashMap::new());
+        assert_eq!(cut.len(), 1);
+        assert_eq!((cut[0].col, cut[0].cells), (7, 5));
+    }
+
+    /// Combining marks break the character-for-column count: the run is then
+    /// pinned as one piece rather than cut where it cannot be.
+    #[test]
+    fn a_run_carrying_combining_marks_stays_whole() {
+        let (line, seg) = run("e\u{301}x", 0, 2);
+        let on_grid = HashMap::from([('\u{301}', false)]);
+        let cut = chunks(&line, &seg, &on_grid);
+        assert_eq!(cut.len(), 1);
+        assert_eq!((cut[0].col, cut[0].cells), (0, 2));
     }
 
     #[test]

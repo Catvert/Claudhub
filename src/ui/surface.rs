@@ -24,6 +24,8 @@
 //! to, no tab to close and no definition to follow — they are dropped rather
 //! than mapped onto something that looks close enough.
 
+use std::path::PathBuf;
+
 use gpui::{div, prelude::*, px, App, Context, Entity, Pixels, SharedString, Window};
 use gpui_component::{h_flex, input::EditorState, ActiveTheme};
 
@@ -31,26 +33,41 @@ use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::settings::Settings;
 
-/// Which of the two code surfaces a gesture is about.
+/// Which code surface a gesture is about.
 ///
-/// The file editor and the SQL console are never both under the keyboard: each
-/// installs its own listener, on its own element, and the name is what the
+/// Each installs its own listener, on its own element, and the name is what the
 /// listener passes along so that the harness knows whose text it is reading.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// **A file is named by its path, and that is not decoration.** "The file being
+/// edited" is the tab a group displays, and the dock can display two of them at
+/// once — a split, two files side by side. `show_file` then runs once per
+/// panel and per frame, so the active tab alternates between the two while
+/// nothing is even being clicked: a wheel gesture landed on whichever had been
+/// painted last, and the smoothing, filed under a single key, was advanced from
+/// **both** panels' renders — one motion pushing two editors, which reads as
+/// two files scrolling in lockstep. The path is what tells the panel that is
+/// asking from the tab that happens to be active.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Surface {
-    File,
+    File(PathBuf),
     Query,
 }
 
 impl Surface {
     /// The key its wheel smoothing is filed under, as `ui::scroll` keys the
-    /// others. Two keys and not one: the two surfaces scroll independently, and
-    /// a shared motion would hand one panel's destination to the other.
-    fn scroll_key(self) -> SharedString {
+    /// others. One key per surface and not one for all: they scroll
+    /// independently, and a shared motion hands one panel's destination to the
+    /// other.
+    fn scroll_key(&self) -> SharedString {
         match self {
-            Surface::File => "editor-scroll".into(),
+            Surface::File(path) => format!("editor-scroll:{}", path.display()).into(),
             Surface::Query => "query-scroll".into(),
         }
+    }
+
+    /// Whether it is a file, which four vim commands ask before naming one.
+    fn is_file(&self) -> bool {
+        matches!(self, Surface::File(_))
     }
 }
 
@@ -86,11 +103,46 @@ pub(super) struct VimHost {
     /// It exists because the editor's own selection is a single run of text and
     /// a rectangle is one range per line: there is nothing to hand it.
     pub selection: gpui_component::input::TextDecorationCollection,
-    /// The mode, caret and text length the cursor was last painted for.
+    /// The layer the occurrences of a search are lit on, created **last** so
+    /// that the block cursor, the yank flash and a blockwise selection all keep
+    /// their colours where they cross one.
+    pub matches: gpui_component::input::TextDecorationCollection,
+    /// The pattern and text length the occurrences were found for.
     ///
-    /// The block is recomputed at a frame only when one of the three has moved:
-    /// `value()` copies the whole text, and this runs at every frame.
-    pub cursor_at: Option<(crate::ui::vim::Mode, usize, usize, bool)>,
+    /// `find_all` walks the whole file, which is a keystroke's worth of work and
+    /// not a frame's: it is redone when the pattern changes and when the text
+    /// does, and never otherwise.
+    pub matches_at: Option<(String, usize, usize)>,
+    /// The mode, selection, head and text length the cursor was last painted
+    /// for.
+    ///
+    /// The block is recomputed at a frame only when one of them has moved:
+    /// `value()` copies the whole text, and this runs at every frame. The head
+    /// is in there on its own account — `o` swaps the two ends of a visual
+    /// selection without changing the range, and the block has to change ends
+    /// with it.
+    pub cursor_at: Option<(
+        crate::ui::vim::Mode,
+        std::ops::Range<usize>,
+        usize,
+        usize,
+        bool,
+    )>,
+    /// Whether the next selection to arrive is to be taken as vim's own
+    /// whatever it says.
+    ///
+    /// Undo and redo are the editor's, they are **deferred**, and they put back
+    /// the selection their transaction was made from — a selection vim did not
+    /// write and did not ask for, which the next frame would otherwise read as a
+    /// drag of the mouse and answer with visual mode.
+    pub absorb_selection: bool,
+    /// The selection vim itself last wrote, read back from the editor.
+    ///
+    /// It is what tells a selection of ours from one made with the mouse: they
+    /// arrive by the same door — `selected_range()` — and nothing announces a
+    /// drag. Read back rather than remembered from the `Change`, since the
+    /// editor clips what it is given to character boundaries.
+    pub selection_at: Option<std::ops::Range<usize>>,
     /// Where `zm` and `zr` have got to: the nesting level below which folds are
     /// closed. `None` is everything open, which is one past the deepest — the
     /// state `zR` puts the surface back into, and the one it opens in.
@@ -106,8 +158,9 @@ impl VimHost {
     /// through a yank's flash, which is the right way round — the flash says
     /// what was taken, the block says where one is.
     pub fn new(input: &Entity<EditorState>, cx: &mut App) -> Self {
-        let (cursor, flash, selection) = input.update(cx, |state, cx| {
+        let (cursor, flash, selection, matches) = input.update(cx, |state, cx| {
             (
+                state.create_decorations_collection(Vec::new(), cx),
                 state.create_decorations_collection(Vec::new(), cx),
                 state.create_decorations_collection(Vec::new(), cx),
                 state.create_decorations_collection(Vec::new(), cx),
@@ -119,7 +172,11 @@ impl VimHost {
             flash_timer: None,
             cursor,
             selection,
+            matches,
+            matches_at: None,
             cursor_at: None,
+            absorb_selection: false,
+            selection_at: None,
             fold_level: None,
         }
     }
@@ -165,23 +222,26 @@ impl ClaudhubApp {
     ///
     /// The console always has one — it is built with the window — where a file
     /// only exists while a tab is open.
-    pub(super) fn surface_input(&self, surface: Surface) -> Option<Entity<EditorState>> {
+    pub(super) fn surface_input(&self, surface: &Surface) -> Option<Entity<EditorState>> {
         match surface {
-            Surface::File => self.editing().map(|editing| editing.input.clone()),
+            Surface::File(path) => self.editing_at(path).map(|editing| editing.input.clone()),
             Surface::Query => Some(self.db_query_input.clone()),
         }
     }
 
-    pub(super) fn surface_host(&self, surface: Surface) -> Option<&VimHost> {
+    pub(super) fn surface_host(&self, surface: &Surface) -> Option<&VimHost> {
         match surface {
-            Surface::File => self.editing().map(|editing| &editing.host),
+            Surface::File(path) => self.editing_at(path).map(|editing| &editing.host),
             Surface::Query => Some(&self.db_host),
         }
     }
 
-    fn surface_host_mut(&mut self, surface: Surface) -> Option<&mut VimHost> {
+    fn surface_host_mut(&mut self, surface: &Surface) -> Option<&mut VimHost> {
         match surface {
-            Surface::File => self.editing_mut().map(|editing| &mut editing.host),
+            Surface::File(path) => {
+                let path = path.clone();
+                self.editing_at_mut(&path).map(|editing| &mut editing.host)
+            }
             Surface::Query => Some(&mut self.db_host),
         }
     }
@@ -199,7 +259,7 @@ impl ClaudhubApp {
     /// makes insert mode an ordinary editor again.
     pub(super) fn vim_key(
         &mut self,
-        surface: Surface,
+        surface: &Surface,
         event: &gpui::KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -238,6 +298,43 @@ impl ClaudhubApp {
         }
     }
 
+    /// A key the editor binds for itself, handed to vim before it gets there.
+    ///
+    /// `Enter` and `Backspace` are **bindings** of the input, and a binding runs
+    /// **before** the capture-phase listener vim's keys go through — so neither
+    /// ever reached it. That is how `Ctrl+V` is caught, and it is the same
+    /// answer: the action is taken on its way down, on the same ancestor.
+    ///
+    /// Without it `:w` and `/foo` had no way of being run — a line one types and
+    /// cannot confirm — and `Backspace` in normal mode **deleted**, which is the
+    /// one keystroke of a modal editor that must not destroy anything.
+    ///
+    /// In insert mode both are let through, where they are what everyone means
+    /// by them.
+    pub(super) fn vim_named_key(
+        &mut self,
+        surface: &Surface,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::ui::vim::Mode;
+
+        if !Settings::global(cx).vim_mode {
+            return false;
+        }
+        let mode = self.surface_host(surface).map(|host| host.vim.mode());
+        if !matches!(mode, Some(mode) if mode != Mode::Insert) {
+            return false;
+        }
+        let key = crate::ui::vim::Key {
+            ch: None,
+            name: name.into(),
+            ctrl: false,
+        };
+        self.vim_press(surface, key, window, cx)
+    }
+
     /// `Ctrl+V`, which never arrives as a keystroke.
     ///
     /// The input binds it to `Paste`, and a **binding runs before** the
@@ -248,7 +345,7 @@ impl ClaudhubApp {
     /// everyone means by it.
     pub(super) fn vim_paste(
         &mut self,
-        surface: Surface,
+        surface: &Surface,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -272,7 +369,7 @@ impl ClaudhubApp {
     /// One keystroke, handed to vim — `true` when it took it.
     fn vim_press(
         &mut self,
-        surface: Surface,
+        surface: &Surface,
         key: crate::ui::vim::Key,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -282,7 +379,7 @@ impl ClaudhubApp {
         let Some(input) = self.surface_input(surface) else {
             return false;
         };
-        let (text, cursor, rows, folds) = {
+        let (text, cursor, rows, folds, query) = {
             let state = input.read(cx);
             let rows = state
                 .visible_row_range()
@@ -302,6 +399,7 @@ impl ClaudhubApp {
                 state.selected_range().start,
                 rows,
                 folds,
+                state.search_session().query.clone(),
             )
         };
         // The clipboard is read **when a paste is about to happen**, and not at
@@ -319,6 +417,11 @@ impl ClaudhubApp {
             host.vim.set_register(text);
         }
         host.vim.set_folds(folds);
+        // The pattern `Ctrl+F` left behind, pushed in the way the folds are:
+        // the editor's search bar and `/` write to the same place, and `n`
+        // carrying on what was typed into the bar is the whole of what "both
+        // searches, one pattern" means.
+        host.vim.set_search(&query);
         let response = host.vim.press(&key, &text, cursor, rows);
         if matches!(response, Response::Ignored) {
             return false;
@@ -339,13 +442,29 @@ impl ClaudhubApp {
                     }
                     state.set_selected_range(change.selection, cx);
                 });
+                // What vim has just written, read **back**: the editor clips a
+                // range to character boundaries, and this is what the next frame
+                // compares against to tell our own selection from the mouse's.
+                let written = input.read(cx).selected_range();
+                if let Some(host) = self.surface_host_mut(surface) {
+                    host.selection_at = Some(written);
+                }
                 self.scroll_to_line(&input, change.head, Place::Nearest, cx);
             }
             Response::Command(command) => match command {
                 // Undo and redo belong to the editor, which is the only one that
                 // knows what the last transaction was.
-                Command::Undo => window.dispatch_action(Box::new(gpui_component::input::Undo), cx),
-                Command::Redo => window.dispatch_action(Box::new(gpui_component::input::Redo), cx),
+                // Both are **deferred** by gpui, and both restore the selection
+                // the undone transaction was made from: the next frame would
+                // find a selection vim never wrote and take it for the mouse's.
+                Command::Undo => {
+                    window.dispatch_action(Box::new(gpui_component::input::Undo), cx);
+                    self.absorb_selection(surface);
+                }
+                Command::Redo => {
+                    window.dispatch_action(Box::new(gpui_component::input::Redo), cx);
+                    self.absorb_selection(surface);
+                }
                 Command::Reveal(at) => self.place_caret_line(&input, at, cx),
                 Command::Scroll(lines) => self.scroll_by_lines(&input, lines, cx),
                 Command::Fold(op) => self.fold(surface, op, cx),
@@ -355,30 +474,50 @@ impl ClaudhubApp {
                 // enough — `:w` running a query is a network gesture nobody
                 // asked for.
                 Command::Save => {
-                    if surface == Surface::File {
+                    if surface.is_file() {
                         self.save_file(cx);
                     }
                 }
                 Command::Close => {
-                    if surface == Surface::File {
+                    if surface.is_file() {
                         self.close_editor(window, cx);
                     }
                 }
                 Command::SaveAndClose => {
-                    if surface == Surface::File {
+                    if surface.is_file() {
                         self.save_file(cx);
                         self.close_editor(window, cx);
                     }
                 }
                 Command::GoToDefinition => {
-                    if surface == Surface::File {
+                    if surface.is_file() {
                         self.goto_definition(window, cx);
                     }
                 }
             },
         }
+        // And back the other way: a `/` line is what `Ctrl+F` opens on next,
+        // so the two never disagree about what is being looked for.
+        if let Some(pattern) = self.surface_host(surface).and_then(|host| {
+            host.vim
+                .highlights()
+                .filter(|pattern| *pattern != query)
+                .map(str::to_string)
+        }) {
+            input.update(cx, |state, cx| state.set_search_query(pattern, false, cx));
+        }
         cx.notify();
         true
+    }
+
+    /// Says that the next selection to arrive is the editor's own doing.
+    ///
+    /// Undo and redo are deferred by gpui, so what they put back is read a frame
+    /// later, by the very code that watches for the mouse.
+    fn absorb_selection(&mut self, surface: &Surface) {
+        if let Some(host) = self.surface_host_mut(surface) {
+            host.absorb_selection = true;
+        }
     }
 
     /// Paints the block cursor, and takes the editor's caret out from under it.
@@ -396,26 +535,67 @@ impl ClaudhubApp {
     /// The caret is only given back where the block has nothing to cover — an
     /// empty line, the end of the text — since a cursor that disappears there
     /// would be worse than two.
-    pub(super) fn sync_block_cursor(&mut self, surface: Surface, on: bool, cx: &mut Context<Self>) {
+    pub(super) fn sync_block_cursor(
+        &mut self,
+        surface: &Surface,
+        on: bool,
+        cx: &mut Context<Self>,
+    ) {
         let (Some(input), Some(host)) = (self.surface_input(surface), self.surface_host(surface))
         else {
             return;
         };
-        let (layer, rectangle, mode) =
-            (host.cursor.clone(), host.selection.clone(), host.vim.mode());
-        let (caret, len) = {
+        let (layer, rectangle) = (host.cursor.clone(), host.selection.clone());
+        let (range, caret, reversed, len) = {
             let state = input.read(cx);
+            let range = state.selected_range();
+            // Which end of the range the mouse was dragging. The editor keeps it
+            // — `cursor()` — and it is the only thing that tells a selection
+            // grown rightwards from one grown leftwards.
+            let reversed = !range.is_empty() && state.cursor() == range.start;
             // The rope's length, which is borrowed: `value()` would copy the
             // whole text to learn one number.
-            (state.selected_range().start, state.text().len())
+            (range.clone(), range.start, reversed, state.text().len())
         };
-        let at = (mode, caret, len, on);
-        if host.cursor_at == Some(at) {
+        // A selection that vim did not write is one made with the mouse — or by
+        // `Ctrl+A`, or by a shifted arrow the input binds for itself. The text
+        // is read here rather than below so that a drag, which changes the
+        // selection at every frame, copies it once and not twice.
+        let mut text = None;
+        if on && host.selection_at.as_ref() != Some(&range) {
+            let value = input.read(cx).value();
+            if let Some(host) = self.surface_host_mut(surface) {
+                let was = host.vim.mode();
+                if std::mem::take(&mut host.absorb_selection) {
+                    // Undo's doing, not a hand's: the mode stays what it was,
+                    // and normal mode reads the caret off the editor anyway.
+                } else {
+                    host.vim.adopt(&value, range.clone(), reversed);
+                }
+                host.selection_at = Some(range.clone());
+                // The mode pill is read at the top of the surface's render,
+                // which has already run: without a frame of its own it would say
+                // "normal" over a selection until something else asked for one.
+                if host.vim.mode() != was {
+                    cx.notify();
+                }
+            }
+            text = Some(value);
+        }
+        let Some(host) = self.surface_host(surface) else {
+            return;
+        };
+        let (mode, head) = (host.vim.mode(), host.vim.head());
+        let at = (mode, range, head, len, on);
+        if host.cursor_at.as_ref() == Some(&at) {
             return;
         }
         let (block, rows) = match on {
             true => {
-                let text = input.read(cx).value();
+                let text = match text {
+                    Some(text) => text,
+                    None => input.read(cx).value(),
+                };
                 let host = match self.surface_host(surface) {
                     Some(host) => host,
                     None => return,
@@ -471,6 +651,80 @@ impl ClaudhubApp {
         }
     }
 
+    /// Lights up every occurrence of the last search — vim's `hlsearch`.
+    ///
+    /// It is the half of `/` that was missing: a search that only moves the
+    /// caret leaves one pressing `n` to find out whether there was anything
+    /// else, and the answer is on screen all along. `Ctrl+F` lights the same
+    /// occurrences from the other end, and the two share one pattern
+    /// (`Vim::set_search`).
+    ///
+    /// Painted on a layer of ours rather than by opening the editor's search
+    /// panel, and that is not a preference: opening it **takes the focus**, and
+    /// the focus is what `n` and `N` need in order to stay where they are.
+    ///
+    /// The occurrence under the caret is lit brighter, which costs nothing —
+    /// the caret is ours to move, so "the current one" is a comparison and not
+    /// a state to keep.
+    pub(super) fn sync_search_matches(
+        &mut self,
+        surface: &Surface,
+        on: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(input), Some(host)) = (self.surface_input(surface), self.surface_host(surface))
+        else {
+            return;
+        };
+        let layer = host.matches.clone();
+        let mut pattern = on.then(|| host.vim.highlights()).flatten().unwrap_or("");
+        let (caret, len, bar) = {
+            let state = input.read(cx);
+            (
+                state.selected_range().start,
+                state.text().len(),
+                state.search_session().open,
+            )
+        };
+        // While the search bar is up, it paints its own occurrences: two layers
+        // of the same colour over the same words is a denser colour, which
+        // reads as a third kind of match.
+        if bar {
+            pattern = "";
+        }
+        let at = (pattern.to_string(), len, caret);
+        if host.matches_at.as_ref() == Some(&at) {
+            return;
+        }
+        let ranges = match pattern.is_empty() {
+            true => Vec::new(),
+            // Byte offsets, and a comparison character by character: the same
+            // reckoning `Ctrl+F` makes, and the same function.
+            false => crate::ui::find::find_all(pattern, &input.read(cx).value()),
+        };
+        let (lit, current) = (
+            crate::ui::find::highlight_color(false, cx),
+            crate::ui::find::highlight_color(true, cx),
+        );
+        layer.set(
+            ranges
+                .into_iter()
+                .map(|range| {
+                    let here = range.contains(&caret);
+                    let style = gpui::HighlightStyle {
+                        background_color: Some(if here { current } else { lit }),
+                        ..Default::default()
+                    };
+                    gpui_component::input::TextDecoration::new(range, style)
+                })
+                .collect(),
+            cx,
+        );
+        if let Some(host) = self.surface_host_mut(surface) {
+            host.matches_at = Some(at);
+        }
+    }
+
     /// Lights up what a yank has just copied, and puts it out again.
     ///
     /// A yank changes nothing on screen: without a sign, one is never sure it
@@ -484,7 +738,7 @@ impl ClaudhubApp {
     /// cancels it.
     fn flash_yank(
         &mut self,
-        surface: Surface,
+        surface: &Surface,
         ranges: Vec<std::ops::Range<usize>>,
         cx: &mut Context<Self>,
     ) {
@@ -563,7 +817,7 @@ impl ClaudhubApp {
     /// editor holds the candidates, and all that is decided here is which of
     /// them to close. `zc`, `zo` and `za` act on the **innermost** fold holding
     /// the caret, which is the one being read.
-    fn fold(&mut self, surface: Surface, op: crate::ui::vim::Fold, cx: &mut Context<Self>) {
+    fn fold(&mut self, surface: &Surface, op: crate::ui::vim::Fold, cx: &mut Context<Self>) {
         use crate::ui::vim::Fold;
         let (Some(input), Some(host)) = (self.surface_input(surface), self.surface_host(surface))
         else {
@@ -685,7 +939,7 @@ impl ClaudhubApp {
     /// surface's render, as the diff's is.
     pub(super) fn advance_surface_scroll(
         &mut self,
-        surface: Surface,
+        surface: &Surface,
         input: &Entity<EditorState>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -707,7 +961,7 @@ impl ClaudhubApp {
     /// when this runs. We give the jump back rather than try to prevent it.
     pub(super) fn on_surface_scroll(
         &mut self,
-        surface: Surface,
+        surface: &Surface,
         event: &gpui::ScrollWheelEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -762,6 +1016,67 @@ impl ClaudhubApp {
     }
 
     // — The pill ————————————————————————————————————————————————
+
+    /// The status line at the **foot** of the editor: the mode, the line being
+    /// typed, and the keys of a command not finished.
+    ///
+    /// Where vim puts it, and the placement is the point rather than a nod to
+    /// habit: a `:` line is a line one **writes**, and a line one writes at the
+    /// top of a panel — above the file, next to its path and its buttons — does
+    /// not read as one. It reads as a label. At the foot it is the same shape as
+    /// the thing it imitates, and the eye that has just typed `:` knows where to
+    /// look without being told.
+    ///
+    /// It is the mode's only home, and that is deliberate: it was in the file's
+    /// top bar before, and two places saying the same thing is one of them too
+    /// many. What still says the mode where the eye actually is, is the block
+    /// cursor's colour.
+    pub(super) fn render_vim_status(
+        &self,
+        mode: crate::ui::vim::Mode,
+        prompt: Option<String>,
+        pending: &str,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let mono = cx.theme().mono_font_family.clone();
+        h_flex()
+            .h(crate::ui::theme::bar_height(cx))
+            .w_full()
+            .px_2()
+            .gap_2()
+            .items_center()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            // The line being typed takes the mode's place rather than sitting
+            // beside it, as it does in vim: while one is writing a command,
+            // what one is writing is the whole of what there is to say.
+            .child(match prompt {
+                Some(line) => div()
+                    .flex_1()
+                    .truncate()
+                    .text_xs()
+                    .font_family(mono.clone())
+                    .text_color(cx.theme().foreground)
+                    .child(SharedString::from(line))
+                    .into_any_element(),
+                None => h_flex()
+                    .flex_1()
+                    .child(self.render_vim_mode(mode, "", cx))
+                    .into_any_element(),
+            })
+            // The keys typed towards a command that is not complete: vim shows
+            // them in the corner of its status line, and they are the only thing
+            // that says why the next key will not do what it usually does.
+            .when(!pending.is_empty(), |el| {
+                el.child(
+                    div()
+                        .text_xs()
+                        .font_family(mono)
+                        .text_color(cx.theme().muted_foreground)
+                        .child(SharedString::from(pending.to_string())),
+                )
+            })
+    }
 
     /// The mode pill, and what is being typed towards a command.
     ///

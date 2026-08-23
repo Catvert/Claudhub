@@ -1122,10 +1122,6 @@ impl ClaudhubApp {
                                     .collect::<Vec<_>>()
                             })
                             .size_full()
-                            // The inset belongs to the list: a margin set on a
-                            // `uniform_list` entry is ignored, the list computing
-                            // its items' size itself.
-                            .px_1()
                             .track_scroll(&scroll.clone()),
                             cx,
                         ),
@@ -1243,7 +1239,6 @@ fn status(depth: usize, loading: bool, message: SharedString) -> Entry {
 #[derive(Clone)]
 struct Look {
     height: gpui::Pixels,
-    radius: gpui::Pixels,
     muted: gpui::Hsla,
     accent: gpui::Hsla,
     guide: gpui::Hsla,
@@ -1257,7 +1252,6 @@ impl Look {
     fn of(cx: &gpui::App) -> Self {
         Self {
             height: crate::ui::theme::row_height(cx),
-            radius: cx.theme().radius,
             muted: cx.theme().muted_foreground,
             accent: cx.theme().accent,
             guide: cx.theme().border.opacity(0.7),
@@ -1344,9 +1338,9 @@ fn render_row(
     h_flex()
         .id(("db-row", index))
         .h(look.height)
-        .rounded(look.radius)
+        .w_full()
         .pl_1()
-        .pr_2()
+        .pr(crate::ui::theme::scroll_gutter())
         .items_center()
         .cursor_pointer()
         .when(at_cursor, |el| el.bg(look.accent.opacity(0.5)))

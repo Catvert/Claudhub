@@ -1300,7 +1300,7 @@ pub fn commit(
     _window: &mut Window,
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
-    this.commit(false, cx);
+    this.commit(false, false, cx);
 }
 
 pub fn annotate_selection(

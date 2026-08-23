@@ -254,7 +254,6 @@ impl ClaudhubApp {
                             },
                         )
                         .size_full()
-                        .px_1()
                         .track_scroll(&handle),
                         cx,
                     ),
@@ -347,7 +346,6 @@ struct Look {
     /// what says whether a query is worth recalling.
     row: gpui::Pixels,
     day: gpui::Pixels,
-    radius: gpui::Pixels,
     muted: gpui::Hsla,
     accent: gpui::Hsla,
     danger: gpui::Hsla,
@@ -360,7 +358,6 @@ impl Look {
         Self {
             row: row * 2.,
             day: row,
-            radius: cx.theme().radius,
             muted: cx.theme().muted_foreground,
             accent: cx.theme().accent,
             danger: cx.theme().danger,
@@ -414,10 +411,10 @@ fn render_entry(
         .id(("sql-history-row", index))
         .h(look.row)
         .w_full()
-        .px_1p5()
+        .pl_1p5()
+        .pr(crate::ui::theme::scroll_gutter())
         .py_0p5()
         .justify_center()
-        .rounded(look.radius)
         .cursor_pointer()
         .when(current, |el| el.bg(look.accent.opacity(0.35)))
         .hover(|s| s.bg(look.accent.opacity(0.4)))

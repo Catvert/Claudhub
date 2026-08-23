@@ -115,6 +115,52 @@ pub struct WtPrompt {
     pub round: u64,
 }
 
+/// What an entry does when it is chosen.
+///
+/// Shared and not owned: the list is folded twice — into a menu and into rows —
+/// and each rendering keeps its own handle on the same gesture.
+pub(super) type WtRun =
+    std::rc::Rc<dyn Fn(&mut ClaudhubApp, &mut Window, &mut Context<ClaudhubApp>)>;
+
+/// One thing one can ask of a worktree.
+///
+/// Data and not a menu entry: the same list is folded into the top bar's
+/// `PopupMenu` and painted as rows inside the worktree picker, whose scrolling
+/// surface cannot carry a popup at all — gpui clips a deferred draw to the
+/// content mask it was prepainted under.
+pub(super) struct WtAction {
+    pub(super) icon: &'static str,
+    pub(super) label: SharedString,
+    /// A rule is drawn above this entry: it opens a new group.
+    pub(super) group: bool,
+    /// The id a list needs to give the row, which two tasks of the same project
+    /// must not share.
+    pub(super) id: SharedString,
+    pub(super) run: WtRun,
+}
+
+impl WtAction {
+    fn new(
+        id: impl Into<SharedString>,
+        icon: &'static str,
+        label: SharedString,
+        run: impl Fn(&mut ClaudhubApp, &mut Window, &mut Context<ClaudhubApp>) + 'static,
+    ) -> Self {
+        Self {
+            icon,
+            label,
+            group: false,
+            id: id.into(),
+            run: std::rc::Rc::new(run),
+        }
+    }
+
+    fn group(mut self) -> Self {
+        self.group = true;
+        self
+    }
+}
+
 impl ClaudhubApp {
     // — What the project declares ———————————————————————————————
 
@@ -1010,6 +1056,214 @@ impl ClaudhubApp {
     }
 
     /// A worktree's context menu: git on one side, the project on the other.
+    /// Everything one can ask of a worktree, as data.
+    ///
+    /// **One table, read twice**: the top bar's `…` folds it into a `PopupMenu`,
+    /// the worktree picker paints it as rows in its second step. Two lists would
+    /// have drifted at the first addition, and the drift is the silent kind —
+    /// one of the two menus would simply lack an entry nobody notices missing.
+    ///
+    /// It is what the sidebar row's right click used to be, plus what a row
+    /// cannot offer once there is no row: a terminal here, the path, the folder.
+    pub(super) fn worktree_actions(
+        &mut self,
+        main: PathBuf,
+        worktree: PathBuf,
+        cx: &App,
+    ) -> Vec<WtAction> {
+        self.ensure_wt_project(&main);
+        let project = self.wt_project(&main).cloned();
+        let known = self.wt_slug(&main, &worktree).is_some();
+        let mut actions = Vec::new();
+
+        {
+            let target = worktree.clone();
+            actions.push(WtAction::new(
+                "update",
+                "arrow-down-to-line",
+                tr!("worktree-update"),
+                move |app, window, cx| {
+                    // Updating from the base is read off the worktree being
+                    // looked at: selecting it first is what makes the entry mean
+                    // the row it was opened on and not the one on screen.
+                    app.select_worktree(target.clone(), window, cx);
+                    app.update_from_base(cx);
+                },
+            ));
+        }
+        {
+            let target = worktree.clone();
+            actions.push(WtAction::new(
+                "integrate",
+                "git-merge",
+                tr!("worktree-integrate"),
+                move |app, _window, cx| app.integrate(target.clone(), cx),
+            ));
+        }
+
+        // What a row could offer and a picker still can: somewhere to type, the
+        // path to paste elsewhere, the folder in the system's own browser.
+        {
+            let target = worktree.clone();
+            actions.push(
+                WtAction::new(
+                    "terminal",
+                    "terminal",
+                    tr!("worktree-terminal"),
+                    move |app, window, cx| app.work_in_worktree(&target, window, cx),
+                )
+                .group(),
+            );
+        }
+        {
+            let target = worktree.clone();
+            actions.push(WtAction::new(
+                "copy-path",
+                "copy",
+                tr!("action-copy-path"),
+                move |_app, _window, cx| {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                        target.display().to_string(),
+                    ));
+                },
+            ));
+        }
+        {
+            let target = worktree.clone();
+            actions.push(WtAction::new(
+                "reveal",
+                "folder-open",
+                tr!("worktree-reveal"),
+                move |_app, _window, cx| cx.open_url(&format!("file://{}", target.display())),
+            ));
+        }
+        // Pinning: the one entry here that is not about the checkout but about
+        // the window — it puts a button for it in the top bar, where switching
+        // to it costs a click instead of a popover and a filter. It lives in
+        // this table because that is where everything one asks of a worktree
+        // lives, and the table is read twice.
+        {
+            let target = worktree.clone();
+            let pinned = crate::ui::store::Store::global(cx).is_pinned(&worktree);
+            actions.push(WtAction::new(
+                "pin",
+                if pinned { "pin-off" } else { "pin" },
+                if pinned {
+                    tr!("worktree-unpin")
+                } else {
+                    tr!("worktree-pin")
+                },
+                move |app, _window, cx| app.toggle_pin(&target, cx),
+            ));
+        }
+
+        let Some(project) = project.filter(|_| known) else {
+            // Removing the checkout itself, when `wt` is not the one keeping the
+            // books. Not offered on the main worktree — git refuses, and the
+            // entry would promise an error.
+            if worktree != main {
+                let (main, target) = (main.clone(), worktree.clone());
+                actions.push(
+                    WtAction::new(
+                        "remove-checkout",
+                        "trash-2",
+                        tr!("worktree-remove-checkout"),
+                        move |app, window, cx| {
+                            app.confirm_remove_worktree(main.clone(), target.clone(), window, cx)
+                        },
+                    )
+                    .group(),
+                );
+            }
+            actions.push(Self::forget_action(main));
+            return actions;
+        };
+
+        let mut first = true;
+        if project.has_up {
+            let (main, target) = (main.clone(), worktree.clone());
+            actions.push(
+                WtAction::new(
+                    "wt-up",
+                    "play",
+                    tr!("worktree-up"),
+                    move |app, window, cx| app.wt_up(main.clone(), &target, window, cx),
+                )
+                .group(),
+            );
+            first = false;
+        }
+        if project.has_down {
+            let (main, target) = (main.clone(), worktree.clone());
+            let action = WtAction::new(
+                "wt-down",
+                "circle-stop",
+                tr!("worktree-down"),
+                move |app, _window, cx| app.wt_down(main.clone(), &target, cx),
+            );
+            actions.push(if first { action.group() } else { action });
+            first = false;
+        }
+        {
+            let (main, target) = (main.clone(), worktree.clone());
+            let action = WtAction::new(
+                "wt-remove",
+                "trash-2",
+                tr!("worktree-remove"),
+                move |app, _window, cx| app.wt_remove(main.clone(), &target, cx),
+            );
+            actions.push(if first { action.group() } else { action });
+        }
+
+        // The project's tasks, as it declares them. Claudhub does not know what
+        // they do, and that is the point.
+        for (index, task) in project.tasks.into_iter().enumerate() {
+            let (main, target) = (main.clone(), worktree.clone());
+            let name = task.name.clone();
+            let label = if task.description.is_empty() {
+                task.name.clone()
+            } else {
+                format!("{} — {}", task.name, task.description)
+            };
+            let action = WtAction::new(
+                SharedString::from(format!("task-{}", task.name)),
+                "terminal",
+                SharedString::from(label),
+                move |app, window, cx| {
+                    app.wt_task(main.clone(), target.clone(), name.clone(), window, cx)
+                },
+            );
+            actions.push(if index == 0 { action.group() } else { action });
+        }
+
+        actions.push(Self::forget_action(main));
+        actions
+    }
+
+    /// Pins a checkout to the top bar, or takes it off.
+    pub(super) fn toggle_pin(&mut self, worktree: &Path, cx: &mut Context<Self>) {
+        let worktree = worktree.to_path_buf();
+        crate::ui::store::Store::update_global(cx, move |store| store.toggle_pin(&worktree));
+        cx.notify();
+    }
+
+    /// The pinned checkouts, in the order they were pinned, and only those a
+    /// repository currently claims.
+    ///
+    /// A pin whose repository has not been opened yet is **kept in the store**
+    /// and simply not painted: it comes back with its repository. Painting it
+    /// would give the bar a button that selects a worktree the rest of the
+    /// window knows nothing about.
+    pub(super) fn pinned_worktrees(&self, cx: &App) -> Vec<PathBuf> {
+        crate::ui::store::Store::global(cx)
+            .pinned
+            .iter()
+            .filter(|path| self.repos.worktree(path).is_some())
+            .cloned()
+            .collect()
+    }
+
+    /// What can be done to a worktree, folded into a menu.
     pub(super) fn worktree_menu(
         &mut self,
         menu: gpui_component::menu::PopupMenu,
@@ -1017,135 +1271,35 @@ impl ClaudhubApp {
         worktree: PathBuf,
         cx: &mut Context<Self>,
     ) -> gpui_component::menu::PopupMenu {
-        self.ensure_wt_project(&main);
         let entity = cx.entity();
-        let project = self.wt_project(&main).cloned();
-        let known = self.wt_slug(&main, &worktree).is_some();
-
-        let mut menu = {
-            let (update, integrate) = (entity.clone(), entity.clone());
-            let (for_update, for_integrate) = (worktree.clone(), worktree.clone());
-            menu.item(
-                PopupMenuItem::new(tr!("worktree-update"))
-                    .icon(icon("arrow-down-to-line"))
-                    .on_click(move |_, window, cx| {
-                        update.update(cx, |this, cx| {
-                            this.select_worktree(for_update.clone(), window, cx);
-                            this.update_from_base(cx);
-                        });
-                    }),
-            )
-            .item(
-                PopupMenuItem::new(tr!("worktree-integrate"))
-                    .icon(icon("git-merge"))
-                    .on_click(move |_, _window, cx| {
-                        integrate.update(cx, |this, cx| this.integrate(for_integrate.clone(), cx));
-                    }),
-            )
-        };
-
-        // Removing the checkout itself, when `wt` is not the one keeping the
-        // books: it was the sidebar row's dustbin, and the sidebar is gone. Not
-        // offered on the main worktree — git refuses, and the entry would
-        // promise an error.
-        let Some(project) = project.filter(|_| known) else {
-            if worktree != main {
-                let (entity, main, path) = (entity.clone(), main.clone(), worktree.clone());
-                menu = menu.separator().item(
-                    PopupMenuItem::new(tr!("worktree-remove-checkout"))
-                        .icon(icon("trash-2"))
+        self.worktree_actions(main, worktree, cx)
+            .into_iter()
+            .fold(menu, |menu, action| {
+                let entity = entity.clone();
+                let run = action.run.clone();
+                let menu = if action.group { menu.separator() } else { menu };
+                menu.item(
+                    PopupMenuItem::new(action.label)
+                        .icon(icon(action.icon))
                         .on_click(move |_, window, cx| {
-                            entity.update(cx, |this, cx| {
-                                this.confirm_remove_worktree(main.clone(), path.clone(), window, cx)
-                            });
+                            entity.update(cx, |this, cx| run(this, window, cx));
                         }),
-                );
-            }
-            return Self::forget_entry(menu, entity, main);
-        };
-
-        menu = menu.separator();
-        if project.has_up {
-            let (entity, main, worktree) = (entity.clone(), main.clone(), worktree.clone());
-            menu = menu.item(
-                PopupMenuItem::new(tr!("worktree-up"))
-                    .icon(icon("play"))
-                    .on_click(move |_, window, cx| {
-                        entity.update(cx, |this, cx| {
-                            this.wt_up(main.clone(), &worktree, window, cx)
-                        });
-                    }),
-            );
-        }
-        if project.has_down {
-            let (entity, main, worktree) = (entity.clone(), main.clone(), worktree.clone());
-            menu = menu.item(
-                PopupMenuItem::new(tr!("worktree-down"))
-                    .icon(icon("circle-stop"))
-                    .on_click(move |_, _window, cx| {
-                        entity.update(cx, |this, cx| this.wt_down(main.clone(), &worktree, cx));
-                    }),
-            );
-        }
-        {
-            let (entity, main, worktree) = (entity.clone(), main.clone(), worktree.clone());
-            menu = menu.item(
-                PopupMenuItem::new(tr!("worktree-remove"))
-                    .icon(icon("trash-2"))
-                    .on_click(move |_, _window, cx| {
-                        entity.update(cx, |this, cx| this.wt_remove(main.clone(), &worktree, cx));
-                    }),
-            );
-        }
-
-        // The project's tasks, as it declares them. Claudhub does not know what
-        // they do, and that is the point.
-        if project.tasks.is_empty() {
-            return Self::forget_entry(menu, entity, main);
-        }
-        menu = menu.separator();
-        let menu = project.tasks.into_iter().fold(menu, |menu, task| {
-            let (entity, main, worktree) = (entity.clone(), main.clone(), worktree.clone());
-            let name = task.name.clone();
-            let label = if task.description.is_empty() {
-                task.name.clone()
-            } else {
-                format!("{} — {}", task.name, task.description)
-            };
-            menu.item(
-                PopupMenuItem::new(SharedString::from(label))
-                    .icon(icon("terminal"))
-                    .on_click(move |_, window, cx| {
-                        entity.update(cx, |this, cx| {
-                            this.wt_task(main.clone(), worktree.clone(), name.clone(), window, cx)
-                        });
-                    }),
-            )
-        });
-        Self::forget_entry(menu, entity, main)
+                )
+            })
     }
 
-    /// Closing the repository, at the bottom of every worktree menu.
+    /// Closing the repository, last in every worktree menu.
     ///
-    /// It was the sidebar's right click on a repository heading, and it has to keep
-    /// living somewhere: nothing on disk is touched, but everything opened in the
-    /// repository is closed, which is not a gesture one makes twice a day — hence
-    /// its place, last and behind a separator, rather than a button one brushes
-    /// past.
-    fn forget_entry(
-        menu: gpui_component::menu::PopupMenu,
-        entity: Entity<ClaudhubApp>,
-        main: PathBuf,
-    ) -> gpui_component::menu::PopupMenu {
-        menu.separator().item(
-            PopupMenuItem::new(tr!("repo-forget"))
-                .icon(icon("x"))
-                .on_click(move |_, window, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.forget_repository(main.clone(), window, cx)
-                    });
-                }),
-        )
+    /// It was the sidebar's right click on a repository heading, and it has to
+    /// keep living somewhere: nothing on disk is touched, but everything opened
+    /// in the repository is closed, which is not a gesture one makes twice a day
+    /// — hence its place, last and behind a rule, rather than a button one
+    /// brushes past.
+    fn forget_action(main: PathBuf) -> WtAction {
+        WtAction::new("forget", "x", tr!("repo-forget"), move |app, window, cx| {
+            app.forget_repository(main.clone(), window, cx)
+        })
+        .group()
     }
 
     /// A worktree's "open" button, when the project exposes an address.

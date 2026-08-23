@@ -33,7 +33,7 @@ use crate::git::search::{Query, Results};
 use crate::runtime::protocol::Cmd;
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
-use crate::ui::highlight::DocumentHighlights;
+use crate::ui::highlight::{DocumentHighlights, HitHighlights};
 use crate::ui::icons::icon;
 use crate::ui::search::{self, Row};
 
@@ -57,6 +57,10 @@ pub struct SearchState {
     /// over results that answer the previous one would be wrong twice.
     pub sent: Query,
     pub results: Rc<Results>,
+    /// The syntax colouring of the shown lines, computed once on arrival — the
+    /// list's closure runs for every visible row of every frame and must not
+    /// parse anything there.
+    pub hits: Rc<HitHighlights>,
     /// Why the search could not run: a bad regular expression, most often. It
     /// is shown **under the field** and not in the status bar, which the next
     /// message wipes.
@@ -117,12 +121,126 @@ impl ClaudhubApp {
     ///
     /// The whole of `Ctrl+Shift+F`: a shortcut that landed on the screen without
     /// putting the caret in the field would leave the gesture half done.
+    ///
+    /// **A selection made in a code surface comes along**, as it does in
+    /// PhpStorm and in every editor: one highlights a call, asks where else it
+    /// is made, and retyping what is already under the cursor is the step the
+    /// shortcut exists to save. The search **goes out** with it — a field
+    /// carrying one query over a list answering another is the state the
+    /// debounce spends its time avoiding — but the caret **stays in the field**,
+    /// its text selected: the gesture asked for the results, not for the list to
+    /// take the keyboard, and the next letter typed replaces the whole word.
     pub(super) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Read **before** the screen changes: `enter_workspace` moves the focus,
+        // and the focus is what says which surface the selection is in.
+        let selection = self.search_seed(window, cx);
         self.enter_workspace(crate::ui::workspace::Workspace::Search, window, cx);
         self.set_panel_visible(crate::ui::panels::SearchPanel::NAME, true, cx);
         let handle = gpui::Focusable::focus_handle(&self.search_input, cx);
         handle.focus(window, cx);
+        if let Some(text) = selection {
+            self.search_input.update(cx, |state, cx| {
+                // `set_value` emits no change event, so nothing is debounced
+                // behind our back — the search below is the only one that goes.
+                state.set_value(text, window, cx);
+                state.select_all(window, cx);
+            });
+            // The same question as the one already answered on screen: asking
+            // it again would only re-select its first hit and re-read its
+            // preview. It is the debounce's own test, and it is the same one
+            // because it is the same thing being avoided.
+            let stale = self.search.worktree != self.active;
+            if stale || self.search.error.is_some() || self.search_query(cx) != self.search.sent {
+                self.run_search(false, cx);
+            }
+        }
         cx.notify();
+    }
+
+    /// What a code surface's selection offers the search, if it offers anything.
+    ///
+    /// **The focused surface and not "the file being edited"**: the dock shows
+    /// two files at once as soon as one splits, and the console is a code
+    /// surface too. Which one the hand was in is what the focus says, and it is
+    /// still the editor's at this point — the shortcut is dispatched before the
+    /// field is focused.
+    ///
+    /// **The mode decides what "selected" means, and that is not a detail**:
+    /// vim's normal mode leaves the editor holding a **one-character** range at
+    /// all times — the block cursor is written as a selection, `vim::block` —
+    /// so reading the range alone would seed every search with the letter under
+    /// the caret. Normal mode is therefore refused outright, blockwise is asked
+    /// of vim (a rectangle is one range per line, which the editor cannot hold),
+    /// and everything else — the visual modes, insert, and every selection made
+    /// with the mouse, vim on or off — is the editor's own range.
+    ///
+    /// What is left of the decision — a selection worth searching for — is
+    /// `search::seed`, pure and tested, in front of this as `notes.rs` is in
+    /// front of `notes_view.rs`.
+    fn search_seed(&self, window: &Window, cx: &App) -> Option<String> {
+        use crate::ui::vim::Mode;
+        let surface = self.focused_surface(window, cx)?;
+        let input = self.surface_input(&surface)?;
+        let value = input.read(cx).value();
+        // Vim's mode only means anything while its keys are on: switched off,
+        // nothing drives the machine and it says "normal" over a selection made
+        // with the mouse.
+        let mode = crate::ui::settings::Settings::global(cx)
+            .vim_mode
+            .then(|| self.surface_host(&surface).map(|host| host.vim.mode()))
+            .flatten();
+        let text = match mode {
+            Some(Mode::Normal) => return None,
+            Some(Mode::VisualBlock) => {
+                let host = self.surface_host(&surface)?;
+                let range = host
+                    .vim
+                    .block_selection(&value)
+                    .into_iter()
+                    .find(|range| !range.is_empty())?;
+                value.get(range)?
+            }
+            _ => {
+                let range = input.read(cx).selected_range();
+                if range.is_empty() {
+                    return None;
+                }
+                value.get(range)?
+            }
+        };
+        search::seed(text)
+    }
+
+    /// Which code surface holds the keyboard, if one does.
+    ///
+    /// The fallback is the screen one is on rather than nothing: a click in the
+    /// project tree leaves the editor showing a selection it no longer owns, and
+    /// that selection is still the answer to "what am I looking at".
+    fn focused_surface(&self, window: &Window, cx: &App) -> Option<crate::ui::surface::Surface> {
+        use crate::ui::surface::Surface;
+        let focused = |surface: &Surface| {
+            self.surface_input(surface)
+                .is_some_and(|input| gpui::Focusable::focus_handle(&input, cx).is_focused(window))
+        };
+        if focused(&Surface::Query) {
+            return Some(Surface::Query);
+        }
+        let root = self.editing_root();
+        let open = root.as_deref().and_then(|root| self.editors(root));
+        if let Some(editing) = open.and_then(|open| {
+            open.open
+                .iter()
+                .find(|editing| focused(&Surface::File(editing.path.clone())))
+        }) {
+            return Some(Surface::File(editing.path.clone()));
+        }
+        match self.workspace {
+            crate::ui::workspace::Workspace::Db => Some(Surface::Query),
+            crate::ui::workspace::Workspace::Files => {
+                Some(Surface::File(self.editing()?.path.clone()))
+            }
+            _ => None,
+        }
     }
 
     /// The query as the two fields describe it.
@@ -235,6 +353,8 @@ impl ClaudhubApp {
         self.search.folded.clear();
         match result {
             Ok(results) => {
+                let theme = cx.theme().highlight_theme.clone();
+                self.search.hits = Rc::new(HitHighlights::compute(&results, &theme));
                 self.search.results = Rc::new(results);
                 self.search.error = None;
                 // The first hit is selected, and its file previewed: a list one
@@ -258,6 +378,7 @@ impl ClaudhubApp {
             }
             Err(message) => {
                 self.search.results = Rc::new(Results::default());
+                self.search.hits = Rc::new(HitHighlights::default());
                 self.search.selected = None;
                 self.search.preview = None;
                 self.search.error = Some(message);
@@ -631,6 +752,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let results = self.search.results.clone();
+        let hits = self.search.hits.clone();
         let rows = Rc::new(search::rows(&results, &self.search.folded));
         let folded = Rc::new(self.search.folded.clone());
         let selected = self.search.selected;
@@ -647,6 +769,7 @@ impl ClaudhubApp {
                 index,
                 row,
                 &results,
+                &hits,
                 &folded,
                 selected == Some(index),
                 &query,
@@ -664,7 +787,6 @@ impl ClaudhubApp {
                 range.map(|index| build(index, cx)).collect::<Vec<_>>()
             })
             .size_full()
-            .px_1()
             .track_scroll(&handle),
             cx,
         )
@@ -802,7 +924,6 @@ const MIN_AUTO: usize = 2;
 #[derive(Clone, Copy)]
 struct Look {
     row: Pixels,
-    radius: Pixels,
     muted: gpui::Hsla,
     accent: gpui::Hsla,
     text: gpui::Hsla,
@@ -815,7 +936,6 @@ impl Look {
     fn of(cx: &App) -> Self {
         Self {
             row: crate::ui::theme::row_height(cx),
-            radius: cx.theme().radius,
             muted: cx.theme().muted_foreground,
             accent: cx.theme().accent,
             text: cx.theme().foreground,
@@ -829,6 +949,7 @@ fn render_row(
     index: usize,
     row: Row,
     results: &Rc<Results>,
+    hits: &Rc<HitHighlights>,
     folded: &Rc<HashSet<PathBuf>>,
     selected: bool,
     query: &Query,
@@ -847,10 +968,10 @@ fn render_row(
                 .id(("search-file", index))
                 .h(look.row)
                 .w_full()
-                .px_1()
+                .pl_1()
+                .pr(crate::ui::theme::scroll_gutter())
                 .gap_1()
                 .items_center()
-                .rounded(look.radius)
                 .cursor_pointer()
                 .when(selected, |el| el.bg(look.accent.opacity(0.4)))
                 .hover(|s| s.bg(look.accent.opacity(0.3)))
@@ -892,20 +1013,26 @@ fn render_row(
             // The leading indentation is dropped: a hit six levels deep would
             // otherwise show nothing but its indentation in a narrow column.
             let text = line.text.trim_start();
-            let marks = if query.regex {
+            // The occurrences are picked out over the syntax colouring, as
+            // the preview does it and as `Ctrl+F` does it in the diff.
+            let marks: Vec<_> = if query.regex {
                 Vec::new()
             } else {
                 crate::ui::find::find_all(&query.text, text)
+                    .into_iter()
+                    .map(|range| (range, look.hit))
+                    .collect()
             };
+            let styles = hits.line(file, hit);
             let shown = SharedString::from(text.to_string());
             h_flex()
                 .id(("search-hit", index))
                 .h(look.row)
                 .w_full()
-                .px_1()
+                .pl_1()
+                .pr(crate::ui::theme::scroll_gutter())
                 .gap_2()
                 .items_center()
-                .rounded(look.radius)
                 .cursor_pointer()
                 .when(selected, |el| el.bg(look.accent.opacity(0.4)))
                 .hover(|s| s.bg(look.accent.opacity(0.3)))
@@ -934,19 +1061,15 @@ fn render_row(
                         .truncate()
                         .text_xs()
                         .font_family(cx.theme().mono_font_family.clone())
-                        .child(if marks.is_empty() {
+                        .child(if marks.is_empty() && styles.is_empty() {
                             div().child(shown).into_any_element()
+                        } else if marks.is_empty() {
+                            StyledText::new(shown)
+                                .with_highlights(styles.iter().cloned())
+                                .into_any_element()
                         } else {
                             StyledText::new(shown)
-                                .with_highlights(marks.into_iter().map(|range| {
-                                    (
-                                        range,
-                                        gpui::HighlightStyle {
-                                            background_color: Some(look.hit),
-                                            ..Default::default()
-                                        },
-                                    )
-                                }))
+                                .with_highlights(crate::ui::highlight::overlay(styles, &marks))
                                 .into_any_element()
                         }),
                 )

@@ -10,15 +10,14 @@
 //! down there as a word one reads; it comes back as a button one clicks, and
 //! saying it in both places at once would be one place too many.
 
-use gpui::{div, prelude::*, px, Context, Entity, Window};
+use gpui::{div, prelude::*, px, Context, Entity, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonGroup, ButtonVariants},
     h_flex,
     menu::{DropdownMenu, PopupMenuItem},
-    v_flex, ActiveTheme, Disableable, Sizable, StyledExt, TitleBar,
+    ActiveTheme, Disableable, Sizable, TitleBar,
 };
 
-use crate::runtime::Cmd;
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
@@ -109,11 +108,34 @@ pub(super) fn volume(summary: crate::git::Summary, cx: &gpui::App) -> impl IntoE
 /// A badge and not a word: the row already carries a name and a branch, and this
 /// is information read out of the corner of the eye while scanning the list.
 pub(super) fn agent_badge(agent: &crate::agent::State, cx: &gpui::App) -> impl IntoElement {
-    let color = if agent.working {
+    let color = agent_colour(agent, cx);
+    agent_dot(agent, cx)
+        // The agent's name as soon as there is more than one profile to tell
+        // apart: the badge says something is going on, it does not say who.
+        .child(
+            div()
+                .text_xs()
+                .text_color(color)
+                .child(agent.programs.join(", ")),
+        )
+}
+
+fn agent_colour(agent: &crate::agent::State, cx: &gpui::App) -> gpui::Hsla {
+    if agent.working {
         cx.theme().warning
     } else {
         cx.theme().muted_foreground
-    };
+    }
+}
+
+/// The badge without the name: the dot, and the count when there is more than
+/// one.
+///
+/// It is what a pin's button carries — the button already says which checkout it
+/// is, and the programs' names would take from the row the width it has to
+/// spare. The picker's row has the space and says them.
+pub(super) fn agent_dot(agent: &crate::agent::State, cx: &gpui::App) -> gpui::Div {
+    let color = agent_colour(agent, cx);
     h_flex()
         .flex_none()
         .gap_1()
@@ -137,39 +159,6 @@ pub(super) fn agent_badge(agent: &crate::agent::State, cx: &gpui::App) -> impl I
                     .child(agent.count.to_string()),
             )
         })
-        // The agent's name as soon as there is more than one profile to tell
-        // apart: the badge says something is going on, it does not say who.
-        .child(
-            div()
-                .text_xs()
-                .text_color(color)
-                .child(agent.programs.join(", ")),
-        )
-}
-
-/// The name of a repository we could not open.
-///
-/// Derived from the path and not asked of git, which is precisely what cannot
-/// answer: it is the last segment, the one that is recognised, and the whole
-/// path stays on the line below.
-fn repo_name(path: &std::path::Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
-}
-
-/// What the worktree picker shows of one worktree.
-///
-/// A snapshot taken when the menu is built, and not read frame by frame: the
-/// menu is rebuilt at every opening, and a list whose rows change height under
-/// the pointer is a list one misses.
-struct WorktreeItem {
-    path: std::path::PathBuf,
-    label: String,
-    branch: Option<String>,
-    is_main: bool,
-    summary: Option<crate::git::Summary>,
-    agent: Option<crate::agent::State>,
 }
 
 impl ClaudhubApp {
@@ -247,6 +236,12 @@ impl ClaudhubApp {
                     // the trail crosses. The editor's bar keeps its own two,
                     // on the same trail.
                     .child(self.render_trail_buttons(cx))
+                    // The pinned checkouts come **before** the picker rather
+                    // than after it: they are the shortest way to the same
+                    // gesture, and what is put in front is what one reaches
+                    // for first. The picker stays right behind them, for the
+                    // checkouts one has not pinned.
+                    .children(self.render_pins(cx))
                     // The two pickers that drive everything else, in the order
                     // one goes through them: the worktree, then its branch.
                     .child(self.render_worktree_picker(cx))
@@ -318,6 +313,24 @@ impl ClaudhubApp {
                                     else {
                                         return;
                                     };
+                                    // **The multiplexer button comes back.**
+                                    // It is the one screen of the two that
+                                    // answers a question rather than holding a
+                                    // form — which has finished, what is
+                                    // running — so pressing it is a glance, and
+                                    // a glance one takes back. Pressed a second
+                                    // time it returns to the last screen one
+                                    // **worked** in, which is where "work here"
+                                    // already sends a terminal: the two gestures
+                                    // leave the grid the same way. The gear does
+                                    // not, its screen being one where one stays
+                                    // and does something.
+                                    if this.workspace == workspace
+                                        && workspace == crate::ui::workspace::Workspace::Multiplexer
+                                    {
+                                        this.travel_to(this.worked_in, window, cx);
+                                        return;
+                                    }
                                     // The step is written down, as in the
                                     // screen picker: a detour to the settings
                                     // or to the multiplexer is exactly what one
@@ -327,6 +340,91 @@ impl ClaudhubApp {
                             )),
                     ),
             )
+    }
+
+    /// The pinned checkouts, as a group of buttons.
+    ///
+    /// A popover is the right shape for twelve checkouts one browses; it is the
+    /// wrong one for the two or three one goes back and forth between all day.
+    /// A pin is what says which those are, and the row is read left to right in
+    /// the order they were pinned — nothing reorders itself under the hand.
+    ///
+    /// Nothing is painted when nothing is pinned: an empty group would take the
+    /// pickers' width to say that a feature exists.
+    fn render_pins(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let pins = self.pinned_worktrees(cx);
+        if pins.is_empty() {
+            return None;
+        }
+        let active = self.active_path();
+        let muted = cx.theme().muted_foreground;
+        let for_click = pins.clone();
+        Some(
+            ButtonGroup::new("worktree-pins")
+                .compact()
+                .xsmall()
+                .children(pins.iter().enumerate().map(|(index, path)| {
+                    let (repo, label) = self.project_label(path);
+                    let selected = active.as_deref() == Some(path.as_path());
+                    Button::new(("pin", index))
+                        .tooltip(SharedString::from(path.display().to_string()))
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                // The repository's name in front and greyed,
+                                // exactly as the picker's trigger says it, and
+                                // dropped when it would repeat the checkout's
+                                // own name — the multiplexer's rule, and the
+                                // same helper.
+                                .children(repo.map(|name| {
+                                    div()
+                                        .text_xs()
+                                        .text_color(if selected {
+                                            muted
+                                        } else {
+                                            muted.opacity(0.8)
+                                        })
+                                        .child(name)
+                                }))
+                                .child(div().max_w(px(140.)).truncate().child(label))
+                                // Who is working in it and how much is in
+                                // progress — the two things one glances at
+                                // before switching, and the two the picker's
+                                // row already carries. They come from the
+                                // background sweep, so a pin says what it says
+                                // of a checkout nobody has opened: the agent
+                                // every two seconds, the volume every fifth
+                                // reading.
+                                .children(self.agents.get(path).map(|agent| agent_dot(agent, cx)))
+                                .children(
+                                    self.summaries
+                                        .get(path)
+                                        .copied()
+                                        .filter(|summary| !summary.is_empty())
+                                        .map(|summary| volume(summary, cx)),
+                                ),
+                        )
+                        // Solid against outline, the window's polarity: the
+                        // "selected" state of an outlined group is a background
+                        // a few percent off its own, invisible on half the
+                        // themes.
+                        .map(|button| {
+                            if selected {
+                                button.primary()
+                            } else {
+                                button.outline()
+                            }
+                        })
+                }))
+                .on_click(cx.listener(move |this, selected: &Vec<usize>, window, cx| {
+                    let Some(path) = selected.first().and_then(|ix| for_click.get(*ix).cloned())
+                    else {
+                        return;
+                    };
+                    this.select_worktree(path, window, cx);
+                })),
+        )
     }
 
     /// The application's menu.
@@ -396,210 +494,6 @@ impl ClaudhubApp {
             })
     }
 
-    /// The worktree picker: the repository, the worktree, and the list to
-    /// change them.
-    ///
-    /// It says the same thing the sidebar's selection does, and it is not a
-    /// duplicate: the sidebar is a panel one can hide, drag or replace with a
-    /// terminal, and what drives every view of the window cannot go away with
-    /// it.
-    fn render_worktree_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let entity = cx.entity();
-        let label = self
-            .active_worktree()
-            .map(|w| w.label())
-            .unwrap_or_else(|| tr!("no-worktree").to_string());
-        // The repository's name in front, greyed: two worktrees called `main`
-        // in two repositories is the normal case, not the exception.
-        let repo = self
-            .active
-            .as_deref()
-            .and_then(|path| self.repo_of(path))
-            .map(|repo| repo.name.clone());
-        let muted = cx.theme().muted_foreground;
-        Button::new("worktree-picker")
-            .ghost()
-            .small()
-            .child(
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .child(icon("folder").xsmall().text_color(muted))
-                    .when_some(repo, |el, name| {
-                        el.child(div().text_sm().text_color(muted).child(name))
-                            .child(div().text_sm().text_color(muted.opacity(0.5)).child("/"))
-                    })
-                    .child(
-                        div()
-                            .max_w(px(240.))
-                            .truncate()
-                            .text_sm()
-                            .font_semibold()
-                            .child(label),
-                    )
-                    .child(icon("chevron-down").xsmall().text_color(muted)),
-            )
-            .dropdown_menu(move |menu, _window, cx| {
-                let app = entity.clone();
-                let active = app.read(cx).active.clone();
-                // A snapshot of the list, taken here: the closures below run
-                // while the menu paints, and reading the application from each
-                // of them would be a borrow per row.
-                let repos: Vec<(std::path::PathBuf, String, Vec<WorktreeItem>)> = app
-                    .read(cx)
-                    .repos
-                    .iter()
-                    .map(|repo| {
-                        let worktrees = repo
-                            .worktrees
-                            .iter()
-                            .map(|w| WorktreeItem {
-                                path: w.path.clone(),
-                                label: w.label(),
-                                branch: w.branch.clone(),
-                                is_main: w.is_main,
-                                summary: app.read(cx).summaries.get(&w.path).copied(),
-                                agent: app.read(cx).agents.get(&w.path).cloned(),
-                            })
-                            .collect();
-                        (repo.main.clone(), repo.name.clone(), worktrees)
-                    })
-                    .collect();
-
-                let mut menu = menu.min_w(px(280.)).max_h(px(420.)).scrollable(true);
-                for (index, (main, name, worktrees)) in repos.into_iter().enumerate() {
-                    menu = menu.item(repo_header(entity.clone(), index, main, name));
-                    for worktree in worktrees {
-                        let selected = active.as_deref() == Some(worktree.path.as_path());
-                        let target = worktree.path.clone();
-                        let is_main = worktree.is_main;
-                        let app = app.clone();
-                        menu = menu.item(
-                            PopupMenuItem::element(move |_window, cx| {
-                                worktree_row(&worktree, selected, cx)
-                            })
-                            // The icon column is the menu's own, and the tick
-                            // takes its place when the row is the current one:
-                            // it is what keeps the names lined up, and it is
-                            // what every other menu of the window does.
-                            .icon(icon(if is_main { "folder" } else { "git-branch" }))
-                            .checked(selected)
-                            .on_click(move |_, window, cx| {
-                                app.update(cx, |this, cx| {
-                                    this.select_worktree(target.clone(), window, cx)
-                                });
-                            }),
-                        );
-                    }
-                }
-                // The repositories that no longer open, last and in error. They
-                // appear nowhere else now, and a repository that appears nowhere
-                // cannot be removed either — it would only leave two warnings in
-                // the log at every start.
-                let missing: Vec<(std::path::PathBuf, String, String)> = app
-                    .read(cx)
-                    .repos
-                    .missing()
-                    .iter()
-                    .map(|repo| {
-                        (
-                            repo.path.clone(),
-                            repo_name(&repo.path),
-                            repo.message.clone(),
-                        )
-                    })
-                    .collect();
-                if !missing.is_empty() {
-                    menu = menu.separator();
-                    for (index, (path, name, message)) in missing.into_iter().enumerate() {
-                        menu = menu.item(missing_repo(entity.clone(), index, path, name, message));
-                    }
-                }
-                let app = entity.clone();
-                menu.separator().item(
-                    PopupMenuItem::new(tr!("repo-open"))
-                        .icon(icon("folder-plus"))
-                        .on_click(move |_, window, cx| {
-                            app.update(cx, |this, cx| this.prompt_open_repository(window, cx));
-                        }),
-                )
-            })
-    }
-
-    /// The branch picker: what HEAD is on, and the branches to move it to.
-    ///
-    /// The list is `branches::rows_for`, the very one the panel used: locals
-    /// under their heading, then the remotes with no local twin. `None` without
-    /// a worktree — an empty picker offers a gesture that cannot be made.
-    fn render_branch_picker(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let worktree = self.active.clone()?;
-        let repo = self.repo_of(&worktree)?;
-        let main = repo.main.clone();
-        let label = self
-            .active_worktree()
-            .and_then(|w| w.branch.clone())
-            .unwrap_or_else(|| tr!("branch-detached").to_string());
-        // The lead and the lag come with it: they are read as part of the
-        // branch, and they were the other half of what the status bar said.
-        let (ahead, behind) = self
-            .active_review()
-            .map(|r| (r.status.ahead, r.status.behind))
-            .unwrap_or((0, 0));
-        let rows = std::rc::Rc::new(crate::ui::branches::rows_for(&repo.branches, ""));
-        let entity = cx.entity();
-        let muted = cx.theme().muted_foreground;
-        Some(
-            Button::new("branch-picker")
-                .ghost()
-                .small()
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .items_center()
-                        .text_color(muted)
-                        .child(icon("git-branch").xsmall())
-                        .child(div().max_w(px(220.)).truncate().text_sm().child(label))
-                        // Behind before ahead: that is what has to be integrated
-                        // before one can push.
-                        .when(behind > 0, |el| el.child(format!("↓{behind}")))
-                        .when(ahead > 0, |el| el.child(format!("↑{ahead}")))
-                        .child(icon("chevron-down").xsmall()),
-                )
-                .dropdown_menu(move |menu, _window, _cx| {
-                    let mut menu = menu.min_w(px(320.)).max_h(px(420.)).scrollable(true);
-                    for (index, row) in rows.iter().enumerate() {
-                        match row {
-                            crate::ui::branches::Row::Group(kind) => {
-                                menu = menu.item(PopupMenuItem::label(match kind {
-                                    crate::git::BranchKind::Local => tr!("branches-local"),
-                                    crate::git::BranchKind::Remote => tr!("branches-remote"),
-                                }));
-                            }
-                            crate::ui::branches::Row::Branch(row) => {
-                                menu = menu.item(branch_item(
-                                    entity.clone(),
-                                    index,
-                                    row.clone(),
-                                    worktree.clone(),
-                                    main.clone(),
-                                ));
-                            }
-                        }
-                    }
-                    // The panel's other gesture, the one that does not need its
-                    // search: a branch one creates has no name to look for yet.
-                    let app = entity.clone();
-                    menu.separator().item(
-                        PopupMenuItem::new(tr!("branch-new"))
-                            .icon(icon("plus"))
-                            .on_click(move |_, window, cx| {
-                                app.update(cx, |this, cx| this.prompt_new_branch(window, cx));
-                            }),
-                    )
-                }),
-        )
-    }
-
     /// What can be done to the worktree being looked at: git on one side, the
     /// project's `wt.toml` on the other.
     ///
@@ -621,268 +515,4 @@ impl ClaudhubApp {
                 }),
         )
     }
-}
-
-/// One worktree in the picker: what the sidebar row says, minus its buttons.
-///
-/// The volume and the agent come along because they are what one chooses on:
-/// "the one where something is happening" is the commonest way of naming a
-/// worktree.
-fn worktree_row(
-    worktree: &WorktreeItem,
-    selected: bool,
-    cx: &mut gpui::App,
-) -> impl IntoElement + use<> {
-    h_flex()
-        .w_full()
-        .gap_1()
-        .items_center()
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .child(
-                    div()
-                        .truncate()
-                        .text_sm()
-                        .when(selected, |el| el.font_semibold())
-                        .child(worktree.label.clone()),
-                )
-                .when_some(worktree.branch.clone(), |el, branch| {
-                    el.child(
-                        div()
-                            .truncate()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(branch),
-                    )
-                }),
-        )
-        .when_some(worktree.agent.as_ref(), |el, agent| {
-            el.child(agent_badge(agent, cx))
-        })
-        .when_some(
-            worktree.summary.filter(|summary| !summary.is_empty()),
-            |el, summary| el.child(volume(summary, cx)),
-        )
-}
-
-/// A repository's heading, and the one action that belongs to it.
-///
-/// The same two-line heading the sidebar draws, and the same `+`: the picker
-/// took the sidebar's place at the top of the window, and a gesture that only
-/// exists in a panel one has hidden is a gesture one no longer has.
-/// Not clickable itself — hence `disabled` — but its button is: the click is
-/// consumed, so the entry never sees it and the menu does not close on the row.
-fn repo_header(
-    app: Entity<ClaudhubApp>,
-    index: usize,
-    main: std::path::PathBuf,
-    name: String,
-) -> PopupMenuItem {
-    PopupMenuItem::element(move |_window, cx| {
-        let (app, main) = (app.clone(), main.clone());
-        h_flex()
-            .id(("repo-heading", index))
-            .w_full()
-            .gap_1()
-            .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .text_xs()
-                    .font_semibold()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(name.clone()),
-            )
-            .child(
-                Button::new(("new-worktree", index))
-                    .ghost()
-                    .xsmall()
-                    .icon(icon("plus"))
-                    .tooltip(tr!("worktree-new"))
-                    .on_click(move |_, window, cx| {
-                        cx.stop_propagation();
-                        app.update(cx, |this, cx| {
-                            this.prompt_new_worktree(main.clone(), window, cx)
-                        });
-                    }),
-            )
-    })
-    .disabled(true)
-}
-
-/// One branch's row: its name, then what it carries or who holds it.
-fn branch_row(
-    row: &crate::ui::branches::BranchRow,
-    index: usize,
-    taken: bool,
-    main: std::path::PathBuf,
-    app: Entity<ClaudhubApp>,
-    cx: &mut gpui::App,
-) -> impl IntoElement + use<> {
-    let muted = cx.theme().muted_foreground;
-    // Where it is checked out matters more than what it carries: that is what
-    // explains a greyed row.
-    let detail = match row.taken_by.as_ref().filter(|_| !row.is_head) {
-        Some(path) => format!(
-            "{} {}",
-            tr!("branch-checked-out"),
-            path.file_name().unwrap_or_default().to_string_lossy()
-        ),
-        None => row.detail.clone(),
-    };
-    let name = row.name.clone();
-    h_flex()
-        .w_full()
-        .gap_2()
-        .items_center()
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .child(
-                    div()
-                        .truncate()
-                        .text_sm()
-                        .when(row.is_head, |el| el.font_semibold())
-                        .child(row.name.clone()),
-                )
-                .when(!detail.is_empty(), |el| {
-                    el.child(div().truncate().text_xs().text_color(muted).child(detail))
-                }),
-        )
-        .when(row.behind > 0, |el| {
-            el.child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(format!("↓{}", row.behind)),
-            )
-        })
-        .when(row.ahead > 0, |el| {
-            el.child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(format!("↑{}", row.ahead)),
-            )
-        })
-        .when(!row.is_head && !taken, |el| {
-            el.child(
-                Button::new(("worktree-from", index))
-                    .ghost()
-                    .xsmall()
-                    .icon(icon("folder-open"))
-                    .tooltip(tr!("branch-new-worktree"))
-                    .on_click(move |_, _window, cx| {
-                        cx.stop_propagation();
-                        app.update(cx, |this, cx| {
-                            this.worktree_from_branch(main.clone(), name.clone(), cx)
-                        });
-                    }),
-            )
-        })
-}
-
-/// One branch in the picker: the row, and the two gestures on it.
-///
-/// The click checks the branch out; the button beside it opens a fresh worktree
-/// on it, which is the opening gesture of a review when an agent's work has
-/// landed on a branch nobody has checked out. Both are refused on a branch
-/// another worktree already holds — git refuses two checkouts of the same
-/// branch, and an entry that can only answer with an error is worse than a
-/// greyed one that says who has it.
-fn branch_item(
-    app: Entity<ClaudhubApp>,
-    index: usize,
-    row: crate::ui::branches::BranchRow,
-    worktree: std::path::PathBuf,
-    main: std::path::PathBuf,
-) -> PopupMenuItem {
-    let taken = row.taken();
-    let (is_head, checkout) = (row.is_head, row.name.clone());
-    let (for_checkout, for_worktree) = (worktree.clone(), app.clone());
-    PopupMenuItem::element(move |_window, cx| {
-        branch_row(&row, index, taken, main.clone(), for_worktree.clone(), cx)
-    })
-    .icon(icon("git-branch"))
-    .checked(is_head)
-    .disabled(taken || is_head)
-    .on_click(move |_, _window, cx| {
-        app.update(cx, |this, cx| {
-            this.start(
-                Some(for_checkout.clone()),
-                crate::runtime::Action::Checkout,
-                Cmd::Checkout {
-                    worktree: for_checkout.clone(),
-                    branch: checkout.clone(),
-                },
-                cx,
-            );
-        });
-    })
-}
-
-/// A repository that no longer opens, and the button that forgets it.
-///
-/// It stays on the list because a repository that appears nowhere cannot be
-/// removed either: a moved folder, an erased clone, an unmounted partition left
-/// two warnings in the log at every start and no way out but editing the
-/// settings file by hand.
-fn missing_repo(
-    app: Entity<ClaudhubApp>,
-    index: usize,
-    path: std::path::PathBuf,
-    name: String,
-    message: String,
-) -> PopupMenuItem {
-    PopupMenuItem::element(move |_window, cx| {
-        let (app, path) = (app.clone(), path.clone());
-        h_flex()
-            .id(("missing-repo", index))
-            .w_full()
-            .gap_2()
-            .items_center()
-            .child(
-                icon("triangle-alert")
-                    .xsmall()
-                    .text_color(cx.theme().warning),
-            )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .truncate()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(name.clone()),
-                    )
-                    // What git answered, and not just "not found": it is what
-                    // says whether the folder moved or the disk is missing.
-                    .child(
-                        div()
-                            .truncate()
-                            .text_xs()
-                            .text_color(cx.theme().warning)
-                            .child(message.clone()),
-                    ),
-            )
-            .child(
-                Button::new(("forget-repo", index))
-                    .ghost()
-                    .xsmall()
-                    .icon(icon("x"))
-                    .tooltip(tr!("repo-forget"))
-                    .on_click(move |_, window, cx| {
-                        cx.stop_propagation();
-                        app.update(cx, |this, cx| {
-                            this.forget_repository(path.clone(), window, cx)
-                        });
-                    }),
-            )
-    })
-    .disabled(true)
 }

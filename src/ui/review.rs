@@ -309,13 +309,6 @@ impl ClaudhubApp {
                                     },
                                 )
                                 .size_full()
-                                // The rows' inset is here and not on them:
-                                // `uniform_list` lays its entries out at the
-                                // size it computes, and a margin on an entry is
-                                // ignored. It is that inset that lets the
-                                // rounded backgrounds breathe instead of
-                                // crossing the panel from edge to edge.
-                                .px_1()
                                 .track_scroll(&scroll.clone()),
                                 cx,
                             ),
@@ -576,14 +569,35 @@ impl ClaudhubApp {
                         // A commit runs the repository's hooks — a linter, a
                         // test suite — and those take as long as they take.
                         let committing = self.active_running(Action::Commit);
+                        let pushing = self.active_running(Action::CommitPush);
                         Button::new("commit")
                             .primary()
                             .xsmall()
                             .icon(icon("git-commit-horizontal"))
                             .label(tr!("action-commit"))
                             .loading(committing)
-                            .disabled(!can_commit || committing)
-                            .on_click(cx.listener(|this, _, _, cx| this.commit(false, cx)))
+                            .disabled(!can_commit || committing || pushing)
+                            .on_click(cx.listener(|this, _, _, cx| this.commit(false, false, cx)))
+                    })
+                    .child({
+                        // **A second button, not a menu on the first.** The two
+                        // are one gesture apart and both are made a dozen times
+                        // a day; hiding one behind a chevron would cost a click
+                        // to the one that ends the work — the commit that stays
+                        // local is the exception, on a branch nobody else
+                        // reads. It is the ghost of the two: what it adds is a
+                        // round trip, and the primary fill belongs to the
+                        // gesture that always applies.
+                        let committing = self.active_running(Action::Commit);
+                        let pushing = self.active_running(Action::CommitPush);
+                        Button::new("commit-push")
+                            .outline()
+                            .xsmall()
+                            .icon(icon("arrow-up-from-line"))
+                            .label(tr!("action-commit-push"))
+                            .loading(pushing)
+                            .disabled(!can_commit || committing || pushing)
+                            .on_click(cx.listener(|this, _, _, cx| this.commit(false, true, cx)))
                     }),
             )
     }
@@ -678,8 +692,9 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Commits what is in the index. `amend` reuses the previous commit.
-    pub(super) fn commit(&mut self, amend: bool, cx: &mut Context<Self>) {
+    /// Commits what is in the index. `amend` reuses the previous commit, and
+    /// `push` sends the branch off in the same command — see `Cmd::Commit`.
+    pub(super) fn commit(&mut self, amend: bool, push: bool, cx: &mut Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
         };
@@ -692,8 +707,14 @@ impl ClaudhubApp {
             message,
             amend,
             all: false,
+            push,
         };
-        self.start(Some(worktree), Action::Commit, cmd, cx);
+        let action = if push {
+            Action::CommitPush
+        } else {
+            Action::Commit
+        };
+        self.start(Some(worktree), action, cmd, cx);
     }
 }
 
@@ -812,9 +833,11 @@ fn render_dir(
     h_flex()
         .id(("dir", index))
         .h(crate::ui::theme::row_height(cx))
-        .rounded(cx.theme().radius)
+        // A band across the panel, like the project explorer's: see
+        // "L'explorateur de projet" in CLAUDE.md.
+        .w_full()
         .pl_1()
-        .pr_2()
+        .pr(crate::ui::theme::scroll_gutter())
         .gap_1()
         .items_center()
         .cursor_pointer()
@@ -962,9 +985,9 @@ fn render_file(
     h_flex()
         .id(("file", index))
         .h(crate::ui::theme::row_height(cx))
-        .rounded(cx.theme().radius)
+        .w_full()
         .pl_1()
-        .pr_2()
+        .pr(crate::ui::theme::scroll_gutter())
         .gap_2()
         .items_center()
         .cursor_pointer()

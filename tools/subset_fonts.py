@@ -27,11 +27,23 @@ from fontTools import subset
 from fontTools.ttLib import TTFont
 
 # Latin and its diacritics, Greek, Cyrillic, punctuation, currencies, arrows,
-# box drawing, block elements, geometric shapes, variation selectors.
+# mathematical operators, technical symbols, box drawing, block elements,
+# geometric shapes, miscellaneous symbols, dingbats, variation selectors.
+#
+# The symbols and the dingbats are there because of what a TUI writes: a check
+# mark, a cross, and the four-pointed stars an agent's spinner cycles through
+# (U+2722, U+2733, U+2736, U+273B) — and the bullet and the elbow it draws its
+# transcript with (U+23FA, U+23BF). Left out, they were drawn by whatever font
+# the system fell back to, at whatever width it pleased — which is what made a
+# status line jitter left and right once a frame. The view now pins every run
+# to its column, so the cost of a missing glyph is a shape that does not match
+# its neighbours rather than a grid that moves; keeping them in is still the
+# answer that looks right.
 CORE = (
     "U+0000-024F,U+0300-036F,U+0370-03FF,U+0400-04FF,"
-    "U+2000-206F,U+20A0-20BF,U+2190-21FF,"
-    "U+2500-257F,U+2580-259F,U+25A0-25FF,U+FE00-FE0F"
+    "U+2000-206F,U+20A0-20BF,U+2190-21FF,U+2200-22FF,U+2300-23FF,"
+    "U+2500-257F,U+2580-259F,U+25A0-25FF,U+2600-27BF,U+2900-29FF,U+2B00-2BFF,"
+    "U+FE00-FE0F"
 )
 # Braille (TUI progress bars) and the private-use plane the Nerd patcher fills.
 NERD = "U+2800-28FF,U+E000-F8FF"

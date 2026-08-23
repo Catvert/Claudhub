@@ -70,6 +70,31 @@ pub fn step(rows: &[Row], from: Option<usize>, delta: isize) -> Option<usize> {
     Some(next.clamp(0, last as isize) as usize)
 }
 
+/// What a selection offers the search field, if it offers anything.
+///
+/// The gesture is PhpStorm's: one highlights a call, asks where else it is
+/// made, and the shortcut spares retyping what is already under the cursor.
+/// What is worth a test is the refusal, because each refusal is a query nobody
+/// meant to ask — and because a bad one is silent, the field simply carrying a
+/// word the hand did not choose.
+///
+/// - **Blanks are trimmed**, a selection dragged with the mouse rarely stopping
+///   on the word.
+/// - **More than one line is refused**: `git grep` matches *within* a line, so a
+///   two-line term can only ever find nothing.
+/// - **Longer than `MAX_SEED` is refused rather than cut**: a truncated query
+///   searches for something no one selected.
+pub fn seed(selection: &str) -> Option<String> {
+    let text = selection.trim();
+    if text.is_empty() || text.contains('\n') || text.chars().count() > MAX_SEED {
+        return None;
+    }
+    Some(text.to_string())
+}
+
+/// Past this many characters a selection is a passage and not a term.
+pub const MAX_SEED: usize = 200;
+
 /// The first hit of the list, which is what a finished search selects.
 ///
 /// The first **hit** and not the first row: landing on a file heading would
@@ -191,5 +216,25 @@ mod tests {
         // A heading points at the top of its file: the preview has to open
         // somewhere.
         assert_eq!(line_of(&results, rows[0]), 1);
+    }
+
+    #[test]
+    fn a_selection_seeds_the_field_only_when_it_is_a_term() {
+        assert_eq!(seed("  handle_event  "), Some("handle_event".into()));
+        // A whole line taken in visual-line mode, its newline included.
+        assert_eq!(seed("    let value = 1;\n"), Some("let value = 1;".into()));
+        // Nothing selected, and a caret's worth of whitespace.
+        assert_eq!(seed(""), None);
+        assert_eq!(seed(" \t "), None);
+        // Two lines: `git grep` matches within a line, so this finds nothing.
+        assert_eq!(seed("first\nsecond"), None);
+        // Too long is refused, not cut: a truncated query is one nobody asked.
+        assert_eq!(seed(&"x".repeat(MAX_SEED)), Some("x".repeat(MAX_SEED)));
+        assert_eq!(seed(&"x".repeat(MAX_SEED + 1)), None);
+        // Counted in characters and not bytes.
+        assert_eq!(
+            seed(&"é".repeat(MAX_SEED)).map(|s| s.chars().count()),
+            Some(MAX_SEED)
+        );
     }
 }

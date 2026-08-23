@@ -49,7 +49,10 @@ use crate::ui::terminal_view::OpenTerminal;
 // 14: the notes left the tabs for the bottom third of the review's column. A
 // saved layout would keep them where they were, which is the one place this
 // change is about.
-const LAYOUT_VERSION: usize = 18;
+// 19: the SQL history did the same on the databases screen, and it is the same
+// bargain — the only lever there is throws away every screen's arrangement,
+// which is dear, and without it the new default is one nobody would ever see.
+const LAYOUT_VERSION: usize = 19;
 
 /// The saved layouts, one per screen.
 ///
@@ -399,11 +402,38 @@ pub struct ClaudhubApp {
     /// its own, and the request stands until its content comes back: without
     /// this, a window with four repositories would read the same file four
     /// times.
-    pub(super) restore_asked: bool,
-    /// What is left to put back from the previous session — see
-    /// `restore_session`. Emptied piece by piece as the repositories open, and
-    /// what never finds its worktree simply stays there and is dropped.
+    /// Which worktree the previous session was on, and nothing else.
+    ///
+    /// Everything else it was doing lives in that worktree's own entry — see
+    /// `store::Place` — and is put back by `settle_place` when the selection
+    /// lands there.
     pub(super) restoring: crate::ui::store::Session,
+    /// A place is being put back: nothing may be filed meanwhile.
+    ///
+    /// The window shows one screen, one console and one set of tabs, and they
+    /// are replaced one after another. A write landing between two of them —
+    /// `enter_workspace` files, and it is the first step — would copy the
+    /// previous project's console under the checkout one is arriving in.
+    pub(super) settling: bool,
+    /// The worktree whose place is the one on screen.
+    ///
+    /// It is what makes `settle_place` idempotent — two call sites reach it for
+    /// one arrival — and what keeps `persist_session` from filing the previous
+    /// project's tabs under the one just selected.
+    pub(super) settled: Option<PathBuf>,
+    /// The worktrees whose files have already been reopened this session.
+    ///
+    /// A file's panel hides itself when the editing root changes and comes back
+    /// with it, so a worktree visited twice must not have its tabs read again —
+    /// they never left.
+    pub(super) replayed: std::collections::HashSet<PathBuf>,
+    /// The files a restore is putting back, whole.
+    ///
+    /// Read by `take_restored_editing`: what arrives during a replay is not a
+    /// gesture, and must not carry the window off to the editing screen.
+    pub(super) replaying: Vec<crate::ui::store::OpenFile>,
+    /// Which of them was on screen, brought forward once they have all landed.
+    pub(super) replaying_focus: Option<crate::ui::store::OpenFile>,
     /// The remembered tabs still waiting to be read, in order.
     ///
     /// **One at a time**, and that is the whole reason this is a queue rather
@@ -428,7 +458,7 @@ pub struct ClaudhubApp {
     /// repository answered first" without ever beating the checkout `claudhub`
     /// was launched from. Ranks rather than flags because there are three of
     /// them, and the comparison is the whole rule.
-    selection_rank: u8,
+    pub(super) selection_rank: u8,
     /// Whether the session's first terminal has been opened. See
     /// `ensure_session_terminal`: it happens once, on the worktree one **ends
     /// up** on.
@@ -440,7 +470,7 @@ pub struct ClaudhubApp {
     /// enumerated". Only `Cmd::OpenRepo` is counted: `OpenIfRepo` answers
     /// **nothing** when the launch directory is not a repository, so counting
     /// it would leave a total that never comes back down.
-    opening_repos: usize,
+    pub(super) opening_repos: usize,
     pub(super) review: HashMap<PathBuf, ReviewState>,
     /// Every open terminal, in the order they were opened, all worktrees
     /// together. Each is a dock panel per screen sharing one pty — see
@@ -451,6 +481,11 @@ pub struct ClaudhubApp {
     /// dozens of branches, and scrolling a list of seventy entries to find one
     /// whose name you already know is exactly what a search field saves.
     pub(super) base_select: Entity<SelectState<SearchableVec<BaseChoice>>>,
+    /// The branch picker's surface, kept from one opening to the next: it holds
+    /// the filter field, whose `InputState` may not be rebuilt at every frame.
+    pub(super) branch_picker: Entity<crate::ui::branch_picker::BranchPicker>,
+    /// The worktree picker's surface, kept for its filter field's sake.
+    pub(super) worktree_picker: Entity<crate::ui::worktree_picker::WorktreePicker>,
     /// A note's input field. Created **once**: recreated in a `render` or when
     /// the dialog opens, it would lose the cursor, the selection and the text on
     /// the first keystroke.
@@ -576,6 +611,20 @@ pub struct ClaudhubApp {
     /// The folded sections of the plugins' panels. In memory, like the notes
     /// panel's: a reading posture, not a preference.
     pub(super) plugin_folded: crate::ui::plugin_view::Folds,
+    /// The scroll handles of the plugins' lists, one per panel and list id.
+    ///
+    /// The window's and not the tree's, for the reason a field's `InputState`
+    /// is: a tree is rebuilt on every gesture, and a handle created there would
+    /// put the list back at the top each time.
+    pub(super) plugin_lists: std::collections::HashMap<String, gpui::UniformListScrollHandle>,
+    /// The colouring of the excerpts a plugin draws, kept by content.
+    ///
+    /// An excerpt is a fragment with no file around it — a stack frame's ten
+    /// lines — so it is parsed on its own, which is what `HitHighlights`
+    /// already does for a search's result list. Parsing costs milliseconds, and
+    /// a panel repaints on every frame, hence the cache; it is keyed by the
+    /// text itself, so a tree rebuilt identically finds it again.
+    pub(super) plugin_code: crate::ui::plugin_view::CodeStyles,
     /// The lane a plugin's capabilities leave by. Kept so the list of plugins
     /// can be rebuilt — after an installation — without spawning a second
     /// drain task for every one of them.
@@ -663,7 +712,8 @@ pub struct ClaudhubApp {
     /// Neither the settings nor the multiplexer are ever recorded here: they
     /// are the two screens one only looks at, and "open this terminal where I
     /// was" has to answer with a screen one was doing something on. It is not
-    /// persisted — a session comes back on the screen `layout.json` names.
+    /// persisted — the screen one comes back to is the arriving worktree's own
+    /// (`store::Place`), or `layout.json`'s while none has been selected.
     pub(super) worked_in: crate::ui::workspace::Workspace,
     /// The current screen's dock — the one the root view shows.
     ///
@@ -714,6 +764,14 @@ pub struct ClaudhubApp {
     /// rebuilt: recreating it per frame would put the diff back at the top on
     /// every frame.
     pub(super) diff_scroll: gpui::UniformListScrollHandle,
+    /// The conflicted file open in the three-pane merge, if there is one. It
+    /// stands **in place of** the diff at the centre of the Git screen: opening
+    /// any other file is what puts the diff back.
+    pub(super) merging: Option<crate::ui::merge_view::MergeState>,
+    /// The merge view's list scrolling. Its own handle, never rebuilt, for the
+    /// reason every other one is: a fresh handle per frame scrolls back to the
+    /// top on every frame.
+    pub(super) merge_scroll: gpui_component::VirtualListScrollHandle,
     /// The measured width of the diff view on the previous frame.
     ///
     /// A view just opened has no bounds: they are only worth something once the
@@ -912,6 +970,9 @@ impl ClaudhubApp {
             needs_save: app_needs_layout_save,
         } = Self::build_docks(window, cx);
 
+        let branch_picker = crate::ui::branch_picker::BranchPicker::new(window, cx);
+        let worktree_picker = crate::ui::worktree_picker::WorktreePicker::new(window, cx);
+
         let search_inputs = crate::ui::search_view::SearchInputs::new(window, cx);
 
         let mut app = Self {
@@ -922,9 +983,13 @@ impl ClaudhubApp {
             server_wsl: false,
             active: None,
             restoring: crate::ui::store::Store::global(cx).session.clone(),
+            settled: None,
+            settling: false,
+            replayed: std::collections::HashSet::new(),
+            replaying: Vec::new(),
+            replaying_focus: None,
             pending_files: Vec::new(),
             restoring_files: false,
-            restore_asked: false,
             launch_dir: None,
             selection_rank: crate::ui::session::SELECTION_NONE,
             terminal_started: false,
@@ -933,6 +998,8 @@ impl ClaudhubApp {
             terminals: Vec::new(),
             commit_input,
             base_select,
+            branch_picker,
+            worktree_picker,
             note_input,
             prompt_input,
             task_input,
@@ -968,6 +1035,8 @@ impl ClaudhubApp {
             plugins: Vec::new(),
             plugin_deadlines: Vec::new(),
             plugin_folded: Default::default(),
+            plugin_lists: Default::default(),
+            plugin_code: Default::default(),
             plugin_outbox: None,
             editing_root: None,
             db: Default::default(),
@@ -1004,6 +1073,8 @@ impl ClaudhubApp {
             diff_scroll: gpui::UniformListScrollHandle::new(),
             diff_width: gpui::px(0.),
             diff_measures: 0,
+            merging: None,
+            merge_scroll: gpui_component::VirtualListScrollHandle::new(),
             diff_laid_out: gpui::px(0.),
             diff_wrap_scroll: gpui_component::VirtualListScrollHandle::new(),
             history_scroll: gpui::UniformListScrollHandle::new(),
@@ -1045,7 +1116,6 @@ impl ClaudhubApp {
         // A layout remembering a screen whose plugin is no longer configured
         // would open on a room with nothing in it.
         app.leave_empty_workspace(window, cx);
-        app.restore_console(window, cx);
         app.open_remembered_repositories(remote, cx);
         // Starting the server waits for the window to be mounted: a dialog needs
         // `Root`'s layers, which are only installed on the first render.
@@ -1163,6 +1233,16 @@ impl ClaudhubApp {
             // "Terminals" would not have the same band as their neighbours — two
             // chromes for one window.
             skin.set_panel_style(gpui_component::dock::PanelStyle::TabBar, cx);
+            // **No collapse affordance in the tab bars.** The dock draws, in
+            // the tab bar of the group nearest each edge, a button that folds
+            // the neighbouring zone away — and it is the one piece of chrome
+            // that says something false here: our panels are not fixed
+            // furniture on the side of a screen, they are tabs one drags
+            // anywhere, so "collapse the left dock" names a zone the user never
+            // arranged. What it hid came back only through a button on a
+            // different group's bar. Closing a view is dragging it out or
+            // hiding it from the `…` menu, both of which say what they do.
+            skin.set_toggle_button_visible(false, cx);
 
             let restored = saved
                 .workspaces
@@ -1687,12 +1767,28 @@ impl ClaudhubApp {
                 worktree,
                 files,
                 ignored,
-            } => self.project_files_arrived(worktree, files, ignored),
+                dirs,
+            } => self.project_files_arrived(worktree, files, ignored, dirs),
+            Evt::DirListed {
+                worktree,
+                dir,
+                result,
+            } => self.dir_listed(worktree, dir, result),
             Evt::FileContent {
                 worktree,
                 path,
                 content,
             } => self.file_content_arrived(worktree, path, content, window, cx),
+            Evt::FileBase {
+                worktree,
+                path,
+                text,
+            } => self.file_base_arrived(worktree, path, text, cx),
+            Evt::MergeStages {
+                worktree,
+                path,
+                result,
+            } => self.merge_arrived(worktree, path, result, cx),
             Evt::SearchDone {
                 worktree,
                 request,
@@ -1852,9 +1948,10 @@ impl ClaudhubApp {
         // made this repository the one being looked at.
         self.opening_repos = self.opening_repos.saturating_sub(1);
         self.ensure_session_terminal(window, cx);
-        // The file that was open may belong to this repository: it is the only
-        // moment we know its worktree exists.
-        self.restore_editing(cx);
+        // And where the work stood there, for the same reason and under the
+        // same rule: a stopgap that nothing displaces *becomes* the answer, and
+        // it is only once nothing is owed that it may open anything.
+        self.settle_place(window, cx);
     }
 
     fn repo_unavailable(&mut self, path: PathBuf, message: String, cx: &mut Context<Self>) {
@@ -1924,6 +2021,22 @@ impl ClaudhubApp {
         if state.base.is_none() {
             state.base = base;
         }
+        // A merge open on a file git no longer reports as unmerged is a merge
+        // that has been settled elsewhere — the two buttons of the conflicts
+        // row, an abort, a `git checkout` in a terminal next door. What it
+        // shows would be the index as it was, and every button on it would act
+        // on a conflict that is over.
+        let settled = self.merging.as_ref().is_some_and(|merge| {
+            merge.worktree == worktree
+                && self
+                    .review
+                    .get(&worktree)
+                    .is_some_and(|state| !unmerged(state, &merge.path))
+        });
+        if settled {
+            self.merging = None;
+        }
+        let state = self.review.entry(worktree.clone()).or_default();
         // The lists depend on the status: a file just staged must not stay
         // displayed on the wrong side. We **ask for them again** without
         // emptying them: clearing what is on screen before having something to
@@ -2096,6 +2209,12 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         self.finish(&worktree, action);
+        // A git write can have moved `HEAD` under the files being edited — a
+        // commit is the everyday case, and it is the one where the gutter's
+        // marks have to go quiet. Hooked on a completed gesture and not on a
+        // status refresh: one of those arrives on every file the watcher sees
+        // change, and this asks git a question per open tab.
+        self.refresh_editor_bases(worktree.as_deref());
         if action == Action::Commit {
             self.commit_input.update(cx, |input, cx| {
                 input.set_value("", window, cx);
@@ -2469,6 +2588,10 @@ impl ClaudhubApp {
         self.refresh_base_choices(window, cx);
         self.selection_rank = rank;
         self.ensure_session_terminal(window, cx);
+        // Where the work stood here: the screen, the console, and — on the
+        // first arrival — the files. **Before** the write below, which would
+        // otherwise file the previous project's tabs under this worktree.
+        self.settle_place(window, cx);
         self.persist_session(cx);
         cx.notify();
     }
@@ -2519,6 +2642,12 @@ impl ClaudhubApp {
             return;
         };
         state.selected = Some(path.clone());
+        // Opening a file is leaving the merge: the centre shows one or the
+        // other, and what one has just clicked is what one wants to see.
+        self.merging = None;
+        let Some(state) = self.review.get_mut(&worktree) else {
+            return;
+        };
         // The previous diff is cleared at once: keeping another file's for the
         // length of the read would give the impression that the click did
         // nothing, and then that the content changes by itself.
@@ -3368,6 +3497,9 @@ impl ClaudhubApp {
         self.workspace = workspace;
         self.dock = self.docks[&workspace].clone();
         self.focus_workspace(window, cx);
+        // The screen is part of where the work stands in this checkout, so
+        // changing it is one of the gestures that file it — see `ui::session`.
+        self.persist_session(cx);
         cx.notify();
     }
 
@@ -3700,6 +3832,11 @@ impl ClaudhubApp {
         let staged = file.is_staged();
         self.set_staged(worktree, vec![path], !staged, cx);
     }
+}
+
+/// Whether git still reports this file as unmerged.
+fn unmerged(state: &ReviewState, path: &Path) -> bool {
+    state.status.conflicted().any(|file| file.path == path)
 }
 
 #[cfg(test)]

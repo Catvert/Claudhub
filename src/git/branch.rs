@@ -170,6 +170,61 @@ pub fn local_exists(main: &Path, branch: &str) -> bool {
     )
 }
 
+/// True when `origin/feat` names a remote-tracking ref this repository has.
+///
+/// Asked before offering `--track`: the answer decides between creating a local
+/// branch and handing git a name it will refuse.
+pub fn remote_exists(main: &Path, branch: &str) -> bool {
+    git_ok(
+        main,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/{branch}"),
+        ],
+    )
+}
+
+/// The branch a remote-tracking name follows locally: `origin/feat/x` → `feat/x`.
+///
+/// A pure split on the first slash, which is what git's own DWIM does. A local
+/// name is left alone — it may well contain a slash of its own, and the callers
+/// only reach this with a name they already know to be remote.
+pub fn short_name(branch: &str) -> &str {
+    match branch.split_once('/') {
+        Some((_, short)) if !short.is_empty() => short,
+        _ => branch,
+    }
+}
+
+/// Splits an upstream into the remote and the branch on it.
+///
+/// `origin/feat/x` is `origin` and `feat/x`: a remote's name never contains a
+/// slash, a branch's often does, so the first one is the boundary. Pure and
+/// tested — it decides the refspec a branch update is fetched with, and a wrong
+/// split there fetches something that exists under another name.
+pub fn split_remote(upstream: &str) -> Option<(&str, &str)> {
+    let (remote, branch) = upstream.split_once('/')?;
+    (!remote.is_empty() && !branch.is_empty()).then_some((remote, branch))
+}
+
+/// The upstream a branch tracks, in `origin/feat` form.
+///
+/// `None` when it tracks nothing, which is a normal answer and not a failure:
+/// a branch Claudhub has just created has no remote counterpart yet.
+pub fn upstream_of(main: &Path, branch: &str) -> Option<String> {
+    git_opt(
+        main,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            &format!("{branch}@{{upstream}}"),
+        ],
+    )
+    .filter(|name| !name.is_empty())
+}
+
 /// The worktree already holding this branch, if there is one.
 pub fn checked_out_at(main: &Path, branch: &str) -> Option<PathBuf> {
     let out = git_opt(main, &["worktree", "list", "--porcelain"])?;
@@ -278,6 +333,23 @@ mod tests {
         assert!(parse_ref("origin/HEAD\0 \0yesterday\0x\0\0", &locals).is_none());
         let b = parse_ref("origin/feature\0 \0yesterday\0x\0\0", &locals).unwrap();
         assert_eq!(b.kind, BranchKind::Remote);
+    }
+
+    #[test]
+    fn an_upstream_splits_at_its_first_slash() {
+        assert_eq!(split_remote("origin/main"), Some(("origin", "main")));
+        // A branch name carries the slashes; a remote's name never does.
+        assert_eq!(split_remote("origin/feat/x"), Some(("origin", "feat/x")));
+        assert_eq!(split_remote("main"), None);
+        assert_eq!(split_remote("origin/"), None);
+    }
+
+    #[test]
+    fn a_remote_name_gives_up_its_remote() {
+        assert_eq!(short_name("origin/feat/x"), "feat/x");
+        // Nothing to strip: what comes back is what went in, so a caller that
+        // passes a local name by mistake does not lose half of it.
+        assert_eq!(short_name("main"), "main");
     }
 
     #[test]

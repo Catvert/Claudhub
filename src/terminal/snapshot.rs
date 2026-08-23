@@ -32,6 +32,15 @@ pub struct Segment {
     /// Byte offset in the line's text.
     pub start: usize,
     pub end: usize,
+    /// Grid column the run starts at.
+    ///
+    /// It is not deducible from `start`: a cell holds a character, not a byte,
+    /// and a wide one holds two columns. The view needs it because a run is
+    /// **pinned** to its column rather than laid end to end — see
+    /// `ui::terminal_view`.
+    pub col: usize,
+    /// Width in columns, which is not the character count either.
+    pub cells: usize,
     pub fg: Paint,
     pub bg: Paint,
     pub bold: bool,
@@ -86,6 +95,7 @@ pub(crate) fn capture<T: EventListener>(term: &Term<T>) -> Snapshot {
     let mut line = Line::default();
     let mut pending: Option<Segment> = None;
     let mut line_index: Option<usize> = None;
+    let mut column = 0usize;
 
     for indexed in content.display_iter {
         // The lines of the walk are numbered from the **bottom** of the
@@ -102,6 +112,7 @@ pub(crate) fn capture<T: EventListener>(term: &Term<T>) -> Snapshot {
                 flush(&mut lines, &mut line, &mut pending);
             }
             line_index = Some(index);
+            column = 0;
         }
 
         let cell = indexed.cell;
@@ -125,20 +136,49 @@ pub(crate) fn capture<T: EventListener>(term: &Term<T>) -> Snapshot {
             line.text.push(*zw);
         }
         let end = line.text.len();
+        // A wide character owns the column its spacer was skipped for.
+        let width = if cell.flags.contains(Flags::WIDE_CHAR) {
+            2
+        } else {
+            1
+        };
 
-        match pending.as_mut() {
-            Some(seg) if same_style(seg, &style) => seg.end = end,
-            _ => {
-                if let Some(seg) = pending.take() {
-                    line.segments.push(seg);
+        // **A wide character is a run of its own**, and that is what makes a
+        // run's width readable from its text: everywhere else, one column is
+        // one character, so the view may cut a run character by character
+        // without owning a width table.
+        if width == 2 {
+            if let Some(seg) = pending.take() {
+                line.segments.push(seg);
+            }
+            line.segments.push(Segment {
+                start,
+                end,
+                col: column,
+                cells: width,
+                ..style
+            });
+        } else {
+            match pending.as_mut() {
+                Some(seg) if same_style(seg, &style) => {
+                    seg.end = end;
+                    seg.cells += width;
                 }
-                pending = Some(Segment {
-                    start,
-                    end,
-                    ..style
-                });
+                _ => {
+                    if let Some(seg) = pending.take() {
+                        line.segments.push(seg);
+                    }
+                    pending = Some(Segment {
+                        start,
+                        end,
+                        col: column,
+                        cells: width,
+                        ..style
+                    });
+                }
             }
         }
+        column += width;
     }
     if line_index.is_some() {
         flush(&mut lines, &mut line, &mut pending);
@@ -188,7 +228,16 @@ fn push_line(lines: &mut Vec<Line>, mut line: Line) {
     if trimmed < line.text.len() {
         line.text.truncate(trimmed);
         line.segments.retain_mut(|seg| {
-            seg.end = seg.end.min(trimmed);
+            // The cut is **brought back into the run**: a run entirely past it
+            // must lose its own bytes and not its neighbour's — an inverted
+            // space is a run of one, and the whole line being blank put the cut
+            // at zero, three cells before the count could bear it.
+            let end = seg.end.min(trimmed).max(seg.start);
+            // One byte cut is one column cut: what is being trimmed is spaces,
+            // which are one byte and one cell each. No other cut may take this
+            // shortcut.
+            seg.cells -= seg.end - end;
+            seg.end = end;
             seg.start < seg.end
         });
     }
@@ -225,6 +274,8 @@ fn style_of(
     Segment {
         start: 0,
         end: 0,
+        col: 0,
+        cells: 0,
         fg,
         bg,
         bold,
@@ -468,6 +519,68 @@ mod tests {
             .map(|s| &line.text[s.start..s.end])
             .collect();
         assert_eq!(selected, "bcd", "runs = {:?}", line.segments);
+    }
+
+    /// What the view places its runs by: a column, not a byte offset.
+    ///
+    /// The trailing blanks the grid is full of are trimmed, and a run's width
+    /// has to be trimmed with them.
+    #[test]
+    fn a_run_knows_its_column_and_its_width() {
+        let snap = render("\x1b[31mred\x1b[0mnormal");
+        let line = &snap.lines[0];
+        assert_eq!(
+            line.segments
+                .iter()
+                .map(|s| (s.col, s.cells))
+                .collect::<Vec<_>>(),
+            [(0, 3), (3, 6)],
+            "runs = {:?}",
+            line.segments
+        );
+    }
+
+    /// A wide character is a run of its own, and it is what lets the view cut a
+    /// run character by character without a width table.
+    #[test]
+    fn a_wide_character_stands_alone_and_owns_two_columns() {
+        let snap = render("a\u{6f22}b");
+        let line = &snap.lines[0];
+        let runs: Vec<(&str, usize, usize)> = line
+            .segments
+            .iter()
+            .map(|s| (&line.text[s.start..s.end], s.col, s.cells))
+            .collect();
+        assert_eq!(runs, [("a", 0, 1), ("\u{6f22}", 1, 2), ("b", 3, 1)]);
+    }
+
+    /// Trimming the blanks off a line is a cut in **bytes** applied to a count
+    /// in **cells**: a run that falls wholly past the cut may only lose what it
+    /// holds. An inverted space on an otherwise blank line put the cut at zero,
+    /// and the run after it subtracted twenty columns from nineteen.
+    #[test]
+    fn trimming_never_underflows() {
+        for input in [
+            "a\u{6f22}b",
+            "\u{6f22}",
+            "\u{6f22} ",
+            "e\u{301}",
+            "\u{1F600}",
+            "a\u{301} b",
+            "\x1b[31m\u{6f22}\x1b[0m",
+            "hello world",
+            "\u{6f22}\u{6f22}\u{6f22}",
+            "  \u{6f22}  ",
+            "\x1b[7m \x1b[0m",
+            "\u{6f22}\r\n\u{6f22}",
+        ] {
+            let snap = render(input);
+            for line in &snap.lines {
+                for seg in &line.segments {
+                    assert!(seg.cells > 0, "{input:?} -> {:?}", line.segments);
+                }
+            }
+        }
     }
 
     #[test]

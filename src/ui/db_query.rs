@@ -177,64 +177,6 @@ pub struct SchemaIndex {
     pub foreign_keys: Vec<db::link::Key>,
 }
 
-/// The keywords offered when no schema is indexed — and beside the table names
-/// when one is.
-const KEYWORDS: &[&str] = &[
-    "SELECT",
-    "FROM",
-    "WHERE",
-    "JOIN",
-    "LEFT",
-    "RIGHT",
-    "INNER",
-    "OUTER",
-    "CROSS",
-    "ON",
-    "USING",
-    "GROUP BY",
-    "ORDER BY",
-    "ASC",
-    "DESC",
-    "LIMIT",
-    "OFFSET",
-    "HAVING",
-    "DISTINCT",
-    "AS",
-    "AND",
-    "OR",
-    "NOT",
-    "NULL",
-    "IS",
-    "IN",
-    "LIKE",
-    "BETWEEN",
-    "EXISTS",
-    "UNION",
-    "ALL",
-    "CASE",
-    "WHEN",
-    "THEN",
-    "ELSE",
-    "END",
-    "COUNT",
-    "SUM",
-    "AVG",
-    "MIN",
-    "MAX",
-    "INSERT INTO",
-    "VALUES",
-    "UPDATE",
-    "SET",
-    "DELETE",
-    "CREATE",
-    "TABLE",
-    "ALTER",
-    "DROP",
-    "INDEX",
-    "VIEW",
-    "EXPLAIN",
-];
-
 /// A query's result, as the table reads it.
 ///
 /// The delegate **is** the result: gpui-component's table asks for its cells one
@@ -847,8 +789,9 @@ impl ClaudhubApp {
     ///
     /// Everything `start_db_console` does apart from its two side effects: it
     /// neither calls up the databases screen nor unhides the panel. Restoring
-    /// is not a gesture — the screen that comes back is the one `layout.json`
-    /// carries, and a console hidden when quitting must stay hidden.
+    /// is not a gesture — the screen that comes back is the arriving worktree's
+    /// own, put back a step earlier by `settle_place`, and a console hidden when
+    /// quitting must stay hidden.
     ///
     /// The query is put in the editor and **not sent**: what one comes back to
     /// is the text one was writing, and replaying a `SELECT` nobody asked for
@@ -872,10 +815,20 @@ impl ClaudhubApp {
 
     /// Closes the console and gives the centre back to the diff.
     pub(super) fn close_db_console(&mut self, cx: &mut Context<Self>) {
-        self.query = QueryState::default();
-        self.set_db_rows(db::Rows::default(), cx);
+        self.reset_db_console(cx);
         self.persist_session(cx);
         cx.notify();
+    }
+
+    /// Empties the console without filing anything.
+    ///
+    /// The half `close_db_console` shares with an arrival in another worktree:
+    /// there is one console for the whole window, so its place has to be
+    /// cleared before the next one is put in it — and writing the store in
+    /// between would file an empty console under a checkout that has one.
+    pub(super) fn reset_db_console(&mut self, cx: &mut Context<Self>) {
+        self.query = QueryState::default();
+        self.set_db_rows(db::Rows::default(), cx);
     }
 
     pub(super) fn db_console_open(&self) -> bool {
@@ -1397,8 +1350,11 @@ impl ClaudhubApp {
         // The same four pieces the file editor installs, on the same harness:
         // see `ui::surface`. SQL is code, read and written the same way, and the
         // console was the one code panel that had none of them.
-        self.advance_surface_scroll(Surface::Query, &editor, window, cx);
-        self.sync_block_cursor(Surface::Query, vim, cx);
+        self.advance_surface_scroll(&Surface::Query, &editor, window, cx);
+        self.sync_block_cursor(&Surface::Query, vim, cx);
+        // The occurrences of the last search, lit as `Ctrl+F` lights them:
+        // see `sync_search_matches`.
+        self.sync_search_matches(&Surface::Query, vim, cx);
         let bar = self.render_console_bar(cx);
         let results = self.render_db_results(window, cx);
         let entity = cx.entity();
@@ -1445,7 +1401,7 @@ impl ClaudhubApp {
                                         )
                                         .capture_key_down(cx.listener(
                                             |this, event, window, cx| {
-                                                this.vim_key(Surface::Query, event, window, cx)
+                                                this.vim_key(&Surface::Query, event, window, cx)
                                             },
                                         ))
                                         // `Ctrl+V` is a binding of the input's
@@ -1456,7 +1412,47 @@ impl ClaudhubApp {
                                              _: &gpui_component::input::Paste,
                                              window,
                                              cx| {
-                                                if this.vim_paste(Surface::Query, window, cx) {
+                                                if this.vim_paste(&Surface::Query, window, cx) {
+                                                    cx.stop_propagation();
+                                                }
+                                            },
+                                        ))
+                                        // And so are `Enter` and `Backspace`,
+                                        // without which a `/` line could be
+                                        // typed and never run: see
+                                        // `vim_named_key`. `Ctrl+Enter` is the
+                                        // query's own key and passes through.
+                                        .capture_action(cx.listener(
+                                            |this,
+                                             action: &gpui_component::input::Enter,
+                                             window,
+                                             cx| {
+                                                if action.secondary || action.shift {
+                                                    return;
+                                                }
+                                                let taken = this.vim_named_key(
+                                                    &Surface::Query,
+                                                    "enter",
+                                                    window,
+                                                    cx,
+                                                );
+                                                if taken {
+                                                    cx.stop_propagation();
+                                                }
+                                            },
+                                        ))
+                                        .capture_action(cx.listener(
+                                            |this,
+                                             _: &gpui_component::input::Backspace,
+                                             window,
+                                             cx| {
+                                                let taken = this.vim_named_key(
+                                                    &Surface::Query,
+                                                    "backspace",
+                                                    window,
+                                                    cx,
+                                                );
+                                                if taken {
                                                     cx.stop_propagation();
                                                 }
                                             },
@@ -1506,7 +1502,7 @@ impl ClaudhubApp {
                                                         cx.stop_propagation();
                                                         entity.update(cx, |this, cx| {
                                                             this.on_surface_scroll(
-                                                                Surface::Query,
+                                                                &Surface::Query,
                                                                 event,
                                                                 window,
                                                                 cx,
@@ -1773,12 +1769,13 @@ impl ClaudhubApp {
     }
 }
 
-/// Completes SQL keywords, and the indexed schema's tables and columns.
+/// Completes what `db::complete` decides, and paints nothing of its own.
 ///
-/// **The provider filters itself**: gpui-component's list shows what it is
-/// given, highlighting the prefix, without dropping anything. A three-hundred-
-/// table schema would otherwise offer three hundred rows on the first letter
-/// typed.
+/// **The provider filters and ranks itself**: gpui-component's menu shows what
+/// it is given, in the order it is given, without dropping anything. A
+/// three-hundred-table schema would otherwise offer three hundred rows on the
+/// first letter typed — and a list cut before it is ranked is how the column
+/// one meant never shows up.
 pub struct SqlCompletions {
     pub schema: Rc<RefCell<SchemaIndex>>,
 }
@@ -1793,88 +1790,45 @@ impl CompletionProvider for SqlCompletions {
         cx: &mut App,
     ) -> Task<anyhow::Result<CompletionResponse>> {
         let source = text.to_string();
-        let offset = offset.min(source.len());
-        // The word in progress: what precedes the cursor and could be an
-        // identifier. It is what the completion replaces.
-        let start = source[..offset]
-            .char_indices()
-            .rev()
-            .take_while(|(_, c)| c.is_alphanumeric() || *c == '_')
-            .last()
-            .map(|(index, _)| index)
-            .unwrap_or(offset);
-        let prefix = source[start..offset].to_lowercase();
-
-        // An identifier followed by a dot narrows the candidates to that table's
-        // columns: `users.` only offers what `users` contains.
-        let qualifier = source[..start].strip_suffix('.').map(|before| {
-            before
-                .chars()
-                .rev()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect::<String>()
-                .to_lowercase()
-        });
-
-        let mut items: Vec<(String, CompletionItemKind)> = Vec::new();
-        {
+        let word = db::complete::word_range(&source, offset);
+        let candidates = {
             let schema = self.schema.borrow();
-            match qualifier.filter(|name| !name.is_empty()) {
-                Some(name) => {
-                    if let Some((_, columns)) = schema
-                        .tables
-                        .iter()
-                        .find(|(table, _)| table.to_lowercase() == name)
-                    {
-                        items.extend(
-                            columns
-                                .iter()
-                                .map(|column| (column.clone(), CompletionItemKind::FIELD)),
-                        );
-                    }
-                }
-                None => {
-                    let mut seen = std::collections::HashSet::new();
-                    for (table, columns) in &schema.tables {
-                        items.push((table.clone(), CompletionItemKind::CLASS));
-                        for column in columns {
-                            if seen.insert(column.clone()) {
-                                items.push((column.clone(), CompletionItemKind::FIELD));
-                            }
-                        }
-                    }
-                    items.extend(
-                        KEYWORDS
-                            .iter()
-                            .map(|word| (word.to_string(), CompletionItemKind::KEYWORD)),
-                    );
-                }
-            }
-        }
+            db::complete::candidates(
+                &source,
+                offset,
+                &schema.tables,
+                &schema.foreign_keys,
+                db::complete::KEYWORDS,
+            )
+        };
 
         // The replacement is given explicitly: the editor's fallback range
         // starts at the first character of the **trigger** word, which takes in
         // the `users.` of a qualified column — the table would be replaced by
         // its column.
         let range = lsp_types::Range {
-            start: text.offset_to_position(start),
-            end: text.offset_to_position(offset),
+            start: text.offset_to_position(word.start),
+            end: text.offset_to_position(word.end),
         };
-        let completions: Vec<CompletionItem> = items
+        let completions: Vec<CompletionItem> = candidates
             .into_iter()
-            .filter(|(label, _)| prefix.is_empty() || label.to_lowercase().starts_with(&prefix))
-            .take(50)
-            .map(|(label, kind)| CompletionItem {
-                filter_text: Some(label.clone()),
-                kind: Some(kind),
+            .map(|candidate| CompletionItem {
+                // No `filter_text`: the menu underlines its **length** from the
+                // start of the label, so filling it in — which is what LSP asks
+                // for — underlines every entry whole. Left out, the underline is
+                // the typed word's length, which is what a prefix match claims.
+                kind: Some(match candidate.kind {
+                    db::complete::Kind::Table => CompletionItemKind::CLASS,
+                    db::complete::Kind::Column => CompletionItemKind::FIELD,
+                    db::complete::Kind::Keyword => CompletionItemKind::KEYWORD,
+                    db::complete::Kind::Join => CompletionItemKind::SNIPPET,
+                }),
+                detail: candidate.detail,
                 text_edit: Some(CompletionTextEdit::Edit(TextEdit {
                     range,
-                    new_text: label.clone(),
+                    new_text: candidate.text,
                 })),
-                label,
+                label: candidate.label,
                 ..Default::default()
             })
             .collect();

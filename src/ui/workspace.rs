@@ -432,15 +432,26 @@ pub fn install_default_layout(
         // centre. This is PhpStorm's explorer, and the gesture is the same —
         // you unfold what you are looking for, you query what you have found.
         Workspace::Db => {
-            // The history is a tab beside the tree and not a panel of its own:
-            // one looks at the schema **or** at what one has already asked of
-            // it, and two columns would leave the console half the screen.
-            let left = with!(
-                listed,
-                DockLayout::tabs()
-                    .panel_view(panel!(DbPanel), cx)
-                    .panel_view(panel!(SqlHistoryPanel), cx)
-            );
+            // **The history is the column's bottom third**, the way the notes
+            // are on the review screen, and for the same reason: it does not
+            // say what there is to query, it says where one stands — what has
+            // already been asked, and what it answered — and that is read
+            // *while* writing the next query rather than instead of. Behind a
+            // tab it was one click away from the schema, so one reached for it
+            // only after having retyped what was already in it.
+            //
+            // A row and not a second column: the console keeps the whole width
+            // it had, which was the reason the tab was chosen in the first
+            // place.
+            let left = DockLayout::v_split()
+                .child(
+                    with!(listed, DockLayout::tabs().panel_view(panel!(DbPanel), cx)),
+                    None,
+                )
+                .child(
+                    DockLayout::tabs().panel_view(panel!(SqlHistoryPanel), cx),
+                    Some(third),
+                );
             let center = with!(
                 centred,
                 DockLayout::tabs().panel_view(panel!(ConsolePanel), cx)

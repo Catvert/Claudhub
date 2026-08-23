@@ -47,7 +47,7 @@ use rune::{Any, Context, Diagnostics, Source, Sources, Unit, Value, Vm};
 
 use crate::plugin::caps::Cap;
 use crate::plugin::manifest::{Capability, Manifest};
-use crate::plugin::view::{Handler, Item, Node, TextStyle};
+use crate::plugin::view::{Handler, Item, Node, Pair, TextStyle, Tone};
 use crate::runtime::Secret;
 
 /// What a script asks the application to do, on this side of the wire.
@@ -64,6 +64,19 @@ pub enum Effect {
     Open { path: PathBuf, line: usize },
     /// Say something in the status bar.
     Notify(String),
+    /// Put a text in the clipboard.
+    ///
+    /// A reference one carries elsewhere — an issue's short id, a run's number,
+    /// a sha — is read once and pasted into a branch name, a commit message, a
+    /// chat. Selecting it by hand out of a panel that has no text selection is
+    /// the one thing a plugin could not offer.
+    Copy(String),
+    /// Hand an address to the system's browser.
+    ///
+    /// A `Node::Link`'s gesture, and one a script cannot make itself: it has no
+    /// capability that reaches a browser, and giving it one would be giving it
+    /// a way to open anything at all without saying so in its manifest.
+    OpenUrl(String),
     /// Create a worktree and hand a text to the agent that lands in it.
     ///
     /// Not Sentry's gesture but everyone's: opening a branch for a CI failure,
@@ -408,6 +421,11 @@ pub struct RuneNode(Node);
 #[rune(item = ::claudhub)]
 pub struct RuneItem(Item);
 
+/// One line of a two-column table.
+#[derive(Any, Debug, Clone)]
+#[rune(item = ::claudhub)]
+pub struct RunePair(Pair);
+
 /// Empty means absent. A script has no `Option` worth the ceremony here, and
 /// "no icon" and "the icon called nothing" are the same thing.
 fn maybe(text: &str) -> Option<String> {
@@ -432,6 +450,7 @@ fn module(shared: &Arc<Shared>) -> Result<rune::Module, rune::ContextError> {
     let mut module = rune::Module::with_crate("claudhub")?;
     module.ty::<RuneNode>()?;
     module.ty::<RuneItem>()?;
+    module.ty::<RunePair>()?;
 
     // — The view vocabulary ——————————————————————————————————————————
     fn styled(text: &str, style: TextStyle) -> RuneNode {
@@ -457,6 +476,89 @@ fn module(shared: &Arc<Shared>) -> Result<rune::Module, rune::ContextError> {
             RuneNode(Node::Code {
                 text: text.to_string(),
                 language: maybe(&language),
+                start_line: None,
+                mark: None,
+            })
+        })
+        .build()?;
+    // The same excerpt, numbered from where it was cut out and with the line
+    // the trace named picked out. Kept apart from `code` rather than folded
+    // into it with two zeroes: an excerpt with no place in a file is the
+    // common case, and four arguments for it would be four arguments to read.
+    module
+        .function(
+            "snippet",
+            |text: Ref<str>, language: Ref<str>, start: i64, mark: i64| {
+                RuneNode(Node::Code {
+                    text: text.to_string(),
+                    language: maybe(&language),
+                    // Zero and below mean "not numbered": a script has no null
+                    // to hand us, and a line number is one-based everywhere a
+                    // file is quoted.
+                    start_line: usize::try_from(start).ok().filter(|n| *n > 0),
+                    mark: usize::try_from(mark).ok().filter(|n| *n > 0),
+                })
+            },
+        )
+        .build()?;
+    module
+        .function("badge", |text: Ref<str>, tone: Ref<str>| {
+            RuneNode(Node::Badge {
+                text: text.to_string(),
+                tone: Tone::named(&tone),
+            })
+        })
+        .build()?;
+    module
+        .function("callout", |text: Ref<str>, tone: Ref<str>| {
+            RuneNode(Node::Callout {
+                text: text.to_string(),
+                tone: Tone::named(&tone),
+            })
+        })
+        .build()?;
+    module
+        .function("pair", |key: Ref<str>, value: Ref<str>| {
+            RunePair(Pair {
+                key: key.to_string(),
+                value: value.to_string(),
+                tone: Tone::Neutral,
+            })
+        })
+        .build()?;
+    module
+        .function("toned", |pair: RunePair, tone: Ref<str>| {
+            RunePair(Pair {
+                tone: Tone::named(&tone),
+                ..pair.0
+            })
+        })
+        .build()?;
+    module
+        .function("fields", |rows: Vec<RunePair>| {
+            RuneNode(Node::Fields {
+                rows: rows.into_iter().map(|p| p.0).collect(),
+            })
+        })
+        .build()?;
+    module
+        .function("meter", |label: Ref<str>, value: Ref<str>, percent: i64| {
+            RuneNode(Node::Meter {
+                label: label.to_string(),
+                value: value.to_string(),
+                percent: percent.clamp(0, 100) as u8,
+            })
+        })
+        .build()?;
+    module
+        .function("divider", || RuneNode(Node::Divider))
+        .build()?;
+    module
+        .function("link", |label: Ref<str>, url: Ref<str>, icon: Ref<str>| {
+            RuneNode(Node::Link {
+                label: label.to_string(),
+                url: url.to_string(),
+                icon: maybe(&icon),
             })
         })
         .build()?;
@@ -475,6 +577,7 @@ fn module(shared: &Arc<Shared>) -> Result<rune::Module, rune::ContextError> {
             RuneNode(Node::Section {
                 title: title.to_string(),
                 body: nodes.into_iter().map(|n| n.0).collect(),
+                folded: false,
             })
         })
         .build()?;
@@ -574,6 +677,21 @@ fn module(shared: &Arc<Shared>) -> Result<rune::Module, rune::ContextError> {
                 primary,
             }),
             other => RuneNode(other),
+        })
+        .build()?;
+    module
+        .function("folded", |node: RuneNode| match node.0 {
+            Node::Section { title, body, .. } => RuneNode(Node::Section {
+                title,
+                body,
+                folded: true,
+            }),
+            other => RuneNode(other),
+        })
+        .build()?;
+    module
+        .function("fill", |node: RuneNode| {
+            RuneNode(Node::Fill(Box::new(node.0)))
         })
         .build()?;
     module
@@ -736,10 +854,44 @@ fn module(shared: &Arc<Shared>) -> Result<rune::Module, rune::ContextError> {
             it.effect(Effect::Notify(text.to_string()))
         })
         .build()?;
+    let it = shared.clone();
+    module
+        .function("open_url", move |url: Ref<str>| {
+            it.effect(Effect::OpenUrl(url.to_string()))
+        })
+        .build()?;
+    let it = shared.clone();
+    module
+        .function("copy", move |text: Ref<str>| {
+            it.effect(Effect::Copy(text.to_string()))
+        })
+        .build()?;
     let id = shared.id.clone();
     module
         .function("log", move |text: Ref<str>| {
             log::info!(target: "plugin", "{id}: {}", &*text);
+        })
+        .build()?;
+
+    // — Telling the time ——————————————————————————————————————————————
+    //
+    // **Two functions and no formatting.** Every API that reports anything
+    // dates it, and "five hours ago" is what one reads it as — but *how* one
+    // writes that is the script's business and the catalogue's, not the host's.
+    // What the host owes is the only two things a script cannot do at all: read
+    // the clock, and read an ISO-8601 stamp.
+    module
+        .function("now", || chrono::Utc::now().timestamp())
+        .build()?;
+    module
+        .function("epoch", |stamp: Ref<str>| {
+            // RFC 3339 is what every JSON API writes, Sentry included
+            // (`2026-08-23T10:12:33.123456Z`). Zero for what does not parse:
+            // a script has no null, and a date it cannot read is a date it
+            // must be able to leave out rather than fail on.
+            chrono::DateTime::parse_from_rfc3339(stamp.trim())
+                .map(|when| when.timestamp())
+                .unwrap_or(0)
         })
         .build()?;
 
@@ -1549,6 +1701,55 @@ mod sentry_plugin {
         probe
     }
 
+    /// The first list of a tree, wherever it sits.
+    ///
+    /// The panel now leads with a picker, a filter and a count, so a hard index
+    /// would have to be moved every time the head of the column gains a line —
+    /// and what these tests are about is what the list holds.
+    fn first_list(nodes: &[Node]) -> &[crate::plugin::view::Item] {
+        fn list_in(node: &Node) -> Option<&[crate::plugin::view::Item]> {
+            match node {
+                Node::List { items, .. } => Some(items.as_slice()),
+                // The panel's own list is wrapped in a `Fill`: it is what the
+                // panel is for, so it takes the height that is left.
+                Node::Fill(inner) => list_in(inner),
+                _ => None,
+            }
+        }
+        nodes
+            .iter()
+            .find_map(list_in)
+            .unwrap_or_else(|| panic!("no list in {nodes:?}"))
+    }
+
+    /// Every node of a tree, sections walked into.
+    ///
+    /// The detail panel puts its trace, its context and its breadcrumbs in
+    /// folding sections, which is a reading posture and not a shape a test
+    /// should have to know.
+    fn flatten(nodes: &[Node], out: &mut Vec<Node>) {
+        for node in nodes {
+            match node {
+                Node::Section { body, .. } => flatten(body, out),
+                Node::Fill(inner) => flatten(std::slice::from_ref(inner), out),
+                Node::Column(children) | Node::Row(children) => {
+                    out.push(node.clone());
+                    flatten(children, out);
+                }
+                other => out.push(other.clone()),
+            }
+        }
+    }
+
+    fn everything(tree: &Node) -> Vec<Node> {
+        let Node::Column(children) = tree else {
+            panic!("expected a column, got {tree:?}");
+        };
+        let mut out = Vec::new();
+        flatten(children, &mut out);
+        out
+    }
+
     #[test]
     fn the_issue_list_reads_whatever_shape_the_count_came_in() {
         let probe = probe_sentry();
@@ -1558,9 +1759,7 @@ mod sentry_plugin {
         let Node::Column(children) = &tree else {
             panic!("expected a column, got {tree:?}");
         };
-        let Some(Node::List { items, .. }) = children.get(1) else {
-            panic!("expected a list, got {children:?}");
-        };
+        let items = first_list(children);
         assert_eq!(items.len(), 2);
         assert_eq!(
             items[0].title,
@@ -1569,8 +1768,15 @@ mod sentry_plugin {
         // A string in the list, a number elsewhere: both read.
         assert_eq!(items[0].badge.as_deref(), Some("137"));
         assert_eq!(items[1].badge.as_deref(), Some("3"));
-        // An issue with no culprit and no permalink still reads.
-        assert_eq!(items[1].detail, None);
+        // The second line carries the culprit and how long ago it was seen,
+        // joined only where there are two things to join.
+        let detail = items[0].detail.as_deref().expect("a culprit and a date");
+        assert!(detail.starts_with("app/Http/Controllers"), "{detail}");
+        assert!(detail.contains(" · il y a "), "{detail}");
+        // An issue with no culprit still reads: the date stands alone, with no
+        // separator hanging off the front of it.
+        let bare = items[1].detail.as_deref().expect("a date at least");
+        assert!(bare.starts_with("il y a "), "{bare}");
     }
 
     #[test]
@@ -1593,24 +1799,336 @@ mod sentry_plugin {
         let Node::Column(body) = &tree else {
             panic!("expected a column");
         };
-        // The whole stack is listed — it is the path that led there — and only
-        // the application's frames carry their code.
-        let frames: Vec<_> = body
-            .iter()
-            .filter(|node| matches!(node, Node::Row(_)))
-            .collect();
-        assert_eq!(frames.len(), 3, "two frames plus the button row");
-        let excerpts: Vec<_> = body
+        let _ = body;
+        let all = everything(&tree);
+
+        // The whole stack is listed — it is the path that led there — and the
+        // most recent frame leads: Sentry's order is the call's, and what one
+        // comes for is the line that threw.
+        let paths: Vec<&str> = all
             .iter()
             .filter_map(|node| match node {
-                Node::Code { text, .. } => Some(text),
+                Node::Button {
+                    label, on_click, ..
+                } if on_click.as_ref().is_some_and(|h| h.action == "open") => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                "app/Http/Controllers/QuoteController.php:88",
+                "/vendor/laravel/framework/src/Foundation/Http/Kernel.php:141",
+            ]
+        );
+
+        // Only the application's frames carry their code, and it is quoted
+        // **bare**: the numbers are the panel's column, so the excerpt stays
+        // copyable into a file, which is what one does with an excerpt.
+        let excerpts: Vec<_> = all
+            .iter()
+            .filter_map(|node| match node {
+                Node::Code {
+                    text,
+                    language,
+                    start_line,
+                    mark,
+                } => Some((text.clone(), language.clone(), *start_line, *mark)),
                 _ => None,
             })
             .collect();
         assert_eq!(excerpts.len(), 1, "only the in-app frame is quoted");
-        // The offending line is marked: the numbering does not say it.
-        assert!(excerpts[0].contains(">"), "{}", excerpts[0]);
-        assert!(excerpts[0].contains("88"), "{}", excerpts[0]);
+        let (text, language, start, mark) = &excerpts[0];
+        assert!(text.starts_with("    public function store"), "{text}");
+        assert!(!text.contains("86"), "no numbers in the text: {text}");
+        assert_eq!(language.as_deref(), Some("php"));
+        assert_eq!(*start, Some(86));
+        assert_eq!(*mark, Some(88), "the line the trace named is picked out");
+
+        // The header says what it is and how bad, and the permalink is a link
+        // and not a button with no action — which is what it was, and what
+        // made it a dead button.
+        assert!(
+            all.iter()
+                .any(|node| matches!(node, Node::Badge { text, .. } if text == "error")),
+            "{all:?}"
+        );
+        assert!(
+            all.iter()
+                .any(|node| matches!(node, Node::Link { url, .. } if url.contains("sentry.io"))),
+            "{all:?}"
+        );
+    }
+
+    /// One issue, with the short id a team reads it by.
+    const SHORT_ID: &str = r#"[
+      {
+        "id": "4508",
+        "shortId": "ACETICS-4Q",
+        "title": "TypeError",
+        "level": "error",
+        "count": "137"
+      }
+    ]"#;
+
+    /// What `issues/{id}/tags/` answers: the top values of each tag, with the
+    /// total they are a share of.
+    const TAGS: &str = r#"[
+      {
+        "key": "environment",
+        "name": "Environment",
+        "totalValues": 200,
+        "topValues": [{ "name": "production", "value": "production", "count": 200 }]
+      },
+      {
+        "key": "release",
+        "name": "Release",
+        "totalValues": 200,
+        "topValues": [
+          { "name": "5.9.4-2", "value": "5.9.4-2", "count": 44 },
+          { "name": "6.1.0-2", "value": "6.1.0-2", "count": 156 }
+        ]
+      }
+    ]"#;
+
+    /// An event with everything a Sentry page shows around a trace.
+    const RICH_EVENT: &str = r#"{
+      "message": "Cannot read properties of undefined",
+      "tags": [
+        { "key": "handled", "value": "yes" },
+        { "key": "level", "value": "error" },
+        { "key": "runtime", "value": "php 8.3.31" }
+      ],
+      "entries": [
+        {
+          "type": "breadcrumbs",
+          "data": {
+            "values": [
+              { "category": "query", "message": "select * from quotes", "level": "info" },
+              { "category": "http", "message": "GET /quotes/12", "level": "warning" }
+            ]
+          }
+        },
+        {
+          "type": "exception",
+          "data": {
+            "values": [
+              {
+                "stacktrace": {
+                  "frames": [
+                    {
+                      "filename": "app/Http/Controllers/QuoteController.php",
+                      "function": "store",
+                      "lineNo": 88,
+                      "inApp": true,
+                      "context": [[87, "    {"], [88, "        return $q->total;"]]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }"#;
+
+    /// **What a trace alone does not say.**
+    ///
+    /// An error is not diagnosable from its stack: what makes it so is what is
+    /// around it — on which release, in which environment, and what happened in
+    /// the second before. Sentry's own page leads with those, and a panel that
+    /// dropped them would be read once here and once in the browser.
+    #[test]
+    fn an_issue_carries_what_surrounds_it() {
+        let probe = probe_sentry();
+        let state =
+            answer_with(&probe, |_| Ok(ISSUES.into()), probe.host.init(None)).expect("init");
+        let state = answer_with(
+            &probe,
+            // Two round trips for one gesture, told apart by the address:
+            // the event carries this occurrence, the tags carry all of them.
+            |cap| match cap {
+                super::Cap::Http { url, .. } if url.ends_with("/tags/") => Ok(TAGS.into()),
+                _ => Ok(format!("[{RICH_EVENT}]")),
+            },
+            probe.host.update(&state, "choose", "0"),
+        )
+        .expect("choose");
+
+        let all = everything(&probe.host.view(&state, "issue").expect("view"));
+
+        // The event's tags, in a table: eight values that line up are read at a
+        // glance, and eight sentences are not.
+        let pairs: Vec<_> = all
+            .iter()
+            .filter_map(|node| match node {
+                Node::Fields { rows } => Some(rows.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert!(
+            pairs
+                .iter()
+                .any(|p| p.key == "runtime" && p.value == "php 8.3.31"),
+            "{pairs:?}"
+        );
+        // `handled: yes` is not a neutral fact, and the tone says so.
+        let handled = pairs.iter().find(|p| p.key == "handled").expect("handled");
+        assert_eq!(handled.tone, crate::plugin::view::Tone::Success);
+        // The counters of the header are in a table of their own.
+        assert!(pairs.iter().any(|p| p.key == "événements"), "{pairs:?}");
+
+        // The distribution, in bars: a share is a comparison, and two numbers
+        // side by side are two numbers.
+        let meters: Vec<_> = all
+            .iter()
+            .filter_map(|node| match node {
+                Node::Meter { label, percent, .. } => Some((label.clone(), *percent)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            meters.contains(&("production".to_string(), 100)),
+            "{meters:?}"
+        );
+        assert!(meters.contains(&("6.1.0-2".to_string(), 78)), "{meters:?}");
+
+        // And the breadcrumbs, in the order they happened.
+        let crumbs = all
+            .iter()
+            .find_map(|node| match node {
+                Node::List { id, items, .. } if id == "crumbs" => Some(items.clone()),
+                _ => None,
+            })
+            .expect("a breadcrumb list");
+        assert_eq!(crumbs.len(), 2);
+        assert_eq!(crumbs[0].title, "select * from quotes");
+        assert_eq!(crumbs[1].detail.as_deref(), Some("http"));
+    }
+
+    /// **The three things a panel does with its own shape.**
+    ///
+    /// The list is what the issues panel is for, so it says so and takes the
+    /// height that is left; the distribution is glanced at once, so it starts
+    /// folded and the trace keeps the screen; and the short id is a reference
+    /// one carries elsewhere, so it is a button and not a line of text.
+    #[test]
+    fn the_panel_says_what_fills_what_folds_and_what_is_carried_away() {
+        let probe = probe_sentry();
+        let state =
+            answer_with(&probe, |_| Ok(SHORT_ID.into()), probe.host.init(None)).expect("init");
+
+        // The list fills: without it, it was given sixteen rows in advance and
+        // the panel ended in a band of nothing under them.
+        let Node::Column(children) = &probe.host.view(&state, "issues").expect("view") else {
+            panic!("expected a column");
+        };
+        assert!(
+            children.iter().any(
+                |node| matches!(node, Node::Fill(inner) if matches!(**inner, Node::List { .. }))
+            ),
+            "{children:?}"
+        );
+
+        let state = answer_with(
+            &probe,
+            |cap| match cap {
+                super::Cap::Http { url, .. } if url.ends_with("/tags/") => Ok(TAGS.into()),
+                _ => Ok(format!("[{RICH_EVENT}]")),
+            },
+            probe.host.update(&state, "choose", "0"),
+        )
+        .expect("choose");
+        let tree = probe.host.view(&state, "issue").expect("view");
+        let Node::Column(body) = &tree else {
+            panic!("expected a column");
+        };
+        let sections: Vec<_> = body
+            .iter()
+            .filter_map(|node| match node {
+                Node::Section { title, folded, .. } => Some((title.as_str(), *folded)),
+                _ => None,
+            })
+            .collect();
+        assert!(sections.contains(&("Répartition", true)), "{sections:?}");
+        assert!(
+            sections
+                .iter()
+                .any(|(title, folded)| title.starts_with("Trace") && !folded),
+            "the trace is what one came to read: {sections:?}"
+        );
+
+        // The short id is a gesture, and the gesture puts it in the clipboard.
+        let all = everything(&tree);
+        let handler = all
+            .iter()
+            .find_map(|node| match node {
+                Node::Button {
+                    label, on_click, ..
+                } if label == "ACETICS-4Q" => on_click.clone(),
+                _ => None,
+            })
+            .expect("the short id is a button");
+        assert_eq!(handler.payload, "ACETICS-4Q");
+        let _ = probe.shared.take_effects();
+        answer_with(
+            &probe,
+            |_| panic!("copying asks nothing of anyone"),
+            probe.host.update(&state, &handler.action, &handler.payload),
+        )
+        .expect("copy");
+        let effects = probe.shared.take_effects();
+        assert!(
+            effects.contains(&super::Effect::Copy("ACETICS-4Q".into())),
+            "{effects:?}"
+        );
+    }
+
+    /// The list filters on what it holds, and a choice survives the filter.
+    ///
+    /// The row one clicks is an index into what is **shown**; what the state
+    /// keeps is the rank in the whole list. Confusing the two means clearing
+    /// the filter opens an error one was not reading.
+    #[test]
+    fn filtering_the_list_does_not_move_the_choice() {
+        let probe = probe_sentry();
+        let state =
+            answer_with(&probe, |_| Ok(ISSUES.into()), probe.host.init(None)).expect("init");
+        let state = answer_with(
+            &probe,
+            |_| panic!("filtering asks nothing of anyone"),
+            probe.host.update(&state, "filter", "valueerror"),
+        )
+        .expect("filter");
+
+        let tree = probe.host.view(&state, "issues").expect("view");
+        let Node::Column(children) = &tree else {
+            panic!("expected a column");
+        };
+        let items = first_list(children);
+        assert_eq!(items.len(), 1, "the filter reaches the title");
+        assert_eq!(items[0].title, "ValueError");
+
+        // Row 0 of the filtered list is issue 1 of the whole one.
+        let state = answer_with(
+            &probe,
+            |_| Ok("[]".into()),
+            probe.host.update(&state, "choose", "0"),
+        )
+        .expect("choose");
+        let state = answer_with(
+            &probe,
+            |_| panic!("clearing the filter asks nothing of anyone"),
+            probe.host.update(&state, "filter", ""),
+        )
+        .expect("filter");
+        let all = everything(&probe.host.view(&state, "issue").expect("view"));
+        assert!(
+            all.iter()
+                .any(|node| matches!(node, Node::Text { text, .. } if text == "ValueError")),
+            "the filter moved the choice: {all:?}"
+        );
     }
 
     #[test]
@@ -1756,10 +2274,7 @@ mod sentry_plugin {
         let Node::Column(children) = &tree else {
             panic!("expected a column, got {tree:?}");
         };
-        assert!(
-            matches!(children.get(1), Some(Node::List { items, .. }) if items.len() == 2),
-            "the picker is still there: {children:?}"
-        );
+        assert_eq!(first_list(children).len(), 2, "the picker is still there");
     }
 
     #[test]
@@ -1812,10 +2327,7 @@ mod sentry_plugin {
         let Node::Column(children) = &tree else {
             panic!("expected a column, got {tree:?}");
         };
-        assert!(
-            matches!(children.get(1), Some(Node::List { items, .. }) if items.len() == 2),
-            "the list is gone: {children:?}"
-        );
+        assert_eq!(first_list(children).len(), 2, "the list is gone");
         // And the reason sits in the issue's own panel.
         let tree = probe.host.view(&state, "issue").expect("view renders");
         let Node::Column(body) = &tree else {
@@ -1823,7 +2335,7 @@ mod sentry_plugin {
         };
         assert!(
             body.iter()
-                .any(|node| matches!(node, Node::Text { text, .. } if text.contains("404"))),
+                .any(|node| matches!(node, Node::Callout { text, .. } if text.contains("404"))),
             "{body:?}"
         );
     }
@@ -1846,7 +2358,7 @@ mod sentry_plugin {
         };
         assert!(
             body.iter().any(
-                |node| matches!(node, Node::Text { text, .. } if text.contains("ne garde plus"))
+                |node| matches!(node, Node::Callout { text, .. } if text.contains("ne garde plus"))
             ),
             "{body:?}"
         );

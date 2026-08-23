@@ -6,15 +6,34 @@
 //! the file again, and retyping the query that was ready to go. That is four
 //! gestures to get back to a state nobody had left on purpose.
 //!
-//! Three things are put back, and the choice of the three is the whole rule:
-//! **what one had chosen**, never what one had obtained. The selected worktree,
-//! the file open in the editor, the console's connection and the text of its
-//! query — but no diff, no result grid, no status. A `SELECT` replayed on
-//! opening is a query against a server nobody asked to reach, and everything
-//! else arrives on its own from the reads the selection already triggers.
+//! What is put back is chosen by one rule: **what one had chosen**, never what
+//! one had obtained. The screen, the files open in the editor, the console's
+//! connection and the text of its query — but no diff, no result grid, no
+//! status. A `SELECT` replayed on arrival is a query against a server nobody
+//! asked to reach, and everything else comes back on its own from the reads the
+//! selection already triggers.
 //!
-//! The screen is not here either: it lives in `layout.json` with the panels'
-//! places, which is where a window's geometry belongs.
+//! **And it is kept per worktree** (`store::Place`), which is the other half of
+//! the same idea: going to another project to check one thing and coming back
+//! used to cost the file, the screen and the query. `layout.json` still says
+//! where the panels are — that is the *window's* geometry, and it is the same
+//! on every project — and it still names the screen the window opens on, which
+//! is what answers before any repository has.
+//!
+//! Three moments, and they are not the same:
+//!
+//! - **The screen and the console** are put back at every arrival: they are one
+//!   apiece for the whole window, so the worktree one leaves has just written
+//!   over them.
+//! - **The tabs** are put back on the first arrival only. A file's panel hides
+//!   itself when the editing root changes and comes back with it — the same
+//!   answer terminals give — so a worktree visited earlier in the session still
+//!   has its files, opened where one left them.
+//! - **Nothing at all** while the selection is a stopgap. Until the
+//!   repositories have finished answering, the window shows the first checkout
+//!   of whichever replied first, and replaying its place would open files in a
+//!   project the session never asked for — `session_terminal_due`, the rule the
+//!   first terminal already follows.
 
 use std::path::{Path, PathBuf};
 
@@ -23,7 +42,7 @@ use gpui::{App, Context, Window};
 use crate::runtime::Cmd;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::settings::Settings;
-use crate::ui::store::{OpenConsole, OpenFile, Session, Store};
+use crate::ui::store::{OpenConsole, OpenFile, Place, Store};
 
 /// Nothing selected yet.
 pub(super) const SELECTION_NONE: u8 = 0;
@@ -85,33 +104,81 @@ pub(super) fn session_terminal_due(rank: u8, pending: usize) -> bool {
 }
 
 impl ClaudhubApp {
-    /// Reopens the file that was in the editor, once its worktree is known to
-    /// exist.
+    /// What the store keeps of a checkout's place.
+    fn place_of(&self, worktree: &Path, cx: &App) -> Place {
+        crate::ui::store::Store::global(cx)
+            .worktrees
+            .get(worktree)
+            .map(|state| state.place.clone())
+            .unwrap_or_default()
+    }
+
+    /// Puts back where the work stood in the worktree now shown.
     ///
-    /// Called every time a repository opens, because that is the only moment we
-    /// learn about its checkouts. What never finds its worktree stays in
-    /// `restoring` and simply goes away with the window: a file whose worktree
-    /// has been removed is nothing to report.
-    pub(super) fn restore_editing(&mut self, cx: &mut Context<Self>) {
-        if self.restore_asked {
-            return;
-        }
-        // The tabs, or the single file a state written before them named.
-        let mut queue = self.restoring.tabs.clone();
-        if queue.is_empty() {
-            queue.extend(self.restoring.editing.clone());
-        }
-        let Some(first) = queue.first().cloned() else {
+    /// Called from the two places a selection can settle: the gesture itself,
+    /// and the moment the last repository answers — a stopgap that nothing
+    /// displaces *becomes* the answer, and it is only then that it may open
+    /// anything. Idempotent by `settled`, which is what lets both call it.
+    pub(super) fn settle_place(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(worktree) = self.active.clone() else {
             return;
         };
-        // They all belong to one worktree — the session files the editors of
-        // the tree it was looking at — so one existence check answers for all.
+        if !session_terminal_due(self.selection_rank, self.opening_repos) {
+            return;
+        }
+        if self.settled.as_deref() == Some(worktree.as_path()) {
+            return;
+        }
+        self.settled = Some(worktree.clone());
+        // Nothing is filed while the three halves are being swapped one after
+        // another: `enter_workspace` files, and it is the first of them.
+        self.settling = true;
+        let place = self.place_of(&worktree, cx);
+        // The screen first: what follows opens files and a console, and doing
+        // it the other way round would show them landing on the screen one is
+        // about to leave.
+        // A screen that has become empty is not one to come back to: the only
+        // plugin it carried may have been uninstalled, or left without the
+        // setting it cannot work without, and `leave_empty_workspace` would
+        // have to undo the arrival straight away.
+        if let Some(screen) = place
+            .screen
+            .as_deref()
+            .and_then(crate::ui::workspace::Workspace::from_key)
+            .filter(|screen| crate::ui::plugin_view::screen_has_content(*screen, cx))
+        {
+            self.enter_workspace(screen, window, cx);
+        }
+        self.restore_console(place.console.clone(), window, cx);
+        // The tabs on the **first** arrival only: a file's panel hides itself
+        // when the editing root changes and comes back with it, so a worktree
+        // visited earlier in this session still has its files.
+        if self.replayed.insert(worktree) {
+            self.restore_tabs(place, cx);
+        }
+        self.settling = false;
+        cx.notify();
+    }
+
+    /// Reopens the files a checkout had open, in tab order.
+    fn restore_tabs(&mut self, place: Place, cx: &mut Context<Self>) {
+        // The tabs, or the single file a state written before them named.
+        let mut queue = place.tabs.clone();
+        if queue.is_empty() {
+            queue.extend(place.editing.clone());
+        }
+        let Some(first) = queue.first() else {
+            return;
+        };
+        // They all belong to one checkout — a place files the editors of the
+        // tree it describes — so one existence check answers for all.
         if !self.worktree_exists(&first.worktree) {
             return;
         }
-        self.restore_asked = true;
-        self.restoring_files = true;
+        self.replaying = queue.clone();
         self.pending_files = queue;
+        self.replaying_focus = place.editing;
+        self.restoring_files = true;
         self.read_next_file(cx);
     }
 
@@ -141,7 +208,8 @@ impl ClaudhubApp {
         if self.restoring_files {
             return;
         }
-        let Some(open) = self.restoring.editing.clone() else {
+        let Some(open) = self.replaying_focus.take() else {
+            self.replaying.clear();
             return;
         };
         let panel = self
@@ -150,34 +218,40 @@ impl ClaudhubApp {
         if let Some(panel) = panel {
             crate::ui::panels::FilePanel::activate(&panel, window, cx);
         }
+        self.replaying.clear();
     }
 
-    /// Is this content the one the restore asked for.
+    /// Is this content the one a restore asked for.
     ///
-    /// It is what keeps the reopened file from calling up the "Files" screen:
+    /// It is what keeps a reopened file from calling up the "Files" screen:
     /// opening a file is a gesture that carries one to it, but here the gesture
-    /// is a restore, and the screen being put back is the one from
-    /// `layout.json`. The answer consumes the request: a second read of the
-    /// same file, this time asked for by hand, gets the usual behaviour.
+    /// is an arrival, and the screen being put back is the place's own. The
+    /// answer consumes nothing: the list is cleared when the last file lands.
     pub(super) fn take_restored_editing(&mut self, worktree: &Path, path: &Path) -> bool {
         self.restoring_files
             && self
-                .restoring
-                .tabs
+                .replaying
                 .iter()
-                .chain(self.restoring.editing.iter())
                 .any(|open| open.worktree == worktree && open.path == path)
     }
 
-    /// Reopens the SQL console on the connection it was on, with the query that
-    /// was in the editor — not sent.
+    /// Puts the SQL console back on the connection this checkout was using,
+    /// with the query that was in its editor — not sent.
     ///
-    /// It does not wait for anything: a connection is described in the
-    /// settings, not in a repository. Named by its key rather than copied, so a
-    /// connection edited in the meantime is the one that opens — and one that
-    /// has been deleted simply does not come back.
-    pub(super) fn restore_console(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(console) = self.restoring.console.take() else {
+    /// There is one console for the whole window, so arriving somewhere else
+    /// **clears** it first: leaving the previous project's query under the
+    /// cursor would be the one thing a per-worktree place must not do. The
+    /// connection is named by its key rather than copied, so one edited in the
+    /// meantime is the one that opens — and one that has been deleted simply
+    /// does not come back.
+    fn restore_console(
+        &mut self,
+        console: Option<OpenConsole>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reset_db_console(cx);
+        let Some(console) = console else {
             return;
         };
         let Some(connection) = Settings::global(cx)
@@ -195,35 +269,54 @@ impl ClaudhubApp {
     ///
     /// Called from the gestures that move it — choosing a worktree, opening or
     /// closing a file, opening or closing the console, typing in the query
-    /// editor — and not on quitting: a window is also closed by a crash, by a
-    /// session ending, by a `kill`, and a state only written on the way out is
-    /// a state one loses precisely on the days it would have helped.
+    /// editor, changing screen — and not on quitting: a window is also closed by
+    /// a crash, by a session ending, by a `kill`, and a state only written on
+    /// the way out is a state one loses precisely on the days it would have
+    /// helped.
     pub(super) fn persist_session(&mut self, cx: &mut App) {
-        let session = Session {
-            // What has not been put back yet stands in for what is not there:
-            // the query editor emits a value per keystroke, and the first of
-            // them arrives before any repository has answered. Without this,
-            // typing one letter on startup would erase the worktree one is
-            // about to be given back.
-            worktree: self
-                .active
-                .clone()
-                .or_else(|| self.restoring.worktree.clone()),
-            editing: self
-                .editing()
-                .map(|editing| OpenFile {
-                    worktree: editing.worktree.clone(),
-                    path: editing.path.clone(),
-                })
-                .or_else(|| self.restoring.editing.clone()),
-            // What has not been put back yet stands in for what is not there,
-            // as the worktree above does: a keystroke lands before the first
-            // file has come back, and filing an empty list there would lose
-            // every tab of the previous session.
+        // What has not been put back yet stands in for what is not there: the
+        // query editor emits a value per keystroke, and the first of them
+        // arrives before any repository has answered. Without this, typing one
+        // letter on startup would erase the worktree one is about to be given
+        // back.
+        let worktree = self
+            .active
+            .clone()
+            .or_else(|| self.restoring.worktree.clone());
+        let repo = worktree.as_deref().and_then(|path| self.main_of(path));
+        Store::update_global(cx, |store| store.session.worktree = worktree.clone());
+        // No worktree, or one whose repository is not open: there is nowhere to
+        // file a place, and inventing an entry would leave a row the purge
+        // cannot judge.
+        let (Some(worktree), Some(repo)) = (worktree, repo) else {
+            return;
+        };
+        // A place is only written once its own has been put back: until then
+        // what the window shows is the previous project's, and filing it here
+        // would copy one checkout's tabs on to another.
+        // Nothing is filed while a place is being put back — neither during the
+        // swap itself nor while the files are still on their way. A keystroke in
+        // the query editor lands well before the last of them, and an empty tab
+        // list written then would lose every one of them.
+        if self.settling
+            || self.restoring_files
+            || self.settled.as_deref() != Some(worktree.as_path())
+        {
+            return;
+        }
+        let place = Place {
+            // Only a screen one works in: the settings and the multiplexer are
+            // detours, and coming back to a project must not put one back in
+            // the detour one took while leaving it.
+            screen: (!crate::ui::workspace::Workspace::ASIDE.contains(&self.workspace))
+                .then(|| self.workspace.key().to_string()),
+            editing: self.editing().map(|editing| OpenFile {
+                worktree: editing.worktree.clone(),
+                path: editing.path.clone(),
+            }),
             tabs: self
                 .editing_root()
                 .and_then(|root| self.editors(&root))
-                .filter(|tabs| !tabs.open.is_empty())
                 .map(|tabs| {
                     tabs.open
                         .iter()
@@ -233,7 +326,7 @@ impl ClaudhubApp {
                         })
                         .collect()
                 })
-                .unwrap_or_else(|| self.restoring.tabs.clone()),
+                .unwrap_or_default(),
             console: self
                 .query
                 .connection
@@ -244,7 +337,9 @@ impl ClaudhubApp {
                     query: self.db_query_input.read(cx).value().to_string(),
                 }),
         };
-        Store::update_global(cx, |store| store.session = session);
+        Store::update_global(cx, |store| {
+            store.worktree_mut(&worktree, &repo).place = place;
+        });
     }
 }
 

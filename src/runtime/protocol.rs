@@ -136,6 +136,16 @@ pub enum Cmd {
         message: String,
         amend: bool,
         all: bool,
+        /// Push the branch in the same breath, the way PhpStorm's
+        /// "Commit and Push" does.
+        ///
+        /// **A flag and not a second command**, the precedent being
+        /// `CreateTag`: the commit is local and the push is a round trip, so
+        /// two commands would go into two queues — and nothing orders those.
+        /// The push could then leave before the commit existed, and git would
+        /// send the branch as it was. `queue_of` reads the flag, which is all
+        /// it takes for the pair to travel in the network queue.
+        push: bool,
     },
     /// Asks the configured agent for a commit message, from what is staged.
     ///
@@ -178,6 +188,40 @@ pub enum Cmd {
         main: PathBuf,
         name: String,
         force: bool,
+    },
+    /// Renames a branch, checked out or not.
+    ///
+    /// It goes to the main repository and not to a worktree: a branch belongs to
+    /// the repository, and the one being renamed is often held by a checkout the
+    /// window has never opened.
+    RenameBranch {
+        main: PathBuf,
+        from: String,
+        to: String,
+    },
+    /// Removes a branch from `origin`, leaving the local one alone.
+    ///
+    /// Two commands and not a flag on `DeleteBranch`, for the reason that split
+    /// the tags: they are two regrets with two different costs, and a branch
+    /// other people have pulled does not come back.
+    DeleteRemoteBranch {
+        main: PathBuf,
+        name: String,
+    },
+    /// Publishes one branch, which need not be the one HEAD is on.
+    ///
+    /// `Push` sends the checkout's own branch and needs no name; this one names
+    /// what it sends, which is what makes it usable from a list.
+    PushBranch {
+        main: PathBuf,
+        branch: String,
+        force_with_lease: bool,
+    },
+    /// Fast-forwards a branch onto its upstream, without leaving the branch one
+    /// is on.
+    UpdateBranch {
+        main: PathBuf,
+        branch: String,
     },
     /// Creates a tag. Annotated when a message is given — that is git's own
     /// distinction, and the message is what makes it.
@@ -251,6 +295,22 @@ pub enum Cmd {
     /// Resumes the operation in progress, once the conflicts are resolved.
     ResumePending {
         worktree: WorktreeId,
+    },
+    /// Reads the three versions of a conflicted file out of the index — the
+    /// ancestor and the two that grew out of it — for the three-pane merge.
+    ///
+    /// A command of its own and not a `ReadFile`: what is on disk is the fourth
+    /// version, the one with markers through it, and it is the only one that
+    /// says nothing about what each side did.
+    ReadMerge {
+        worktree: WorktreeId,
+        path: PathBuf,
+    },
+    /// Writes a merged file and stages it, which is what marks it resolved.
+    ResolveWith {
+        worktree: WorktreeId,
+        path: PathBuf,
+        content: String,
     },
     /// Resolves a conflict by keeping one of the two versions, then stages it.
     ResolveConflict {
@@ -352,8 +412,26 @@ pub enum Cmd {
         worktree: WorktreeId,
         ignored: bool,
     },
+    /// Reads one level of a directory the file listing stopped at.
+    ///
+    /// Only ever asked of a directory `.gitignore` excludes whole, which is
+    /// what makes a `readdir` the right answer rather than a git command: git
+    /// does not descend into one, so it has nothing left to say about what is
+    /// inside. See `files::read_dir`.
+    ReadDir {
+        worktree: WorktreeId,
+        dir: PathBuf,
+    },
     /// Reads a file for editing.
     ReadFile {
+        worktree: WorktreeId,
+        path: PathBuf,
+    },
+    /// Reads what `HEAD` holds for a file, which is what the editor's gutter
+    /// compares its buffer against. A command of its own rather than a
+    /// `LoadFileDiff`: the diff git computes is against the file **on disk**,
+    /// and the buffer the gutter marks is the one under the caret.
+    ReadFileBase {
         worktree: WorktreeId,
         path: PathBuf,
     },
@@ -666,6 +744,10 @@ impl Cmd {
             Self::Checkout { .. } => "Checkout",
             Self::CreateBranch { .. } => "CreateBranch",
             Self::DeleteBranch { .. } => "DeleteBranch",
+            Self::RenameBranch { .. } => "RenameBranch",
+            Self::DeleteRemoteBranch { .. } => "DeleteRemoteBranch",
+            Self::PushBranch { .. } => "PushBranch",
+            Self::UpdateBranch { .. } => "UpdateBranch",
             Self::CreateTag { .. } => "CreateTag",
             Self::DeleteTag { .. } => "DeleteTag",
             Self::DeleteRemoteTag { .. } => "DeleteRemoteTag",
@@ -675,6 +757,8 @@ impl Cmd {
             Self::Rebase { .. } => "Rebase",
             Self::AbortPending { .. } => "AbortPending",
             Self::ResumePending { .. } => "ResumePending",
+            Self::ReadMerge { .. } => "ReadMerge",
+            Self::ResolveWith { .. } => "ResolveWith",
             Self::ResolveConflict { .. } => "ResolveConflict",
             Self::DbDatabases { .. } => "DbDatabases",
             Self::DbTables { .. } => "DbTables",
@@ -685,7 +769,9 @@ impl Cmd {
             Self::Search { .. } => "Search",
             Self::ReadPreview { .. } => "ReadPreview",
             Self::ListFiles { .. } => "ListFiles",
+            Self::ReadDir { .. } => "ReadDir",
             Self::ReadFile { .. } => "ReadFile",
+            Self::ReadFileBase { .. } => "ReadFileBase",
             Self::WriteFile { .. } => "WriteFile",
             Self::FileOp { .. } => "FileOp",
             Self::ReadNotes { .. } => "ReadNotes",
@@ -872,11 +958,44 @@ pub enum Evt {
         /// The subset of `files` that `.gitignore` excludes, sorted. Empty when
         /// they were not asked for.
         ignored: Vec<PathBuf>,
+        /// Those of `ignored` that are directories nobody has looked inside,
+        /// sorted. See `git::Files::dirs`.
+        dirs: Vec<PathBuf>,
+    },
+    /// What one level of an excluded directory holds, folders and files apart.
+    ///
+    /// The folders arrive unexplored in their turn: opening `vendor/` says what
+    /// is directly in it, not what a hundred and fifty thousand files under it
+    /// are. The error travels in the event rather than in the status bar — a
+    /// directory removed since the listing belongs under the chevron that asked.
+    DirListed {
+        worktree: WorktreeId,
+        dir: PathBuf,
+        result: Result<(Vec<PathBuf>, Vec<PathBuf>), String>,
     },
     FileContent {
         worktree: WorktreeId,
         path: PathBuf,
         content: crate::files::Content,
+    },
+    /// The three versions of a conflicted file, or why there are not three.
+    ///
+    /// The error travels in the event rather than in the status bar: it belongs
+    /// under the pane that asked for it — a binary file and a conflict where one
+    /// side deleted the file both answer here, and both leave the two buttons of
+    /// the conflicts panel as the way out.
+    MergeStages {
+        worktree: WorktreeId,
+        path: PathBuf,
+        result: Result<crate::git::Stages, String>,
+    },
+    /// What `HEAD` holds for a file. `None` for a file git does not track: it
+    /// has no base, and every one of its lines is new — which is a different
+    /// answer from an empty base, and the gutter says so.
+    FileBase {
+        worktree: WorktreeId,
+        path: PathBuf,
+        text: Option<String>,
     },
     Agents {
         agents: crate::agent::Agents,
@@ -1080,6 +1199,10 @@ pub enum Action {
     Discard,
     Delete,
     Commit,
+    /// A commit that pushes: its own action, so that the button that asked for
+    /// it is the one that spins, and so that the bar says which of the two
+    /// gestures is running.
+    CommitPush,
     SuggestMessage,
     Fetch,
     Pull,
@@ -1114,13 +1237,14 @@ pub enum Action {
 impl Action {
     /// The i18n key of the message shown on success.
     /// Every action, for the tests that check each has its messages.
-    pub const ALL: [Action; 31] = [
+    pub const ALL: [Action; 32] = [
         Action::Refresh,
         Action::Stage,
         Action::Unstage,
         Action::Discard,
         Action::Delete,
         Action::Commit,
+        Action::CommitPush,
         Action::SuggestMessage,
         Action::Fetch,
         Action::Pull,
@@ -1158,6 +1282,7 @@ impl Action {
     pub fn running_key(self) -> &'static str {
         match self {
             Self::Commit => "running-commit",
+            Self::CommitPush => "running-commit-push",
             Self::SuggestMessage => "running-suggest-message",
             Self::Fetch => "running-fetch",
             Self::Pull => "running-pull",
@@ -1185,6 +1310,7 @@ impl Action {
             Self::Discard => "action-discard-ok",
             Self::Delete => "action-delete-ok",
             Self::Commit => "action-commit-ok",
+            Self::CommitPush => "action-commit-push-ok",
             Self::SuggestMessage => "action-suggest-message-ok",
             Self::Fetch => "action-fetch-ok",
             Self::Pull => "action-pull-ok",

@@ -110,20 +110,52 @@ pub fn write_at(full: &Path, text: &str, expect: Option<u64>) -> Result<()> {
 /// What we do to a file from the explorer.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Op {
-    Rename { from: PathBuf, to: PathBuf },
-    Delete { path: PathBuf },
-    NewFile { path: PathBuf },
-    NewDir { path: PathBuf },
+    Rename {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    Delete {
+        path: PathBuf,
+    },
+    NewFile {
+        path: PathBuf,
+    },
+    NewDir {
+        path: PathBuf,
+    },
+    /// Copies something that comes from outside the worktree into it — what a
+    /// drop from the desktop's file manager is.
+    ///
+    /// `from` is **absolute and of the machine the workers run on**: on
+    /// Windows the view translates it before sending, like the target of a CSV
+    /// export. `to` is relative to the worktree, the name included.
+    Import {
+        from: PathBuf,
+        to: PathBuf,
+    },
 }
 
 impl Op {
     /// The path the operation acts on, for the result message.
     pub fn target(&self) -> &Path {
         match self {
-            Self::Rename { to, .. } => to,
+            Self::Rename { to, .. } | Self::Import { to, .. } => to,
             Self::Delete { path } | Self::NewFile { path } | Self::NewDir { path } => path,
         }
     }
+}
+
+/// Where something dropped on a folder lands, relative to the worktree.
+///
+/// `dir` is a folder of the worktree, empty for its root. `None` for a source
+/// with no name of its own — `/`, or a path ending in `..`: there would be
+/// nothing to call the copy.
+pub fn drop_target(dir: &Path, source: &Path) -> Option<PathBuf> {
+    let name = source.file_name()?;
+    if Path::new(name).components().count() != 1 {
+        return None;
+    }
+    Some(dir.join(name))
 }
 
 /// Runs an explorer operation.
@@ -167,7 +199,84 @@ pub fn apply(worktree: &Path, op: &Op) -> Result<()> {
             std::fs::create_dir_all(&full)
                 .with_context(|| format!("cannot create {}", full.display()))
         }
+        Op::Import { from, to } => {
+            let to = inside(worktree, to)?;
+            if !from.is_absolute() {
+                bail!("{}: an import comes from an absolute path", from.display());
+            }
+            // Nothing is overwritten, ever: a drop is one gesture of the hand,
+            // and the file underneath may be an hour of work. The refusal is
+            // said, and renaming is one right click away.
+            if to.exists() {
+                bail!("{} already exists", to.display());
+            }
+            // Copying a folder into itself never ends.
+            if to.starts_with(from) {
+                bail!("{} is inside {}", to.display(), from.display());
+            }
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            copy_into(from, &to).with_context(|| format!("cannot copy {} here", from.display()))
+        }
     }
+}
+
+/// Copies a file or a whole folder to a path that does not exist yet.
+///
+/// Written here rather than pulled in as a crate: the recursion is six lines,
+/// and what a copy has to answer — a symlink, a socket, a device — is a
+/// decision we would rather make ourselves. Anything that is neither a file nor
+/// a folder is **skipped**, silently: a drop of a folder that holds a socket is
+/// still a drop that should land.
+fn copy_into(from: &Path, to: &Path) -> std::io::Result<()> {
+    let kind = std::fs::metadata(from)?;
+    if kind.is_dir() {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            copy_into(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else if kind.is_file() {
+        std::fs::copy(from, to).map(|_| ())
+    } else {
+        Ok(())
+    }
+}
+
+/// Everything directly under a directory git has declared it does not descend
+/// into, folders first.
+///
+/// A `readdir` and not a git command, and it is **exact**: git never walks into
+/// an excluded directory, so nothing under one can be re-included — asking git
+/// about `vendor/` answers `vendor/`. Reading one level costs two milliseconds
+/// on the seven hundred entries of a `node_modules/`, where enumerating what is
+/// under it costs a second.
+///
+/// This is the one place the explorer touches the disk, and the rule it seems
+/// to break says why: what the tree must never do is **walk** forty thousand
+/// directories to find the seven hundred that carry code. One level, on a
+/// gesture, inside a folder git has given up on, is the opposite of that.
+pub fn read_dir(worktree: &Path, dir: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+    let full = inside(worktree, dir)?;
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(&full)
+        .with_context(|| format!("reading {}", full.display()))?
+        .flatten()
+    {
+        let path = dir.join(entry.file_name());
+        // `file_type` comes from the directory entry on Linux and costs no
+        // extra syscall; a symlink is left where it is rather than followed.
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => dirs.push(path),
+            _ => files.push(path),
+        }
+    }
+    dirs.sort_unstable();
+    files.sort_unstable();
+    Ok((dirs, files))
 }
 
 /// Resolves a relative path inside the worktree, refusing to leave it.
@@ -352,6 +461,33 @@ mod tests {
         assert_ne!(digest("Claudhub\n"), digest("Claudhub"));
     }
 
+    /// One level, folders apart from files, and never a step outside — the
+    /// path comes from a tree row, and the tree is what a listing built.
+    #[test]
+    fn one_level_of_a_directory_comes_back_sorted_and_split() {
+        let root = std::env::temp_dir().join(format!("claudhub-readdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("vendor/laravel")).unwrap();
+        std::fs::create_dir_all(root.join("vendor/psr")).unwrap();
+        std::fs::write(root.join("vendor/autoload.php"), "<?php").unwrap();
+
+        let (dirs, files) = read_dir(&root, Path::new("vendor")).unwrap();
+        assert_eq!(
+            dirs,
+            vec![PathBuf::from("vendor/laravel"), PathBuf::from("vendor/psr")]
+        );
+        assert_eq!(files, vec![PathBuf::from("vendor/autoload.php")]);
+        // Nothing deeper: opening `vendor/` says what is directly in it, which
+        // is the whole point of stopping there.
+        assert!(!files.iter().any(|p| p.ends_with("composer.json")));
+
+        assert!(
+            read_dir(&root, Path::new("../elsewhere")).is_err(),
+            "a path that leaves the worktree is refused"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The whole chain of the notes folder: what we write reads back, what is
     /// no longer in the list goes away, and what we did not write stays. The
     /// only test in this module that touches the disk, like the watcher's: it
@@ -421,6 +557,74 @@ mod tests {
         assert!(inside(worktree, Path::new("src/main.rs")).is_ok());
         assert!(inside(worktree, Path::new("../elsewhere")).is_err());
         assert!(inside(worktree, Path::new("/etc/passwd")).is_err());
+    }
+
+    #[test]
+    fn what_is_dropped_keeps_its_own_name() {
+        assert_eq!(
+            drop_target(Path::new("src"), Path::new("/tmp/logo.png")),
+            Some(PathBuf::from("src/logo.png"))
+        );
+        // The worktree's root is the empty folder.
+        assert_eq!(
+            drop_target(Path::new(""), Path::new("/tmp/assets")),
+            Some(PathBuf::from("assets"))
+        );
+        // Nothing to call the copy.
+        assert_eq!(drop_target(Path::new("src"), Path::new("/")), None);
+        assert_eq!(drop_target(Path::new("src"), Path::new("/tmp/..")), None);
+    }
+
+    /// An import copies, it never overwrites, and a folder comes whole.
+    #[test]
+    fn an_import_copies_a_tree_and_spares_what_is_there() {
+        let root = std::env::temp_dir().join(format!("claudhub-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (worktree, outside) = (root.join("repo"), root.join("elsewhere"));
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        std::fs::create_dir_all(outside.join("assets/img")).unwrap();
+        std::fs::write(outside.join("assets/a.css"), "a{}").unwrap();
+        std::fs::write(outside.join("assets/img/logo.svg"), "<svg/>").unwrap();
+
+        apply(
+            &worktree,
+            &Op::Import {
+                from: outside.join("assets"),
+                to: PathBuf::from("src/assets"),
+            },
+        )
+        .expect("import");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("src/assets/img/logo.svg")).unwrap(),
+            "<svg/>"
+        );
+
+        // What is already there is not touched, and the refusal is said.
+        std::fs::write(worktree.join("src/assets/a.css"), "mine").unwrap();
+        assert!(apply(
+            &worktree,
+            &Op::Import {
+                from: outside.join("assets/a.css"),
+                to: PathBuf::from("src/assets/a.css"),
+            },
+        )
+        .is_err());
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("src/assets/a.css")).unwrap(),
+            "mine"
+        );
+
+        // And a drop cannot leave the worktree.
+        assert!(apply(
+            &worktree,
+            &Op::Import {
+                from: outside.join("assets/a.css"),
+                to: PathBuf::from("../a.css"),
+            },
+        )
+        .is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
