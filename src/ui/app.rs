@@ -1665,11 +1665,30 @@ impl ClaudhubApp {
             .update(cx, |input, cx| input.set_value(text, window, cx));
     }
 
-    fn file_changed(&mut self, path: &Path, cx: &mut Context<Self>) {
+    /// The two directories `file_changed` weighs a path against.
+    ///
+    /// Resolved once for a batch of paths: both are joins and lookups, and a
+    /// single write in a busy worktree brings dozens of paths at a time.
+    fn watched_dirs(&self, cx: &App) -> (Option<PathBuf>, Option<PathBuf>) {
+        let plugins = crate::ui::plugin_view::plugins_dir();
+        let vault = self
+            .active
+            .clone()
+            .and_then(|active| self.notes_dir(&active, cx));
+        (plugins, vault)
+    }
+
+    fn file_changed(
+        &mut self,
+        path: &Path,
+        dirs: &(Option<PathBuf>, Option<PathBuf>),
+        cx: &mut Context<Self>,
+    ) {
+        let (plugins, vault) = dirs;
         // Before the worktree guard: a plugin's directory is not in a worktree,
         // and its script has to be picked up whether or not one is open.
-        if let Some(dir) = crate::ui::plugin_view::plugins_dir() {
-            if path.starts_with(&dir) {
+        if let Some(dir) = plugins {
+            if path.starts_with(dir) {
                 self.reload_plugins(cx);
                 return;
             }
@@ -1679,7 +1698,7 @@ impl ClaudhubApp {
         };
         // The vault is not inside the worktree, and what changes there is not
         // read with `git status`: it is the folder itself that has to be re-read.
-        if let Some(vault) = self.notes_dir(&active, cx) {
+        if let Some(vault) = vault.clone() {
             if path.starts_with(&vault) {
                 self.git.send(Cmd::ReadNotes {
                     worktree: active,
@@ -1862,8 +1881,9 @@ impl ClaudhubApp {
                 content,
             } => self.preview_arrived(worktree, path, content, cx),
             Evt::FilesChanged { paths } => {
+                let dirs = self.watched_dirs(cx);
                 for path in paths {
-                    self.file_changed(&path, cx);
+                    self.file_changed(&path, &dirs, cx);
                 }
             }
             // The vault has been written: it exists, so it can be watched.

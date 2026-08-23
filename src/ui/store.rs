@@ -370,12 +370,25 @@ impl Store {
     ///
     /// No visible side effect, unlike the settings: nothing here carries a font
     /// or a theme, and the calling view already knows what it has to redraw.
+    ///
+    /// Whether anything moved is told by comparing a copy of the whole state,
+    /// which is fine for a gesture but not for what happens per keystroke:
+    /// there, [`Store::update_global_if`] lets the caller answer itself.
     pub fn update_global(cx: &mut App, f: impl FnOnce(&mut Store)) {
         let changed = cx.update_global::<StateStore, _>(|store, _| {
             let before = store.store.clone();
             f(&mut store.store);
             store.store != before
         });
+        if changed {
+            schedule_save(cx);
+        }
+    }
+
+    /// The same, for a caller that knows whether it changed anything: the
+    /// closure answers, and no copy of the state is taken.
+    pub fn update_global_if(cx: &mut App, f: impl FnOnce(&mut Store) -> bool) {
+        let changed = cx.update_global::<StateStore, _>(|store, _| f(&mut store.store));
         if changed {
             schedule_save(cx);
         }

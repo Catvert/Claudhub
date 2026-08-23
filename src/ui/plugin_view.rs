@@ -115,8 +115,7 @@ pub fn manifests() -> &'static [Manifest] {
 }
 
 /// The plugins whose panel belongs to one screen.
-pub fn on_screen(screen: &str) -> impl Iterator<Item = &'static Manifest> {
-    let screen = screen.to_string();
+pub fn on_screen(screen: &str) -> impl Iterator<Item = &'static Manifest> + '_ {
     manifests()
         .iter()
         .filter(move |m| m.declaration.screen == screen)
@@ -147,18 +146,16 @@ pub fn enabled(id: &str, cx: &gpui::App) -> bool {
 /// The manifest's defaults laid over by the settings, secrets included: from
 /// here a setting and a secret are the same thing, something one has to say.
 pub fn missing(manifest: &'static Manifest, cx: &gpui::App) -> Vec<&'static str> {
+    // Borrowed, not copied: this is read per frame, once per plugin of the
+    // screen, and only the value of a required field is ever needed.
     let configured = crate::ui::settings::Settings::global(cx)
         .plugins
-        .get(&manifest.id)
-        .cloned()
-        .unwrap_or_default();
+        .get(&manifest.id);
     manifest.missing(&|name| {
         configured
-            .settings
-            .get(name)
-            .or_else(|| configured.secrets.get(name))
+            .and_then(|c| c.settings.get(name).or_else(|| c.secrets.get(name)))
+            .or_else(|| manifest.declaration.settings.get(name))
             .cloned()
-            .or_else(|| manifest.declaration.settings.get(name).cloned())
     })
 }
 

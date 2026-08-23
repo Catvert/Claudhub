@@ -920,23 +920,47 @@ impl Settings {
 
     /// Changes the settings, applies what shows at once and schedules the write.
     ///
-    /// The theme is re-applied on every change, including those that do not
-    /// concern it: it is what carries the fonts and the text size, and telling
-    /// the fields that affect it from the others would cost more code than one
-    /// `refresh_windows` too many.
+    /// Only one copy is taken — the state before — and the comparison is made
+    /// against the settings in place: this runs on every wheel notch of the zoom
+    /// and on every keystroke of the form, and `theme::apply` is expensive
+    /// (two `Theme::change`, the tokens recomputed, every window refreshed). It
+    /// is therefore called only when a field it reads has moved; the rest of a
+    /// change shows through a plain refresh.
     pub fn update_global(cx: &mut App, f: impl FnOnce(&mut Settings)) {
         let before = Self::global(cx).clone();
         cx.update_global::<SettingsStore, _>(|store, _| f(&mut store.settings));
-        let after = Self::global(cx).clone();
-        if after == before {
+        let after = Self::global(cx);
+        if *after == before {
             return;
         }
-        if after.language != before.language {
-            crate::ui::set_language(after.language);
+        let language = after.language;
+        let language_changed = language != before.language;
+        let theme_changed = affects_theme(&before, after);
+        if language_changed {
+            crate::ui::set_language(language);
         }
-        crate::ui::theme::apply(&after, None, cx);
+        if theme_changed {
+            let after = Self::global(cx).clone();
+            crate::ui::theme::apply(&after, None, cx);
+        } else {
+            cx.refresh_windows();
+        }
         schedule_save(cx);
     }
+}
+
+/// Whether a change moves one of the fields `theme::apply` reads.
+///
+/// Kept next to it: adding a setting that `apply` looks at without listing it
+/// here would leave the window painted with the old one, and nothing would say
+/// so.
+fn affects_theme(before: &Settings, after: &Settings) -> bool {
+    before.theme != after.theme
+        || before.light_theme != after.light_theme
+        || before.dark_theme != after.dark_theme
+        || before.font_size != after.font_size
+        || before.ui_font() != after.ui_font()
+        || before.mono_font() != after.mono_font()
 }
 
 fn schedule_save(cx: &mut App) {
@@ -1084,9 +1108,16 @@ pub fn available_shells() -> Vec<String> {
 /// no business finding it there.
 /// The directory where Claudhub files what it remembers: settings, panel
 /// layout, themes.
+///
+/// Resolved once: the answer never changes while the process runs, and this is
+/// read per frame (the notes directory) and per changed path.
 pub fn config_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("be", "acetics", "claudhub")
-        .map(|dirs| dirs.config_dir().to_path_buf())
+    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        directories::ProjectDirs::from("be", "acetics", "claudhub")
+            .map(|dirs| dirs.config_dir().to_path_buf())
+    })
+    .clone()
 }
 
 pub fn layout_path() -> Option<PathBuf> {
@@ -1173,6 +1204,36 @@ pub(super) fn write_private(path: &Path, contents: &str) -> std::io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_fields_the_theme_reads_make_it_apply() {
+        let base = Settings::default();
+        let mut other = base.clone();
+        other.diff_context += 1;
+        other.show_ignored_files = !other.show_ignored_files;
+        assert!(!affects_theme(&base, &other));
+
+        let mut zoomed = base.clone();
+        zoomed.font_size += 1.;
+        assert!(affects_theme(&base, &zoomed));
+
+        // An empty family falls back on the default: the effective font has not
+        // moved, so neither has the theme.
+        let mut blank = base.clone();
+        blank.ui_font_family = String::new();
+        assert_eq!(
+            affects_theme(&base, &blank),
+            base.ui_font() != blank.ui_font()
+        );
+
+        let mut font = base.clone();
+        font.mono_font_family = "Nonesuch Mono".into();
+        assert!(affects_theme(&base, &font));
+
+        let mut palette = base.clone();
+        palette.dark_theme = "whatever".into();
+        assert!(affects_theme(&base, &palette));
+    }
 
     /// A shipped entry that serves nothing, or that no file reaches, is a line
     /// in a form that never does anything — and nothing else would say so.
