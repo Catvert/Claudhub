@@ -708,7 +708,10 @@ mod tests {
             pairs,
             [
                 ("http://itcs.demo.wt.localhost", "itcs"),
-                ("http://acme.demo.wt.localhost", "http://acme.demo.wt.localhost"),
+                (
+                    "http://acme.demo.wt.localhost",
+                    "http://acme.demo.wt.localhost"
+                ),
             ]
         );
     }

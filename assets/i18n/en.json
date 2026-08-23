@@ -674,5 +674,7 @@
   "worktree-unpin": "Unpin from the top bar",
   "worktree-up": "Start",
   "worktree-up-title": "Start the worktree",
-  "worktree-update": "Update from base"
+  "worktree-update": "Update from base",
+  "wt-links-none": "No other address",
+  "wt-links-resolving": "Resolving addresses…"
 }

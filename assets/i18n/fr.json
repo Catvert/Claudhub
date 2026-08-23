@@ -674,5 +674,7 @@
   "worktree-unpin": "Retirer de la barre",
   "worktree-up": "Démarrer",
   "worktree-up-title": "Démarrer le worktree",
-  "worktree-update": "Mettre à jour depuis la base"
+  "worktree-update": "Mettre à jour depuis la base",
+  "wt-links-none": "Aucune autre adresse",
+  "wt-links-resolving": "Adresses en cours de résolution…"
 }

@@ -165,6 +165,59 @@ impl WtAction {
     }
 }
 
+/// The rows of the "open" menu under the static address: what `[open]
+/// source` enumerated, or the state of the question.
+///
+/// Three states and each is said: not asked or not yet answered — an
+/// ellipsis; answered with nothing — a sentence, because an empty block under
+/// a rule reads as a glitch; answered — one row per address, the label first,
+/// the address dimmed behind it, the row opening it.
+fn wt_links_rows(links: Option<Option<Vec<wt::Endpoint>>>, cx: &App) -> gpui::AnyElement {
+    let muted = cx.theme().muted_foreground;
+    let note = |text: SharedString| {
+        div()
+            .px_2()
+            .py_1()
+            .text_sm()
+            .text_color(muted)
+            .child(text)
+            .into_any_element()
+    };
+    let links = match links {
+        None | Some(None) => return note(tr!("wt-links-resolving")),
+        Some(Some(links)) if links.is_empty() => return note(tr!("wt-links-none")),
+        Some(Some(links)) => links,
+    };
+    let accent = cx.theme().accent;
+    v_flex()
+        .w_full()
+        .children(links.into_iter().enumerate().map(|(ix, link)| {
+            let url = link.url.clone();
+            h_flex()
+                .id(("wt-link", ix))
+                .w_full()
+                .px_2()
+                .py_1()
+                .gap_2()
+                .items_center()
+                .rounded(cx.theme().radius)
+                .cursor_pointer()
+                .hover(|s| s.bg(accent.opacity(0.4)))
+                .child(div().text_sm().child(SharedString::from(link.label)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(SharedString::from(link.url)),
+                )
+                .on_click(move |_, _window, cx| cx.open_url(&url))
+        }))
+        .into_any_element()
+}
+
 impl ClaudhubApp {
     // — What the project declares ———————————————————————————————
 
@@ -186,11 +239,43 @@ impl ClaudhubApp {
         });
     }
 
+    /// Reads it again — the file has just changed.
+    ///
+    /// The entry is **kept** while the answer travels, as `reload_just` keeps
+    /// the justfile's: the project's gestures would blink out of the menu on
+    /// every save, and what they say is right until the new reading
+    /// contradicts it. A repository never asked about is not asked now: the
+    /// first read belongs to the menu that needs it.
+    pub(super) fn reload_wt_project(&mut self, main: &Path) {
+        if !self.wt_projects.contains_key(main) {
+            return;
+        }
+        self.git.send(Cmd::WtLoad {
+            main: main.to_path_buf(),
+        });
+    }
+
     pub(super) fn wt_state(
         &self,
         worktree: &Path,
     ) -> Option<&crate::runtime::protocol::WtWorktree> {
         self.wt_states.get(worktree)
+    }
+
+    /// Asks the worker what `[open] source` enumerates for a worktree.
+    ///
+    /// Called when the "open" menu opens, and each time: the list is one per
+    /// tenant mounted, and a tenant added since the last look has to show. What
+    /// was resolved before **stays on screen** while the new answer travels —
+    /// the entry only becomes "pending" when there was nothing yet — so the
+    /// menu never empties under the pointer.
+    pub(super) fn request_wt_links(&mut self, main: PathBuf, worktree: PathBuf, slug: String) {
+        self.wt_links.entry(worktree.clone()).or_insert(None);
+        self.git.send(Cmd::WtLinks {
+            main,
+            worktree,
+            slug,
+        });
     }
 
     /// The background reading: state and addresses of every worktree `wt` manages.
@@ -1427,25 +1512,73 @@ impl ClaudhubApp {
     }
 
     /// A worktree's "open" button, when the project exposes an address.
+    ///
+    /// Two shapes, decided by the `wt.toml`. Without `[open] source` the
+    /// button opens the static URL and nothing is asked. With one it is a
+    /// menu: the static URL at once, then what `source` enumerates — one
+    /// address per tenant mounted, on Acetics — resolved **when the menu
+    /// opens**, as the project's own comment asks, because it is an SQL query
+    /// through a container and has no business running while a list is drawn.
+    ///
+    /// The menu's builder touches nothing of the application: it runs inside
+    /// the root's render, where reading the root entity is a panic. The rows
+    /// are a `PopupMenuItem::element`, painted by the menu's own entity after
+    /// the root has handed back, which is where the resolved links are read —
+    /// and where the request goes out, once per opening: the builder, called
+    /// on every opening, only raises a flag the first frame of the rows lowers.
     pub(super) fn render_wt_links(
         &self,
         worktree: &Path,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
-        let endpoints = self.wt_state(worktree)?.endpoints.clone();
-        let first = endpoints.first()?.clone();
+        let first = self.wt_state(worktree)?.endpoints.first()?.clone();
+        let button = Button::new(SharedString::from(format!(
+            "wt-open-{}",
+            worktree.display()
+        )))
+        .ghost()
+        .xsmall()
+        .icon(icon("external-link"))
+        .tooltip(SharedString::from(first.label.clone()));
+        let main = self.repo_of(worktree).map(|repo| repo.main.clone());
+        let slug = main.as_deref().and_then(|main| {
+            self.wt_project(main)
+                .is_some_and(|project| project.has_open_source)
+                .then(|| self.wt_slug(main, worktree))
+                .flatten()
+        });
+        let (Some(main), Some(slug)) = (main, slug) else {
+            let url = first.url.clone();
+            return Some(
+                button
+                    .on_click(cx.listener(move |_, _, _window, cx| {
+                        cx.open_url(&url);
+                    }))
+                    .into_any_element(),
+            );
+        };
+        let app = cx.entity();
+        let worktree = worktree.to_path_buf();
+        let fresh = Rc::new(std::cell::Cell::new(false));
         Some(
-            Button::new(SharedString::from(format!(
-                "wt-open-{}",
-                worktree.display()
-            )))
-            .ghost()
-            .xsmall()
-            .icon(icon("external-link"))
-            .tooltip(SharedString::from(first.label.clone()))
-            .on_click(cx.listener(move |_, _, _window, cx| {
-                cx.open_url(&first.url);
-            })),
+            button
+                .dropdown_menu(move |menu, _window, _cx| {
+                    fresh.set(true);
+                    let (app, fresh) = (app.clone(), fresh.clone());
+                    let (main, worktree, slug) = (main.clone(), worktree.clone(), slug.clone());
+                    menu.link(SharedString::from(first.label.clone()), first.url.clone())
+                        .separator()
+                        .item(PopupMenuItem::element(move |_window, cx| {
+                            if fresh.replace(false) {
+                                let (main, worktree, slug) =
+                                    (main.clone(), worktree.clone(), slug.clone());
+                                app.update(cx, |app, _| app.request_wt_links(main, worktree, slug));
+                            }
+                            let links = app.read(cx).wt_links.get(&worktree).cloned();
+                            wt_links_rows(links, cx)
+                        }))
+                })
+                .into_any_element(),
         )
     }
 
