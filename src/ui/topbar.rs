@@ -294,7 +294,6 @@ impl ClaudhubApp {
                             .clone()
                             .and_then(|worktree| self.render_wt_state(&worktree, cx)),
                     )
-                    .children(self.render_worktree_actions("worktree-actions", cx))
                     // The middle is empty on purpose, and the space is not
                     // lost: it is the window's drag region. Neither `fetch`, nor
                     // `pull`, nor `push` — they have moved down into the
@@ -306,12 +305,9 @@ impl ClaudhubApp {
                     // Opening the worktree in the browser, then its actions,
                     // then the run button: the right corner is the "act on
                     // what I am looking at" corner, and the address a project
-                    // exposes is the gesture one makes most once it runs. The
-                    // actions live here **as well as** beside the picker: the
-                    // corner is where the hand already is when one has just
-                    // launched something.
+                    // exposes is the gesture one makes most once it runs.
                     .children(active.and_then(|worktree| self.render_wt_links(&worktree, cx)))
-                    .children(self.render_worktree_actions("worktree-actions-corner", cx))
+                    .children(self.render_worktree_actions(cx))
                     // The run button, at the far right and just before the two
                     // screens one does not work in. A `justfile` is the
                     // project's commands, and running one is a gesture of its
@@ -652,20 +648,12 @@ impl ClaudhubApp {
         Some(h_flex().items_center().child(run).children(more))
     }
 
-    /// `id` must differ between the two places this button is painted: the
-    /// dropdown files its open/closed state under the element's id
-    /// (`use_keyed_state`), and two buttons sharing one id toggle together —
-    /// their two overlays stacked, and every click landing on the dead one.
-    fn render_worktree_actions(
-        &self,
-        id: &'static str,
-        cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
+    fn render_worktree_actions(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let worktree = self.active.clone()?;
         let main = self.main_of(&worktree)?;
         let entity = cx.entity();
         Some(
-            Button::new(id)
+            Button::new("worktree-actions")
                 .ghost()
                 .small()
                 .icon(icon("ellipsis"))
