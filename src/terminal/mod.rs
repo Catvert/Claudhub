@@ -45,7 +45,13 @@ pub enum TerminalEvent {
     Bell,
     /// The process has exited; the session is dead but its content stays
     /// readable, which is exactly what one wants after a failed test.
-    Exited,
+    ///
+    /// Carries the child's exit code when there is one — `None` for a death by
+    /// signal, and for the loop's own end, which alacritty signals a second
+    /// time right after the child's. It is what tells a command that has run
+    /// its course from one that failed, and the tab is only closed on the
+    /// former.
+    Exited(Option<i32>),
 }
 
 /// A position in the visible area, in cells.
@@ -138,7 +144,8 @@ impl EventListener for Proxy {
             AlacEvent::Title(t) => TerminalEvent::Title(t),
             AlacEvent::ResetTitle => TerminalEvent::Title(String::new()),
             AlacEvent::Bell => TerminalEvent::Bell,
-            AlacEvent::Exit | AlacEvent::ChildExit(_) => TerminalEvent::Exited,
+            AlacEvent::ChildExit(status) => TerminalEvent::Exited(status.code()),
+            AlacEvent::Exit => TerminalEvent::Exited(None),
             // An answer the emulator owes the program: terminal identity, cursor
             // position, state of a mode. It is not optional — fish queries the
             // terminal at startup and waits **ten seconds** before giving up,

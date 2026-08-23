@@ -95,6 +95,95 @@ pub fn seed(selection: &str) -> Option<String> {
 /// Past this many characters a selection is a passage and not a term.
 pub const MAX_SEED: usize = 200;
 
+/// The symbol an offset falls in — what a jump to definition looks for when
+/// there is no language server to ask.
+///
+/// **Word characters and nothing else**: letters, digits and `_`. A sigil is
+/// left out on purpose — PHP's `$user` is looked up as `user`, and `git grep
+/// -w` finds the declaration and every use of it just the same, where a query
+/// carrying the `$` would miss `->user` and the docblock.
+///
+/// **The character *before* the offset counts too.** A caret sits after the
+/// word one has just typed, and a click lands on the space that follows a name
+/// as often as on the name itself; refusing those would make the gesture work
+/// in some places and not in others, which reads as a broken key.
+///
+/// **A number is refused.** `42` is a word by this rule and a symbol by no
+/// rule at all, and searching a project for it answers with every line that
+/// happens to count that high.
+pub fn symbol_at(text: &str, offset: usize) -> Option<String> {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut offset = offset.min(text.len());
+    while !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    if !text[offset..].chars().next().is_some_and(word) {
+        let previous = text[..offset].chars().next_back().filter(|c| word(*c))?;
+        offset -= previous.len_utf8();
+    }
+    let start = text[..offset]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| word(*c))
+        .map(|(at, _)| at)
+        .last()
+        .unwrap_or(offset);
+    let end = text[offset..]
+        .char_indices()
+        .find(|(_, c)| !word(*c))
+        .map_or(text.len(), |(at, _)| offset + at);
+    let symbol = &text[start..end];
+    if symbol.chars().next()?.is_numeric() {
+        return None;
+    }
+    Some(symbol.to_string())
+}
+
+/// Every symbol of a line, as byte ranges into it.
+///
+/// What makes a diff line's words clickable: the range is what the click lands
+/// in, and the text of it is what gets looked up. The same rule as `symbol_at`,
+/// applied along the whole line — a number is not a symbol, and is therefore
+/// not offered.
+///
+/// **Only when the modifier is held.** The call is a scan of a line, cheaper
+/// than the string and the style runs the row already clones per frame, but it
+/// buys nothing while nobody is holding `Ctrl`: an unarmed line asks for no
+/// ranges at all.
+pub fn word_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut ranges = Vec::new();
+    let mut start = None;
+    for (at, c) in line.char_indices() {
+        match (word(c), start) {
+            (true, None) => start = Some(at),
+            (false, Some(from)) => {
+                push_symbol(&mut ranges, line, from..at);
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(from) = start {
+        push_symbol(&mut ranges, line, from..line.len());
+    }
+    ranges
+}
+
+fn push_symbol(
+    ranges: &mut Vec<std::ops::Range<usize>>,
+    line: &str,
+    range: std::ops::Range<usize>,
+) {
+    if line[range.clone()]
+        .chars()
+        .next()
+        .is_some_and(|c| !c.is_numeric())
+    {
+        ranges.push(range);
+    }
+}
+
 /// The first hit of the list, which is what a finished search selects.
 ///
 /// The first **hit** and not the first row: landing on a file heading would
@@ -190,6 +279,43 @@ mod tests {
         assert_eq!(step(&rows, None, 1), Some(0));
         assert_eq!(step(&rows, None, -1), Some(4));
         assert_eq!(step(&[], Some(0), 1), None);
+    }
+
+    #[test]
+    fn a_symbol_is_read_from_either_side_of_the_offset() {
+        let text = "let user = $user->name;";
+        assert_eq!(symbol_at(text, 4).as_deref(), Some("user"));
+        // The caret standing right after the word reads the word.
+        assert_eq!(symbol_at(text, 8).as_deref(), Some("user"));
+        // The sigil is not part of it, and standing on it reads nothing —
+        // there is no word character on either side of `$` here.
+        assert_eq!(symbol_at(text, 12).as_deref(), Some("user"));
+        assert_eq!(symbol_at(text, 18).as_deref(), Some("name"));
+    }
+
+    #[test]
+    fn what_is_not_a_symbol_is_refused() {
+        assert_eq!(symbol_at("a + 42 + b", 4), None);
+        assert_eq!(symbol_at("one  two", 4), None);
+        assert_eq!(symbol_at("", 0), None);
+        // Past the end, and in the middle of a character: neither may panic.
+        assert_eq!(symbol_at("épée", 40).as_deref(), Some("épée"));
+        assert_eq!(symbol_at("épée", 1).as_deref(), Some("épée"));
+    }
+
+    #[test]
+    fn a_line_offers_its_symbols_and_not_its_numbers() {
+        let line = "    let width = size.0 + 42;";
+        let ranges = word_ranges(line);
+        let words: Vec<&str> = ranges.iter().map(|r| &line[r.clone()]).collect();
+        assert_eq!(words, ["let", "width", "size"]);
+        // Every range is a symbol `symbol_at` would read at its own start.
+        for range in ranges {
+            assert_eq!(
+                symbol_at(line, range.start).as_deref(),
+                Some(&line[range.clone()])
+            );
+        }
     }
 
     #[test]

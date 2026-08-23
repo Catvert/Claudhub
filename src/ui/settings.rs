@@ -209,6 +209,37 @@ fn command_name(command: &str) -> &str {
 // because the form is what uses it most.
 pub use crate::cmdline::{join_command, split_command};
 
+/// Where a screen's **first** terminal opens: under the content, or beside it.
+///
+/// Only the first: the ones that follow join its tab group, and a terminal
+/// dragged elsewhere stays where it was put — the layout is saved. A setting
+/// because the answer depends on the screen's shape, not on the program: a wide
+/// screen has room to the right and none at the bottom, a tall one the reverse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalPlacement {
+    #[default]
+    Bottom,
+    Right,
+}
+
+impl TerminalPlacement {
+    /// The value as it travels through the form, which only handles strings.
+    pub fn as_key(self) -> &'static str {
+        match self {
+            Self::Bottom => "bottom",
+            Self::Right => "right",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Self {
+        match key {
+            "right" => Self::Right,
+            _ => Self::Bottom,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerminalSettings {
@@ -227,6 +258,8 @@ pub struct TerminalSettings {
     pub agents: Vec<AgentProfile>,
     /// Name of the profile launched by default. Empty, or unknown: the first.
     pub default_agent: String,
+    /// Which side a screen's first terminal opens on.
+    pub placement: TerminalPlacement,
 }
 
 impl Default for TerminalSettings {
@@ -244,6 +277,7 @@ impl Default for TerminalSettings {
             // file written by an earlier version.
             agents: Vec::new(),
             default_agent: String::new(),
+            placement: TerminalPlacement::default(),
         }
     }
 }
@@ -340,6 +374,9 @@ pub struct Settings {
     pub review_tree: bool,
     /// Diff in two columns — old version on the left, new on the right — rather
     /// than as a single list.
+    ///
+    /// True by default: this is the reading a review asks for, and it is the only
+    /// view where `diff_wrap` applies.
     pub diff_split: bool,
     /// Show the whole file around the changes, and not only their few lines of
     /// context.
@@ -370,6 +407,27 @@ pub struct Settings {
     pub external_editor: String,
     /// Also show the files `.gitignore` leaves out, in the explorer.
     pub show_ignored_files: bool,
+    /// How many file tabs one worktree keeps at once. `0`: no limit.
+    ///
+    /// Ten, as PhpStorm's own: browsing a project opens far more files than one
+    /// reads, and a bar nobody prunes is a bar one stops reading. What closes is
+    /// the tab read longest ago, and never one holding unsaved text — losing
+    /// work to make room for a glance is the one thing the limit must not do.
+    pub editor_tab_limit: usize,
+    /// `Ctrl+S` writes every unsaved tab, and not only the one on screen.
+    ///
+    /// On by default: one edits a file, follows a call into another, edits that
+    /// one too, and the gesture at the end of it means "put my work on disk".
+    /// It is what an IDE does — PhpStorm has no per-file save at all — and what
+    /// it removes is the tab left unsaved behind another, found by a build.
+    pub save_all_tabs: bool,
+    /// One clicked file at a time reuses the same tab, until it is kept.
+    ///
+    /// VS Code's preview tab: a single click in the tree shows the file in a
+    /// tab that the next click replaces, and typing in it — or opening it with
+    /// Enter, or double-clicking — keeps it for good. It is the answer to
+    /// browsing, where the limit is the answer to a long session.
+    pub editor_preview_tab: bool,
     /// Minutes between two automatic `git fetch`es. `0`: none.
     ///
     /// Without it, "three commits behind" only appears after a fetch asked for
@@ -544,13 +602,16 @@ impl Default for Settings {
             repositories: Vec::new(),
             diff_context: 3,
             review_tree: true,
-            diff_split: false,
+            diff_split: true,
             diff_whole_file: false,
             diff_wrap: true,
             update_with_rebase: false,
             integrate_no_ff: true,
             external_editor: String::new(),
             show_ignored_files: true,
+            editor_tab_limit: 10,
+            editor_preview_tab: true,
+            save_all_tabs: true,
             auto_fetch_minutes: 10,
             commit_message_command: DEFAULT_COMMIT_MESSAGE_COMMAND.into(),
             sentry_org: String::new(),

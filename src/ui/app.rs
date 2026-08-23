@@ -52,7 +52,7 @@ use crate::ui::terminal_view::OpenTerminal;
 // 19: the SQL history did the same on the databases screen, and it is the same
 // bargain — the only lever there is throws away every screen's arrangement,
 // which is dear, and without it the new default is one nobody would ever see.
-const LAYOUT_VERSION: usize = 19;
+const LAYOUT_VERSION: usize = 21;
 
 /// The saved layouts, one per screen.
 ///
@@ -526,6 +526,13 @@ pub struct ClaudhubApp {
     /// Each open repository's `wt.toml`, read once. `None`: it has none, and the
     /// project's gestures simply disappear from the menu.
     pub(super) wt_projects: HashMap<PathBuf, Option<crate::wt::Snapshot>>,
+    /// Each visited worktree's `justfile`, read once and re-read when the file
+    /// changes. `None`: there is none — or `just` is not installed — and the run
+    /// button simply is not painted.
+    ///
+    /// Keyed by worktree and not by repository, unlike `wt.toml`: a justfile is
+    /// a file of the checkout, and a branch is free to add a recipe.
+    pub(super) just_recipes: HashMap<PathBuf, Option<crate::just::Snapshot>>,
     /// What `wt` knows about each worktree: started or not, its addresses.
     pub(super) wt_states: HashMap<PathBuf, crate::runtime::protocol::WtWorktree>,
     /// The guided creation under way.
@@ -554,6 +561,10 @@ pub struct ClaudhubApp {
     /// being read, and landing a caret in somebody else's editor is worse than
     /// not landing it at all.
     pub(super) landing: Option<crate::ui::explorer::Pending>,
+    /// Ticks once per file tab read, and stamps the tab that is read: what the
+    /// tab limit closes on. A counter of our own and not a clock — the order is
+    /// all that is asked of it, and a clock is one thing the wire does not carry.
+    pub(super) tab_clock: u64,
     /// The language servers, one session per worktree. See `ui::lsp`.
     pub(super) lsp: HashMap<PathBuf, crate::ui::lsp::Session>,
     /// The requests in flight, by the id we gave them: what a provider's `Task`
@@ -567,6 +578,29 @@ pub struct ClaudhubApp {
     /// Never goes back, like the SQL console's send id: the answer to a gesture
     /// that has been replaced must be recognisable as such.
     pub(super) lsp_next_id: u64,
+    /// The editor has just followed a definition on its own.
+    ///
+    /// gpui-component handles a `Ctrl`+click on a symbol it has an answer for,
+    /// and tells nobody: our own listener sits on an ancestor and runs in the
+    /// same dispatch, right after. Without this it would ask again — at the
+    /// caret of the file just landed in, which is somebody else's word. It is
+    /// cleared in the **capture** phase of that same click, so a jump followed
+    /// from the context menu cannot leave it standing for the next one.
+    pub(super) followed_definition: bool,
+    /// The modifier that makes a diff line's symbols clickable is held down.
+    ///
+    /// Kept rather than read at each render, and that is what makes it cheap:
+    /// the window is asked for a new frame only when it **flips**, not on every
+    /// `Shift` of every capital letter typed somewhere else. See
+    /// `diff_view::followable`.
+    pub(super) diff_armed: bool,
+    /// The `Ctrl`-hovered word of the diff, and which line's text it is in.
+    ///
+    /// The underline is painted from here, one frame behind the pointer as a
+    /// hover always is. It is cleared by the entry the pointer moves onto and
+    /// by letting go of the modifier — a word left underlined under nothing
+    /// would read as a word that has been chosen.
+    pub(super) diff_hover: Option<(crate::ui::diff_view::WordSpot, std::ops::Range<usize>)>,
     pub(super) files_scroll: gpui::UniformListScrollHandle,
     /// The explorer tree's focus, which gives it its arrows.
     ///
@@ -1011,6 +1045,7 @@ impl ClaudhubApp {
             note_draft: None,
             notes_only_open: false,
             wt_projects: HashMap::new(),
+            just_recipes: HashMap::new(),
             lsp: HashMap::new(),
             lsp_pending: HashMap::new(),
             lsp_asking: HashMap::new(),
@@ -1022,6 +1057,10 @@ impl ClaudhubApp {
             editings: HashMap::new(),
             jumps: HashMap::new(),
             landing: None,
+            tab_clock: 0,
+            followed_definition: false,
+            diff_armed: false,
+            diff_hover: None,
             files_scroll: gpui::UniformListScrollHandle::new(),
             search: Default::default(),
             search_input: search_inputs.text,
@@ -1655,6 +1694,15 @@ impl ClaudhubApp {
         if !path.starts_with(&active) {
             return;
         }
+        // A recipe added while Claudhub is open has to show up in the menu: the
+        // justfile is a file one edits during the very session it drives.
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(crate::just::is_justfile)
+        {
+            self.reload_just(&active);
+        }
         self.request_status(active);
         cx.notify();
     }
@@ -1730,6 +1778,9 @@ impl ClaudhubApp {
             Evt::WtProject { main, project } => {
                 self.wt_projects.insert(main, project);
             }
+            Evt::JustRecipes { worktree, recipes } => {
+                self.just_recipes.insert(worktree, recipes);
+            }
             Evt::WtQuestions {
                 main,
                 slug,
@@ -1779,6 +1830,11 @@ impl ClaudhubApp {
                 path,
                 content,
             } => self.file_content_arrived(worktree, path, content, window, cx),
+            Evt::ImageContent {
+                worktree,
+                path,
+                image,
+            } => self.image_content_arrived(worktree, path, image, window, cx),
             Evt::FileBase {
                 worktree,
                 path,
@@ -2572,6 +2628,9 @@ impl ClaudhubApp {
         }
         self.active = Some(path.clone());
         self.ensure_review(&path, cx);
+        // What this checkout's justfile offers, for the run button. Asked here
+        // and not while drawing the bar: it is a subprocess.
+        self.ensure_just(&path);
         // A plugin's panel speaks about the worktree the window shows, like
         // every other panel: changing it is starting over, not refreshing.
         self.plugins_follow_worktree(cx);
@@ -3268,6 +3327,25 @@ impl Render for ClaudhubApp {
             // along the way.
             .key_context(super::shortcuts::context(Settings::global(cx).vim_mode))
             .track_focus(&self.focus)
+            // **On the root, and it has to be.** A modifier change is a
+            // keyboard event: it walks the path from whatever holds the focus
+            // up to here, so a listener on the diff itself would be silent
+            // whenever the hand is in a terminal or in the tree — which is
+            // exactly when one reaches for `Ctrl` and the mouse. Nothing is
+            // repainted unless the flag turns over: `Shift` on every capital
+            // letter would otherwise cost a frame each.
+            .on_modifiers_changed(cx.listener(
+                |this, event: &gpui::ModifiersChangedEvent, _, cx| {
+                    let armed = event.modifiers.secondary();
+                    if this.diff_armed != armed {
+                        this.diff_armed = armed;
+                        // Let go of it and nothing is followable any more: the
+                        // underline goes with the hand cursor.
+                        this.diff_hover = None;
+                        cx.notify();
+                    }
+                },
+            ))
             .on_action(cx.listener(super::shortcuts::refresh))
             .on_action(cx.listener(super::shortcuts::new_terminal))
             .on_action(cx.listener(super::shortcuts::close_terminal))
@@ -3296,6 +3374,7 @@ impl Render for ClaudhubApp {
             .on_action(cx.listener(super::shortcuts::send_notes))
             .on_action(cx.listener(super::shortcuts::save_file))
             .on_action(cx.listener(super::shortcuts::find))
+            .on_action(cx.listener(super::shortcuts::find_file))
             .on_action(cx.listener(super::shortcuts::close_find))
             .on_action(cx.listener(super::shortcuts::find_next))
             .on_action(cx.listener(super::shortcuts::find_previous))
@@ -3421,6 +3500,7 @@ impl ClaudhubApp {
                 .default_value(value)
         });
         let entity = cx.entity();
+        let field = input.clone();
         let on_ok = std::rc::Rc::new(on_ok);
         window.open_dialog(cx, move |dialog, _window, _cx| {
             let (input, entity, on_ok) = (input.clone(), entity.clone(), on_ok.clone());
@@ -3440,6 +3520,9 @@ impl ClaudhubApp {
                     true
                 })
         });
+        // The field takes the focus, so that the dialog is typed in and answered
+        // with Enter without a click first.
+        super::dialogs::focus_field(&field, window, cx);
     }
 }
 
@@ -3510,9 +3593,11 @@ impl ClaudhubApp {
     /// plugin's script, a settings page a panel asked for — **and for the two
     /// button groups that change screen**, the bar and the aside. A screen one
     /// clicks is a place one leaves, and what one was doing there is what the
-    /// back arrow is for. Only the keyboard stays out: `Alt+4` is undone by
+    /// back arrow is for. The **screen keys** stay out: `Alt+4` is undone by
     /// pressing the key one came from, and a trail that recorded it would fill
-    /// with round trips one made on purpose.
+    /// with round trips one made on purpose. A key that has no such counterpart
+    /// does come through — `Ctrl+Shift+F` leaves a file for a list of hits and
+    /// nothing puts that file back, which is a jump like any other.
     ///
     /// Opening a file does not come through here: it writes its own step, from
     /// wherever one stood to the place in the file, and calling up the editing

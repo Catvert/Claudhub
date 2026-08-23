@@ -477,6 +477,23 @@ fn offset_of(text: &gpui_component::input::Rope, landing: &Landing) -> usize {
     }
 }
 
+/// Which tab closes to make room, given what each holds and when it was read.
+///
+/// A decision of its own, before the view that acts on it: the rule is short and
+/// every part of it was a bug waiting to happen. Never a tab holding unsaved
+/// text — losing work to make room for a glance is the one thing the limit must
+/// not do — and never the file about to open, which would close the tab being
+/// reused. `None` when every tab is spoken for: the bar then goes over the limit
+/// and stays there, which is what PhpStorm does too.
+fn oldest_spare<'a>(
+    tabs: impl Iterator<Item = (&'a Path, bool, u64)>,
+    keep: &Path,
+) -> Option<&'a Path> {
+    tabs.filter(|(path, dirty, _)| !dirty && *path != keep)
+        .min_by_key(|(_, _, used)| *used)
+        .map(|(path, _, _)| path)
+}
+
 pub struct Pending {
     pub worktree: PathBuf,
     pub path: PathBuf,
@@ -488,6 +505,11 @@ pub struct Pending {
     /// recording it would put back the place one has just stepped away from,
     /// and the trail would never end.
     pub from: Option<crate::ui::jumps::Place>,
+    /// The gesture only wants a look: the tab it opens is the preview tab, and
+    /// the next look replaces it. Said here rather than read at arrival because
+    /// it belongs to the **gesture**, and by the time the content lands the
+    /// gesture is over.
+    pub ephemeral: bool,
 }
 
 /// The files one worktree has open, and which of them is on screen.
@@ -574,10 +596,23 @@ pub struct Editing {
     /// than derived at render: the render closure runs every frame and this
     /// walks the whole file.
     pub hunks: Rc<Vec<crate::ui::hunks::Hunk>>,
+    /// The picture this tab shows, when what was opened is one to look at
+    /// rather than to edit. `None` for a file, and that is what every gesture
+    /// reads to know which of the two a tab holds — see `ui::preview`.
+    pub preview: Option<crate::ui::preview::Preview>,
     /// The hunk whose popover is open, named by the buffer line it was opened
     /// from. A line and not an index: the list is rebuilt on every keystroke,
     /// and an index into the old one names a different hunk in the new one.
     pub hunk_open: Option<usize>,
+    /// This tab is the preview tab: opened for a look, and given up as soon as
+    /// another file is looked at. Typing in it keeps it, and so does opening it
+    /// deliberately — see `ClaudhubApp::browse_in_editor`.
+    pub ephemeral: bool,
+    /// When this tab was last read, on `ClaudhubApp::tab_clock`'s counter.
+    ///
+    /// A stamp and not a position in a list: the tab order is the bar's, which
+    /// the user rearranges by dragging, and the limit closes on *reading* age.
+    pub used: u64,
 }
 
 impl ClaudhubApp {
@@ -1000,9 +1035,21 @@ impl ClaudhubApp {
 
     // — Reading and writing ———————————————————————————————————
 
-    /// Opens a file in the built-in editor.
+    /// Opens a file in the built-in editor, in a tab of its own.
     pub(super) fn open_in_editor(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.open_at(path, None, cx);
+    }
+
+    /// Opens a file to be **looked at**: it takes the preview tab, the one the
+    /// next look replaces.
+    ///
+    /// The gesture the tree makes on a single click. Browsing a project opens
+    /// ten files for one that is read, and a bar that grows by one per glance
+    /// is a bar one stops reading — the same answer as VS Code's, and the
+    /// reason its preview tab exists at all.
+    pub(super) fn browse_in_editor(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let ephemeral = crate::ui::settings::Settings::global(cx).editor_preview_tab;
+        self.open_where(path, None, ephemeral, cx);
     }
 
     /// The same, with a place in the file to come to rest at.
@@ -1018,6 +1065,17 @@ impl ClaudhubApp {
         landing: Option<Landing>,
         cx: &mut Context<Self>,
     ) {
+        self.open_where(path, landing, false, cx);
+    }
+
+    /// The same, saying whether the tab it opens is only for a look.
+    fn open_where(
+        &mut self,
+        path: PathBuf,
+        landing: Option<Landing>,
+        ephemeral: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(worktree) = self.active.clone() else {
             return;
         };
@@ -1029,8 +1087,9 @@ impl ClaudhubApp {
             path: path.clone(),
             landing,
             from,
+            ephemeral,
         });
-        self.git.send(Cmd::ReadFile { worktree, path });
+        self.git.send(self.read_file_cmd(worktree, path));
         cx.notify();
     }
 
@@ -1154,11 +1213,11 @@ impl ClaudhubApp {
                         path: spot.path.clone(),
                         landing: Some(Landing::Offset(spot.offset)),
                         from: None,
+                        // Stepping through the trail is not browsing: the file
+                        // one comes back to is one already worked in.
+                        ephemeral: false,
                     });
-                    self.git.send(Cmd::ReadFile {
-                        worktree,
-                        path: spot.path,
-                    });
+                    self.git.send(self.read_file_cmd(worktree, spot.path));
                 }
             }
         }
@@ -1199,6 +1258,78 @@ impl ClaudhubApp {
         Some(offset)
     }
 
+    /// Stamps a tab as the one being read, and gives back the stamp.
+    pub(super) fn touch_tab(&mut self) -> u64 {
+        self.tab_clock += 1;
+        self.tab_clock
+    }
+
+    /// Whether a gesture asked for this very file, and whether it only wants a
+    /// look. `None` when the content is an arrival nobody asked for — a save, an
+    /// agent's write, the watcher — which must move no tab.
+    pub(super) fn asked_for(&self, worktree: &Path, path: &Path) -> Option<bool> {
+        self.landing
+            .as_ref()
+            .filter(|pending| pending.worktree == worktree && pending.path == path)
+            .map(|pending| pending.ephemeral)
+    }
+
+    /// Makes room for a tab about to open: the preview tab it replaces, then
+    /// the oldest read over the limit.
+    ///
+    /// Called **before** the tab is installed, and that is the whole reason it
+    /// is a step of its own: closing shifts every index, and the code that
+    /// follows works in indices.
+    pub(super) fn make_tab_room(
+        &mut self,
+        worktree: &Path,
+        path: &Path,
+        ephemeral: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The preview tab is the one being replaced, so it goes — unless it is
+        // this very file, which is then simply read again.
+        if ephemeral {
+            let previous = self.editors(worktree).and_then(|tabs| {
+                tabs.open
+                    .iter()
+                    .find(|editing| editing.ephemeral && editing.path != path)
+                    .map(|editing| editing.path.clone())
+            });
+            if let Some(previous) = previous {
+                self.close_file(worktree.to_path_buf(), previous, window, cx);
+            }
+        }
+        let limit = crate::ui::settings::Settings::global(cx).editor_tab_limit;
+        if limit == 0 {
+            return;
+        }
+        // A file already open takes no room: its tab is reused.
+        let opening = self
+            .editors(worktree)
+            .is_none_or(|tabs| tabs.index_of(path).is_none());
+        while opening
+            && self
+                .editors(worktree)
+                .is_some_and(|tabs| tabs.open.len() >= limit)
+        {
+            let oldest = self.editors(worktree).and_then(|tabs| {
+                oldest_spare(
+                    tabs.open
+                        .iter()
+                        .map(|editing| (editing.path.as_path(), editing.dirty, editing.used)),
+                    path,
+                )
+                .map(Path::to_path_buf)
+            });
+            let Some(oldest) = oldest else {
+                return;
+            };
+            self.close_file(worktree.to_path_buf(), oldest, window, cx);
+        }
+    }
+
     /// Receives a content and installs the editor.
     pub(super) fn file_content_arrived(
         &mut self,
@@ -1211,6 +1342,12 @@ impl ClaudhubApp {
         // The language follows from the extension, as for a diff's highlighting:
         // it is the same table, PHP included.
         let restored = self.take_restored_editing(&worktree, &path);
+        // A tab put back by the session is one that was kept, however it was
+        // opened: the preview tab is a gesture's, and there is no gesture here.
+        let ephemeral = !restored && self.asked_for(&worktree, &path).unwrap_or(false);
+        if !restored {
+            self.make_tab_room(&worktree, &path, ephemeral, window, cx);
+        }
         let language = crate::ui::highlight::language_for_path(&path).unwrap_or("text");
         let input = cx.new(|cx| {
             // `EditorState` and not `InputState`: the input rework split the
@@ -1250,6 +1387,9 @@ impl ClaudhubApp {
                 .and_then(|tabs| tabs.by_path_mut(&edited))
             {
                 editing.dirty = true;
+                // A file one types in is a file one stays in: the preview tab
+                // becomes a tab like the others, and nothing replaces it.
+                editing.ephemeral = false;
             }
             this.lsp_editor_changed(&owner, cx);
             // The gutter answers while one types, which is the whole point of
@@ -1283,11 +1423,24 @@ impl ClaudhubApp {
             .editings
             .get(&worktree)
             .and_then(|tabs| tabs.index_of(&path));
+        // A file already open is asked for again — from the tree, from a diff
+        // line — and its tab has to come to the front. `open_file_tab` says it
+        // for a tab it creates; a reused one had nobody to say it, and the
+        // group went on showing whatever was there, which reads as a click that
+        // did nothing.
+        //
+        // Only when a gesture asked for the file, which is what a pending
+        // landing on this very file means: a reread — a save, an agent's write,
+        // the watcher — must not pull the group away from the tab being read.
+        let asked = self.asked_for(&worktree, &path).is_some();
         let panel = match reopened {
             Some(ix) => {
                 let panel = self.editings[&worktree].open[ix].panel.clone();
                 let fresh = input.clone();
                 panel.update(cx, |panel, cx| panel.rebind(fresh, cx));
+                if asked {
+                    crate::ui::panels::FilePanel::activate(&panel, window, cx);
+                }
                 panel
             }
             None => self.open_file_tab(&worktree, &path, input.clone(), window, cx),
@@ -1311,6 +1464,14 @@ impl ClaudhubApp {
             base_asked: false,
             hunks: Rc::default(),
             hunk_open: None,
+            preview: None,
+            // A reread keeps what the tab was: saving a file looked at does not
+            // make it a file one stays in.
+            ephemeral: reopened
+                .map(|ix| self.editings[&worktree].open[ix].ephemeral && !asked)
+                .unwrap_or(false)
+                || ephemeral,
+            used: self.touch_tab(),
         };
         let tabs = self.editings.entry(worktree.clone()).or_default();
         match reopened {
@@ -1371,14 +1532,67 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    /// `Ctrl+S`: writes what has been typed.
+    ///
+    /// **Every unsaved tab of the checkout**, and not only the one on screen —
+    /// the setting is on by default. One edits a file, follows a call into
+    /// another, edits that one too, and the gesture one makes at the end of it
+    /// means "put my work on disk", not "put on disk whichever of it the dock
+    /// happens to be showing". It is what an IDE does — PhpStorm has no
+    /// per-file save at all — and the risk it removes is the one that costs:
+    /// a tab left unsaved behind another, and a build run on a file nobody
+    /// wrote.
+    ///
+    /// The tab on screen is written whether or not it is marked, which is what
+    /// the single-file gesture always did: `Ctrl+S` on a file one has not
+    /// touched is a way of saying "write it anyway".
     pub(super) fn save_file(&mut self, cx: &mut Context<Self>) {
-        let Some(editing) = self.editing() else {
+        let Some(root) = self.editing_root() else {
             return;
         };
+        let mut doomed: Vec<PathBuf> = Vec::new();
+        if crate::ui::settings::Settings::global(cx).save_all_tabs {
+            if let Some(tabs) = self.editors(&root) {
+                doomed.extend(
+                    tabs.open
+                        .iter()
+                        .filter(|editing| editing.dirty)
+                        .map(|editing| editing.path.clone()),
+                );
+            }
+        }
+        if let Some(path) = self.editing().map(|editing| editing.path.clone()) {
+            if !doomed.contains(&path) {
+                doomed.push(path);
+            }
+        }
+        for path in doomed {
+            self.save_tab(&path, cx);
+        }
+        // A server that runs a formatter or an external analyser on save — as
+        // PHPantom does with PHPStan — has no other way of knowing.
+        self.lsp_editor_saved();
+        cx.notify();
+    }
+
+    /// Writes one open file back, named by its path.
+    ///
+    /// By path and not by "the file being edited": saving them all walks tabs
+    /// the dock is not showing, and the index of a tab is not a thing to hold
+    /// across a write.
+    fn save_tab(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some(editing) = self.editing_at(path) else {
+            return;
+        };
+        // Nothing to write back from a picture: the tab holds an empty editor
+        // nobody typed in, and saving it would truncate the file to nothing.
+        if editing.preview.is_some() {
+            return;
+        }
         let content = editing.input.read(cx).value().to_string();
         self.git.send(Cmd::WriteFile {
             worktree: editing.worktree.clone(),
-            path: editing.path.clone(),
+            path: path.to_path_buf(),
             content: content.clone(),
             // The digest of what we had read: an agent that wrote in the
             // meantime makes the save be refused rather than be overwritten.
@@ -1387,14 +1601,10 @@ impl ClaudhubApp {
         // The digest follows what has just been sent: without that, two saves in
         // a row would make the second be refused, the file having changed — by
         // us.
-        if let Some(editing) = self.editing_mut() {
+        if let Some(editing) = self.editing_at_mut(path) {
             editing.hash = files::digest(&content);
             editing.dirty = false;
         }
-        // A server that runs a formatter or an external analyser on save — as
-        // PHPantom does with PHPStan — has no other way of knowing.
-        self.lsp_editor_saved();
-        cx.notify();
     }
 
     // — The gutter's change marks ————————————————————————————————
@@ -1647,7 +1857,7 @@ impl ClaudhubApp {
     ///
     /// One panel and not one per screen, unlike a terminal: a file is only ever
     /// read on the editing screen.
-    fn open_file_tab(
+    pub(super) fn open_file_tab(
         &mut self,
         worktree: &Path,
         path: &Path,
@@ -1739,8 +1949,15 @@ impl ClaudhubApp {
             return;
         }
         let left = tabs.active().map(|editing| editing.path.clone());
+        // The tab one arrives in is the most recently read, which is what the
+        // tab limit closes on. Switching does not keep a preview tab, though:
+        // browsing through the bar is browsing all the same.
+        let stamp = self.touch_tab();
         if let Some(tabs) = self.editings.get_mut(&worktree) {
             tabs.active = ix;
+            if let Some(editing) = tabs.open.get_mut(ix) {
+                editing.used = stamp;
+            }
         }
         if let Some(left) = left {
             if left != path {
@@ -1816,24 +2033,58 @@ impl ClaudhubApp {
         }
     }
 
-    /// Closes the editor, asking for confirmation if the file has changed.
+    /// Closes the file on screen, asking about it if it has changed.
     pub(super) fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editing) = self.editing() else {
             return;
         };
         // The worktree the gesture was made in, and not the one selected when
         // the dialog is answered: one browses while a question is open.
-        let worktree = editing.worktree.clone();
-        let path = editing.path.clone();
-        if !editing.dirty {
+        let (worktree, path) = (editing.worktree.clone(), editing.path.clone());
+        self.ask_close_file(worktree, path, window, cx);
+    }
+
+    /// The gestures that close a tab: the cross, the wheel button, `Ctrl+W`.
+    ///
+    /// **Unsaved text is asked about**, with the three answers the question
+    /// really has — write it, drop it, or stay. A two-button dialog would have
+    /// made "close" mean "lose", which is the reading nobody wants to make at
+    /// speed on a tab bar.
+    ///
+    /// The dock's own removal does **not** come through here: by the time
+    /// `on_removed` fires the tab is gone, and a cancelled dialogue would leave
+    /// an editor nothing renders. It is the same limit the terminals have, and
+    /// the reason both draw their cross themselves.
+    pub(super) fn ask_close_file(
+        &mut self,
+        worktree: PathBuf,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dirty = self
+            .editors(&worktree)
+            .and_then(|tabs| tabs.by_path(&path))
+            .is_some_and(|editing| editing.dirty);
+        if !dirty {
             self.close_file(worktree, path, window, cx);
             return;
         }
-        let label = SharedString::from(editing.path.display().to_string());
+        let label = SharedString::from(path.display().to_string());
         let entity = cx.entity();
         window.open_dialog(cx, move |dialog, _window, _cx| {
             let (entity, label, worktree) = (entity.clone(), label.clone(), worktree.clone());
             let path = path.clone();
+            // The button that drops the work, and the one Enter makes: saving.
+            // Enter is the answer one gives without reading, so it is the one
+            // that keeps what was typed.
+            let dropping = {
+                let (entity, worktree, path) = (entity.clone(), worktree.clone(), path.clone());
+                move |window: &mut Window, cx: &mut App| {
+                    let (worktree, path) = (worktree.clone(), path.clone());
+                    entity.update(cx, |this, cx| this.close_file(worktree, path, window, cx));
+                }
+            };
             dialog
                 .title(tr!("editor-discard-title"))
                 .child(
@@ -1844,10 +2095,16 @@ impl ClaudhubApp {
                 )
                 .overlay_closable(false)
                 .close_button(false)
-                .footer(super::dialogs::confirm())
+                .footer(super::dialogs::choose(
+                    tr!("editor-discard-save"),
+                    tr!("editor-discard-drop"),
+                    dropping,
+                ))
                 .on_ok(move |_, window, cx| {
                     let (worktree, path) = (worktree.clone(), path.clone());
                     entity.update(cx, |this, cx| {
+                        this.save_tab(&path, cx);
+                        this.lsp_editor_saved();
                         this.close_file(worktree, path, window, cx);
                     });
                     true
@@ -1880,31 +2137,9 @@ impl ClaudhubApp {
 
     /// Opens the diff's file in the external editor, at the selected line.
     pub(super) fn open_diff_externally(&mut self, cx: &mut Context<Self>) {
-        let split = Settings::global(cx).diff_split;
-        let Some(state) = self.active_review() else {
+        let Some((path, line)) = self.diff_place(cx) else {
             return;
         };
-        let Some(path) = state.selected.clone() else {
-            return;
-        };
-        let line = state
-            .diff
-            .as_ref()
-            .zip(state.diff_selection)
-            .and_then(|(diff, (anchor, head))| {
-                let row = if split {
-                    diff.unified_span(anchor, head)?.0
-                } else {
-                    anchor.min(head)
-                };
-                let crate::ui::diff_view::Row::Line { hunk, line } = diff.rows.get(row).copied()?
-                else {
-                    return None;
-                };
-                let source = diff.file.hunks.get(hunk)?.lines.get(line)?;
-                source.new_no.or(source.old_no)
-            })
-            .unwrap_or(1);
         self.open_externally(path, line, cx);
     }
 
@@ -2425,7 +2660,7 @@ impl ClaudhubApp {
     /// exists at all. Both are always shown, greyed when there is nowhere to
     /// go: an arrow that appears and disappears moves the four buttons beside
     /// it every time one follows a definition.
-    fn render_jump_buttons(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    pub(super) fn render_jump_buttons(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let (back, forward) = self.can_travel();
         Some(
             h_flex()
@@ -2717,6 +2952,21 @@ impl ClaudhubApp {
                         .relative()
                         .flex_1()
                         .min_h_0()
+                        // `Ctrl`+click follows a symbol, and the two halves of
+                        // it are here: the flag is cleared before the editor
+                        // sees the click, and read after — see
+                        // `on_surface_definition_click`.
+                        .capture_any_mouse_down(cx.listener(
+                            |this, _: &gpui::MouseDownEvent, _, _| {
+                                this.followed_definition = false;
+                            },
+                        ))
+                        .on_mouse_down(gpui::MouseButton::Left, {
+                            let surface = surface.clone();
+                            cx.listener(move |this, event, window, cx| {
+                                this.on_surface_definition_click(&surface, event, window, cx)
+                            })
+                        })
                         // The capture phase, on an ancestor of the editor: see
                         // `vim_key`. Installed only when the mode is on, so that
                         // nothing stands between the keyboard and the input
@@ -2987,10 +3237,20 @@ fn render_row(
                 .when(is_open, |el| el.bg(look.accent))
                 .when(at_cursor && !is_open, |el| el.bg(look.accent.opacity(0.5)))
                 .hover(|s| s.bg(look.accent.opacity(0.4)))
-                .on_click(move |_, window, cx| {
+                // One click shows the file, two keep it: the preview tab is
+                // what a single click fills, and a double click is the gesture
+                // by which one says "this one I am staying in". The count comes
+                // from the event — gpui counts the clicks for us — so there is
+                // no second handler and no delay waiting for one.
+                .on_click(move |event: &gpui::ClickEvent, window, cx| {
+                    let kept = event.click_count() > 1;
                     open_entity.update(cx, |this, cx| {
                         this.focus_project_tree(for_open.clone(), window, cx);
-                        this.open_in_editor(for_open.clone(), cx);
+                        if kept {
+                            this.open_in_editor(for_open.clone(), cx);
+                        } else {
+                            this.browse_in_editor(for_open.clone(), cx);
+                        }
                     });
                 })
                 // A file takes a drop too, and hands it to the folder it lives
@@ -3271,6 +3531,40 @@ fn paint_hunk_mark(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tab limit's whole rule. Each clause here was a way of losing
+    /// something: the oldest read is the one one has finished with, unsaved text
+    /// is not a thing to close for a glance, and closing the file about to open
+    /// would take down the tab being reused.
+    #[test]
+    fn the_tab_that_makes_room_is_the_oldest_one_can_spare() {
+        let tabs = [
+            (Path::new("a.rs"), false, 1),
+            (Path::new("b.rs"), false, 2),
+            (Path::new("c.rs"), false, 3),
+        ];
+        assert_eq!(
+            oldest_spare(tabs.iter().copied(), Path::new("d.rs")),
+            Some(Path::new("a.rs"))
+        );
+        // The file about to open is never the one that closes for it.
+        assert_eq!(
+            oldest_spare(tabs.iter().copied(), Path::new("a.rs")),
+            Some(Path::new("b.rs"))
+        );
+        // Unsaved text is passed over, however old.
+        let dirty = [(Path::new("a.rs"), true, 1), (Path::new("b.rs"), false, 2)];
+        assert_eq!(
+            oldest_spare(dirty.iter().copied(), Path::new("d.rs")),
+            Some(Path::new("b.rs"))
+        );
+        // Nothing to spare: the bar goes over the limit rather than lose work.
+        let all_dirty = [(Path::new("a.rs"), true, 1)];
+        assert_eq!(
+            oldest_spare(all_dirty.iter().copied(), Path::new("d.rs")),
+            None
+        );
+    }
 
     /// What a drop on a row asks for. This is the whole decision of dragging
     /// inside the tree, and the only part of it that can be wrong in silence:

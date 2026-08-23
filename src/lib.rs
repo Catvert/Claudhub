@@ -25,6 +25,7 @@ pub mod commit_msg;
 pub mod db;
 pub mod files;
 pub mod git;
+pub mod just;
 pub mod logging;
 pub mod lsp;
 pub mod plugin;

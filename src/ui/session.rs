@@ -39,7 +39,6 @@ use std::path::{Path, PathBuf};
 
 use gpui::{App, Context, Window};
 
-use crate::runtime::Cmd;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::settings::Settings;
 use crate::ui::store::{OpenConsole, OpenFile, Place, Store};
@@ -190,10 +189,7 @@ impl ClaudhubApp {
             return;
         }
         let next = self.pending_files.remove(0);
-        self.git.send(Cmd::ReadFile {
-            worktree: next.worktree,
-            path: next.path,
-        });
+        self.git.send(self.read_file_cmd(next.worktree, next.path));
         cx.notify();
     }
 

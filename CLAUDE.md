@@ -96,6 +96,7 @@ src/
     host.rs     la machine Rune (feature `plugins`) — le seul module qui la voit
     loaded.rs   un plugin tel que la fenêtre le tient : script, état, arbres
   wt.rs         le `wt.toml` d'un projet : questions, tâches, statut, URLs
+  just.rs       les recettes du `justfile`, lues par `just --dump` (JSON)
   git/          couche git — sous-processus `git`, testable sans gpui
     mod.rs      exécution (stdin fermé, LC_ALL=C, pas de pager)
     repo.rs     découverte, worktrees, écritures (stage, commit, push…)
@@ -143,6 +144,7 @@ src/
     tree.rs         chemins → arborescence repliable, en indices
     file_icons.rs   l'icône et la teinte d'un fichier, d'après son nom
     explorer.rs     l'explorateur, l'éditeur intégré et ses onglets
+    preview.rs      regarder un fichier au lieu de l'éditer : images et SVG
     db.rs           l'arbre des bases : connexion, base, table, colonne
     db_query.rs     la console SQL, ses complétions et sa table de résultats
     sql_history.rs  les requêtes déjà jouées : dédup, portée, jours — pur
@@ -208,8 +210,9 @@ attend, et c'est la panne qu'on ne diagnostique pas.
   se disputeraient le verrou des références.
 - **Hooks du projet** (un worker) : `wt new/rm/up/down`. Pas avec les lectures
   (un `up` démarre des conteneurs), pas avec le réseau.
-- **Fond** (un worker) : résumés, agents, relevé de `wt`, commandes shell d'un
-  plugin. Ne doit jamais passer devant un diff qu'on vient de demander.
+- **Fond** (un worker) : résumés, agents, relevé de `wt`, recettes d'un
+  `justfile`, commandes shell d'un plugin. Ne doit jamais passer devant un diff
+  qu'on vient de demander.
 - **Bases** (deux workers) : deux, parce que déplier un schéma en demande
   plusieurs à la fois et qu'ils attendent une socket.
 - **Recherche** (un worker) : une recherche se **remplace** — c'est
@@ -368,8 +371,11 @@ Six pièges du dock, tous rencontrés :
 rendant la **même** `Entity<TerminalView>`. La place se garde par l'invisibilité,
 pas par un déménagement. Ils sont retirés de `layout.json` avant écriture — leur
 contenu est un **processus**. Fermer un onglet dont une commande tourne se fait
-confirmer (`Terminal::busy`, lu dans `/proc/<pid>/stat`) ; un onglet d'agent est
-occupé tant qu'il vit.
+confirmer (`Terminal::busy`, lu dans `/proc/<pid>/stat`) ; un onglet **lancé sur
+une commande** — agent, tâche `wt`, recette `just` — est occupé tant qu'il vit,
+et ça ne se déduit pas du processus : `sh -lc` **exec** ce qu'on lui donne, si
+bien que l'enfant du pty tient le groupe de premier plan comme un shell à son
+invite.
 
 ### Le grain de l'interface
 
@@ -400,8 +406,8 @@ registre de gpui-component ne se charge **que depuis un répertoire**, qu'il
 surveille ; les thèmes sont donc écrits dans `<config>/themes/` au démarrage, et
 réécrits à chaque fois — pour en modifier un, le copier sous un autre nom.
 
-**Le fork de gpui-component** (voir `Cargo.toml`) est seize commits au-dessus de
-leur `main`, chacun payé par un symptôme :
+**Le fork de gpui-component** (voir `Cargo.toml`) est dix-sept commits au-dessus
+de leur `main`, chacun payé par un symptôme :
 
 1. le `TabVariant` que `DockSkin` fait passer jusqu'au `TabBar` ;
 2. les coins en boîte bordée réservés au variant classique ;
@@ -431,7 +437,12 @@ leur `main`, chacun payé par un symptôme :
 15. **le seul panneau d'une zone latérale se déplace quand même** : `alone` se
     lisait par arbre, et chaque zone est le sien ;
 16. **et la zone qu'il laisse cesse d'être peinte** : un dock garde sa taille une
-    fois vidé, laissant une bande morte le long du bord.
+    fois vidé, laissant une bande morte le long du bord ;
+17. **l'entrée d'un menu tronque son libellé** : la boîte est plafonnée
+    (`max_width`), la ligne ne l'était pas — un libellé long gardait sa largeur
+    entière, mille cent pixels dans une boîte de deux cents, peinte à travers la
+    bordure. Rien ne le repliait non plus, une ligne de menu ayant la hauteur
+    d'une ligne.
 
 Les commits ont vocation à partir en PR.
 
@@ -449,7 +460,15 @@ fermeture de rendu. Le repli des lignes longues n'existe qu'en deux colonnes, se
 fait **à la colonne** et non aux mots — c'est ce qui rend la hauteur calculable —
 et bascule sur `v_virtual_list`. La largeur mesurée n'existe pas à la première
 frame et est **toujours celle de la frame d'avant**, d'où le `canvas` de
-`diff_laid_out`.
+`diff_laid_out`. **`Ctrl` rend les symboles cliquables** : les plages de mots ne
+sont posées que tant que la touche est tenue — c'est ce qui met la main sur un
+mot et nulle part ailleurs —, et le repeint qui les installe vient d'un
+`on_modifiers_changed` sur la **racine**, un changement de modificateur étant un
+événement clavier qui remonte depuis ce qui a le focus. Le mot survolé est
+souligné par une **troisième couche** de style (`highlight::underline`, après la
+grammaire et les occurrences), et c'est l'entrée survolée qui efface le
+soulignement d'une autre — un texte est l'enfant de sa ligne, donc il parle en
+premier.
 
 **La revue** (`review.rs`) — `DiffRange` n'a ni `Unstaged` ni `Staged` : la
 distinction est un détail de plomberie git, restitué par une case à cocher par
@@ -579,8 +598,11 @@ compte**. Un seul propriétaire par session. Du JSON brut sur le fil, `lsp-types
 étant sous la feature `ui`. Le `languageId` n'est pas l'extension
 (`lsp::language_of`). Le fil ne transporte que des chemins **absolus** — une URI
 est absolue ou elle n'est rien —, et l'oubli ne provoque aucune erreur : les
-diagnostics reviennent sous un chemin que l'éditeur n'emploie pas. La légende des
-jetons sémantiques est traduite dans le vocabulaire de nos thèmes
+diagnostics reviennent sous un chemin que l'éditeur n'emploie pas. **Un saut de définition
+qui ne trouve rien retombe sur `git grep`** (`search_view::search_for_definition`) :
+serveur coupé, langue non servie, symbole inconnu — c'est le même geste pour la
+main, et une seule occurrence se suit, plusieurs ouvrent l'écran Recherche. La
+légende des jetons sémantiques est traduite dans le vocabulaire de nos thèmes
 (`lsp::theme_name`), un nom inconnu ne rendant **aucun** style.
 
 **La piste** (`jumps.rs`) — une place est un fichier *ou* un écran, et c'est une
@@ -638,10 +660,12 @@ un rebase** : la traduction se fait dans la couche git, une fois. Le blob se lit
 octet pour octet (`git_blob`), `git` rognant les sauts de ligne finaux.
 
 **Ce qui tient lieu de système d'extension**, du moins cher au plus cher : le
-`wt.toml` du projet ; des commandes déclarées dans les réglages ; un panneau
-écrit en Rune. Des extensions wasm à la Zed ont été **écartées** : un script
-rechargé à chaud fait ce que le troisième niveau demandait, sans WIT ni deuxième
-format de paquet.
+`justfile` du dépôt, s'il en a un — ses recettes sont le bouton « Lancer » de
+la barre de titre, lues par `just --dump --dump-format json` et jamais par un
+parseur à nous ; le `wt.toml` du projet ; des commandes déclarées dans les
+réglages ; un panneau écrit en Rune. Des extensions wasm à la Zed ont été
+**écartées** : un script rechargé à chaud fait ce que le troisième niveau
+demandait, sans WIT ni deuxième format de paquet.
 
 ## Conventions gpui
 
@@ -668,6 +692,13 @@ Elles viennent d'Aviary, et les enfreindre produit des bugs silencieux.
 - **Un `Dialog` ne peint pas ses boutons** : `on_ok` et `on_cancel` n'installent
   que les rappels d'Entrée et d'Échap. `ui::dialogs::confirm` rend le pied de
   page, et ses boutons **dispatchent les mêmes actions que les touches**.
+- **Le champ d'un dialogue prend le focus, et de façon différée**
+  (`ui::dialogs::focus_field`) : un menu contextuel **rend le focus** à ce qui
+  l'avait quand il se referme, après le gestionnaire qui a ouvert le dialogue.
+  Un focus posé tout de suite perd la course, et le dialogue s'ouvre sans
+  clavier — ni frappe, ni Entrée. Rien ne s'abonne au `PressEnter` du champ :
+  l'Entrée d'un champ d'une ligne **remonte déjà** à la liaison `Confirm` du
+  dialogue, et l'abonnement en ferait une deuxième.
 - **`key_context` prend un identifiant, pas un prédicat.** Passer
   `"Claudhub && !Dialog"` fait boucler le parseur et déborder la pile au premier
   rendu. L'expression va dans le troisième argument de `KeyBinding::new`. Et un

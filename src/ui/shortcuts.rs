@@ -70,6 +70,7 @@ actions!(
         SaveFile,
         CloseEditor,
         Find,
+        FindFile,
         CloseFind,
         FindNext,
         FindPrevious,
@@ -720,6 +721,14 @@ table!(STANDARD, standard_bindings, false, [
     // `Ctrl+F` searches in the panel where the last click happened. It is
     // excluded from the terminal and from input fields, which each have their own.
     Search "secondary-f" => Find, COPY_PREDICATE, "shortcut-find";
+    // `Ctrl+P` and not `Ctrl+Shift+P`: every editor that has this gesture
+    // writes it that way — VSCode, Sublime, Zed — and reserves the Shift
+    // variant for a command palette we do not have. A single letter with the
+    // platform key, so `WINDOW_PREDICATE`: `Ctrl+P` in a shell is the previous
+    // history entry, and the agent running there is what one came to drive.
+    // Input fields are **not** excluded, unlike `Ctrl+F`: the selection this
+    // seeds itself with is in the editor, which is an `Input` too.
+    Search "secondary-p" => FindFile, WINDOW_PREDICATE, "shortcut-find-file";
     Search "secondary-g" => FindNext, WINDOW_PREDICATE, "shortcut-find-next";
     Search "enter" => FindNext, FIND_PREDICATE, "shortcut-find-next";
     Search "secondary-shift-g" => FindPrevious, PREDICATE, "shortcut-find-previous";
@@ -1337,6 +1346,15 @@ pub fn save_file(
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.save_file(cx);
+}
+
+pub fn find_file(
+    this: &mut ClaudhubApp,
+    _: &FindFile,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.open_file_find(window, cx);
 }
 
 pub fn search_project(

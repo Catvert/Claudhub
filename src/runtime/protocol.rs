@@ -427,6 +427,16 @@ pub enum Cmd {
         worktree: WorktreeId,
         path: PathBuf,
     },
+    /// Reads a file to **look at** it rather than edit it.
+    ///
+    /// A command of its own and not a flag on `ReadFile`: what comes back is
+    /// bytes and not text, and the two answers land in two different halves of
+    /// a tab — the editor, or the preview. Which one is asked is decided from
+    /// the file name alone (`files::picture_of`), before anything is read.
+    ReadImage {
+        worktree: WorktreeId,
+        path: PathBuf,
+    },
     /// Reads what `HEAD` holds for a file, which is what the editor's gutter
     /// compares its buffer against. A command of its own rather than a
     /// `LoadFileDiff`: the diff git computes is against the file **on disk**,
@@ -578,6 +588,15 @@ pub enum Cmd {
         /// into its arguments — the order is the task's, and only it knows it.
         answers: std::collections::BTreeMap<String, String>,
     },
+    /// Reads a worktree's `justfile`: the recipes the run button offers.
+    ///
+    /// A subprocess (`just --dump`), hence a command and not a file read the
+    /// view could do itself. Background queue: nothing on screen waits for it,
+    /// and it must never sit in front of a diff.
+    JustLoad {
+        worktree: WorktreeId,
+    },
+
     /// Reads the state and the addresses of a project's worktrees.
     ///
     /// These are shell commands, one per worktree and per reading: background
@@ -771,6 +790,7 @@ impl Cmd {
             Self::ListFiles { .. } => "ListFiles",
             Self::ReadDir { .. } => "ReadDir",
             Self::ReadFile { .. } => "ReadFile",
+            Self::ReadImage { .. } => "ReadImage",
             Self::ReadFileBase { .. } => "ReadFileBase",
             Self::WriteFile { .. } => "WriteFile",
             Self::FileOp { .. } => "FileOp",
@@ -789,6 +809,7 @@ impl Cmd {
             Self::WtUp { .. } => "WtUp",
             Self::WtDown { .. } => "WtDown",
             Self::WtTask { .. } => "WtTask",
+            Self::JustLoad { .. } => "JustLoad",
             Self::WtScan { .. } => "WtScan",
             Self::PluginCall { .. } => "PluginCall",
             Self::PluginManage { .. } => "PluginManage",
@@ -915,6 +936,13 @@ pub enum Evt {
         task: String,
         launch: crate::wt::Launch,
     },
+    /// What a worktree's `justfile` declares. `None` when there is none, or
+    /// when `just` is not installed: the run button disappears, which is the
+    /// truth in both cases.
+    JustRecipes {
+        worktree: WorktreeId,
+        recipes: Option<crate::just::Snapshot>,
+    },
     WtStates {
         states: Vec<(WorktreeId, WtWorktree)>,
     },
@@ -977,6 +1005,12 @@ pub enum Evt {
         worktree: WorktreeId,
         path: PathBuf,
         content: crate::files::Content,
+    },
+    /// An image, as read, for the tab that will paint it.
+    ImageContent {
+        worktree: WorktreeId,
+        path: PathBuf,
+        image: crate::files::Image,
     },
     /// The three versions of a conflicted file, or why there are not three.
     ///

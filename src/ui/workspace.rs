@@ -370,25 +370,39 @@ pub fn install_default_layout(
         Workspace::Git => {
             let list = DockLayout::v_split()
                 .child(
+                    DockLayout::tabs()
+                        .panel_view(panel!(ChangesPanel), cx)
+                        .panel_view(panel!(BranchPanel), cx)
+                        // Hidden while there is nothing to resolve: a permanent
+                        // tab would shift the others aside to serve one time in
+                        // a hundred.
+                        .panel_view(panel!(ConflictsPanel), cx),
+                    None,
+                )
+                // The bottom third holds what one reads *while* choosing a
+                // file: where one stands, and where the branch comes from.
+                // The history and the tags joined the notes there rather than
+                // staying above — they do not answer "what is there to read",
+                // they answer "what happened", and pushed aside the two tabs
+                // that do choose the file.
+                //
+                // **This screen's plugins land here too**, and not in the group
+                // above: a plugin asking for the list column is asking to sit
+                // beside what one reads, and the shipped one — the CI, whose
+                // runs answer "what happened to this branch" — is the whole
+                // point. The three tabs above choose the file being reviewed,
+                // and nothing else belongs among them.
+                .child(
                     with!(
                         listed,
                         DockLayout::tabs()
-                            .panel_view(panel!(ChangesPanel), cx)
-                            .panel_view(panel!(BranchPanel), cx)
+                            .panel_view(panel!(NotesPanel), cx)
                             .panel_view(panel!(HistoryPanel), cx)
                             // Beside the history, and that is where it belongs: a
                             // tag names a commit, and the gesture one makes after
                             // finding the commit worth marking is right there.
                             .panel_view(panel!(TagsPanel), cx)
-                            // Hidden while there is nothing to resolve: a permanent
-                            // tab would shift the others aside to serve one time in
-                            // a hundred.
-                            .panel_view(panel!(ConflictsPanel), cx)
                     ),
-                    None,
-                )
-                .child(
-                    DockLayout::tabs().panel_view(panel!(NotesPanel), cx),
                     Some(third),
                 );
             let center = DockLayout::h_split()

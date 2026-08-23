@@ -174,6 +174,10 @@ impl ClaudhubApp {
                     true
                 })
         });
+        // One opens this dialog to write: the caret goes in it. Enter stays a
+        // newline here — the field is a `Textarea`, and a remark about code runs
+        // to several lines — so the note is filed by the button.
+        super::dialogs::focus_field(&self.note_input, window, cx);
     }
 
     fn save_note(&mut self, body: String, cx: &mut Context<Self>) {
@@ -601,6 +605,9 @@ impl ClaudhubApp {
                     true
                 })
         });
+        // The text is already there, and it is meant to be added to: the caret
+        // goes in the field.
+        super::dialogs::focus_field(&self.prompt_input, window, cx);
     }
 
     /// Delivers the prompt and marks the notes as sent.

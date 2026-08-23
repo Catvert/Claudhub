@@ -22,9 +22,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    div, prelude::*, px, App, Bounds, ClipboardItem, Context, Entity, FocusHandle, Focusable, Hsla,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
-    ScrollWheelEvent, SharedString, StyledText, TextRun, Window,
+    div, prelude::*, px, App, Bounds, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, Render, ScrollWheelEvent, SharedString, StyledText, TextRun, Window,
 };
 use gpui_component::{
     dock::{DockPlacement, InsertTarget, PanelId},
@@ -102,7 +102,19 @@ pub struct TerminalView {
     /// title: an agent renames its tab as the conversation goes, and looking for
     /// its name in a changing title would be guesswork.
     agent: bool,
+    /// True when the tab was launched **on a command** rather than on a shell.
+    ///
+    /// An agent, a `wt` task, a `just` recipe: three ways of asking for the same
+    /// thing, and what they have in common is that the pty's child *is* the
+    /// command. Recorded at opening, like `agent`, and for the same reason —
+    /// nothing about the running process says it afterwards.
+    runs_command: bool,
 }
+
+/// The pty's child has exited, and the tab was a shell — nothing to keep.
+pub struct TerminalExited;
+
+impl EventEmitter<TerminalExited> for TerminalView {}
 
 impl TerminalView {
     /// Opens a pty. Separate from the view because it is the only step that can
@@ -141,6 +153,7 @@ impl TerminalView {
         terminal: Terminal,
         label: SharedString,
         agent: bool,
+        runs_command: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -161,7 +174,28 @@ impl TerminalView {
                                 view.terminal.set_title(title);
                             }
                             TerminalEvent::Bell => {}
-                            TerminalEvent::Exited => view.terminal.mark_exited(),
+                            // The child is gone and the tab has nothing left to
+                            // show: `exit` in fish, `Ctrl+D`, a `just` recipe or a
+                            // `wt` task that has run its course. The application
+                            // closes the tab; the view only says so, being the one
+                            // that hears the pty.
+                            //
+                            // **Only on a success.** A failure is the one thing
+                            // one comes back to read — the failed test, the build
+                            // that stopped on an error —, and a tab that closes
+                            // itself takes the message with it. Everything else
+                            // goes: a shell exits with 0, and so does a recipe
+                            // that ran its course.
+                            //
+                            // A death by signal has no code, and neither has the
+                            // loop's own end, which follows the child's: an exit
+                            // one did not ask for keeps its tab.
+                            TerminalEvent::Exited(code) => {
+                                view.terminal.mark_exited();
+                                if code == Some(0) {
+                                    cx.emit(TerminalExited);
+                                }
+                            }
                         }
                         view.snapshot = view.terminal.snapshot();
                         cx.notify();
@@ -191,6 +225,7 @@ impl TerminalView {
             resize_moved: false,
             label,
             agent,
+            runs_command,
         }
     }
 
@@ -227,17 +262,27 @@ impl TerminalView {
     /// Whether something is running in there — what closing has to ask.
     ///
     /// Two shapes, and only one of them is job control. A **shell** is busy when
-    /// a command holds the pty's foreground group (`Terminal::busy`). An
-    /// **agent's tab** has no prompt to come back to — its child *is* the
-    /// command — so it counts as busy for as long as it lives. What tells them
-    /// apart is the profile the tab was launched with, and not "we named a
-    /// program": the shell itself is named too, every tab of this window
-    /// launching the one from the settings.
+    /// a command holds the pty's foreground group (`Terminal::busy`). A tab
+    /// **launched on a command** has no prompt to come back to — its child *is*
+    /// the command — so it counts as busy for as long as it lives.
+    ///
+    /// That second half is not the agent's alone, and reading it off the profile
+    /// was the bug: a `just` recipe and a `wt` task go through `sh -lc`, which
+    /// **execs** the command it was given rather than keeping a shell in front
+    /// of it, so the pty's child holds the foreground group itself — exactly
+    /// what a shell at its prompt looks like. A recipe that had been building
+    /// for two minutes was therefore closed without a word.
+    ///
+    /// What tells the two apart is the launch, and not "we named a program":
+    /// the shell itself is named too, every tab of this window launching the one
+    /// from the settings. The cost is a tab opened on an interactive command —
+    /// a task whose `run` is `nix-shell` — asking to be closed even while it
+    /// sits at a prompt, which is the side to be wrong on.
     pub fn busy(&self) -> bool {
         if self.terminal.has_exited() {
             return false;
         }
-        self.agent || self.terminal.busy()
+        self.runs_command || self.terminal.busy()
     }
 
     pub fn label(&self) -> SharedString {
@@ -1365,8 +1410,20 @@ impl ClaudhubApp {
                 return;
             }
         };
-        let view =
-            cx.new(|cx| TerminalView::attach(terminal, launch.label, launch.agent, window, cx));
+        // Whether the tab runs a command is read from the launch and not from
+        // the pty: `open` falls back on the settings' program when nothing was
+        // asked for, and that fallback is the shell.
+        let runs_command = launch.command.is_some();
+        let view = cx.new(|cx| {
+            TerminalView::attach(
+                terminal,
+                launch.label,
+                launch.agent,
+                runs_command,
+                window,
+                cx,
+            )
+        });
         // **A terminal opened on purpose is a terminal one wants to see.** The
         // panel may have been hidden — from the corner button, or from a
         // view's `…` menu —, and a pty installed behind a hidden panel is a
@@ -1415,6 +1472,19 @@ impl ClaudhubApp {
                 }
             }));
         }
+        // A shell that exits closes its tab. `subscribe_in` and not
+        // `subscribe`: removing the panels and handing the focus on both need a
+        // window, which the event does not carry. Held here and not in the view
+        // — closing a terminal is the application's gesture, and the same one
+        // the cross goes through, panels of the five screens included.
+        cx.subscribe_in(
+            &view,
+            window,
+            |this, view, _: &TerminalExited, window, cx| {
+                this.close_terminal(view.entity_id(), window, cx);
+            },
+        )
+        .detach();
         self.terminals.push(OpenTerminal {
             worktree: worktree.clone(),
             view: view.clone(),
@@ -1441,6 +1511,7 @@ impl ClaudhubApp {
         let Some(dock) = self.docks.get(&workspace).cloned() else {
             return;
         };
+        let side = crate::ui::settings::Settings::global(cx).terminal.placement;
         // The node of a terminal already open on this worktree, in this dock:
         // that is the tab group the new one joins.
         let sibling = self
@@ -1496,19 +1567,34 @@ impl ClaudhubApp {
                             // that also gives the right answer where the
                             // centre holds a single column.
                             let tree = dock.layout(DockPlacement::Center)?;
-                            let node = match tree.root().kind() {
-                                gpui_component::dock::PaneRef::Split {
-                                    axis: gpui::Axis::Horizontal,
-                                    children,
-                                    ..
-                                } => children.last().map(|child| child.id()),
-                                _ => None,
-                            }
-                            .unwrap_or_else(|| tree.root().id());
+                            // Beside the content, the whole row is the right
+                            // neighbour: a terminal opened to the right of the
+                            // diff alone would leave the review's list column
+                            // and the terminal sharing a height for no reason.
+                            // Under it, the last slot of the row — see above.
+                            let (node, placement, size) = match side {
+                                crate::ui::settings::TerminalPlacement::Right => (
+                                    tree.root().id(),
+                                    gpui_base::Placement::Right,
+                                    TERMINAL_WIDTH,
+                                ),
+                                crate::ui::settings::TerminalPlacement::Bottom => {
+                                    let node = match tree.root().kind() {
+                                        gpui_component::dock::PaneRef::Split {
+                                            axis: gpui::Axis::Horizontal,
+                                            children,
+                                            ..
+                                        } => children.last().map(|child| child.id()),
+                                        _ => None,
+                                    }
+                                    .unwrap_or_else(|| tree.root().id());
+                                    (node, gpui_base::Placement::Bottom, TERMINAL_HEIGHT)
+                                }
+                            };
                             Some(InsertTarget::Split {
                                 node,
-                                placement: gpui_base::Placement::Bottom,
-                                size: Some(TERMINAL_HEIGHT),
+                                placement,
+                                size: Some(size),
                             })
                         })
                 },
@@ -1941,6 +2027,9 @@ impl ClaudhubApp {
 
 /// The height the first terminal of a screen opens at.
 const TERMINAL_HEIGHT: Pixels = px(260.);
+
+/// And the width, when it opens beside the content rather than under it.
+const TERMINAL_WIDTH: Pixels = px(520.);
 
 #[cfg(test)]
 mod tests {

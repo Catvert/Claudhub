@@ -9,7 +9,7 @@
 //! `[[prompt]]`s become a dialog, its `[status] up` a badge in the sidebar. None
 //! of that is compiled here: the project's file is what declares it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use gpui::{div, prelude::*, px, App, Context, Entity, SharedString, Window};
@@ -375,6 +375,18 @@ impl ClaudhubApp {
         creation.questions = questions;
         creation.inputs = inputs;
         creation.filters = filters;
+        // The round's first text field takes the focus: the questions arrive
+        // after the dialog opens, so this is the only moment there is a field to
+        // put the caret in. The choice filters are left alone — a filter is not
+        // what the page asks for, and Enter in it would answer the whole page.
+        let first = creation
+            .questions
+            .iter()
+            .find_map(|question| creation.inputs.get(&question.name))
+            .cloned();
+        if let Some(field) = first {
+            crate::ui::dialogs::focus_field(&field, window, cx);
+        }
         cx.notify();
     }
 
@@ -851,6 +863,72 @@ impl ClaudhubApp {
         // `worktrees_changed` answers without naming a checkout — the one that
         // was removed no longer exists — so the key is the bare action.
         self.start(None, Action::Worktree, Cmd::WtRemove { main, slug }, cx);
+    }
+
+    // — `just` ————————————————————————————————————————————————
+
+    /// Reads this checkout's justfile, once.
+    ///
+    /// Marked as read straight away, like `wt.toml`: without that, every frame
+    /// of the bar would restart the subprocess for the whole length of the read.
+    pub(super) fn ensure_just(&mut self, worktree: &Path) {
+        if self.just_recipes.contains_key(worktree) {
+            return;
+        }
+        self.just_recipes.insert(worktree.to_path_buf(), None);
+        self.git.send(Cmd::JustLoad {
+            worktree: worktree.to_path_buf(),
+        });
+    }
+
+    /// Reads it again — the file has just changed.
+    ///
+    /// The entry is **kept** while the answer travels rather than cleared: the
+    /// button would blink out and back on every save, and what it says is right
+    /// until the new reading contradicts it.
+    pub(super) fn reload_just(&mut self, worktree: &Path) {
+        self.git.send(Cmd::JustLoad {
+            worktree: worktree.to_path_buf(),
+        });
+    }
+
+    /// What this checkout's justfile offers, when it has one with a recipe in
+    /// it.
+    pub(super) fn just_recipes(&self, worktree: &Path) -> Option<&crate::just::Snapshot> {
+        let snapshot = self.just_recipes.get(worktree)?.as_ref()?;
+        snapshot.default.is_some().then_some(snapshot)
+    }
+
+    /// Runs a recipe in a terminal tab.
+    ///
+    /// A terminal and not an output panel, for the reason the project's tasks
+    /// are already there: a recipe builds, watches, serves or asks something —
+    /// `just run` opens a window — and what it writes is coloured, progressive,
+    /// and sometimes answered.
+    pub(super) fn run_just(
+        &mut self,
+        worktree: PathBuf,
+        recipe: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let line = format!("just {}", crate::cmdline::join_command([&recipe]));
+        // `open_terminal` shows the panel: asking for it here would open a shell
+        // beside the recipe's own.
+        self.open_terminal(
+            &worktree,
+            crate::ui::terminal_view::Launch {
+                // Through a login shell, like a project task: `just` is looked
+                // up on the `PATH`, and a window opened from a desktop launcher
+                // does not have the one the user's shell builds.
+                command: Some(("sh".into(), vec!["-lc".into(), line])),
+                env: HashMap::new(),
+                label: SharedString::from(format!("just {recipe}")),
+                agent: false,
+            },
+            window,
+            cx,
+        );
     }
 
     /// Launches a project task in a terminal tab, asking its own questions

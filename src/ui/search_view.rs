@@ -97,6 +97,16 @@ pub struct SearchState {
     pub selected: Option<usize>,
     /// The file shown on the right.
     pub preview: Option<Preview>,
+    /// The request id of a search asked for by a jump to definition, if one is
+    /// out.
+    ///
+    /// The fallback of `Ctrl`+click and `gd` when no language server answers:
+    /// the answer is not for the panel to show but for the gesture to act on —
+    /// one hit is jumped to, several open the screen. An id and not a flag,
+    /// like every other answer that has to be told from the answer of the
+    /// gesture that replaced it; and `run_search` clears it, so a search one
+    /// types cannot be mistaken for the one a jump asked for.
+    pub definition: Option<u64>,
 }
 
 /// The file beside the list.
@@ -130,11 +140,18 @@ impl ClaudhubApp {
     /// debounce spends its time avoiding — but the caret **stays in the field**,
     /// its text selected: the gesture asked for the results, not for the list to
     /// take the keyboard, and the next letter typed replaces the whole word.
+    ///
+    /// **And the step is written down**, though it is a key that makes it: the
+    /// exception the rule of `travel_to` earns, the screen keys staying out
+    /// because the key one came from undoes them. This one has no such key —
+    /// nothing puts back the file one was reading — and the gesture is the one
+    /// that leaves a file in the middle of a line to go and look elsewhere,
+    /// which is precisely what the back arrow is for.
     pub(super) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Read **before** the screen changes: `enter_workspace` moves the focus,
         // and the focus is what says which surface the selection is in.
         let selection = self.search_seed(window, cx);
-        self.enter_workspace(crate::ui::workspace::Workspace::Search, window, cx);
+        self.travel_to(crate::ui::workspace::Workspace::Search, window, cx);
         self.set_panel_visible(crate::ui::panels::SearchPanel::NAME, true, cx);
         let handle = gpui::Focusable::focus_handle(&self.search_input, cx);
         handle.focus(window, cx);
@@ -177,7 +194,7 @@ impl ClaudhubApp {
     /// What is left of the decision — a selection worth searching for — is
     /// `search::seed`, pure and tested, in front of this as `notes.rs` is in
     /// front of `notes_view.rs`.
-    fn search_seed(&self, window: &Window, cx: &App) -> Option<String> {
+    pub(super) fn search_seed(&self, window: &Window, cx: &App) -> Option<String> {
         use crate::ui::vim::Mode;
         let surface = self.focused_surface(window, cx)?;
         let input = self.surface_input(&surface)?;
@@ -309,6 +326,9 @@ impl ClaudhubApp {
     /// is what decides whether the answer takes the focus.
     pub(super) fn run_search(&mut self, hand: bool, cx: &mut Context<Self>) {
         self.search.focus_on_answer = hand;
+        // Whatever a jump to definition was waiting for, this is not it:
+        // `search_for_definition` files its id again once the send goes out.
+        self.search.definition = None;
         let Some(worktree) = self.active.clone() else {
             return;
         };
@@ -349,6 +369,9 @@ impl ClaudhubApp {
         if request != self.search.request {
             return;
         }
+        // Taken here and not further down: whatever happens to this answer, the
+        // jump that asked for it is no longer waiting.
+        let followed = self.search.definition.take() == Some(request);
         self.search.running = false;
         self.search.folded.clear();
         match result {
@@ -372,11 +395,16 @@ impl ClaudhubApp {
                 // typing must leave the caret exactly where it is. Coming back
                 // to the field is `Ctrl+Shift+F`, which is also how one got
                 // here.
-                if self.search.selected.is_some() && self.search.focus_on_answer {
+                if followed {
+                    self.follow_definition_hits(window, cx);
+                } else if self.search.selected.is_some() && self.search.focus_on_answer {
                     window.focus(&self.search_focus, cx);
                 }
             }
             Err(message) => {
+                if followed {
+                    self.announce(tr!("editor-no-definition"), cx);
+                }
                 self.search.results = Rc::new(Results::default());
                 self.search.hits = Rc::new(HitHighlights::default());
                 self.search.selected = None;
@@ -477,6 +505,100 @@ impl ClaudhubApp {
             window,
             cx,
         );
+    }
+
+    /// Looks a symbol up in the project because no server could say where it
+    /// is declared — the fallback of `Ctrl`+click and `gd`.
+    ///
+    /// **The query is fully written here**, glob included: the gesture is "find
+    /// this name in this project", and a `*.php` left in the field from an
+    /// earlier search would answer a question nobody asked — silently, since
+    /// the screen is not even shown when there is a single hit. Whole words,
+    /// no regular expression: a symbol is a word, and a name carrying a `.` or
+    /// a `$` would otherwise be read as a pattern.
+    ///
+    /// What the answer does is `follow_definition_hits`, a moment later: it is
+    /// `git grep` that decides, and it has not run yet.
+    pub(super) fn search_for_definition(
+        &mut self,
+        symbol: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.search_regex = false;
+        self.search_whole_word = true;
+        self.search_input.update(cx, |state, cx| {
+            // As in `open_search`: `set_value` emits no change event, so the
+            // debounce is not woken and the send below is the only one.
+            state.set_value(symbol.to_string(), window, cx);
+        });
+        self.search_glob_input.update(cx, |state, cx| {
+            state.set_value(String::new(), window, cx);
+        });
+        self.run_search(false, cx);
+        // Nothing went out — no worktree, or an empty symbol — and there is
+        // therefore no answer to wait for.
+        if self.search.running {
+            self.search.definition = Some(self.search.request);
+        } else {
+            self.announce(tr!("editor-no-definition"), cx);
+        }
+    }
+
+    /// A symbol followed from a diff line: `Ctrl`+click on a word.
+    ///
+    /// **The language server is not asked, and that is deliberate.** A diff
+    /// line is not a document: it is one side of a comparison, an old version
+    /// as often as a new one, and the position it would be asked at maps to a
+    /// file on disk only when the range being read happens to be the working
+    /// tree's. A server answers such a question confidently and wrongly, which
+    /// is the one failure this window will not trade for. `git grep` knows
+    /// nothing about where a name is declared, and says so by giving the list —
+    /// the same rule as the editor's fallback, with the same single hit
+    /// followed straight away.
+    pub(super) fn follow_diff_symbol(
+        &mut self,
+        symbol: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.search_for_definition(symbol, window, cx);
+    }
+
+    /// What a jump to definition makes of what `git grep` found.
+    ///
+    /// **One hit is followed, several are shown.** grep does not know a
+    /// declaration from a use, so picking the first of a list would land on
+    /// whichever file sorts first — the wrong answer, given confidently. A
+    /// single hit has no such doubt: it is the only place the name exists, and
+    /// stopping to show a list of one would be ceremony.
+    ///
+    /// **Nothing found is said out loud and changes no screen.** The gesture
+    /// asked a question; an empty list taking over the window is not an answer
+    /// to it.
+    fn follow_definition_hits(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.search.results.total {
+            0 => {
+                let symbol = self.search.sent.text.clone();
+                self.announce(tr!("editor-no-symbol", { symbol: symbol }), cx);
+            }
+            1 => self.open_search_row(window, cx),
+            _ => {
+                // `travel_to` and not `enter_workspace`: the screen was not
+                // asked for, it was taken — one pressed a key on a name in a
+                // file, and the list of hits is where the code decided to
+                // answer. Without the step, one step back walks a trail whose
+                // last entry is whatever file was opened last, and lands in a
+                // tab one never left. The place written down is the caret one
+                // jumped from, `here` reading the editor while it is still the
+                // screen on show.
+                self.travel_to(crate::ui::workspace::Workspace::Search, window, cx);
+                self.set_panel_visible(crate::ui::panels::SearchPanel::NAME, true, cx);
+                // The list and not the field: the results are already there,
+                // and they are what the gesture asked for.
+                window.focus(&self.search_focus, cx);
+            }
+        }
     }
 
     fn selected_search_row(&self) -> Option<Row> {

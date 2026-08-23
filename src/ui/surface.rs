@@ -953,6 +953,48 @@ impl ClaudhubApp {
         }
     }
 
+    /// `Ctrl`+click on a symbol, when the editor has not followed it itself.
+    ///
+    /// **Bubble phase, on an ancestor of the editor, and that is the whole
+    /// trick.** gpui-component answers the click itself when it has a
+    /// definition at hand — one it got by `Ctrl`-hovering the symbol a moment
+    /// earlier — and otherwise does what any click does: it moves the caret.
+    /// Running after it therefore costs nothing and gains everything: the caret
+    /// is already on the word that was clicked, so the gesture is the keyboard
+    /// one from there. `followed_definition`, cleared in the capture phase of
+    /// this same click, is what tells the two apart — without it, a click the
+    /// editor has answered would be answered twice, the second time from the
+    /// file just landed in.
+    ///
+    /// The surface must be the file being edited: a split shows two, and the
+    /// caret this reads belongs to the active one.
+    pub(super) fn on_surface_definition_click(
+        &mut self,
+        surface: &Surface,
+        event: &gpui::MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The second down of a double click is the same gesture, and by then
+        // the first has already answered it.
+        if event.button != gpui::MouseButton::Left
+            || !event.modifiers.secondary()
+            || event.click_count > 1
+        {
+            return;
+        }
+        if std::mem::take(&mut self.followed_definition) {
+            return;
+        }
+        let Surface::File(path) = surface else {
+            return;
+        };
+        if !self.editing().is_some_and(|editing| &editing.path == path) {
+            return;
+        }
+        self.goto_definition(window, cx);
+    }
+
     /// A code surface's wheel: zoom with the platform key, smoothed scrolling
     /// otherwise — the diff's two gestures, on every panel that shows code.
     ///

@@ -84,7 +84,25 @@ fn toggle_row(
 /// The file count is only there for want of better — a rename or a binary moves
 /// no line, and showing nothing would suggest there is nothing.
 pub(super) fn volume(summary: crate::git::Summary, cx: &gpui::App) -> impl IntoElement {
-    let colors = crate::ui::theme::DiffColors::of(cx);
+    volume_on(summary, None, cx)
+}
+
+/// The same, painted in one given colour.
+///
+/// `on` is the foreground the ground underneath asks for: a selected pin is
+/// filled with the accent, and the diff's green and its red — chosen against the
+/// window's background — are then two of the least readable colours there are.
+/// The signs stay, so nothing of what the badge means is lost with the hue.
+pub(super) fn volume_on(
+    summary: crate::git::Summary,
+    on: Option<gpui::Hsla>,
+    cx: &gpui::App,
+) -> impl IntoElement {
+    let mut colors = crate::ui::theme::DiffColors::of(cx);
+    if let Some(on) = on {
+        colors.added_fg = on;
+        colors.removed_fg = on;
+    }
     h_flex()
         .flex_none()
         .gap_1()
@@ -97,7 +115,7 @@ pub(super) fn volume(summary: crate::git::Summary, cx: &gpui::App) -> impl IntoE
         .when(summary.added == 0 && summary.removed == 0, |el| {
             el.child(
                 div()
-                    .text_color(cx.theme().muted_foreground)
+                    .text_color(on.unwrap_or(cx.theme().muted_foreground))
                     .child(summary.files.to_string()),
             )
         })
@@ -135,7 +153,17 @@ fn agent_colour(agent: &crate::agent::State, cx: &gpui::App) -> gpui::Hsla {
 /// is, and the programs' names would take from the row the width it has to
 /// spare. The picker's row has the space and says them.
 pub(super) fn agent_dot(agent: &crate::agent::State, cx: &gpui::App) -> gpui::Div {
-    let color = agent_colour(agent, cx);
+    agent_dot_on(agent, None, cx)
+}
+
+/// The same, painted in one given colour — `volume_on`'s reason, and the same
+/// grounds.
+pub(super) fn agent_dot_on(
+    agent: &crate::agent::State,
+    on: Option<gpui::Hsla>,
+    cx: &gpui::App,
+) -> gpui::Div {
+    let color = on.unwrap_or_else(|| agent_colour(agent, cx));
     h_flex()
         .flex_none()
         .gap_1()
@@ -264,6 +292,16 @@ impl ClaudhubApp {
                     // are dock tabs. And the terminals have gone down to the
                     // status bar, at the corner of the window they open on.
                     .child(div().flex_1())
+                    // The run button, at the far right and just before the two
+                    // screens one does not work in. A `justfile` is the
+                    // project's commands, and running one is a gesture of its
+                    // own: not one of the pickers that say what the window is
+                    // talking about, and not one of the worktree's operations
+                    // either — it is the corner one reaches for, next to the
+                    // multiplexer, which is where what it starts ends up. It is
+                    // painted only where there is a justfile with a recipe in
+                    // it.
+                    .children(self.render_just(cx))
                     // The two screens one does not work in, at the far right
                     // of the title bar and in a group of their own: the
                     // multiplexer is where one goes to see what is running
@@ -358,6 +396,13 @@ impl ClaudhubApp {
         }
         let active = self.active_path();
         let muted = cx.theme().muted_foreground;
+        // What a selected pin is painted with. A solid button's ground is the
+        // accent, and everything the row carries beside its name — the
+        // repository, the agent, the volume — is coloured against the *window's*
+        // background: greys and pastels, which the accent swallows. On One Dark
+        // the pin read as three illegible marks. They therefore take the ground's
+        // own foreground, the one the theme picked to be read on it.
+        let on_accent = cx.theme().primary_foreground;
         let for_click = pins.clone();
         Some(
             ButtonGroup::new("worktree-pins")
@@ -366,6 +411,7 @@ impl ClaudhubApp {
                 .children(pins.iter().enumerate().map(|(index, path)| {
                     let (repo, label) = self.project_label(path);
                     let selected = active.as_deref() == Some(path.as_path());
+                    let on_selected = selected.then_some(on_accent);
                     Button::new(("pin", index))
                         .tooltip(SharedString::from(path.display().to_string()))
                         .child(
@@ -381,7 +427,7 @@ impl ClaudhubApp {
                                     div()
                                         .text_xs()
                                         .text_color(if selected {
-                                            muted
+                                            on_accent.opacity(0.7)
                                         } else {
                                             muted.opacity(0.8)
                                         })
@@ -396,13 +442,17 @@ impl ClaudhubApp {
                                 // of a checkout nobody has opened: the agent
                                 // every two seconds, the volume every fifth
                                 // reading.
-                                .children(self.agents.get(path).map(|agent| agent_dot(agent, cx)))
+                                .children(
+                                    self.agents
+                                        .get(path)
+                                        .map(|agent| agent_dot_on(agent, on_selected, cx)),
+                                )
                                 .children(
                                     self.summaries
                                         .get(path)
                                         .copied()
                                         .filter(|summary| !summary.is_empty())
-                                        .map(|summary| volume(summary, cx)),
+                                        .map(|summary| volume_on(summary, on_selected, cx)),
                                 ),
                         )
                         // Solid against outline, the window's polarity: the
@@ -500,6 +550,76 @@ impl ClaudhubApp {
     /// `ClaudhubApp::worktree_menu`, unchanged — it was the sidebar row's right
     /// click. A right click needs a row to land on, and there is no list up
     /// here: it becomes a button, which is also what makes it findable.
+    /// The run button: the default recipe on the left, all of them under the
+    /// chevron.
+    ///
+    /// Two buttons and not a menu alone. What a bare `just` runs is the recipe
+    /// the project put first, which is the one one runs twenty times a day, and
+    /// making it cost a menu would be making the common gesture pay for the
+    /// rare one. The chevron is where the rest lives.
+    ///
+    /// The recipes are read from what the worker brought back — never from the
+    /// disk here, and never a subprocess in a render.
+    fn render_just(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let worktree = self.active.clone()?;
+        let snapshot = self.just_recipes(&worktree)?;
+        let default = snapshot.default.clone()?;
+        let recipes = snapshot.recipes.clone();
+        let entity = cx.entity();
+        let run = {
+            let (worktree, default) = (worktree.clone(), default.clone());
+            let entity = entity.clone();
+            Button::new("just-run")
+                .ghost()
+                .small()
+                .icon(icon("play"))
+                .label(tr!("just-run"))
+                // What the click actually runs, written out: "Run" alone leaves
+                // one to guess which recipe, and a project's first recipe is not
+                // always the one its name suggests.
+                .tooltip(SharedString::from(format!("just {default}")))
+                .on_click(move |_, window, cx| {
+                    let (worktree, default) = (worktree.clone(), default.clone());
+                    entity.update(cx, |this, cx| this.run_just(worktree, default, window, cx));
+                })
+        };
+        // Nothing to unfold when the default recipe is the only one: a chevron
+        // opening a menu of one is a click that says nothing.
+        let more = (recipes.len() > 1).then(|| {
+            Button::new("just-recipes")
+                .ghost()
+                .small()
+                .icon(icon("chevron-down"))
+                .tooltip(tr!("just-recipes"))
+                .dropdown_menu(move |menu, _window, _cx| {
+                    recipes.iter().fold(menu, |menu, recipe| {
+                        let (worktree, name) = (worktree.clone(), recipe.name.clone());
+                        let entity = entity.clone();
+                        // The recipe as `just --list` writes it, its doc
+                        // comment after: the menu says what the tool says, and
+                        // what a recipe takes is part of what one reads before
+                        // clicking.
+                        let label = if recipe.doc.is_empty() {
+                            recipe.signature()
+                        } else {
+                            format!("{} — {}", recipe.signature(), recipe.doc)
+                        };
+                        menu.item(
+                            PopupMenuItem::new(SharedString::from(label))
+                                .icon(icon("terminal"))
+                                .on_click(move |_, window, cx| {
+                                    let (worktree, name) = (worktree.clone(), name.clone());
+                                    entity.update(cx, |this, cx| {
+                                        this.run_just(worktree, name, window, cx)
+                                    });
+                                }),
+                        )
+                    })
+                })
+        });
+        Some(h_flex().items_center().child(run).children(more))
+    }
+
     fn render_worktree_actions(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let worktree = self.active.clone()?;
         let main = self.main_of(&worktree)?;

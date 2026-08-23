@@ -35,6 +35,7 @@ pub(crate) mod notes_view;
 mod notify;
 mod panels;
 pub mod plugin_view;
+mod preview;
 mod repos;
 mod review;
 mod scroll;

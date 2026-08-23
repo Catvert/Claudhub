@@ -742,15 +742,16 @@ impl Panel for FilePanel {
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| self.path.display().to_string());
         let (root, path) = (self.root.clone(), self.path.clone());
-        let dirty = self
+        let (dirty, ephemeral) = self
             .app
             .upgrade()
             .and_then(|app| {
                 let app = app.read(cx);
                 let tabs = app.editors(&root)?;
-                Some(tabs.open.get(tabs.index_of(&path)?)?.dirty)
+                let editing = tabs.open.get(tabs.index_of(&path)?)?;
+                Some((editing.dirty, editing.ephemeral))
             })
-            .unwrap_or(false);
+            .unwrap_or((false, false));
         let app = self.app.clone();
         // The same closing as the cross's, and it has to be: the wheel button is
         // the other way of making the same gesture.
@@ -762,7 +763,7 @@ impl Panel for FilePanel {
                 };
                 let (root, path) = (root.clone(), path.clone());
                 window.defer(cx, move |window, cx| {
-                    app.update(cx, |app, cx| app.close_file(root, path, window, cx));
+                    app.update(cx, |app, cx| app.ask_close_file(root, path, window, cx));
                 });
             }
         };
@@ -771,7 +772,15 @@ impl Panel for FilePanel {
             .gap_1()
             .items_center()
             .child(crate::ui::file_icons::file_icon(&self.path, cx))
-            .child(gpui::SharedString::from(name))
+            // Italic for the preview tab, as VS Code's is: the tab is about to
+            // be replaced, and one is entitled to know it before opening ten
+            // files and finding one. A shape and not a colour — a colour in a
+            // tab bar is read as selection.
+            .child(
+                div()
+                    .when(ephemeral, |el| el.italic())
+                    .child(gpui::SharedString::from(name)),
+            )
             // A dot and not a coloured name: the tab of the file one is typing
             // in is already the selected one, and a colour there would be read
             // as selection rather than as "not saved".
@@ -791,7 +800,7 @@ impl Panel for FilePanel {
                         };
                         let (root, path) = (root.clone(), path.clone());
                         window.defer(cx, move |window, cx| {
-                            app.update(cx, |app, cx| app.close_file(root, path, window, cx));
+                            app.update(cx, |app, cx| app.ask_close_file(root, path, window, cx));
                         });
                     }),
             );

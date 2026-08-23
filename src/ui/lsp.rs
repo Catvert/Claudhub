@@ -428,6 +428,14 @@ impl ClaudhubApp {
                 // immediate: we have taken the jump, we just make it a moment
                 // later.
                 let app = app.clone();
+                // **Said before the jump, not after.** Our own `Ctrl`+click
+                // listener sits on an ancestor of the editor and runs in this
+                // same dispatch, right after the editor's handler returns: it
+                // reads this to know the click has already been answered. The
+                // application is not the entity being written to here — the
+                // editor is — so the flag can be set at once, where the jump
+                // itself cannot.
+                let _ = app.update(cx, |this, _| this.followed_definition = true);
                 window.defer(cx, move |window, cx| {
                     let _ = app.update(cx, |this, cx| match landing {
                         Some(landing) => this.jump_to(path, landing, window, cx),
@@ -689,6 +697,14 @@ impl ClaudhubApp {
     /// interface and its implementations — and choosing between them wants a
     /// list to pick from, which is a gesture this editor does not have; landing
     /// on the first is what every editor does before it grows one.
+    ///
+    /// **And when nobody answers, the project is searched instead.** No server
+    /// running, none that serves this language, one that does not know the
+    /// symbol: all three are the same thing to the hand, a key pressed on a
+    /// name one wants to go to. `git grep` is a poorer answer than a server's
+    /// — it cannot tell a declaration from a use — but it is an answer, and it
+    /// is what this window had before the server existed. See
+    /// `search_for_definition`.
     pub(super) fn goto_definition(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
         let Some(editing) = self.editing() else {
             return;
@@ -697,8 +713,11 @@ impl ClaudhubApp {
         let state = editing.input.read(cx);
         let offset = state.selected_range().start;
         let position = state.text().offset_to_position(offset);
+        // Read here, while the editor is at hand: the fallback runs from inside
+        // the answer's closure, by which time the caret may have moved.
+        let symbol = crate::ui::search::symbol_at(&state.text().to_string(), offset);
         if !self.lsp_enabled(&worktree) || !self.lsp.contains_key(&worktree) {
-            self.announce(tr!("editor-lsp-off"), cx);
+            self.fallback_to_search(symbol, window, cx);
             return;
         }
         let params = json!({
@@ -719,14 +738,14 @@ impl ClaudhubApp {
                     _ => None,
                 };
                 let Some(link) = target else {
-                    // Said out loud: a key that answers nothing is a key one
-                    // presses again, and the answer here is "the server does
-                    // not know", not "the key is broken".
-                    this.announce(tr!("editor-no-definition"), cx);
+                    // A server that says nothing is not the end of the gesture:
+                    // it says nothing about a `@method` docblock, about a name
+                    // in a Blade view, about anything it has not indexed yet.
+                    this.fallback_to_search(symbol, window, cx);
                     return;
                 };
                 let Some(path) = crate::lsp::uri::path(link.target_uri.as_str()) else {
-                    this.announce(tr!("editor-no-definition"), cx);
+                    this.fallback_to_search(symbol, window, cx);
                     return;
                 };
                 // A definition in `vendor/` is a file of the worktree like any
@@ -747,6 +766,27 @@ impl ClaudhubApp {
             });
         })
         .detach();
+    }
+
+    /// The fallback of a jump that found no definition: look the symbol up in
+    /// the project.
+    ///
+    /// **A symbol and not a selection.** What is under the caret is a word, and
+    /// `search::symbol_at` is what says which — the caret standing after a name
+    /// counts, a number does not.
+    fn fallback_to_search(
+        &mut self,
+        symbol: Option<String>,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let Some(symbol) = symbol else {
+            // Nothing to look for: said out loud, a key that answers nothing
+            // being a key one presses again.
+            self.announce(tr!("editor-no-definition"), cx);
+            return;
+        };
+        self.search_for_definition(&symbol, window, cx);
     }
 
     // — The bridge ——————————————————————————————————————————————

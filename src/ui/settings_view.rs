@@ -677,6 +677,32 @@ fn terminal_page(
         .group(
             SettingGroup::new()
                 .title(tr!("settings-group-terminal-display"))
+                .item(
+                    SettingItem::new(
+                        tr!("settings-terminal-placement"),
+                        SettingField::dropdown(
+                            vec![
+                                (
+                                    SharedString::from("bottom"),
+                                    tr!("settings-terminal-placement-bottom"),
+                                ),
+                                (
+                                    SharedString::from("right"),
+                                    tr!("settings-terminal-placement-right"),
+                                ),
+                            ],
+                            |cx: &App| Settings::global(cx).terminal.placement.as_key().into(),
+                            |value: SharedString, cx: &mut App| {
+                                Settings::update_global(cx, |s| {
+                                    s.terminal.placement =
+                                        settings::TerminalPlacement::from_key(&value)
+                                })
+                            },
+                        )
+                        .default_value(SharedString::from("bottom")),
+                    )
+                    .description(tr!("settings-terminal-placement-help")),
+                )
                 .item(SettingItem::new(
                     tr!("settings-terminal-font"),
                     SettingField::dropdown(
@@ -1238,6 +1264,52 @@ fn files_page() -> SettingPage {
                     .default_value(false),
                 )
                 .description(tr!("settings-show-ignored-help")),
+            )
+            .item(
+                SettingItem::new(
+                    tr!("settings-save-all"),
+                    SettingField::switch(
+                        |cx: &App| Settings::global(cx).save_all_tabs,
+                        |value: bool, cx: &mut App| {
+                            Settings::update_global(cx, |s| s.save_all_tabs = value)
+                        },
+                    )
+                    .default_value(true),
+                )
+                .description(tr!("settings-save-all-help")),
+            )
+            .item(
+                SettingItem::new(
+                    tr!("settings-preview-tab"),
+                    SettingField::switch(
+                        |cx: &App| Settings::global(cx).editor_preview_tab,
+                        |value: bool, cx: &mut App| {
+                            Settings::update_global(cx, |s| s.editor_preview_tab = value)
+                        },
+                    )
+                    .default_value(true),
+                )
+                .description(tr!("settings-preview-tab-help")),
+            )
+            .item(
+                SettingItem::new(
+                    tr!("settings-tab-limit"),
+                    SettingField::number_input(
+                        NumberFieldOptions {
+                            min: 0.,
+                            max: 100.,
+                            step: 1.,
+                        },
+                        |cx: &App| Settings::global(cx).editor_tab_limit as f64,
+                        |value: f64, cx: &mut App| {
+                            Settings::update_global(cx, |s| {
+                                s.editor_tab_limit = value.clamp(0., 100.) as usize
+                            })
+                        },
+                    )
+                    .default_value(10.0),
+                )
+                .description(tr!("settings-tab-limit-help")),
             ),
     )
 }

@@ -228,6 +228,9 @@ impl ClaudhubApp {
             at,
         });
         let entity = cx.entity();
+        // The name, and not the message: it is the field the dialog exists for,
+        // and the one Enter can be pressed straight after filling in.
+        let name = draft.read(cx).name.clone();
         window.open_dialog(cx, move |dialog, _window, _cx| {
             let (entity, draft) = (entity.clone(), draft.clone());
             dialog
@@ -249,6 +252,7 @@ impl ClaudhubApp {
                     true
                 })
         });
+        super::dialogs::focus_field(&name, window, cx);
     }
 
     fn create_tag(

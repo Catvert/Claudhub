@@ -102,7 +102,10 @@ fn is_db(cmd: &Cmd) -> bool {
 fn is_background(cmd: &Cmd) -> bool {
     matches!(
         cmd,
-        Cmd::LoadSummaries { .. } | Cmd::ScanAgents { .. } | Cmd::WtScan { .. }
+        Cmd::LoadSummaries { .. }
+            | Cmd::ScanAgents { .. }
+            | Cmd::WtScan { .. }
+            | Cmd::JustLoad { .. }
     )
 }
 
@@ -908,6 +911,14 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
             }],
             Err(e) => vec![fail(Some(worktree), Action::Read, e)],
         },
+        Cmd::ReadImage { worktree, path } => match crate::files::read_image(&worktree, &path) {
+            Ok(image) => vec![Evt::ImageContent {
+                worktree,
+                path,
+                image,
+            }],
+            Err(e) => vec![fail(Some(worktree), Action::Read, e)],
+        },
         // A file git does not track has no base, and that is an answer rather
         // than a failure: nothing is wrong, every line of it is simply new.
         Cmd::ReadFileBase { worktree, path } => {
@@ -1014,6 +1025,10 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
             Err(e) => vec![fail(Some(worktree), Action::Worktree, e)],
         },
         Cmd::WtScan { targets } => wt_scan(targets),
+        Cmd::JustLoad { worktree } => {
+            let recipes = crate::just::snapshot(&worktree);
+            vec![Evt::JustRecipes { worktree, recipes }]
+        }
         Cmd::AddWorktree {
             main,
             path,
@@ -1591,6 +1606,19 @@ mod tests {
     /// The editor's gutter waits on this one: a `git show` of a single blob is
     /// a read, and putting it anywhere slower would leave the change strip
     /// blank behind a fetch.
+    /// A picture is what a frame is waiting for, exactly like the text next to
+    /// it: the tab is already open and empty until it lands.
+    #[test]
+    fn an_image_is_a_read() {
+        assert_eq!(
+            queue_of(&Cmd::ReadImage {
+                worktree: worktree(),
+                path: "assets/logo.png".into(),
+            }),
+            Queue::Reads
+        );
+    }
+
     #[test]
     fn the_editors_base_is_a_read() {
         assert_eq!(

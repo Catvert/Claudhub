@@ -567,6 +567,23 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    /// What the right click selects before opening its menu.
+    ///
+    /// The line under the cursor, unless it is already part of what is selected
+    /// — a menu opened on a block of lines has to act on that block. Without
+    /// this the menu acted on a selection made somewhere else, or on none at
+    /// all, while pointing at the line the eye had just picked.
+    pub(super) fn aim_diff_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        let inside = self
+            .active_review()
+            .and_then(|state| state.diff_selection)
+            .is_some_and(|(anchor, head)| (anchor.min(head)..=anchor.max(head)).contains(&index));
+        if inside {
+            return;
+        }
+        self.select_diff_row(index, false, cx);
+    }
+
     /// Extends the selection during a drag.
     pub(super) fn drag_diff_row(&mut self, index: usize, cx: &mut Context<Self>) {
         if !self.diff_dragging {
@@ -577,6 +594,43 @@ impl ClaudhubApp {
 
     pub(super) fn end_diff_drag(&mut self) {
         self.diff_dragging = false;
+    }
+
+    /// The pointer has moved onto a word of a diff line: underline that one.
+    ///
+    /// `None` for the word means the pointer is on the same text but between
+    /// two of them — a space, a bracket — which is a reason to take the
+    /// underline away, not to leave the last one standing.
+    pub(super) fn hover_diff_word(
+        &mut self,
+        spot: WordSpot,
+        word: Option<std::ops::Range<usize>>,
+        cx: &mut Context<Self>,
+    ) {
+        let next = word.map(|word| (spot, word));
+        if self.diff_hover != next {
+            self.diff_hover = next;
+            cx.notify();
+        }
+    }
+
+    /// The pointer is over an entry: whatever is underlined elsewhere is not
+    /// under it any more.
+    ///
+    /// **Not the entry's own words**: those are a child of it, and a child is
+    /// dispatched before its ancestor, so this runs *after* the text has said
+    /// what it has. Without it a word stayed underlined once the pointer moved
+    /// off the text and onto the line numbers, where nothing would ever have
+    /// told it otherwise.
+    pub(super) fn leave_diff_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self
+            .diff_hover
+            .as_ref()
+            .is_some_and(|(spot, _)| spot.row != index)
+        {
+            self.diff_hover = None;
+            cx.notify();
+        }
     }
 
     /// Switches between one column and two.
@@ -1001,6 +1055,12 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // A picture takes the editor's place: the tab is the same, what fills
+        // it is not. Asked first, because the editor state a preview holds is
+        // empty and would draw as a blank file.
+        if let Some(preview) = self.render_image_preview(cx) {
+            return preview;
+        }
         match self.render_editor(window, cx) {
             Some(editor) => editor.into_any_element(),
             None => centered_message(tr!("editor-pick-a-file"), cx),
@@ -1123,6 +1183,11 @@ impl ClaudhubApp {
 
         // One entry, whichever list asks for it: the two branches below differ
         // only in how the height is reserved, not in what they paint.
+        // Read once for the frame: `on_modifiers_changed` on the root is what
+        // asks for a new one when it flips, so this is never a frame behind for
+        // long. See `ClaudhubApp::diff_armed`.
+        let armed = self.diff_armed;
+        let hovered = self.diff_hover.clone();
         let build = move |ix: usize, cx: &mut gpui::App| {
             let selected = selection.is_some_and(|(a, b)| ix >= a && ix <= b);
             let style = RowStyle {
@@ -1135,6 +1200,8 @@ impl ClaudhubApp {
                 note_color,
                 current_hunk: current_hunk.is_some() && rows.hunk_of(ix, split) == current_hunk,
                 hunk_color,
+                armed,
+                hovered: hovered.clone(),
             };
             if split {
                 render_split_row(
@@ -1417,18 +1484,53 @@ impl ClaudhubApp {
             )
     }
 
-    /// Opens the file being reviewed in the built-in editor.
+    /// The reviewed file, and the line the selection rests on — one-based, as a
+    /// file's lines are numbered everywhere else.
+    ///
+    /// The new version's number when the line has one, the old one otherwise: a
+    /// deleted line no longer exists in the file one is about to open, and the
+    /// place it used to hold is the closest thing to an answer.
+    pub(super) fn diff_place(&self, cx: &App) -> Option<(std::path::PathBuf, usize)> {
+        let split = crate::ui::settings::Settings::global(cx).diff_split;
+        let state = self.active_review()?;
+        let path = state.selected.clone()?;
+        let line = state
+            .diff
+            .as_ref()
+            .zip(state.diff_selection)
+            .and_then(|(diff, (anchor, head))| {
+                // In two columns the selection addresses the paired rows, whose
+                // indices are not those of the flat list the numbers come from.
+                let row = if split {
+                    diff.unified_span(anchor, head)?.0
+                } else {
+                    anchor.min(head)
+                };
+                let Row::Line { hunk, line } = diff.rows.get(row).copied()? else {
+                    return None;
+                };
+                let source = diff.file.hunks.get(hunk)?.lines.get(line)?;
+                source.new_no.or(source.old_no)
+            })
+            .unwrap_or(1);
+        Some((path, line))
+    }
+
+    /// Opens the file being reviewed in the built-in editor, at the line the
+    /// selection rests on.
     ///
     /// The same path as the explorer's: the file is read by a worker, and it is
     /// its arrival that installs the editor and calls up its screen.
     pub(super) fn edit_diff_file(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self
-            .active_review()
-            .and_then(|state| state.selected.clone())
-        else {
+        let Some((path, line)) = self.diff_place(cx) else {
             return;
         };
-        self.open_in_editor(path, cx);
+        // `Landing::Position` counts from zero, a diff's numbers from one.
+        let landing = crate::ui::explorer::Landing::Position {
+            line: line.saturating_sub(1) as u32,
+            character: 0,
+        };
+        self.open_at(path, Some(landing), cx);
     }
 
     /// One of the four navigation buttons of the diff's bar.
@@ -1585,7 +1687,7 @@ fn diff_menu(
     entity: &gpui::Entity<ClaudhubApp>,
 ) -> gpui_component::menu::PopupMenu {
     let (note, ask) = (entity.clone(), entity.clone());
-    let edit = entity.clone();
+    let (here, edit) = (entity.clone(), entity.clone());
     let (copy, patch) = (entity.clone(), entity.clone());
     menu.item(
         gpui_component::menu::PopupMenuItem::new(tr!("note-add"))
@@ -1599,6 +1701,16 @@ fn diff_menu(
             .icon(icon("bot"))
             .on_click(move |_, window, cx| {
                 ask.update(cx, |this, cx| this.ask_about_selection(window, cx));
+            }),
+    )
+    .item(
+        // Editing a line is read from the diff: one walks the changes, one sees
+        // what is wrong, and the file opens at that very line rather than at its
+        // top with the number to find again.
+        gpui_component::menu::PopupMenuItem::new(tr!("diff-edit-line"))
+            .icon(icon("pencil"))
+            .on_click(move |_, _window, cx| {
+                here.update(cx, |this, cx| this.edit_diff_file(cx));
             }),
     )
     .item(
@@ -1683,9 +1795,25 @@ pub struct RowStyle {
     /// The entry belongs to the hunk the selection is in.
     pub current_hunk: bool,
     pub hunk_color: gpui::Hsla,
+    /// The modifier that makes a symbol clickable is held down.
+    ///
+    /// Per frame and not per row, but it travels with the rest: it decides what
+    /// a row paints, exactly as the selection does. See `followable`.
+    pub armed: bool,
+    /// The word the pointer is over, and which text it belongs to.
+    ///
+    /// One per frame, at most: the pointer is in one place. Every line is
+    /// handed it and only the one it names underlines anything.
+    pub hovered: Option<(WordSpot, std::ops::Range<usize>)>,
 }
 
 impl RowStyle {
+    /// The word to underline in one text, if the pointer is in that one.
+    fn hovered_word(&self, row: usize, side: u8, segment: usize) -> Option<std::ops::Range<usize>> {
+        let (spot, word) = self.hovered.as_ref()?;
+        (spot.row == row && spot.side == side && spot.segment == segment).then(|| word.clone())
+    }
+
     /// The rule that says which hunk one is reading.
     ///
     /// A **border** and not a child strip: it is outside the padding, so it
@@ -1725,9 +1853,27 @@ fn render_row(
                 return div().into_any_element();
             };
             let (bg, fg) = line_colors(source.kind, colors);
-            let content = line_content(diff, hunk, line, fg, &search.marks(hunk, line), None);
+            let content = line_content(
+                diff,
+                hunk,
+                line,
+                fg,
+                &search.marks(hunk, line),
+                None,
+                style.armed.then(|| Follow {
+                    id: ("diff-word", index).into(),
+                    spot: WordSpot {
+                        row: index,
+                        side: 0,
+                        segment: 0,
+                    },
+                    hovered: style.hovered_word(index, 0, 0),
+                    entity,
+                }),
+            );
 
             let for_drag = entity.clone();
+            let for_menu = entity.clone();
             let entity = entity.clone();
             let row = h_flex()
                 .id(("line", index))
@@ -1743,6 +1889,9 @@ fn render_row(
                 .when(selected, |el| el.bg(selection_bg))
                 .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
                     select(&entity, index, event.modifiers.shift, window, cx);
+                })
+                .on_mouse_down(gpui::MouseButton::Right, move |_, window, cx| {
+                    aim(&for_menu, index, window, cx);
                 })
                 .on_mouse_move(move |event, _window, cx| drag(&for_drag, index, event, cx))
                 // The annotation marker is a rule in the margin, before the
@@ -1789,6 +1938,7 @@ fn render_header(
     let entity = entity.clone();
     let for_copy = entity.clone();
     let for_click = entity.clone();
+    let for_menu = entity.clone();
     let for_drag = entity.clone();
     let row = h_flex()
         .id(("hunk", index))
@@ -1805,6 +1955,9 @@ fn render_header(
         })
         .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
             select(&for_click, index, event.modifiers.shift, window, cx);
+        })
+        .on_mouse_down(gpui::MouseButton::Right, move |_, window, cx| {
+            aim(&for_menu, index, window, cx);
         })
         .on_mouse_move(move |event, _window, cx| drag(&for_drag, index, event, cx))
         .child(
@@ -1858,6 +2011,34 @@ fn line_colors(
 /// Tabs are rendered as they are by the font: replacing them here would keep the
 /// alignment but shift the highlighting ranges, which are computed on the
 /// original text.
+/// Which line's text a word belongs to.
+///
+/// The entry alone would not do: in two columns an entry has two texts, and a
+/// wrapped one has a text per visible line. It is what says whether the word
+/// the pointer is over is *this* element's — and the underline follows from
+/// that.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct WordSpot {
+    pub row: usize,
+    pub side: u8,
+    pub segment: usize,
+}
+
+/// What a line needs to make its symbols followable.
+///
+/// Built only while the modifier is held: `None` is the state of every line
+/// almost all the time, and it costs exactly what it did before.
+struct Follow<'a> {
+    id: gpui::ElementId,
+    spot: WordSpot,
+    /// The word the pointer is over, in this text's own bytes — the one to
+    /// underline. It comes from the frame before, which is what a hover always
+    /// does.
+    hovered: Option<std::ops::Range<usize>>,
+    entity: &'a Entity<ClaudhubApp>,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn line_content(
     diff: &Rc<Rendered>,
     hunk: usize,
@@ -1866,6 +2047,10 @@ fn line_content(
     marks: &[(std::ops::Range<usize>, gpui::Hsla)],
     // `span`: the slice of columns to show, when the line is wrapped.
     span: Option<(usize, usize)>,
+    // `follow`: what makes the words clickable. `None` while nobody holds the
+    // modifier, which is all the time: no ranges are computed, and the text is
+    // the plain element it has always been.
+    follow: Option<Follow>,
 ) -> gpui::AnyElement {
     let Some(source) = diff.file.hunks.get(hunk).and_then(|h| h.lines.get(line)) else {
         return div().into_any_element();
@@ -1886,24 +2071,84 @@ fn line_content(
         }
     };
     let (styles, marks) = (styles.as_slice(), marks.as_slice());
-    if marks.is_empty() {
-        return if styles.is_empty() {
-            div()
-                .when_some(fg, |el, fg| el.text_color(fg))
-                .child(text)
-                .into_any_element()
-        } else {
-            StyledText::new(text)
-                .with_highlights(styles.iter().cloned())
-                .into_any_element()
-        };
+    // Three layers, in the order they were decided: the grammar, the search
+    // hits over it, and the underline of the word being pointed at. Each is
+    // laid on the one below rather than replacing it — a hit in coloured code
+    // keeps its colours, and so does an underlined symbol.
+    let base = if marks.is_empty() {
+        styles.to_vec()
+    } else {
+        crate::ui::highlight::overlay(styles, marks)
+    };
+    let highlights = match follow.as_ref().and_then(|follow| follow.hovered.clone()) {
+        Some(word) => crate::ui::highlight::underline(&base, word),
+        None => base,
+    };
+    // Nothing to colour and nobody holding the modifier — which is the common
+    // case by far: the line is the plain element it has always been, painted by
+    // the code that painted it before, at the same cost.
+    if highlights.is_empty() && follow.is_none() {
+        return div()
+            .when_some(fg, |el, fg| el.text_color(fg))
+            .child(text)
+            .into_any_element();
+    }
+    let styled = StyledText::new(text.clone()).with_highlights(highlights);
+    let content = match follow {
+        None => styled.into_any_element(),
+        Some(follow) => followable(follow, text, styled),
+    };
+    if !styles.is_empty() {
+        return content;
     }
     // The addition or removal colour stays carried by the container when the
     // grammar has nothing to say: without it, a line found in a file with no
     // grammar would lose its diff tint.
     div()
-        .when_some(fg.filter(|_| styles.is_empty()), |el, fg| el.text_color(fg))
-        .child(StyledText::new(text).with_highlights(crate::ui::highlight::overlay(styles, marks)))
+        .when_some(fg, |el, fg| el.text_color(fg))
+        .child(content)
+        .into_any_element()
+}
+
+/// A line whose symbols can be followed: `Ctrl`+click on one looks it up.
+///
+/// **`InteractiveText` and not arithmetic on the pointer's x.** The column of a
+/// click could be divided out of a fixed-pitch font, and it would be wrong the
+/// day a glyph falls back to another face, or the gutter gains a pixel. This
+/// asks the shaped line itself which character was hit, which is the same
+/// question the editor answers, answered by the same code.
+///
+/// **The modifier is read again at the click.** The ranges are only installed
+/// while it is held — that is what puts the hand cursor on a word and nothing
+/// else — but a frame can be a modifier behind, and a plain click that selects
+/// a line must never jump.
+fn followable(follow: Follow, text: SharedString, styled: StyledText) -> gpui::AnyElement {
+    let ranges = crate::ui::search::word_ranges(&text);
+    let (clicked, hovered) = (ranges.clone(), ranges.clone());
+    let (for_click, for_hover) = (follow.entity.clone(), follow.entity.clone());
+    let spot = follow.spot;
+    gpui::InteractiveText::new(follow.id, styled)
+        .on_click(ranges, move |index, window, cx| {
+            if !window.modifiers().secondary() {
+                return;
+            }
+            let Some(range) = clicked.get(index) else {
+                return;
+            };
+            let symbol = text[range.clone()].to_string();
+            for_click.update(cx, |this, cx| {
+                this.follow_diff_symbol(&symbol, window, cx);
+            });
+        })
+        // **The character, not the word**: what comes back is where the pointer
+        // is, and the word around it is ours to find. It only fires when that
+        // character changes, so this costs a frame per character crossed and
+        // nothing while the hand is still.
+        .on_hover(move |index, _event, _window, cx| {
+            let word =
+                index.and_then(|at| hovered.iter().find(|range| range.contains(&at)).cloned());
+            for_hover.update(cx, |this, cx| this.hover_diff_word(spot, word, cx));
+        })
         .into_any_element()
 }
 
@@ -1944,6 +2189,7 @@ fn render_split_row(
     };
     let for_drag = entity.clone();
     let for_click = entity.clone();
+    let for_menu = entity.clone();
     let row = h_flex()
         .id(("pair", index))
         .h(style.line_height * lines as f32)
@@ -1951,6 +2197,9 @@ fn render_split_row(
         .whitespace_nowrap()
         .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
             select(&for_click, index, event.modifiers.shift, window, cx);
+        })
+        .on_mouse_down(gpui::MouseButton::Right, move |_, window, cx| {
+            aim(&for_menu, index, window, cx);
         })
         .on_mouse_move(move |event, _window, cx| drag(&for_drag, index, event, cx))
         .child(note_mark(style))
@@ -1964,6 +2213,8 @@ fn render_split_row(
             cols,
             lines,
             search,
+            index,
+            entity,
         ))
         .child(half(
             diff,
@@ -1975,6 +2226,8 @@ fn render_split_row(
             cols,
             lines,
             search,
+            index,
+            entity,
         ));
     style.hunk_rule(row).into_any_element()
 }
@@ -2017,6 +2270,9 @@ fn half(
     // `lines`: the entry's visible lines, the taller of the two halves.
     lines: usize,
     search: &SearchPaint,
+    // `index`: the entry of the list, which names its clickable words.
+    index: usize,
+    entity: &Entity<ClaudhubApp>,
 ) -> gpui::AnyElement {
     let (gutter, selected, selection_bg) = (style.gutter, style.selected, style.selection_bg);
     let source = row
@@ -2059,7 +2315,23 @@ fn half(
     // the continuation of the text. The entry's height is then exactly the one
     // announced to the list.
     let wrapped = cols > 0;
+    let follow = |segment: usize| {
+        style.armed.then(|| Follow {
+            id: ("diff-word", index).into(),
+            spot: WordSpot {
+                row: index,
+                side: side as u8,
+                segment,
+            },
+            hovered: style.hovered_word(index, side as u8, segment),
+            entity,
+        })
+    };
     h_flex()
+        // An id of its own, and it is not decoration: an element's identity is
+        // the path of the ids above it, and the two halves would otherwise give
+        // the same name to two different lines' words.
+        .id(("half", side as usize))
         .w(column)
         .flex_none()
         .h_full()
@@ -2089,7 +2361,7 @@ fn half(
         )
         .map(|el| {
             if !wrapped {
-                return el.child(line_content(diff, hunk, line, fg, &marks, None));
+                return el.child(line_content(diff, hunk, line, fg, &marks, None, follow(0)));
             }
             // The entry's index, which `row_chars` indexes: finding it by
             // walking `rows` would cost a sweep of the file per visible half
@@ -2103,7 +2375,9 @@ fn half(
                     .flex_1()
                     .min_w_0()
                     .children((0..lines).map(|segment| {
-                        div().h(line_height).map(|el| {
+                        // Same reason as the half's own id: each wrapped
+                        // segment is a line of its own, and its words with it.
+                        div().id(("segment", segment)).h(line_height).map(|el| {
                             if segment < own {
                                 el.child(line_content(
                                     diff,
@@ -2112,6 +2386,7 @@ fn half(
                                     fg,
                                     &marks,
                                     Some((segment * cols, (segment + 1) * cols)),
+                                    follow(segment),
                                 ))
                             } else {
                                 el
@@ -2173,6 +2448,15 @@ fn select(
     });
 }
 
+/// The right click's press: it puts the selection where the eye is, and no drag
+/// starts — the menu opens on the release, and a button that is not held cannot
+/// extend anything.
+fn aim(entity: &Entity<ClaudhubApp>, index: usize, window: &mut Window, cx: &mut gpui::App) {
+    let handle = entity.read(cx).focus_handle(cx);
+    window.focus(&handle, cx);
+    entity.update(cx, |this, cx| this.aim_diff_row(index, cx));
+}
+
 /// Extends the selection as the mouse passes, button held.
 ///
 /// The button is rechecked here and not only on the press: a release outside the
@@ -2184,11 +2468,17 @@ fn drag(
     event: &gpui::MouseMoveEvent,
     cx: &mut gpui::App,
 ) {
-    if event.pressed_button != Some(gpui::MouseButton::Left) {
-        entity.update(cx, |this, _| this.end_diff_drag());
-        return;
-    }
-    entity.update(cx, |this, cx| this.drag_diff_row(index, cx));
+    entity.update(cx, |this, cx| {
+        // The pointer is on **this** entry, so a word underlined on another one
+        // is no longer under it. The words of this entry have already had their
+        // say: a text is a child of its row, and a child is dispatched first.
+        this.leave_diff_row(index, cx);
+        if event.pressed_button != Some(gpui::MouseButton::Left) {
+            this.end_diff_drag();
+            return;
+        }
+        this.drag_diff_row(index, cx);
+    });
 }
 
 fn number(value: Option<usize>, width: Pixels, colors: &DiffColors) -> gpui::Div {

@@ -659,8 +659,95 @@ pub fn overlay(
     out
 }
 
+/// Underlines one range on top of an existing highlighting.
+///
+/// The `Ctrl`-hovered symbol of a diff line: the grammar keeps its colours, the
+/// word gains the underline that says it can be followed. The colour is left
+/// unset on purpose — an underline takes the colour of the text it is under,
+/// which is what makes it read as part of the word rather than a rule drawn
+/// near it.
+///
+/// The same two invariants as `overlay`, and the same reason: sorted, disjoint,
+/// and in bytes. Unlike `overlay`, a segment the base says nothing about is
+/// **kept** when it falls in the range — here the added style is the whole
+/// point, and a line with no grammar at all must underline just the same.
+pub fn underline(
+    base: &[(Range<usize>, HighlightStyle)],
+    word: Range<usize>,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let mut cuts: Vec<usize> = Vec::with_capacity(base.len() * 2 + 2);
+    for (range, _) in base {
+        cuts.push(range.start);
+        cuts.push(range.end);
+    }
+    cuts.push(word.start);
+    cuts.push(word.end);
+    cuts.sort_unstable();
+    cuts.dedup();
+
+    let mut out: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
+    for pair in cuts.windows(2) {
+        let (start, end) = (pair[0], pair[1]);
+        let inside = word.start <= start && end <= word.end;
+        let style = base
+            .iter()
+            .find(|(range, _)| range.start <= start && end <= range.end)
+            .map(|(_, style)| *style);
+        // Outside the word and unstyled: nothing to say about it, and a run
+        // with no effect has no business in the list.
+        let Some(mut style) = style.or_else(|| inside.then(HighlightStyle::default)) else {
+            continue;
+        };
+        if inside {
+            style.underline = Some(gpui::UnderlineStyle {
+                thickness: gpui::px(1.),
+                color: None,
+                wavy: false,
+            });
+        }
+        match out.last_mut() {
+            Some((last, previous)) if last.end == start && *previous == style => last.end = end,
+            _ => out.push((start..end, style)),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    use super::underline;
+    use gpui::HighlightStyle;
+
+    /// The hovered word keeps the colour the grammar gave it, and the runs
+    /// around it are left exactly as they were.
+    #[test]
+    fn an_underline_splits_a_run_without_recolouring_it() {
+        let red = HighlightStyle {
+            color: Some(gpui::red()),
+            ..Default::default()
+        };
+        // `fooba` is red, and `oob` is hovered.
+        let runs = underline(&[(0..5, red)], 1..4);
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].0, 0..1);
+        assert_eq!(runs[1].0, 1..4);
+        assert_eq!(runs[2].0, 4..5);
+        assert!(runs.iter().all(|(_, style)| style.color == red.color));
+        assert!(runs[0].1.underline.is_none());
+        assert!(runs[1].1.underline.is_some());
+        assert!(runs[2].1.underline.is_none());
+    }
+
+    /// A line with no grammar at all still underlines: there is no base run to
+    /// carry the style, so the range has to make its own.
+    #[test]
+    fn a_line_without_highlighting_underlines_all_the_same() {
+        let runs = underline(&[], 3..7);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].0, 3..7);
+        assert!(runs[0].1.underline.is_some());
+    }
+
     /// A background laid in the middle of a coloured word must split that word
     /// into three, and not replace its colour.
     #[test]

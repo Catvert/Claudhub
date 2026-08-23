@@ -56,6 +56,101 @@ pub fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8000).any(|byte| *byte == 0)
 }
 
+/// Past this, an image is not previewed: the bytes cross the wire whole — the
+/// server reads the file and the window paints it — and a hundred-megabyte
+/// texture answers a question nobody asked. The external editor is the way
+/// out, as it is for a file over `MAX_LINES`.
+pub const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// The picture formats the preview knows how to paint.
+///
+/// **Ours and not gpui's**: this module belongs to the core, which the headless
+/// server builds without the `ui` feature — and it is the server that reads the
+/// file. `ui::explorer` translates it into `gpui::ImageFormat`, which is one
+/// match and the only place the two vocabularies meet.
+///
+/// The list is gpui's, minus what it cannot decode. SVG is in it: gpui rasters
+/// it through its own renderer, from the bytes, exactly like the others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Picture {
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+    Bmp,
+    Ico,
+    Tiff,
+    Svg,
+}
+
+impl Picture {
+    /// What the preview's footer calls it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Png => "PNG",
+            Self::Jpeg => "JPEG",
+            Self::Gif => "GIF",
+            Self::Webp => "WEBP",
+            Self::Bmp => "BMP",
+            Self::Ico => "ICO",
+            Self::Tiff => "TIFF",
+            Self::Svg => "SVG",
+        }
+    }
+}
+
+/// The picture a file name announces, if it announces one.
+///
+/// **By extension and not by sniffing the bytes**, and that is deliberate: the
+/// question is asked by the interface, before anything has been read, to know
+/// which command to send — and a name is all it has. A `.png` holding something
+/// else fails to decode, which is the honest outcome of a lie in the name.
+pub fn picture_of(path: &Path) -> Option<Picture> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match extension.as_str() {
+        "png" => Picture::Png,
+        "jpg" | "jpeg" => Picture::Jpeg,
+        "gif" => Picture::Gif,
+        "webp" => Picture::Webp,
+        "bmp" => Picture::Bmp,
+        "ico" => Picture::Ico,
+        "tif" | "tiff" => Picture::Tiff,
+        "svg" => Picture::Svg,
+        _ => return None,
+    })
+}
+
+/// An image as it travels: its format, and the bytes untouched.
+///
+/// Undecoded, and the decoding belongs at the far end: gpui caches a decoded
+/// image by the digest of these very bytes, so decoding here would be work done
+/// twice and a frame's worth of pixels on the wire instead of a file.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Image {
+    pub kind: Picture,
+    pub bytes: Vec<u8>,
+}
+
+/// Reads a file from the worktree to preview it as an image.
+pub fn read_image(worktree: &Path, path: &Path) -> Result<Image> {
+    let kind = picture_of(path).with_context(|| format!("{} is not an image", path.display()))?;
+    let full = worktree.join(path);
+    // Asked of the metadata rather than of what was read: refusing after having
+    // loaded a hundred megabytes into memory refuses nothing.
+    let size = std::fs::metadata(&full)
+        .with_context(|| format!("cannot read {}", full.display()))?
+        .len();
+    if size > MAX_IMAGE_BYTES {
+        bail!(
+            "{} is over {} MB: open it in your editor",
+            path.display(),
+            MAX_IMAGE_BYTES / (1024 * 1024)
+        );
+    }
+    let bytes = std::fs::read(&full).with_context(|| format!("cannot read {}", full.display()))?;
+    Ok(Image { kind, bytes })
+}
+
 /// Reads a file from the worktree for editing.
 pub fn read(worktree: &Path, path: &Path) -> Result<Content> {
     let full = worktree.join(path);
@@ -549,6 +644,19 @@ mod tests {
             editor_command(r#""/opt/my editor/bin/ed" {path}"#, Path::new("/a b.rs"), 1),
             Some(("/opt/my editor/bin/ed".into(), vec!["/a b.rs".into()]))
         );
+    }
+
+    /// The name decides, and it decides before anything is read.
+    #[test]
+    fn a_picture_is_recognised_by_its_extension() {
+        assert_eq!(picture_of(Path::new("assets/logo.PNG")), Some(Picture::Png));
+        assert_eq!(picture_of(Path::new("a/b/photo.jpeg")), Some(Picture::Jpeg));
+        // Text that is drawn: read as a picture, and gpui rasters it.
+        assert_eq!(picture_of(Path::new("icons/x.svg")), Some(Picture::Svg));
+        assert_eq!(picture_of(Path::new("src/main.rs")), None);
+        // No extension at all, and an extension that only looks like one.
+        assert_eq!(picture_of(Path::new("Makefile")), None);
+        assert_eq!(picture_of(Path::new("archive.png.gz")), None);
     }
 
     #[test]
