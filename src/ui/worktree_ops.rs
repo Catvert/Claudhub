@@ -11,6 +11,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use gpui::{div, prelude::*, px, App, Context, Entity, SharedString, Window};
 use gpui_component::{
@@ -101,7 +102,10 @@ pub struct WtPrompt {
     pub main: PathBuf,
     pub slug: String,
     pub target: WtTarget,
-    pub questions: Vec<wt::Question>,
+    /// Shared and not owned: a menu's closure needs the choices of the question
+    /// it belongs to, and it is rebuilt on every frame of the dialog — eighty
+    /// tenants cloned three strings each, sixty times a second.
+    pub questions: Rc<Vec<wt::Question>>,
     pub answers: BTreeMap<String, String>,
     /// The free fields, created when the questions arrive and never in a render:
     /// recreated per frame, they would lose the cursor on the first keystroke.
@@ -260,7 +264,7 @@ impl ClaudhubApp {
             main: main.clone(),
             slug: slug.clone(),
             target,
-            questions: Vec::new(),
+            questions: Rc::new(Vec::new()),
             answers: BTreeMap::new(),
             inputs: BTreeMap::new(),
             filters: BTreeMap::new(),
@@ -372,7 +376,7 @@ impl ClaudhubApp {
             }
             creation.answers.insert(question.name.clone(), value);
         }
-        creation.questions = questions;
+        creation.questions = Rc::new(questions);
         creation.inputs = inputs;
         creation.filters = filters;
         // The round's first text field takes the focus: the questions arrive
@@ -388,6 +392,33 @@ impl ClaudhubApp {
             crate::ui::dialogs::focus_field(&field, window, cx);
         }
         cx.notify();
+    }
+
+    /// Adds or removes one value of a multiple choice.
+    ///
+    /// The answer is read here and not carried into the box's closure: a
+    /// question whose choices come from a shell command has eighty of them, and
+    /// each box would otherwise hold a copy of everything chosen.
+    fn toggle_multi(&mut self, name: &str, value: &str, separator: &str, cx: &mut Context<Self>) {
+        let Some(creation) = self.creation.as_ref() else {
+            return;
+        };
+        let current = creation
+            .answers
+            .get(name)
+            .map(String::as_str)
+            .unwrap_or_default();
+        let mut chosen: Vec<&str> = current
+            .split(separator)
+            .filter(|part| !part.is_empty())
+            .collect();
+        if let Some(at) = chosen.iter().position(|part| *part == value) {
+            chosen.remove(at);
+        } else {
+            chosen.push(value);
+        }
+        let joined = chosen.join(separator);
+        self.answer(name.to_string(), joined, cx);
     }
 
     /// Records an answer and asks the questions again: a `when` may unlock
@@ -543,16 +574,22 @@ impl ClaudhubApp {
                 .child(tr!("worktree-asking"))
                 .into_any_element();
         }
+        // Shared, and the answers and the fields merely borrowed: all three
+        // were copied whole on every frame of the dialog, and the questions
+        // carry every choice of every one of them.
         let questions = creation.questions.clone();
-        let answers = creation.answers.clone();
-        let inputs = creation.inputs.clone();
         let muted = cx.theme().muted_foreground;
 
         let mut rows = Vec::new();
-        for question in questions {
-            let current = answers.get(&question.name).cloned().unwrap_or_default();
+        for (index, question) in questions.iter().enumerate() {
+            let current = creation
+                .answers
+                .get(&question.name)
+                .map(String::as_str)
+                .unwrap_or_default();
             let field = match question.kind {
-                wt::Kind::Text => inputs
+                wt::Kind::Text => creation
+                    .inputs
                     .get(&question.name)
                     .map(|input| Input::new(input).small().into_any_element())
                     .unwrap_or_else(|| div().into_any_element()),
@@ -572,11 +609,9 @@ impl ClaudhubApp {
                         .into_any_element()
                 }
                 wt::Kind::Choice => self
-                    .render_choice(&question, &current, cx)
+                    .render_choice(&questions, index, current, cx)
                     .into_any_element(),
-                wt::Kind::Multi => self
-                    .render_multi(&question, &current, cx)
-                    .into_any_element(),
+                wt::Kind::Multi => self.render_multi(question, current, cx).into_any_element(),
             };
             rows.push(
                 v_flex()
@@ -608,13 +643,15 @@ impl ClaudhubApp {
     /// the rows would take the whole dialog, and the menu comes back.
     fn render_choice(
         &self,
-        question: &wt::Question,
+        questions: &Rc<Vec<wt::Question>>,
+        index: usize,
         current: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let question = &questions[index];
         if question.choices.len() > ROWS_UP_TO {
             return self
-                .render_choice_menu(question, current, cx)
+                .render_choice_menu(questions, index, current, cx)
                 .into_any_element();
         }
         let muted = cx.theme().muted_foreground;
@@ -662,10 +699,12 @@ impl ClaudhubApp {
     /// The same, as a menu, when there are too many options for rows.
     fn render_choice_menu(
         &self,
-        question: &wt::Question,
+        questions: &Rc<Vec<wt::Question>>,
+        index: usize,
         current: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let question = &questions[index];
         let label = question
             .choices
             .iter()
@@ -673,13 +712,17 @@ impl ClaudhubApp {
             .map(|choice| choice.label.clone())
             .unwrap_or_else(|| current.to_string());
         let entity = cx.entity();
-        let (name, choices) = (question.name.clone(), question.choices.clone());
+        // The question is named by its index into the shared list rather than
+        // copied into the closure: this closure is rebuilt on every frame, and
+        // a long choice — a `source` listing eighty tenants — is exactly the
+        // case this menu exists for.
+        let (name, questions) = (question.name.clone(), questions.clone());
         Button::new(SharedString::from(format!("wt-choice-{}", question.name)))
             .outline()
             .small()
             .label(SharedString::from(label))
             .dropdown_menu(move |menu, _window, _cx| {
-                choices.iter().fold(menu, |menu, choice| {
+                questions[index].choices.iter().fold(menu, |menu, choice| {
                     let (entity, name, value) =
                         (entity.clone(), name.clone(), choice.value.clone());
                     menu.item(
@@ -715,10 +758,9 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let separator = question.separator.clone();
-        let chosen: Vec<String> = current
+        let chosen: Vec<&str> = current
             .split(separator.as_str())
             .filter(|value| !value.is_empty())
-            .map(str::to_string)
             .collect();
         let filter = self
             .creation
@@ -734,14 +776,13 @@ impl ClaudhubApp {
             if !crate::ui::find::matches(&needle, &choice_line(choice)) {
                 continue;
             }
-            let checked = chosen.iter().any(|value| value == &choice.value);
+            let checked = chosen.iter().any(|value| *value == choice.value);
             let entity = cx.entity();
             let (name, value, separator) = (
                 question.name.clone(),
                 choice.value.clone(),
                 separator.clone(),
             );
-            let chosen = chosen.clone();
             boxes.push(
                 h_flex()
                     .w_full()
@@ -754,15 +795,14 @@ impl ClaudhubApp {
                         )))
                         .label(SharedString::from(choice.label.clone()))
                         .checked(checked)
+                        // The answer is read again when the box is clicked
+                        // rather than carried here: a copy of it per box per
+                        // frame is eighty vectors of eighty strings on the
+                        // question this list exists for.
                         .on_click(move |_, _window, cx| {
-                            let mut next = chosen.clone();
-                            if checked {
-                                next.retain(|v| v != &value);
-                            } else {
-                                next.push(value.clone());
-                            }
-                            let joined = next.join(&separator);
-                            entity.update(cx, |this, cx| this.answer(name.clone(), joined, cx));
+                            entity.update(cx, |this, cx| {
+                                this.toggle_multi(&name, &value, &separator, cx)
+                            });
                         }),
                     )
                     .child(
