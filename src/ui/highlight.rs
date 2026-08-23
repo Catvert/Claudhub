@@ -30,6 +30,37 @@ use super::blade;
 use crate::git::search::Results;
 use crate::git::{DiffLineKind, FileDiff};
 
+/// A compiled grammar, kept from one call to the next.
+///
+/// `SyntaxHighlighter::new` compiles the grammar's queries — nearly forty
+/// milliseconds for JavaScript — where `update` only reparses a text. A file
+/// opened, a plugin's excerpt, a diff: each one used to pay that fixed cost
+/// again. The pool is per thread and holds one instance per language; a
+/// language name is a bounded vocabulary here, but a plugin names its own, so
+/// the lot is dropped past a ceiling rather than grown for ever.
+///
+/// The instance is **taken out** while it is in use: a nested call would
+/// otherwise meet a borrow of the map and panic.
+fn with_grammar<T>(language: &str, f: impl FnOnce(&mut SyntaxHighlighter) -> T) -> T {
+    thread_local! {
+        static GRAMMARS: std::cell::RefCell<HashMap<String, SyntaxHighlighter>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    const MAX_GRAMMARS: usize = 32;
+    let mut highlighter = GRAMMARS
+        .with(|grammars| grammars.borrow_mut().remove(language))
+        .unwrap_or_else(|| SyntaxHighlighter::new(language));
+    let out = f(&mut highlighter);
+    GRAMMARS.with(|grammars| {
+        let mut grammars = grammars.borrow_mut();
+        if grammars.len() >= MAX_GRAMMARS {
+            grammars.clear();
+        }
+        grammars.insert(language.to_string(), highlighter);
+    });
+    out
+}
+
 /// Registers the grammars gpui-component does not embed.
 ///
 /// PHP is missing from it, although it is the language of half the repositories
@@ -157,31 +188,32 @@ impl DiffHighlights {
         // comments — are added afterwards, the PHP grammar knowing none of them.
         let blade = blade::is_blade(path);
 
-        // A single instance for both passes: `SyntaxHighlighter::new` compiles
-        // the grammar's queries — nearly forty milliseconds for JavaScript —
-        // whereas `update` only reparses a text. Creating two doubled the fixed
-        // cost of every opened file.
-        let mut highlighter = SyntaxHighlighter::new(language);
-        for side in [Side::Old, Side::New] {
-            let (mut text, mut spans) = build_side(diff, side, blade);
-            if spans.is_empty() {
-                continue;
-            }
-            // The fragment first receives what its grammar needs to recognise
-            // it. The line positions follow the offset: the prologue belongs to
-            // none of them, so its styles are ignored by themselves.
-            let prologue = if blade { "" } else { prologue(language, &text) };
-            if !prologue.is_empty() {
-                text.insert_str(0, prologue);
-                for span in &mut spans {
-                    span.range.start += prologue.len();
-                    span.range.end += prologue.len();
+        // A single instance for both passes, and the same one from a file to
+        // the next: compiling a grammar is the fixed cost, reparsing a text is
+        // not. See `with_grammar`.
+        with_grammar(language, |highlighter| {
+            for side in [Side::Old, Side::New] {
+                let (mut text, mut spans) = build_side(diff, side, blade);
+                if spans.is_empty() {
+                    continue;
                 }
+                // The fragment first receives what its grammar needs to
+                // recognise it. The line positions follow the offset: the
+                // prologue belongs to none of them, so its styles are ignored
+                // by themselves.
+                let prologue = if blade { "" } else { prologue(language, &text) };
+                if !prologue.is_empty() {
+                    text.insert_str(0, prologue);
+                    for span in &mut spans {
+                        span.range.start += prologue.len();
+                        span.range.end += prologue.len();
+                    }
+                }
+                highlighter.update(None, &Rope::from_str(&text), None);
+                let highlighted = highlighter.styles(&(0..text.len()), theme);
+                distribute(&highlighted, &spans, &mut styles);
             }
-            highlighter.update(None, &Rope::from_str(&text), None);
-            let highlighted = highlighter.styles(&(0..text.len()), theme);
-            distribute(&highlighted, &spans, &mut styles);
-        }
+        });
         if blade {
             blade::overlay(diff, theme, &mut styles);
         }
@@ -368,14 +400,15 @@ impl DocumentHighlights {
         if text.len() > Self::MAX_BYTES {
             return Self::default();
         }
-        let mut highlighter = SyntaxHighlighter::new(language);
         // The prologue for the same reason as everywhere else: without `<?php`
         // a PHP fragment is read as HTML text and comes back with no colours at
         // all — and a stack frame is very often PHP.
         let head = prologue(language, text);
         let whole = format!("{head}{text}");
-        highlighter.update(None, &Rope::from_str(&whole), None);
-        let styles = highlighter.styles(&(0..whole.len()), theme);
+        let styles = with_grammar(language, |highlighter| {
+            highlighter.update(None, &Rope::from_str(&whole), None);
+            highlighter.styles(&(0..whole.len()), theme)
+        });
         let mut lines = cut_into_lines(&whole, &styles);
         // The prologue is one line, and it is not one of the excerpt's: its
         // own lines do not count in the offsets the panel paints against.
@@ -396,9 +429,10 @@ impl DocumentHighlights {
             let Some(language) = language_for_path(path) else {
                 return Self::default();
             };
-            let mut highlighter = SyntaxHighlighter::new(language);
-            highlighter.update(None, &Rope::from_str(text), None);
-            highlighter.styles(&(0..text.len()), theme)
+            with_grammar(language, |highlighter| {
+                highlighter.update(None, &Rope::from_str(text), None);
+                highlighter.styles(&(0..text.len()), theme)
+            })
         };
         Self {
             lines: cut_into_lines(text, &styles),

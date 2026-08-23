@@ -471,6 +471,49 @@ impl Entry {
     }
 }
 
+/// What the settings row shows about a binding, decided once.
+///
+/// Named for the settings page and not for a list of rows: `Row` here is a
+/// line of the **help** window.
+///
+/// A row used to work all of this out for itself, which meant a copy of the
+/// whole override map, three `Entry::id()` and a re-parse of the keys **per
+/// row and per frame**. It is a pure reading of the table and the overrides,
+/// so it is decided here and tested.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Setting {
+    /// The binding's name in `settings.json`.
+    pub id: String,
+    /// The keys in force, trimmed. Empty when the binding is switched off.
+    pub keys: String,
+    /// The user has said something about this one.
+    pub customised: bool,
+    /// What gpui cannot read, and would match nothing for the whole session.
+    pub invalid: bool,
+    /// A vim binding while the mode is off: not an error, and not a key
+    /// either.
+    pub idle: bool,
+}
+
+impl Setting {
+    pub fn of(entry: &Entry, overrides: &Overrides, vim: bool) -> Self {
+        let id = entry.id();
+        let keys = overrides
+            .get(&id)
+            .map(String::as_str)
+            .unwrap_or(entry.keys)
+            .trim()
+            .to_string();
+        Self {
+            customised: overrides.contains_key(&id),
+            invalid: !valid_keys(&keys),
+            idle: entry.vim && !vim,
+            id,
+            keys,
+        }
+    }
+}
+
 /// The keys that have a name rather than a character.
 ///
 /// Written out because gpui does not offer the list: its own is a *negative*
@@ -1755,6 +1798,56 @@ mod tests {
             home: "Home".into(),
             end: "Fin".into(),
         }
+    }
+
+    /// What a settings row says about a binding, from the table and the
+    /// overrides alone.
+    #[test]
+    fn a_row_reads_the_binding_and_what_was_said_of_it() {
+        let entry = Entry {
+            keys: "secondary-r",
+            group: Group::Repository,
+            label: "action-refresh",
+            predicate: "Claudhub",
+            vim: false,
+        };
+        let vim_entry = Entry {
+            keys: "secondary-r",
+            group: Group::Repository,
+            label: "action-refresh",
+            predicate: "Claudhub",
+            vim: true,
+        };
+        let mut overrides = Overrides::new();
+
+        let plain = Setting::of(&entry, &overrides, false);
+        assert_eq!(plain.id, "repo:secondary-r");
+        assert_eq!(plain.keys, "secondary-r");
+        assert!(!plain.customised);
+        assert!(!plain.invalid);
+        assert!(!plain.idle);
+
+        // A vim binding while the mode is off is not an error, and not a key
+        // either.
+        assert!(Setting::of(&vim_entry, &overrides, false).idle);
+        assert!(!Setting::of(&vim_entry, &overrides, true).idle);
+
+        // The user's keys win, and what gpui cannot read is said so rather
+        // than matching nothing for the rest of the session.
+        overrides.insert("repo:secondary-r".into(), "  f5  ".into());
+        let mine = Setting::of(&entry, &overrides, false);
+        assert_eq!(mine.keys, "f5");
+        assert!(mine.customised);
+        assert!(!mine.invalid);
+
+        overrides.insert("repo:secondary-r".into(), "nonsense".into());
+        assert!(Setting::of(&entry, &overrides, false).invalid);
+
+        // Empty is switched off, not broken.
+        overrides.insert("repo:secondary-r".into(), String::new());
+        let off = Setting::of(&entry, &overrides, false);
+        assert!(off.keys.is_empty());
+        assert!(!off.invalid);
     }
 
     #[test]

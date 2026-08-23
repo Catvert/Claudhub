@@ -240,6 +240,9 @@ impl ClaudhubApp {
         let Some(sender) = self.plugin_outbox.clone() else {
             return;
         };
+        // The settings page shows each plugin's revision, and reads it through
+        // a cache: a plugin appearing, going or moving is what makes it stale.
+        crate::ui::settings_view::forget_plugin_revisions();
         self.plugins = manifests()
             .iter()
             .map(|manifest| Plugin::load(manifest.clone(), sender.clone()))
@@ -573,6 +576,9 @@ impl ClaudhubApp {
     /// word, and losing a working panel on every keystroke would make the
     /// reload worse than a restart.
     pub(super) fn reload_plugins(&mut self, cx: &mut Context<Self>) {
+        // Something moved under a plugin's folder — very possibly a `git pull`
+        // run outside Claudhub. See `settings_view::plugin_revision`.
+        crate::ui::settings_view::forget_plugin_revisions();
         for plugin in &mut self.plugins {
             plugin.reload();
         }
