@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use gpui::{
     div, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, Render, SharedString, Window,
@@ -249,7 +250,11 @@ pub struct ReviewState {
     /// They live here and not in the diff: a note survives a reload of the file,
     /// a change of range and Claudhub being closed, whereas a `Rendered` does
     /// not survive the next file write.
-    pub notes: Vec<crate::ui::notes::Note>,
+    ///
+    /// Behind an `Rc`: the panel paints every note it shows on every frame, and
+    /// it cannot borrow the state while it does — cloning the list to get
+    /// around that copied every note's text, its excerpt and its path.
+    pub notes: Rc<Vec<crate::ui::notes::Note>>,
     /// The next id. It cannot be derived from `notes`: a deleted note would free
     /// its number, and two notes would carry it.
     pub next_note: u64,
@@ -362,7 +367,7 @@ impl Default for ReviewState {
             history_range: LogRange::All,
             history_pending: false,
             commit: None,
-            notes: Vec::new(),
+            notes: Rc::new(Vec::new()),
             next_note: 1,
             reviewed: Vec::new(),
             journal: String::new(),
@@ -2508,7 +2513,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         let mut notes = Vec::new();
-        let mut reviewed = Vec::new();
+        let mut reviewed: Vec<crate::ui::vault::Reviewed> = Vec::new();
         let mut todo = None;
         let mut journal = String::new();
         let on_disk = !files.is_empty();
@@ -2531,7 +2536,11 @@ impl ClaudhubApp {
             // with the same number, and the prompt would name one for the other.
             let highest = notes.iter().map(|note| note.id).max().unwrap_or(0);
             state.next_note = state.next_note.max(highest + 1);
-            state.notes = notes;
+            state.notes = Rc::new(notes);
+            // Sorted here, and kept sorted by `set_reviewed`: the panel showed
+            // them in order, and sorting a copy on every frame is what that
+            // cost.
+            reviewed.sort_by(|a, b| a.path.cmp(&b.path));
             state.reviewed = reviewed;
             state.rows_changed();
             state.todo = todo;
@@ -3147,6 +3156,8 @@ impl ClaudhubApp {
                 });
             }
         }
+        // Kept sorted: it is the order the notes panel lists them in.
+        state.reviewed.sort_by(|a, b| a.path.cmp(&b.path));
         state.rows_changed();
         self.persist_review(&worktree, cx);
         cx.notify();
