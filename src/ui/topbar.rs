@@ -10,6 +10,8 @@
 //! down there as a word one reads; it comes back as a button one clicks, and
 //! saying it in both places at once would be one place too many.
 
+use std::path::PathBuf;
+
 use gpui::{div, prelude::*, px, Context, Entity, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonGroup, ButtonVariants},
@@ -390,7 +392,9 @@ impl ClaudhubApp {
     /// Nothing is painted when nothing is pinned: an empty group would take the
     /// pickers' width to say that a feature exists.
     fn render_pins(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let pins = self.pinned_worktrees(cx);
+        // Shared, not copied twice: the click handler outlives the frame and
+        // used to take a second list of its own.
+        let pins: std::rc::Rc<[PathBuf]> = self.pinned_worktrees(cx).into();
         if pins.is_empty() {
             return None;
         }
@@ -562,9 +566,10 @@ impl ClaudhubApp {
     /// disk here, and never a subprocess in a render.
     fn render_just(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let worktree = self.active.clone()?;
+        // The snapshot is shared rather than copied: the recipes go into the
+        // menu's `'static` closure, and this runs on every frame of the bar.
         let snapshot = self.just_recipes(&worktree)?;
         let default = snapshot.default.clone()?;
-        let recipes = snapshot.recipes.clone();
         let entity = cx.entity();
         let run = {
             let (worktree, default) = (worktree.clone(), default.clone());
@@ -585,14 +590,14 @@ impl ClaudhubApp {
         };
         // Nothing to unfold when the default recipe is the only one: a chevron
         // opening a menu of one is a click that says nothing.
-        let more = (recipes.len() > 1).then(|| {
+        let more = (snapshot.recipes.len() > 1).then(|| {
             Button::new("just-recipes")
                 .ghost()
                 .small()
                 .icon(icon("chevron-down"))
                 .tooltip(tr!("just-recipes"))
                 .dropdown_menu(move |menu, _window, _cx| {
-                    recipes.iter().fold(menu, |menu, recipe| {
+                    snapshot.recipes.iter().fold(menu, |menu, recipe| {
                         let (worktree, name) = (worktree.clone(), recipe.name.clone());
                         let entity = entity.clone();
                         // The recipe as `just --list` writes it, its doc

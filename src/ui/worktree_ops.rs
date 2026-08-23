@@ -894,8 +894,14 @@ impl ClaudhubApp {
 
     /// What this checkout's justfile offers, when it has one with a recipe in
     /// it.
-    pub(super) fn just_recipes(&self, worktree: &Path) -> Option<&crate::just::Snapshot> {
-        let snapshot = self.just_recipes.get(worktree)?.as_ref()?;
+    ///
+    /// The handle is shared, not the snapshot copied: the bar reads it on every
+    /// frame and the run menu keeps it in a `'static` closure.
+    pub(super) fn just_recipes(
+        &self,
+        worktree: &Path,
+    ) -> Option<std::rc::Rc<crate::just::Snapshot>> {
+        let snapshot = self.just_recipes.get(worktree)?.clone()?;
         snapshot.default.is_some().then_some(snapshot)
     }
 

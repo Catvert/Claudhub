@@ -125,6 +125,32 @@ fn corner_cut(radius: Pixels, left: bool, colour: Hsla) -> impl IntoElement {
 ///
 /// The click is **consumed**: the tab under it would otherwise bring forward
 /// the panel it is about to close, exactly as it does under the cross.
+/// Brings a panel's own tab forward in the group that holds it.
+///
+/// The two closable panels — a file, a terminal — need exactly this and say it
+/// the same way: the panel exists and sits in the right group, but the tab on
+/// screen is whichever was added last.
+fn select_own_tab(
+    group: Option<gpui::WeakEntity<gpui_component::dock::TabGroup>>,
+    panel: gpui::EntityId,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(group) = group.and_then(|group| group.upgrade()) else {
+        return;
+    };
+    let me = gpui_component::dock::PanelId::from(panel);
+    group.update(cx, |group, cx| {
+        if let Some(ix) = group
+            .panels()
+            .iter()
+            .position(|panel| panel.panel_id(cx) == me)
+        {
+            group.select_tab(ix, window, cx);
+        }
+    });
+}
+
 fn close_on_middle_click<E: gpui::StatefulInteractiveElement>(
     tab: E,
     close: impl Fn(&mut Window, &mut App) + 'static,
@@ -600,6 +626,9 @@ pub struct FilePanel {
     app: WeakEntity<ClaudhubApp>,
     root: std::path::PathBuf,
     path: std::path::PathBuf,
+    /// What the tab says, worked out once: a path's last segment never moves,
+    /// and the title is asked for on every frame the bar paints.
+    name: gpui::SharedString,
     /// The editor's state, held rather than looked up: `focus_handle` and the
     /// tab's title are asked for by the dock at moments when reading the
     /// application would read it while it is being updated.
@@ -633,10 +662,15 @@ impl FilePanel {
             cx.notify();
         })
         .detach();
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
         Self {
             app: app.downgrade(),
             root,
             path,
+            name: name.into(),
             input,
             group: None,
             visible,
@@ -648,24 +682,8 @@ impl FilePanel {
     /// What restoring a session needs: the panels exist and sit in the right
     /// order, but the tab on screen is whichever was added last.
     pub fn activate(panel: &Entity<Self>, window: &mut Window, cx: &mut App) {
-        let Some(group) = panel
-            .read(cx)
-            .group
-            .clone()
-            .and_then(|group| group.upgrade())
-        else {
-            return;
-        };
-        let me = gpui_component::dock::PanelId::from(panel.entity_id());
-        group.update(cx, |group, cx| {
-            if let Some(ix) = group
-                .panels()
-                .iter()
-                .position(|panel| panel.panel_id(cx) == me)
-            {
-                group.select_tab(ix, window, cx);
-            }
-        });
+        let group = panel.read(cx).group.clone();
+        select_own_tab(group, panel.entity_id(), window, cx);
     }
 
     /// Takes the editor state a reopening has built.
@@ -736,28 +754,25 @@ impl Panel for FilePanel {
     /// `app/Http/Controllers/UserController.php` in six tabs is one long line
     /// of directories. The full path is one row below, in the file's bar.
     fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let name = self
-            .path
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| self.path.display().to_string());
-        let (root, path) = (self.root.clone(), self.path.clone());
+        let name = self.name.clone();
         let (dirty, ephemeral) = self
             .app
             .upgrade()
             .and_then(|app| {
                 let app = app.read(cx);
-                let tabs = app.editors(&root)?;
-                let editing = tabs.open.get(tabs.index_of(&path)?)?;
+                let tabs = app.editors(&self.root)?;
+                let editing = tabs.open.get(tabs.index_of(&self.path)?)?;
                 Some((editing.dirty, editing.ephemeral))
             })
             .unwrap_or((false, false));
         let app = self.app.clone();
         // The same closing as the cross's, and it has to be: the wheel button is
-        // the other way of making the same gesture.
-        let closing = {
-            let (app, root, path) = (app.clone(), root.clone(), path.clone());
-            move |window: &mut Window, cx: &mut App| {
+        // the other way of making the same gesture. **One closure shared by
+        // both** — it used to be written twice, with a copy of the two paths
+        // each, on every frame.
+        let closing: std::rc::Rc<dyn Fn(&mut Window, &mut App)> = {
+            let (root, path) = (self.root.clone(), self.path.clone());
+            std::rc::Rc::new(move |window: &mut Window, cx: &mut App| {
                 let Some(app) = app.upgrade() else {
                     return;
                 };
@@ -765,8 +780,9 @@ impl Panel for FilePanel {
                 window.defer(cx, move |window, cx| {
                     app.update(cx, |app, cx| app.ask_close_file(root, path, window, cx));
                 });
-            }
+            })
         };
+        let on_cross = closing.clone();
         let tab = gpui_component::h_flex()
             .id(("file-tab", self.input.entity_id()))
             .gap_1()
@@ -776,11 +792,7 @@ impl Panel for FilePanel {
             // be replaced, and one is entitled to know it before opening ten
             // files and finding one. A shape and not a colour — a colour in a
             // tab bar is read as selection.
-            .child(
-                div()
-                    .when(ephemeral, |el| el.italic())
-                    .child(gpui::SharedString::from(name)),
-            )
+            .child(div().when(ephemeral, |el| el.italic()).child(name))
             // A dot and not a coloured name: the tab of the file one is typing
             // in is already the selected one, and a colour there would be read
             // as selection rather than as "not saved".
@@ -795,16 +807,10 @@ impl Panel for FilePanel {
                         // cross would first bring forward the file it is about
                         // to close.
                         cx.stop_propagation();
-                        let Some(app) = app.upgrade() else {
-                            return;
-                        };
-                        let (root, path) = (root.clone(), path.clone());
-                        window.defer(cx, move |window, cx| {
-                            app.update(cx, |app, cx| app.ask_close_file(root, path, window, cx));
-                        });
+                        on_cross(window, cx);
                     }),
             );
-        close_on_middle_click(tab, closing)
+        close_on_middle_click(tab, move |window, cx| closing(window, cx))
     }
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {
@@ -863,7 +869,7 @@ impl ConflictsPanel {
     pub fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
         cx.observe(app, |this: &mut Self, app, cx| {
             let app = app.read(cx);
-            let visible = app.pending_operation().is_some() || !app.conflicted_files().is_empty();
+            let visible = app.pending_operation().is_some() || app.has_conflicts();
             if this.visible != visible {
                 this.visible = visible;
                 // The dock re-reads its tabs' visibility when the zone
@@ -1042,24 +1048,8 @@ impl TerminalPanel {
     /// exists and is in the right group, but the tab beside it is the one on
     /// screen.
     pub fn activate(panel: &Entity<Self>, window: &mut Window, cx: &mut App) {
-        let Some(group) = panel
-            .read(cx)
-            .group
-            .clone()
-            .and_then(|group| group.upgrade())
-        else {
-            return;
-        };
-        let me = gpui_component::dock::PanelId::from(panel.entity_id());
-        group.update(cx, |group, cx| {
-            if let Some(ix) = group
-                .panels()
-                .iter()
-                .position(|panel| panel.panel_id(cx) == me)
-            {
-                group.select_tab(ix, window, cx);
-            }
-        });
+        let group = panel.read(cx).group.clone();
+        select_own_tab(group, panel.entity_id(), window, cx);
     }
 }
 

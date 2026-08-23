@@ -532,7 +532,11 @@ pub struct ClaudhubApp {
     ///
     /// Keyed by worktree and not by repository, unlike `wt.toml`: a justfile is
     /// a file of the checkout, and a branch is free to add a recipe.
-    pub(super) just_recipes: HashMap<PathBuf, Option<crate::just::Snapshot>>,
+    ///
+    /// Behind an `Rc`: the run button's menu needs the recipes in a `'static`
+    /// closure, and copying the list on every frame of the bar is what that
+    /// used to cost.
+    pub(super) just_recipes: HashMap<PathBuf, Option<std::rc::Rc<crate::just::Snapshot>>>,
     /// What `wt` knows about each worktree: started or not, its addresses.
     pub(super) wt_states: HashMap<PathBuf, crate::runtime::protocol::WtWorktree>,
     /// The guided creation under way.
@@ -1798,7 +1802,8 @@ impl ClaudhubApp {
                 self.wt_projects.insert(main, project);
             }
             Evt::JustRecipes { worktree, recipes } => {
-                self.just_recipes.insert(worktree, recipes);
+                self.just_recipes
+                    .insert(worktree, recipes.map(std::rc::Rc::new));
             }
             Evt::WtQuestions {
                 main,
@@ -2092,7 +2097,11 @@ impl ClaudhubApp {
         self.pending_status.remove(&worktree);
         let base = self.default_base_for(&worktree);
         self.ensure_review(&worktree, cx);
-        let state = self.review.entry(worktree.clone()).or_default();
+        // `ensure_review` has just put it there, so no key is copied to look it
+        // up.
+        let Some(state) = self.review.get_mut(&worktree) else {
+            return;
+        };
         state.status = status;
         if state.base.is_none() {
             state.base = base;
@@ -2296,17 +2305,10 @@ impl ClaudhubApp {
                 input.set_value("", window, cx);
             });
         }
-        // The bar keeps one line and the balloon takes the rest: a `git pull`
-        // answers with a file per line, and poured into a bar one line high
-        // that text does not truncate — it wraps over the window. See
-        // `ui::notify`.
-        let text = match crate::ui::notify::headline(&output) {
-            Some(line) => SharedString::from(line),
-            None => tr!(action.success_key()),
-        };
-        self.toast = Some(Toast { text, error: false });
-        self.notify(
-            crate::ui::notify::notice(action, &output, crate::ui::notify::Level::Success),
+        self.report(
+            action,
+            &output,
+            crate::ui::notify::Level::Success,
             window,
             cx,
         );
@@ -2356,18 +2358,45 @@ impl ClaudhubApp {
                 self.project_files_failed(worktree);
             }
         }
-        let text = match crate::ui::notify::headline(&message) {
-            Some(line) => SharedString::from(line),
-            None => tr!(action.success_key()),
-        };
-        self.toast = Some(Toast { text, error: true });
-        // A failure always gets one: the bar is overwritten by the next message
-        // that goes through it, and this is what one comes back to read.
-        self.notify(
-            crate::ui::notify::notice(action, &message, crate::ui::notify::Level::Error),
+        // A failure always gets a balloon: the bar is overwritten by the next
+        // message that goes through it, and the balloon is what one comes back
+        // to read.
+        self.report(
+            action,
+            &message,
+            crate::ui::notify::Level::Error,
             window,
             cx,
         );
+    }
+
+    /// The one line of the status bar and the balloon beside it, for an outcome
+    /// of either sign.
+    ///
+    /// The fallback is `success_key()` on both paths — it was so before this was
+    /// one function — which reads as the name of what was attempted; the level
+    /// is what says how it went.
+    fn report(
+        &mut self,
+        action: Action,
+        output: &str,
+        level: crate::ui::notify::Level,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The bar keeps one line and the balloon takes the rest: a `git pull`
+        // answers with a file per line, and poured into a bar one line high
+        // that text does not truncate — it wraps over the window. See
+        // `ui::notify`.
+        let text = match crate::ui::notify::headline(output) {
+            Some(line) => SharedString::from(line),
+            None => tr!(action.success_key()),
+        };
+        self.toast = Some(Toast {
+            text,
+            error: matches!(level, crate::ui::notify::Level::Error),
+        });
+        self.notify(crate::ui::notify::notice(action, output, level), window, cx);
     }
 
     /// Puts an outcome on screen as a balloon, if it earned one.
@@ -2721,12 +2750,6 @@ impl ClaudhubApp {
             return;
         };
         state.selected = Some(path.clone());
-        // Opening a file is leaving the merge: the centre shows one or the
-        // other, and what one has just clicked is what one wants to see.
-        self.merging = None;
-        let Some(state) = self.review.get_mut(&worktree) else {
-            return;
-        };
         // The previous diff is cleared at once: keeping another file's for the
         // length of the read would give the impression that the click did
         // nothing, and then that the content changes by itself.
@@ -2741,6 +2764,11 @@ impl ClaudhubApp {
             .files
             .iter()
             .any(|f| f.path == path && f.is_untracked());
+        // Opening a file is leaving the merge: the centre shows one or the
+        // other, and what one has just clicked is what one wants to see. After
+        // the state above and not before, so that one lookup serves for all of
+        // it — nothing between the two reads either.
+        self.merging = None;
         self.git.send(Cmd::LoadFileDiff {
             worktree,
             range: range.clone(),
@@ -2870,9 +2898,7 @@ impl ClaudhubApp {
             .pending_files
             .retain(|range| !matches!(range, DiffRange::Branch { .. }));
         // The branch history depends on the same base.
-        if let Some(state) = self.review.get_mut(&worktree) {
-            state.history = None;
-        }
+        state.history = None;
         self.persist_review(&worktree, cx);
         cx.notify();
     }
@@ -3740,9 +3766,13 @@ impl ClaudhubApp {
         if self.workspace.shows_every_worktree() {
             return !self.terminals.is_empty();
         }
-        self.active
-            .as_deref()
-            .is_some_and(|worktree| !self.terminals_of(worktree).is_empty())
+        // Asked, not counted: `terminals_of` builds a list, and this is read on
+        // every frame the status bar paints.
+        self.active.as_deref().is_some_and(|worktree| {
+            self.terminals
+                .iter()
+                .any(|terminal| terminal.worktree == worktree)
+        })
     }
 
     /// Whether *this* worktree's terminals are on screen.

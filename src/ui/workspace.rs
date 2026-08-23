@@ -127,12 +127,14 @@ impl Workspace {
     /// neither is a screen with **nothing to show**: since Sentry became a
     /// plugin, its screen carries no panel of ours, and a button opening an
     /// empty room is worse than no button. See `plugin_view::screen_has_content`.
-    pub fn working(cx: &App) -> Vec<Workspace> {
+    ///
+    /// An iterator and not a list: the bar builds this on every frame, and
+    /// nothing here needs the seven of them at once.
+    pub fn working(cx: &App) -> impl Iterator<Item = Workspace> + '_ {
         Self::ALL
             .into_iter()
             .filter(|w| !Self::ASIDE.contains(w))
             .filter(|w| crate::ui::plugin_view::screen_has_content(*w, cx))
-            .collect()
     }
 
     /// Does this screen hold panels of its own, or only whatever plugins land
@@ -523,7 +525,7 @@ impl ClaudhubApp {
     /// it.
     pub(super) fn render_workspace_nav(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.workspace;
-        let shown = Workspace::working(cx);
+        let shown: Vec<Workspace> = Workspace::working(cx).collect();
         ButtonGroup::new("workspace-nav")
             .compact()
             .children(shown.iter().map(|workspace| {

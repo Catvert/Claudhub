@@ -460,7 +460,7 @@ impl ClaudhubApp {
         {
             return;
         }
-        let elsewhere = Workspace::working(cx).first().copied().unwrap_or_default();
+        let elsewhere = Workspace::working(cx).next().unwrap_or_default();
         self.enter_workspace(elsewhere, window, cx);
     }
 
