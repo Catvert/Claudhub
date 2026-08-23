@@ -63,8 +63,11 @@ pub struct Rendered {
     /// They depend on the column count and the line height and on nothing else,
     /// a `Rendered` never changing again: the key is those two, and a resize or
     /// a zoom is what rebuilds them — not every frame.
-    wrap_sizes: std::cell::RefCell<Option<(usize, Pixels, Rc<Vec<gpui::Size<Pixels>>>)>>,
+    wrap_sizes: std::cell::RefCell<Option<WrapSizes>>,
 }
+
+/// The wrapped list's sizes, and the two things they depend on.
+type WrapSizes = (usize, Pixels, Rc<Vec<gpui::Size<Pixels>>>);
 
 impl Rendered {
     pub fn new(path: &Path, file: FileDiff, theme: &HighlightTheme) -> Self {

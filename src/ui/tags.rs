@@ -43,11 +43,16 @@ use crate::ui::icons::icon;
 /// What is known of a repository's tags.
 #[derive(Default)]
 pub struct TagsState {
-    pub tags: Vec<Tag>,
+    /// Behind an `Rc`: the row closure runs for every visible row on every
+    /// frame and cannot read the application back, so it has to capture the
+    /// list — and copying a few hundred tags to do so was the panel's whole
+    /// cost.
+    pub tags: Rc<Vec<Tag>>,
     /// The names `origin` carries. **`None` until it has been asked for**: a
     /// panel that showed "only local" without having read the remote would be
-    /// saying something it does not know.
-    pub remote: Option<HashSet<String>>,
+    /// saying something it does not know. Behind an `Rc` for the same reason as
+    /// the tags.
+    pub remote: Option<Rc<HashSet<String>>>,
     /// A read has gone out and has not come back. Without this guard, every
     /// frame would restart the command for the whole length of the read — it is
     /// the panel that asks, and it asks at render time.
@@ -161,7 +166,7 @@ impl ClaudhubApp {
 
     pub(super) fn tags_arrived(&mut self, main: PathBuf, tags: Vec<Tag>, cx: &mut Context<Self>) {
         let state = self.tags.entry(main).or_default();
-        state.tags = tags;
+        state.tags = Rc::new(tags);
         state.pending = false;
         state.loaded = true;
         cx.notify();
@@ -174,7 +179,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         let state = self.tags.entry(main).or_default();
-        state.remote = Some(names.into_iter().collect());
+        state.remote = Some(Rc::new(names.into_iter().collect()));
         state.remote_pending = false;
         cx.notify();
     }
@@ -188,7 +193,7 @@ impl ClaudhubApp {
             return;
         };
         let state = self.tags.entry(main.clone()).or_default();
-        state.tags.clear();
+        state.tags = Rc::new(Vec::new());
         state.remote = None;
         state.loaded = false;
         state.pending = true;
@@ -429,23 +434,21 @@ impl ClaudhubApp {
 
         let state = self.tags.get(&main);
         let remote = state.and_then(|state| state.remote.clone());
-        // Cloned rather than borrowed: the row closure runs for every visible
-        // row on every frame, with the application already borrowed — reading
-        // the entity from inside it is the panic gpui refuses.
-        let rows: Rc<Vec<Tag>> = Rc::new(
-            state
-                .map(|state| {
-                    state
-                        .tags
-                        .iter()
-                        .filter(|tag| {
-                            crate::ui::find::matches(&query, &tag.name)
-                                || crate::ui::find::matches(&query, &tag.subject)
-                        })
-                        .cloned()
-                        .collect()
+        // The list is captured, not read back: the row closure runs for every
+        // visible row on every frame, with the application already borrowed —
+        // reading the entity from inside it is the panic gpui refuses. What the
+        // search keeps is a list of **indices** into it, so a frame costs no
+        // copy of a tag.
+        let tags = state.map(|state| state.tags.clone()).unwrap_or_default();
+        let rows: Rc<Vec<usize>> = Rc::new(
+            tags.iter()
+                .enumerate()
+                .filter(|(_, tag)| {
+                    crate::ui::find::matches(&query, &tag.name)
+                        || crate::ui::find::matches(&query, &tag.subject)
                 })
-                .unwrap_or_default(),
+                .map(|(index, _)| index)
+                .collect(),
         );
         if rows.is_empty() {
             let pending = state.is_some_and(|state| state.pending);
@@ -475,9 +478,15 @@ impl ClaudhubApp {
                         uniform_list("tags-rows", count, move |visible, _window, cx| {
                             visible
                                 .map(|index| match rows.get(index) {
-                                    Some(tag) => {
-                                        render_tag(index, tag, remote.as_ref(), &look, &entity, cx)
-                                    }
+                                    Some(at) => render_tag(
+                                        index,
+                                        &tags,
+                                        *at,
+                                        remote.as_deref(),
+                                        &look,
+                                        &entity,
+                                        cx,
+                                    ),
                                     None => div().into_any_element(),
                                 })
                                 .collect::<Vec<_>>()
@@ -596,20 +605,29 @@ impl Look {
 }
 
 /// One tag.
+///
+/// `index` names the row of the list, `at` the tag in the list the search has
+/// filtered: the gestures capture the list and that index rather than a copy of
+/// the tag, which was one copy per visible row and per frame.
+#[allow(clippy::too_many_arguments)]
 fn render_tag(
     index: usize,
-    tag: &Tag,
+    tags: &Rc<Vec<Tag>>,
+    at: usize,
     remote: Option<&HashSet<String>>,
     look: &Look,
     entity: &Entity<ClaudhubApp>,
     cx: &App,
 ) -> gpui::AnyElement {
+    let Some(tag) = tags.get(at) else {
+        return div().into_any_element();
+    };
     let mono = cx.theme().mono_font_family.clone();
     // Only said when the remote list has been read: "only local" about a remote
     // nobody asked would be a claim, not a fact.
     let only_local = remote.map(|remote| !remote.contains(&tag.name));
     let (open, menu) = (entity.clone(), entity.clone());
-    let (target, for_menu) = (tag.target.clone(), tag.clone());
+    let (for_click, for_menu) = (tags.clone(), tags.clone());
 
     v_flex()
         .id(("tag-row", index))
@@ -622,7 +640,9 @@ fn render_tag(
         .cursor_pointer()
         .hover(|s| s.bg(look.accent.opacity(0.4)))
         .on_click(move |_, _window, cx| {
-            let target = target.clone();
+            let Some(target) = for_click.get(at).map(|tag| tag.target.clone()) else {
+                return;
+            };
             open.update(cx, |this, cx| this.open_tag_commit(target, cx));
         })
         .child(
@@ -681,7 +701,10 @@ fn render_tag(
                         .child(SharedString::from(summary(tag))),
                 ),
         )
-        .context_menu(move |popup, _window, _cx| row_menu(popup, &menu, &for_menu))
+        .context_menu(move |popup, _window, _cx| match for_menu.get(at) {
+            Some(tag) => row_menu(popup, &menu, tag),
+            None => popup,
+        })
         .into_any_element()
 }
 

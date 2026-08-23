@@ -320,6 +320,38 @@ impl ClaudhubApp {
     }
 }
 
+/// A row's texts, built once when the history arrives.
+///
+/// `SharedString` is an `Arc`: the list's closure hands these out for every
+/// visible row on every frame, and cloning the `String`s of the commit copied
+/// four of them per row.
+pub struct CommitText {
+    pub short: SharedString,
+    pub summary: SharedString,
+    pub author: SharedString,
+    pub date: SharedString,
+    /// The two the row shows, and no more: the rest would never be painted.
+    pub refs: Vec<SharedString>,
+}
+
+pub fn commit_texts(commits: &[crate::git::Commit]) -> Vec<CommitText> {
+    commits
+        .iter()
+        .map(|commit| CommitText {
+            short: commit.short.clone().into(),
+            summary: commit.summary.clone().into(),
+            author: commit.author.clone().into(),
+            date: commit.date.clone().into(),
+            refs: commit
+                .refs
+                .iter()
+                .take(2)
+                .map(|reference| reference.clone().into())
+                .collect(),
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_commit(
     history: &Rc<History>,
@@ -332,7 +364,11 @@ fn render_commit(
     entity: &Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
-    let (Some(commit), Some(row)) = (history.commits.get(index), history.graph.get(index)) else {
+    let (Some(commit), Some(row), Some(text)) = (
+        history.commits.get(index),
+        history.graph.get(index),
+        history.texts.get(index),
+    ) else {
         return div().into_any_element();
     };
     let is_selected = selected == Some(commit.id.as_str());
@@ -340,11 +376,18 @@ fn render_commit(
     let muted = cx.theme().muted_foreground;
     let accent = cx.theme().accent;
 
-    let row = row.clone();
+    // The history is captured, not the row: an `Rc` clone where copying the
+    // row's three vectors of lanes was an allocation per visible row and per
+    // frame.
+    let for_graph = history.clone();
     let entity = entity.clone();
     let graph = canvas(
         move |_, _, _| {},
-        move |bounds, _, window, cx| paint_graph(&row, bounds, window, cx),
+        move |bounds, _, window, cx| {
+            if let Some(row) = for_graph.graph.get(index) {
+                paint_graph(row, bounds, window, cx);
+            }
+        },
     )
     .w(gutter)
     .h(row_height);
@@ -380,7 +423,7 @@ fn render_commit(
                 .font_family(cx.theme().mono_font_family.clone())
                 .text_xs()
                 .text_color(dot_color)
-                .child(commit.short.clone()),
+                .child(text.short.clone()),
         )
         .child(
             div()
@@ -388,9 +431,9 @@ fn render_commit(
                 .min_w_0()
                 .truncate()
                 .text_sm()
-                .child(commit.summary.clone()),
+                .child(text.summary.clone()),
         )
-        .children(commit.refs.iter().take(2).map(|reference| {
+        .children(text.refs.iter().map(|reference| {
             div()
                 .flex_none()
                 .px_1()
@@ -398,7 +441,7 @@ fn render_commit(
                 .bg(dot_color.opacity(0.18))
                 .text_xs()
                 .text_color(dot_color)
-                .child(SharedString::from(reference.clone()))
+                .child(reference.clone())
         }))
         .child(
             div()
@@ -407,7 +450,7 @@ fn render_commit(
                 .truncate()
                 .text_xs()
                 .text_color(muted)
-                .child(commit.author.clone()),
+                .child(text.author.clone()),
         )
         .child(
             div()
@@ -416,7 +459,7 @@ fn render_commit(
                 .text_right()
                 .text_xs()
                 .text_color(muted)
-                .child(commit.date.clone()),
+                .child(text.date.clone()),
         )
         .into_any_element()
 }

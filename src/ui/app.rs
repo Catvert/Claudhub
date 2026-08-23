@@ -338,6 +338,9 @@ pub enum Jump {
 pub struct History {
     pub commits: Vec<Commit>,
     pub graph: Vec<GraphRow>,
+    /// What a row shows, ready to hand to gpui — see
+    /// `ui::history_view::commit_texts`.
+    pub texts: Vec<crate::ui::history_view::CommitText>,
     /// The graph's number of columns, to size its gutter.
     pub width: usize,
 }
@@ -2238,9 +2241,14 @@ impl ClaudhubApp {
         // the history with the wrong one.
         if state.history_range == range {
             let width = crate::git::history::width(&graph);
+            // The row's texts are built here, once, and not in the list's
+            // closure: that one runs for every visible row of every frame, and
+            // it was four strings copied per row.
+            let texts = crate::ui::history_view::commit_texts(&commits);
             state.history = Some(std::rc::Rc::new(History {
                 commits,
                 graph,
+                texts,
                 width,
             }));
         }
