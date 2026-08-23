@@ -26,7 +26,7 @@ use gpui_component::{
     v_flex, ActiveTheme, Disableable as _, Sizable as _, StyledExt as _, WindowExt as _,
 };
 
-use crate::plugin::host::{Effect, Request};
+use crate::plugin::host::{Effect, Host, Request};
 use crate::plugin::manifest::{self, Manifest, PanelSpec};
 use crate::plugin::view::{Item, Node, Pair, TextStyle, Tone};
 use crate::plugin::Plugin;
@@ -34,6 +34,7 @@ use crate::runtime::Cmd;
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
+use rune::Value;
 
 /// How long a capability may take before the panel is told nobody answered.
 ///
@@ -676,6 +677,27 @@ impl ClaudhubApp {
         .detach();
     }
 
+    /// What a call needs: the machine and the state it runs against.
+    ///
+    /// `None` as soon as one of the two is missing — a plugin that has gone, a
+    /// script that does not compile, a state not yet settled — and a gesture on
+    /// any of those is a gesture that does nothing, which is right.
+    fn plugin_call(&self, panel: &str) -> Option<(std::rc::Rc<Host>, Value)> {
+        let index = self.plugin_index(panel)?;
+        Some((self.plugins[index].host()?, self.plugins[index].state()?))
+    }
+
+    /// Records what a call came back with. The two gestures share it.
+    fn plugin_outcome(&mut self, panel: &'static str, outcome: Result<Value, String>) {
+        let Some(index) = self.plugin_index(panel) else {
+            return;
+        };
+        match outcome {
+            Ok(state) => self.plugins[index].settle(state),
+            Err(message) => self.plugins[index].fail(message),
+        }
+    }
+
     /// A gesture: `update(state, action, payload)`, then repaint.
     fn plugin_gesture(
         &mut self,
@@ -685,11 +707,10 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(index) = self.plugin_index(panel) else {
+        let Some((host, state)) = self.plugin_call(panel) else {
             return;
         };
-        let (Some(host), Some(state)) = (self.plugins[index].host(), self.plugins[index].state())
-        else {
+        let Some(index) = self.plugin_index(panel) else {
             return;
         };
         // The panel the gesture came from keeps what it shows; the others wait.
@@ -719,23 +740,13 @@ impl ClaudhubApp {
         typed: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(index) = self.plugin_index(panel) else {
-            return;
-        };
-        let (Some(host), Some(state)) = (self.plugins[index].host(), self.plugins[index].state())
-        else {
+        let Some((host, state)) = self.plugin_call(panel) else {
             return;
         };
         cx.spawn(async move |this, cx| {
             let outcome = host.update(&state, &action, &typed).await;
             this.update(cx, |this, cx| {
-                let Some(index) = this.plugin_index(panel) else {
-                    return;
-                };
-                match outcome {
-                    Ok(state) => this.plugins[index].settle(state),
-                    Err(message) => this.plugins[index].fail(message),
-                }
+                this.plugin_outcome(panel, outcome);
                 // The effects wait: a keystroke has no window to open anything
                 // with, and the next settling drains them.
                 cx.notify();
@@ -748,17 +759,14 @@ impl ClaudhubApp {
     fn plugin_settled(
         &mut self,
         panel: &'static str,
-        outcome: Result<rune::Value, String>,
+        outcome: Result<Value, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.plugin_outcome(panel, outcome);
         let Some(index) = self.plugin_index(panel) else {
             return;
         };
-        match outcome {
-            Ok(state) => self.plugins[index].settle(state),
-            Err(message) => self.plugins[index].fail(message),
-        }
         let effects = self.plugins[index].take_effects();
         let id = self.plugins[index].manifest.id.clone();
         self.apply_plugin_effects(&id, effects, window, cx);

@@ -644,50 +644,31 @@ fn module(shared: &Arc<Shared>) -> Result<rune::Module, rune::ContextError> {
         .build()?;
     // Modifiers rather than eight-argument constructors: they compose, and a
     // script reads `primary(button(…))` the way the button reads on screen.
+    // Each one raises a flag in place and hands the node back: a node the
+    // modifier does not apply to comes through untouched, which is what keeps
+    // `primary(text(…))` from being an error a script has to guard against.
     module
-        .function("primary", |node: RuneNode| match node.0 {
-            Node::Button {
-                label,
-                icon,
-                on_click,
-                disabled,
-                ..
-            } => RuneNode(Node::Button {
-                label,
-                icon,
-                on_click,
-                disabled,
-                primary: true,
-            }),
-            other => RuneNode(other),
+        .function("primary", |mut node: RuneNode| {
+            if let Node::Button { primary, .. } = &mut node.0 {
+                *primary = true;
+            }
+            node
         })
         .build()?;
     module
-        .function("disabled", |node: RuneNode| match node.0 {
-            Node::Button {
-                label,
-                icon,
-                on_click,
-                primary,
-                ..
-            } => RuneNode(Node::Button {
-                label,
-                icon,
-                on_click,
-                disabled: true,
-                primary,
-            }),
-            other => RuneNode(other),
+        .function("disabled", |mut node: RuneNode| {
+            if let Node::Button { disabled, .. } = &mut node.0 {
+                *disabled = true;
+            }
+            node
         })
         .build()?;
     module
-        .function("folded", |node: RuneNode| match node.0 {
-            Node::Section { title, body, .. } => RuneNode(Node::Section {
-                title,
-                body,
-                folded: true,
-            }),
-            other => RuneNode(other),
+        .function("folded", |mut node: RuneNode| {
+            if let Node::Section { folded, .. } = &mut node.0 {
+                *folded = true;
+            }
+            node
         })
         .build()?;
     module
