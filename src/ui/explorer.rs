@@ -2730,8 +2730,11 @@ impl ClaudhubApp {
     fn render_lsp_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         use crate::ui::lsp::Status;
         let editing = self.editing()?;
-        let servers = self.lsp_servers(&editing.worktree, cx);
-        crate::lsp::pick(&servers, &editing.path)?;
+        // Whether there is a server for this file, without cloning the list of
+        // them at every frame: see `lsp_serves`.
+        if !self.lsp_serves(&editing.worktree, &editing.path, cx) {
+            return None;
+        }
         let on = self.lsp_enabled(&editing.worktree);
         let session = self.lsp_session(&editing.worktree);
         let status = session.map(|session| session.status.clone());
@@ -2902,7 +2905,6 @@ impl ClaudhubApp {
         // The occurrences of the last search, lit as `Ctrl+F` lights them:
         // see `sync_search_matches`.
         self.sync_search_matches(&surface, vim, cx);
-        let entity = cx.entity();
         let mono = cx.theme().mono_font_family.clone();
         // The editor is code, like the diff on the screen next door: same
         // family, same size. Without saying so it inherits the interface's
@@ -3013,62 +3015,12 @@ impl ClaudhubApp {
                                 this.on_surface_definition_click(&surface, event, window, cx)
                             })
                         })
-                        // The capture phase, on an ancestor of the editor: see
-                        // `vim_key`. Installed only when the mode is on, so that
-                        // nothing stands between the keyboard and the input
-                        // otherwise.
-                        .when(vim, |el| {
-                            el.capture_key_down({
-                                let surface = surface.clone();
-                                cx.listener(move |this, event, window, cx| {
-                                    this.vim_key(&surface, event, window, cx)
-                                })
-                            })
-                            // `Ctrl+V` is a binding of the input's before it is
-                            // a keystroke: see `vim_paste`.
-                            .capture_action({
-                                let surface = surface.clone();
-                                cx.listener(
-                                    move |this, _: &gpui_component::input::Paste, window, cx| {
-                                        if this.vim_paste(&surface, window, cx) {
-                                            cx.stop_propagation();
-                                        }
-                                    },
-                                )
-                            })
-                            // And so are `Enter` and `Backspace`, which is why
-                            // a `:` line could be typed and never run: see
-                            // `vim_named_key`. A modified `Enter` is left
-                            // alone — it is somebody else's.
-                            .capture_action({
-                                let surface = surface.clone();
-                                cx.listener(
-                                    move |this,
-                                          action: &gpui_component::input::Enter,
-                                          window,
-                                          cx| {
-                                        if action.secondary || action.shift {
-                                            return;
-                                        }
-                                        if this.vim_named_key(&surface, "enter", window, cx) {
-                                            cx.stop_propagation();
-                                        }
-                                    },
-                                )
-                            })
-                            .capture_action({
-                                let surface = surface.clone();
-                                cx.listener(
-                                    move |this,
-                                          _: &gpui_component::input::Backspace,
-                                          window,
-                                          cx| {
-                                        if this.vim_named_key(&surface, "backspace", window, cx) {
-                                            cx.stop_propagation();
-                                        }
-                                    },
-                                )
-                            })
+                        // The four keys vim takes before the editor sees
+                        // them, installed only when the mode is on: see
+                        // `surface::vim_capture`.
+                        .map(|el| match vim {
+                            true => crate::ui::surface::vim_capture(el, surface.clone(), cx),
+                            false => el,
                         })
                         .child(
                             // **No card of its own.** `Input` paints a
@@ -3096,38 +3048,9 @@ impl ClaudhubApp {
                                 .line_height(crate::ui::diff_view::line_height(code_size))
                                 .h_full(),
                         )
-                        // **The wheel is taken before the editor sees it.**
-                        // `InputState::on_scroll_wheel` scrolls and then calls
-                        // `stop_propagation` as soon as the offset moved: a
-                        // listener on the ancestor — the diff's arrangement —
-                        // was never called, except at the very top and bottom.
-                        // Nothing smoothed anything, and `Ctrl`+wheel zoomed
-                        // while the editor went on scrolling underneath. A
-                        // window mouse listener in the **capture** phase runs
-                        // first, and consuming the event there leaves the whole
-                        // movement to us.
-                        .child(
-                            gpui::canvas(
-                                |_, _, _| (),
-                                move |bounds: gpui::Bounds<Pixels>, _, window, _cx| {
-                                    window.on_mouse_event(
-                                        move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
-                                            if phase != gpui::DispatchPhase::Capture
-                                                || !bounds.contains(&event.position)
-                                            {
-                                                return;
-                                            }
-                                            cx.stop_propagation();
-                                            entity.update(cx, |this, cx| {
-                                                this.on_surface_scroll(&surface, event, window, cx)
-                                            });
-                                        },
-                                    );
-                                },
-                            )
-                            .absolute()
-                            .inset_0(),
-                        ),
+                        // The wheel, taken before the editor sees it: see
+                        // `surface::wheel_capture`.
+                        .child(crate::ui::surface::wheel_capture(surface, cx)),
                 )
                 // vim's status line, at the foot of the file it belongs to: the
                 // mode, and the `:` or `/` line being written. See

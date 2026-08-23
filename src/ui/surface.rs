@@ -1206,6 +1206,89 @@ impl ClaudhubApp {
     }
 }
 
+/// The four keys a code surface takes before its editor sees them.
+///
+/// One place and not two: the file editor and the SQL console install exactly
+/// the same listeners, and the pair had already drifted once — a `:` line that
+/// could be typed and never run on whichever of them was forgotten.
+///
+/// **Capture phase, on an ancestor of the editor**, and that placement is the
+/// mechanism: a key listener runs after the bindings — which leaves `Ctrl+S`
+/// and `Alt+2` to the window — but before the platform hands the character to
+/// the input. `Ctrl+V`, `Enter` and `Backspace` never arrive as keystrokes at
+/// all: the input **binds** them, and a binding runs ahead of the listener, so
+/// they are caught as actions on the way down. A modified `Enter` is left
+/// alone — it is somebody else's, `Ctrl+Enter` being the console's own key.
+///
+/// The caller installs it only when the mode is on, so that nothing stands
+/// between the keyboard and the input otherwise.
+pub(super) fn vim_capture(
+    el: gpui::Stateful<gpui::Div>,
+    surface: Surface,
+    cx: &mut Context<ClaudhubApp>,
+) -> gpui::Stateful<gpui::Div> {
+    let (keys, paste, enter, backspace) =
+        (surface.clone(), surface.clone(), surface.clone(), surface);
+    el.capture_key_down(
+        cx.listener(move |this, event, window, cx| this.vim_key(&keys, event, window, cx)),
+    )
+    .capture_action(
+        cx.listener(move |this, _: &gpui_component::input::Paste, window, cx| {
+            if this.vim_paste(&paste, window, cx) {
+                cx.stop_propagation();
+            }
+        }),
+    )
+    .capture_action(cx.listener(
+        move |this, action: &gpui_component::input::Enter, window, cx| {
+            if action.secondary || action.shift {
+                return;
+            }
+            if this.vim_named_key(&enter, "enter", window, cx) {
+                cx.stop_propagation();
+            }
+        },
+    ))
+    .capture_action(cx.listener(
+        move |this, _: &gpui_component::input::Backspace, window, cx| {
+            if this.vim_named_key(&backspace, "backspace", window, cx) {
+                cx.stop_propagation();
+            }
+        },
+    ))
+}
+
+/// The wheel, taken before the editor sees it.
+///
+/// `InputState::on_scroll_wheel` scrolls and then consumes the event as soon as
+/// the offset moved, so a listener on an ancestor — the diff's arrangement —
+/// was never called except at the very top and bottom: nothing smoothed
+/// anything, and `Ctrl`+wheel zoomed while the editor went on scrolling
+/// underneath. A window mouse listener in the **capture** phase runs first, and
+/// consuming the event there leaves the whole movement to us.
+///
+/// A `canvas` because the listener needs the laid-out bounds to know whether
+/// the pointer is over this surface at all.
+pub(super) fn wheel_capture(surface: Surface, cx: &mut Context<ClaudhubApp>) -> impl IntoElement {
+    let entity = cx.entity();
+    gpui::canvas(
+        |_, _, _| (),
+        move |bounds: gpui::Bounds<Pixels>, _, window, _cx| {
+            window.on_mouse_event(move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
+                if phase != gpui::DispatchPhase::Capture || !bounds.contains(&event.position) {
+                    return;
+                }
+                cx.stop_propagation();
+                entity.update(cx, |this, cx| {
+                    this.on_surface_scroll(&surface, event, window, cx)
+                });
+            });
+        },
+    )
+    .absolute()
+    .inset_0()
+}
+
 /// The editor's scroll offset, and how far it can go.
 ///
 /// The travel is **read** and not worked out: it is the content the last paint

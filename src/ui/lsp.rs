@@ -266,6 +266,23 @@ impl ClaudhubApp {
         servers
     }
 
+    /// Whether any of them would serve this file — the button's only question.
+    ///
+    /// Asked at every frame of the editor's bar, where `lsp_servers` would
+    /// clone the whole list to answer it: what is wanted is not *which* server
+    /// but whether there is one, and that is a walk of two borrowed lists.
+    pub(super) fn lsp_serves(&self, worktree: &Path, path: &Path, cx: &App) -> bool {
+        let project = self
+            .main_of(worktree)
+            .and_then(|main| self.wt_project(&main))
+            .map(|project| project.lsp.as_slice())
+            .unwrap_or_default();
+        project
+            .iter()
+            .chain(Settings::global(cx).lsp.iter())
+            .any(|server| server.is_runnable() && server.matches(path).is_some())
+    }
+
     pub(super) fn lsp_session(&self, worktree: &Path) -> Option<&Session> {
         self.lsp.get(worktree)
     }
