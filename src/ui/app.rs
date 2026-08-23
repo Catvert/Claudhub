@@ -303,6 +303,26 @@ pub struct ReviewState {
     /// Same reason as `pending_jump`: clicking a note in the panel opens a file,
     /// and its diff only arrives after the git command.
     pub pending_note: Option<u64>,
+    /// The file list as the panels paint it, one entry per range — see
+    /// `ui::review::RowCache`. Rebuilding it costs three allocations per file
+    /// plus a tree, twice over when both panels are open; nothing in it changes
+    /// between two frames.
+    pub row_cache: HashMap<DiffRange, crate::ui::review::RowCache>,
+    /// Bumped by everything the list is derived from: the status, the file
+    /// lists, the reviews, the collapses. A cache built under an older number
+    /// is thrown away.
+    pub rows_epoch: u64,
+}
+
+impl ReviewState {
+    /// Something the file list is derived from has changed.
+    ///
+    /// The caches go rather than being patched: they are rebuilt on the next
+    /// frame of the panel that shows them, and only that panel knows its query.
+    pub fn rows_changed(&mut self) {
+        self.rows_epoch += 1;
+        self.row_cache.clear();
+    }
 }
 
 /// Which end a file opened with the keyboard starts from.
@@ -350,6 +370,8 @@ impl Default for ReviewState {
             drifted: std::collections::HashSet::new(),
             pending_jump: None,
             pending_note: None,
+            row_cache: HashMap::new(),
+            rows_epoch: 0,
         }
     }
 }
@@ -2074,6 +2096,7 @@ impl ClaudhubApp {
         self.ensure_review(&worktree, cx);
         let state = self.review.entry(worktree.clone()).or_default();
         state.status = status;
+        state.rows_changed();
         if state.base.is_none() {
             state.base = base;
         }
@@ -2142,6 +2165,7 @@ impl ClaudhubApp {
         });
         let pruned = state.reviewed.len() != before;
         state.files.insert(range, files);
+        state.rows_changed();
         if gone {
             state.selected = None;
             state.diff = None;
@@ -2501,6 +2525,7 @@ impl ClaudhubApp {
             state.next_note = state.next_note.max(highest + 1);
             state.notes = notes;
             state.reviewed = reviewed;
+            state.rows_changed();
             state.todo = todo;
             state.journal = journal;
             state.notes_loaded = true;
@@ -3114,6 +3139,7 @@ impl ClaudhubApp {
                 });
             }
         }
+        state.rows_changed();
         self.persist_review(&worktree, cx);
         cx.notify();
     }

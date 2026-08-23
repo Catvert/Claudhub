@@ -7,6 +7,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use gpui::{div, prelude::*, px, uniform_list, Context, Focusable, Window};
 use gpui_component::{
@@ -33,10 +34,23 @@ use crate::ui::theme::{status_color, DiffColors};
 /// which stages or unstages everything at once.
 #[derive(Clone)]
 enum Row {
-    Group(Group),
+    Group(GroupRow),
     /// A folder of the tree, collapsible.
     Dir(DirRow),
     File(FileRow),
+}
+
+/// A group heading, with what its box acts on.
+///
+/// The files and the tick are carried by the row rather than read back from the
+/// list at paint time: that read walked the whole list twice per group and per
+/// frame.
+#[derive(Clone)]
+struct GroupRow {
+    group: Group,
+    paths: Rc<[PathBuf]>,
+    /// The whole group is already staged.
+    checked: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,14 +72,17 @@ struct DirRow {
     /// Full path, and collapse key. It is the deepest folder of the merged
     /// chain: collapsing `app/Http` and collapsing `app/Http/Livewire` are two
     /// different gestures, but a merged chain only offers one.
-    path: PathBuf,
+    path: Rc<PathBuf>,
     /// What is displayed: one segment, or the merged chain.
     label: String,
     depth: usize,
     collapsed: bool,
     /// Every file of the subtree, including those a collapse hides: ticking a
     /// closed folder must stage what it contains, and not what is visible of it.
-    paths: Vec<PathBuf>,
+    ///
+    /// Behind an `Rc`: the two boxes of a visible folder capture it on every
+    /// frame, and a subtree can hold hundreds of paths.
+    paths: Rc<[PathBuf]>,
     /// True when the whole subtree is already staged.
     staged: bool,
     /// True when the whole subtree has already been reviewed — that is what
@@ -77,7 +94,10 @@ struct DirRow {
 
 #[derive(Clone)]
 struct FileRow {
-    path: PathBuf,
+    /// The path, in a slice of one: the staging box and the review tick both act
+    /// on a list of paths, and an `Rc` costs a visible row no allocation per
+    /// frame. `path()` reads it back.
+    paths: Rc<[PathBuf]>,
     /// Depth in the tree. Zero in the flat list.
     depth: usize,
     name: String,
@@ -97,6 +117,10 @@ struct FileRow {
 }
 
 impl FileRow {
+    fn path(&self) -> &Path {
+        &self.paths[0]
+    }
+
     /// Only part of the file is staged: what git writes `MM`.
     fn partial(&self) -> bool {
         self.staged && !matches!(self.worktree, StatusCode::Unmodified)
@@ -176,15 +200,7 @@ impl ClaudhubApp {
                 .into_any_element();
         };
 
-        // Two panels show this list at the same time: each has its own search,
-        // otherwise filtering the changes would also filter the branch review.
-        let pane = if matches!(range, DiffRange::Working) {
-            crate::ui::find::Pane::Changes
-        } else {
-            crate::ui::find::Pane::Branch
-        };
-        let find = self.render_find(pane, cx);
-        let query = self.query(pane, cx);
+        let find = self.render_find(Self::find_pane(&range), cx);
         // It is the panel that asks for its list: it alone knows what it shows,
         // and loading both ranges in advance would cost a command for a tab
         // nobody will open.
@@ -192,47 +208,16 @@ impl ClaudhubApp {
         // Taken before any borrow of the state: it is the view that holds it,
         // and the list only hangs off it.
         let scroll = self.file_scroll(&range);
+        let Some(view) = self.rows_view(&range, cx) else {
+            return div().into_any_element();
+        };
+        let tree = crate::ui::settings::Settings::global(cx).review_tree;
         let Some(state) = self.review.get(&worktree) else {
             return div().into_any_element();
         };
         let selected = state.selected.clone();
-        let collapsed = state.collapsed.clone();
-        // The flat list stays the reference: it is what counts what is staged
-        // and what gives a group's box the files to act on, including those a
-        // collapsed folder hides.
-        // The filter applies to the flat list, before the tree: it is the
-        // reference, and a folder with nothing left in it has to disappear with
-        // its files.
-        let flat: Vec<Row> = self
-            .rows(&range, cx)
-            .into_iter()
-            .filter(|row| match row {
-                Row::File(file) => crate::ui::find::matches(&query, &file.path.to_string_lossy()),
-                _ => true,
-            })
-            .collect();
-        let staged_count = flat
-            .iter()
-            .filter(|row| matches!(row, Row::File(file) if file.staged))
-            .count();
-        // The two lists are behind an `Rc`: without the tree, the displayed list
-        // **is** the flat one, and copying several hundred rows on every frame
-        // to say so would be the cost of the whole panel.
-        let flat = std::rc::Rc::new(flat);
-        // During a search, collapses are ignored: a file found in a closed
-        // folder would not be visible, and the search would look as if it had
-        // found nothing.
-        let tree = crate::ui::settings::Settings::global(cx).review_tree;
-        let rows = if tree {
-            let collapsed = if query.trim().is_empty() {
-                collapsed
-            } else {
-                HashSet::new()
-            };
-            std::rc::Rc::new(tree_rows(&flat, &collapsed))
-        } else {
-            flat.clone()
-        };
+        let staged_count = view.staged;
+        let rows = view.shown;
         let can_commit = staged_count > 0;
         let commits = matches!(range, DiffRange::Working);
         // Two lists live side by side: they cannot carry the same id, otherwise
@@ -278,7 +263,11 @@ impl ClaudhubApp {
                         // Only the changes in progress can be ticked: on a
                         // commit already written, there is nothing to stage.
                         let checkable = matches!(range, DiffRange::Working);
-                        let row_range = range.clone();
+                        // Behind `Rc`: every gesture of every visible row
+                        // captures them, and that was four copies of the
+                        // worktree's path per row and per frame.
+                        let row_range = Rc::new(range.clone());
+                        let worktree = Rc::new(worktree);
                         el.child(
                             self.scrolled(
                                 gpui::SharedString::from(format!("file-bar-{}", list_id)),
@@ -293,7 +282,6 @@ impl ClaudhubApp {
                                             .map(|ix| {
                                                 render_row(
                                                     &rows,
-                                                    &flat,
                                                     ix,
                                                     &worktree,
                                                     &row_range,
@@ -321,45 +309,81 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    /// The rows of a range's list.
+    /// The pane whose search bar filters a range's list.
+    ///
+    /// Two panels show this list at the same time: each has its own search,
+    /// otherwise filtering the changes would also filter the branch review.
+    fn find_pane(range: &DiffRange) -> crate::ui::find::Pane {
+        if matches!(range, DiffRange::Working) {
+            crate::ui::find::Pane::Changes
+        } else {
+            crate::ui::find::Pane::Branch
+        }
+    }
+
+    /// A range's rows, from the cache, rebuilt only when it is stale.
     ///
     /// The status is the source for the changes in progress — it alone tells the
     /// index from the working tree — and `--numstat` for the ranges that are
     /// about commits and have no notion of an index.
-    fn rows(&self, range: &DiffRange, _cx: &Context<Self>) -> Vec<Row> {
-        let Some(state) = self.active_review() else {
-            return Vec::new();
-        };
-        let files = state.files.get(range).map(Vec::as_slice).unwrap_or(&[]);
-        rows_for(range, &state.status, files, &state.reviewed)
+    fn rows_view(&mut self, range: &DiffRange, cx: &gpui::App) -> Option<RowsView> {
+        let query = self.query(Self::find_pane(range), cx);
+        let tree = crate::ui::settings::Settings::global(cx).review_tree;
+        let worktree = self.active.clone()?;
+        let state = self.review.get_mut(&worktree)?;
+        let epoch = state.rows_epoch;
+        let fresh = state.row_cache.get(range).is_some_and(|cache| {
+            cache.epoch == epoch && cache.tree == tree && cache.query == query
+        });
+        if !fresh {
+            let files = state.files.get(range).map(Vec::as_slice).unwrap_or(&[]);
+            let flat = Rc::new(rows_for(
+                range,
+                &state.status,
+                files,
+                &state.reviewed,
+                &query,
+            ));
+            let staged = flat
+                .iter()
+                .filter(|row| matches!(row, Row::File(file) if file.staged))
+                .count();
+            let shown = shown_rows(&flat, &query, tree, &state.collapsed);
+            state.row_cache.insert(
+                range.clone(),
+                RowCache {
+                    epoch,
+                    query,
+                    tree,
+                    shown,
+                    staged,
+                },
+            );
+        }
+        let cache = state.row_cache.get(range)?;
+        Some(RowsView {
+            shown: cache.shown.clone(),
+            staged: cache.staged,
+        })
     }
 
     /// The list's files, in the order they are displayed.
     ///
     /// The displayed order and not the raw one: a collapsed folder hides its
     /// files, and the arrows must not open a file the list does not show — the
-    /// next one would then be impossible to find by eye.
-    fn visible_files(&self, range: &DiffRange, cx: &Context<Self>) -> Vec<PathBuf> {
-        self.visible_rows(range, cx)
-            .into_iter()
+    /// next one would then be impossible to find by eye. The search counts the
+    /// same way: it is the same list.
+    fn visible_files(&mut self, range: &DiffRange, cx: &gpui::App) -> Vec<PathBuf> {
+        let Some(view) = self.rows_view(range, cx) else {
+            return Vec::new();
+        };
+        view.shown
+            .iter()
             .filter_map(|row| match row {
-                Row::File(file) => Some(file.path),
+                Row::File(file) => Some(file.path().to_path_buf()),
                 _ => None,
             })
             .collect()
-    }
-
-    /// The entries as the list shows them, folders included.
-    fn visible_rows(&self, range: &DiffRange, cx: &Context<Self>) -> Vec<Row> {
-        let Some(state) = self.active_review() else {
-            return Vec::new();
-        };
-        let flat = self.rows(range, cx);
-        if crate::ui::settings::Settings::global(cx).review_tree {
-            tree_rows(&flat, &state.collapsed)
-        } else {
-            flat
-        }
     }
 
     /// Brings the list onto a file.
@@ -368,10 +392,13 @@ impl ClaudhubApp {
     /// without what the collapses hide: it is that list the view virtualises,
     /// and an index taken elsewhere would name another row.
     pub(super) fn reveal_file(&mut self, range: &DiffRange, path: &Path, cx: &mut Context<Self>) {
-        let Some(index) = self
-            .visible_rows(range, cx)
+        let Some(view) = self.rows_view(range, cx) else {
+            return;
+        };
+        let Some(index) = view
+            .shown
             .iter()
-            .position(|row| matches!(row, Row::File(file) if file.path == path))
+            .position(|row| matches!(row, Row::File(file) if file.path() == path))
         else {
             return;
         };
@@ -665,6 +692,7 @@ impl ClaudhubApp {
         if !state.collapsed.remove(&path) {
             state.collapsed.insert(path);
         }
+        state.rows_changed();
         if let Some(worktree) = self.active_path() {
             self.persist_review(&worktree, cx);
         }
@@ -788,11 +816,10 @@ impl ClaudhubApp {
 /// dialog handlers do.
 #[allow(clippy::too_many_arguments)]
 fn render_row(
-    rows: &std::rc::Rc<Vec<Row>>,
-    flat: &std::rc::Rc<Vec<Row>>,
+    rows: &Rc<Vec<Row>>,
     index: usize,
-    worktree: &Path,
-    range: &DiffRange,
+    worktree: &Rc<PathBuf>,
+    range: &Rc<DiffRange>,
     selected: Option<&Path>,
     colors: &DiffColors,
     checkable: bool,
@@ -803,7 +830,7 @@ fn render_row(
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
     match rows.get(index) {
-        Some(Row::Group(group)) => render_group(flat, index, *group, worktree, entity, cx),
+        Some(Row::Group(group)) => render_group(group, index, worktree, entity, cx),
         Some(Row::Dir(dir)) => {
             render_dir(dir, index, worktree, range, colors, checkable, entity, cx)
         }
@@ -820,8 +847,8 @@ fn render_row(
 fn render_dir(
     row: &DirRow,
     index: usize,
-    worktree: &Path,
-    range: &DiffRange,
+    worktree: &Rc<PathBuf>,
+    range: &Rc<DiffRange>,
     colors: &DiffColors,
     checkable: bool,
     entity: &gpui::Entity<ClaudhubApp>,
@@ -850,7 +877,7 @@ fn render_dir(
         .on_click({
             let (entity, path) = (entity.clone(), row.path.clone());
             move |_, _window, cx| {
-                entity.update(cx, |this, cx| this.toggle_directory(path.clone(), cx));
+                entity.update(cx, |this, cx| this.toggle_directory((*path).clone(), cx));
             }
         })
         // The rules of the levels above, as in the project explorer: the tree
@@ -872,15 +899,14 @@ fn render_dir(
         // ticking a closed folder must stage what it contains, and not what is
         // visible of it.
         .when(checkable, |el| {
-            let (entity, worktree, paths) =
-                (entity.clone(), worktree.to_path_buf(), row.paths.clone());
+            let (entity, worktree, paths) = (entity.clone(), worktree.clone(), row.paths.clone());
             el.child(
                 Checkbox::new(("stage-dir", index))
                     .checked(staged)
                     .on_click(move |_, _window, cx| {
                         cx.stop_propagation();
                         entity.update(cx, |this, cx| {
-                            this.set_staged(worktree.clone(), paths.clone(), !staged, cx)
+                            this.set_staged((*worktree).clone(), paths.to_vec(), !staged, cx)
                         });
                     }),
             )
@@ -915,7 +941,7 @@ fn render_dir(
             row.reviewed,
             worktree,
             range,
-            row.paths.clone(),
+            &row.paths,
             entity,
             cx,
         ))
@@ -923,21 +949,20 @@ fn render_dir(
 }
 
 fn render_group(
-    rows: &std::rc::Rc<Vec<Row>>,
+    row: &GroupRow,
     index: usize,
-    group: Group,
-    worktree: &Path,
+    worktree: &Rc<PathBuf>,
     entity: &gpui::Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
-    let checked = group_checked(rows, group);
-    let paths = group_paths(rows, group);
+    let checked = row.checked;
+    let paths = row.paths.clone();
     let count = paths.len();
-    let label = match group {
+    let label = match row.group {
         Group::Tracked => tr!("group-tracked"),
         Group::Untracked => tr!("group-untracked"),
     };
-    let (entity, worktree) = (entity.clone(), worktree.to_path_buf());
+    let (entity, worktree) = (entity.clone(), worktree.clone());
 
     h_flex()
         .h(crate::ui::theme::row_height(cx))
@@ -951,7 +976,7 @@ fn render_group(
                 .checked(checked)
                 .on_click(move |_, _window, cx| {
                     entity.update(cx, |this, cx| {
-                        this.set_staged(worktree.clone(), paths.clone(), !checked, cx)
+                        this.set_staged((*worktree).clone(), paths.to_vec(), !checked, cx)
                     });
                 }),
         )
@@ -970,8 +995,8 @@ fn render_group(
 fn render_file(
     row: &FileRow,
     index: usize,
-    worktree: &Path,
-    range: &DiffRange,
+    worktree: &Rc<PathBuf>,
+    range: &Rc<DiffRange>,
     selected: Option<&Path>,
     colors: &DiffColors,
     checkable: bool,
@@ -979,7 +1004,7 @@ fn render_file(
     entity: &gpui::Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
-    let is_selected = selected == Some(row.path.as_path());
+    let is_selected = selected == Some(row.path());
     let staged = row.staged;
 
     h_flex()
@@ -1005,8 +1030,8 @@ fn render_file(
         .on_click({
             let (entity, worktree, path, range) = (
                 entity.clone(),
-                worktree.to_path_buf(),
-                row.path.clone(),
+                worktree.clone(),
+                row.paths.clone(),
                 range.clone(),
             );
             move |_, window, cx| {
@@ -1017,7 +1042,7 @@ fn render_file(
                 let handle = entity.read(cx).focus_handle(cx);
                 window.focus(&handle, cx);
                 entity.update(cx, |this, cx| {
-                    this.open_file(worktree.clone(), path.clone(), range.clone(), cx)
+                    this.open_file((*worktree).clone(), path[0].clone(), (*range).clone(), cx)
                 });
             }
         })
@@ -1033,13 +1058,12 @@ fn render_file(
         // Ticking is staging. The ranges that are about commits already written
         // have nothing to tick: a box there would be a button that lies.
         .when(checkable, |el| {
-            let (entity, worktree, path) =
-                (entity.clone(), worktree.to_path_buf(), row.path.clone());
+            let (entity, worktree, paths) = (entity.clone(), worktree.clone(), row.paths.clone());
             el.child(Checkbox::new(("stage", index)).checked(staged).on_click(
                 move |_, _window, cx| {
                     cx.stop_propagation();
                     entity.update(cx, |this, cx| {
-                        this.set_staged(worktree.clone(), vec![path.clone()], !staged, cx)
+                        this.set_staged((*worktree).clone(), paths.to_vec(), !staged, cx)
                     });
                 },
             ))
@@ -1065,7 +1089,7 @@ fn render_file(
         // The icon says the family by its shape and the language by its tint:
         // that is what makes a list of two hundred files scannable, where git's
         // codes only say what changed.
-        .child(crate::ui::file_icons::file_icon(&row.path, cx))
+        .child(crate::ui::file_icons::file_icon(row.path(), cx))
         .child(
             h_flex()
                 .flex_1()
@@ -1112,8 +1136,7 @@ fn render_file(
         // it is deleted, which is not the same gesture and therefore carries
         // neither the same icon nor the same warning.
         .when(checkable, |el| {
-            let (entity, worktree, path) =
-                (entity.clone(), worktree.to_path_buf(), row.path.clone());
+            let (entity, worktree, paths) = (entity.clone(), worktree.clone(), row.paths.clone());
             let untracked = row.untracked;
             el.child(
                 Button::new(("discard", index))
@@ -1129,8 +1152,8 @@ fn render_file(
                         cx.stop_propagation();
                         entity.update(cx, |this, cx| {
                             this.confirm_removal(
-                                worktree.clone(),
-                                path.clone(),
+                                (*worktree).clone(),
+                                paths[0].clone(),
                                 untracked,
                                 window,
                                 cx,
@@ -1146,7 +1169,7 @@ fn render_file(
             row.reviewed,
             worktree,
             range,
-            vec![row.path.clone()],
+            &row.paths,
             entity,
             cx,
         ))
@@ -1167,13 +1190,18 @@ fn render_file(
 fn render_reviewed(
     id: (&'static str, usize),
     reviewed: bool,
-    worktree: &Path,
-    range: &DiffRange,
-    paths: Vec<PathBuf>,
+    worktree: &Rc<PathBuf>,
+    range: &Rc<DiffRange>,
+    paths: &Rc<[PathBuf]>,
     entity: &gpui::Entity<ClaudhubApp>,
     cx: &gpui::App,
 ) -> Button {
-    let (entity, worktree, range) = (entity.clone(), worktree.to_path_buf(), range.clone());
+    let (entity, worktree, range, paths) = (
+        entity.clone(),
+        worktree.clone(),
+        range.clone(),
+        paths.clone(),
+    );
     Button::new(id)
         .ghost()
         .xsmall()
@@ -1193,9 +1221,9 @@ fn render_reviewed(
             cx.stop_propagation();
             entity.update(cx, |this, cx| {
                 this.set_reviewed(
-                    worktree.clone(),
-                    range.clone(),
-                    paths.clone(),
+                    (*worktree).clone(),
+                    (*range).clone(),
+                    paths.to_vec(),
                     !reviewed,
                     cx,
                 )
@@ -1233,6 +1261,7 @@ fn rows_for(
     status: &Status,
     files: &[DiffFile],
     reviewed: &[crate::ui::vault::Reviewed],
+    query: &str,
 ) -> Vec<Row> {
     let volumes: std::collections::HashMap<&PathBuf, (usize, usize)> = files
         .iter()
@@ -1242,14 +1271,20 @@ fn rows_for(
     // Reviewed **and** unchanged since: the recorded volume is what expires the
     // tick, otherwise it would say "reviewed" of a file an agent has just
     // rewritten.
-    let is_reviewed = |path: &PathBuf, added: usize, removed: usize| {
-        reviewed.iter().any(|item| {
-            item.range == *range
-                && item.path == *path
-                && item.added == added
-                && item.removed == removed
-        })
-    };
+    //
+    // A set and not a scan: a branch review holds as many reviews as files, and
+    // the scan made the list quadratic.
+    let ticks: HashSet<(&Path, usize, usize)> = reviewed
+        .iter()
+        .filter(|item| item.range == *range)
+        .map(|item| (item.path.as_path(), item.added, item.removed))
+        .collect();
+    let is_reviewed =
+        |path: &Path, added: usize, removed: usize| ticks.contains(&(path, added, removed));
+    // The query filters the files before they are grouped: a group whose files
+    // have all gone must go with them, and a group's box must only carry what
+    // is still shown.
+    let keep = |path: &Path| crate::ui::find::matches(query, &path.to_string_lossy());
 
     match range {
         DiffRange::Working => {
@@ -1259,9 +1294,12 @@ fn rows_for(
                 if matches!(file.index, StatusCode::Ignored) {
                     continue;
                 }
+                if !keep(&file.path) {
+                    continue;
+                }
                 let (added, removed) = volume(&file.path);
                 let row = FileRow {
-                    path: file.path.clone(),
+                    paths: Rc::from(vec![file.path.clone()]),
                     depth: 0,
                     name: file.file_name(),
                     directory: file.directory(),
@@ -1281,33 +1319,28 @@ fn rows_for(
             }
 
             let mut rows = Vec::new();
-            if !tracked.is_empty() {
-                rows.push(Row::Group(Group::Tracked));
-                rows.extend(tracked.into_iter().map(Row::File));
-            }
-            if !untracked.is_empty() {
-                rows.push(Row::Group(Group::Untracked));
-                rows.extend(untracked.into_iter().map(Row::File));
+            for (group, files) in [(Group::Tracked, tracked), (Group::Untracked, untracked)] {
+                if files.is_empty() {
+                    continue;
+                }
+                rows.push(Row::Group(GroupRow {
+                    group,
+                    paths: files.iter().map(|file| file.path().to_path_buf()).collect(),
+                    checked: files.iter().all(|file| file.staged),
+                }));
+                rows.extend(files.into_iter().map(Row::File));
             }
             rows
         }
         DiffRange::Branch { .. } | DiffRange::Commit { .. } => files
             .iter()
+            .filter(|f| keep(&f.path))
             .map(|f| {
                 Row::File(FileRow {
-                    path: f.path.clone(),
+                    paths: Rc::from(vec![f.path.clone()]),
                     depth: 0,
-                    name: f
-                        .path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    directory: f
-                        .path
-                        .parent()
-                        .filter(|p| !p.as_os_str().is_empty())
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default(),
+                    name: crate::git::status::file_name(&f.path),
+                    directory: crate::git::status::directory(&f.path),
                     index: if f.removed == 0 {
                         StatusCode::Added
                     } else if f.added == 0 {
@@ -1328,39 +1361,6 @@ fn rows_for(
     }
 }
 
-/// A group's files, for the boxes that act on the whole batch.
-fn group_paths(rows: &[Row], group: Group) -> Vec<PathBuf> {
-    let mut inside = false;
-    let mut paths = Vec::new();
-    for row in rows {
-        match row {
-            Row::Group(g) => inside = *g == group,
-            Row::File(file) if inside => paths.push(file.path.clone()),
-            Row::File(_) | Row::Dir(_) => {}
-        }
-    }
-    paths
-}
-
-/// True if the whole group is already staged.
-fn group_checked(rows: &[Row], group: Group) -> bool {
-    let mut inside = false;
-    let mut any = false;
-    for row in rows {
-        match row {
-            Row::Group(g) => inside = *g == group,
-            Row::File(file) if inside => {
-                any = true;
-                if !file.staged {
-                    return false;
-                }
-            }
-            Row::File(_) | Row::Dir(_) => {}
-        }
-    }
-    any
-}
-
 /// Turns the flat list into a tree.
 ///
 /// The groups are kept as they are; each block of files between two groups
@@ -1374,7 +1374,7 @@ fn tree_rows(flat: &[Row], collapsed: &HashSet<PathBuf>) -> Vec<Row> {
         match row {
             Row::Group(group) => {
                 flush(&mut block, collapsed, &mut out);
-                out.push(Row::Group(*group));
+                out.push(Row::Group(group.clone()));
             }
             Row::File(file) => block.push(file.clone()),
             // A list already in tree form is not turned into a tree again.
@@ -1390,7 +1390,7 @@ fn flush(block: &mut Vec<FileRow>, collapsed: &HashSet<PathBuf>, out: &mut Vec<R
         return;
     }
     let files: Vec<FileRow> = std::mem::take(block);
-    let paths: Vec<PathBuf> = files.iter().map(|file| file.path.clone()).collect();
+    let paths: Vec<PathBuf> = files.iter().map(|file| file.path().to_path_buf()).collect();
     // Open unless named: a review is a few dozen files, and is read wide open.
     for entry in crate::ui::tree::build(&paths, crate::ui::tree::Folds::OpenBut(collapsed)) {
         match entry {
@@ -1406,11 +1406,14 @@ fn flush(block: &mut Vec<FileRow>, collapsed: &HashSet<PathBuf>, out: &mut Vec<R
                 // volume announces.
                 let inside: Vec<&FileRow> = leaves.iter().map(|index| &files[*index]).collect();
                 out.push(Row::Dir(DirRow {
-                    path,
+                    path: Rc::new(path),
                     label,
                     depth,
                     collapsed,
-                    paths: inside.iter().map(|file| file.path.clone()).collect(),
+                    paths: inside
+                        .iter()
+                        .map(|file| file.path().to_path_buf())
+                        .collect(),
                     staged: inside.iter().all(|file| file.staged),
                     reviewed: inside.iter().all(|file| file.reviewed),
                     added: inside.iter().map(|file| file.added).sum(),
@@ -1427,6 +1430,54 @@ fn flush(block: &mut Vec<FileRow>, collapsed: &HashSet<PathBuf>, out: &mut Vec<R
             }
         }
     }
+}
+
+/// What the list paints, from the flat rows it is derived from.
+///
+/// One function for both the render and the arrows: they read the same list, and
+/// while they each computed their own, the arrows opened files a filtered list
+/// did not show.
+fn shown_rows(
+    flat: &Rc<Vec<Row>>,
+    query: &str,
+    tree: bool,
+    collapsed: &HashSet<PathBuf>,
+) -> Rc<Vec<Row>> {
+    if !tree {
+        // Without the tree, the displayed list **is** the flat one, and copying
+        // several hundred rows to say so would be the cost of the whole panel.
+        return flat.clone();
+    }
+    // During a search, collapses are ignored: a file found in a closed folder
+    // would not be visible, and the search would look as if it had found
+    // nothing.
+    if query.trim().is_empty() {
+        Rc::new(tree_rows(flat, collapsed))
+    } else {
+        Rc::new(tree_rows(flat, &HashSet::new()))
+    }
+}
+
+/// The file list of one range, kept between frames.
+///
+/// Held by `ReviewState`, one per range. Thrown away by
+/// `ReviewState::rows_changed` — status, files, reviews, collapses — and rebuilt
+/// when the query or the tree setting no longer matches the one it was built
+/// with.
+pub struct RowCache {
+    epoch: u64,
+    query: String,
+    tree: bool,
+    shown: Rc<Vec<Row>>,
+    /// How many files are ticked, over the **whole** list: a collapsed folder
+    /// hides its files from `shown`, and it still stages them.
+    staged: usize,
+}
+
+/// A range's rows as the view reads them back: one `Rc` clone and a count.
+struct RowsView {
+    shown: Rc<Vec<Row>>,
+    staged: usize,
 }
 
 #[cfg(test)]
@@ -1462,10 +1513,19 @@ mod tests {
     fn groups_of(rows: &[Row]) -> Vec<Group> {
         rows.iter()
             .filter_map(|row| match row {
-                Row::Group(group) => Some(*group),
+                Row::Group(group) => Some(group.group),
                 Row::File(_) | Row::Dir(_) => None,
             })
             .collect()
+    }
+
+    fn group_of(rows: &[Row], group: Group) -> &GroupRow {
+        rows.iter()
+            .find_map(|row| match row {
+                Row::Group(row) if row.group == group => Some(row),
+                _ => None,
+            })
+            .expect("le groupe")
     }
 
     fn tree(paths: &[&str], collapsed: &[&str]) -> Vec<Row> {
@@ -1473,7 +1533,7 @@ mod tests {
             .iter()
             .map(|p| {
                 Row::File(FileRow {
-                    path: PathBuf::from(p),
+                    paths: Rc::from(vec![PathBuf::from(p)]),
                     depth: 0,
                     name: Path::new(p)
                         .file_name()
@@ -1572,6 +1632,7 @@ mod tests {
             ]),
             &[],
             &[],
+            "",
         );
         let rows = tree_rows(&flat, &HashSet::new());
         // One tree per group, and not a single tree mixing tracked and untracked
@@ -1591,7 +1652,7 @@ mod tests {
             file("modifie.rs", StatusCode::Unmodified, StatusCode::Modified),
             file("nouveau.rs", StatusCode::Untracked, StatusCode::Untracked),
         ]);
-        let rows = rows_for(&DiffRange::Working, &status, &[], &[]);
+        let rows = rows_for(&DiffRange::Working, &status, &[], &[], "");
         let files = files_of(&rows);
 
         assert_eq!(files.len(), 3);
@@ -1624,7 +1685,7 @@ mod tests {
             StatusCode::Modified,
             StatusCode::Modified,
         )]);
-        let rows = rows_for(&DiffRange::Working, &status, &[], &[]);
+        let rows = rows_for(&DiffRange::Working, &status, &[], &[], "");
         let file = files_of(&rows)[0];
         assert!(file.staged);
         assert!(file.partial(), "partial staging must be reported");
@@ -1638,7 +1699,7 @@ mod tests {
             file("efface.rs", StatusCode::Unmodified, StatusCode::Deleted),
             file("neuf.rs", StatusCode::Untracked, StatusCode::Untracked),
         ]);
-        let rows = rows_for(&DiffRange::Working, &status, &[], &[]);
+        let rows = rows_for(&DiffRange::Working, &status, &[], &[], "");
         let files = files_of(&rows);
         assert_eq!(files[0].codes(), "A");
         assert_eq!(files[1].codes(), "D");
@@ -1679,6 +1740,7 @@ mod tests {
             &status,
             &[diff_file("a.rs", 12, 3)],
             &[reviewed("a.rs", 12, 3)],
+            "",
         );
         assert!(files_of(&rows)[0].reviewed);
 
@@ -1687,6 +1749,7 @@ mod tests {
             &status,
             &[diff_file("a.rs", 13, 3)],
             &[reviewed("a.rs", 12, 3)],
+            "",
         );
         assert!(
             !files_of(&rows)[0].reviewed,
@@ -1710,6 +1773,7 @@ mod tests {
             &status,
             &[diff_file("a.rs", 1, 0)],
             &[reviewed("a.rs", 1, 0)],
+            "",
         );
         assert!(!files_of(&rows)[0].reviewed);
     }
@@ -1728,6 +1792,7 @@ mod tests {
             &status,
             &files,
             &[reviewed("src/un.rs", 1, 0)],
+            "",
         );
         let dirs = tree_rows(&flat, &HashSet::new());
         let dir = dirs
@@ -1745,6 +1810,7 @@ mod tests {
             &status,
             &files,
             &[reviewed("src/un.rs", 1, 0), reviewed("src/deux.rs", 2, 0)],
+            "",
         );
         let dirs = tree_rows(&flat, &HashSet::new());
         assert!(dirs
@@ -1759,7 +1825,7 @@ mod tests {
             StatusCode::Modified,
             StatusCode::Unmodified,
         )]);
-        let rows = rows_for(&DiffRange::Working, &status, &[], &[]);
+        let rows = rows_for(&DiffRange::Working, &status, &[], &[], "");
         assert_eq!(groups_of(&rows), vec![Group::Tracked]);
     }
 
@@ -1769,16 +1835,16 @@ mod tests {
             file("un.rs", StatusCode::Modified, StatusCode::Unmodified),
             file("deux.rs", StatusCode::Unmodified, StatusCode::Modified),
         ]);
-        let rows = rows_for(&DiffRange::Working, &mixed, &[], &[]);
-        assert!(!group_checked(&rows, Group::Tracked));
-        assert_eq!(group_paths(&rows, Group::Tracked).len(), 2);
+        let rows = rows_for(&DiffRange::Working, &mixed, &[], &[], "");
+        assert!(!group_of(&rows, Group::Tracked).checked);
+        assert_eq!(group_of(&rows, Group::Tracked).paths.len(), 2);
 
         let everything = status(vec![
             file("un.rs", StatusCode::Modified, StatusCode::Unmodified),
             file("deux.rs", StatusCode::Added, StatusCode::Unmodified),
         ]);
-        let rows = rows_for(&DiffRange::Working, &everything, &[], &[]);
-        assert!(group_checked(&rows, Group::Tracked));
+        let rows = rows_for(&DiffRange::Working, &everything, &[], &[], "");
+        assert!(group_of(&rows, Group::Tracked).checked);
     }
 
     #[test]
@@ -1787,15 +1853,56 @@ mod tests {
             file("suivi.rs", StatusCode::Modified, StatusCode::Unmodified),
             file("neuf.rs", StatusCode::Untracked, StatusCode::Untracked),
         ]);
-        let rows = rows_for(&DiffRange::Working, &status, &[], &[]);
+        let rows = rows_for(&DiffRange::Working, &status, &[], &[], "");
         assert_eq!(
-            group_paths(&rows, Group::Untracked),
+            group_of(&rows, Group::Untracked).paths.to_vec(),
             vec![PathBuf::from("neuf.rs")]
         );
         assert_eq!(
-            group_paths(&rows, Group::Tracked),
+            group_of(&rows, Group::Tracked).paths.to_vec(),
             vec![PathBuf::from("suivi.rs")]
         );
+    }
+
+    /// The list the arrows walk is the list on screen: while the render ignored
+    /// the collapses during a search and the arrows did not, the arrows opened
+    /// files the filtered list did not show.
+    #[test]
+    fn a_search_opens_what_a_collapse_hides() {
+        let status = status(vec![
+            file(
+                "src/ui/app.rs",
+                StatusCode::Modified,
+                StatusCode::Unmodified,
+            ),
+            file("Cargo.toml", StatusCode::Modified, StatusCode::Unmodified),
+        ]);
+        let collapsed: HashSet<PathBuf> = [PathBuf::from("src/ui")].into_iter().collect();
+
+        let flat = Rc::new(rows_for(&DiffRange::Working, &status, &[], &[], ""));
+        let shown = shown_rows(&flat, "", true, &collapsed);
+        assert_eq!(shape(&shown), vec!["groupe", "[1] src/ui", "Cargo.toml"]);
+
+        // The query has kept one file, and it is inside the closed folder: the
+        // list has to show it anyway.
+        let flat = Rc::new(rows_for(&DiffRange::Working, &status, &[], &[], "app"));
+        let shown = shown_rows(&flat, "app", true, &collapsed);
+        assert_eq!(shape(&shown), vec!["groupe", "[1] src/ui", " app.rs"]);
+    }
+
+    /// A group whose files the search has all removed goes with them: an empty
+    /// heading reads as a group with nothing left to do.
+    #[test]
+    fn a_search_that_empties_a_group_removes_it() {
+        let status = status(vec![
+            file("suivi.rs", StatusCode::Modified, StatusCode::Unmodified),
+            file("neuf.rs", StatusCode::Untracked, StatusCode::Untracked),
+        ]);
+        let rows = rows_for(&DiffRange::Working, &status, &[], &[], "neuf");
+        assert_eq!(groups_of(&rows), vec![Group::Untracked]);
+        assert_eq!(files_of(&rows).len(), 1);
+        // And the group's box only carries what is left.
+        assert_eq!(group_of(&rows, Group::Untracked).paths.len(), 1);
     }
 
     #[test]
@@ -1830,12 +1937,12 @@ mod tests {
             removed: 3,
             binary: false,
         }];
-        let rows = rows_for(&DiffRange::Working, &status, &files, &[]);
+        let rows = rows_for(&DiffRange::Working, &status, &files, &[], "");
         let row = files_of(&rows)[0];
         assert_eq!((row.added, row.removed), (12, 3));
 
         // With `--numstat` not yet arrived, the row still shows.
-        let rows = rows_for(&DiffRange::Working, &status, &[], &[]);
+        let rows = rows_for(&DiffRange::Working, &status, &[], &[], "");
         assert_eq!(
             (files_of(&rows)[0].added, files_of(&rows)[0].removed),
             (0, 0)
@@ -1861,6 +1968,7 @@ mod tests {
             &Status::default(),
             &files,
             &[],
+            "",
         );
         assert!(groups_of(&rows).is_empty(), "pas de groupes sur un commit");
         let row = files_of(&rows)[0];

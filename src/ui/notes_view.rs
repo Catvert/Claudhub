@@ -413,6 +413,7 @@ impl ClaudhubApp {
         };
         if let Some(state) = self.review.get_mut(&worktree) {
             state.reviewed.clear();
+            state.rows_changed();
         }
         self.persist_review(&worktree, cx);
         cx.notify();

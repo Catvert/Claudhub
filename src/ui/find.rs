@@ -129,7 +129,11 @@ pub fn find_all(query: &str, haystack: &str) -> Vec<Range<usize>> {
 fn first_match(query: &str, haystack: &str, from: usize) -> Option<Range<usize>> {
     let sensitive = query.chars().any(char::is_uppercase);
     let first = query.chars().next()?;
-    for (start, candidate) in haystack.char_indices().skip_while(|(i, _)| *i < from) {
+    // Sliced and not skipped: `find_all` restarts from the end of the previous
+    // occurrence, and walking the whole text again each time made it quadratic.
+    // `from` is always a character boundary — it comes from a match's end.
+    for (offset, candidate) in haystack[from..].char_indices() {
+        let start = from + offset;
         if !same(candidate, first, sensitive) {
             continue;
         }
@@ -462,6 +466,19 @@ mod tests {
     #[test]
     fn a_repeated_needle_is_found_every_time() {
         assert_eq!(find_all("ab", "abcab"), vec![0..2, 3..5]);
+    }
+
+    /// Every occurrence is found from the end of the previous one, and the
+    /// offsets stay byte offsets past a multi-byte character: that is what the
+    /// resumed scan must not break.
+    #[test]
+    fn the_scan_resumes_where_the_last_occurrence_ended() {
+        let text = "éaébéc";
+        let hits = find_all("é", text);
+        assert_eq!(hits, vec![0..2, 3..5, 6..8]);
+        for hit in &hits {
+            assert_eq!(&text[hit.clone()], "é");
+        }
     }
 
     /// Two overlapping occurrences are not returned twice: the ranges have to
