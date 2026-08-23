@@ -60,6 +60,10 @@ struct Look {
     success: Hsla,
     /// A checkout's row: two lines of text and next to nothing around them.
     row: gpui::Pixels,
+    /// The same row with `wt`'s line under the branch: three lines. The list
+    /// is a `v_virtual_list` and every row says its own height, so a worktree
+    /// `wt` knows grows and the others do not.
+    tall: gpui::Pixels,
     /// A repository's heading: one line, and shorter than a row — it is a rule
     /// with a name on it, not an entry.
     head: gpui::Pixels,
@@ -79,6 +83,7 @@ impl Look {
             // twice as tall as it needs to be shows four of them where it could
             // show seven, and what one comes here to do is compare.
             row: unit * 1.45,
+            tall: unit * 2.0,
             head: unit * 0.95,
         }
     }
@@ -232,6 +237,7 @@ impl WorktreePicker {
             summary: app.summaries.get(&checkout.path).copied(),
             agent: app.agents.get(&checkout.path).cloned(),
             up: app.wt_state(&checkout.path).and_then(|state| state.up),
+            detail: app.wt_state(&checkout.path).and_then(worktrees::detail),
             pinned: pinned.contains(&checkout.path),
         })
     }
@@ -299,6 +305,7 @@ impl WorktreePicker {
             rows.iter()
                 .map(|row| match row {
                     Row::Repo { .. } => gpui::size(px(0.), look.head),
+                    Row::Worktree(item) if item.detail.is_some() => gpui::size(px(0.), look.tall),
                     _ => gpui::size(px(0.), look.row),
                 })
                 .collect::<Vec<_>>(),
@@ -587,9 +594,14 @@ fn worktree_row(
     let target = item.path.clone();
     let pin_target = item.path.clone();
     let opened = item.clone();
+    let height = if item.detail.is_some() {
+        look.tall
+    } else {
+        look.row
+    };
     h_flex()
         .id(("worktree-row", index))
-        .h(look.row)
+        .h(height)
         .w_full()
         // Set in from the heading: a flat column under a title reads as a list
         // that happens to have a title above it, not as the repository's
@@ -632,6 +644,29 @@ fn worktree_row(
                             .text_xs()
                             .text_color(look.muted)
                             .child(branch),
+                    )
+                })
+                // What `wt` knows beyond started/stopped — the options chosen,
+                // the ports, the project's `[status.info]` — dimmer than the
+                // branch: it is read when two worktrees of one branch have to
+                // be told apart, not on every glance. Cut to the width, whole
+                // in the tooltip.
+                .when_some(item.detail.clone(), |el, detail| {
+                    el.child(
+                        div()
+                            .id(("worktree-detail", index))
+                            .w_full()
+                            .truncate()
+                            .text_xs()
+                            .text_color(look.muted.opacity(0.75))
+                            .tooltip({
+                                let full = SharedString::from(detail.full);
+                                move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(full.clone())
+                                        .build(window, cx)
+                                }
+                            })
+                            .child(SharedString::from(detail.line)),
                     )
                 }),
         )
