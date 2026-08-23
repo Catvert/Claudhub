@@ -30,12 +30,6 @@ pub(super) fn close() -> DialogFooter {
     footer(tr!("dialog-close"), None)
 }
 
-/// The single button of a dialog one leaves without ending anything — the
-/// console of an operation still running, which "close" would misname.
-pub(super) fn only(label: SharedString) -> DialogFooter {
-    footer(label, None)
-}
-
 /// The three buttons of a question with two answers: cancelling, the other
 /// answer, and the one Enter makes.
 ///

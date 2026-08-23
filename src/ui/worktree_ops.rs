@@ -327,6 +327,31 @@ fn wt_links_rows(links: Option<Option<Vec<wt::Endpoint>>>, cx: &App) -> gpui::An
         .into_any_element()
 }
 
+/// The creation dialog's content — the pages, then the console — and its
+/// buttons.
+///
+/// A child entity for the reason [`WtLinksMenu`] is one: the dialog's frame
+/// closure runs inside `ClaudhubApp`'s own render, and what has to read the
+/// application must render after the parent has given the borrow back.
+pub(super) struct CreationView {
+    app: gpui::WeakEntity<ClaudhubApp>,
+}
+
+impl Render for CreationView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(app) = self.app.upgrade() else {
+            return div().into_any_element();
+        };
+        app.update(cx, |this, cx| {
+            v_flex()
+                .gap_3()
+                .child(this.render_creation_body(cx).into_any_element())
+                .child(this.render_creation_footer())
+                .into_any_element()
+        })
+    }
+}
+
 /// The resolved links of one worktree, as the "open" menu shows them.
 ///
 /// An entity of its own for one reason: it is painted inside a popover, whose
@@ -1025,23 +1050,25 @@ impl ClaudhubApp {
     /// opens, and content frozen at construction would stay empty. The title
     /// and the buttons too — the same dialog is a form, then a console.
     fn open_creation_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The title is settled when the dialog opens — the gesture it belongs
+        // to does not change while it is up — because the frame closure below
+        // runs **inside `ClaudhubApp`'s own render**: the root re-emits
+        // `Root`'s layers at the end of its `render`, and reading the
+        // application from there is the double-lease panic. Everything that
+        // must follow the dialog's state — the body, and the buttons that go
+        // from "confirm" to "hide" to "close" — is a child entity, whose
+        // `render` runs once the parent has given the borrow back.
+        let title = self.creation_title();
+        let app = cx.entity().downgrade();
+        let view = cx.new(|_| CreationView { app });
         let entity = cx.entity();
         window.open_dialog(cx, move |dialog, _window, _cx| {
-            let entity = entity.clone();
             let (ok, cancel) = (entity.clone(), entity.clone());
-            let (title, footer, body) = entity.update(_cx, |this, cx| {
-                (
-                    this.creation_title(),
-                    this.creation_footer(),
-                    this.render_creation_body(cx).into_any_element(),
-                )
-            });
             dialog
-                .title(title)
-                .child(div().w(px(520.)).child(body))
+                .title(title.clone())
+                .child(div().w(px(520.)).child(view.clone()))
                 .overlay_closable(false)
                 .close_button(false)
-                .footer(footer)
                 .on_ok(move |_, window, cx| {
                     ok.update(cx, |this, cx| this.confirm_creation(window, cx))
                 })
@@ -1076,12 +1103,50 @@ impl ClaudhubApp {
 
     /// The buttons: cancel and OK through the pages, one button on a console —
     /// "hide" while it runs, "close" once it has failed.
-    fn creation_footer(&self) -> gpui_component::dialog::DialogFooter {
-        match self.creation.as_ref().map(|creation| &creation.stage) {
-            Some(Stage::Running(console)) if console.failed => super::dialogs::close(),
-            Some(Stage::Running(_)) => super::dialogs::only(tr!("worktree-console-hide")),
-            _ => super::dialogs::confirm(),
-        }
+    ///
+    /// Rendered by [`CreationView`] under the body, not handed to the dialog:
+    /// the dialog's chrome is built where the application cannot be read. They
+    /// dispatch the very actions the keys dispatch — `Confirm` and `Cancel` —
+    /// so both routes end in the same `on_ok` / `on_cancel`, the rule
+    /// `ui::dialogs` is built on.
+    fn render_creation_footer(&self) -> gpui::AnyElement {
+        use gpui_component::dialog::{Cancel, Confirm};
+        let dispatch = |action: fn() -> Box<dyn gpui::Action>| {
+            move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+                window.dispatch_action(action(), cx);
+            }
+        };
+        let confirm = dispatch(|| Box::new(Confirm { secondary: false }));
+        let cancel = dispatch(|| Box::new(Cancel));
+        let buttons: Vec<gpui::AnyElement> =
+            match self.creation.as_ref().map(|creation| &creation.stage) {
+                Some(Stage::Running(console)) if console.failed => vec![Button::new("dialog-ok")
+                    .label(tr!("dialog-close"))
+                    .primary()
+                    .on_click(confirm)
+                    .into_any_element()],
+                Some(Stage::Running(_)) => vec![Button::new("dialog-ok")
+                    .label(tr!("worktree-console-hide"))
+                    .on_click(cancel)
+                    .into_any_element()],
+                _ => vec![
+                    Button::new("dialog-cancel")
+                        .label(tr!("dialog-cancel"))
+                        .on_click(cancel)
+                        .into_any_element(),
+                    Button::new("dialog-ok")
+                        .label(tr!("dialog-ok"))
+                        .primary()
+                        .on_click(confirm)
+                        .into_any_element(),
+                ],
+            };
+        h_flex()
+            .justify_end()
+            .gap_2()
+            .pt_2()
+            .children(buttons)
+            .into_any_element()
     }
 
     fn render_creation_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

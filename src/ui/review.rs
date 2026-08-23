@@ -16,7 +16,6 @@ use gpui_component::{
     h_flex,
     input::Textarea,
     select::Select,
-    separator::Separator as Divider,
     v_flex, ActiveTheme, Disableable, Sizable, WindowExt,
 };
 
@@ -458,7 +457,18 @@ impl ClaudhubApp {
             .map(|state| (state.status.ahead, state.status.behind))
             .unwrap_or((0, 0));
         self.bar(cx)
+            // The tree toggle sits on the left, alone, and keeps its icon: it
+            // does not act on the repository, it changes how this list is
+            // shown. The gap that follows is what says so — the buttons on the
+            // right are the gestures, and this one is a way of looking.
+            .child(self.tree_toggle(cx))
+            .child(div().flex_1())
             .child(
+                // The one gesture that stays wordless. What it does — read what
+                // the remote has — is what its two neighbours then act on, and
+                // it is the arrow one presses without reading, several times an
+                // hour. A word beside it would push the two that decide
+                // something out to the edge.
                 Button::new("fetch")
                     .ghost()
                     .xsmall()
@@ -475,6 +485,22 @@ impl ClaudhubApp {
                         }
                     })),
             )
+            // Right after the fetch, and before the two that talk to the
+            // remote: putting the changes aside is what one does *to this
+            // list*, and it is the gesture that comes before pulling onto a
+            // tree that is not clean. The stack itself is read in the
+            // "Stashes" tab.
+            .child(
+                Button::new("stash")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("archive"))
+                    .label(tr!("action-stash-short"))
+                    .tooltip(tr!("stash-new"))
+                    .loading(self.active_running(Action::Stash))
+                    .disabled(!has_active)
+                    .on_click(cx.listener(|this, _, window, cx| this.prompt_stash(window, cx))),
+            )
             .child(
                 Button::new("pull")
                     .ghost()
@@ -485,7 +511,12 @@ impl ClaudhubApp {
                     } else {
                         tr!("action-pull")
                     })
-                    .when(behind > 0, |el| el.primary().label(behind.to_string()))
+                    // The word, and the count beside it when there is one. The
+                    // count used to *be* the label: a lone "3" said how much
+                    // there was to do without saying what the button did, and
+                    // the two arrows differed by their direction alone.
+                    .label(with_count(tr!("action-pull-short"), behind))
+                    .when(behind > 0, |el| el.primary())
                     .loading(pulling)
                     .disabled(!has_active || pulling)
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -507,7 +538,8 @@ impl ClaudhubApp {
                     } else {
                         tr!("action-push")
                     })
-                    .when(ahead > 0, |el| el.primary().label(ahead.to_string()))
+                    .label(with_count(tr!("action-push-short"), ahead))
+                    .when(ahead > 0, |el| el.primary())
                     .loading(pushing)
                     .disabled(!has_active || pushing)
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -520,22 +552,6 @@ impl ClaudhubApp {
                         }
                     })),
             )
-            // Beside the three that talk to the remote, and before the rule:
-            // putting the changes aside is a gesture one makes *about this
-            // list*, and the panel that shows them is where it is made. The
-            // stack itself is read in the "Stashes" tab.
-            .child(
-                Button::new("stash")
-                    .ghost()
-                    .xsmall()
-                    .icon(icon("archive"))
-                    .tooltip(tr!("stash-new"))
-                    .loading(self.active_running(Action::Stash))
-                    .disabled(!has_active)
-                    .on_click(cx.listener(|this, _, window, cx| this.prompt_stash(window, cx))),
-            )
-            .child(Divider::vertical().h(px(12.)))
-            .child(self.tree_toggle(cx))
     }
 
     /// The branch review's bar: the toggle, and the choice of base.
@@ -861,6 +877,17 @@ fn render_row(
             file, index, worktree, range, selected, colors, checkable, tree, entity, cx,
         ),
         None => div().into_any_element(),
+    }
+}
+
+/// A button's word, with the count of what is waiting when there is any.
+///
+/// Kept out of the catalogues: "Pull 3" is the same in both languages, and a
+/// key per shape would be two entries saying nothing a `format!` does not.
+fn with_count(label: gpui::SharedString, count: usize) -> gpui::SharedString {
+    match count {
+        0 => label,
+        _ => gpui::SharedString::from(format!("{label} {count}")),
     }
 }
 
