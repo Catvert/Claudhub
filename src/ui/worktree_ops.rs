@@ -274,64 +274,10 @@ impl WtAction {
     }
 }
 
-/// The rows of the "open" menu under the static address: what `[open]
-/// source` enumerated, or the state of the question.
-///
-/// Three states and each is said: not asked or not yet answered — an
-/// ellipsis; answered with nothing — a sentence, because an empty block under
-/// a rule reads as a glitch; answered — one row per address, the label first,
-/// the address dimmed behind it, the row opening it.
-fn wt_links_rows(links: Option<Option<Vec<wt::Endpoint>>>, cx: &App) -> gpui::AnyElement {
-    let muted = cx.theme().muted_foreground;
-    let note = |text: SharedString| {
-        div()
-            .px_2()
-            .py_1()
-            .text_sm()
-            .text_color(muted)
-            .child(text)
-            .into_any_element()
-    };
-    let links = match links {
-        None | Some(None) => return note(tr!("wt-links-resolving")),
-        Some(Some(links)) if links.is_empty() => return note(tr!("wt-links-none")),
-        Some(Some(links)) => links,
-    };
-    let accent = cx.theme().accent;
-    v_flex()
-        .w_full()
-        .children(links.into_iter().enumerate().map(|(ix, link)| {
-            let url = link.url.clone();
-            h_flex()
-                .id(("wt-link", ix))
-                .w_full()
-                .px_2()
-                .py_1()
-                .gap_2()
-                .items_center()
-                .rounded(cx.theme().radius)
-                .cursor_pointer()
-                .hover(|s| s.bg(accent.opacity(0.4)))
-                .child(div().text_sm().child(SharedString::from(link.label)))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(SharedString::from(link.url)),
-                )
-                .on_click(move |_, _window, cx| cx.open_url(&url))
-        }))
-        .into_any_element()
-}
-
 /// The creation dialog's content — the pages, then the console — and its
 /// buttons.
 ///
-/// A child entity for the reason [`WtLinksMenu`] is one: the dialog's frame
-/// closure runs inside `ClaudhubApp`'s own render, and what has to read the
+/// A child entity because the dialog's frame closure runs inside `ClaudhubApp`'s own render, and what has to read the
 /// application must render after the parent has given the borrow back.
 pub(super) struct CreationView {
     app: gpui::WeakEntity<ClaudhubApp>,
@@ -349,45 +295,6 @@ impl Render for CreationView {
                 .child(this.render_creation_footer())
                 .into_any_element()
         })
-    }
-}
-
-/// The resolved links of one worktree, as the "open" menu shows them.
-///
-/// An entity of its own for one reason: it is painted inside a popover, whose
-/// content is built from `ClaudhubApp::render`, and what has to read the
-/// application must be a child whose `render` runs after the parent's. The
-/// request for the links is **deferred** rather than sent from the constructor,
-/// which runs in the same place.
-pub(super) struct WtLinksMenu {
-    app: gpui::WeakEntity<ClaudhubApp>,
-    worktree: PathBuf,
-}
-
-impl WtLinksMenu {
-    fn new(
-        app: gpui::WeakEntity<ClaudhubApp>,
-        main: PathBuf,
-        worktree: PathBuf,
-        slug: String,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let requester = app.clone();
-        let target = worktree.clone();
-        cx.defer(move |cx| {
-            let _ = requester.update(cx, |app, _| app.request_wt_links(main, target, slug));
-        });
-        Self { app, worktree }
-    }
-}
-
-impl Render for WtLinksMenu {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let links = self
-            .app
-            .upgrade()
-            .and_then(|app| app.read(cx).wt_links.get(&self.worktree).cloned());
-        wt_links_rows(links, cx)
     }
 }
 
@@ -2344,19 +2251,14 @@ impl ClaudhubApp {
 
     /// A worktree's "open" button, when the project exposes an address.
     ///
-    /// Two shapes, decided by the `wt.toml`. Without `[open] source` the
-    /// button opens the static URL and nothing is asked. With one it is a
-    /// menu: the static URL at once, then what `source` enumerates — one
-    /// address per tenant mounted, on Acetics — resolved **when the menu
-    /// opens**, as the project's own comment asks, because it is an SQL query
-    /// through a container and has no business running while a list is drawn.
-    ///
-    /// The menu's builder touches nothing of the application: it runs inside
-    /// the root's render, where reading the root entity is a panic. The rows
-    /// are a `PopupMenuItem::element`, painted by the menu's own entity after
-    /// the root has handed back, which is where the resolved links are read —
-    /// and where the request goes out, once per opening: the builder, called
-    /// on every opening, only raises a flag the first frame of the rows lowers.
+    /// With an `[open] source`, the button is a menu of **real entries** — the
+    /// static address, then one per enumerated link. The menu is rebuilt at
+    /// every opening (the dropdown drops its items on dismiss), which is when
+    /// the cache is read — a menu's builder runs outside the root's lease, as
+    /// `worktree_menu` already relies on. And the resolution is asked as soon
+    /// as the button is **hovered**: the SQL query usually lands before the
+    /// click that opens the menu, and what is still unresolved shows as one
+    /// waiting line, complete on the next opening.
     pub(super) fn render_wt_links(
         &self,
         worktree: &Path,
@@ -2370,7 +2272,7 @@ impl ClaudhubApp {
         .ghost()
         .xsmall()
         .icon(icon("external-link"))
-        .tooltip(SharedString::from(first.label.clone()));
+        .tooltip(tr!("wt-links-open"));
         let main = self.repo_of(worktree).map(|repo| repo.main.clone());
         let slug = main.as_deref().and_then(|main| {
             self.wt_project(main)
@@ -2388,33 +2290,40 @@ impl ClaudhubApp {
                     .into_any_element(),
             );
         };
-        let app = cx.entity().downgrade();
+        let entity = cx.entity();
         let worktree = worktree.to_path_buf();
+        let request = std::rc::Rc::new({
+            let (entity, worktree) = (entity.clone(), worktree.clone());
+            move |cx: &mut App| {
+                entity.update(cx, |this, _| {
+                    // Only while nothing is cached: a hover fires on every
+                    // crossing, and the query is a `docker exec`.
+                    if !this.wt_links.contains_key(&worktree) {
+                        this.request_wt_links(main.clone(), worktree.clone(), slug.clone());
+                    }
+                });
+            }
+        });
+        let prefetch = request.clone();
         Some(
             button
+                .on_hover(move |hovered, _window, cx| {
+                    if *hovered {
+                        prefetch(cx);
+                    }
+                })
                 .dropdown_menu(move |menu, _window, cx| {
-                    // The rows are a **child entity**, and not an element built
-                    // here: a popover's content runs inside `ClaudhubApp`'s own
-                    // render, where reading the application — let alone asking
-                    // it for the links — is the panic `open_dialog`'s closure
-                    // already taught this repository. The child renders once
-                    // the parent has given the borrow back, and it is built
-                    // anew at each opening, which is what makes the request go
-                    // out again.
-                    let rows = cx.new(|cx| {
-                        WtLinksMenu::new(
-                            app.clone(),
-                            main.clone(),
-                            worktree.clone(),
-                            slug.clone(),
-                            cx,
-                        )
-                    });
-                    menu.link(SharedString::from(first.label.clone()), first.url.clone())
-                        .separator()
-                        .item(PopupMenuItem::element(move |_window, _cx| {
-                            rows.clone().into_any_element()
-                        }))
+                    request(cx);
+                    let links = entity.read(cx).wt_links.get(&worktree).cloned().flatten();
+                    let menu = menu
+                        .link(SharedString::from(first.label.clone()), first.url.clone())
+                        .separator();
+                    match links {
+                        None => menu.label(tr!("wt-links-resolving")),
+                        Some(links) => links.into_iter().fold(menu, |menu, link| {
+                            menu.link(SharedString::from(link.label), link.url)
+                        }),
+                    }
                 })
                 .into_any_element(),
         )
