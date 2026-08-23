@@ -982,7 +982,7 @@ impl ClaudhubApp {
             None => {
                 // Painted before the scroll wrapper: `scrolled` takes `&mut
                 // self` too, and the two borrows would meet.
-                self.colour_plugin_code(&tree, cx);
+                self.lay_out_plugin_code(panel, &tree, cx);
                 let painted = self.render_plugin_node(panel, &mut 0, &tree, window, cx);
                 // **A tree that fills does not get the panel's scroll.** The
                 // filled child takes what is left and scrolls itself, so
@@ -990,7 +990,7 @@ impl ClaudhubApp {
                 // bars on one gesture and leave a band of nothing under the
                 // list. What stays above it is a header, and a header does not
                 // scroll.
-                if fills(&tree) {
+                if tree.fills() {
                     return v_flex()
                         .size_full()
                         .child(bar)
@@ -1142,12 +1142,7 @@ impl ClaudhubApp {
                 }
                 .into_any_element()
             }
-            Node::Code {
-                text,
-                language,
-                start_line,
-                mark,
-            } => self.render_plugin_code(rank, text, language.as_deref(), *start_line, *mark, cx),
+            Node::Code { .. } => self.render_plugin_code(rank, node, cx),
             Node::Badge { text, tone } => badge(text, *tone, cx).into_any_element(),
             Node::Callout { text, tone } => {
                 let colour = tone_colour(*tone, cx);
@@ -1289,45 +1284,72 @@ impl ClaudhubApp {
         }
     }
 
-    /// Colours every excerpt of a tree, once, outside the walk that paints it.
+    /// Lays out every excerpt of a tree, once, outside the walk that paints it.
     ///
     /// **Never in the render closure**, which is the whole module's rule:
-    /// parsing costs milliseconds and a panel repaints on every frame. It is
-    /// keyed by the text, so a tree rebuilt identically after a gesture finds
-    /// its colours again and pays nothing.
+    /// parsing costs milliseconds, making the strings of a two hundred line
+    /// trace costs hundreds of allocations, and a panel repaints on every
+    /// frame. It is keyed by what the excerpt says, so a tree rebuilt
+    /// identically after a gesture finds its lines again and pays nothing.
+    ///
+    /// **A tree that has not moved is not walked at all.** `Plugin::repaint`
+    /// hands out a fresh `Rc` when the script settles and the same one
+    /// otherwise, so pointer equality is the exact question — and it is also
+    /// what tells the lists their rows are still good.
     ///
     /// The theme is the **witness**: a palette change is signalled to nobody —
     /// the lesson `ui::blade`'s editor cache already learned — and colours
     /// captured under the old one would stay until the next fetch.
-    fn colour_plugin_code(&mut self, tree: &Node, cx: &mut Context<Self>) {
+    fn lay_out_plugin_code(
+        &mut self,
+        panel: &'static str,
+        tree: &std::rc::Rc<Node>,
+        cx: &mut Context<Self>,
+    ) {
         let theme = cx.theme().highlight_theme.clone();
         match &self.plugin_code.theme {
             Some(seen) if std::sync::Arc::ptr_eq(seen, &theme) => {}
             _ => {
                 self.plugin_code.by_text.clear();
+                self.plugin_code.lists.clear();
+                self.plugin_code.seen.clear();
                 self.plugin_code.theme = Some(theme.clone());
             }
         }
+        if self
+            .plugin_code
+            .seen
+            .get(panel)
+            .is_some_and(|seen| std::rc::Rc::ptr_eq(seen, tree))
+        {
+            return;
+        }
+        self.plugin_code.seen.insert(panel, tree.clone());
+        self.plugin_code.epoch += 1;
+        let epoch = self.plugin_code.epoch;
+        self.plugin_code.epoch_of.insert(panel, epoch);
+
         let mut wanted = Vec::new();
-        collect_code(tree, &mut wanted);
-        for (language, text) in wanted {
-            let key = code_key(&language, &text);
+        tree.excerpts(&mut wanted);
+        for node in wanted {
+            let key = code_key(node);
             if self.plugin_code.by_text.contains_key(&key) {
                 continue;
             }
-            let styles =
-                crate::ui::highlight::DocumentHighlights::for_language(&language, &text, &theme);
             self.plugin_code
                 .by_text
-                .insert(key, std::rc::Rc::new(styles));
+                .insert(key, std::rc::Rc::new(PaintedCode::of(node, &theme)));
         }
         // A panel one has scrolled through a long trace may hold a hundred
         // excerpts; a plugin fetching in a loop would grow this without end.
         // The cap is generous and the eviction total: what a tree needs is put
         // back on the next frame, and a re-parse of what is on screen is what
-        // an arrival already costs.
+        // an arrival already costs. The lists follow the same rule.
         if self.plugin_code.by_text.len() > MAX_CODE_CACHE {
             self.plugin_code.by_text.clear();
+        }
+        if self.plugin_code.lists.len() > MAX_CODE_CACHE {
+            self.plugin_code.lists.clear();
         }
     }
 
@@ -1337,57 +1359,57 @@ impl ClaudhubApp {
     /// The numbers are a column of their own rather than part of the text: a
     /// text carrying them cannot be copied without them, and copying an excerpt
     /// to paste it into a file is what one does with it.
+    ///
+    /// Nothing here is computed: the lines were made by `lay_out_plugin_code`
+    /// when the tree arrived, and this walks them. What is read from the theme
+    /// stays here — a palette is three colours, and reading them per frame is
+    /// what every other row of this window does.
     fn render_plugin_code(
         &mut self,
         rank: usize,
-        text: &str,
-        language: Option<&str>,
-        start_line: Option<usize>,
-        mark: Option<usize>,
+        node: &Node,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
-        let styles = language
-            .map(|language| code_key(language, text))
-            .and_then(|key| self.plugin_code.by_text.get(&key).cloned());
+        let painted = self.plugin_code.by_text.get(&code_key(node)).cloned();
         let theme = cx.theme().clone();
         let marked = theme.accent.opacity(0.6);
         let gutter = theme.muted_foreground.opacity(0.7);
-        let width = start_line
-            .map(|first| format!("{}", first + text.lines().count()).len())
-            .unwrap_or(0);
-        let lines = text.lines().enumerate().map(|(index, line)| {
-            let number = start_line.map(|first| first + index);
-            let here = matches!((number, mark), (Some(n), Some(m)) if n == m);
-            h_flex()
-                .w_full()
-                .when(here, |el| el.bg(marked))
-                .when_some(number, |el, number| {
-                    el.child(
+        let lines = painted
+            .iter()
+            .flat_map(|code| code.lines.iter())
+            .map(|line| {
+                let here = line.marked;
+                h_flex()
+                    .w_full()
+                    .when(here, |el| el.bg(marked))
+                    .when_some(line.number.clone(), |el, number| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .px_2()
+                                .text_color(if here { theme.foreground } else { gutter })
+                                .child(number),
+                        )
+                    })
+                    .child(
                         div()
-                            .flex_none()
-                            .px_2()
-                            .text_color(if here { theme.foreground } else { gutter })
-                            .child(SharedString::from(format!("{number:>width$}"))),
-                    )
-                })
-                .child(
-                    div()
-                        .flex_1()
-                        .pr_2()
-                        .when(number.is_none(), |el| el.pl_2())
-                        .child(match styles.as_ref() {
-                            // The offsets are in **bytes** and the ranges
-                            // sorted and disjoint — `with_highlights` checks
-                            // neither, and gets both wrong in silence.
-                            Some(styles) => {
-                                gpui::StyledText::new(SharedString::from(line.to_string()))
-                                    .with_highlights(styles.line(index).to_vec())
+                            .flex_1()
+                            .pr_2()
+                            .when(line.number.is_none(), |el| el.pl_2())
+                            .child(if line.styles.is_empty() {
+                                line.text.clone().into_any_element()
+                            } else {
+                                // The offsets are in **bytes** and the ranges
+                                // sorted and disjoint — `with_highlights`
+                                // checks neither, and gets both wrong in
+                                // silence.
+                                gpui::StyledText::new(line.text.clone())
+                                    .with_highlights(line.styles.clone())
                                     .into_any_element()
-                            }
-                            None => SharedString::from(line.to_string()).into_any_element(),
-                        }),
-                )
-        });
+                            }),
+                    )
+            })
+            .collect::<Vec<_>>();
         div()
             .id(("plugin-code", rank))
             .w_full()
@@ -1502,10 +1524,30 @@ impl ClaudhubApp {
         if items.is_empty() {
             return div().into_any_element();
         }
-        let rows: std::rc::Rc<Vec<Item>> = std::rc::Rc::new(items.to_vec());
-        let count = rows.len();
-        let tall = rows.iter().any(|item| item.detail.is_some());
-        let height = if tall {
+        let key = format!("{panel}/{id}");
+        // **The rows are copied when the tree moves, not when a frame is
+        // drawn.** `uniform_list`'s closure outlives the tree it was built
+        // from, so the items have to be owned; copying them per frame meant
+        // four `String` per row, for a list nobody had touched. The epoch is
+        // the tree's — see `lay_out_plugin_code`.
+        let epoch = self
+            .plugin_code
+            .epoch_of
+            .get(panel)
+            .copied()
+            .unwrap_or_default();
+        let rows = match self.plugin_code.lists.get(&key) {
+            Some((seen, rows)) if *seen == epoch => rows.clone(),
+            _ => {
+                let rows = std::rc::Rc::new(PaintedList::of(items));
+                self.plugin_code
+                    .lists
+                    .insert(key.clone(), (epoch, rows.clone()));
+                rows
+            }
+        };
+        let count = rows.items.len();
+        let height = if rows.tall {
             crate::ui::theme::row_height(cx) * 1.8
         } else {
             crate::ui::theme::row_height(cx)
@@ -1515,7 +1557,6 @@ impl ClaudhubApp {
         // one that took the whole panel would push everything under it out of
         // reach. A filled list has no such problem — it *is* what is left.
         let shown = count.min(16);
-        let key = format!("{panel}/{id}");
         let handle = self.plugin_lists.entry(key.clone()).or_default().clone();
         let action = on_select.map(|handler| handler.action.clone());
         let entity = cx.entity();
@@ -1524,7 +1565,7 @@ impl ClaudhubApp {
         let list = uniform_list(element_id, count, move |range, _window, cx| {
             let mut painted = Vec::new();
             for index in range {
-                let Some(item) = rows.get(index) else {
+                let Some(item) = rows.items.get(index) else {
                     continue;
                 };
                 painted.push(plugin_row(
@@ -1576,65 +1617,148 @@ impl ClaudhubApp {
     }
 }
 
-/// How many excerpts are kept coloured before the lot is dropped.
+/// How many excerpts and lists are kept laid out before the lot is dropped.
 const MAX_CODE_CACHE: usize = 256;
 
-/// The colouring of the excerpts a plugin draws, and the palette it was done
-/// under.
+/// What a plugin's panels have already been laid out into, and the palette it
+/// was done under.
+///
+/// Everything here is derived from a tree, and a tree only moves when the
+/// script settles a new state — `Plugin::repaint` builds a fresh `Rc` then, and
+/// never between two frames. `seen` is what says so, and `epoch` is what a
+/// cache keyed by something other than the tree compares itself against.
 #[derive(Default)]
 pub struct CodeStyles {
-    by_text: std::collections::HashMap<u64, std::rc::Rc<crate::ui::highlight::DocumentHighlights>>,
+    by_text: std::collections::HashMap<u64, std::rc::Rc<PaintedCode>>,
+    /// The rows of each list, keyed by panel and list id, with the epoch they
+    /// were copied at.
+    lists: std::collections::HashMap<String, (u64, std::rc::Rc<PaintedList>)>,
+    /// The tree each panel was last laid out from.
+    seen: std::collections::HashMap<&'static str, std::rc::Rc<Node>>,
+    /// Bumped every time a panel's tree moves.
+    epoch: u64,
+    epoch_of: std::collections::HashMap<&'static str, u64>,
     theme: Option<std::sync::Arc<gpui_component::highlighter::HighlightTheme>>,
 }
 
-/// A key for one excerpt. The text itself, hashed: two frames of the same file
-/// quote different lines, and a path would not tell them apart.
-fn code_key(language: &str, text: &str) -> u64 {
+/// An excerpt, ready to paint: one entry per line, numbers included.
+///
+/// **The strings are made here and not in the render closure.** A trace of two
+/// hundred lines was costing two hundred `format!` and four hundred allocations
+/// per frame, for a block whose text had not moved since the last gesture.
+struct PaintedCode {
+    lines: Vec<PaintedLine>,
+}
+
+impl PaintedCode {
+    /// Lays an excerpt out: its lines, their numbers, and their colours.
+    ///
+    /// A language that names no grammar leaves the lines plain, and so does a
+    /// node without one: guessing a grammar from the text is how a shell
+    /// transcript ends up painted as Rust.
+    fn of(node: &Node, theme: &gpui_component::highlighter::HighlightTheme) -> Self {
+        let Node::Code {
+            text,
+            language,
+            start_line,
+            mark,
+        } = node
+        else {
+            return Self { lines: Vec::new() };
+        };
+        let styles = language.as_ref().map(|language| {
+            crate::ui::highlight::DocumentHighlights::for_language(language, text, theme)
+        });
+        // The width of the number column, from the last line: a gutter that
+        // grows halfway down the excerpt would shift the code under it.
+        let width = start_line
+            .map(|first| format!("{}", first + text.lines().count()).len())
+            .unwrap_or(0);
+        let lines = text
+            .lines()
+            .enumerate()
+            .map(|(index, line)| {
+                let number = start_line.map(|first| first + index);
+                PaintedLine {
+                    marked: matches!((number, mark), (Some(n), Some(m)) if n == *m),
+                    number: number.map(|number| SharedString::from(format!("{number:>width$}"))),
+                    text: SharedString::from(line.to_string()),
+                    styles: styles
+                        .as_ref()
+                        .map(|styles| styles.line(index).to_vec())
+                        .unwrap_or_default(),
+                }
+            })
+            .collect();
+        Self { lines }
+    }
+}
+
+/// A list's rows, ready to paint, and whether they are two storeys.
+///
+/// Built when the tree moves: `uniform_list`'s closure has to own its rows, and
+/// copying the items per frame meant four `String` per row for a list nobody
+/// had touched. `tall` goes with them — it is a reading of the same rows, and
+/// the row height is what a virtualised list is told before anything is
+/// painted.
+struct PaintedList {
+    tall: bool,
+    items: Vec<PaintedItem>,
+}
+
+struct PaintedItem {
+    title: SharedString,
+    detail: Option<SharedString>,
+    badge: Option<SharedString>,
+    icon: Option<SharedString>,
+}
+
+impl PaintedList {
+    fn of(items: &[Item]) -> Self {
+        Self {
+            tall: items.iter().any(|item| item.detail.is_some()),
+            items: items
+                .iter()
+                .map(|item| PaintedItem {
+                    title: SharedString::from(item.title.clone()),
+                    detail: item.detail.clone().map(SharedString::from),
+                    badge: item.badge.clone().map(SharedString::from),
+                    icon: item.icon.clone().map(SharedString::from),
+                })
+                .collect(),
+        }
+    }
+}
+
+struct PaintedLine {
+    /// The absolute number, right-aligned, when the excerpt is numbered.
+    number: Option<SharedString>,
+    text: SharedString,
+    /// The line the trace named, painted the way a diff paints the row one is
+    /// on.
+    marked: bool,
+    styles: Vec<(std::ops::Range<usize>, gpui::HighlightStyle)>,
+}
+
+/// A key for one excerpt. What it says, hashed — the text, its language and the
+/// numbering: two frames of the same file quote different lines, and a path
+/// would not tell them apart.
+fn code_key(node: &Node) -> u64 {
     use std::hash::{Hash as _, Hasher as _};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    language.hash(&mut hasher);
-    text.hash(&mut hasher);
+    if let Node::Code {
+        text,
+        language,
+        start_line,
+        mark,
+    } = node
+    {
+        language.hash(&mut hasher);
+        text.hash(&mut hasher);
+        start_line.hash(&mut hasher);
+        mark.hash(&mut hasher);
+    }
     hasher.finish()
-}
-
-/// Does this tree hand its remaining height to one of its blocks.
-///
-/// Only the root column's own children are looked at: a `Fill` buried inside a
-/// section is a section that grows, not a panel that stops scrolling, and the
-/// two would fight over the same pixels.
-fn fills(tree: &Node) -> bool {
-    match tree {
-        Node::Fill(_) => true,
-        Node::Column(children) => children.iter().any(|child| matches!(child, Node::Fill(_))),
-        _ => false,
-    }
-}
-
-/// Every excerpt of a tree that names a language. One that does not is left
-/// plain: guessing a grammar from the text is how a shell transcript ends up
-/// painted as Rust.
-fn collect_code(node: &Node, out: &mut Vec<(String, String)>) {
-    match node {
-        Node::Code {
-            text,
-            language: Some(language),
-            ..
-        } => out.push((language.clone(), text.clone())),
-        Node::Column(children) | Node::Row(children) => {
-            for child in children {
-                collect_code(child, out);
-            }
-        }
-        // A folded section too: folding is a reading posture, and unfolding
-        // must not be a gesture one waits for a parse behind.
-        Node::Section { body, .. } => {
-            for child in body {
-                collect_code(child, out);
-            }
-        }
-        Node::Fill(inner) => collect_code(inner, out),
-        _ => {}
-    }
 }
 
 /// The colour a tone reads in. Named by the theme and never by us: a palette
@@ -1756,7 +1880,7 @@ fn render_meter(label: &str, value: &str, percent: u8, cx: &gpui::App) -> impl I
 #[allow(clippy::too_many_arguments)]
 fn plugin_row(
     index: usize,
-    item: &Item,
+    item: &PaintedItem,
     selected: bool,
     height: gpui::Pixels,
     theme: &gpui_component::theme::Theme,
@@ -1790,7 +1914,7 @@ fn plugin_row(
                         .min_w_0()
                         .truncate()
                         .text_sm()
-                        .child(SharedString::from(item.title.clone())),
+                        .child(item.title.clone()),
                 )
                 .when_some(item.badge.clone(), |el, badge| {
                     el.child(
@@ -1800,7 +1924,7 @@ fn plugin_row(
                             .bg(theme.secondary)
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(SharedString::from(badge)),
+                            .child(badge),
                     )
                 }),
         )
@@ -1811,7 +1935,7 @@ fn plugin_row(
                     .truncate()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(SharedString::from(detail)),
+                    .child(detail),
             )
         })
         .when_some(on_click, |el, on_click| {

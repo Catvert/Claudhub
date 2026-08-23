@@ -245,11 +245,107 @@ impl Node {
     pub fn nothing() -> Self {
         Node::Column(Vec::new())
     }
+
+    /// Does this tree hand its remaining height to one of its blocks.
+    ///
+    /// Only the root column's own children are looked at: a `Fill` buried
+    /// inside a section is a section that grows, not a panel that stops
+    /// scrolling, and the two would fight over the same pixels.
+    pub fn fills(&self) -> bool {
+        match self {
+            Node::Fill(_) => true,
+            Node::Column(children) => children.iter().any(|child| matches!(child, Node::Fill(_))),
+            _ => false,
+        }
+    }
+
+    /// Every excerpt the tree carries, gathered for the pass that colours them.
+    ///
+    /// Borrowed and not copied: this runs before the walk that paints, and a
+    /// stack trace's excerpts are the biggest strings a plugin produces.
+    ///
+    /// A folded section is looked into as well: folding is a reading posture,
+    /// and unfolding must not be a gesture one waits for a parse behind.
+    pub fn excerpts<'a>(&'a self, out: &mut Vec<&'a Node>) {
+        match self {
+            Node::Code { .. } => out.push(self),
+            Node::Column(children) | Node::Row(children) => {
+                for child in children {
+                    child.excerpts(out);
+                }
+            }
+            Node::Section { body, .. } => {
+                for child in body {
+                    child.excerpts(out);
+                }
+            }
+            Node::Fill(inner) => inner.excerpts(out),
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A panel stops scrolling when its **root** hands its height over.
+    #[test]
+    fn only_the_root_says_a_panel_is_filled() {
+        let list = Node::List {
+            id: "runs".into(),
+            items: Vec::new(),
+            selected: None,
+            on_select: None,
+        };
+        assert!(Node::Fill(Box::new(list.clone())).fills());
+        assert!(Node::Column(vec![Node::Divider, Node::Fill(Box::new(list.clone())),]).fills());
+        assert!(!Node::Column(vec![list.clone()]).fills());
+        // Buried in a section, it is a section that grows.
+        assert!(!Node::Column(vec![Node::Section {
+            title: "Trace".into(),
+            body: vec![Node::Fill(Box::new(list))],
+            folded: false,
+        }])
+        .fills());
+    }
+
+    /// Every excerpt, folded ones included, and in the order they are painted.
+    #[test]
+    fn the_excerpts_are_gathered_wherever_they_sit() {
+        fn code(text: &str) -> Node {
+            Node::Code {
+                text: text.into(),
+                language: Some("rust".into()),
+                start_line: None,
+                mark: None,
+            }
+        }
+        let tree = Node::Column(vec![
+            code("one"),
+            Node::Row(vec![code("two")]),
+            Node::Section {
+                title: "Trace".into(),
+                body: vec![code("three")],
+                folded: true,
+            },
+            Node::Fill(Box::new(code("four"))),
+            Node::Text {
+                text: "not an excerpt".into(),
+                style: TextStyle::Body,
+            },
+        ]);
+        let mut found = Vec::new();
+        tree.excerpts(&mut found);
+        let texts: Vec<&str> = found
+            .iter()
+            .map(|node| match node {
+                Node::Code { text, .. } => text.as_str(),
+                _ => unreachable!("only excerpts are gathered"),
+            })
+            .collect();
+        assert_eq!(texts, ["one", "two", "three", "four"]);
+    }
 
     /// The tree crosses serialisation unchanged.
     ///
