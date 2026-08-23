@@ -165,6 +165,7 @@ src/
     lsp.rs          le pont vers le serveur de langage
     jumps.rs        la piste : d'où l'on vient, où l'on repart — pur
     folds.rs        quels replis un niveau de repli ferme — pur
+    follow.rs       les mots qu'on suit au Ctrl+clic : où est le pointeur — pur
     hunks.rs        la gouttière de l'éditeur, et la comparaison de lignes — pur
     merge.rs        la fusion à trois voies : ce que chaque côté a fait — pur
     merge_view.rs   les trois colonnes, et le clic qui tranche

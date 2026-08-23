@@ -343,6 +343,9 @@ pub enum Jump {
 pub struct History {
     pub commits: Vec<Commit>,
     pub graph: Vec<GraphRow>,
+    /// The patch restricted to the lines asked for, one per commit — only in
+    /// `LogRange::Lines`, empty everywhere else. See `Evt::History`.
+    pub patches: Vec<crate::git::FileDiff>,
     /// What a row shows, ready to hand to gpui — see
     /// `ui::history_view::commit_texts`.
     pub texts: Vec<crate::ui::history_view::CommitText>,
@@ -621,20 +624,20 @@ pub struct ClaudhubApp {
     /// cleared in the **capture** phase of that same click, so a jump followed
     /// from the context menu cannot leave it standing for the next one.
     pub(super) followed_definition: bool,
-    /// The modifier that makes a diff line's symbols clickable is held down.
+    /// The modifier that makes a line's symbols clickable is held down.
     ///
     /// Kept rather than read at each render, and that is what makes it cheap:
     /// the window is asked for a new frame only when it **flips**, not on every
     /// `Shift` of every capital letter typed somewhere else. See
-    /// `diff_view::followable`.
-    pub(super) diff_armed: bool,
-    /// The `Ctrl`-hovered word of the diff, and which line's text it is in.
+    /// `ui::follow::followable`.
+    pub(super) follow_armed: bool,
+    /// The `Ctrl`-hovered word, and which line's text it is in.
     ///
     /// The underline is painted from here, one frame behind the pointer as a
     /// hover always is. It is cleared by the entry the pointer moves onto and
     /// by letting go of the modifier — a word left underlined under nothing
     /// would read as a word that has been chosen.
-    pub(super) diff_hover: Option<(crate::ui::diff_view::WordSpot, std::ops::Range<usize>)>,
+    pub(super) follow_hover: Option<(crate::ui::follow::Spot, std::ops::Range<usize>)>,
     pub(super) files_scroll: gpui::UniformListScrollHandle,
     /// The explorer tree's focus, which gives it its arrows.
     ///
@@ -642,9 +645,18 @@ pub struct ClaudhubApp {
     /// browse the tree" from "the arrows browse the diff", and the bindings'
     /// predicate is read on the focused node's context.
     pub(super) explorer_focus: FocusHandle,
-    /// The project-wide search: what was asked, what came back, and the file
-    /// shown beside it. See `ui::search_view`.
+    /// The project-wide search of the worktree on show: what was asked, what
+    /// came back, and the file shown beside it. See `ui::search_view`.
     pub(super) search: crate::ui::search_view::SearchState,
+    /// The other worktrees' searches, put back on returning to one.
+    ///
+    /// A search belongs to the project it was made in — its hits name that
+    /// checkout's files — so changing worktree stashes it here and takes back
+    /// what was left, the field included. See `ClaudhubApp::sync_search`.
+    pub(super) searches: HashMap<PathBuf, crate::ui::search_view::SearchState>,
+    /// The id of the last search sent, whatever worktree asked for it. Never
+    /// goes back: see `search_view::SearchState::request`.
+    pub(super) search_next_id: u64,
     /// The search field. Created **once**, like every other input: rebuilt at
     /// render time it would lose the cursor and the text on the first
     /// keystroke.
@@ -877,11 +889,18 @@ pub struct ClaudhubApp {
     /// its own. The two are never shown at the same time.
     pub(super) diff_wrap_scroll: gpui_component::VirtualListScrollHandle,
     pub(super) history_scroll: gpui::UniformListScrollHandle,
+    /// In a line history, whether a commit shows the patch restricted to those
+    /// lines or the whole commit.
+    ///
+    /// A reading preference and not a worktree's state: it is the same answer
+    /// one wants from one selection to the next.
+    pub(super) history_lines_only: bool,
     /// The file lists' scrolling, **one per range**: "Review" and "Changes" are
     /// shown at the same time, and a single handle would scroll them together.
     file_scroll: HashMap<DiffRange, gpui::UniformListScrollHandle>,
-    /// Each panel's search, created on its first opening.
-    pub(super) finders: HashMap<crate::ui::find::Pane, crate::ui::find::Finder>,
+    /// Each panel's search, created on its first opening — **one per worktree
+    /// and per panel**, as the editors and the trail are. See `find::Key`.
+    pub(super) finders: HashMap<crate::ui::find::Key, crate::ui::find::Finder>,
     /// The panel the last click happened in: that is what `Ctrl+F` aims at.
     ///
     /// The click and not the focus. gpui-component's dock puts focus on the
@@ -1098,10 +1117,12 @@ impl ClaudhubApp {
             landing: None,
             tab_clock: 0,
             followed_definition: false,
-            diff_armed: false,
-            diff_hover: None,
+            follow_armed: false,
+            follow_hover: None,
             files_scroll: gpui::UniformListScrollHandle::new(),
             search: Default::default(),
+            searches: HashMap::new(),
+            search_next_id: 0,
             search_input: search_inputs.text,
             search_glob_input: search_inputs.glob,
             search_regex: false,
@@ -1157,6 +1178,7 @@ impl ClaudhubApp {
             diff_laid_out: gpui::px(0.),
             diff_wrap_scroll: gpui_component::VirtualListScrollHandle::new(),
             history_scroll: gpui::UniformListScrollHandle::new(),
+            history_lines_only: true,
             file_scroll: HashMap::new(),
             scrolls: HashMap::new(),
             motions: HashMap::new(),
@@ -1209,6 +1231,15 @@ impl ClaudhubApp {
         // keyboard, it is what makes the bindings resolve at all — same defect
         // as hiding a focused terminal, one step earlier.
         window.focus(&app.focus, cx);
+        // The window manager's close — `Alt+F4`, its cross — is the one gesture
+        // the platform takes without asking the view; this is where it is told
+        // to ask. The callback is `Fn`, hence the weak handle: the window
+        // outlives nothing here, but the signature does not know it.
+        let this = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            this.update(cx, |app, cx| app.quit_or_ask(window, cx))
+                .unwrap_or(true)
+        });
         app
     }
 
@@ -1808,7 +1839,8 @@ impl ClaudhubApp {
                 range,
                 commits,
                 graph,
-            } => self.history_arrived(worktree, range, commits, graph),
+                patches,
+            } => self.history_arrived(worktree, range, commits, graph, patches, cx),
             Evt::Branches {
                 main,
                 branches,
@@ -2115,6 +2147,7 @@ impl ClaudhubApp {
                 // longer has them, and their tabs would stay in the dock.
                 self.close_files_of(&active, window, cx);
                 self.jumps.remove(&active);
+                self.forget_finders(&active);
                 if let Some(first) = self.first_worktree() {
                     self.select_worktree(first, window, cx);
                 }
@@ -2279,7 +2312,10 @@ impl ClaudhubApp {
         range: LogRange,
         commits: Vec<Commit>,
         graph: Vec<GraphRow>,
+        patches: Vec<crate::git::FileDiff>,
+        cx: &mut Context<Self>,
     ) {
+        let first = matches!(range, LogRange::Lines { .. }) && !commits.is_empty();
         let Some(state) = self.review.get_mut(&worktree) else {
             return;
         };
@@ -2295,9 +2331,17 @@ impl ClaudhubApp {
             state.history = Some(std::rc::Rc::new(History {
                 commits,
                 graph,
+                patches,
                 texts,
                 width,
             }));
+        }
+        // A line history is asked for by a gesture on a selection, and it is
+        // that selection's story one wants to read: showing the list without
+        // opening anything would ask for a second click to say what was already
+        // said.
+        if first && self.active.as_deref() == Some(worktree.as_path()) {
+            self.open_commit(0, cx);
         }
     }
 
@@ -2745,6 +2789,8 @@ impl ClaudhubApp {
         // The free note follows the displayed worktree: the input is unique, and
         // keeping the previous one's text would write it here.
         self.sync_journal_input(&path, window, cx);
+        // And so does the search, field included, for the same reason.
+        self.sync_search(&path, window, cx);
         self.request_status(path);
         // Every worktree has its base: the selector has to show this one, not
         // the one of the worktree just left.
@@ -3445,16 +3491,21 @@ impl Render for ClaudhubApp {
             .on_modifiers_changed(cx.listener(
                 |this, event: &gpui::ModifiersChangedEvent, _, cx| {
                     let armed = event.modifiers.secondary();
-                    if this.diff_armed != armed {
-                        this.diff_armed = armed;
+                    if this.follow_armed != armed {
+                        this.follow_armed = armed;
                         // Let go of it and nothing is followable any more: the
                         // underline goes with the hand cursor.
-                        this.diff_hover = None;
+                        this.follow_hover = None;
+                        // The result grid is told rather than asked: its cells
+                        // are painted by a delegate, which has no place to read
+                        // the application once per frame.
+                        this.arm_db_follow(armed, cx);
                         cx.notify();
                     }
                 },
             ))
             .on_action(cx.listener(super::shortcuts::refresh))
+            .on_action(cx.listener(super::shortcuts::show_line_history))
             .on_action(cx.listener(super::shortcuts::new_terminal))
             .on_action(cx.listener(super::shortcuts::close_terminal))
             .on_action(cx.listener(super::shortcuts::toggle_terminal))

@@ -40,12 +40,21 @@ pub fn install(cx: &mut App) {
         log::warn!("themes not installed: {e}");
     }
     // Loading is asynchronous: the chosen theme does not exist in the registry
-    // yet at this point, hence the re-application in the callback.
-    let result = ThemeRegistry::watch_dir(dir, cx, |cx| {
+    // yet at this point. The re-application is **not** done in `watch_dir`'s
+    // callback: gpui-component installs its own `observe_global::<ThemeRegistry>`
+    // in `gpui_component::init`, which calls `Theme::change` — and so wipes
+    // every colour `apply` writes — and global observers run at the end of the
+    // effects cycle, *after* that callback. The window then opened with the
+    // palette's raw `tab_bar` (lighter than the card, the dock read as
+    // inverted) until the next mode toggle re-ran `apply`. Observers run in
+    // subscription order, and ours is subscribed after theirs: it is what has
+    // the last word, on startup and on every later reload of the directory.
+    cx.observe_global::<ThemeRegistry>(|cx| {
         let settings = Settings::global(cx).clone();
         apply(&settings, None, cx);
-    });
-    if let Err(e) = result {
+    })
+    .detach();
+    if let Err(e) = ThemeRegistry::watch_dir(dir, cx, |_| {}) {
         log::warn!("theme directory not watched: {e}");
     }
 }

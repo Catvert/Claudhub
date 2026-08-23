@@ -1198,6 +1198,13 @@ pub enum Evt {
         /// One entry per commit, in the same order: the view shows them side by
         /// side and being off by one would make each line point at the wrong one.
         graph: Vec<GraphRow>,
+        /// The patch restricted to the lines asked for, one per commit and in
+        /// the same order — `LogRange::Lines` only, empty everywhere else.
+        ///
+        /// It comes with the list because it comes from the **same** command:
+        /// `git log -L` writes both, and the line range only makes sense in
+        /// HEAD's numbering, so it cannot be asked for again commit by commit.
+        patches: Vec<FileDiff>,
     },
     /// A write operation succeeded. `output` is git's output, which the view
     /// shows as it is: it is what says what was pushed, advanced or created, and

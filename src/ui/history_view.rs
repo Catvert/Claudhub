@@ -6,6 +6,7 @@
 //! leaving it — which is what lets the list stay virtualised: a row draws
 //! without knowing anything about the ones out of sight.
 
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::{
@@ -35,6 +36,19 @@ const STROKE: Pixels = px(1.5);
 /// scrolling — and an unbounded `git log` on an old repository costs seconds
 /// for rows nobody will reach.
 const LIMIT: usize = 2_000;
+/// Number of commits asked for in a line history. Far lower, and for a reason
+/// of its own: `git log -L` reconstructs the file at every commit it walks, and
+/// each answer carries its patch — a range of lines has a handful of authors,
+/// not two thousand.
+const LINE_LIMIT: usize = 200;
+
+/// How many commits a range is worth asking for.
+fn limit_of(range: &LogRange) -> usize {
+    match range {
+        LogRange::Lines { .. } => LINE_LIMIT,
+        _ => LIMIT,
+    }
+}
 
 /// A column's colour. The hues rotate so two neighbouring branches are not
 /// confused; they have no other meaning, git having no notion of branch
@@ -66,8 +80,8 @@ impl ClaudhubApp {
         let range = state.history_range.clone();
         self.git.send(Cmd::LoadHistory {
             worktree,
+            limit: limit_of(&range),
             range,
-            limit: LIMIT,
         });
         cx.notify();
     }
@@ -90,14 +104,104 @@ impl ClaudhubApp {
         state.history_pending = true;
         self.git.send(Cmd::LoadHistory {
             worktree,
+            limit: limit_of(&range),
             range,
-            limit: LIMIT,
         });
         cx.notify();
     }
 
+    /// The history of the lines selected in a file — PhpStorm's "Show History
+    /// for Selection".
+    ///
+    /// The gesture is made on a **buffer**, and git only knows the file it has:
+    /// the line numbers are mapped back onto HEAD's before they are asked
+    /// about, otherwise an edited file returns the history of other lines
+    /// without anything saying so.
+    pub(super) fn show_line_history(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        // **The editor names its files relative to the checkout** — it is what
+        // `repo::head_blob` reads as `HEAD:./<path>`, and it is what `-L` wants,
+        // taking no pathspec. An absolute path is accepted anyway, and one that
+        // is not under the worktree belongs to no history here: a plugin's
+        // script is edited in the same panel and lives outside every checkout.
+        let relative = match path.strip_prefix(&worktree) {
+            Ok(relative) => relative.to_path_buf(),
+            Err(_) if path.is_absolute() => return,
+            Err(_) => path.clone(),
+        };
+        let Some(editing) = self.editing_at(&path) else {
+            return;
+        };
+        let dirty = editing.dirty;
+        let base = editing.base.clone();
+        let (rows, text) = {
+            let state = editing.input.read(cx);
+            let selection = state.selected_range();
+            let text = state.value();
+            let first = crate::ui::surface::line_at(state.text(), selection.start);
+            let mut last = crate::ui::surface::line_at(state.text(), selection.end);
+            // A selection made by dragging down whole lines ends at the start of
+            // the one below, which is not part of what was pointed at. An empty
+            // selection is the caret's line, as it is in every editor offering
+            // this gesture: one right-clicks a line to ask about it.
+            if last > first && text.as_bytes().get(selection.end.wrapping_sub(1)) == Some(&b'\n') {
+                last -= 1;
+            }
+            (first..last + 1, text)
+        };
+
+        let rows = match base.as_deref() {
+            Some(base) if dirty => match crate::ui::hunks::to_base(base, &text, rows) {
+                Some(rows) => rows,
+                None => {
+                    self.notify(
+                        Some(crate::ui::notify::Notice {
+                            title: "history-lines-untracked",
+                            body: String::new(),
+                            level: crate::ui::notify::Level::Error,
+                        }),
+                        window,
+                        cx,
+                    );
+                    return;
+                }
+            },
+            _ => rows,
+        };
+        // git counts from one, both ends included: the exclusive end of a
+        // zero-based range is already the last line's number.
+        let range = LogRange::Lines {
+            path: relative,
+            start: rows.start + 1,
+            end: rows.end.max(rows.start + 1),
+        };
+
+        let from = self.here(cx);
+        self.record_step(
+            from,
+            crate::ui::jumps::Place::Screen(crate::ui::workspace::Workspace::Git),
+            cx,
+        );
+        // The screen is called up before the answer: the list takes a `git log`
+        // to arrive, and staying in the file until then reads as the menu
+        // having done nothing.
+        self.enter_workspace(crate::ui::workspace::Workspace::Git, window, cx);
+        self.set_panel_visible(crate::ui::panels::HistoryPanel::NAME, true, cx);
+        self.set_history_range(range, cx);
+    }
+
     /// Shows a commit's diff.
     pub(super) fn open_commit(&mut self, index: usize, cx: &mut Context<Self>) {
+        // Read before the state is borrowed: the highlighting depends on the
+        // theme, and `cx.theme()` borrows `cx`.
+        let theme = cx.theme().highlight_theme.clone();
         let Some(worktree) = self.active.clone() else {
             return;
         };
@@ -130,6 +234,24 @@ impl ClaudhubApp {
         state
             .pending_files
             .retain(|kept| !matches!(kept, DiffRange::Commit { .. }));
+
+        // In a line history, the restricted patch is already here: it came with
+        // the list, from the same `git log -L`. Showing it costs no command —
+        // and the whole commit stays one click away, on the toggle.
+        let lines = match &state.history_range {
+            LogRange::Lines { path, .. } if self.history_lines_only => Some(path.clone()),
+            _ => None,
+        };
+        if let (Some(path), Some(patch)) = (lines, history.patches.get(index)) {
+            state.selected = Some(path.clone());
+            state.diff = Some(std::rc::Rc::new(crate::ui::diff_view::Rendered::new(
+                &path,
+                patch.clone(),
+                &theme,
+            )));
+            cx.notify();
+            return;
+        }
         self.ensure_files(range, cx);
         cx.notify();
     }
@@ -197,6 +319,17 @@ impl ClaudhubApp {
         let history = state.history.clone();
 
         let row_height = crate::ui::theme::row_height(cx);
+        // What the scope says, and what leaves it. A line history is a filter
+        // on the list, and a list that is short without saying why reads as a
+        // repository with no history.
+        let scope = match &range {
+            LogRange::Lines { path, start, end } => Some(SharedString::from(format!(
+                "{}:{start}\u{2013}{end}",
+                path.display()
+            ))),
+            _ => None,
+        };
+        let lines_only = self.history_lines_only;
         let header = h_flex()
             .h(crate::ui::theme::bar_height(cx))
             .w_full()
@@ -223,7 +356,63 @@ impl ClaudhubApp {
                             this.set_history_range(target.clone(), cx);
                         }))
                 }),
-            );
+            )
+            .when_some(scope, |header, scope| {
+                header
+                    .child(
+                        div()
+                            .px_1p5()
+                            .rounded(px(8.))
+                            .bg(cx.theme().secondary)
+                            .text_xs()
+                            .text_color(cx.theme().secondary_foreground)
+                            // The path is the long part, and the bar is narrow:
+                            // it is cut at the start, the file's name being what
+                            // says which file this is.
+                            .truncate()
+                            .child(scope),
+                    )
+                    .child(
+                        Button::new("history-lines-close")
+                            .ghost()
+                            .xsmall()
+                            .icon(crate::ui::icons::icon("x"))
+                            .tooltip(tr!("history-lines-close"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_history_range(LogRange::All, cx);
+                            })),
+                    )
+                    // The toggle: the patch restricted to those lines, or the
+                    // commit whole. Both are one click away because both are
+                    // read — the first says what happened to this code, the
+                    // second says what it was part of.
+                    .child(
+                        Button::new("history-lines-scope")
+                            .ghost()
+                            .xsmall()
+                            .label(if lines_only {
+                                tr!("history-lines-only")
+                            } else {
+                                tr!("history-lines-whole")
+                            })
+                            .tooltip(tr!("history-lines-toggle"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.history_lines_only = !this.history_lines_only;
+                                // The commit on screen was opened under the old
+                                // answer: re-opening it is what makes the toggle
+                                // show its effect rather than announce it.
+                                let index = this.active_review().and_then(|state| {
+                                    let history = state.history.as_ref()?;
+                                    let id = state.commit.as_deref()?;
+                                    history.commits.iter().position(|c| c.id == id)
+                                });
+                                if let Some(index) = index {
+                                    this.open_commit(index, cx);
+                                }
+                                cx.notify();
+                            })),
+                    )
+            });
 
         let Some(history) = history else {
             return v_flex()
@@ -258,10 +447,15 @@ impl ClaudhubApp {
         let count = history.commits.len();
         let gutter = LANE * history.width as f32 + px(6.);
 
+        // The file list under the graph says what else a commit touched. In a
+        // line history read line by line there is nothing else: the patch on
+        // screen is the answer, and the list would be a second one for a
+        // question nobody asked.
         let commit_range = self
             .active_review()
             .and_then(|state| state.commit.as_ref().map(|_| state.range.clone()))
-            .filter(|range| matches!(range, DiffRange::Commit { .. }));
+            .filter(|range| matches!(range, DiffRange::Commit { .. }))
+            .filter(|_| !(lines_only && matches!(range, LogRange::Lines { .. })));
 
         let graph = v_flex().size_full().child(header).children(find).child(
             div().flex_1().min_h_0().child(

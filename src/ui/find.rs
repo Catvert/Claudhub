@@ -85,6 +85,18 @@ impl Pane {
     }
 }
 
+/// What a panel's search is filed under.
+///
+/// **A panel's search belongs to the checkout being looked at**, like its
+/// editors, its terminals and its trail: the entries it filters are that
+/// project's, and a filter carried from one worktree to the next hides files in
+/// a tree that has nothing to do with what was typed — without saying so, since
+/// the bar reads as belonging to the panel on screen.
+///
+/// `None` for the moment where no worktree is shown: the panels are painted
+/// then too, and a key they cannot be filed under would give them one another's.
+pub type Key = (Option<std::path::PathBuf>, Pane);
+
 /// A panel's search: its field, and whether it is open.
 pub struct Finder {
     /// Created **once**, on first opening. Recreated at render time, it would
@@ -171,10 +183,21 @@ impl ClaudhubApp {
     /// query removes nothing.
     pub(super) fn query(&self, pane: Pane, cx: &gpui::App) -> String {
         self.finders
-            .get(&pane)
+            .get(&self.find_key(pane))
             .filter(|finder| finder.open)
             .map(|finder| finder.input.read(cx).value().to_string())
             .unwrap_or_default()
+    }
+
+    /// Where a panel's search is filed: the worktree on show, and the panel.
+    fn find_key(&self, pane: Pane) -> Key {
+        (self.active.clone(), pane)
+    }
+
+    /// Drops the searches of a checkout that is gone, as its trail is dropped.
+    pub(super) fn forget_finders(&mut self, worktree: &std::path::Path) {
+        self.finders
+            .retain(|(kept, _), _| kept.as_deref() != Some(worktree));
     }
 
     /// Records the panel where the gesture happened. That is what `Ctrl+F` aims at.
@@ -208,7 +231,8 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<InputState> {
-        let input = match self.finders.get_mut(&pane) {
+        let key = self.find_key(pane);
+        let input = match self.finders.get_mut(&key) {
             Some(finder) => {
                 finder.open = true;
                 finder.input.clone()
@@ -232,7 +256,7 @@ impl ClaudhubApp {
                 })
                 .detach();
                 self.finders.insert(
-                    pane,
+                    key,
                     Finder {
                         input: input.clone(),
                         open: true,
@@ -279,7 +303,8 @@ impl ClaudhubApp {
 
     /// Closes the target panel's bar.
     pub(super) fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(finder) = self.finders.get_mut(&self.pane) {
+        let key = self.find_key(self.pane);
+        if let Some(finder) = self.finders.get_mut(&key) {
             finder.open = false;
         }
         // The focus goes back to the view: leaving it in a field just hidden
@@ -313,7 +338,10 @@ impl ClaudhubApp {
         pane: Pane,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
-        let finder = self.finders.get(&pane).filter(|finder| finder.open)?;
+        let finder = self
+            .finders
+            .get(&self.find_key(pane))
+            .filter(|finder| finder.open)?;
         let input = finder.input.clone();
         let query = input.read(cx).value().to_string();
         let count = self.find_count(pane, &query);

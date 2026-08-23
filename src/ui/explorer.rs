@@ -3019,6 +3019,12 @@ impl ClaudhubApp {
         // The occurrences of the last search, lit as `Ctrl+F` lights them:
         // see `sync_search_matches`.
         self.sync_search_matches(&surface, vim, cx);
+        // And the occurrence the bar has just jumped to, put in the middle of
+        // the panel rather than on its edge: see `centre_search_match`.
+        self.centre_search_match(&surface, cx);
+        // Read before the editor is built, for its context menu: the closure
+        // that builds it cannot read the state itself. See `editor_menu`.
+        let has_selection = !input.read(cx).selected_range().is_empty();
         let mono = cx.theme().mono_font_family.clone();
         // The editor is code, like the diff on the screen next door: same
         // family, same size. Without saying so it inherits the interface's
@@ -3102,6 +3108,22 @@ impl ClaudhubApp {
                                 // the same code read the same way on both
                                 // screens.
                                 .line_height(crate::ui::diff_view::line_height(code_size))
+                                // The menu is **rebuilt whole**: a custom
+                                // builder replaces the editor's own, which is
+                                // where cut, copy and paste come from.
+                                //
+                                // **The selection is read here and captured**,
+                                // never inside the closure: the builder runs
+                                // from the editor's own right-click handler,
+                                // that is to say while its state is being
+                                // updated, and reading the entity there is a
+                                // panic. The closure is rebuilt on every frame,
+                                // so what it carries is a frame old at worst.
+                                .context_menu({
+                                    let path = path.clone();
+                                    let selection = has_selection;
+                                    move |menu, _window, cx| editor_menu(menu, selection, &path, cx)
+                                })
                                 .h_full(),
                         )
                         // The wheel, taken before the editor sees it: see
@@ -3439,6 +3461,45 @@ fn dir_menu(
 }
 
 /// A file's menu.
+/// The editor's right-click menu.
+///
+/// The items the editor itself offers, plus the one gesture that is ours: the
+/// history of the lines under the pointer. They are `NativeMenu` actions and
+/// not closures — the menu carries a `gpui::Action` and nothing else, which is
+/// why `ShowLineHistory` names its file rather than relying on "the file being
+/// edited".
+fn editor_menu(
+    menu: gpui_component::native_menu::NativeMenu,
+    // Whether the editor had a selection when the frame was painted — see the
+    // call site: it cannot be read from here.
+    selection: bool,
+    path: &Path,
+    cx: &gpui::App,
+) -> gpui_component::native_menu::NativeMenu {
+    use gpui_base::input as base;
+    menu.menu(
+        tr!("shortcut-goto-definition"),
+        Box::new(base::GoToDefinition),
+    )
+    .separator()
+    .menu(
+        tr!("history-selection"),
+        Box::new(crate::ui::shortcuts::ShowLineHistory {
+            path: path.to_path_buf(),
+        }),
+    )
+    .separator()
+    .menu_with_disabled(tr!("editor-cut"), !selection, Box::new(base::Cut))
+    .menu_with_disabled(tr!("editor-copy"), !selection, Box::new(base::Copy))
+    .menu_with_disabled(
+        tr!("editor-paste"),
+        cx.read_from_clipboard().is_none(),
+        Box::new(base::Paste),
+    )
+    .separator()
+    .menu(tr!("editor-select-all"), Box::new(base::SelectAll))
+}
+
 fn file_menu(
     menu: gpui_component::menu::PopupMenu,
     entity: &Entity<ClaudhubApp>,

@@ -247,8 +247,18 @@ impl ClaudhubApp {
         // returned as `HTCAPTION`, but gpui handles non-client mouse messages
         // and redistributes them. It is what Zed's title bar does, on the same
         // terms.
+        let for_close = cx.entity();
         TitleBar::new()
             .h(super::theme::toolbar_height(cx))
+            // Our cross, under Linux, would `remove_window` without a word —
+            // the same question as the window manager's cross, asked here.
+            .on_close_window(move |_, window, cx| {
+                for_close.update(cx, |this, cx| {
+                    if this.quit_or_ask(window, cx) {
+                        window.remove_window();
+                    }
+                });
+            })
             .border_color(cx.theme().border)
             .bg(cx.theme().title_bar)
             .child(
@@ -496,6 +506,7 @@ impl ClaudhubApp {
             .dropdown_menu(move |menu, window, cx| {
                 let entity = entity.clone();
                 let for_reset = entity.clone();
+                let for_quit = entity.clone();
                 let for_shortcuts = entity.clone();
                 let for_views = entity.clone();
                 menu.item(PopupMenuItem::new(tr!("settings-title")).on_click(
@@ -544,7 +555,15 @@ impl ClaudhubApp {
                     },
                 ))
                 .separator()
-                .item(PopupMenuItem::new(tr!("menu-quit")).on_click(|_, _window, cx| cx.quit()))
+                .item(
+                    PopupMenuItem::new(tr!("menu-quit")).on_click(move |_, window, cx| {
+                        for_quit.update(cx, |this, cx| {
+                            if this.quit_or_ask(window, cx) {
+                                cx.quit();
+                            }
+                        });
+                    }),
+                )
             })
     }
 

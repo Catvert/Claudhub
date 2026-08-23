@@ -1089,6 +1089,24 @@ fn file_diff(
 /// The history, and the graph layout that goes with it: the view shows them
 /// side by side, so they are computed together and travel together.
 fn history(worktree: PathBuf, range: LogRange, limit: usize) -> Vec<Evt> {
+    // The history of a few lines is read by `-L`, which hands back the commits
+    // and their restricted patches in one go; the graph stays empty, its lanes
+    // having nothing to join — the parents are not in the list.
+    if let LogRange::Lines { path, start, end } = &range {
+        return match history::line_history(&worktree, path, *start, *end, limit) {
+            Ok(found) => {
+                let (commits, patches): (Vec<_>, Vec<_>) = found.into_iter().unzip();
+                vec![Evt::History {
+                    worktree,
+                    range,
+                    graph: vec![Default::default(); commits.len()],
+                    commits,
+                    patches,
+                }]
+            }
+            Err(e) => vec![fail(Some(worktree), Action::History, e)],
+        };
+    }
     match history::commits(&worktree, &range, limit) {
         Ok(commits) => {
             let graph = history::layout(&commits);
@@ -1097,6 +1115,7 @@ fn history(worktree: PathBuf, range: LogRange, limit: usize) -> Vec<Evt> {
                 range,
                 commits,
                 graph,
+                patches: Vec::new(),
             }]
         }
         Err(e) => vec![fail(Some(worktree), Action::History, e)],

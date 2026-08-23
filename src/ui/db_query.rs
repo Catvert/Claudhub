@@ -213,6 +213,14 @@ pub struct Results {
     links: Vec<Option<db::link::Target>>,
     /// The engine, which decides how the query written by a jump quotes.
     engine: db::Engine,
+    /// The system key is held: the cells that can be followed say so.
+    ///
+    /// Kept here rather than read from the application at each cell: the
+    /// delegate is asked for its cells one by one on every frame, and what
+    /// changes is a flag that flips twice per gesture. `ClaudhubApp::
+    /// arm_db_follow` is what pushes it, from the same listener the diff's
+    /// underline hangs on — see `ClaudhubApp::follow_armed`.
+    armed: bool,
     /// The application, to report a sort or a request for more to it.
     ///
     /// **Weak**, like the dock's panels: the application holds the table, and a
@@ -265,6 +273,7 @@ impl Results {
                 .as_ref()
                 .map(|connection| connection.engine)
                 .unwrap_or_default(),
+            armed: false,
             app: Some(cx.weak_entity()),
         }
     }
@@ -528,6 +537,17 @@ impl TableDelegate for Results {
                 el.text_color(cx.theme().muted_foreground).italic()
             })
             .when(key, |el| el.text_color(cx.theme().info))
+            // **The underline exists only while the key is held**, exactly as
+            // it does on a diff line: it is the answer to "what does this click
+            // do", asked by holding the modifier down, and a cell underlined at
+            // rest would read as a link one clicks plainly. The hand cursor
+            // comes with it, and the styling is the element's own hover — the
+            // grid has no hovered cell of its own to keep, and one more piece
+            // of state repainted per pointer move is what we would be paying
+            // for a rule the compositor already applies.
+            .when(key && self.armed, |el| {
+                el.cursor_pointer().hover(|el| el.underline())
+            })
             .when(selected, |el| el.bg(cx.theme().selection))
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -905,6 +925,19 @@ impl ClaudhubApp {
         });
     }
 
+    /// Tells the result grid whether the system key is held.
+    ///
+    /// Pushed and not read: see `Results::armed`. It costs a frame at each flip
+    /// of the modifier, and only when a console is on screen.
+    pub(super) fn arm_db_follow(&mut self, armed: bool, cx: &mut Context<Self>) {
+        self.db_table.update(cx, |state, cx| {
+            if state.delegate().armed != armed {
+                state.delegate_mut().armed = armed;
+                cx.notify();
+            }
+        });
+    }
+
     /// Follows the foreign key a cell carries.
     ///
     /// The gesture is the system-key click and the menu entry, and both end in
@@ -1153,7 +1186,12 @@ impl ClaudhubApp {
     /// back to the top in the middle of paging.
     fn set_db_rows(&mut self, rows: db::Rows, cx: &mut Context<Self>) {
         let links = self.db_links(&rows.columns);
-        let results = Results::new(rows, links, &self.query, cx);
+        let mut results = Results::new(rows, links, &self.query, cx);
+        // A result that lands while the key is held is followable straight
+        // away: the flag is only pushed when the modifier *flips*, and paging
+        // with `Ctrl` down would otherwise paint a grid that says nothing can
+        // be followed until one lets go of it.
+        results.armed = self.follow_armed;
         self.db_table.update(cx, |state, cx| {
             *state.delegate_mut() = results;
             state.refresh(cx);
@@ -1355,6 +1393,9 @@ impl ClaudhubApp {
         // The occurrences of the last search, lit as `Ctrl+F` lights them:
         // see `sync_search_matches`.
         self.sync_search_matches(&Surface::Query, vim, cx);
+        // And the occurrence the bar has just jumped to, put in the middle of
+        // the panel rather than on its edge: see `centre_search_match`.
+        self.centre_search_match(&Surface::Query, cx);
         let bar = self.render_console_bar(cx);
         let results = self.render_db_results(window, cx);
         // SQL is code: same family, same size as the diff and the file editor,

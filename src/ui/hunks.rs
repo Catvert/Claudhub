@@ -96,6 +96,44 @@ pub fn compare(base: &str, now: &str) -> Vec<Hunk> {
         .collect()
 }
 
+/// Maps a range of **buffer** lines onto the base's numbering.
+///
+/// A file being edited is not the file git knows: asking `git log -L` for the
+/// buffer's line numbers reads the history of the wrong lines, and nothing
+/// says so — the answer is a plausible list of commits about other code. The
+/// base text is already at hand for the gutter, so the mapping costs nothing
+/// more than the comparison the gutter already makes.
+///
+/// Both ends are 0-based, `end` excluded. `None` when the selection is lines
+/// the base does not have — freshly typed code has no history yet, and an empty
+/// range would make `-L` fail rather than say so.
+pub fn to_base(base: &str, now: &str, rows: Range<usize>) -> Option<Range<usize>> {
+    let (base, now) = (split(base), split(now));
+    let regions = regions(&base, &now);
+    let start = map_boundary(&regions, rows.start, false);
+    let end = map_boundary(&regions, rows.end, true);
+    (start < end).then_some(start..end)
+}
+
+/// One boundary — a position *between* lines, from 0 to the line count.
+///
+/// `upper` decides what a boundary falling **inside** a difference becomes: the
+/// start of the base's run for the lower end, its end for the upper one, so
+/// that a selection covering a change covers what it replaced.
+fn map_boundary(regions: &[(Range<usize>, Range<usize>)], row: usize, upper: bool) -> usize {
+    let mut delta: isize = 0;
+    for (b, n) in regions {
+        if row <= n.start {
+            break;
+        }
+        if row < n.end {
+            return if upper { b.end } else { b.start };
+        }
+        delta = b.end as isize - n.end as isize;
+    }
+    (row as isize + delta).max(0) as usize
+}
+
 /// Where two line sequences differ, as one index range on each side, in order.
 ///
 /// The comparison itself, with nothing said about which side is a base and
@@ -409,5 +447,33 @@ mod tests {
         let hunks = compare("", "a\nb\n");
         assert_eq!(rows(&hunks), vec![(0..2, vec![])]);
         assert_eq!(hunks[0].kind(), Kind::Added);
+    }
+
+    #[test]
+    fn an_untouched_range_keeps_its_numbers() {
+        let base = "a\nb\nc\nd\n";
+        assert_eq!(to_base(base, base, 1..3), Some(1..3));
+    }
+
+    #[test]
+    fn a_range_below_an_insertion_shifts_back() {
+        let base = "a\nb\nc\n";
+        let now = "a\nnew\nnew\nb\nc\n";
+        // Lines 3 and 4 of the buffer are `b` and `c`: lines 1 and 2 of the base.
+        assert_eq!(to_base(base, now, 3..5), Some(1..3));
+    }
+
+    #[test]
+    fn a_range_covering_a_change_covers_what_it_replaced() {
+        let base = "a\nb\nc\nd\n";
+        let now = "a\nB1\nB2\nc\nd\n";
+        assert_eq!(to_base(base, now, 1..4), Some(1..3));
+    }
+
+    #[test]
+    fn brand_new_lines_have_no_history() {
+        let base = "a\nb\n";
+        let now = "a\nnew\nb\n";
+        assert_eq!(to_base(base, now, 1..2), None);
     }
 }

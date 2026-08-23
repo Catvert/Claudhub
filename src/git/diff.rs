@@ -220,7 +220,7 @@ fn parse_numstat(out: &str) -> Vec<DiffFile> {
     files
 }
 
-fn parse_unified(out: &str) -> FileDiff {
+pub(super) fn parse_unified(out: &str) -> FileDiff {
     let mut diff = FileDiff {
         empty: true,
         ..Default::default()

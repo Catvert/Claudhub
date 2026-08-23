@@ -152,6 +152,12 @@ pub(super) struct VimHost {
     /// drag. Read back rather than remembered from the `Change`, since the
     /// editor clips what it is given to character boundaries.
     pub selection_at: Option<std::ops::Range<usize>>,
+    /// The pattern and occurrence index the search bar was last centred on.
+    ///
+    /// It is what tells a jump from one occurrence to the next apart from a
+    /// caret that merely walks over one: only the first is worth moving the
+    /// page for. See `centre_search_match`.
+    pub search_centred: Option<(String, usize)>,
     /// Where `zm` and `zr` have got to: the nesting level below which folds are
     /// closed. `None` is everything open, which is one past the deepest — the
     /// state `zR` puts the surface back into, and the one it opens in.
@@ -188,6 +194,7 @@ impl VimHost {
             cursor_at: None,
             absorb_selection: false,
             selection_at: None,
+            search_centred: None,
             fold_level: None,
         }
     }
@@ -770,6 +777,59 @@ impl ClaudhubApp {
         layer.set(decorations, cx);
         if let Some(host) = self.surface_host_mut(surface) {
             host.matches_lit = current;
+        }
+    }
+
+    /// Centres the occurrence the editor's own search bar has just moved to.
+    ///
+    /// `Ctrl+F` on a code surface is the input's search, not ours, and the
+    /// input scrolls **as little as it can**: the occurrence one is sent to
+    /// lands on the very edge of the panel, with none of the code around it —
+    /// which is what one came to read. Same ruling as a jump to a definition,
+    /// and the same `Place`.
+    ///
+    /// Read at every frame rather than hung on a key: the bar's `Enter`, its
+    /// two arrows and the query being typed all move the current match, and not
+    /// one of them is ours to listen to. What it compares is the pattern and
+    /// the index, so a caret walking over an occurrence moves nothing.
+    pub(super) fn centre_search_match(&mut self, surface: &Surface, cx: &mut Context<Self>) {
+        let Some(input) = self.surface_input(surface) else {
+            return;
+        };
+        let (open, at, head) = {
+            let state = input.read(cx);
+            let session = state.search_session();
+            let index = session.matcher.current_match_index();
+            let head = session
+                .matcher
+                .matched_ranges()
+                .get(index)
+                .map(|range| range.start);
+            (session.open, (session.query.clone(), index), head)
+        };
+        let Some(host) = self.surface_host_mut(surface) else {
+            return;
+        };
+        // Closing forgets: reopening on the same pattern is a fresh search, and
+        // its first occurrence wants centring like any other.
+        if !open {
+            host.search_centred = None;
+            return;
+        }
+        if host.search_centred.as_ref() == Some(&at) {
+            return;
+        }
+        host.search_centred = Some(at);
+        let Some(head) = head else {
+            return;
+        };
+        let centred = Place::Asked(crate::ui::vim::Reveal::Centre);
+        // A panel that has never been laid out has nothing to divide by. The
+        // memory is put back so the next frame tries again, as `reveal_at` does.
+        if !self.scroll_to_line(&input, head, centred, cx) {
+            if let Some(host) = self.surface_host_mut(surface) {
+                host.search_centred = None;
+            }
         }
     }
 

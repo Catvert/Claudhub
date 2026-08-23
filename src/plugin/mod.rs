@@ -35,7 +35,7 @@ pub mod host;
 #[cfg(feature = "plugins")]
 mod loaded;
 #[cfg(feature = "plugins")]
-pub use loaded::Plugin;
+pub use loaded::{Plugin, SHOW_AFTER};
 
 /// A path a script named, read as a path **inside the worktree**.
 ///

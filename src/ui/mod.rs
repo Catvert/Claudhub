@@ -19,6 +19,7 @@ mod explorer;
 mod file_icons;
 mod find;
 mod folds;
+mod follow;
 mod highlight;
 mod history_view;
 mod hunks;

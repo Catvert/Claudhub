@@ -7,11 +7,11 @@
 //! not delegated to `git log --graph`, whose output is a drawing in characters
 //! that would have to be re-parsed back into coordinates.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use super::git;
+use super::{git, FileDiff};
 
 /// A commit as the list shows it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -45,6 +45,19 @@ pub enum LogRange {
     /// Every reference: this is where the graph earns its keep, parallel
     /// branches being visible side by side.
     All,
+    /// The history of a handful of lines of one file — `git log -L`.
+    ///
+    /// The path is relative to the worktree and the lines are git's: 1-based,
+    /// both ends included, and counted **in HEAD**, not in the buffer being
+    /// edited. Whoever asks does the mapping — see `ui::hunks::to_base`.
+    ///
+    /// git follows renames on its own here; `--follow` neither is needed nor
+    /// allowed.
+    Lines {
+        path: PathBuf,
+        start: usize,
+        end: usize,
+    },
 }
 
 impl LogRange {
@@ -56,6 +69,12 @@ impl LogRange {
             // date, which gives an unreadable graph: the lines would jump from
             // one branch to another on every row.
             Self::All => vec!["--all".into(), "--topo-order".into()],
+            // `-L` takes no pathspec and refuses `--graph`: the list it returns
+            // has holes — a commit's parent is usually missing — which is why
+            // the view paints no lanes in this mode.
+            Self::Lines { path, start, end } => {
+                vec!["-L".into(), format!("{start},{end}:{}", path.display())]
+            }
         }
     }
 }
@@ -72,9 +91,66 @@ pub fn commits(dir: &Path, range: &LogRange, limit: usize) -> Result<Vec<Commit>
         format,
         format!("--max-count={limit}"),
     ];
+    // Without this, `-L` writes its patch after the format, and it would spill
+    // into the next record's fields — `-z` separates commits, not sections.
+    if matches!(range, LogRange::Lines { .. }) {
+        args.push("--no-patch".into());
+    }
     args.extend(range.args());
     let out = git(dir, &args)?;
     Ok(parse(&out))
+}
+
+/// Commits that touched those lines, each with the patch **restricted to
+/// them** — which is the whole point of `-L`: "how these eight lines became
+/// what they are", commit after commit, without ever replaying a `git diff`.
+///
+/// One command and not two: the line range is expressed in HEAD's numbering,
+/// so asking a single older commit for its patch would count the lines from the
+/// wrong revision.
+///
+/// The record separator is `\x01` at the **start of a line**. A patch line
+/// always begins with a space, `+`, `-` or `\`, so that byte can only ever
+/// appear at column two or beyond, where a file happens to contain it.
+pub fn line_history(
+    dir: &Path,
+    path: &Path,
+    start: usize,
+    end: usize,
+    limit: usize,
+) -> Result<Vec<(Commit, FileDiff)>> {
+    let format = format!(
+        "--format=%x01%H{f}%h{f}%P{f}%an{f}%ar{f}%D{f}%s",
+        f = "%x1f"
+    );
+    let range = LogRange::Lines {
+        path: path.to_path_buf(),
+        start,
+        end,
+    };
+    let mut args: Vec<String> = vec![
+        "log".into(),
+        format,
+        format!("--max-count={limit}"),
+        // A `diff.external` or a `.gitattributes` driver would replace the
+        // unified output with a format we do not know how to read.
+        "--no-ext-diff".into(),
+        "--no-color".into(),
+    ];
+    args.extend(range.args());
+    let out = git(dir, &args)?;
+    Ok(parse_line_history(&out))
+}
+
+fn parse_line_history(out: &str) -> Vec<(Commit, FileDiff)> {
+    out.split('\u{1}')
+        .filter(|record| !record.trim().is_empty())
+        .filter_map(|record| {
+            let (fields, patch) = record.split_once('\n').unwrap_or((record, ""));
+            let commit = parse_commit(fields)?;
+            Some((commit, super::diff::parse_unified(patch)))
+        })
+        .collect()
 }
 
 /// The subjects of the latest commits, most recent first.
@@ -457,5 +533,65 @@ mod tests {
         );
         // Topological order is what keeps the branches grouped.
         assert!(LogRange::All.args().contains(&"--topo-order".to_string()));
+        assert_eq!(
+            LogRange::Lines {
+                path: "src/ui/app.rs".into(),
+                start: 12,
+                end: 20,
+            }
+            .args(),
+            vec!["-L", "12,20:src/ui/app.rs"]
+        );
+    }
+
+    #[test]
+    fn a_line_history_reads_its_commits_and_their_patches() {
+        // What `git log -L` writes: the format, then the patch, one record per
+        // commit, each opened by the `\x01` the format starts with.
+        let out =
+            "\u{1}aaa\u{1f}aaa1234\u{1f}bbb\u{1f}Ada\u{1f}2 days ago\u{1f}HEAD -> main\u{1f}Second
+diff --git a/f.rs b/f.rs
+index 1..2 100644
+--- a/f.rs
++++ b/f.rs
+@@ -12,3 +12,3 @@
+ kept
+-was
++is
+\u{1}bbb\u{1f}bbb5678\u{1f}\u{1f}Bo\u{1f}3 weeks ago\u{1f}\u{1f}First
+diff --git a/f.rs b/f.rs
+--- /dev/null
++++ b/f.rs
+@@ -0,0 +1,2 @@
++kept
++was
+";
+        let found = parse_line_history(out);
+        assert_eq!(found.len(), 2);
+
+        let (commit, patch) = &found[0];
+        assert_eq!(commit.short, "aaa1234");
+        assert_eq!(commit.summary, "Second");
+        assert_eq!(commit.parents, vec!["bbb"]);
+        // The arrow is dropped, the branch kept.
+        assert_eq!(commit.refs, vec!["main"]);
+        assert_eq!(patch.hunks.len(), 1);
+        // The patch is the one `-L` restricted, and it is numbered from the
+        // file it belongs to: line 12, not line 1.
+        assert_eq!(patch.hunks[0].old_start, 12);
+        assert_eq!(patch.hunks[0].lines.len(), 3);
+
+        // A root commit: no parent, and the patch git writes against nothing.
+        let (commit, patch) = &found[1];
+        assert!(commit.parents.is_empty());
+        assert!(commit.refs.is_empty());
+        assert_eq!(patch.hunks.len(), 1);
+        assert!(!patch.empty);
+    }
+
+    #[test]
+    fn a_line_history_of_nothing_is_an_empty_list() {
+        assert!(parse_line_history("").is_empty());
+        assert!(parse_line_history("\n").is_empty());
     }
 }

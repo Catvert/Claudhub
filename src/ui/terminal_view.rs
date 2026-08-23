@@ -1853,6 +1853,54 @@ impl ClaudhubApp {
         });
     }
 
+    /// Closes the window — or asks first, when a terminal is in the middle of
+    /// something. Returns whether the window may go **now**.
+    ///
+    /// Three gestures close the window, and gpui intercepts only the first:
+    /// the window manager's — `Alt+F4`, its own cross, `WM_CLOSE` under
+    /// Windows — comes through `on_window_should_close`; our title bar's cross
+    /// calls `remove_window` outright unless it is given `on_close_window`;
+    /// and the menu's « Quit » is a `cx.quit()` that asks nobody. All three
+    /// come here, so that the one question is asked the same way whatever the
+    /// hand did.
+    ///
+    /// The question is `ask_close_terminal`'s, and for the same reason: the
+    /// window going away takes every pty with it, the same SIGHUP multiplied
+    /// by the terminals of every worktree. Only what is busy is listed — a
+    /// shell at its prompt has nothing to lose, and naming it would bury the
+    /// build that has.
+    pub(super) fn quit_or_ask(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let busy: Vec<SharedString> = self
+            .terminals
+            .iter()
+            .map(|terminal| terminal.view.read(cx))
+            .filter(|terminal| terminal.busy())
+            .map(|terminal| terminal.label())
+            .collect();
+        if busy.is_empty() {
+            return true;
+        }
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let busy = busy.clone();
+            dialog
+                .title(tr!("window-close-busy"))
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .children(busy.into_iter().map(|label| div().text_sm().child(label)))
+                        .child(div().text_xs().child(tr!("window-close-busy-help"))),
+                )
+                .overlay_closable(false)
+                .close_button(false)
+                .footer(crate::ui::dialogs::confirm())
+                .on_ok(move |_, _window, cx| {
+                    cx.quit();
+                    true
+                })
+        });
+        false
+    }
+
     /// Closes a terminal: its pty, and its panel in each of the five docks.
     ///
     /// Called by whichever panel the user closed — one screen's — and it takes

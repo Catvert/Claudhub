@@ -663,6 +663,7 @@ impl ClaudhubApp {
         // Nobody asked for this from anywhere: it is the first load, and every
         // panel of the plugin is blank until it lands.
         self.plugins[index].start(None);
+        self.wake_when_slow(cx);
         let worktree = self.active.clone();
         cx.spawn_in(window, async move |this, cx| {
             let outcome = host.init(worktree.as_deref()).await;
@@ -713,6 +714,7 @@ impl ClaudhubApp {
         // The panel the gesture came from keeps what it shows; the others wait.
         // See `Plugin::waiting_in`.
         self.plugins[index].start(Some(panel));
+        self.wake_when_slow(cx);
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let outcome = host.update(&state, &action, &payload).await;
@@ -720,6 +722,22 @@ impl ClaudhubApp {
                 this.plugin_settled(panel, outcome, window, cx)
             })
             .ok();
+        })
+        .detach();
+    }
+
+    /// Asks for a frame when the grace period is over.
+    ///
+    /// Without it a call that really is slow would show nothing until the next
+    /// frame something else asked for: the spinner is a function of the clock,
+    /// and nothing else in the window ticks. One timer per gesture, and a
+    /// gesture is a click.
+    fn wake_when_slow(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(crate::plugin::SHOW_AFTER)
+                .await;
+            this.update(cx, |_, cx| cx.notify()).ok();
         })
         .detach();
     }
@@ -901,7 +919,9 @@ impl ClaudhubApp {
         let tree = spec
             .map(|spec| self.plugins[index].tree_of(&spec.id))
             .unwrap_or_else(|| std::rc::Rc::new(Node::nothing()));
-        let busy = self.plugins[index].busy;
+        // `working` and not `busy`: see `Plugin::working` — a gesture that
+        // comes back in a frame turns nothing.
+        let busy = self.plugins[index].working();
         let waiting_here = self.plugins[index].waiting_in(panel);
         let error = self.plugins[index].error.clone();
         let scroll = self.scroll_of(panel);
@@ -1061,9 +1081,15 @@ impl ClaudhubApp {
         *seq += 1;
         let rank = *seq;
         match node {
+            // **A column carrying a `Fill` claims its parent's free height.**
+            // Left at `w_full` its height is the content's, so the filled
+            // child had nothing to grow into and the list under it resolved
+            // its `size_full` against an indefinite height — painted zero
+            // pixels tall, under a count line that said fifty errors.
             Node::Column(children) => v_flex()
                 .w_full()
                 .gap_1()
+                .when(node.fills(), |el| el.flex_1().min_h_0())
                 .children(
                     children
                         .iter()
@@ -1197,7 +1223,13 @@ impl ClaudhubApp {
                     ),
                     other => self.render_plugin_node(panel, seq, other, window, cx),
                 };
-                div()
+                // **A flex column and not a `div`**: gpui's default display is
+                // `Block`, where the flex properties of a child are ignored —
+                // the filled list was laid out at its content height, so the
+                // `size_full` under it resolved against nothing and the panel
+                // ended on the band of emptiness this whole node exists to
+                // remove. It is what the root's own body already is.
+                v_flex()
                     .w_full()
                     .flex_1()
                     .min_h_0()
@@ -1608,7 +1640,9 @@ impl ClaudhubApp {
             list,
             cx,
         );
-        div()
+        // A flex column here too, for the same reason as the `Fill` node's
+        // wrapper: what it holds asks for the whole of it.
+        v_flex()
             .w_full()
             .map(|el| {
                 if fill {

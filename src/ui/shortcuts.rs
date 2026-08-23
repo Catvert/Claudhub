@@ -121,6 +121,17 @@ pub struct SelectWorktree {
     pub index: usize,
 }
 
+/// The history of the lines selected in a file — the editor's context menu.
+///
+/// A payload and not a bare action: the dock shows two editors as soon as a
+/// split is open, and it is the one the menu was opened on that is being asked
+/// about — the same reason a surface is named by its path. See `ui::surface`.
+#[derive(Clone, PartialEq, Debug, Default, gpui::Action)]
+#[action(namespace = claudhub, no_json)]
+pub struct ShowLineHistory {
+    pub path: std::path::PathBuf,
+}
+
 /// The bindings' predicate. gpui-component's layers (dialog, menu, popover) are
 /// excluded: a shortcut firing behind a dialog acts on state the user is not
 /// looking at.
@@ -1129,6 +1140,15 @@ fn consecutive(first: &str, next: &str) -> bool {
         (Some((head, a)), Some((other, b))) => head == other && b == a + 1,
         _ => false,
     }
+}
+
+pub fn show_line_history(
+    this: &mut ClaudhubApp,
+    action: &ShowLineHistory,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.show_line_history(action.path.clone(), window, cx);
 }
 
 pub fn refresh(

@@ -34,6 +34,7 @@ use crate::git::search::{Query, Results};
 use crate::runtime::protocol::Cmd;
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
+use crate::ui::follow::{followable, Armed, Spot};
 use crate::ui::highlight::{DocumentHighlights, HitHighlights};
 use crate::ui::icons::icon;
 use crate::ui::search::{self, Row};
@@ -49,14 +50,21 @@ const PREVIEW_SCROLL: &str = "search-preview";
 /// search found.
 #[derive(Default)]
 pub struct SearchState {
-    /// The checkout the shown results belong to. Switching worktree therefore
-    /// does not silently show another project's hits: the panel says the search
-    /// is stale rather than pretending it is not.
+    /// The checkout these results belong to, and the key this state is filed
+    /// under when one leaves it. `None` before anything has been searched here.
     pub worktree: Option<PathBuf>,
     /// The query as it went out — never as it is being typed. It is what the
     /// list highlights its occurrences with, and highlighting a half-typed word
     /// over results that answer the previous one would be wrong twice.
     pub sent: Query,
+    /// What the two fields and the two checkboxes hold.
+    ///
+    /// Only ever read when this worktree is not the one on show: while it is,
+    /// the inputs themselves are the truth and this is what they were last
+    /// filed as. It differs from `sent` while one is typing, and for good under
+    /// `MIN_AUTO` characters, where nothing goes out by itself — a word one
+    /// half-typed before changing project must be there on coming back.
+    pub field: Query,
     pub results: Rc<Results>,
     /// The displayed list, rebuilt when the results or the folds change and
     /// never in a render: it was laid out again on every frame, and it is read
@@ -74,9 +82,14 @@ pub struct SearchState {
     pub error: Option<String>,
     /// A search has gone out and has not come back.
     pub running: bool,
-    /// Never goes back, like the SQL console's send id: one types, the earlier
-    /// query is stale, and this is what tells the answer of a gesture from the
-    /// answer of the gesture that replaced it.
+    /// The id of the last search sent from this worktree's search.
+    ///
+    /// Like the SQL console's send id: one types, the earlier query is stale,
+    /// and this is what tells the answer of a gesture from the answer of the
+    /// gesture that replaced it. **The counter itself is the window's**
+    /// (`ClaudhubApp::search_next_id`) and not this state's: an answer names no
+    /// worktree, so two projects numbering their searches from one would each
+    /// accept the other's.
     pub request: u64,
     /// Bumped on every keystroke, and read again when the debounce fires.
     ///
@@ -180,8 +193,7 @@ impl ClaudhubApp {
             // it again would only re-select its first hit and re-read its
             // preview. It is the debounce's own test, and it is the same one
             // because it is the same thing being avoided.
-            let stale = self.search.worktree != self.active;
-            if stale || self.search.error.is_some() || self.search_query(cx) != self.search.sent {
+            if self.search.error.is_some() || self.search_query(cx) != self.search.sent {
                 self.run_search(false, cx);
             }
         }
@@ -334,6 +346,50 @@ impl ClaudhubApp {
         .detach();
     }
 
+    /// The worktree has changed: each project takes back its own search.
+    ///
+    /// **The field first, because it is what one sees.** The two inputs are
+    /// unique — there is one search screen, not one per checkout — so a word
+    /// left in them from the previous project asks this one a question that was
+    /// never about it, and the next `Enter` answers it. The journal's free note
+    /// is synced for exactly this reason, and this is the same rule.
+    ///
+    /// **The results follow the field rather than being wiped.** A search is
+    /// worth minutes on a large checkout, and glancing at another project must
+    /// not spend them again; filed under the worktree they name, they can never
+    /// be shown under another project's name either, which is what the panel
+    /// used to have to say out loud.
+    pub(super) fn sync_search(
+        &mut self,
+        worktree: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut previous = std::mem::take(&mut self.search);
+        if let Some(path) = previous.worktree.clone() {
+            // What the fields hold, which only they knew until now.
+            previous.field = self.search_query(cx);
+            // An answer still owed is dropped when it lands — its id is not the
+            // one the shown search is waiting for — so the panel must not come
+            // back to this project saying it is still searching.
+            previous.running = false;
+            self.searches.insert(path, previous);
+        }
+        self.search = self.searches.remove(worktree).unwrap_or_default();
+        let field = self.search.field.clone();
+        self.search_regex = field.regex;
+        self.search_whole_word = field.whole_word;
+        // `set_value` emits no change event: nothing is debounced behind our
+        // back, and no search goes out on a change of worktree.
+        self.search_input.update(cx, |state, cx| {
+            state.set_value(field.text, window, cx);
+        });
+        self.search_glob_input.update(cx, |state, cx| {
+            state.set_value(field.include, window, cx);
+        });
+        cx.notify();
+    }
+
     /// Sends the search.
     ///
     /// `hand` is true for a search one asked for — `Enter`, the button — which
@@ -356,7 +412,8 @@ impl ClaudhubApp {
             cx.notify();
             return;
         }
-        self.search.request += 1;
+        self.search_next_id += 1;
+        self.search.request = self.search_next_id;
         self.search.running = true;
         self.search.error = None;
         self.search.worktree = Some(worktree.clone());
@@ -532,15 +589,6 @@ impl ClaudhubApp {
         let Some(path) = search::path_of(&self.search.results, row).map(PathBuf::from) else {
             return;
         };
-        // A hit found in a worktree one has since left belongs to a tree the
-        // rest of the window is no longer showing — and `jump_to` opens in the
-        // **selected** one, so it would read another file of the same name or
-        // none at all. Said out loud: a button that does nothing reads as a
-        // broken button.
-        if self.search.worktree.as_deref() != self.active.as_deref() {
-            self.announce(tr!("search-other-worktree"), cx);
-            return;
-        }
         let line = search::line_of(&self.search.results, row).saturating_sub(1);
         self.jump_to(
             path,
@@ -588,18 +636,19 @@ impl ClaudhubApp {
         }
     }
 
-    /// A symbol followed from a diff line: `Ctrl`+click on a word.
+    /// A symbol followed from a line of code that is not an editor's:
+    /// `Ctrl`+click on a word of a diff, of a result, or of the preview.
     ///
-    /// **The language server is not asked, and that is deliberate.** A diff
-    /// line is not a document: it is one side of a comparison, an old version
-    /// as often as a new one, and the position it would be asked at maps to a
-    /// file on disk only when the range being read happens to be the working
-    /// tree's. A server answers such a question confidently and wrongly, which
-    /// is the one failure this window will not trade for. `git grep` knows
-    /// nothing about where a name is declared, and says so by giving the list —
-    /// the same rule as the editor's fallback, with the same single hit
-    /// followed straight away.
-    pub(super) fn follow_diff_symbol(
+    /// **The language server is not asked, and that is deliberate.** None of
+    /// these lines is a document: a diff line is one side of a comparison, an
+    /// old version as often as a new one, and a result's line is trimmed of its
+    /// indentation — the position a server would be asked at maps to a file on
+    /// disk only by chance. A server answers such a question confidently and
+    /// wrongly, which is the one failure this window will not trade for. `git
+    /// grep` knows nothing about where a name is declared, and says so by
+    /// giving the list — the same rule as the editor's fallback, with the same
+    /// single hit followed straight away.
+    pub(super) fn follow_symbol(
         &mut self,
         symbol: &str,
         window: &mut Window,
@@ -856,13 +905,6 @@ impl ClaudhubApp {
     /// a word reads as a project with two thousand hits.
     fn render_search_status(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let (muted, danger) = (cx.theme().muted_foreground, cx.theme().danger);
-        // Results belonging to a checkout one has left are kept — a search is
-        // worth minutes and switching worktrees to glance at something should
-        // not spend it — but they are **labelled**: silently showing another
-        // project's hits under this project's name is the one thing this panel
-        // must not do.
-        let stale = self.search.worktree.is_some()
-            && self.search.worktree.as_deref() != self.active.as_deref();
         let (text, colour) = if let Some(error) = self.search.error.clone() {
             (SharedString::from(error), danger)
         } else if self.search.running {
@@ -878,10 +920,7 @@ impl ClaudhubApp {
             if self.search.results.truncated {
                 text = format!("{text} · {}", tr!("search-truncated"));
             }
-            if stale {
-                text = format!("{text} · {}", tr!("search-other-worktree"));
-            }
-            (SharedString::from(text), if stale { danger } else { muted })
+            (SharedString::from(text), muted)
         };
         Some(
             div()
@@ -926,6 +965,10 @@ impl ClaudhubApp {
         let folded = self.search.folded.clone();
         let selected = self.search.selected;
         let look = Look::of(cx);
+        // Read once for the frame, as the diff reads them: while nobody holds
+        // the modifier no word range is computed for any row. See `ui::follow`.
+        let armed = self.follow_armed;
+        let hovered = self.follow_hover.clone();
         let entity = cx.entity();
         let count = rows.len();
         let handle = self.search_scroll.clone();
@@ -942,6 +985,8 @@ impl ClaudhubApp {
                 &folded,
                 selected == Some(index),
                 &look,
+                armed,
+                &hovered,
                 &entity,
                 cx,
             )
@@ -1026,6 +1071,11 @@ impl ClaudhubApp {
         let marks = preview.marks.clone();
         let widest = preview.widest;
         let marked = preview.line.saturating_sub(1) as usize;
+        // As in the result list and in the diff: read once for the frame. See
+        // `ui::follow`.
+        let armed = self.follow_armed;
+        let hovered = self.follow_hover.clone();
+        let entity = cx.entity();
         let digits = digits_of(lines.len());
         let gutter = font_size * 0.62 * digits as f32 + px(8.);
         let count = lines.len();
@@ -1049,6 +1099,9 @@ impl ClaudhubApp {
                             gutter,
                             line_height,
                             &look,
+                            armed,
+                            &hovered,
+                            &entity,
                             cx,
                         )
                     })
@@ -1112,6 +1165,49 @@ impl Look {
     }
 }
 
+/// The word to underline in one line, if the pointer is in that one.
+///
+/// There is one hovered word per frame at most — the pointer is in one place —
+/// and every line is handed it: only the one it names underlines anything.
+fn hovered_word(hovered: &Option<(Spot, Range<usize>)>, here: Spot) -> Option<Range<usize>> {
+    let (spot, word) = hovered.as_ref()?;
+    (*spot == here).then(|| word.clone())
+}
+
+/// A line of code: the grammar, the occurrences over it, and the underline of
+/// the word being pointed at.
+///
+/// Three layers, in the order they were decided, each laid on the one below
+/// rather than replacing it — a hit in coloured code keeps its colours, and so
+/// does an underlined symbol. It is `diff_view::line_content` without the diff:
+/// the same rule, because the eye reads the same thing.
+fn code_line(
+    text: SharedString,
+    styles: &[(Range<usize>, gpui::HighlightStyle)],
+    marks: &[(Range<usize>, gpui::Hsla)],
+    follow: Option<Armed>,
+) -> gpui::AnyElement {
+    // Nothing to colour and nobody holding the modifier — the common case by
+    // far: the plain element it has always been, at the same cost.
+    if styles.is_empty() && marks.is_empty() && follow.is_none() {
+        return div().child(text).into_any_element();
+    }
+    let base = if marks.is_empty() {
+        styles.to_vec()
+    } else {
+        crate::ui::highlight::overlay(styles, marks)
+    };
+    let highlights = match follow.as_ref().and_then(|follow| follow.hovered.clone()) {
+        Some(word) => crate::ui::highlight::underline(&base, word),
+        None => base,
+    };
+    let styled = StyledText::new(text.clone()).with_highlights(highlights);
+    match follow {
+        None => styled.into_any_element(),
+        Some(follow) => followable(follow, text, styled),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_row(
     index: usize,
@@ -1122,6 +1218,11 @@ fn render_row(
     folded: &Rc<HashSet<PathBuf>>,
     selected: bool,
     look: &Look,
+    // `armed`: the modifier that makes a symbol clickable is held down.
+    // `hovered`: the word the pointer is over, wherever in the window it is —
+    // only the row it names underlines anything.
+    armed: bool,
+    hovered: &Option<(Spot, Range<usize>)>,
     entity: &Entity<ClaudhubApp>,
     cx: &App,
 ) -> gpui::AnyElement {
@@ -1177,7 +1278,6 @@ fn render_row(
             let Some(line) = results.files.get(file).and_then(|file| file.hits.get(hit)) else {
                 return div().into_any_element();
             };
-            let entity = entity.clone();
             // The leading indentation is dropped: a hit six levels deep would
             // otherwise show nothing but its indentation in a narrow column.
             let text = line.text.trim_start();
@@ -1191,6 +1291,14 @@ fn render_row(
                 .collect();
             let styles = hits.line(file, hit);
             let shown = SharedString::from(text.to_string());
+            let spot = Spot::SearchHit { row: index };
+            let follow = armed.then(|| Armed {
+                id: ("search-hit-word", index).into(),
+                spot,
+                hovered: hovered_word(hovered, spot),
+                entity,
+            });
+            let (leaving, clicking) = (entity.clone(), entity.clone());
             h_flex()
                 .id(("search-hit", index))
                 .h(look.row)
@@ -1202,9 +1310,23 @@ fn render_row(
                 .cursor_pointer()
                 .when(selected, |el| el.bg(look.accent.opacity(0.4)))
                 .hover(|s| s.bg(look.accent.opacity(0.3)))
+                // The pointer is on **this** row: a word underlined on another
+                // one — or in the preview beside it — is no longer under it.
+                // The row's own words have already had their say, a text being
+                // a child of its row.
+                .on_mouse_move(move |_, _, cx| {
+                    leaving.update(cx, |this, cx| this.leave_row(spot, cx));
+                })
                 .on_click(move |event, window, cx| {
+                    // `Ctrl` on a word is the follow gesture, and the text
+                    // under the pointer has just answered it: selecting the row
+                    // as well would change the preview under the file one is
+                    // being sent to.
+                    if window.modifiers().secondary() {
+                        return;
+                    }
                     let open = event.click_count() > 1;
-                    entity.update(cx, |this, cx| {
+                    clicking.update(cx, |this, cx| {
                         this.select_search_row(index, window, cx);
                         if open {
                             this.open_search_row(window, cx);
@@ -1227,17 +1349,7 @@ fn render_row(
                         .truncate()
                         .text_xs()
                         .font_family(cx.theme().mono_font_family.clone())
-                        .child(if marks.is_empty() && styles.is_empty() {
-                            div().child(shown).into_any_element()
-                        } else if marks.is_empty() {
-                            StyledText::new(shown)
-                                .with_highlights(styles.iter().cloned())
-                                .into_any_element()
-                        } else {
-                            StyledText::new(shown)
-                                .with_highlights(crate::ui::highlight::overlay(styles, &marks))
-                                .into_any_element()
-                        }),
+                        .child(code_line(shown, styles, &marks, follow)),
                 )
                 .into_any_element()
         }
@@ -1254,6 +1366,9 @@ fn render_preview_line(
     gutter: Pixels,
     line_height: Pixels,
     look: &Look,
+    armed: bool,
+    hovered: &Option<(Spot, Range<usize>)>,
+    entity: &Entity<ClaudhubApp>,
     _cx: &App,
 ) -> gpui::AnyElement {
     let Some(text) = lines.get(index).cloned() else {
@@ -1267,23 +1382,26 @@ fn render_preview_line(
         .iter()
         .map(|range| (range.clone(), look.hit))
         .collect();
-    let content = if marks.is_empty() {
-        if styles.is_empty() {
-            div().child(text).into_any_element()
-        } else {
-            StyledText::new(text)
-                .with_highlights(styles.iter().cloned())
-                .into_any_element()
-        }
-    } else {
-        StyledText::new(text)
-            .with_highlights(crate::ui::highlight::overlay(styles, &marks))
-            .into_any_element()
-    };
+    let spot = Spot::SearchLine { row: index };
+    let follow = armed.then(|| Armed {
+        id: ("search-preview-word", index).into(),
+        spot,
+        hovered: hovered_word(hovered, spot),
+        entity,
+    });
+    let content = code_line(text, styles, &marks, follow);
+    let leaving = entity.clone();
     h_flex()
+        .id(("search-preview-line", index))
         .h(line_height)
         .items_center()
         .whitespace_nowrap()
+        // The pointer is on **this** line: what is underlined elsewhere is not
+        // under it any more — the line numbers included, where no text would
+        // ever have said so.
+        .on_mouse_move(move |_, _, cx| {
+            leaving.update(cx, |this, cx| this.leave_row(spot, cx));
+        })
         .when(marked, |el| el.bg(look.accent.opacity(0.35)))
         .child(
             div()

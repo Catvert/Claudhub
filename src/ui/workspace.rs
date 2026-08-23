@@ -325,6 +325,20 @@ pub fn install_default_layout(
     if workspace == Workspace::Multiplexer {
         return;
     }
+    // **The three docks go first, whatever they hold.** `set_dock` keeps the
+    // size and open state of the dock it refills, and a dock the default layout
+    // does not name is not touched at all: a left column dragged to a sliver and
+    // then collapsed came back collapsed and a sliver, and a right or bottom
+    // dock one had opened by hand kept its width — the reset repaired the
+    // centre and left the rest as it was. Removed, they are rebuilt below with
+    // a fresh `Dock`: open, at the default size.
+    for placement in [
+        DockPlacement::Left,
+        DockPlacement::Right,
+        DockPlacement::Bottom,
+    ] {
+        area.remove_dock(placement, window, cx);
+    }
     use gpui_component::dock::panel_handle;
     macro_rules! panel {
         ($name:ident) => {

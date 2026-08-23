@@ -685,6 +685,7 @@ use gpui_component::{
 use crate::git::DiffRange;
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
+use crate::ui::follow::{followable, Armed, Spot};
 use crate::ui::icons::icon;
 use crate::ui::theme::DiffColors;
 
@@ -765,43 +766,6 @@ impl ClaudhubApp {
 
     pub(super) fn end_diff_drag(&mut self) {
         self.diff_dragging = false;
-    }
-
-    /// The pointer has moved onto a word of a diff line: underline that one.
-    ///
-    /// `None` for the word means the pointer is on the same text but between
-    /// two of them — a space, a bracket — which is a reason to take the
-    /// underline away, not to leave the last one standing.
-    pub(super) fn hover_diff_word(
-        &mut self,
-        spot: WordSpot,
-        word: Option<std::ops::Range<usize>>,
-        cx: &mut Context<Self>,
-    ) {
-        let next = word.map(|word| (spot, word));
-        if self.diff_hover != next {
-            self.diff_hover = next;
-            cx.notify();
-        }
-    }
-
-    /// The pointer is over an entry: whatever is underlined elsewhere is not
-    /// under it any more.
-    ///
-    /// **Not the entry's own words**: those are a child of it, and a child is
-    /// dispatched before its ancestor, so this runs *after* the text has said
-    /// what it has. Without it a word stayed underlined once the pointer moved
-    /// off the text and onto the line numbers, where nothing would ever have
-    /// told it otherwise.
-    pub(super) fn leave_diff_row(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self
-            .diff_hover
-            .as_ref()
-            .is_some_and(|(spot, _)| spot.row != index)
-        {
-            self.diff_hover = None;
-            cx.notify();
-        }
     }
 
     /// Switches between one column and two.
@@ -1365,9 +1329,9 @@ impl ClaudhubApp {
         // only in how the height is reserved, not in what they paint.
         // Read once for the frame: `on_modifiers_changed` on the root is what
         // asks for a new one when it flips, so this is never a frame behind for
-        // long. See `ClaudhubApp::diff_armed`.
-        let armed = self.diff_armed;
-        let hovered = self.diff_hover.clone();
+        // long. See `ClaudhubApp::follow_armed`.
+        let armed = self.follow_armed;
+        let hovered = self.follow_hover.clone();
         let build = move |ix: usize, cx: &mut gpui::App| {
             let selected = selection.is_some_and(|(a, b)| ix >= a && ix <= b);
             let style = RowStyle {
@@ -1973,20 +1937,20 @@ pub struct RowStyle {
     /// The modifier that makes a symbol clickable is held down.
     ///
     /// Per frame and not per row, but it travels with the rest: it decides what
-    /// a row paints, exactly as the selection does. See `followable`.
+    /// a row paints, exactly as the selection does. See `ui::follow`.
     pub armed: bool,
     /// The word the pointer is over, and which text it belongs to.
     ///
     /// One per frame, at most: the pointer is in one place. Every line is
     /// handed it and only the one it names underlines anything.
-    pub hovered: Option<(WordSpot, std::ops::Range<usize>)>,
+    pub hovered: Option<(Spot, std::ops::Range<usize>)>,
 }
 
 impl RowStyle {
     /// The word to underline in one text, if the pointer is in that one.
     fn hovered_word(&self, row: usize, side: u8, segment: usize) -> Option<std::ops::Range<usize>> {
         let (spot, word) = self.hovered.as_ref()?;
-        (spot.row == row && spot.side == side && spot.segment == segment).then(|| word.clone())
+        (*spot == Spot::Diff { row, side, segment }).then(|| word.clone())
     }
 
     /// The rule that says which hunk one is reading.
@@ -2035,13 +1999,9 @@ fn render_row(
                 fg,
                 &search.marks(hunk, line),
                 None,
-                style.armed.then(|| Follow {
+                style.armed.then(|| Armed {
                     id: ("diff-word", index).into(),
-                    spot: WordSpot {
-                        row: index,
-                        side: 0,
-                        segment: 0,
-                    },
+                    spot: Spot::diff_row(index),
                     hovered: style.hovered_word(index, 0, 0),
                     entity,
                 }),
@@ -2186,33 +2146,6 @@ fn line_colors(
 /// Tabs are rendered as they are by the font: replacing them here would keep the
 /// alignment but shift the highlighting ranges, which are computed on the
 /// original text.
-/// Which line's text a word belongs to.
-///
-/// The entry alone would not do: in two columns an entry has two texts, and a
-/// wrapped one has a text per visible line. It is what says whether the word
-/// the pointer is over is *this* element's — and the underline follows from
-/// that.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct WordSpot {
-    pub row: usize,
-    pub side: u8,
-    pub segment: usize,
-}
-
-/// What a line needs to make its symbols followable.
-///
-/// Built only while the modifier is held: `None` is the state of every line
-/// almost all the time, and it costs exactly what it did before.
-struct Follow<'a> {
-    id: gpui::ElementId,
-    spot: WordSpot,
-    /// The word the pointer is over, in this text's own bytes — the one to
-    /// underline. It comes from the frame before, which is what a hover always
-    /// does.
-    hovered: Option<std::ops::Range<usize>>,
-    entity: &'a Entity<ClaudhubApp>,
-}
-
 #[allow(clippy::too_many_arguments)]
 fn line_content(
     diff: &Rc<Rendered>,
@@ -2227,7 +2160,7 @@ fn line_content(
     // `follow`: what makes the words clickable. `None` while nobody holds the
     // modifier, which is all the time: no ranges are computed, and the text is
     // the plain element it has always been.
-    follow: Option<Follow>,
+    follow: Option<Armed>,
 ) -> gpui::AnyElement {
     let Some(source) = diff.file.hunks.get(hunk).and_then(|h| h.lines.get(line)) else {
         return div().into_any_element();
@@ -2289,48 +2222,6 @@ fn line_content(
     div()
         .when_some(fg, |el, fg| el.text_color(fg))
         .child(content)
-        .into_any_element()
-}
-
-/// A line whose symbols can be followed: `Ctrl`+click on one looks it up.
-///
-/// **`InteractiveText` and not arithmetic on the pointer's x.** The column of a
-/// click could be divided out of a fixed-pitch font, and it would be wrong the
-/// day a glyph falls back to another face, or the gutter gains a pixel. This
-/// asks the shaped line itself which character was hit, which is the same
-/// question the editor answers, answered by the same code.
-///
-/// **The modifier is read again at the click.** The ranges are only installed
-/// while it is held — that is what puts the hand cursor on a word and nothing
-/// else — but a frame can be a modifier behind, and a plain click that selects
-/// a line must never jump.
-fn followable(follow: Follow, text: SharedString, styled: StyledText) -> gpui::AnyElement {
-    let ranges = crate::ui::search::word_ranges(&text);
-    let (clicked, hovered) = (ranges.clone(), ranges.clone());
-    let (for_click, for_hover) = (follow.entity.clone(), follow.entity.clone());
-    let spot = follow.spot;
-    gpui::InteractiveText::new(follow.id, styled)
-        .on_click(ranges, move |index, window, cx| {
-            if !window.modifiers().secondary() {
-                return;
-            }
-            let Some(range) = clicked.get(index) else {
-                return;
-            };
-            let symbol = text[range.clone()].to_string();
-            for_click.update(cx, |this, cx| {
-                this.follow_diff_symbol(&symbol, window, cx);
-            });
-        })
-        // **The character, not the word**: what comes back is where the pointer
-        // is, and the word around it is ours to find. It only fires when that
-        // character changes, so this costs a frame per character crossed and
-        // nothing while the hand is still.
-        .on_hover(move |index, _event, _window, cx| {
-            let word =
-                index.and_then(|at| hovered.iter().find(|range| range.contains(&at)).cloned());
-            for_hover.update(cx, |this, cx| this.hover_diff_word(spot, word, cx));
-        })
         .into_any_element()
 }
 
@@ -2492,9 +2383,9 @@ fn half(
     // announced to the list.
     let wrapped = cols > 0;
     let follow = |segment: usize| {
-        style.armed.then(|| Follow {
+        style.armed.then(|| Armed {
             id: ("diff-word", index).into(),
-            spot: WordSpot {
+            spot: Spot::Diff {
                 row: index,
                 side: side as u8,
                 segment,
@@ -2649,7 +2540,7 @@ fn drag(
         // The pointer is on **this** entry, so a word underlined on another one
         // is no longer under it. The words of this entry have already had their
         // say: a text is a child of its row, and a child is dispatched first.
-        this.leave_diff_row(index, cx);
+        this.leave_row(Spot::diff_row(index), cx);
         if event.pressed_button != Some(gpui::MouseButton::Left) {
             this.end_diff_drag();
             return;

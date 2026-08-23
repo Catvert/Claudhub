@@ -11,6 +11,13 @@ use crate::plugin::host::{Compiler, Effect, Host, Request, Shared};
 use crate::plugin::manifest::Manifest;
 use crate::plugin::view::Node;
 
+/// How long a call runs before the window says it is running.
+///
+/// Long enough that a gesture with no round trip in it never shows anything,
+/// short enough that a fetch says so before one wonders whether the click
+/// landed. See `Plugin::working`.
+pub const SHOW_AFTER: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub struct Plugin {
     pub manifest: Manifest,
     shared: Arc<Shared>,
@@ -37,6 +44,9 @@ pub struct Plugin {
     trees: HashMap<String, Rc<Node>>,
     /// A gesture has gone out and not come back.
     pub busy: bool,
+    /// When it went out. What tells a round trip worth a spinner from one that
+    /// is over before the eye catches it — see `Plugin::working`.
+    since: Option<std::time::Instant>,
     /// The panel it went out from, when a gesture is what sent it.
     ///
     /// `None` for a first load, which nobody asked for from anywhere. What it
@@ -65,6 +75,7 @@ impl Plugin {
             state: None,
             trees: HashMap::new(),
             busy: false,
+            since: None,
             from: None,
         };
         plugin.compile();
@@ -159,12 +170,41 @@ impl Plugin {
     /// `None` a first load.
     pub fn start(&mut self, from: Option<&'static str>) {
         self.busy = true;
+        self.since = Some(std::time::Instant::now());
         self.from = from;
     }
 
     fn settled(&mut self) {
         self.busy = false;
+        self.since = None;
         self.from = None;
+    }
+
+    /// Is there something out **long enough to say so**.
+    ///
+    /// Not `busy`, and the difference is a grace period: a gesture that changes
+    /// no state — copying an identifier, opening a browser — comes back in a
+    /// frame or two, and saying it is running blanks the panels one is reading
+    /// for the length of a blink. What that reads as is a flicker on every
+    /// click, which is worse than the second of silence it was meant to
+    /// explain. A call that really is a round trip crosses the threshold and
+    /// says so, as it always did.
+    ///
+    /// `busy` stays what it is — the guard that keeps a first load from being
+    /// asked for twice — and this is only ever what is **painted**.
+    pub fn working(&self) -> bool {
+        self.busy
+            && self
+                .since
+                .is_some_and(|since| since.elapsed() >= SHOW_AFTER)
+    }
+
+    /// Pretends the grace period has gone by, for a test that cannot wait.
+    #[cfg(test)]
+    fn aged(&mut self) {
+        self.since = self
+            .since
+            .map(|since| since.checked_sub(SHOW_AFTER).unwrap_or(since));
     }
 
     /// Does this panel show a spinner where its tree was.
@@ -177,7 +217,7 @@ impl Plugin {
     /// and blanking it takes away the context of one's own gesture. A first
     /// load has no exception to make, which is right — nothing is known yet.
     pub fn waiting_in(&self, panel: &str) -> bool {
-        self.busy && self.from != Some(panel)
+        self.working() && self.from != Some(panel)
     }
 
     /// What a panel last painted. An empty column while nothing has run yet.
@@ -378,8 +418,16 @@ mod tests {
         assert!(!plugin.waiting_in(list));
         assert!(!plugin.waiting_in(detail));
 
-        // A first load: nothing is known, so both are blank.
+        // A first load: nothing is known, so both are blank — **once the
+        // grace period is over**. Before it, a gesture that comes back in a
+        // frame has blanked nothing at all.
         plugin.start(None);
+        assert!(
+            !plugin.waiting_in(list),
+            "the grace period holds the spinner"
+        );
+        assert!(!plugin.waiting_in(detail));
+        plugin.aged();
         assert!(plugin.waiting_in(list));
         assert!(plugin.waiting_in(detail));
 
@@ -393,6 +441,7 @@ mod tests {
         // A gesture made in the list: the list keeps its rows, the detail waits
         // for what the click asked for.
         plugin.start(Some(list));
+        plugin.aged();
         assert!(!plugin.waiting_in(list));
         assert!(plugin.waiting_in(detail));
 
