@@ -30,7 +30,16 @@ pub struct Rendered {
     /// no comparison to the highlighting's.
     pub split: Vec<SplitRow>,
     pub highlights: DiffHighlights,
-    pub patches: Vec<String>,
+    /// The file this diff is of, as the patch that stages a hunk names it.
+    pub path: std::path::PathBuf,
+    /// Every line's text, ready to hand to gpui.
+    ///
+    /// A `SharedString` is an `Arc`: the render hands one out for every visible
+    /// line of every frame, and building it from the `String` copied the line
+    /// each time. Indexed by hunk, then by line.
+    pub texts: Vec<Vec<SharedString>>,
+    /// The `@@ … @@` headers, for the same reason.
+    pub headers: Vec<SharedString>,
     pub gutter_digits: usize,
     /// The index of the widest row and its length in characters.
     ///
@@ -49,24 +58,78 @@ pub struct Rendered {
     /// produces one per frame — and rewalking the file's text every time would
     /// cost what virtualisation saves.
     pub row_chars: Vec<usize>,
+    /// The heights `v_virtual_list` walks in wrapped mode, kept between frames.
+    ///
+    /// They depend on the column count and the line height and on nothing else,
+    /// a `Rendered` never changing again: the key is those two, and a resize or
+    /// a zoom is what rebuilds them — not every frame.
+    wrap_sizes: std::cell::RefCell<Option<WrapSizes>>,
 }
+
+/// The wrapped list's sizes, and the two things they depend on.
+type WrapSizes = (usize, Pixels, Rc<Vec<gpui::Size<Pixels>>>);
 
 impl Rendered {
     pub fn new(path: &Path, file: FileDiff, theme: &HighlightTheme) -> Self {
         let rows = rows(&file);
-        let (longest_row, longest_chars) = longest(&file, &rows);
-        let row_chars = rows.iter().map(|row| row_width(&file, *row)).collect();
+        // The widths first, the widest read off them: two sweeps of the file's
+        // text where one does.
+        let row_chars: Vec<usize> = rows.iter().map(|row| row_width(&file, *row)).collect();
+        let (longest_row, longest_chars) = longest(&row_chars);
         Self {
             row_chars,
             highlights: DiffHighlights::compute(path, &file, theme),
-            patches: hunk_patches(path, &file),
+            path: path.to_path_buf(),
+            texts: file
+                .hunks
+                .iter()
+                .map(|hunk| {
+                    hunk.lines
+                        .iter()
+                        .map(|line| SharedString::from(line.text.clone()))
+                        .collect()
+                })
+                .collect(),
+            headers: file
+                .hunks
+                .iter()
+                .map(|hunk| SharedString::from(hunk.header.clone()))
+                .collect(),
             gutter_digits: gutter_digits(&file),
             longest_row,
             longest_chars,
             split: split_rows(&file, &rows),
+            wrap_sizes: std::cell::RefCell::new(None),
             rows,
             file,
         }
+    }
+
+    /// The sizes of the wrapped two-column list, from the cache.
+    ///
+    /// `v_virtual_list` wants a vector as long as the list, and building it on
+    /// every frame walked every entry of the file — the very sweep
+    /// virtualisation exists to avoid.
+    fn wrap_sizes(&self, cols: usize, line_height: Pixels) -> Rc<Vec<gpui::Size<Pixels>>> {
+        let mut slot = self.wrap_sizes.borrow_mut();
+        if let Some((had_cols, had_height, sizes)) = slot.as_ref() {
+            if *had_cols == cols && *had_height == line_height {
+                return sizes.clone();
+            }
+        }
+        let sizes = Rc::new(
+            split_heights(self, cols)
+                .into_iter()
+                .map(|lines| gpui::size(px(0.), line_height * lines as f32))
+                .collect::<Vec<_>>(),
+        );
+        *slot = Some((cols, line_height, sizes.clone()));
+        sizes
+    }
+
+    /// A line's text as gpui takes it: an `Arc` clone, not a copy.
+    fn line_text(&self, hunk: usize, line: usize) -> Option<&SharedString> {
+        self.texts.get(hunk)?.get(line)
     }
 
     /// The text of a range of lines, ready to paste.
@@ -245,10 +308,9 @@ impl Rendered {
 /// Counted in characters and not in bytes: at fixed pitch, it is the number of
 /// characters that gives the width, and an accent takes two bytes for a single
 /// column.
-fn longest(file: &FileDiff, rows: &[Row]) -> (usize, usize) {
+fn longest(row_chars: &[usize]) -> (usize, usize) {
     let mut best = (0usize, 0usize);
-    for (index, row) in rows.iter().enumerate() {
-        let width = row_width(file, *row);
+    for (index, width) in row_chars.iter().copied().enumerate() {
         if width > best.1 {
             best = (index, width);
         }
@@ -304,23 +366,29 @@ pub fn split_heights(diff: &Rendered, cols: usize) -> Vec<usize> {
         .collect()
 }
 
-/// The bytes of a slice of columns.
+/// Where a line wraps, in bytes: one offset per segment, plus the end.
 ///
-/// In characters and not in bytes: an accented line would otherwise wrap one
-/// column too early, and in the middle of a character.
-fn char_span(text: &str, from: usize, to: usize) -> std::ops::Range<usize> {
-    let mut start = text.len();
-    let mut end = text.len();
-    for (count, (offset, _)) in text.char_indices().enumerate() {
-        if count == from {
-            start = offset;
-        }
-        if count == to {
-            end = offset;
-            break;
+/// Counted in characters and cut in bytes: at fixed pitch it is characters that
+/// give the column, and an accent takes two bytes for one column. One sweep of
+/// the text for the whole line — taking the segments one by one restarted from
+/// the beginning each time, which made a long line quadratic in its own length.
+fn wrap_offsets(text: &str, cols: usize, segments: usize) -> Vec<usize> {
+    let mut out = Vec::with_capacity(segments + 1);
+    out.push(0);
+    if cols > 0 {
+        for (count, (offset, _)) in text.char_indices().enumerate() {
+            if count > 0 && count % cols == 0 {
+                out.push(offset);
+            }
         }
     }
-    start.min(end)..end
+    // A segment past the end of the text is empty, not missing: the half
+    // opposite may be taller, and it is the caller that decides how many lines
+    // the row has.
+    while out.len() <= segments {
+        out.push(text.len());
+    }
+    out
 }
 
 /// A slice's ranges, brought back to its start.
@@ -482,18 +550,6 @@ fn patch_sign(kind: DiffLineKind) -> &'static str {
         DiffLineKind::Context => " ",
         DiffLineKind::NoNewline => "",
     }
-}
-
-/// The staging patches, one per hunk.
-///
-/// They are built once per displayed diff rather than on click: a click handler
-/// cannot borrow the review's state, which is already borrowed by the render
-/// that installed it.
-pub fn hunk_patches(path: &Path, diff: &FileDiff) -> Vec<String> {
-    diff.hunks
-        .iter()
-        .map(|hunk| crate::git::diff::hunk_patch(path, None, hunk, false))
-        .collect()
 }
 
 // — Rendering ————————————————————————————————————————————————————————
@@ -1229,13 +1285,7 @@ impl ClaudhubApp {
         // nothing left to scroll horizontally, which this list would not know
         // how to do.
         let list = if wrap {
-            let heights = split_heights(&diff, cols);
-            let sizes = std::rc::Rc::new(
-                heights
-                    .into_iter()
-                    .map(|lines| gpui::size(px(0.), line_height * lines as f32))
-                    .collect::<Vec<_>>(),
-            );
+            let sizes = diff.wrap_sizes(cols, line_height);
             crate::ui::scroll::vertical(
                 DIFF_SCROLL,
                 &self.diff_wrap_scroll,
@@ -1872,9 +1922,6 @@ fn render_row(
                 }),
             );
 
-            let for_drag = entity.clone();
-            let for_menu = entity.clone();
-            let entity = entity.clone();
             let row = h_flex()
                 .id(("line", index))
                 .h(style.line_height)
@@ -1887,13 +1934,6 @@ fn render_row(
                 // is useless.
                 .when_some(bg.filter(|_| !selected), |el, bg| el.bg(bg))
                 .when(selected, |el| el.bg(selection_bg))
-                .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
-                    select(&entity, index, event.modifiers.shift, window, cx);
-                })
-                .on_mouse_down(gpui::MouseButton::Right, move |_, window, cx| {
-                    aim(&for_menu, index, window, cx);
-                })
-                .on_mouse_move(move |event, _window, cx| drag(&for_drag, index, event, cx))
                 // The annotation marker is a rule in the margin, before the
                 // numbers: it has to be visible without moving a column, and the
                 // gutter is the only place horizontal scrolling does not take
@@ -1910,9 +1950,33 @@ fn render_row(
                         .child(sign(source.kind)),
                 )
                 .child(content);
-            style.hunk_rule(row).into_any_element()
+            style
+                .hunk_rule(with_row_gestures(row, index, entity))
+                .into_any_element()
         }
     }
+}
+
+/// The three gestures every entry of the list carries: the click that selects,
+/// the right click that aims the context menu, and the drag that extends the
+/// selection.
+///
+/// One function: the three were copied into each of the three kinds of row, and
+/// a row that forgets one is a row the selection stops at with nothing to say
+/// so.
+fn with_row_gestures<E: InteractiveElement>(
+    el: E,
+    index: usize,
+    entity: &Entity<ClaudhubApp>,
+) -> E {
+    let (for_click, for_menu, for_drag) = (entity.clone(), entity.clone(), entity.clone());
+    el.on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+        select(&for_click, index, event.modifiers.shift, window, cx);
+    })
+    .on_mouse_down(gpui::MouseButton::Right, move |_, window, cx| {
+        aim(&for_menu, index, window, cx);
+    })
+    .on_mouse_move(move |event, _window, cx| drag(&for_drag, index, event, cx))
 }
 
 /// The `@@ … @@` header, with its buttons. The same in both modes: it is about
@@ -1934,12 +1998,9 @@ fn render_header(
         style.line_height,
         style.stageable,
     );
-    let patch = diff.patches.get(hunk).cloned().unwrap_or_default();
-    let entity = entity.clone();
+    let header = diff.headers.get(hunk).cloned().unwrap_or_default();
     let for_copy = entity.clone();
-    let for_click = entity.clone();
-    let for_menu = entity.clone();
-    let for_drag = entity.clone();
+    let for_stage = entity.clone();
     let row = h_flex()
         .id(("hunk", index))
         .h(line_height)
@@ -1953,20 +2014,7 @@ fn render_header(
         } else {
             colors.hunk_bg
         })
-        .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
-            select(&for_click, index, event.modifiers.shift, window, cx);
-        })
-        .on_mouse_down(gpui::MouseButton::Right, move |_, window, cx| {
-            aim(&for_menu, index, window, cx);
-        })
-        .on_mouse_move(move |event, _window, cx| drag(&for_drag, index, event, cx))
-        .child(
-            div()
-                .text_color(cx.theme().muted_foreground)
-                .child(SharedString::from(
-                    diff.row_text(Row::Header { hunk }).to_string(),
-                )),
-        )
+        .child(div().text_color(cx.theme().muted_foreground).child(header))
         .child(
             Button::new(("copy-hunk", index))
                 .ghost()
@@ -1988,11 +2036,13 @@ fn render_header(
                     .icon(icon("plus"))
                     .tooltip(tr!("action-stage-hunk"))
                     .on_click(move |_, _window, cx| {
-                        entity.update(cx, |this, cx| this.apply_hunk(patch.clone(), cx));
+                        for_stage.update(cx, |this, cx| this.stage_hunk(hunk, cx));
                     }),
             )
         });
-    style.hunk_rule(row).into_any_element()
+    style
+        .hunk_rule(with_row_gestures(row, index, entity))
+        .into_any_element()
 }
 
 fn line_colors(
@@ -2045,8 +2095,10 @@ fn line_content(
     line: usize,
     fg: Option<gpui::Hsla>,
     marks: &[(std::ops::Range<usize>, gpui::Hsla)],
-    // `span`: the slice of columns to show, when the line is wrapped.
-    span: Option<(usize, usize)>,
+    // `span`: the slice of the text to show, in **bytes**, when the line is
+    // wrapped. Its ends are computed once per line by `wrap_offsets`, where
+    // taking them a column count at a time walked the text once per segment.
+    span: Option<std::ops::Range<usize>>,
     // `follow`: what makes the words clickable. `None` while nobody holds the
     // modifier, which is all the time: no ranges are computed, and the text is
     // the plain element it has always been.
@@ -2055,22 +2107,27 @@ fn line_content(
     let Some(source) = diff.file.hunks.get(hunk).and_then(|h| h.lines.get(line)) else {
         return div().into_any_element();
     };
+    // The whole line is borrowed — its text is an `Arc` clone and its runs stay
+    // where they are; only a wrapped segment owns anything.
+    let sliced;
     let (text, styles, marks) = match span {
         None => (
-            SharedString::from(source.text.clone()),
-            diff.highlights.line(hunk, line).to_vec(),
-            marks.to_vec(),
+            diff.line_text(hunk, line).cloned().unwrap_or_default(),
+            diff.highlights.line(hunk, line),
+            marks,
         ),
-        Some((from, to)) => {
-            let bytes = char_span(&source.text, from, to);
-            (
-                SharedString::from(source.text[bytes.clone()].to_string()),
+        Some(bytes) => {
+            sliced = (
                 slice_runs(diff.highlights.line(hunk, line), &bytes),
                 slice_runs(marks, &bytes),
+            );
+            (
+                SharedString::from(source.text[bytes].to_string()),
+                sliced.0.as_slice(),
+                sliced.1.as_slice(),
             )
         }
     };
-    let (styles, marks) = (styles.as_slice(), marks.as_slice());
     // Three layers, in the order they were decided: the grammar, the search
     // hits over it, and the underline of the word being pointed at. Each is
     // laid on the one below rather than replacing it — a hit in coloured code
@@ -2187,48 +2244,42 @@ fn render_split_row(
             .max()
             .unwrap_or(1)
     };
-    let for_drag = entity.clone();
-    let for_click = entity.clone();
-    let for_menu = entity.clone();
-    let row = h_flex()
-        .id(("pair", index))
-        .h(style.line_height * lines as f32)
-        .items_start()
-        .whitespace_nowrap()
-        .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
-            select(&for_click, index, event.modifiers.shift, window, cx);
-        })
-        .on_mouse_down(gpui::MouseButton::Right, move |_, window, cx| {
-            aim(&for_menu, index, window, cx);
-        })
-        .on_mouse_move(move |event, _window, cx| drag(&for_drag, index, event, cx))
-        .child(note_mark(style))
-        .child(half(
-            diff,
-            old,
-            Column::Old,
-            colors,
-            style,
-            column,
-            cols,
-            lines,
-            search,
-            index,
-            entity,
-        ))
-        .child(half(
-            diff,
-            new,
-            Column::New,
-            colors,
-            style,
-            column,
-            cols,
-            lines,
-            search,
-            index,
-            entity,
-        ));
+    let row = with_row_gestures(
+        h_flex()
+            .id(("pair", index))
+            .h(style.line_height * lines as f32)
+            .items_start()
+            .whitespace_nowrap(),
+        index,
+        entity,
+    )
+    .child(note_mark(style))
+    .child(half(
+        diff,
+        old,
+        Column::Old,
+        colors,
+        style,
+        column,
+        cols,
+        lines,
+        search,
+        index,
+        entity,
+    ))
+    .child(half(
+        diff,
+        new,
+        Column::New,
+        colors,
+        style,
+        column,
+        cols,
+        lines,
+        search,
+        index,
+        entity,
+    ));
     style.hunk_rule(row).into_any_element()
 }
 
@@ -2370,6 +2421,7 @@ fn half(
                 .and_then(|index| diff.row_chars.get(index).copied())
                 .unwrap_or(0);
             let own = wrapped_lines(chars, cols);
+            let bounds = wrap_offsets(&source.text, cols, own);
             el.child(
                 v_flex()
                     .flex_1()
@@ -2385,7 +2437,7 @@ fn half(
                                     line,
                                     fg,
                                     &marks,
-                                    Some((segment * cols, (segment + 1) * cols)),
+                                    Some(bounds[segment]..bounds[segment + 1]),
                                     follow(segment),
                                 ))
                             } else {
@@ -2808,17 +2860,26 @@ mod tests {
         );
     }
 
-    /// A slice counts **characters**: in bytes, an accented line would be cut
-    /// one column too early, and in the middle of a character — which panics.
+    /// A wrap counts **characters**: in bytes, an accented line would be cut one
+    /// column too early, and in the middle of a character — which panics.
     #[test]
-    fn a_slice_counts_characters_and_not_bytes() {
+    fn a_wrap_counts_characters_and_not_bytes() {
         let text = "éàü1234";
-        assert_eq!(char_span(text, 0, 3), 0..6);
-        assert_eq!(&text[char_span(text, 0, 3)], "éàü");
-        assert_eq!(&text[char_span(text, 3, 5)], "12");
-        // Past the end, the slice stops at the text.
-        assert_eq!(&text[char_span(text, 5, 99)], "34");
-        assert_eq!(char_span(text, 99, 120), text.len()..text.len());
+        let cuts = wrap_offsets(text, 3, 3);
+        assert_eq!(cuts, vec![0, 6, 9, 10]);
+        assert_eq!(&text[cuts[0]..cuts[1]], "éàü");
+        assert_eq!(&text[cuts[1]..cuts[2]], "123");
+        assert_eq!(&text[cuts[2]..cuts[3]], "4");
+
+        // A segment past the end of the text is empty, not out of bounds: the
+        // half opposite decides how many lines the row has.
+        let cuts = wrap_offsets(text, 3, 5);
+        assert_eq!(&text[cuts[3]..cuts[4]], "");
+        assert_eq!(cuts[5], text.len());
+
+        // Nothing to wrap: the whole line, in one piece.
+        assert_eq!(wrap_offsets(text, 0, 1), vec![0, text.len()]);
+        assert_eq!(wrap_offsets("", 3, 1), vec![0, 0]);
     }
 
     /// A slice's ranges stay sorted and disjoint, and start again from zero: it

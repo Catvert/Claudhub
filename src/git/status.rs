@@ -99,19 +99,30 @@ impl FileStatus {
     /// File name alone, for the left column; the directory is shown beside it,
     /// dimmed.
     pub fn file_name(&self) -> String {
-        self.path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.path.display().to_string())
+        file_name(&self.path)
     }
 
     pub fn directory(&self) -> String {
-        self.path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .map(|p| p.display().to_string())
-            .unwrap_or_default()
+        directory(&self.path)
     }
+}
+
+/// The name a list shows in its left column.
+///
+/// A free function: the review builds the same two columns for the ranges that
+/// come from `--numstat`, where there is no `FileStatus` at all.
+pub fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// The folder shown beside the name, empty at the root.
+pub fn directory(path: &Path) -> String {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.display().to_string())
+        .unwrap_or_default()
 }
 
 /// A checkout's full state at a given moment.

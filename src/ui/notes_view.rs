@@ -197,7 +197,10 @@ impl ClaudhubApp {
             // Editing a note reopens the question: it goes back to unsent,
             // otherwise the corrected version would never go out.
             Some(id) => {
-                if let Some(note) = state.notes.iter_mut().find(|note| note.id == id) {
+                if let Some(note) = std::rc::Rc::make_mut(&mut state.notes)
+                    .iter_mut()
+                    .find(|note| note.id == id)
+                {
                     note.body = body;
                     note.sent = false;
                 }
@@ -205,7 +208,7 @@ impl ClaudhubApp {
             None => {
                 let id = state.next_note;
                 state.next_note += 1;
-                state.notes.push(Note {
+                std::rc::Rc::make_mut(&mut state.notes).push(Note {
                     id,
                     range: draft.range,
                     path: draft.path,
@@ -229,7 +232,7 @@ impl ClaudhubApp {
             return;
         };
         if let Some(state) = self.review.get_mut(&worktree) {
-            state.notes.retain(|note| note.id != id);
+            std::rc::Rc::make_mut(&mut state.notes).retain(|note| note.id != id);
         }
         self.refresh_note_marks(&worktree);
         self.persist_review(&worktree, cx);
@@ -240,11 +243,11 @@ impl ClaudhubApp {
         let Some(worktree) = self.active.clone() else {
             return;
         };
-        if let Some(note) = self
-            .review
-            .get_mut(&worktree)
-            .and_then(|state| state.notes.iter_mut().find(|note| note.id == id))
-        {
+        if let Some(note) = self.review.get_mut(&worktree).and_then(|state| {
+            std::rc::Rc::make_mut(&mut state.notes)
+                .iter_mut()
+                .find(|note| note.id == id)
+        }) {
             note.done = done;
         }
         self.refresh_note_marks(&worktree);
@@ -413,6 +416,7 @@ impl ClaudhubApp {
         };
         if let Some(state) = self.review.get_mut(&worktree) {
             state.reviewed.clear();
+            state.rows_changed();
         }
         self.persist_review(&worktree, cx);
         cx.notify();
@@ -628,7 +632,10 @@ impl ClaudhubApp {
         let count = ids.len();
         self.deliver(worktree.clone(), text, window, cx);
         if let Some(state) = self.review.get_mut(&worktree) {
-            for note in state.notes.iter_mut().filter(|note| ids.contains(&note.id)) {
+            for note in std::rc::Rc::make_mut(&mut state.notes)
+                .iter_mut()
+                .filter(|note| ids.contains(&note.id))
+            {
                 note.sent = true;
             }
         }
@@ -881,10 +888,14 @@ impl ClaudhubApp {
             return div().into_any_element();
         };
         let drifted = state.drifted.clone();
+        // The list is held by an `Rc` clone, not copied: what is shown is read
+        // through it, and a note carries its remark, its excerpt and its path.
+        let notes = state.notes.clone();
+        let total = notes.len();
+        let pending = notes.iter().filter(|note| !note.done).count();
         // The search covers the remark, the quoted code and the path: the three
         // things a note is found by.
-        let notes: Vec<Note> = state
-            .notes
+        let shown: Vec<&Note> = notes
             .iter()
             .filter(|note| !only_open || !note.done)
             .filter(|note| {
@@ -892,10 +903,7 @@ impl ClaudhubApp {
                     || crate::ui::find::matches(&query, &note.excerpt)
                     || crate::ui::find::matches(&query, &note.path.to_string_lossy())
             })
-            .cloned()
             .collect();
-        let total = state.notes.len();
-        let pending = state.notes.iter().filter(|note| !note.done).count();
         let mono = cx.theme().mono_font_family.clone();
 
         let header = self
@@ -929,7 +937,7 @@ impl ClaudhubApp {
             return v_flex().w_full().child(header).into_any_element();
         }
 
-        if notes.is_empty() {
+        if shown.is_empty() {
             let message = if total == 0 {
                 tr!("note-empty")
             } else {
@@ -944,11 +952,11 @@ impl ClaudhubApp {
 
         // Grouped by file, in the order the notes were taken: a review is read
         // back in the order it was made.
-        let mut groups: Vec<(PathBuf, Vec<Note>)> = Vec::new();
-        for note in notes {
+        let mut groups: Vec<(&PathBuf, Vec<&Note>)> = Vec::new();
+        for note in shown {
             match groups.last_mut() {
-                Some((path, bucket)) if *path == note.path => bucket.push(note),
-                _ => groups.push((note.path.clone(), vec![note])),
+                Some((path, bucket)) if **path == note.path => bucket.push(note),
+                _ => groups.push((&note.path, vec![note])),
             }
         }
 
@@ -1017,12 +1025,10 @@ impl ClaudhubApp {
     /// file by file, or in the vault's Markdown. A review one wants to restart
     /// from scratch therefore took as many clicks as it has files.
     fn render_reviewed_section(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let state = self.active_review()?;
-        if state.reviewed.is_empty() {
+        let count = self.active_review()?.reviewed.len();
+        if count == 0 {
             return None;
         }
-        let mut reviewed = state.reviewed.clone();
-        reviewed.sort_by(|a, b| a.path.cmp(&b.path));
         let worktree = self.active.clone()?;
         let mono = cx.theme().mono_font_family.clone();
         let muted = cx.theme().muted_foreground;
@@ -1032,7 +1038,7 @@ impl ClaudhubApp {
                 "reviewed",
                 "check-check",
                 tr!("note-reviewed"),
-                SharedString::from(reviewed.len().to_string()),
+                SharedString::from(count.to_string()),
                 cx,
             )
             .child(
@@ -1048,8 +1054,11 @@ impl ClaudhubApp {
             return Some(v_flex().w_full().child(header));
         }
 
+        // Read in place and already sorted — see `ReviewState::reviewed`: the
+        // copy and the sort were paid on every frame.
+        let reviewed = &self.active_review()?.reviewed;
         let rows: Vec<_> = reviewed
-            .into_iter()
+            .iter()
             .enumerate()
             .map(|(index, item)| {
                 let (worktree, range, path) =
@@ -1208,7 +1217,7 @@ impl ClaudhubApp {
 
     fn render_note(
         &mut self,
-        note: Note,
+        note: &Note,
         drifted: &std::collections::HashSet<u64>,
         mono: SharedString,
         cx: &mut Context<Self>,
@@ -1328,12 +1337,15 @@ const EXCERPT_LINES: usize = 4;
 /// One line per element and not a single text: gpui does not break a text on its
 /// `\n`, and a six-line excerpt would show on one.
 fn excerpt_lines(excerpt: &str, limit: usize) -> Vec<SharedString> {
-    let mut lines: Vec<SharedString> = excerpt
-        .lines()
+    // One walk of the excerpt: asking for the total afterwards read it a second
+    // time, and it is read for every note the panel shows.
+    let mut source = excerpt.lines();
+    let mut lines: Vec<SharedString> = source
+        .by_ref()
         .take(limit)
         .map(|line| SharedString::from(line.to_string()))
         .collect();
-    if excerpt.lines().count() > limit {
+    if source.next().is_some() {
         lines.push(SharedString::new_static("…"));
     }
     lines
