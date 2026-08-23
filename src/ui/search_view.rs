@@ -14,6 +14,7 @@
 //! hides, where an arrow lands; here there is plumbing and painting.
 
 use std::collections::HashSet;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -57,6 +58,12 @@ pub struct SearchState {
     /// over results that answer the previous one would be wrong twice.
     pub sent: Query,
     pub results: Rc<Results>,
+    /// The displayed list, rebuilt when the results or the folds change and
+    /// never in a render: it was laid out again on every frame, and it is read
+    /// by the arrows and by the preview as well as by the list itself.
+    pub rows: Rc<Vec<Row>>,
+    /// Where the searched text falls in each line shown, found once on arrival.
+    pub marks: Rc<Marks>,
     /// The syntax colouring of the shown lines, computed once on arrival — the
     /// list's closure runs for every visible row of every frame and must not
     /// parse anything there.
@@ -87,8 +94,9 @@ pub struct SearchState {
     /// one the typing triggered: taking the caret out of the field one is
     /// typing in is the one thing an interactive search must not do.
     pub focus_on_answer: bool,
-    /// The files whose hits are hidden.
-    pub folded: HashSet<PathBuf>,
+    /// The files whose hits are hidden. Shared rather than cloned: the render
+    /// closure needs it for every visible row.
+    pub folded: Rc<HashSet<PathBuf>>,
     /// The selected row, as an index into the displayed list.
     ///
     /// An index and not a path: the list is only rebuilt by a fold, and a fold
@@ -118,6 +126,12 @@ pub struct Preview {
     pub lines: Rc<Vec<SharedString>>,
     /// Their syntax colouring, computed once for the same reason.
     pub highlights: Rc<DocumentHighlights>,
+    /// Where the searched text falls in each line, found once for the same
+    /// reason again.
+    pub marks: Rc<Vec<Vec<Range<usize>>>>,
+    /// The longest line, which is what the horizontal scroll is sized on.
+    /// Measured on arrival: the file does not change under the preview.
+    pub widest: usize,
     /// The line the selected hit is on, one-based. What the view scrolls to and
     /// paints.
     pub line: u32,
@@ -335,6 +349,7 @@ impl ClaudhubApp {
         let query = self.search_query(cx);
         if query.is_empty() {
             self.search.results = Rc::new(Results::default());
+            self.relist_search();
             self.search.error = None;
             self.search.running = false;
             self.search.selected = None;
@@ -373,17 +388,29 @@ impl ClaudhubApp {
         // jump that asked for it is no longer waiting.
         let followed = self.search.definition.take() == Some(request);
         self.search.running = false;
-        self.search.folded.clear();
+        self.search.folded = Rc::new(HashSet::new());
         match result {
             Ok(results) => {
                 let theme = cx.theme().highlight_theme.clone();
                 self.search.hits = Rc::new(HitHighlights::compute(&results, &theme));
+                self.search.marks = Rc::new(Marks::compute(&results, &self.search.sent));
                 self.search.results = Rc::new(results);
+                self.relist_search();
                 self.search.error = None;
+                // The preview outlives a search — the same file often answers
+                // the next question too — so what it underlines is found again
+                // here: the marks are made on arrival, and this is the one
+                // moment the query changes under a file already read.
+                if let Some(lines) = self.search.preview.as_ref().map(|p| p.lines.clone()) {
+                    let marks = Rc::new(line_marks(&lines, &self.search.sent));
+                    if let Some(preview) = self.search.preview.as_mut() {
+                        preview.marks = marks;
+                    }
+                }
                 // The first hit is selected, and its file previewed: a list one
                 // has to click before seeing anything is a list one clicks
                 // through.
-                let rows = search::rows(&self.search.results, &self.search.folded);
+                let rows = self.search.rows.clone();
                 self.search.selected = search::first_hit(&rows);
                 self.sync_search_preview(window, cx);
                 // **A search one asked for hands the list the focus.** The
@@ -407,12 +434,23 @@ impl ClaudhubApp {
                 }
                 self.search.results = Rc::new(Results::default());
                 self.search.hits = Rc::new(HitHighlights::default());
+                self.search.marks = Rc::new(Marks::default());
+                self.relist_search();
                 self.search.selected = None;
                 self.search.preview = None;
                 self.search.error = Some(message);
             }
         }
         cx.notify();
+    }
+
+    /// Lays the displayed list out again.
+    ///
+    /// Called wherever the results or the folds change, and nowhere else: the
+    /// list was rebuilt in the render closure, by the arrows and by the preview
+    /// — four times over for something a gesture changes.
+    fn relist_search(&mut self) {
+        self.search.rows = Rc::new(search::rows(&self.search.results, &self.search.folded));
     }
 
     /// Selects a row and shows what it points at.
@@ -438,7 +476,7 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let rows = search::rows(&self.search.results, &self.search.folded);
+        let rows = self.search.rows.clone();
         let Some(next) = search::step(&rows, self.search.selected, delta) else {
             return;
         };
@@ -463,11 +501,16 @@ impl ClaudhubApp {
         let Some(path) = self.search.results.files.get(file).map(|f| f.path.clone()) else {
             return;
         };
-        if !self.search.folded.remove(&path) {
-            self.search.folded.insert(path);
+        let folded = Rc::make_mut(&mut self.search.folded);
+        if !folded.remove(&path) {
+            folded.insert(path);
         }
-        let rows = search::rows(&self.search.results, &self.search.folded);
-        self.search.selected = rows.iter().position(|row| row == &Row::File { file });
+        self.relist_search();
+        self.search.selected = self
+            .search
+            .rows
+            .iter()
+            .position(|row| row == &Row::File { file });
         self.sync_search_preview(window, cx);
         cx.notify();
     }
@@ -602,8 +645,7 @@ impl ClaudhubApp {
     }
 
     fn selected_search_row(&self) -> Option<Row> {
-        let rows = search::rows(&self.search.results, &self.search.folded);
-        rows.get(self.search.selected?).copied()
+        self.search.rows.get(self.search.selected?).copied()
     }
 
     /// Asks for the file the cursor points at, unless it is already there.
@@ -682,7 +724,7 @@ impl ClaudhubApp {
             .filter(|row| search::path_of(&self.search.results, *row) == Some(path.as_path()))
             .map(|row| search::line_of(&self.search.results, row))
             .unwrap_or(line);
-        let (lines, highlights, error) = match content {
+        let (lines, highlights, error): (Vec<SharedString>, _, _) = match content {
             Ok(content) => {
                 let theme = cx.theme().highlight_theme.clone();
                 let highlights = DocumentHighlights::compute(&path, &content.text, &theme);
@@ -698,11 +740,15 @@ impl ClaudhubApp {
             }
             Err(message) => (Vec::new(), DocumentHighlights::default(), Some(message)),
         };
+        let marks = line_marks(&lines, &self.search.sent);
+        let widest = widest_line(&lines);
         self.search.preview = Some(Preview {
             worktree,
             path,
             lines: Rc::new(lines),
             highlights: Rc::new(highlights),
+            marks: Rc::new(marks),
+            widest,
             line,
             error,
         });
@@ -875,10 +921,10 @@ impl ClaudhubApp {
     ) -> impl IntoElement {
         let results = self.search.results.clone();
         let hits = self.search.hits.clone();
-        let rows = Rc::new(search::rows(&results, &self.search.folded));
-        let folded = Rc::new(self.search.folded.clone());
+        let rows = self.search.rows.clone();
+        let marks = self.search.marks.clone();
+        let folded = self.search.folded.clone();
         let selected = self.search.selected;
-        let query = self.search.sent.clone();
         let look = Look::of(cx);
         let entity = cx.entity();
         let count = rows.len();
@@ -892,9 +938,9 @@ impl ClaudhubApp {
                 row,
                 &results,
                 &hits,
+                &marks,
                 &folded,
                 selected == Some(index),
-                &query,
                 &look,
                 &entity,
                 cx,
@@ -977,13 +1023,13 @@ impl ClaudhubApp {
         let look = Look::of(cx);
         let lines = preview.lines.clone();
         let highlights = preview.highlights.clone();
+        let marks = preview.marks.clone();
+        let widest = preview.widest;
         let marked = preview.line.saturating_sub(1) as usize;
-        let query = self.search.sent.clone();
         let digits = digits_of(lines.len());
         let gutter = font_size * 0.62 * digits as f32 + px(8.);
         let count = lines.len();
         let handle = self.search_preview_scroll.clone();
-        let widest = widest_line(&lines);
         let body = self.scrolled(
             PREVIEW_SCROLL,
             &handle.clone(),
@@ -998,8 +1044,8 @@ impl ClaudhubApp {
                             index,
                             &lines,
                             &highlights,
+                            &marks,
                             index == marked,
-                            &query,
                             gutter,
                             line_height,
                             &look,
@@ -1072,9 +1118,9 @@ fn render_row(
     row: Row,
     results: &Rc<Results>,
     hits: &Rc<HitHighlights>,
+    marks: &Rc<Marks>,
     folded: &Rc<HashSet<PathBuf>>,
     selected: bool,
-    query: &Query,
     look: &Look,
     entity: &Entity<ClaudhubApp>,
     cx: &App,
@@ -1136,15 +1182,13 @@ fn render_row(
             // otherwise show nothing but its indentation in a narrow column.
             let text = line.text.trim_start();
             // The occurrences are picked out over the syntax colouring, as
-            // the preview does it and as `Ctrl+F` does it in the diff.
-            let marks: Vec<_> = if query.regex {
-                Vec::new()
-            } else {
-                crate::ui::find::find_all(&query.text, text)
-                    .into_iter()
-                    .map(|range| (range, look.hit))
-                    .collect()
-            };
+            // the preview does it and as `Ctrl+F` does it in the diff. Found on
+            // arrival: the colour is the only half of this a frame decides.
+            let marks: Vec<_> = marks
+                .line(file, hit)
+                .iter()
+                .map(|range| (range.clone(), look.hit))
+                .collect();
             let styles = hits.line(file, hit);
             let shown = SharedString::from(text.to_string());
             h_flex()
@@ -1205,8 +1249,8 @@ fn render_preview_line(
     index: usize,
     lines: &Rc<Vec<SharedString>>,
     highlights: &Rc<DocumentHighlights>,
+    marks: &Rc<Vec<Vec<Range<usize>>>>,
     marked: bool,
-    query: &Query,
     gutter: Pixels,
     line_height: Pixels,
     look: &Look,
@@ -1216,14 +1260,13 @@ fn render_preview_line(
         return div().into_any_element();
     };
     let styles = highlights.line(index);
-    let marks: Vec<_> = if query.regex {
-        Vec::new()
-    } else {
-        crate::ui::find::find_all(&query.text, &text)
-            .into_iter()
-            .map(|range| (range, look.hit))
-            .collect()
-    };
+    let marks: Vec<_> = marks
+        .get(index)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .map(|range| (range.clone(), look.hit))
+        .collect();
     let content = if marks.is_empty() {
         if styles.is_empty() {
             div().child(text).into_any_element()
@@ -1257,6 +1300,61 @@ fn render_preview_line(
 
 fn digits_of(lines: usize) -> usize {
     lines.max(1).to_string().len()
+}
+/// Where the searched text falls in the lines a result list shows, `[file][hit]`.
+///
+/// The occurrences were found again for every visible row of every frame — a
+/// scan of a line per row per frame, for a list whose text and whose query both
+/// stop changing the moment it arrives. Computed on arrival, exactly like the
+/// syntax colouring beside it, and for the same reason.
+///
+/// **Empty for a regular expression.** `find::find_all` looks for a literal;
+/// picking out a pattern's matches is a question git answered and did not
+/// report, and guessing at it would underline the wrong words.
+#[derive(Default)]
+pub struct Marks {
+    files: Vec<Vec<Vec<Range<usize>>>>,
+}
+
+impl Marks {
+    /// A hit's occurrences, as byte offsets into the **trimmed** text — which is
+    /// what the row shows, its leading indentation dropped.
+    pub fn line(&self, file: usize, hit: usize) -> &[Range<usize>] {
+        self.files
+            .get(file)
+            .and_then(|file| file.get(hit))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn compute(results: &Results, query: &Query) -> Self {
+        if query.regex {
+            return Self::default();
+        }
+        Self {
+            files: results
+                .files
+                .iter()
+                .map(|file| {
+                    file.hits
+                        .iter()
+                        .map(|hit| crate::ui::find::find_all(&query.text, hit.text.trim_start()))
+                        .collect()
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The same, for the file beside the list: one entry per line.
+fn line_marks(lines: &[SharedString], query: &Query) -> Vec<Vec<Range<usize>>> {
+    if query.regex {
+        return Vec::new();
+    }
+    lines
+        .iter()
+        .map(|line| crate::ui::find::find_all(&query.text, line))
+        .collect()
 }
 
 /// The longest line, which is what the horizontal scroll is sized on.
