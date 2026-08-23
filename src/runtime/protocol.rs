@@ -559,6 +559,11 @@ pub enum Cmd {
     WtCreate {
         main: PathBuf,
         slug: String,
+        /// An existing branch to check out — local, or `origin/…`, which git
+        /// turns into a local one of the short name — or a name imposed on the
+        /// new branch. `None`: a new branch named by the project's template.
+        branch: Option<String>,
+        /// Where a *new* branch starts. `None`: the main repository's HEAD.
         from: Option<String>,
         answers: std::collections::BTreeMap<String, String>,
     },
@@ -945,6 +950,17 @@ pub enum Evt {
     },
     WtStates {
         states: Vec<(WorktreeId, WtWorktree)>,
+    },
+    /// One line of a `wt` operation, as it is said — `new`, `up`, `down` and
+    /// `rm` run the project's hooks, which are measured in minutes, and the
+    /// `Done` or `Failed` that closes the operation arrives only at the end.
+    /// `main` and `slug` say which operation: two may be in flight.
+    WtProgress {
+        main: PathBuf,
+        slug: String,
+        op: crate::wt::Op,
+        line: String,
+        warning: bool,
     },
     /// What a plugin's capability answered — the body, or one sentence of why
     /// not. It goes back to the request that is awaiting it, by `call`.
