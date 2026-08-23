@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gpui::{div, prelude::*, px, App, Context, Entity, SharedString, Window};
+use gpui::{div, prelude::*, px, App, Context, Entity, Render, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
@@ -325,6 +325,45 @@ fn wt_links_rows(links: Option<Option<Vec<wt::Endpoint>>>, cx: &App) -> gpui::An
                 .on_click(move |_, _window, cx| cx.open_url(&url))
         }))
         .into_any_element()
+}
+
+/// The resolved links of one worktree, as the "open" menu shows them.
+///
+/// An entity of its own for one reason: it is painted inside a popover, whose
+/// content is built from `ClaudhubApp::render`, and what has to read the
+/// application must be a child whose `render` runs after the parent's. The
+/// request for the links is **deferred** rather than sent from the constructor,
+/// which runs in the same place.
+pub(super) struct WtLinksMenu {
+    app: gpui::WeakEntity<ClaudhubApp>,
+    worktree: PathBuf,
+}
+
+impl WtLinksMenu {
+    fn new(
+        app: gpui::WeakEntity<ClaudhubApp>,
+        main: PathBuf,
+        worktree: PathBuf,
+        slug: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let requester = app.clone();
+        let target = worktree.clone();
+        cx.defer(move |cx| {
+            let _ = requester.update(cx, |app, _| app.request_wt_links(main, target, slug));
+        });
+        Self { app, worktree }
+    }
+}
+
+impl Render for WtLinksMenu {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let links = self
+            .app
+            .upgrade()
+            .and_then(|app| app.read(cx).wt_links.get(&self.worktree).cloned());
+        wt_links_rows(links, cx)
+    }
 }
 
 impl ClaudhubApp {
@@ -2268,25 +2307,32 @@ impl ClaudhubApp {
                     .into_any_element(),
             );
         };
-        let app = cx.entity();
+        let app = cx.entity().downgrade();
         let worktree = worktree.to_path_buf();
-        let fresh = Rc::new(std::cell::Cell::new(false));
         Some(
             button
-                .dropdown_menu(move |menu, _window, _cx| {
-                    fresh.set(true);
-                    let (app, fresh) = (app.clone(), fresh.clone());
-                    let (main, worktree, slug) = (main.clone(), worktree.clone(), slug.clone());
+                .dropdown_menu(move |menu, _window, cx| {
+                    // The rows are a **child entity**, and not an element built
+                    // here: a popover's content runs inside `ClaudhubApp`'s own
+                    // render, where reading the application — let alone asking
+                    // it for the links — is the panic `open_dialog`'s closure
+                    // already taught this repository. The child renders once
+                    // the parent has given the borrow back, and it is built
+                    // anew at each opening, which is what makes the request go
+                    // out again.
+                    let rows = cx.new(|cx| {
+                        WtLinksMenu::new(
+                            app.clone(),
+                            main.clone(),
+                            worktree.clone(),
+                            slug.clone(),
+                            cx,
+                        )
+                    });
                     menu.link(SharedString::from(first.label.clone()), first.url.clone())
                         .separator()
-                        .item(PopupMenuItem::element(move |_window, cx| {
-                            if fresh.replace(false) {
-                                let (main, worktree, slug) =
-                                    (main.clone(), worktree.clone(), slug.clone());
-                                app.update(cx, |app, _| app.request_wt_links(main, worktree, slug));
-                            }
-                            let links = app.read(cx).wt_links.get(&worktree).cloned();
-                            wt_links_rows(links, cx)
+                        .item(PopupMenuItem::element(move |_window, _cx| {
+                            rows.clone().into_any_element()
                         }))
                 })
                 .into_any_element(),
