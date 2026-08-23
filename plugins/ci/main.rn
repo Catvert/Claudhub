@@ -91,7 +91,8 @@ pub async fn update(s, action, payload) {
 Voici la fin de son journal. Dis-moi ce qui casse, puis corrige-le.
 
 ${tail(text, 120)}`);
-        notify("Journal confié à l'agent");
+        // Pas de `notify` : le prompt passe par une relecture, et le script ne
+        // sait pas si elle sera confirmée. Voir le plugin Sentry.
         return Ok(s);
     }
 

@@ -1368,10 +1368,7 @@ impl ClaudhubApp {
                 self.announce(tr!("db-exported", { n: count, path: file }), cx);
             }
             Err(message) => {
-                self.toast = Some(crate::ui::app::Toast {
-                    text: SharedString::from(message),
-                    error: true,
-                });
+                self.announce_error(SharedString::from(message), cx);
             }
         }
         cx.notify();

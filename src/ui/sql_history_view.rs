@@ -119,10 +119,7 @@ impl ClaudhubApp {
             .find(|connection| connection.key() == entry.connection)
             .cloned()
         else {
-            self.toast = Some(crate::ui::app::Toast {
-                text: tr!("sql-history-no-connection"),
-                error: true,
-            });
+            self.announce_error(tr!("sql-history-no-connection"), cx);
             cx.notify();
             return;
         };

@@ -398,7 +398,6 @@ const AGENT_PERIOD: std::time::Duration = std::time::Duration::from_secs(2);
 /// dozen worktrees. A line count ten seconds out of date fools nobody.
 const SUMMARY_EVERY: u32 = 5;
 
-/// The last action's result, shown in the status bar.
 /// A weak handle to the application, for the closures that only get an `App`.
 ///
 /// The settings form declares its fields by closures receiving nothing else —
@@ -408,11 +407,6 @@ const SUMMARY_EVERY: u32 = 5;
 pub struct AppHandle(pub gpui::WeakEntity<ClaudhubApp>);
 
 impl gpui::Global for AppHandle {}
-
-pub struct Toast {
-    pub text: SharedString,
-    pub error: bool,
-}
 
 pub struct ClaudhubApp {
     pub(super) git: runtime::Handle,
@@ -771,7 +765,14 @@ pub struct ClaudhubApp {
     /// `wt`'s creation runs hooks that take minutes; nothing but the arrival of
     /// the worktree list says it has finished.
     pub(super) awaiting_agent: Option<(PathBuf, String)>,
-    pub(super) toast: Option<Toast>,
+    /// What is waiting for a frame to become a balloon.
+    ///
+    /// **A queue and not a call**: `push_notification` wants a `&mut Window`,
+    /// and most of the places with something to say hold none — a copy, an
+    /// editor's refusal, a note that could not be replaced, an answer that came
+    /// back in a spawned task. They are drained at the top of the root's
+    /// render, the first place a window exists again after `cx.notify()`.
+    pub(super) pending_notes: Vec<(SharedString, crate::ui::notify::Level)>,
     /// Worktrees whose status read has already gone out.
     ///
     /// The file watcher can produce several waves before an answer comes back;
@@ -1156,7 +1157,7 @@ impl ClaudhubApp {
             sql_history_scroll: gpui_component::VirtualListScrollHandle::new(),
             sql_history_list: None,
             awaiting_agent: None,
-            toast: None,
+            pending_notes: Vec::new(),
             pending_status: std::collections::HashSet::new(),
             last_auto_fetch: None,
             suggesting_message: None,
@@ -2115,10 +2116,7 @@ impl ClaudhubApp {
         {
             self.repos.mark_missing(path, message);
         } else {
-            self.toast = Some(Toast {
-                text: SharedString::from(message),
-                error: true,
-            });
+            self.announce_error(SharedString::from(message), cx);
         }
     }
 
@@ -2464,12 +2462,11 @@ impl ClaudhubApp {
         );
     }
 
-    /// The one line of the status bar and the balloon beside it, for an outcome
-    /// of either sign.
+    /// An outcome, of either sign, as a balloon.
     ///
-    /// The fallback is `success_key()` on both paths — it was so before this was
-    /// one function — which reads as the name of what was attempted; the level
-    /// is what says how it went.
+    /// The fallback is `success_key()` on both paths — it was so before this
+    /// was one function — which reads as the name of what was attempted; the
+    /// level is what says how it went.
     fn report(
         &mut self,
         action: Action,
@@ -2478,37 +2475,44 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The bar keeps one line and the balloon takes the rest: a `git pull`
-        // answers with a file per line, and poured into a bar one line high
-        // that text does not truncate — it wraps over the window. See
-        // `ui::notify`.
-        let text = match crate::ui::notify::headline(output) {
-            Some(line) => SharedString::from(line),
-            None => tr!(action.success_key()),
-        };
-        self.toast = Some(Toast {
-            text,
-            error: matches!(level, crate::ui::notify::Level::Error),
-        });
         self.notify(crate::ui::notify::notice(action, output, level), window, cx);
     }
 
-    /// Puts an outcome on screen as a balloon, if it earned one.
+    /// Puts an outcome on screen.
     ///
-    /// The decision is `ui::notify`'s and is tested there; what is left here is
-    /// the gpui-component call. `Root` already re-emits the notification layer
-    /// at the end of the root view's render — see "Conventions gpui" — so
-    /// nothing else is needed to make it appear.
+    /// What it says is `ui::notify`'s decision and is tested there; what is
+    /// left here is the gpui-component call.
     pub(super) fn notify(
         &mut self,
-        notice: Option<crate::ui::notify::Notice>,
+        notice: crate::ui::notify::Notice,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(notice) = notice else {
-            return;
-        };
-        let kind = match notice.level {
+        self.balloon(
+            Some(tr!(notice.title)),
+            SharedString::from(notice.body),
+            notice.level,
+            window,
+            cx,
+        );
+    }
+
+    /// One balloon, top right.
+    ///
+    /// `Root` already re-emits the notification layer at the end of the root
+    /// view's render — see "Conventions gpui" — so nothing else is needed to
+    /// make it appear. A message with no title of its own carries none: the
+    /// balloon then reads as the sentence it is, which is what a copy or a
+    /// refusal has to say.
+    fn balloon(
+        &mut self,
+        title: Option<SharedString>,
+        message: SharedString,
+        level: crate::ui::notify::Level,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let kind = match level {
             crate::ui::notify::Level::Success => {
                 gpui_component::notification::NotificationType::Success
             }
@@ -2519,12 +2523,12 @@ impl ClaudhubApp {
         window.push_notification(
             gpui_component::notification::Notification::new()
                 .with_type(kind)
-                .title(tr!(notice.title))
-                .message(SharedString::from(notice.body))
+                .when_some(title, |note, title| note.title(title))
+                .message(message)
                 // A failure stays until it is dismissed: it is the one thing
                 // here that is read late, and a balloon that fades on its own
                 // is a message one finds gone on coming back to it.
-                .autohide(notice.level == crate::ui::notify::Level::Success),
+                .autohide(level == crate::ui::notify::Level::Success),
             cx,
         );
     }
@@ -3296,8 +3300,33 @@ impl ClaudhubApp {
     /// changing anything on screen — copying, for instance — it is the only
     /// acknowledgement one can give.
     pub(super) fn announce(&mut self, text: SharedString, cx: &mut Context<Self>) {
-        self.toast = Some(Toast { text, error: false });
+        self.pending_notes
+            .push((text, crate::ui::notify::Level::Success));
         cx.notify();
+    }
+
+    /// The same, for something that did not work.
+    ///
+    /// It differs by one thing and it is the one that matters: a failure does
+    /// **not** fade. It is the message read late — one comes back to the window
+    /// to find out why nothing happened — and a balloon that goes on its own is
+    /// a message found gone.
+    pub(super) fn announce_error(&mut self, text: SharedString, cx: &mut Context<Self>) {
+        self.pending_notes
+            .push((text, crate::ui::notify::Level::Error));
+        cx.notify();
+    }
+
+    /// Turns what was said between two frames into balloons.
+    ///
+    /// Called at the top of the root's render: `Root` is not leased then — its
+    /// own render returned before ours was asked for, which is the rule the
+    /// dock's panels live by — so pushing into it is safe here and nowhere
+    /// inside a closure the root itself calls back.
+    fn flush_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for (text, level) in std::mem::take(&mut self.pending_notes) {
+            self.balloon(None, text, level, window, cx);
+        }
     }
 
     pub(super) fn main_of(&self, worktree: &Path) -> Option<PathBuf> {
@@ -3354,10 +3383,6 @@ impl ClaudhubApp {
     }
 
     fn render_status_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (text, error) = match &self.toast {
-            Some(t) => (t.text.clone(), t.error),
-            None => (SharedString::default(), false),
-        };
         // On a Windows drive mounted by WSL, watching reports nothing: saying so
         // is the only way to tell "nothing has changed" from "Claudhub no longer
         // sees anything". The computation is redone on every frame because it
@@ -3413,14 +3438,11 @@ impl ClaudhubApp {
                 )
                 .child(Divider::vertical().h(px(12.)))
             })
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .when(error, |el| el.text_color(cx.theme().danger))
-                    .child(text),
-            )
+            // What the bar used to say has gone to the balloons, top right:
+            // the last message of a window is read where one is looking, and
+            // the bottom edge is where one is not. What is left here is the
+            // space that pushes the terminals to the other end.
+            .child(div().flex_1().min_w_0())
             // The terminals close the bar, at the bottom right — the corner of
             // the window they open on. They were at the top, at the other end of
             // the screen from the panel they show and beside a menu that speaks
@@ -3475,6 +3497,9 @@ impl Focusable for ClaudhubApp {
 
 impl Render for ClaudhubApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // What was said between two frames, before anything is painted: see
+        // `flush_notes`.
+        self.flush_notes(window, cx);
         v_flex()
             // Vim mode is read at render time and not at construction: the
             // context is what turns its bindings on, and the setting changes

@@ -459,8 +459,12 @@ pub async fn update(s, action, payload) {
     }
 
     if action == "hand" {
+        // **Pas de `notify` ici.** Le prompt s'ouvre en relecture avant de
+        // partir, et le script ne sait pas ce qu'on en fera : annoncer que
+        // l'erreur est confiée alors que le dialogue attend encore, c'est
+        // dire une chose fausse une fois sur deux. Ce qui répond, ce sont le
+        // dialogue puis l'onglet du terminal où le collage arrive.
         agent(prompt(s));
-        notify("Erreur confiée à l'agent");
         return Ok(s);
     }
 
@@ -488,12 +492,18 @@ fn pick(s, shown) {
 /// faisant cent lignes où le bug n'est pas.
 fn prompt(s) {
     let issue = s.issues[s.chosen];
+    let out = [setting("intro"), ""];
+    for line in reference(issue) {
+        out.push(line);
+    }
     // Le bouton est peint au-dessus de la trace, donc pressable avant qu'elle
     // n'arrive : ce qui part alors est ce qu'on sait, et non une erreur.
     if s.event is Tuple {
-        return join([setting("intro"), "", issue.kind, issue.value, issue.culprit], "\n");
+        out.push(issue.kind);
+        out.push(issue.value);
+        out.push(issue.culprit);
+        return join(out, "\n");
     }
-    let out = [setting("intro"), ""];
     out.push(`# ${issue.kind}`);
     if issue.value != "" {
         out.push(issue.value);
@@ -536,6 +546,42 @@ fn prompt(s) {
         }
     }
     join(out, "\n")
+}
+
+/// De quoi retrouver le ticket, en tête de ce qui part à l'agent.
+///
+/// **Ce qu'on recopie est une photographie, et l'agent peut avoir la source.**
+/// Le texte porte l'événement d'un instant ; les questions qui viennent ensuite
+/// — est-ce que ça arrive encore, depuis quelle release, sur combien
+/// d'utilisateurs — se posent à Sentry. Un agent qui a le serveur MCP les pose
+/// lui-même, et tout ce qu'il lui manquait était l'identifiant. Celui qui ne
+/// l'a pas a le permalien, qui se lit à la main.
+///
+/// L'identifiant court d'abord : c'est celui qu'une équipe s'échange et celui
+/// que les outils prennent. Le numérique reste, l'API le demandant sur
+/// certaines routes.
+fn reference(issue) {
+    let out = [];
+    if issue.short_id != "" {
+        out.push(`- Ticket Sentry : ${issue.short_id}`);
+    }
+    if issue.id != "" {
+        out.push(`- Identifiant : ${issue.id}`);
+    }
+    let org = setting("org");
+    if org != "" {
+        out.push(`- Organisation : ${org}`);
+    }
+    if issue.permalink != "" {
+        out.push(`- ${issue.permalink}`);
+    }
+    if out.is_empty() {
+        return out;
+    }
+    out.push("");
+    out.push("Si tu as accès au serveur MCP de Sentry, tu peux lui demander le reste avec cette référence.");
+    out.push("");
+    out
 }
 
 /// L'extrait tel qu'il part au prompt : numéroté, la ligne fautive marquée.

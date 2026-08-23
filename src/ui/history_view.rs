@@ -162,11 +162,11 @@ impl ClaudhubApp {
                 Some(rows) => rows,
                 None => {
                     self.notify(
-                        Some(crate::ui::notify::Notice {
+                        crate::ui::notify::Notice {
                             title: "history-lines-untracked",
                             body: String::new(),
                             level: crate::ui::notify::Level::Error,
-                        }),
+                        },
                         window,
                         cx,
                     );

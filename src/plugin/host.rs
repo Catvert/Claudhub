@@ -1611,7 +1611,10 @@ mod shipped {
         )
         .expect("hand succeeds");
         let effects = probe.shared.take_effects();
-        assert_eq!(effects.len(), 2, "{effects:?}");
+        // The paste and nothing else: the announcement it used to carry was a
+        // claim the script cannot make — the prompt goes through a review
+        // dialog, and only the window knows whether it was confirmed.
+        assert_eq!(effects.len(), 1, "{effects:?}");
         let super::Effect::Agent(text) = &effects[0] else {
             panic!("expected a paste, got {effects:?}");
         };
@@ -1643,6 +1646,7 @@ mod sentry_plugin {
     const ISSUES: &str = r#"[
       {
         "id": "4508",
+        "shortId": "ACME-7X",
         "title": "TypeError: Cannot read properties of undefined",
         "culprit": "app/Http/Controllers/QuoteController.php in store",
         "level": "error",
@@ -2166,6 +2170,20 @@ mod sentry_plugin {
         let Some(super::Effect::Agent(text)) = effects.first() else {
             panic!("expected a paste, got {effects:?}");
         };
+        // **The ticket goes first, and it is not a courtesy**: what is pasted
+        // is one event of one moment, and everything asked next — is it still
+        // happening, since which release, on how many users — is a question for
+        // Sentry. An agent holding its MCP server asks it, and the only thing
+        // it was missing was the reference.
+        assert!(text.contains("ACME-7X"), "the short id: {text}");
+        assert!(
+            text.contains("acme"),
+            "the organisation it belongs to: {text}"
+        );
+        assert!(
+            text.contains("https://sentry.io/organizations/acme/issues/4508/"),
+            "and the link, for an agent with no server: {text}"
+        );
         assert!(text.contains("QuoteController.php:88"), "{text}");
         assert!(text.contains("Kernel.php:141"), "the whole stack: {text}");
         assert!(text.contains("$request->quote->total"), "{text}");

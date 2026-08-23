@@ -1,22 +1,21 @@
-//! What an operation's outcome says, and where it says it.
+//! What an operation's outcome says.
 //!
-//! The status bar was the only place anything was reported, and it is the
-//! wrong one as soon as there is something to *read*: a `git pull` answers
-//! with `Updating 9ae0f50b..55e38b36`, `Fast-forward`, and one line per file
-//! changed. Poured into a bar one line high, that text does not truncate — it
-//! wraps, and the forty lines paint themselves over the window from the bar
-//! upwards, on top of whatever was there.
+//! Everything a gesture has to say is a **balloon, top right**, and this module
+//! is what turns an answer into one. There used to be two surfaces — one line
+//! in the status bar, a balloon beside it for what had to be read — and the bar
+//! lost: the last message of a window belongs where the eye is, which is the
+//! panel one has just clicked in, and the bottom edge is precisely where it is
+//! not. What the bar held well, it held for nobody.
 //!
-//! Two places, therefore, and the split is the whole point of this module:
+//! Two things are decided here, and both have a case behind them:
 //!
-//! - **The bar keeps one line**, always, whatever arrives. It says *what just
-//!   happened* and it is glanced at, not read.
-//! - **A balloon carries what has to be read** — the file list of a pull, the
-//!   refs a push updated, the reason a merge refused. It is PhpStorm's
-//!   convention, it stacks, it can be dismissed, and it does not fight the
-//!   window for room.
+//! - **What it is called.** A success is named after what was attempted, a
+//!   failure by one key for all of them — what failed is in the body, git
+//!   naming the operation itself (`error: failed to push some refs`).
+//! - **How long it stays.** A success fades; a failure waits to be dismissed.
+//!   That one is the view's to apply, and `Level` is what says it.
 //!
-//! No gpui here, as in `inflight.rs` and `notes.rs`: what deserves a balloon
+//! No gpui here, as in `inflight.rs` and `notes.rs`: what an outcome reads as
 //! is a decision, and a decision is a thing one tests rather than watches.
 
 use crate::runtime::Action;
@@ -31,71 +30,27 @@ pub enum Level {
     Error,
 }
 
-/// An outcome as the two surfaces want it.
+/// An outcome, as the balloon wants it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
     /// The i18n key naming the outcome, resolved by the view.
     pub title: &'static str,
-    /// What git said, whole. Empty when it said nothing worth reading.
+    /// What git said, whole. Empty when it said nothing worth reading, and the
+    /// balloon is then its title alone — which is the whole message of a stage
+    /// or a checkout.
     pub body: String,
     pub level: Level,
 }
 
-/// The single line the status bar shows.
+/// The balloon an outcome deserves.
 ///
-/// The **first** line and not the last: git leads with what it did — `Updating
-/// 9ae0f50b..55e38b36`, `To github.com:…` — and the tail is the detail. An
-/// output that says nothing falls back to the action's own success label.
-pub fn headline(output: &str) -> Option<String> {
-    output
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_string)
-}
-
-/// Does this action always deserve a balloon, whatever it answered?
-///
-/// The ones that reach the network do: `fetch`, `pull`, `push`, and the two tag
-/// gestures that are pushes. They cost seconds, one goes on doing something
-/// else while they run, and what they answered is read **afterwards** — which
-/// is exactly what the status bar cannot serve, being overwritten by the next
-/// message that goes through it. A commit got its balloon by accident, its
-/// output happening to run to two lines; a push that published three commits
-/// got none, git having written its whole account on stderr.
-///
-/// The automatic fetch is not among them and cannot be: it never produces a
-/// `Done` — see `Cmd::AutoFetch`. A balloon every ten minutes saying nothing
-/// happened would wear out the very place one looks at what has just happened.
-fn always_worth_reading(action: Action) -> bool {
-    matches!(
-        action,
-        Action::Fetch | Action::Pull | Action::Push | Action::PushTag
-    )
-}
-
-/// The balloon an outcome deserves, if it deserves one.
-///
-/// Four rules, and each has a case behind it:
-///
-/// - **Every failure gets one.** The bar is overwritten by the next message,
-///   and a `git push` refused for want of an upstream is precisely what one
-///   comes back to read a minute later.
-/// - **Every remote operation gets one** — see `always_worth_reading`.
-/// - **An output with more than one line gets one**: that is the definition of
-///   "there is something to read here", and it is what a pull produces.
-/// - **Nothing else does.** A `Stage` that finishes in ten milliseconds with
-///   `Staged` to say for itself would be a balloon nobody has time to read,
-///   and one that pushes the useful ones off the screen.
-pub fn notice(action: Action, output: &str, level: Level) -> Option<Notice> {
-    let body = output.trim();
-    if level == Level::Success
-        && !always_worth_reading(action)
-        && body.lines().filter(|l| !l.trim().is_empty()).count() < 2
-    {
-        return None;
-    }
-    Some(Notice {
+/// **Every outcome gets one.** It was not always so: while the bar carried a
+/// line for each, a balloon was reserved for what could not fit in it — more
+/// than one line, or a round trip whose answer is read after the fact. With the
+/// bar gone, that rule became a way of saying nothing at all, and a gesture
+/// that answers nothing reads as a gesture that did nothing.
+pub fn notice(action: Action, output: &str, level: Level) -> Notice {
+    Notice {
         title: match level {
             Level::Success => action.success_key(),
             // One key for every failure, rather than a third family of thirty
@@ -103,81 +58,45 @@ pub fn notice(action: Action, output: &str, level: Level) -> Option<Notice> {
             // the operation itself — `error: failed to push some refs`.
             Level::Error => FAILED,
         },
-        body: body.to_string(),
+        body: output.trim().to_string(),
         level,
-    })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A pull answers with a file per line, and all of it is read: the balloon
+    /// is the surface that can hold it, which is why it exists.
     #[test]
-    fn the_bar_keeps_the_first_line_and_only_that() {
+    fn an_answer_is_carried_whole() {
         let pull = "Updating 9ae0f50b..55e38b36\nFast-forward\n app/Config.php | 6 +\n";
-        assert_eq!(
-            headline(pull).as_deref(),
-            Some("Updating 9ae0f50b..55e38b36")
-        );
-        // This is the whole defect: a bar one line high cannot hold this.
-        assert!(!headline(pull).unwrap().contains('\n'));
-    }
-
-    #[test]
-    fn a_leading_blank_line_is_not_the_headline() {
-        assert_eq!(
-            headline("\n\n  Already up to date.\n").as_deref(),
-            Some("Already up to date.")
-        );
-        assert_eq!(headline("   \n"), None);
-    }
-
-    /// A pull that changed files has a list to show; one that changed nothing
-    /// says so in a line, and a line belongs in the bar.
-    #[test]
-    fn only_an_outcome_with_something_to_read_earns_a_balloon() {
-        let pull = "Updating 9ae0f50b..55e38b36\nFast-forward\n app/Config.php | 6 +\n";
-        let balloon = notice(Action::Pull, pull, Level::Success).expect("something to read");
+        let balloon = notice(Action::Pull, pull, Level::Success);
         assert_eq!(balloon.title, Action::Pull.success_key());
         assert!(balloon.body.contains("app/Config.php"));
-
-        // A local gesture with nothing to read gets none. A pull with nothing
-        // to bring back does get one, being a remote operation — see
-        // `a_remote_operation_always_earns_one`.
-        assert_eq!(notice(Action::Stage, "", Level::Success), None);
-        assert_eq!(
-            notice(Action::Commit, "nothing to commit", Level::Success),
-            None
-        );
+        assert!(balloon.body.starts_with("Updating"), "{}", balloon.body);
     }
 
-    /// A push that published three commits used to get nothing: git writes its
-    /// account on stderr, and what reached here was empty. Now the account
-    /// arrives (`git_reporting`) — and even a one-line one earns its balloon,
-    /// because a round trip's answer is read after the fact.
+    /// **A gesture that answers nothing still says it happened.** Git says
+    /// nothing at all about a `git add`; the name of what was attempted is the
+    /// whole message, and while the status bar carried it this earned no
+    /// balloon and would now be silence.
     #[test]
-    fn a_remote_operation_always_earns_one() {
-        let push = "To github.com:acetics/claudhub.git\n   9ae0f50..55e38b3  master -> master";
-        let balloon = notice(Action::Push, push, Level::Success).expect("a push says what it did");
-        assert_eq!(balloon.title, Action::Push.success_key());
-        assert!(balloon.body.contains("master -> master"));
-
-        // Even when there was nothing to bring back.
-        let quiet = notice(Action::Pull, "Already up to date.", Level::Success)
-            .expect("a pull always says where it stands");
-        assert_eq!(quiet.body, "Already up to date.");
-
-        // And a local gesture still gets none.
-        assert_eq!(notice(Action::Stage, "", Level::Success), None);
+    fn a_gesture_with_nothing_to_say_still_gets_a_balloon() {
+        let staged = notice(Action::Stage, "", Level::Success);
+        assert_eq!(staged.title, Action::Stage.success_key());
+        assert!(staged.body.is_empty());
+        assert_eq!(staged.level, Level::Success);
     }
 
-    /// A failure is what one comes back to read, and the bar is overwritten by
-    /// the next message that goes through it.
+    /// A failure is what one comes back to read, and it is the level that keeps
+    /// it on screen until it is dismissed.
     #[test]
-    fn a_failure_always_earns_one_however_short() {
-        let balloon = notice(Action::Push, "no upstream branch", Level::Error)
-            .expect("a failure is always worth a balloon");
+    fn a_failure_is_named_by_one_key_and_says_why_in_its_body() {
+        let balloon = notice(Action::Push, "  no upstream branch\n", Level::Error);
         assert_eq!(balloon.level, Level::Error);
         assert_eq!(balloon.title, FAILED);
+        assert_eq!(balloon.body, "no upstream branch");
     }
 }

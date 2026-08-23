@@ -1524,10 +1524,7 @@ impl ClaudhubApp {
             Ok(terminal) => terminal,
             Err(e) => {
                 log::error!("opening the terminal: {e:#}");
-                self.toast = Some(crate::ui::app::Toast {
-                    text: SharedString::from(e.to_string()),
-                    error: true,
-                });
+                self.announce_error(SharedString::from(e.to_string()), cx);
                 cx.notify();
                 return;
             }

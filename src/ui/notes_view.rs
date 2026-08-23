@@ -590,12 +590,12 @@ impl ClaudhubApp {
             let entity = entity.clone();
             let (worktree, ids) = (worktree.clone(), ids.clone());
             dialog
-                .title(tr!("note-prompt-title"))
+                .title(tr!("agent-prompt-title"))
                 .child(
                     v_flex()
                         .gap_2()
                         .w(px(640.))
-                        .child(div().text_xs().child(tr!("note-prompt-hint")))
+                        .child(div().text_xs().child(tr!("agent-prompt-hint")))
                         .child(Textarea::new(&input)),
                 )
                 .overlay_closable(false)

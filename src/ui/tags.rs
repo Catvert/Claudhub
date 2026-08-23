@@ -272,10 +272,7 @@ impl ClaudhubApp {
             return;
         };
         if !crate::git::tags::is_valid_name(&name) {
-            self.toast = Some(crate::ui::app::Toast {
-                text: tr!("tag-name-invalid"),
-                error: true,
-            });
+            self.announce_error(tr!("tag-name-invalid"), cx);
             cx.notify();
             return;
         }

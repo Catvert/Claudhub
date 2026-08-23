@@ -717,6 +717,10 @@ Elles viennent d'Aviary, et les enfreindre produit des bugs silencieux.
   `flex_1()` y prend la hauteur du contenu, et le `size_full()` d'en dessous se
   résout alors contre une hauteur indéfinie, donc zéro. Un conteneur dont un
   enfant réclame la place restante s'écrit `v_flex()` / `h_flex()`.
+- **Tout ce qu'une opération a à dire est une bulle, en haut à droite**
+  (`ui::notify`, `ClaudhubApp::announce`) : la barre d'état n'en porte plus
+  rien. Un point d'appel sans fenêtre passe par la file `pending_notes`, vidée
+  en tête du rendu de la racine — `push_notification` réclame un `&mut Window`.
 - Les raccourcis passent par `secondary-` : le reste du clavier appartient au
   programme du terminal.
 - gpui rend via Vulkan sur Linux : `vulkan-loader` doit être dans
@@ -736,7 +740,7 @@ substitutions `%{…}` : `ui::i18n_tests` le vérifie.
 messages d'erreur du cœur sont en anglais — c'est la langue de gpui, de git et
 des dépendances qu'on lit à côté ; ce fichier, le README et le `justfile` restent
 en français. Un message d'erreur d'un worker remonte donc en anglais dans la
-barre d'état.
+bulle qui le rapporte.
 
 ## Tests
 

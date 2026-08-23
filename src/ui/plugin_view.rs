@@ -334,10 +334,6 @@ impl ClaudhubApp {
     /// status bar is overwritten by the next message, and "this repository
     /// carries no plugin.toml" is exactly what one comes back to read.
     fn plugin_failed(&mut self, message: String, window: &mut Window, cx: &mut Context<Self>) {
-        let text = crate::ui::notify::headline(&message)
-            .map(SharedString::from)
-            .unwrap_or_else(|| SharedString::from(message.clone()));
-        self.toast = Some(crate::ui::app::Toast { text, error: true });
         self.notify(
             crate::ui::notify::notice(
                 crate::runtime::Action::Plugin,
@@ -788,6 +784,71 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    /// Shows what a plugin is about to hand an agent, and lets it be edited.
+    ///
+    /// **The notes' own dialog, on the same field** (`prompt_input`): what goes
+    /// into a terminal cannot be taken back — an agent has read the paste
+    /// before one has seen what one just sent — and the two gestures are the
+    /// same gesture.
+    ///
+    /// Here it earns a second reason. What a script writes is a **report**, not
+    /// a request: a Sentry issue arrives with its trace, its context and its
+    /// code, and what one wants to add is the one sentence that narrows it —
+    /// start with the controller, leave the migrations alone, this only happens
+    /// in production. That sentence has nowhere else to be written.
+    ///
+    /// An empty field sends nothing: emptying it is how one changes one's mind
+    /// once the dialog is open.
+    fn confirm_agent_prompt(
+        &mut self,
+        worktree: PathBuf,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = self.prompt_input.clone();
+        let entity = cx.entity();
+        input.update(cx, |input, cx| input.set_value(text, window, cx));
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            // Cloned into the closure and never read from it: `open_dialog`
+            // keeps a `Fn` called back from the root's own render, where
+            // reading the application is a panic. See "Conventions gpui".
+            let input = input.clone();
+            let entity = entity.clone();
+            let worktree = worktree.clone();
+            dialog
+                .title(tr!("agent-prompt-title"))
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .w(gpui::px(640.))
+                        .child(div().text_xs().child(tr!("agent-prompt-hint")))
+                        .child(gpui_component::input::Textarea::new(&input)),
+                )
+                .overlay_closable(false)
+                .close_button(false)
+                .footer(super::dialogs::confirm())
+                .on_ok(move |_, window, cx| {
+                    let text = input.read(cx).value().to_string();
+                    if text.trim().is_empty() {
+                        return true;
+                    }
+                    entity.update(cx, |this, cx| {
+                        // Shown before it is sent: a message delivered into a
+                        // hidden tab is a message nobody sees arrive. It is
+                        // what the notes' `deliver` does, and for the same
+                        // reason.
+                        this.show_terminal_panel(window, cx);
+                        this.send_to_agent(&worktree, text, window, cx);
+                    });
+                    true
+                })
+        });
+        // The text is already there and it is meant to be added to: the caret
+        // goes in the field.
+        super::dialogs::focus_field(&self.prompt_input, window, cx);
+    }
+
     /// What the script asked of the window, in the order it asked.
     fn apply_plugin_effects(
         &mut self,
@@ -796,17 +857,23 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A balloon says who is speaking, and the plugin's own title is the
+        // only name the window and the script agree on — the panel's would name
+        // one of two readings of the same state.
+        let title = SharedString::from(
+            manifests()
+                .iter()
+                .find(|manifest| manifest.id == plugin)
+                .map(|manifest| manifest.declaration.title.clone())
+                .unwrap_or_else(|| plugin.to_string()),
+        );
         for effect in effects {
             match effect {
                 Effect::Agent(text) => {
                     let Some(worktree) = self.active.clone() else {
                         continue;
                     };
-                    // Shown before it is sent: a message delivered into a
-                    // hidden tab is a message nobody sees arrive. It is what
-                    // the notes' `deliver` does, and for the same reason.
-                    self.show_terminal_panel(window, cx);
-                    self.send_to_agent(&worktree, text, window, cx);
+                    self.confirm_agent_prompt(worktree, text, window, cx);
                 }
                 // The external editor when there is one, ours otherwise:
                 // exactly what a Sentry frame does — a plugin's "open this
@@ -846,7 +913,22 @@ impl ClaudhubApp {
                 }
                 Effect::OpenUrl(url) => cx.open_url(&url),
                 Effect::Copy(text) => cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)),
-                Effect::Notify(text) => self.announce(SharedString::from(text), cx),
+                // **Titled by the plugin**, where the window's own messages
+                // carry no title: a balloon that says "Sentry" above "ACME-7X
+                // copié" says who is speaking, and a plugin is the one voice
+                // here that is not the application's. It fades on its own — a
+                // script has no level to tell a failure by, and everything
+                // coming through here is something one asked for a moment ago.
+                Effect::Notify(text) => {
+                    window.push_notification(
+                        gpui_component::notification::Notification::new()
+                            .with_type(gpui_component::notification::NotificationType::Success)
+                            .title(title.clone())
+                            .message(SharedString::from(text))
+                            .autohide(true),
+                        cx,
+                    );
+                }
                 // The worktree does not exist yet: the prompt is **held** and
                 // delivered when the worktree list comes back, which is the
                 // only signal saying `wt` has finished its hooks — they install
