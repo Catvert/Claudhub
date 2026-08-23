@@ -1066,7 +1066,11 @@ impl ClaudhubApp {
             let (ok, cancel) = (entity.clone(), entity.clone());
             dialog
                 .title(title.clone())
-                .child(div().w(px(520.)).child(view.clone()))
+                // The dialog's own width, not the body's: a `Dialog` is 448 px
+                // wide by default, and a wider child overflows its frame and
+                // is clipped — buttons included.
+                .w(px(560.))
+                .child(div().w_full().child(view.clone()))
                 .overlay_closable(false)
                 .close_button(false)
                 .on_ok(move |_, window, cx| {
