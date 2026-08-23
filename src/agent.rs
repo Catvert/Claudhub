@@ -196,13 +196,11 @@ pub fn scan(worktrees: &[PathBuf], programs: &[String]) -> Agents {
             continue;
         };
         let dir = entry.path();
-        let Some(program) = programs
-            .iter()
-            .find(|program| matches_program(&dir, program))
-            .map(|program| program.to_string())
-        else {
-            continue;
-        };
+        // **The working directory first.** It is one `readlink`, and it rules
+        // out ninety-nine processes in a hundred — naming the program means
+        // reading two files, and it used to be done for every process on the
+        // machine before this filter had a say.
+        //
         // A process's working directory is the worktree it works in; an
         // unresolved symlink — vanished process, permissions — simply makes it
         // skipped.
@@ -210,6 +208,9 @@ pub fn scan(worktrees: &[PathBuf], programs: &[String]) -> Agents {
             continue;
         };
         let Some(worktree) = owning_worktree(worktrees, &cwd) else {
+            continue;
+        };
+        let Some(program) = program_of(&dir, &programs) else {
             continue;
         };
         let cpu = std::fs::read_to_string(dir.join("stat"))
@@ -230,22 +231,21 @@ pub fn command_name(command: &str) -> &str {
     program.rsplit('/').next().unwrap_or(program)
 }
 
-/// True if this process is the agent we are looking for.
+/// Which of the profiles this process answers to, if any.
 ///
 /// The name alone (`comm`) is not enough: an agent launched by a script or by
 /// a node version manager is called `node`, and it is its command line that
-/// carries `claude`.
+/// carries `claude`. Both files are read **once**, and then compared to every
+/// profile — reading them per profile was the same two files three times over.
 #[cfg(target_os = "linux")]
-fn matches_program(proc_dir: &Path, program: &str) -> bool {
-    if let Ok(comm) = std::fs::read_to_string(proc_dir.join("comm")) {
-        if comm.trim() == program {
-            return true;
-        }
-    }
-    let Ok(cmdline) = std::fs::read(proc_dir.join("cmdline")) else {
-        return false;
-    };
-    cmdline_matches(&cmdline, program)
+fn program_of(proc_dir: &Path, programs: &[&str]) -> Option<String> {
+    let comm = std::fs::read_to_string(proc_dir.join("comm")).unwrap_or_default();
+    let comm = comm.trim();
+    let cmdline = std::fs::read(proc_dir.join("cmdline")).unwrap_or_default();
+    programs
+        .iter()
+        .find(|program| comm == **program || cmdline_matches(&cmdline, program))
+        .map(|program| program.to_string())
 }
 
 /// `/proc/<pid>/cmdline` separates the arguments with null bytes.

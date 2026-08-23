@@ -315,6 +315,118 @@ pub(crate) fn git_tolerant<S: AsRef<OsStr>>(
     ))
 }
 
+/// A reader of a command's standard output, line by line, free to decide it has
+/// seen enough.
+pub(crate) trait Sink {
+    type Output;
+    /// `false` stops the command there: what follows would be thrown away.
+    fn line(&mut self, line: &str) -> bool;
+    /// `interrupted` says the command was stopped rather than left to finish.
+    fn finish(self, interrupted: bool) -> Self::Output;
+}
+
+/// Runs a git command and hands its standard output to `sink`, one line at a
+/// time, **killing it as soon as the sink has had enough**.
+///
+/// This exists for `git grep`, whose answer is capped: a common word on a large
+/// checkout writes tens of megabytes for the two thousand lines that are kept,
+/// and reading the lot before cutting means waiting for a walk whose outcome was
+/// already decided. Nothing else needs it — a status or a diff is read whole
+/// because all of it is used.
+///
+/// `max_code` is `git_tolerant`'s: the codes that are an answer rather than a
+/// failure. An interrupted command has no code worth reading, and does not get
+/// one looked at.
+pub(crate) fn run_streaming<S: AsRef<OsStr>, K: Sink>(
+    dir: &Path,
+    args: &[S],
+    max_code: i32,
+    mut sink: K,
+) -> Result<K::Output> {
+    use std::io::BufRead;
+
+    let started = Instant::now();
+    let mut cmd = command(dir, args);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("git {}: program not found", describe(args)))?;
+
+    let stdout = child.stdout.take().expect("stdout requested as piped");
+    let mut stderr = child.stderr.take().expect("stderr requested as piped");
+    let err_reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = stderr.read_to_end(&mut buffer);
+        buffer
+    });
+
+    // The lines travel through a channel rather than being read here: a read
+    // blocked on a command that says nothing would have no ceiling, and the
+    // ceiling is the whole reason `wait_with_timeout` exists.
+    let (lines, incoming) = std::sync::mpsc::sync_channel::<String>(256);
+    let reader = std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).split(b'\n') {
+            let Ok(line) = line else { break };
+            // A line git wrote is not necessarily UTF-8 — a match inside a
+            // file with an odd encoding — and losing it beats losing the search.
+            let line = String::from_utf8_lossy(&line).into_owned();
+            if lines.send(line).is_err() {
+                break; // the sink has had enough
+            }
+        }
+    });
+
+    let deadline = Instant::now() + TIMEOUT;
+    let mut interrupted = false;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "git {} did not answer within {TIMEOUT:?} and was interrupted",
+                describe(args)
+            );
+        }
+        match incoming.recv_timeout(deadline - now) {
+            Ok(line) => {
+                if !sink.line(&line) {
+                    interrupted = true;
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+        }
+    }
+
+    let status = if interrupted {
+        let _ = child.kill();
+        child.wait()?
+    } else {
+        let _ = reader.join();
+        child.wait()?
+    };
+    let elapsed = started.elapsed();
+    log::debug!(
+        "git {} in {} — {}{}",
+        describe(args),
+        dir.display(),
+        crate::logging::ms(elapsed),
+        if interrupted { " (capped)" } else { "" }
+    );
+
+    if !interrupted {
+        let code = status.code().unwrap_or(-1);
+        if code < 0 || code > max_code {
+            let stderr = err_reader.join().unwrap_or_default();
+            let stderr = String::from_utf8_lossy(&stderr);
+            bail!("git {}: {}", describe(args), stderr.trim());
+        }
+    }
+    Ok(sink.finish(interrupted))
+}
+
 /// True if the command exits with code 0. For closed questions
 /// (`show-ref --verify --quiet`) whose output interests nobody.
 pub(crate) fn git_ok<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> bool {
