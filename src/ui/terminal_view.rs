@@ -55,6 +55,21 @@ const SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(120);
 pub struct TerminalView {
     terminal: Terminal,
     snapshot: Snapshot,
+    /// The snapshot cut into the runs the view paints, one entry per line.
+    ///
+    /// Held rather than worked out at render: cutting the runs and slicing
+    /// their text is one walk of the visible grid, and it answers the same
+    /// thing for as long as the snapshot, the font and the measured glyphs
+    /// stay put. What invalidates it is `restyled`.
+    painted: Vec<Vec<Painted>>,
+    /// The runs have to be cut again: a new snapshot, a new font, or a glyph
+    /// that has just been measured.
+    restyled: bool,
+    /// The title the running program has set, ready to be handed to a tab.
+    ///
+    /// Kept as a `SharedString` because the dock asks every tab for its title
+    /// at every frame, and `Terminal` holds a `String` — it knows no gpui type.
+    title: SharedString,
     focus: FocusHandle,
     font_size: Pixels,
     /// The effective font, re-read on every render from the settings: that is
@@ -166,38 +181,52 @@ impl TerminalView {
         // next render triggered by something else.
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(event) = events.recv().await {
+                // What the I/O loop has already queued behind this one, taken
+                // in the same breath: a wake-up is emitted per `pty_read`, and
+                // a `cat` of a large file sends hundreds a second. Each one
+                // used to copy the whole grid; what they all say is the same
+                // thing — "redraw" — so they are drained here and answered
+                // with a single snapshot. What a queued event *carries* — a
+                // title, a child's death — is handled on the way through.
+                let mut batch = vec![event];
+                while let Ok(next) = events.try_recv() {
+                    batch.push(next);
+                }
                 let alive = this
                     .update(cx, |view, cx| {
-                        match event {
-                            TerminalEvent::Wakeup => {}
-                            TerminalEvent::Title(title) => {
-                                view.terminal.set_title(title);
-                            }
-                            TerminalEvent::Bell => {}
-                            // The child is gone and the tab has nothing left to
-                            // show: `exit` in fish, `Ctrl+D`, a `just` recipe or a
-                            // `wt` task that has run its course. The application
-                            // closes the tab; the view only says so, being the one
-                            // that hears the pty.
-                            //
-                            // **Only on a success.** A failure is the one thing
-                            // one comes back to read — the failed test, the build
-                            // that stopped on an error —, and a tab that closes
-                            // itself takes the message with it. Everything else
-                            // goes: a shell exits with 0, and so does a recipe
-                            // that ran its course.
-                            //
-                            // A death by signal has no code, and neither has the
-                            // loop's own end, which follows the child's: an exit
-                            // one did not ask for keeps its tab.
-                            TerminalEvent::Exited(code) => {
-                                view.terminal.mark_exited();
-                                if code == Some(0) {
-                                    cx.emit(TerminalExited);
+                        for event in batch {
+                            match event {
+                                TerminalEvent::Wakeup => {}
+                                TerminalEvent::Title(title) => {
+                                    view.title = SharedString::from(title.clone());
+                                    view.terminal.set_title(title);
+                                }
+                                TerminalEvent::Bell => {}
+                                // The child is gone and the tab has nothing left to
+                                // show: `exit` in fish, `Ctrl+D`, a `just` recipe or a
+                                // `wt` task that has run its course. The application
+                                // closes the tab; the view only says so, being the one
+                                // that hears the pty.
+                                //
+                                // **Only on a success.** A failure is the one thing
+                                // one comes back to read — the failed test, the build
+                                // that stopped on an error —, and a tab that closes
+                                // itself takes the message with it. Everything else
+                                // goes: a shell exits with 0, and so does a recipe
+                                // that ran its course.
+                                //
+                                // A death by signal has no code, and neither has the
+                                // loop's own end, which follows the child's: an exit
+                                // one did not ask for keeps its tab.
+                                TerminalEvent::Exited(code) => {
+                                    view.terminal.mark_exited();
+                                    if code == Some(0) {
+                                        cx.emit(TerminalExited);
+                                    }
                                 }
                             }
                         }
-                        view.snapshot = view.terminal.snapshot();
+                        view.take_snapshot();
                         cx.notify();
                     })
                     .is_ok();
@@ -210,6 +239,9 @@ impl TerminalView {
 
         Self {
             snapshot: terminal.snapshot(),
+            painted: Vec::new(),
+            restyled: true,
+            title: SharedString::default(),
             terminal,
             focus: cx.focus_handle(),
             font_size,
@@ -242,7 +274,7 @@ impl TerminalView {
     pub fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.terminal.paste(text);
         self.terminal.scroll_to_bottom();
-        self.snapshot = self.terminal.snapshot();
+        self.take_snapshot();
         cx.notify();
     }
 
@@ -255,7 +287,7 @@ impl TerminalView {
     pub fn submit(&mut self, cx: &mut Context<Self>) {
         self.terminal.write_str("\r");
         self.terminal.scroll_to_bottom();
-        self.snapshot = self.terminal.snapshot();
+        self.take_snapshot();
         cx.notify();
     }
 
@@ -286,11 +318,13 @@ impl TerminalView {
     }
 
     pub fn label(&self) -> SharedString {
-        let title = self.terminal.title();
-        if title.is_empty() {
+        // The kept `SharedString` and not `Terminal::title`: the dock asks
+        // every tab for its title at every frame, and that one would copy the
+        // string each time.
+        if self.title.is_empty() {
             self.label.clone()
         } else {
-            SharedString::from(title.to_string())
+            self.title.clone()
         }
     }
 
@@ -311,10 +345,38 @@ impl TerminalView {
         self.font_family = SharedString::from(font_family.to_string());
         self.bounds = Bounds::default();
         self.on_grid.clear();
+        // Everything measured is measured against the family: what was cut on
+        // the old one says nothing about this one.
+        self.restyled = true;
     }
 
     pub fn has_exited(&self) -> bool {
         self.terminal.has_exited()
+    }
+
+    /// Reads the grid, and says the runs have to be cut again.
+    ///
+    /// The one door in: what is painted is derived from the snapshot, and a
+    /// snapshot replaced behind the derivation's back is a frame drawn from
+    /// the grid as it was.
+    fn take_snapshot(&mut self) {
+        self.snapshot = self.terminal.snapshot();
+        self.restyled = true;
+    }
+
+    /// Cuts the snapshot's lines into the runs the view paints.
+    ///
+    /// Once per snapshot and not once per frame: the cut asks `on_grid` about
+    /// every character on screen and slices the line's text for every run —
+    /// a walk of the grid, which is what a frame must not carry.
+    fn restyle(&mut self) {
+        self.painted = self
+            .snapshot
+            .lines
+            .iter()
+            .map(|line| painted_line(line, &self.on_grid))
+            .collect();
+        self.restyled = false;
     }
 
     /// Measures the characters on screen that have not been measured yet.
@@ -349,6 +411,8 @@ impl TerminalView {
                 .is_ok_and(|advance| (f32::from(advance.width) - width).abs() <= 0.01);
             self.on_grid.insert(ch, on_grid);
         }
+        // A character that has just been measured may cut a run in two.
+        self.restyled = true;
     }
 
     /// Recomputes the grid for the available room.
@@ -456,7 +520,7 @@ impl TerminalView {
             // following would be disconcerting.
             self.terminal.scroll_to_bottom();
             self.terminal.write(bytes);
-            self.snapshot = self.terminal.snapshot();
+            self.take_snapshot();
             cx.notify();
         }
     }
@@ -529,7 +593,7 @@ impl TerminalView {
             // A selection left behind would paint over what the program draws,
             // with no way left to remove it.
             self.terminal.clear_selection();
-            self.snapshot = self.terminal.snapshot();
+            self.take_snapshot();
             cx.notify();
             return;
         }
@@ -543,7 +607,7 @@ impl TerminalView {
         self.terminal
             .start_selection(self.position_at(event.position), kind);
         self.selecting = true;
-        self.snapshot = self.terminal.snapshot();
+        self.take_snapshot();
         cx.notify();
     }
 
@@ -567,7 +631,7 @@ impl TerminalView {
         }
         self.terminal
             .update_selection(self.position_at(event.position));
-        self.snapshot = self.terminal.snapshot();
+        self.take_snapshot();
         cx.notify();
     }
 
@@ -592,7 +656,7 @@ impl TerminalView {
         // invisible remnant that would make the next copy fail.
         if !self.terminal.has_selection() {
             self.terminal.clear_selection();
-            self.snapshot = self.terminal.snapshot();
+            self.take_snapshot();
             cx.notify();
         }
     }
@@ -619,7 +683,7 @@ impl TerminalView {
         {
             self.terminal.paste(&text);
             self.terminal.scroll_to_bottom();
-            self.snapshot = self.terminal.snapshot();
+            self.take_snapshot();
             cx.notify();
         }
         #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
@@ -632,7 +696,7 @@ impl TerminalView {
     /// state: the shell does have a `clear`, but its prompt still has to answer.
     pub fn clear_scrollback(&mut self, cx: &mut Context<Self>) {
         self.terminal.clear();
-        self.snapshot = self.terminal.snapshot();
+        self.take_snapshot();
         cx.notify();
     }
 
@@ -650,7 +714,7 @@ impl TerminalView {
         {
             self.terminal.paste(&text);
             self.terminal.scroll_to_bottom();
-            self.snapshot = self.terminal.snapshot();
+            self.take_snapshot();
             cx.notify();
         }
     }
@@ -658,7 +722,7 @@ impl TerminalView {
     /// Selects all the visible content and the scrollback.
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
         self.terminal.select_all();
-        self.snapshot = self.terminal.snapshot();
+        self.take_snapshot();
         cx.notify();
     }
 
@@ -770,7 +834,7 @@ impl TerminalView {
         }
 
         self.terminal.scroll(lines);
-        self.snapshot = self.terminal.snapshot();
+        self.take_snapshot();
         cx.notify();
     }
 }
@@ -786,7 +850,12 @@ impl Render for TerminalView {
         let focused = self.focus.is_focused(window);
         let default_fg = cx.theme().foreground;
         self.sync_font(cx);
-        self.learn_glyphs(window);
+        // Both only answer for the snapshot on screen: they run when it — or
+        // the font under it — has moved, never on a frame that repeats one.
+        if self.restyled {
+            self.learn_glyphs(window);
+            self.restyle();
+        }
         let font_size = self.font_size;
         let font_family = self.font_family.clone();
         let entity = cx.entity();
@@ -814,12 +883,12 @@ impl Render for TerminalView {
         // measured after layout, so the grid stays too wide for one frame, and
         // the wrapping that follows throws everything out of line.
         let cell = self.cell;
-        let on_grid = &self.on_grid;
         let lines: Vec<_> = self
             .snapshot
             .lines
             .iter()
-            .map(|line| {
+            .zip(self.painted.iter())
+            .map(|(line, painted)| {
                 div()
                     .h(cell.height)
                     // The runs are placed at their column, so the box they sit
@@ -842,7 +911,7 @@ impl Render for TerminalView {
                     .whitespace_nowrap()
                     .children(line_boxes(
                         line,
-                        on_grid,
+                        painted,
                         cell,
                         &font_family,
                         default_fg,
@@ -1101,6 +1170,34 @@ fn chunks(
     out
 }
 
+/// A run of a line, cut and sliced once per snapshot.
+///
+/// The text is a `SharedString` because it is one anyway by the time it is
+/// painted: what is kept is the **copy**, which would otherwise be made again
+/// for every run of every visible line, at every frame.
+struct Painted {
+    /// Which of the line's segments gives it its colours.
+    segment: usize,
+    chunk: Chunk,
+    text: SharedString,
+}
+
+/// Cuts a line into its runs and slices their text — once per snapshot.
+fn painted_line(line: &crate::terminal::Line, on_grid: &HashMap<char, bool>) -> Vec<Painted> {
+    let mut out = Vec::new();
+    for (segment, seg) in line.segments.iter().enumerate() {
+        for chunk in chunks(line, seg, on_grid) {
+            let text = SharedString::from(line.text[chunk.start..chunk.end].to_string());
+            out.push(Painted {
+                segment,
+                chunk,
+                text,
+            });
+        }
+    }
+    out
+}
+
 /// Converts a snapshot line into the boxes that draw it.
 ///
 /// One box per chunk, **placed at its column** rather than laid end to end.
@@ -1108,14 +1205,18 @@ fn chunks(
 /// covers exactly the cells it is meant to, whatever the glyph inside measures.
 fn line_boxes(
     line: &crate::terminal::Line,
-    on_grid: &HashMap<char, bool>,
+    painted: &[Painted],
     cell: gpui::Size<Pixels>,
     family: &SharedString,
     default_fg: Hsla,
     selection_bg: Hsla,
 ) -> Vec<gpui::Div> {
     let mut out = Vec::new();
-    for seg in &line.segments {
+    for run in painted {
+        let Some(seg) = line.segments.get(run.segment) else {
+            continue;
+        };
+        let (chunk, text) = (&run.chunk, run.text.clone());
         let background = if seg.selected {
             // The selection wins over the cell's background colour, otherwise
             // it would vanish on a coloured line.
@@ -1128,48 +1229,45 @@ fn line_boxes(
                 Paint::Rgb(r, g, b) => Some(rgb(r, g, b)),
             }
         };
-        for chunk in chunks(line, seg, on_grid) {
-            let text = SharedString::from(line.text[chunk.start..chunk.end].to_string());
-            let run = TextRun {
-                len: text.len(),
-                font: gpui::Font {
-                    family: family.clone(),
-                    features: Default::default(),
-                    weight: if seg.bold {
-                        gpui::FontWeight::BOLD
-                    } else {
-                        gpui::FontWeight::NORMAL
-                    },
-                    style: if seg.italic {
-                        gpui::FontStyle::Italic
-                    } else {
-                        gpui::FontStyle::Normal
-                    },
-                    fallbacks: None,
+        let styled = TextRun {
+            len: text.len(),
+            font: gpui::Font {
+                family: family.clone(),
+                features: Default::default(),
+                weight: if seg.bold {
+                    gpui::FontWeight::BOLD
+                } else {
+                    gpui::FontWeight::NORMAL
                 },
-                color: match seg.fg {
-                    Paint::Default => default_fg,
-                    Paint::Rgb(r, g, b) => rgb(r, g, b),
+                style: if seg.italic {
+                    gpui::FontStyle::Italic
+                } else {
+                    gpui::FontStyle::Normal
                 },
-                background_color: None,
-                underline: seg.underline.then(gpui::UnderlineStyle::default),
-                strikethrough: seg.strikethrough.then(gpui::StrikethroughStyle::default),
-            };
-            out.push(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left(cell.width * chunk.col as f32)
-                    .w(cell.width * chunk.cells as f32)
-                    .h(cell.height)
-                    // A fallback glyph wider than its cell is clipped rather
-                    // than allowed to cover its neighbour.
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .when_some(background, |el, bg| el.bg(bg))
-                    .child(StyledText::new(text).with_runs(vec![run])),
-            );
-        }
+                fallbacks: None,
+            },
+            color: match seg.fg {
+                Paint::Default => default_fg,
+                Paint::Rgb(r, g, b) => rgb(r, g, b),
+            },
+            background_color: None,
+            underline: seg.underline.then(gpui::UnderlineStyle::default),
+            strikethrough: seg.strikethrough.then(gpui::StrikethroughStyle::default),
+        };
+        out.push(
+            div()
+                .absolute()
+                .top_0()
+                .left(cell.width * chunk.col as f32)
+                .w(cell.width * chunk.cells as f32)
+                .h(cell.height)
+                // A fallback glyph wider than its cell is clipped rather
+                // than allowed to cover its neighbour.
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .when_some(background, |el, bg| el.bg(bg))
+                .child(StyledText::new(text).with_runs(vec![styled])),
+        );
     }
     out
 }
@@ -1349,11 +1447,16 @@ impl OpenTerminal {}
 
 impl ClaudhubApp {
     /// The terminals of the worktree being looked at, in the order they opened.
-    pub(super) fn terminals_of(&self, worktree: &Path) -> Vec<&OpenTerminal> {
+    /// An iterator and not a list: three of its callers only ask whether there
+    /// is one, and one of them — `is_last_terminal` — is asked by every tab at
+    /// every frame.
+    pub(super) fn terminals_of<'a>(
+        &'a self,
+        worktree: &'a Path,
+    ) -> impl DoubleEndedIterator<Item = &'a OpenTerminal> + 'a {
         self.terminals
             .iter()
-            .filter(|terminal| terminal.worktree == worktree)
-            .collect()
+            .filter(move |terminal| terminal.worktree == worktree)
     }
 
     /// Opens a terminal on a worktree and shows it.
@@ -1619,8 +1722,10 @@ impl ClaudhubApp {
         else {
             return false;
         };
+        // Walked from the end and stopped at the first: the answer is the
+        // worktree's last terminal, and every tab asks at every frame.
         self.terminals_of(&terminal.worktree)
-            .last()
+            .next_back()
             .is_some_and(|last| last.view.entity_id() == view)
     }
 
@@ -1765,7 +1870,7 @@ impl ClaudhubApp {
         // the neighbouring terminal, which is what one is left looking at, and
         // to the root when there is none.
         if had_focus {
-            if self.terminals_of(&worktree).is_empty() {
+            if self.terminals_of(&worktree).next().is_none() {
                 let root = self.focus.clone();
                 window.focus(&root, cx);
             } else {
@@ -1809,7 +1914,7 @@ impl ClaudhubApp {
             .iter()
             .filter(|terminal| terminal.worktree == worktree)
             .find(|terminal| terminal.view.read(cx).focus_handle(cx).is_focused(window))
-            .or_else(|| self.terminals_of(worktree).into_iter().next_back())
+            .or_else(|| self.terminals_of(worktree).next_back())
             .map(|terminal| terminal.view.entity_id());
         if let Some(view) = doomed {
             self.ask_close_terminal(view, window, cx);
@@ -1828,7 +1933,7 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let terminals = self.terminals_of(worktree);
+        let terminals: Vec<&OpenTerminal> = self.terminals_of(worktree).collect();
         if terminals.is_empty() {
             return;
         }
@@ -1891,7 +1996,7 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.terminals_of(worktree).is_empty() {
+        if self.terminals_of(worktree).next().is_none() {
             self.open_terminal(worktree, Launch::shell(), window, cx);
         }
     }

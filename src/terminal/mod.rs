@@ -124,9 +124,11 @@ impl From<TermSize> for WindowSize {
 
 /// The bridge between alacritty's I/O loop and the interface thread.
 ///
-/// `try_send` and not `send`: if the view has not drained yet, losing a wake-up
-/// is better — the next one will redraw the current state anyway — than
-/// blocking the thread that reads the pty.
+/// `try_send` and not `send`: the channel is unbounded, so this never blocks
+/// the thread that reads the pty, and the one failure left — a receiver that
+/// has gone — is nothing to wait on. A wake-up says "there is something new",
+/// never what: the view coalesces what has piled up and takes **one** snapshot
+/// (see `ui::terminal_view`), a `cat` of a large file emitting one per read.
 #[derive(Clone)]
 struct Proxy {
     events: async_channel::Sender<TerminalEvent>,

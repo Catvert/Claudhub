@@ -3725,7 +3725,7 @@ impl ClaudhubApp {
         }
         self.active
             .as_deref()
-            .is_some_and(|worktree| !self.terminals_of(worktree).is_empty())
+            .is_some_and(|worktree| self.terminals_of(worktree).next().is_some())
     }
 
     /// Whether *this* worktree's terminals are on screen.
@@ -3817,7 +3817,7 @@ impl ClaudhubApp {
         // that does nothing, which is how one concludes it is broken.
         let empty = worktree
             .as_deref()
-            .is_some_and(|worktree| self.terminals_of(worktree).is_empty());
+            .is_some_and(|worktree| self.terminals_of(worktree).next().is_none());
         if empty {
             self.set_panel_visible(super::panels::TerminalPanel::NAME, true, cx);
         } else {
