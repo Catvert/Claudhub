@@ -498,8 +498,8 @@ impl BranchPicker {
                         return;
                     };
                     let branch = branch.clone();
-                    this.act(window, cx, move |app, _window, cx| {
-                        app.worktree_from_branch(main, branch, cx)
+                    this.act(window, cx, move |app, window, cx| {
+                        app.worktree_from_branch(main, branch, window, cx)
                     })
                 }
             },

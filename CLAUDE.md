@@ -215,9 +215,10 @@ attend, et c'est la panne qu'on ne diagnostique pas.
   se disputeraient le verrou des références.
 - **Hooks du projet** (un worker) : `wt new/rm/up/down`. Pas avec les lectures
   (un `up` démarre des conteneurs), pas avec le réseau.
-- **Fond** (un worker) : résumés, agents, relevé de `wt`, recettes d'un
-  `justfile`, commandes shell d'un plugin. Ne doit jamais passer devant un diff
-  qu'on vient de demander.
+- **Fond** (un worker) : résumés, agents, relevé de `wt`, ses questions et les
+  liens de son `[open] source` (des shells du projet), recettes d'un `justfile`,
+  commandes shell d'un plugin. Ne doit jamais passer devant un diff qu'on vient
+  de demander.
 - **Bases** (deux workers) : deux, parce que déplier un schéma en demande
   plusieurs à la fois et qu'ils attendent une socket.
 - **Recherche** (un worker) : une recherche se **remplace** — c'est

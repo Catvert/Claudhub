@@ -99,12 +99,20 @@ fn is_db(cmd: &Cmd) -> bool {
 /// It has its own queue for the same reason as the network: it covers every open
 /// worktree, it comes back every few seconds, and it must never get in front of
 /// the diff just asked for.
+///
+/// A project's **questions** are here too, and not with the reads where they
+/// started: a `[[prompt]]`'s `source` or `when` is a shell of the project —
+/// on Acetics, `ensure-infra mariadb` may start a container before querying
+/// it — and a diff asked for meanwhile waited behind it. Same for the links
+/// `[open] source` enumerates: an SQL query through `docker exec`.
 fn is_background(cmd: &Cmd) -> bool {
     matches!(
         cmd,
         Cmd::LoadSummaries { .. }
             | Cmd::ScanAgents { .. }
             | Cmd::WtScan { .. }
+            | Cmd::WtLinks { .. }
+            | Cmd::WtQuestions { .. }
             | Cmd::JustLoad { .. }
     )
 }
@@ -445,6 +453,12 @@ pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
     )
 }
 
+/// Where an arm puts what it has to say before it returns.
+///
+/// `Sync`, because `wt`'s narration is relayed from the thread that drains its
+/// channel, not from the one running the hook.
+type Emit<'a> = &'a (dyn Fn(Evt) + Sync);
+
 fn worker(
     name: String,
     commands: async_channel::Receiver<Cmd>,
@@ -453,8 +467,14 @@ fn worker(
     std::thread::Builder::new()
         .name(name)
         .spawn(move || {
+            // What an operation says **while** it runs goes out on the same
+            // channel as what it returns: the window gone is the one failure,
+            // and it is read again on the events that follow.
+            let emit = |evt: Evt| {
+                let _ = events.send_blocking(evt);
+            };
             while let Ok(cmd) = commands.recv_blocking() {
-                for evt in handle(cmd) {
+                for evt in handle(cmd, &emit) {
                     if events.send_blocking(evt).is_err() {
                         return; // the window is gone
                     }
@@ -471,10 +491,14 @@ fn worker(
 /// that only carried the results would not say what was waiting behind what.
 /// Writes are louder — `info`, with their duration — and say what they did one
 /// floor down, in `done` and `fail`.
-fn handle(cmd: Cmd) -> Vec<Evt> {
+///
+/// `emit` is for what an operation has to say **before** it returns — the
+/// lines of a `wt` hook — and nothing else goes through it: the result is the
+/// returned list, so that an arm stays a function of its command.
+fn handle(cmd: Cmd, emit: Emit) -> Vec<Evt> {
     let name = cmd.name();
     let started = std::time::Instant::now();
-    let evts = dispatch(cmd);
+    let evts = dispatch(cmd, emit);
     let elapsed = crate::logging::ms(started.elapsed());
     // A command that produced a `Done` or a `Failed` is a **write**: that is
     // what those two events mean, and it saves classifying sixty variants a
@@ -502,8 +526,10 @@ fn handle(cmd: Cmd) -> Vec<Evt> {
 /// dispatch table one can read end to end.
 ///
 /// Returning a `Vec` rather than emitting as it goes keeps this function pure
-/// and testable: it does not know the channel.
-fn dispatch(cmd: Cmd) -> Vec<Evt> {
+/// and testable: it does not know the channel. The four `wt` operations are
+/// the exception, and `emit` exists for them alone: their progress is worth
+/// reading **while** they run, and it is the worker that has it.
+fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
     match cmd {
         Cmd::OpenRepo(path) => open(path),
         // The launch directory: opened if it is a repository, silence otherwise
@@ -1023,28 +1049,44 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
         Cmd::WtCreate {
             main,
             slug,
+            branch,
             from,
             answers,
         } => {
-            let created = crate::wt::create(&main, &slug, from.as_deref(), &answers);
+            let progress = wt_progress(main.clone(), slug.clone(), crate::wt::Op::New, emit);
+            let created = crate::wt::create(
+                &main,
+                &slug,
+                branch.as_deref(),
+                from.as_deref(),
+                &answers,
+                &progress,
+            );
             worktrees_changed(main, created.map(|(_, output)| output))
         }
         Cmd::WtRemove { main, slug } => {
-            let removed = crate::wt::remove(&main, &slug);
+            let progress = wt_progress(main.clone(), slug.clone(), crate::wt::Op::Remove, emit);
+            let removed = crate::wt::remove(&main, &slug, &progress);
             worktrees_changed(main, removed)
         }
         Cmd::WtUp {
             main,
             slug,
             answers,
-        } => match crate::wt::up(&main, &slug, &answers) {
-            Ok(output) => vec![done(None, Action::WtUp, output)],
-            Err(e) => vec![fail(None, Action::WtUp, e)],
-        },
-        Cmd::WtDown { main, slug } => match crate::wt::down(&main, &slug) {
-            Ok(output) => vec![done(None, Action::WtDown, output)],
-            Err(e) => vec![fail(None, Action::WtDown, e)],
-        },
+        } => {
+            let progress = wt_progress(main.clone(), slug.clone(), crate::wt::Op::Up, emit);
+            match crate::wt::up(&main, &slug, &answers, &progress) {
+                Ok(output) => vec![done(None, Action::WtUp, output)],
+                Err(e) => vec![fail(None, Action::WtUp, e)],
+            }
+        }
+        Cmd::WtDown { main, slug } => {
+            let progress = wt_progress(main.clone(), slug.clone(), crate::wt::Op::Down, emit);
+            match crate::wt::down(&main, &slug, &progress) {
+                Ok(output) => vec![done(None, Action::WtDown, output)],
+                Err(e) => vec![fail(None, Action::WtDown, e)],
+            }
+        }
         Cmd::WtTask {
             main,
             worktree,
@@ -1060,6 +1102,19 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
             Err(e) => vec![fail(Some(worktree), Action::Worktree, e)],
         },
         Cmd::WtScan { targets } => wt_scan(targets),
+        Cmd::WtLinks {
+            main,
+            worktree,
+            slug,
+        } => {
+            let endpoints = crate::wt::Session::open(&main)
+                .map(|session| session.links_of(&slug))
+                .unwrap_or_default();
+            vec![Evt::WtLinks {
+                worktree,
+                endpoints,
+            }]
+        }
         Cmd::JustLoad { worktree } => {
             let recipes = crate::just::snapshot(&worktree);
             vec![Evt::JustRecipes { worktree, recipes }]
@@ -1304,8 +1359,7 @@ fn wt_scan(targets: Vec<(PathBuf, PathBuf)>) -> Vec<Evt> {
                 .or_insert_with(|| crate::wt::Session::open(&main))
                 .as_ref()?;
             let slug = session.slug_of(&worktree)?;
-            let (up, endpoints) = session.state_of(&slug);
-            Some((worktree, protocol::WtWorktree { up, endpoints }))
+            Some((worktree, session.state_of(&slug)))
         })
         .collect();
     vec![Evt::WtStates { states }]
@@ -1346,6 +1400,26 @@ fn wt_questions(
             round,
         }],
         Err(e) => vec![fail(None, Action::Worktree, e)],
+    }
+}
+
+/// The relay of one `wt` operation's narration: each line becomes an
+/// `Evt::WtProgress` tagged with the operation, so the console it belongs to
+/// can tell it from another's.
+fn wt_progress(
+    main: PathBuf,
+    slug: String,
+    op: crate::wt::Op,
+    emit: Emit<'_>,
+) -> impl Fn(String, bool) + Sync + '_ {
+    move |line, warning| {
+        emit(Evt::WtProgress {
+            main: main.clone(),
+            slug: slug.clone(),
+            op,
+            line,
+            warning,
+        })
     }
 }
 
@@ -1593,6 +1667,32 @@ mod tests {
                 force_with_lease: false,
             }),
             Queue::Network
+        );
+    }
+
+    /// A project's questions and the links its `[open] source` enumerates are
+    /// shells of the project — one of them starts a container — and go with
+    /// the background sweep, never with the reads a frame waits for.
+    #[test]
+    fn a_projects_shells_never_hold_back_a_diff() {
+        assert_eq!(
+            queue_of(&Cmd::WtQuestions {
+                main: worktree(),
+                slug: "fix".into(),
+                answers: Default::default(),
+                phase: crate::wt::Phase::Up,
+                task: None,
+                round: 0,
+            }),
+            Queue::Background
+        );
+        assert_eq!(
+            queue_of(&Cmd::WtLinks {
+                main: worktree(),
+                worktree: worktree(),
+                slug: "fix".into(),
+            }),
+            Queue::Background
         );
     }
 

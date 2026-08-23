@@ -615,6 +615,11 @@ pub enum Cmd {
     WtCreate {
         main: PathBuf,
         slug: String,
+        /// An existing branch to check out — local, or `origin/…`, which git
+        /// turns into a local one of the short name — or a name imposed on the
+        /// new branch. `None`: a new branch named by the project's template.
+        branch: Option<String>,
+        /// Where a *new* branch starts. `None`: the main repository's HEAD.
         from: Option<String>,
         answers: std::collections::BTreeMap<String, String>,
     },
@@ -659,6 +664,15 @@ pub enum Cmd {
     /// queue only, and a long period.
     WtScan {
         targets: Vec<(PathBuf, WorktreeId)>,
+    },
+    /// The addresses `[open] source` enumerates for one worktree — one per
+    /// tenant, per service… — asked **when the menu opens**, never by the scan:
+    /// it is a shell command that may query a database, and the project's own
+    /// comment says "resolved on opening, not while listing". Background queue.
+    WtLinks {
+        main: PathBuf,
+        worktree: WorktreeId,
+        slug: String,
     },
 
     // — The language server ————————————————————————————————————
@@ -873,6 +887,7 @@ impl Cmd {
             Self::WtTask { .. } => "WtTask",
             Self::JustLoad { .. } => "JustLoad",
             Self::WtScan { .. } => "WtScan",
+            Self::WtLinks { .. } => "WtLinks",
             Self::PluginCall { .. } => "PluginCall",
             Self::PluginManage { .. } => "PluginManage",
             Self::AddWorktree { .. } => "AddWorktree",
@@ -1012,6 +1027,24 @@ pub enum Evt {
     },
     WtStates {
         states: Vec<(WorktreeId, WtWorktree)>,
+    },
+    /// The addresses `[open] source` enumerated for a worktree. The static URL
+    /// is not among them: it travels with `WtStates`, and the menu shows it
+    /// before this arrives.
+    WtLinks {
+        worktree: WorktreeId,
+        endpoints: Vec<crate::wt::Endpoint>,
+    },
+    /// One line of a `wt` operation, as it is said — `new`, `up`, `down` and
+    /// `rm` run the project's hooks, which are measured in minutes, and the
+    /// `Done` or `Failed` that closes the operation arrives only at the end.
+    /// `main` and `slug` say which operation: two may be in flight.
+    WtProgress {
+        main: PathBuf,
+        slug: String,
+        op: crate::wt::Op,
+        line: String,
+        warning: bool,
     },
     /// What a plugin's capability answered — the body, or one sentence of why
     /// not. It goes back to the request that is awaiting it, by `call`.
@@ -1294,7 +1327,21 @@ pub struct WtWorktree {
     /// `None` when the project declares no `[status] up`: there is then nothing
     /// to start, and showing "stopped" would be false information.
     pub up: Option<bool>,
+    /// The static `[open] url`, rendered — at most one. What `[open] source`
+    /// enumerates is **not** here: it is a shell command, asked by `WtLinks`
+    /// when the menu opens.
     pub endpoints: Vec<crate::wt::Endpoint>,
+    /// The branch `wt` recorded when it created the worktree. Empty when `wt`
+    /// did not create it, or before its first `up`.
+    pub branch: String,
+    /// The answers remembered from the last `new`/`up` — `db`, `tenants`,
+    /// `services`… — raw values: `wt` keeps no labels.
+    pub opts: std::collections::BTreeMap<String, String>,
+    /// The ports frozen at the first start.
+    pub ports: std::collections::BTreeMap<String, u16>,
+    /// Each `[status.info]` line, run and trimmed. In the order of the keys as
+    /// `wt` holds them — a `BTreeMap` in its config, so alphabetical.
+    pub info: Vec<(String, String)>,
 }
 
 /// What the user asked for, in order to phrase the result message and know what
