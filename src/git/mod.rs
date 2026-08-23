@@ -136,7 +136,27 @@ fn run<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<std::process::Output> 
 /// reading after the wait is the classic deadlock. What differs is only how
 /// long one is willing to wait, which is why the constant became a parameter.
 pub(crate) fn wait_with_timeout(
+    cmd: Command,
+    limit: Duration,
+    describe: impl Fn() -> String,
+) -> Result<std::process::Output> {
+    wait_feeding(cmd, None, limit, describe)
+}
+
+/// The same wait, with something to write on the process's standard input.
+///
+/// The command must have asked for a piped `stdin` when there is an input to
+/// give. The write goes through a thread of its own for the reason the reads
+/// do: a program that reads its input slowly — an agent reading a diff of a
+/// megabyte — blocks whoever writes it, and writing before waiting deadlocks
+/// against the very pipes we have not started draining.
+///
+/// The write **ignores its own failure**: a program that exits before reading
+/// everything closes the pipe, and it is its exit code that has to be reported,
+/// not an `EPIPE` that explains nothing.
+pub(crate) fn wait_feeding(
     mut cmd: Command,
+    input: Option<Vec<u8>>,
     limit: Duration,
     describe: impl Fn() -> String,
 ) -> Result<std::process::Output> {
@@ -144,38 +164,65 @@ pub(crate) fn wait_with_timeout(
         .spawn()
         .with_context(|| format!("{}: program not found", describe()))?;
 
+    let feeder = input.map(|bytes| {
+        let mut stdin = child.stdin.take().expect("stdin requested as piped");
+        std::thread::spawn(move || {
+            let _ = std::io::Write::write_all(&mut stdin, &bytes);
+        })
+    });
+
     let mut stdout = child.stdout.take().expect("stdout requested as piped");
     let mut stderr = child.stderr.take().expect("stderr requested as piped");
+    // Closing an output is the process's last act: whoever finishes reading one
+    // wakes the wait below, which is what replaced polling every five
+    // milliseconds for an answer that usually arrives in ten.
+    let (closed, closes) = std::sync::mpsc::channel::<()>();
+    let out_closed = closed.clone();
     let out_reader = std::thread::spawn(move || {
         let mut buffer = Vec::new();
         let _ = stdout.read_to_end(&mut buffer);
+        let _ = out_closed.send(());
         buffer
     });
     let err_reader = std::thread::spawn(move || {
         let mut buffer = Vec::new();
         let _ = stderr.read_to_end(&mut buffer);
+        let _ = closed.send(());
         buffer
     });
 
+    /// The pipes are closed and the process still has not been reaped: it is
+    /// about to be, or a grandchild inherited them. Rare enough to be polled.
+    const RESIDUAL: Duration = Duration::from_millis(50);
+
     let deadline = Instant::now() + limit;
     let status = loop {
-        match child.try_wait()? {
-            Some(status) => break status,
-            None if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                bail!(
-                    "{} did not answer within {:?} and was interrupted",
-                    describe(),
-                    limit
-                );
-            }
-            // Short enough that a ten-millisecond command does not look like
-            // fifty, long enough not to spin.
-            None => std::thread::sleep(Duration::from_millis(5)),
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "{} did not answer within {:?} and was interrupted",
+                describe(),
+                limit
+            );
+        }
+        // Both outputs already closed: nothing will wake us any more, and the
+        // exit status is a hair away — a short step, not the residual one.
+        if closes
+            .recv_timeout(RESIDUAL.min(deadline - now))
+            .is_err_and(|e| e == std::sync::mpsc::RecvTimeoutError::Disconnected)
+        {
+            std::thread::sleep(Duration::from_millis(1));
         }
     };
 
+    if let Some(feeder) = feeder {
+        let _ = feeder.join();
+    }
     Ok(std::process::Output {
         status,
         stdout: out_reader.join().unwrap_or_default(),
@@ -379,5 +426,21 @@ mod tests {
         let out = wait_with_timeout(cmd, TIMEOUT, || "large output".into())
             .expect("the command must finish");
         assert_eq!(out.stdout.len(), 2_000_000);
+    }
+
+    /// Writing and reading at the same time, both past a pipe's size: writing
+    /// everything before starting to read would block on both ends at once.
+    #[test]
+    fn a_large_input_goes_out_while_the_answer_comes_back() {
+        let mut cmd = Command::new("cat");
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let input = vec![b'x'; 1_000_000];
+        let out = wait_feeding(cmd, Some(input), TIMEOUT, || "cat".into())
+            .expect("the command must finish");
+        assert!(out.status.success());
+        assert_eq!(out.stdout.len(), 1_000_000);
     }
 }

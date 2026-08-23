@@ -1,6 +1,7 @@
 //! Branches: the selector's list, and the closed questions worktree operations
 //! ask.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -44,12 +45,17 @@ pub struct Branch {
 /// the most recent commit to the oldest.
 pub fn list(main: &Path) -> Result<Vec<Branch>> {
     // The separator has to be a character a commit subject does not contain;
-    // `%00` is written literally by for-each-ref as a null byte. The author
-    // comes last: adding a field at the end keeps outputs written by an earlier
-    // version readable, a missing field being the empty string.
+    // `%00` is written literally by for-each-ref as a null byte. The author,
+    // then the full reference, come last: adding a field at the end keeps
+    // outputs written by an earlier version readable, a missing field being the
+    // empty string.
+    //
+    // `%(refname)` is what removed the second `for-each-ref`: it says whether a
+    // reference lives under `refs/heads` or `refs/remotes`, which the short name
+    // alone cannot tell — a local branch may well be called `origin/x`.
     const FORMAT: &str = "%(refname:short)%00%(HEAD)%00%(committerdate:relative)%00\
                           %(contents:subject)%00%(upstream:short)%00%(upstream:track)%00\
-                          %(authorname)";
+                          %(authorname)%00%(refname)";
 
     let raw = git(
         main,
@@ -62,14 +68,11 @@ pub fn list(main: &Path) -> Result<Vec<Branch>> {
         ],
     )?;
 
-    let locals: Vec<String> = git_opt(
-        main,
-        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
-    )
-    .unwrap_or_default()
-    .lines()
-    .map(str::to_string)
-    .collect();
+    let locals: HashSet<&str> = raw
+        .lines()
+        .filter_map(|line| line.split('\0').nth(REFNAME_FIELD))
+        .filter_map(|refname| refname.strip_prefix("refs/heads/"))
+        .collect();
 
     let mut branches: Vec<Branch> = raw
         .lines()
@@ -81,15 +84,22 @@ pub fn list(main: &Path) -> Result<Vec<Branch>> {
         BranchKind::Local => 0,
         BranchKind::Remote => 1,
     });
+    // One `worktree list` for the whole list, and not one per branch: the
+    // answer is the same for all of them, and it used to be a fork per local
+    // branch — a hundred of them on a repository that has lived a while.
+    let holders = checked_out_map(main);
     for b in &mut branches {
         if b.kind == BranchKind::Local {
-            b.checked_out_at = checked_out_at(main, &b.name);
+            b.checked_out_at = holders.get(b.name.as_str()).cloned();
         }
     }
     Ok(branches)
 }
 
-fn parse_ref(line: &str, locals: &[String]) -> Option<Branch> {
+/// Where `%(refname)` sits in `FORMAT`, counted in NUL-separated fields.
+const REFNAME_FIELD: usize = 7;
+
+fn parse_ref(line: &str, locals: &HashSet<&str>) -> Option<Branch> {
     let mut f = line.split('\0');
     let name = f.next()?.to_string();
     let head = f.next().unwrap_or("").trim() == "*";
@@ -98,8 +108,15 @@ fn parse_ref(line: &str, locals: &[String]) -> Option<Branch> {
     let upstream_name = f.next().unwrap_or("");
     let track = f.next().unwrap_or("");
     let author = f.next().unwrap_or("").to_string();
+    let refname = f.next().unwrap_or("");
 
-    let kind = if name.contains('/') && !locals.iter().any(|l| l == &name) {
+    // The reference decides when it is there; without it — a line written by an
+    // older format — the short name is all there is to go on.
+    let kind = if refname.starts_with("refs/remotes/") {
+        BranchKind::Remote
+    } else if refname.starts_with("refs/heads/") {
+        BranchKind::Local
+    } else if name.contains('/') && !locals.contains(name.as_str()) {
         BranchKind::Remote
     } else {
         BranchKind::Local
@@ -112,7 +129,7 @@ fn parse_ref(line: &str, locals: &[String]) -> Option<Branch> {
         }
         // A remote already present locally adds nothing to the selector.
         if let Some((_, short)) = name.split_once('/') {
-            if locals.iter().any(|l| l == short) {
+            if locals.contains(short) {
                 return None;
             }
         }
@@ -227,17 +244,35 @@ pub fn upstream_of(main: &Path, branch: &str) -> Option<String> {
 
 /// The worktree already holding this branch, if there is one.
 pub fn checked_out_at(main: &Path, branch: &str) -> Option<PathBuf> {
-    let out = git_opt(main, &["worktree", "list", "--porcelain"])?;
+    checked_out_map(main).remove(branch)
+}
+
+/// Every branch a checkout holds, from a single `worktree list`.
+///
+/// Asking branch by branch meant one fork per branch for an answer that does
+/// not change between two of them.
+fn checked_out_map(main: &Path) -> HashMap<String, PathBuf> {
+    git_opt(main, &["worktree", "list", "--porcelain"])
+        .map(|out| parse_checked_out(&out))
+        .unwrap_or_default()
+}
+
+/// `worktree list --porcelain` is a paragraph per checkout: `worktree <path>`
+/// opens it, `branch refs/heads/<name>` names what it holds — and a detached
+/// HEAD has no such line at all.
+fn parse_checked_out(out: &str) -> HashMap<String, PathBuf> {
+    let mut holders = HashMap::new();
     let mut current: Option<&str> = None;
-    let target = format!("refs/heads/{branch}");
     for line in out.lines() {
-        if let Some(p) = line.strip_prefix("worktree ") {
-            current = Some(p);
-        } else if line.strip_prefix("branch ") == Some(target.as_str()) {
-            return current.map(PathBuf::from);
+        if let Some(path) = line.strip_prefix("worktree ") {
+            current = Some(path);
+        } else if let Some(refname) = line.strip_prefix("branch refs/heads/") {
+            if let Some(path) = current {
+                holders.insert(refname.to_string(), PathBuf::from(path));
+            }
         }
     }
-    None
+    holders
 }
 
 /// The divergence point between `branch` and its base: it is that commit the
@@ -300,7 +335,7 @@ mod tests {
 
     #[test]
     fn reads_a_local_branch_with_its_upstream() {
-        let locals = vec!["main".to_string()];
+        let locals = HashSet::from(["main"]);
         let line =
             "main\0*\x002 hours ago\0Fix the rendering\0origin/main\0[ahead 1, behind 4]\0Zoé";
         let b = parse_ref(line, &locals).unwrap();
@@ -317,7 +352,7 @@ mod tests {
     #[test]
     fn a_branch_without_upstream_has_none() {
         let line = "wt/try\0 \0yesterday\0Draft\0\0";
-        let b = parse_ref(line, &["wt/try".to_string()]).unwrap();
+        let b = parse_ref(line, &HashSet::from(["wt/try"])).unwrap();
         assert_eq!(b.kind, BranchKind::Local, "a local name may contain a /");
         assert!(!b.is_head);
         assert_eq!(b.upstream, None);
@@ -328,7 +363,7 @@ mod tests {
 
     #[test]
     fn hides_remote_duplicates_and_head_alias() {
-        let locals = vec!["main".to_string()];
+        let locals = HashSet::from(["main"]);
         assert!(parse_ref("origin/main\0 \0yesterday\0x\0\0", &locals).is_none());
         assert!(parse_ref("origin/HEAD\0 \0yesterday\0x\0\0", &locals).is_none());
         let b = parse_ref("origin/feature\0 \0yesterday\0x\0\0", &locals).unwrap();
@@ -350,6 +385,34 @@ mod tests {
         // Nothing to strip: what comes back is what went in, so a caller that
         // passes a local name by mistake does not lose half of it.
         assert_eq!(short_name("main"), "main");
+    }
+
+    /// A detached checkout has no `branch` line, and the paragraph that follows
+    /// must not inherit the previous one's.
+    #[test]
+    fn reads_which_checkout_holds_each_branch() {
+        let out = "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\n\
+                   worktree /repo/wt/detached\nHEAD def\ndetached\n\n\
+                   worktree /repo/wt/feat\nHEAD ghi\nbranch refs/heads/feat/x\n";
+        let holders = parse_checked_out(out);
+        assert_eq!(holders.get("main"), Some(&PathBuf::from("/repo")));
+        assert_eq!(
+            holders.get("feat/x"),
+            Some(&PathBuf::from("/repo/wt/feat")),
+            "a branch name carries slashes of its own"
+        );
+        assert_eq!(holders.len(), 2);
+    }
+
+    /// A local branch really called `origin/x`: the short name alone reads as a
+    /// remote one, the full reference does not.
+    #[test]
+    fn the_reference_decides_local_from_remote() {
+        let locals = HashSet::new();
+        let line = "origin/x\0 \0yesterday\0Draft\0\0\0Zoé\0refs/heads/origin/x";
+        assert_eq!(parse_ref(line, &locals).unwrap().kind, BranchKind::Local);
+        let line = "origin/x\0 \0yesterday\0Draft\0\0\0Zoé\0refs/remotes/origin/x";
+        assert_eq!(parse_ref(line, &locals).unwrap().kind, BranchKind::Remote);
     }
 
     #[test]

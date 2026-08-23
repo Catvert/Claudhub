@@ -15,12 +15,11 @@
 //! Nothing here knows gpui, and both `prompt` and `clean` are free of I/O:
 //! that is what makes them testable.
 
-use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 
 /// Beyond this, the diff is truncated.
 ///
@@ -144,10 +143,12 @@ pub fn suggest(worktree: &Path, command_line: &str) -> Result<String> {
 /// Runs the configured program, gives it the prompt on standard input, and
 /// returns its standard output.
 ///
-/// All three streams go through threads: a full pipe blocks whoever writes,
-/// and both the prompt and the answer go well past a pipe's sixty-four
-/// kilobytes. Writing first and then waiting would give the classic deadlock —
-/// the process waits for us to read, we wait for it to finish.
+/// The wait is the git layer's (`wait_feeding`): all three streams go through
+/// threads because a full pipe blocks whoever writes, and both the prompt and
+/// the answer go well past a pipe's sixty-four kilobytes. Writing first and
+/// then waiting would give the classic deadlock — the process waits for us to
+/// read, we wait for it to finish. What differs here is only the ceiling, an
+/// agent taking seconds where git takes milliseconds.
 fn ask(worktree: &Path, command_line: &str, prompt: &str) -> Result<String> {
     let mut parts = crate::cmdline::split_command(command_line).into_iter();
     let program = parts
@@ -155,44 +156,18 @@ fn ask(worktree: &Path, command_line: &str, prompt: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("no message-generation command in the settings"))?;
     let args: Vec<String> = parts.collect();
 
-    let mut child = Command::new(&program)
-        .args(&args)
+    let mut cmd = Command::new(&program);
+    cmd.args(&args)
         .current_dir(worktree)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("{program}: program not found"))?;
+        .stderr(Stdio::piped());
+    let output = crate::git::wait_feeding(cmd, Some(prompt.as_bytes().to_vec()), TIMEOUT, || {
+        program.clone()
+    })?;
 
-    let mut stdin = child.stdin.take().expect("stdin requested as piped");
-    let text = prompt.to_string();
-    // The write ignores its own failure: a program that exits before reading
-    // everything closes the pipe, and it is its exit code that has to be
-    // reported, not an `EPIPE` that explains nothing.
-    let writer = std::thread::spawn(move || {
-        let _ = stdin.write_all(text.as_bytes());
-    });
-    let out = read_thread(child.stdout.take().expect("stdout requested as piped"));
-    let err = read_thread(child.stderr.take().expect("stderr requested as piped"));
-
-    let deadline = Instant::now() + TIMEOUT;
-    let status = loop {
-        match child.try_wait()? {
-            Some(status) => break status,
-            None if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                bail!("{program} did not answer within {TIMEOUT:?} and was interrupted");
-            }
-            None => std::thread::sleep(Duration::from_millis(20)),
-        }
-    };
-    let _ = writer.join();
-    let stdout = out.join().unwrap_or_default();
-    let stderr = err.join().unwrap_or_default();
-
-    if !status.success() {
-        let message = String::from_utf8_lossy(&stderr);
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr);
         let message = message.trim();
         bail!(
             "{program} failed: {}",
@@ -203,17 +178,7 @@ fn ask(worktree: &Path, command_line: &str, prompt: &str) -> Result<String> {
             }
         );
     }
-    Ok(String::from_utf8_lossy(&stdout).into_owned())
-}
-
-fn read_thread(
-    mut source: impl std::io::Read + Send + 'static,
-) -> std::thread::JoinHandle<Vec<u8>> {
-    std::thread::spawn(move || {
-        let mut buffer = Vec::new();
-        let _ = source.read_to_end(&mut buffer);
-        buffer
-    })
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 #[cfg(test)]

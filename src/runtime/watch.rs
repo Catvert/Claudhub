@@ -359,26 +359,17 @@ fn tracked_directories(worktree: &Path) -> Option<HashSet<PathBuf>> {
     Some(dirs)
 }
 
-/// A checkout's git directory.
+/// A checkout's git directory, read from disk.
 ///
 /// In the main repository it is `.git/`. In a linked worktree, `.git` is a
 /// *file* pointing at `<main>/.git/worktrees/<name>`: that is where this
 /// checkout's `HEAD` and `index` live, and watching them in the wrong place
 /// amounts to watching nothing at all.
+///
+/// The reading lives in the git layer, which needs the same answer on every
+/// status and used to fork a `rev-parse` for it.
 fn git_dir(worktree: &Path) -> Option<PathBuf> {
-    let entry = worktree.join(".git");
-    if entry.is_dir() {
-        return Some(entry);
-    }
-    let text = std::fs::read_to_string(&entry).ok()?;
-    let target = text.strip_prefix("gitdir:")?.trim();
-    let path = PathBuf::from(target);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        worktree.join(path)
-    };
-    path.is_dir().then_some(path)
+    crate::git::repo::git_dir_on_disk(worktree)
 }
 
 #[cfg(test)]
