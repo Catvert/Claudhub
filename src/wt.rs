@@ -708,8 +708,10 @@ fn capturing<T>(
             // dropped, which is the `set_sink(None)` below.
             while let Ok(msg) = rx.recv() {
                 let (line, warning) = match msg {
-                    util::Msg::Warn(m) => (m, true),
-                    util::Msg::Info(m) | util::Msg::Ok(m) | util::Msg::Out(m) => (m, false),
+                    util::Msg::Warn(m) => (strip_ansi(&m), true),
+                    util::Msg::Info(m) | util::Msg::Ok(m) | util::Msg::Out(m) => {
+                        (strip_ansi(&m), false)
+                    }
                     // `Done` carries no text of its own: it marks the end of a
                     // step.
                     util::Msg::Done(_) => continue,
@@ -739,6 +741,46 @@ fn capturing<T>(
     (last, result)
 }
 
+/// A hook's line, undressed: ANSI escapes are instructions to a terminal, and
+/// the console panel and the journal are plain text — an SGR left in shows as
+/// `␛[36m` in the middle of the sentence. CSI sequences (colours, cursor),
+/// OSC ones (titles, up to BEL or ST) and the two-byte escapes are dropped;
+/// the carriage returns of a progress bar go with them.
+pub fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => match chars.next() {
+                // CSI: parameters and intermediates, then one final byte.
+                Some('[') => {
+                    for c in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: swallowed up to BEL or ST (ESC \).
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\u{07}' || (c == '\u{1b}' && chars.peek() == Some(&'\\')) {
+                            if c == '\u{1b}' {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                // Two-byte escapes (ESC c, ESC =, …): the second byte goes too.
+                Some(_) | None => {}
+            },
+            '\r' => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -764,6 +806,18 @@ mod tests {
     fn an_empty_answer_produces_no_argument() {
         let answers = BTreeMap::from([("add_tenants".to_string(), String::new())]);
         assert!(task_args([("add_tenants", ",")], &answers).is_empty());
+    }
+
+    /// The dress a hook's line arrives in — colours, a title, a progress
+    /// bar's carriage return — is dropped whole; the words stay.
+    #[test]
+    fn ansi_escapes_are_stripped_and_the_words_stay() {
+        assert_eq!(
+            strip_ansi("\u{1b}[36mvendor\u{1b}[0m recable\r"),
+            "vendor recable"
+        );
+        assert_eq!(strip_ansi("\u{1b}]0;title\u{07}plain \u{1b}c!"), "plain !");
+        assert_eq!(strip_ansi("sans habit"), "sans habit");
     }
 
     #[test]
