@@ -354,6 +354,44 @@ impl TerminalView {
         self.terminal.has_exited()
     }
 
+    /// What the grid **will** be, while the hand is still moving.
+    ///
+    /// The pty is only resized once the drag stops, so what is painted
+    /// underneath during that time is the old grid, clipped — which reads as a
+    /// frozen terminal. This badge is the whole answer: it says the geometry is
+    /// on its way and what it will be, the way every tiling window manager
+    /// does. It exists because of the multiplexer, where one drag moves a dozen
+    /// terminals at once, and it is just as right on a dock splitter.
+    fn render_pending_size(
+        &self,
+        font_size: Pixels,
+        cx: &Context<Self>,
+    ) -> Option<impl IntoElement> {
+        self.pending_size.map(|size| {
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded(cx.theme().radius)
+                        .bg(cx.theme().popover)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .text_size(font_size)
+                        .text_color(cx.theme().popover_foreground)
+                        .child(SharedString::from(format!(
+                            "{} × {}",
+                            size.columns, size.lines
+                        ))),
+                )
+        })
+    }
+
     /// Reads the grid, and says the runs have to be cut again.
     ///
     /// The one door in: what is painted is derived from the snapshot, and a
@@ -962,76 +1000,57 @@ impl Render for TerminalView {
             // program.
             .context_menu({
                 let entity = cx.entity();
-                move |menu, _window, _cx| {
-                    let (copy, paste) = (entity.clone(), entity.clone());
-                    let (all, clear) = (entity.clone(), entity.clone());
-                    menu.item(
-                        PopupMenuItem::new(tr!("terminal-copy"))
-                            .icon(icon("copy"))
-                            .on_click(move |_, _window, cx| {
-                                copy.update(cx, |this, cx| this.copy_selection(cx));
-                            }),
-                    )
-                    .item(
-                        PopupMenuItem::new(tr!("terminal-paste"))
-                            .icon(icon("clipboard-paste"))
-                            .on_click(move |_, _window, cx| {
-                                paste.update(cx, |this, cx| this.paste_from_clipboard(cx));
-                            }),
-                    )
-                    .separator()
-                    .item(
-                        PopupMenuItem::new(tr!("terminal-select-all"))
-                            .icon(icon("text-select"))
-                            .on_click(move |_, _window, cx| {
-                                all.update(cx, |this, cx| this.select_all(cx));
-                            }),
-                    )
-                    .item(
-                        PopupMenuItem::new(tr!("terminal-clear"))
-                            .icon(icon("eraser"))
-                            .on_click(move |_, _window, cx| {
-                                clear.update(cx, |this, cx| this.clear_scrollback(cx));
-                            }),
-                    )
-                }
+                move |menu, _window, _cx| terminal_menu(menu, &entity)
             })
             .child(measure)
             .child(v_flex().size_full().overflow_hidden().children(lines))
             .children(self.render_cursor(focused, cx))
-            // What the grid **will** be, while the hand is still moving.
-            //
-            // The pty is only resized once the drag stops, so what is painted
-            // underneath during that time is the old grid, clipped — which
-            // reads as a frozen terminal. This badge is the whole answer: it
-            // says the geometry is on its way and what it will be, the way
-            // every tiling window manager does. It exists because of the
-            // multiplexer, where one drag moves a dozen terminals at once, and
-            // it is just as right on a dock splitter.
-            .children(self.pending_size.map(|size| {
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        div()
-                            .px_2()
-                            .py_1()
-                            .rounded(cx.theme().radius)
-                            .bg(cx.theme().popover)
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .text_size(font_size)
-                            .text_color(cx.theme().popover_foreground)
-                            .child(SharedString::from(format!(
-                                "{} × {}",
-                                size.columns, size.lines
-                            ))),
-                    )
-            }))
+            // The grid on its way, while the hand is still moving.
+            .children(self.render_pending_size(font_size, cx))
     }
+}
+
+/// What a right click on a terminal offers.
+///
+/// The gestures one looks for first in a terminal, and which `Ctrl+C` cannot
+/// carry — it belongs to the running program. A function of its own so that
+/// `render` reads as the shape of the panel rather than as a menu with a
+/// terminal around it.
+fn terminal_menu(
+    menu: gpui_component::menu::PopupMenu,
+    entity: &gpui::Entity<TerminalView>,
+) -> gpui_component::menu::PopupMenu {
+    let (copy, paste) = (entity.clone(), entity.clone());
+    let (all, clear) = (entity.clone(), entity.clone());
+    menu.item(
+        PopupMenuItem::new(tr!("terminal-copy"))
+            .icon(icon("copy"))
+            .on_click(move |_, _window, cx| {
+                copy.update(cx, |this, cx| this.copy_selection(cx));
+            }),
+    )
+    .item(
+        PopupMenuItem::new(tr!("terminal-paste"))
+            .icon(icon("clipboard-paste"))
+            .on_click(move |_, _window, cx| {
+                paste.update(cx, |this, cx| this.paste_from_clipboard(cx));
+            }),
+    )
+    .separator()
+    .item(
+        PopupMenuItem::new(tr!("terminal-select-all"))
+            .icon(icon("text-select"))
+            .on_click(move |_, _window, cx| {
+                all.update(cx, |this, cx| this.select_all(cx));
+            }),
+    )
+    .item(
+        PopupMenuItem::new(tr!("terminal-clear"))
+            .icon(icon("eraser"))
+            .on_click(move |_, _window, cx| {
+                clear.update(cx, |this, cx| this.clear_scrollback(cx));
+            }),
+    )
 }
 
 /// Converts a pixel movement into whole lines.
