@@ -409,7 +409,7 @@ registre de gpui-component ne se charge **que depuis un répertoire**, qu'il
 surveille ; les thèmes sont donc écrits dans `<config>/themes/` au démarrage, et
 réécrits à chaque fois — pour en modifier un, le copier sous un autre nom.
 
-**Le fork de gpui-component** (voir `Cargo.toml`) est dix-sept commits au-dessus
+**Le fork de gpui-component** (voir `Cargo.toml`) est dix-huit commits au-dessus
 de leur `main`, chacun payé par un symptôme :
 
 1. le `TabVariant` que `DockSkin` fait passer jusqu'au `TabBar` ;
@@ -446,6 +446,11 @@ de leur `main`, chacun payé par un symptôme :
     entière, mille cent pixels dans une boîte de deux cents, peinte à travers la
     bordure. Rien ne le repliait non plus, une ligne de menu ayant la hauteur
     d'une ligne.
+18. **les tailles d'une division sont des parts, pas des mesures** : le dock
+    les redonne à chaque réconciliation — un changement d'onglet en est une —
+    et l'état les reprenait brutes, sans les remettre à l'échelle du conteneur
+    déjà mesuré ; une colonne de 420 px dessinée à 508 y retombait au premier
+    clic dans une barre d'onglets.
 
 Les commits ont vocation à partir en PR.
 
@@ -707,6 +712,11 @@ Elles viennent d'Aviary, et les enfreindre produit des bugs silencieux.
   rendu. L'expression va dans le troisième argument de `KeyBinding::new`. Et un
   contexte doit être déclaré **sur le même nœud** que celui avec lequel il se
   combine : `depth_of` évalue chaque identifiant contre un seul niveau.
+- **`div()` est un *bloc*, pas une boîte flex** : `Style::default()` porte
+  `Display::Block`, où les propriétés flex d'un enfant sont **ignorées** — un
+  `flex_1()` y prend la hauteur du contenu, et le `size_full()` d'en dessous se
+  résout alors contre une hauteur indéfinie, donc zéro. Un conteneur dont un
+  enfant réclame la place restante s'écrit `v_flex()` / `h_flex()`.
 - Les raccourcis passent par `secondary-` : le reste du clavier appartient au
   programme du terminal.
 - gpui rend via Vulkan sur Linux : `vulkan-loader` doit être dans
