@@ -137,6 +137,8 @@ src/
     branches.rs     ce que le sélecteur de branches liste, et les gestes sur une
     branch_picker.rs   le sélecteur de branches : le filtre, la liste, les actions
     worktree_picker.rs le sélecteur de worktrees : le filtre, la liste, les actions
+    worktrees.rs    ce que le sélecteur de worktrees liste — pur, testé
+    picker.rs       ce que les deux sélecteurs partagent : le pas du curseur — pur
     review.rs / terminal_view.rs
     server.rs       la mise en route du serveur WSL
     settings.rs     les réglages et leur global

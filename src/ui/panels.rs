@@ -31,6 +31,10 @@ use crate::ui::app::ClaudhubApp;
 use crate::ui::find::Pane;
 use crate::ui::settings::Settings;
 
+/// A gesture shared by two controls of the same tab — the cross and the
+/// wheel button both close the file.
+type Closing = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
+
 /// A panel's background, and the bottom corners of the card carrying it.
 ///
 /// No card here any more: it is the **group's frame** that is one now — the
@@ -713,7 +717,7 @@ impl Panel for FilePanel {
         // the other way of making the same gesture. **One closure shared by
         // both** — it used to be written twice, with a copy of the two paths
         // each, on every frame.
-        let closing: std::rc::Rc<dyn Fn(&mut Window, &mut App)> = {
+        let closing: Closing = {
             let (root, path) = (self.root.clone(), self.path.clone());
             std::rc::Rc::new(move |window: &mut Window, cx: &mut App| {
                 let Some(app) = app.upgrade() else {
