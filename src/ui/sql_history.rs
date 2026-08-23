@@ -188,6 +188,14 @@ pub struct History {
     /// Most recent first. That is the order it is read in, and keeping it here
     /// spares a sort on every render.
     pub entries: Vec<Entry>,
+    /// Bumped by every change to the journal, and by nothing else.
+    ///
+    /// It is what lets the panel keep the list it prepared — the entries it
+    /// cloned, their rows and their heights — instead of rebuilding it on every
+    /// frame. Not serialised: a number that only means "the same as a moment
+    /// ago" has nothing to say across two runs.
+    #[serde(skip)]
+    pub version: u64,
 }
 
 impl History {
@@ -215,6 +223,7 @@ impl History {
             self.entries.insert(0, entry);
         }
         self.purge();
+        self.version += 1;
     }
 
     /// Keeps each worktree's last `PER_WORKTREE` queries.
@@ -231,6 +240,7 @@ impl History {
     pub fn remove(&mut self, at: i64, sql: &str) {
         self.entries
             .retain(|entry| !(entry.at == at && entry.sql == sql));
+        self.version += 1;
     }
 
     /// Forgets what the filter shows, and only that.
@@ -239,6 +249,7 @@ impl History {
     /// what one asks to forget is what one is looking at.
     pub fn clear(&mut self, filter: &Filter) {
         self.entries.retain(|entry| !keeps(filter, entry));
+        self.version += 1;
     }
 
     /// The entries the filter keeps, most recent first.
@@ -531,6 +542,26 @@ mod tests {
                 Row::Entry(3),
             ]
         );
+    }
+
+    /// The panel keeps the list it prepared — cloned entries, rows, heights —
+    /// until this number moves. A change the counter did not record would leave
+    /// a stale list on screen, and nothing would say so.
+    #[test]
+    fn every_change_moves_the_version() {
+        let mut history = History::default();
+        let start = history.version;
+        history.record(entry("SELECT 1", "/w", 10));
+        let recorded = history.version;
+        assert!(recorded > start);
+        history.remove(10, "SELECT 1");
+        let removed = history.version;
+        assert!(removed > recorded);
+        history.clear(&Filter {
+            reach: Reach::All,
+            ..Default::default()
+        });
+        assert!(history.version > removed);
     }
 
     #[test]

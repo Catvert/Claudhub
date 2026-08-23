@@ -744,6 +744,10 @@ pub struct ClaudhubApp {
     /// two — and that is the one case where walking a vector of sizes is worth
     /// its price.
     pub(super) sql_history_scroll: gpui_component::VirtualListScrollHandle,
+    /// The history list as the panel last prepared it — the entries the filter
+    /// kept, their rows and their heights. Rebuilt when what it depends on
+    /// moves, `History::version` included; see `refresh_sql_history_list`.
+    pub(super) sql_history_list: Option<crate::ui::sql_history_view::HistoryList>,
     /// The height split between the console's editor and its grid.
     ///
     /// An entity, because that is what `v_resizable` asks for, and created once:
@@ -1129,6 +1133,7 @@ impl ClaudhubApp {
             sql_history: crate::ui::sql_history::History::load(),
             sql_history_reach: Default::default(),
             sql_history_scroll: gpui_component::VirtualListScrollHandle::new(),
+            sql_history_list: None,
             awaiting_agent: None,
             toast: None,
             pending_status: std::collections::HashSet::new(),

@@ -123,6 +123,11 @@ pub(super) struct BranchPicker {
     /// what the arrows move is a row on screen, and a cursor counted on anything
     /// else drifts the moment a heading leaves with its group.
     cursor: usize,
+    /// The rows on screen, kept between frames — see `rows`.
+    rows: Rc<Vec<Row>>,
+    /// The list has to be laid out again. Set by the three things that change
+    /// it: the filter, a fold, and the repository itself.
+    stale: bool,
     /// The groups one has closed.
     ///
     /// Two of them at most — the locals and the remotes — so a pair of flags and
@@ -138,22 +143,33 @@ pub(super) struct BranchPicker {
 
 impl BranchPicker {
     pub(super) fn new(window: &mut Window, cx: &mut Context<ClaudhubApp>) -> Entity<Self> {
-        let app = cx.entity().downgrade();
+        let owner = cx.entity();
+        let app = owner.downgrade();
         let query = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("branch-filter")));
         cx.new(|cx| {
-            // Typing filters, and the filter is what the list reads at render:
-            // all this has to do is ask for a frame.
+            // Typing filters: the list is laid out again, once, and a frame is
+            // asked for.
             cx.subscribe(
                 &query,
-                |_this: &mut Self, _, _event: &gpui_component::input::InputEvent, cx| cx.notify(),
+                |this: &mut Self, _, _event: &gpui_component::input::InputEvent, cx| {
+                    this.stale = true;
+                    cx.notify();
+                },
             )
             .detach();
+            // The list is a projection of the repository's branches, and they
+            // move under it — a fetch, a checkout, a branch created next door.
+            // Nothing else would tell the prepared list to let go.
+            cx.observe(&owner, |this: &mut Self, _, _cx| this.stale = true)
+                .detach();
             Self {
                 app,
                 query,
                 step: Step::List,
                 scroll: gpui_component::VirtualListScrollHandle::new(),
                 cursor: 0,
+                rows: Rc::new(Vec::new()),
+                stale: true,
                 folded: [false; 2],
                 popover: None,
             }
@@ -167,6 +183,7 @@ impl BranchPicker {
     fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.step = Step::List;
         self.cursor = 0;
+        self.stale = true;
         self.query
             .update(cx, |input, cx| input.set_value("", window, cx));
         cx.notify();
@@ -179,7 +196,20 @@ impl BranchPicker {
     }
 
     /// The rows on screen, headings included.
-    fn rows(&self, cx: &App) -> Vec<Row> {
+    ///
+    /// **Kept between frames.** It was laid out again on every frame of the
+    /// popover — every branch lowercased for the filter, every row's name and
+    /// subject cloned — for a list that only moves when the filter, a fold or
+    /// the repository does. Those three are what set `stale`.
+    fn rows(&mut self, cx: &App) -> Rc<Vec<Row>> {
+        if self.stale {
+            self.rows = Rc::new(self.build_rows(cx));
+            self.stale = false;
+        }
+        self.rows.clone()
+    }
+
+    fn build_rows(&self, cx: &App) -> Vec<Row> {
         let Some(app) = self.app.upgrade() else {
             return Vec::new();
         };
@@ -253,20 +283,17 @@ impl BranchPicker {
     /// stops answering at the last of them reads as broken too.
     fn step_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
         let rows = self.rows(cx);
-        if rows.is_empty() {
+        let Some(next) = crate::ui::picker::step_cursor(
+            rows.len(),
+            |ix| matches!(rows[ix], Row::Branch(_)),
+            self.cursor,
+            delta,
+        ) else {
             return;
-        }
-        let len = rows.len() as isize;
-        let mut ix = self.cursor as isize;
-        for _ in 0..rows.len() {
-            ix = (ix + delta).rem_euclid(len);
-            if matches!(rows[ix as usize], Row::Branch(_)) {
-                self.cursor = ix as usize;
-                self.scroll.scroll_to_item(self.cursor, ScrollStrategy::Top);
-                cx.notify();
-                return;
-            }
-        }
+        };
+        self.cursor = next;
+        self.scroll.scroll_to_item(next, ScrollStrategy::Top);
+        cx.notify();
     }
 
     /// The arrows and `Enter`, taken **before** the field sees them.
@@ -290,7 +317,8 @@ impl BranchPicker {
             }
             "enter" => {
                 cx.stop_propagation();
-                if let Some(Row::Branch(row)) = self.rows(cx).get(self.cursor).cloned() {
+                let rows = self.rows(cx);
+                if let Some(Row::Branch(row)) = rows.get(self.cursor).cloned() {
                     self.checkout(&row, window, cx);
                 }
             }
@@ -300,7 +328,7 @@ impl BranchPicker {
 
     fn render_list(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let look = Look::of(cx);
-        let rows = Rc::new(self.rows(cx));
+        let rows = self.rows(cx);
         let count = rows.len();
         let cursor = self.cursor;
         let folded = self.folded;
@@ -821,6 +849,7 @@ fn group_heading(
         .on_click(move |_, _window, cx| {
             picker.update(cx, |this, cx| {
                 this.folded[group_ix(kind)] = !this.folded[group_ix(kind)];
+                this.stale = true;
                 cx.notify();
             });
         })

@@ -34,6 +34,7 @@ mod notes;
 pub(crate) mod notes_view;
 mod notify;
 mod panels;
+mod picker;
 pub mod plugin_view;
 mod preview;
 mod repos;
@@ -61,6 +62,7 @@ mod vim;
 mod workspace;
 mod worktree_ops;
 mod worktree_picker;
+mod worktrees;
 
 use gpui::{px, size, App, AppContext, Bounds, WindowBounds, WindowOptions};
 use gpui_component::Root;

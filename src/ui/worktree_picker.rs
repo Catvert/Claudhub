@@ -32,49 +32,12 @@ use gpui_component::{
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
+use crate::ui::worktrees::{self, Item, Row};
 
 /// How wide the surface is. Narrower than the branch picker's: what a row
 /// carries here is a folder name and a branch, not a commit subject.
 const WIDTH: gpui::Pixels = px(360.);
 const LIST_HEIGHT: gpui::Pixels = px(320.);
-
-/// What the picker shows of one checkout.
-///
-/// A snapshot taken when the list is built: the summary and the agent are read
-/// out of two tables of the application, and reading them from the virtualised
-/// closure would be two borrows per row and per frame.
-#[derive(Clone)]
-struct Item {
-    main: PathBuf,
-    path: PathBuf,
-    label: String,
-    branch: Option<String>,
-    is_main: bool,
-    summary: Option<crate::git::Summary>,
-    agent: Option<crate::agent::State>,
-    /// What `wt` says: started, stopped, or nothing to start at all.
-    up: Option<bool>,
-    /// Whether it has a button of its own in the top bar.
-    pinned: bool,
-}
-
-/// One line of the list.
-#[derive(Clone)]
-enum Row {
-    Repo {
-        main: PathBuf,
-        name: String,
-        folded: bool,
-    },
-    Worktree(Item),
-    /// A remembered repository that no longer opens. It stays on the list
-    /// because a repository that appears nowhere cannot be removed either.
-    Missing {
-        path: PathBuf,
-        name: String,
-        message: String,
-    },
-}
 
 enum Step {
     List,
@@ -127,6 +90,11 @@ pub(super) struct WorktreePicker {
     step: Step,
     scroll: gpui_component::VirtualListScrollHandle,
     cursor: usize,
+    /// The rows on screen, kept between frames — see `rows`.
+    rows: Rc<Vec<Row>>,
+    /// The list has to be laid out again. Set by the three things that change
+    /// it: the filter, a fold, and the application itself.
+    stale: bool,
     /// The repositories one has closed.
     ///
     /// What is **folded** and not what is open, the polarity of the review tree:
@@ -139,20 +107,32 @@ pub(super) struct WorktreePicker {
 
 impl WorktreePicker {
     pub(super) fn new(window: &mut Window, cx: &mut Context<ClaudhubApp>) -> Entity<Self> {
-        let app = cx.entity().downgrade();
+        let owner = cx.entity();
+        let app = owner.downgrade();
         let query = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("worktree-filter")));
         cx.new(|cx| {
             cx.subscribe(
                 &query,
-                |_this: &mut Self, _, _event: &gpui_component::input::InputEvent, cx| cx.notify(),
+                |this: &mut Self, _, _event: &gpui_component::input::InputEvent, cx| {
+                    this.stale = true;
+                    cx.notify();
+                },
             )
             .detach();
+            // The list is a projection of the application's repositories, and
+            // they move under it — a worktree created, a summary read, an agent
+            // that starts working. Nothing else would tell the prepared list to
+            // let go.
+            cx.observe(&owner, |this: &mut Self, _, _cx| this.stale = true)
+                .detach();
             Self {
                 app,
                 query,
                 step: Step::List,
                 scroll: gpui_component::VirtualListScrollHandle::new(),
                 cursor: 0,
+                rows: Rc::new(Vec::new()),
+                stale: true,
                 folded: HashSet::new(),
                 popover: None,
             }
@@ -162,6 +142,7 @@ impl WorktreePicker {
     fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.step = Step::List;
         self.cursor = 0;
+        self.stale = true;
         self.query
             .update(cx, |input, cx| input.set_value("", window, cx));
         cx.notify();
@@ -185,12 +166,22 @@ impl WorktreePicker {
         self.close(window, cx);
     }
 
-    /// The rows on screen: each repository, then the checkouts of it that match.
+    /// The rows on screen, headings included.
     ///
-    /// A heading with nothing under it is dropped, as in the branch list: a
-    /// title followed by nothing reads as a display glitch rather than as a
-    /// repository where the filter found no match.
-    fn rows(&self, cx: &App) -> Vec<Row> {
+    /// **Kept between frames.** It was laid out again on every frame of the
+    /// popover — and it built every checkout's row, its summary, its agent and
+    /// its `wt` state read one by one, *before* the filter had a say. What is
+    /// listed is `worktrees::rows_for`, which is free of gpui and tested; what
+    /// is here is where the data comes from.
+    fn rows(&mut self, cx: &App) -> Rc<Vec<Row>> {
+        if self.stale {
+            self.rows = Rc::new(self.build_rows(cx));
+            self.stale = false;
+        }
+        self.rows.clone()
+    }
+
+    fn build_rows(&self, cx: &App) -> Vec<Row> {
         let Some(app) = self.app.upgrade() else {
             return Vec::new();
         };
@@ -199,69 +190,50 @@ impl WorktreePicker {
         // single vector in a global, and a row's closure would borrow it again
         // for every checkout of every repository.
         let pinned = &crate::ui::store::Store::global(cx).pinned;
-        let needle = self.query.read(cx).value().trim().to_lowercase();
-        let matches = |item: &Item, repo: &str| {
-            needle.is_empty()
-                || item.label.to_lowercase().contains(&needle)
-                || repo.to_lowercase().contains(&needle)
-                || item
-                    .branch
-                    .as_deref()
-                    .is_some_and(|b| b.to_lowercase().contains(&needle))
-        };
-
-        let mut rows = Vec::new();
-        for repo in app.repos.iter() {
-            let items: Vec<Row> = repo
-                .worktrees
-                .iter()
-                .map(|w| Item {
-                    main: repo.main.clone(),
-                    path: w.path.clone(),
-                    label: w.label(),
-                    branch: w.branch.clone(),
-                    is_main: w.is_main,
-                    summary: app.summaries.get(&w.path).copied(),
-                    agent: app.agents.get(&w.path).cloned(),
-                    up: app.wt_state(&w.path).and_then(|state| state.up),
-                    pinned: pinned.contains(&w.path),
-                })
-                .filter(|item| matches(item, &repo.name))
-                .map(Row::Worktree)
-                .collect();
-            if items.is_empty() {
-                continue;
-            }
-            // **A filter ignores the folds**, the window's rule for every
-            // foldable list: a query that found something and shows nothing is
-            // read as a query that found nothing.
-            let folded = needle.is_empty() && self.folded.contains(&repo.main);
-            rows.push(Row::Repo {
+        let repos: Vec<worktrees::Repository> = app
+            .repos
+            .iter()
+            .map(|repo| worktrees::Repository {
                 main: repo.main.clone(),
                 name: repo.name.clone(),
-                folded,
-            });
-            if !folded {
-                rows.extend(items);
-            }
-        }
-        // Last, and only when nothing is being filtered: a folder that no longer
-        // opens has no branch and no name to search on, and hiding it behind a
-        // query would make it unremovable.
-        if needle.is_empty() {
-            for repo in app.repos.missing() {
-                rows.push(Row::Missing {
-                    path: repo.path.clone(),
-                    name: repo
-                        .path
-                        .file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| repo.path.display().to_string()),
-                    message: repo.message.clone(),
-                });
-            }
-        }
-        rows
+                checkouts: repo
+                    .worktrees
+                    .iter()
+                    .map(|w| worktrees::Checkout {
+                        path: w.path.clone(),
+                        label: w.label(),
+                        branch: w.branch.clone(),
+                        is_main: w.is_main,
+                    })
+                    .collect(),
+            })
+            .collect();
+        let gone: Vec<worktrees::Gone> = app
+            .repos
+            .missing()
+            .iter()
+            .map(|repo| worktrees::Gone {
+                path: repo.path.clone(),
+                name: repo
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| repo.path.display().to_string()),
+                message: repo.message.clone(),
+            })
+            .collect();
+        let query = self.query.read(cx).value();
+        worktrees::rows_for(&repos, &gone, &query, &self.folded, |repo, checkout| Item {
+            main: repo.main.clone(),
+            path: checkout.path.clone(),
+            label: checkout.label.clone(),
+            branch: checkout.branch.clone(),
+            is_main: checkout.is_main,
+            summary: app.summaries.get(&checkout.path).copied(),
+            agent: app.agents.get(&checkout.path).cloned(),
+            up: app.wt_state(&checkout.path).and_then(|state| state.up),
+            pinned: pinned.contains(&checkout.path),
+        })
     }
 
     fn select(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -274,20 +246,17 @@ impl WorktreePicker {
     /// repositories: neither is somewhere Enter could take one.
     fn step_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
         let rows = self.rows(cx);
-        if rows.is_empty() {
+        let Some(next) = crate::ui::picker::step_cursor(
+            rows.len(),
+            |ix| matches!(rows[ix], Row::Worktree(_)),
+            self.cursor,
+            delta,
+        ) else {
             return;
-        }
-        let len = rows.len() as isize;
-        let mut ix = self.cursor as isize;
-        for _ in 0..rows.len() {
-            ix = (ix + delta).rem_euclid(len);
-            if matches!(rows[ix as usize], Row::Worktree(_)) {
-                self.cursor = ix as usize;
-                self.scroll.scroll_to_item(self.cursor, ScrollStrategy::Top);
-                cx.notify();
-                return;
-            }
-        }
+        };
+        self.cursor = next;
+        self.scroll.scroll_to_item(next, ScrollStrategy::Top);
+        cx.notify();
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -305,7 +274,8 @@ impl WorktreePicker {
             }
             "enter" => {
                 cx.stop_propagation();
-                if let Some(Row::Worktree(item)) = self.rows(cx).get(self.cursor).cloned() {
+                let rows = self.rows(cx);
+                if let Some(Row::Worktree(item)) = rows.get(self.cursor).cloned() {
                     self.select(item.path, window, cx);
                 }
             }
@@ -315,7 +285,7 @@ impl WorktreePicker {
 
     fn render_list(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let look = Look::of(cx);
-        let rows = Rc::new(self.rows(cx));
+        let rows = self.rows(cx);
         let count = rows.len();
         let cursor = self.cursor;
         let active = self
@@ -557,6 +527,7 @@ fn repo_heading(
                 if !this.folded.remove(&main) {
                     this.folded.insert(main);
                 }
+                this.stale = true;
                 cx.notify();
             });
         })
