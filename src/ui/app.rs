@@ -2232,7 +2232,10 @@ impl ClaudhubApp {
         // The theme is read before the mutable borrow of the state: the
         // highlighting depends on it, and `cx.theme()` borrows `cx`.
         let theme = cx.theme().highlight_theme.clone();
-        let split = Settings::global(cx).diff_split;
+        let (split, whole_file) = {
+            let settings = Settings::global(cx);
+            (settings.diff_split, settings.diff_whole_file)
+        };
         let mut jumped = None;
         let mut note = None;
         if let Some(state) = self.review.get_mut(&worktree) {
@@ -2241,11 +2244,12 @@ impl ClaudhubApp {
                 // The arrow that opened this file expects a change, not the top
                 // of the file.
                 if let Some(jump) = state.pending_jump.take() {
-                    let headers = rendered.headers(split);
+                    let stops = rendered.blocks(split, whole_file);
                     jumped = match jump {
-                        Jump::First => headers.first().copied(),
-                        Jump::Last => headers.last().copied(),
-                    };
+                        Jump::First => stops.first(),
+                        Jump::Last => stops.last(),
+                    }
+                    .map(|(start, _)| *start);
                     state.diff_selection = jumped.map(|row| (row, row));
                 }
                 note = state.pending_note.take();

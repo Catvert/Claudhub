@@ -58,6 +58,15 @@ pub struct Rendered {
     /// produces one per frame — and rewalking the file's text every time would
     /// cost what virtualisation saves.
     pub row_chars: Vec<usize>,
+    /// The file's changes: each a maximal run of added and removed lines, as
+    /// the first and last index of the unified list.
+    ///
+    /// A hunk is what git cuts, and it cuts by context: asked for the whole
+    /// file (`Settings::context_lines`), it hands back **one** hunk, and "the
+    /// hunk under the eye" would be the file — `j`/`k` leapt from file to file
+    /// and the gutter marked everything. What the eye calls a change is the red
+    /// and green block; the whole-file view reads these instead, see `blocks`.
+    pub changes: Vec<(usize, usize)>,
     /// The heights `v_virtual_list` walks in wrapped mode, kept between frames.
     ///
     /// They depend on the column count and the line height and on nothing else,
@@ -78,6 +87,7 @@ impl Rendered {
         let (longest_row, longest_chars) = longest(&row_chars);
         Self {
             row_chars,
+            changes: changes(&file, &rows),
             highlights: DiffHighlights::compute(path, &file, theme),
             path: path.to_path_buf(),
             texts: file
@@ -211,6 +221,74 @@ impl Rendered {
             .rposition(|row| matches!(row, Row::Line { hunk: h, .. } if *h == hunk))
             .unwrap_or(first);
         Some((first, last))
+    }
+
+    /// Which change a displayed entry belongs to — `hunk_of`, for the
+    /// whole-file view.
+    pub fn change_of(&self, index: usize, split: bool) -> Option<usize> {
+        let unified = if split {
+            match self.split.get(index)? {
+                SplitRow::Header { .. } => return None,
+                SplitRow::Pair { old, new } => old.or(*new)?,
+            }
+        } else {
+            index
+        };
+        self.changes
+            .iter()
+            .position(|(first, last)| (*first..=*last).contains(&unified))
+    }
+
+    /// The index, in the displayed list, of a unified entry.
+    fn display_index(&self, unified: usize, split: bool) -> Option<usize> {
+        if !split {
+            return Some(unified);
+        }
+        self.split
+            .iter()
+            .position(|row| row.unified().any(|index| index == unified))
+    }
+
+    /// What `j`/`k` stop on and what the gutter marks, in the displayed list:
+    /// the hunk headers, or — whole file asked — the first line of every
+    /// change, with the block each one opens, as `(start, end)`.
+    ///
+    /// One list for both readings, so that what is marked is what the key
+    /// reaches: with the whole file on screen the single header sits at the
+    /// top, far from the first change, and would be a stop at nothing.
+    pub fn blocks(&self, split: bool, whole_file: bool) -> Vec<(usize, usize)> {
+        if whole_file {
+            return self
+                .changes
+                .iter()
+                .filter_map(|(first, last)| {
+                    Some((
+                        self.display_index(*first, split)?,
+                        self.display_index(*last, split)?,
+                    ))
+                })
+                .collect();
+        }
+        let headers = self.headers(split);
+        let len = self.len(split);
+        headers
+            .iter()
+            .enumerate()
+            .map(|(h, start)| {
+                let end = headers.get(h + 1).map_or(len, |next| *next);
+                (*start, end.saturating_sub(1).max(*start))
+            })
+            .collect()
+    }
+
+    /// Which block a displayed entry belongs to: `hunk_of`, or `change_of`
+    /// when the whole file is shown.
+    pub fn block_of(&self, index: usize, split: bool, whole_file: bool) -> Option<usize> {
+        if whole_file {
+            self.change_of(index, split)
+        } else {
+            self.hunk_of(index, split)
+        }
     }
 
     /// The number of entries in the displayed list.
@@ -430,6 +508,43 @@ pub fn rows(diff: &FileDiff) -> Vec<Row> {
         rows.extend((0..hunk.lines.len()).map(|line| Row::Line { hunk: h, line }));
     }
     rows
+}
+
+/// The changes of a diff, as runs of the unified list — see
+/// `Rendered::changes`.
+///
+/// A "no newline" marker belongs to the line before it: it neither opens nor
+/// closes a run. A header closes one, being never a change itself.
+pub fn changes(diff: &FileDiff, rows: &[Row]) -> Vec<(usize, usize)> {
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    let mut open = false;
+    for (index, row) in rows.iter().enumerate() {
+        let kind = match row {
+            Row::Header { .. } => None,
+            Row::Line { hunk, line } => diff
+                .hunks
+                .get(*hunk)
+                .and_then(|h| h.lines.get(*line))
+                .map(|l| l.kind),
+        };
+        match kind {
+            Some(DiffLineKind::Added | DiffLineKind::Removed) => {
+                if open {
+                    out.last_mut().expect("an open run has a start").1 = index;
+                } else {
+                    out.push((index, index));
+                    open = true;
+                }
+            }
+            Some(DiffLineKind::NoNewline) => {
+                if open {
+                    out.last_mut().expect("an open run has a start").1 = index;
+                }
+            }
+            _ => open = false,
+        }
+    }
+    out
 }
 
 /// One entry of the two-column list.
@@ -951,7 +1066,9 @@ impl ClaudhubApp {
     /// last one is passed.
     ///
     /// Reviewing is going from one change to the next: the context lines between
-    /// two hunks have nothing to show. And a review does not stop at the end of
+    /// two hunks have nothing to show. With the whole file on screen a hunk
+    /// *is* the file, so the stops are the changes themselves (`Rendered::
+    /// blocks`). And a review does not stop at the end of
     /// a file — the same arrow carries on into the next, entering it from the
     /// end it came from.
     pub(super) fn step_diff_hunk(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -963,17 +1080,23 @@ impl ClaudhubApp {
             self.merge_step(delta, cx);
             return;
         }
-        let split = crate::ui::settings::Settings::global(cx).diff_split;
-        let headers = self
+        let settings = crate::ui::settings::Settings::global(cx);
+        let (split, whole_file) = (settings.diff_split, settings.diff_whole_file);
+        let stops: Vec<usize> = self
             .active_review()
             .and_then(|state| state.diff.as_ref())
-            .map(|diff| diff.headers(split))
+            .map(|diff| {
+                diff.blocks(split, whole_file)
+                    .into_iter()
+                    .map(|(start, _)| start)
+                    .collect()
+            })
             .unwrap_or_default();
         let from = self
             .active_review()
             .and_then(|state| state.diff_selection)
             .map(|(_, head)| head);
-        match next_header(&headers, from, delta) {
+        match next_header(&stops, from, delta) {
             Some(target) => self.move_diff_selection_to_hunk(target, cx),
             None => self.step_file_to_a_hunk(delta, cx),
         }
@@ -1024,15 +1147,16 @@ impl ClaudhubApp {
     /// placements — being a line or two out changes nothing to which one is
     /// right.
     pub(super) fn hunk_fits_the_view(&self, header: usize, cx: &App) -> bool {
-        let split = crate::ui::settings::Settings::global(cx).diff_split;
+        let settings = crate::ui::settings::Settings::global(cx);
+        let (split, whole_file) = (settings.diff_split, settings.diff_whole_file);
         let Some(diff) = self.active_review().and_then(|state| state.diff.as_ref()) else {
             return true;
         };
         let end = diff
-            .headers(split)
+            .blocks(split, whole_file)
             .into_iter()
-            .find(|row| *row > header)
-            .unwrap_or_else(|| diff.len(split));
+            .find(|(start, _)| *start == header)
+            .map_or(header, |(_, end)| end + 1);
         end.saturating_sub(header) <= self.page_rows(cx)
     }
 
@@ -1225,7 +1349,7 @@ impl ClaudhubApp {
         let current_hunk = self
             .active_review()
             .and_then(|state| state.diff_selection)
-            .and_then(|(_, head)| diff.hunk_of(head, split));
+            .and_then(|(_, head)| diff.block_of(head, split, whole_file));
         let hunk_color = cx.theme().primary;
         // The hits are filed by line on every change of query or of diff, and the
         // closure below only looks them up: it runs for every visible line of
@@ -1254,7 +1378,8 @@ impl ClaudhubApp {
                 selection_bg,
                 annotated: marks.at(ix, split),
                 note_color,
-                current_hunk: current_hunk.is_some() && rows.hunk_of(ix, split) == current_hunk,
+                current_hunk: current_hunk.is_some()
+                    && rows.block_of(ix, split, whole_file) == current_hunk,
                 hunk_color,
                 armed,
                 hovered: hovered.clone(),
@@ -2619,6 +2744,70 @@ mod tests {
                 Row::Line { hunk: 1, line: 0 },
             ]
         );
+    }
+
+    /// Asked for the whole file, git hands back one hunk: what the eye calls a
+    /// change is each red-and-green block, and that is what `j`/`k` must stop
+    /// on and what the gutter must mark — not the file.
+    #[test]
+    fn the_whole_file_view_reads_changes_and_not_the_one_hunk() {
+        use DiffLineKind::*;
+        let diff = FileDiff {
+            hunks: vec![hunk(
+                "@@ -1,9 +1,9 @@",
+                &[
+                    Context, Context, Removed, Added, Context, Context, Added, Added, Context,
+                    NoNewline,
+                ],
+            )],
+            binary: false,
+            empty: false,
+        };
+        let rendered = Rendered::new(Path::new("a.rs"), diff, &Theme::default_light());
+        // Unified: rows 0 is the header, line `n` is row `n + 1`.
+        assert_eq!(rendered.changes, vec![(3, 4), (7, 8)]);
+        assert_eq!(rendered.blocks(false, true), vec![(3, 4), (7, 8)]);
+        // The one hunk, read as git cut it, is still the file.
+        assert_eq!(rendered.blocks(false, false), vec![(0, 10)]);
+        assert_eq!(rendered.change_of(3, false), Some(0));
+        assert_eq!(rendered.change_of(5, false), None);
+        assert_eq!(rendered.change_of(8, false), Some(1));
+        assert_eq!(rendered.block_of(8, false, true), Some(1));
+        assert_eq!(rendered.block_of(8, false, false), Some(0));
+        // The stops are what `j` walks: from the first change, `j` reaches the
+        // second, and a third press has nowhere to go in this file.
+        let stops: Vec<usize> = rendered
+            .blocks(false, true)
+            .into_iter()
+            .map(|(s, _)| s)
+            .collect();
+        assert_eq!(next_header(&stops, None, 1), Some(3));
+        assert_eq!(next_header(&stops, Some(3), 1), Some(7));
+        assert_eq!(next_header(&stops, Some(7), 1), None);
+        // Two columns: the removal and the addition share one entry, so the
+        // first change is one entry long, and the second still two.
+        let paired = rendered.blocks(true, true);
+        assert_eq!(paired.len(), 2);
+        assert_eq!(paired[0].0, paired[0].1);
+        assert_eq!(paired[1].1 - paired[1].0, 1);
+        assert_eq!(rendered.change_of(paired[1].0, true), Some(1));
+    }
+
+    /// A trailing "no newline" marker belongs to the change before it, and a
+    /// change never crosses a hunk header.
+    #[test]
+    fn a_change_keeps_its_marker_and_stops_at_a_header() {
+        use DiffLineKind::*;
+        let diff = FileDiff {
+            hunks: vec![
+                hunk("@@ a @@", &[Context, Added, NoNewline]),
+                hunk("@@ b @@", &[Removed, Context, NoNewline]),
+            ],
+            binary: false,
+            empty: false,
+        };
+        let rows = rows(&diff);
+        assert_eq!(changes(&diff, &rows), vec![(2, 3), (5, 5)]);
     }
 
     /// The pairing is the whole column view: a block of removals followed by a
