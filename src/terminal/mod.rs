@@ -178,7 +178,9 @@ pub struct Terminal {
     exited: bool,
     /// The pid of what was started in the pty — a shell, or the program a
     /// profile named. Kept for the one question a closing tab has to ask: is
-    /// anything running in there.
+    /// anything running in there. Linux only, like the `/proc` reading that is
+    /// the only use it has — and alacritty's Windows pty has no child to ask.
+    #[cfg(target_os = "linux")]
     child: u32,
 }
 
@@ -248,6 +250,7 @@ impl Terminal {
 
         // Read before the pty is moved into the loop, which is the only chance:
         // `EventLoop::new` takes it, and nothing hands the child back.
+        #[cfg(target_os = "linux")]
         let child = pty.child().id();
 
         let event_loop = EventLoop::new(
@@ -275,6 +278,7 @@ impl Terminal {
             working_directory: options.working_directory.to_path_buf(),
             title: String::new(),
             exited: false,
+            #[cfg(target_os = "linux")]
             child,
         })
     }
