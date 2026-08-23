@@ -2355,3 +2355,22 @@ impl ClaudhubApp {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A console is opened under an action and closed by the `Done` that
+    /// echoes it: the two tables must agree, or a console would never close —
+    /// the silent kind of failure, a dialog that stays.
+    #[test]
+    fn a_consoles_action_closes_its_operation() {
+        for op in [wt::Op::New, wt::Op::Up, wt::Op::Down, wt::Op::Remove] {
+            let ops = op_of(action_of(op)).unwrap_or_default();
+            assert!(ops.contains(&op), "{op:?}");
+        }
+        // The bare git gestures share `Worktree` with `new` and `rm`, and a
+        // `Commit` never ends a console.
+        assert!(op_of(Action::Commit).is_none());
+    }
+}
