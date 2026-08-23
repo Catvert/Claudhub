@@ -28,7 +28,7 @@ use anyhow::Result;
 // prefix removes the ambiguity for the reader as much as for the compiler.
 use ::wt::config::{Ask, Project, PromptKind};
 use ::wt::ops::App;
-use ::wt::{ops, state, tmpl, util};
+use ::wt::{state, tmpl, util};
 
 /// When the questions are asked.
 ///
@@ -71,6 +71,10 @@ pub struct Snapshot {
     pub has_up: bool,
     pub has_down: bool,
     pub has_open: bool,
+    /// Does `[open]` also carry a `source` — a shell command enumerating more
+    /// addresses. The view needs to know before clicking: with one the "open"
+    /// button is a menu, without one it opens the URL and nothing is asked.
+    pub has_open_source: bool,
     /// Does the project ask questions before creating a worktree, and before
     /// starting one. Two flags and not one: a project may ask nothing at `new`
     /// and everything at `up`, and opening an empty dialog to find that out
@@ -183,6 +187,7 @@ pub fn snapshot(main: &Path) -> Option<Snapshot> {
         has_up: app.has_up(),
         has_down: app.has_down(),
         has_open: app.has_open(),
+        has_open_source: config.open.source.is_some(),
         has_new_prompts: config.prompts.iter().any(|p| p.ask.covers(Ask::New)),
         has_up_prompts: config.prompts.iter().any(|p| p.ask.covers(Ask::Up)),
         lsp: config
@@ -414,38 +419,149 @@ impl Session {
         slug_under(&self.app.root, worktree)
     }
 
-    /// Whether the worktree runs, and the addresses it exposes.
+    /// What `wt` knows of the worktree: running or not, its static address,
+    /// and the preview the TUI shows — branch, options, ports, `[status.info]`.
     ///
-    /// The two together because they read the same saved state, and reading it
-    /// twice is reading a file twice for one answer.
-    pub fn state_of(&self, slug: &str) -> (Option<bool>, Vec<Endpoint>) {
+    /// All of it reads the same saved state, and reading it twice is reading a
+    /// file twice for one answer. **`[open] source` is not run here**: the
+    /// project's own comment says "resolved on opening, not while listing",
+    /// and it used to be run — a `docker exec` and an SQL query per worktree
+    /// per scan, with no timeout, on the single background worker — only for
+    /// the view to keep the first, static address. See [`Self::links_of`].
+    pub fn state_of(&self, slug: &str) -> crate::runtime::protocol::WtWorktree {
         let saved = state::load(&self.app.root, slug);
-        let up = self.app.project.config.status.up.as_ref().map(|status| {
-            let vars = self.app.vars(slug, &saved);
-            succeeds_within(
-                &tmpl::render(status, &vars),
-                &self.app.dir(slug),
-                &state::env(&vars),
-            )
-        });
+        let vars = self.app.vars(slug, &saved);
+        let env = state::env(&vars);
+        let cwd = self.probe_cwd(slug);
+        let config = &self.app.project.config;
+        let up = config
+            .status
+            .up
+            .as_ref()
+            .map(|status| succeeds_within(&tmpl::render(status, &vars), &cwd, &env));
+        // The same two guards `App::links` applies to the static address: a
+        // template left unresolved is not an address, and a missing label is
+        // `wt`'s own default.
         let endpoints = self
             .app
-            .links(slug, &saved)
+            .url(slug, &saved)
+            .filter(|url| !url.contains("{{"))
+            .map(|url| Endpoint {
+                url,
+                label: config
+                    .open
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| "application".into()),
+            })
             .into_iter()
-            .map(|link: ops::Link| Endpoint {
-                url: link.url,
-                label: link.label,
+            .collect();
+        // `[status.info]`, each with the probe's ceiling: they run on the same
+        // single worker, and one reading a `.env` through a container that
+        // does not answer would hold the scan the way the probe did.
+        let info = config
+            .status
+            .info
+            .iter()
+            .map(|(name, command)| {
+                let value = capture_within(&tmpl::render(command, &vars), &cwd, &env);
+                (name.clone(), value)
             })
             .collect();
-        (up, endpoints)
+        crate::runtime::protocol::WtWorktree {
+            up,
+            endpoints,
+            branch: saved.branch.clone(),
+            opts: saved.opts.clone(),
+            ports: saved.ports.clone(),
+            info,
+        }
+    }
+
+    /// The addresses `[open] source` enumerates, and only those.
+    ///
+    /// Exactly `App::links` minus the static address — one line per link,
+    /// `url<TAB>label`, an empty label falling back to the URL — with the
+    /// probe's ceiling instead of `util::capture`'s none: it is asked by a
+    /// click, and a query that hangs must give the menu back.
+    pub fn links_of(&self, slug: &str) -> Vec<Endpoint> {
+        let Some(source) = &self.app.project.config.open.source else {
+            return Vec::new();
+        };
+        let saved = state::load(&self.app.root, slug);
+        let vars = self.app.vars(slug, &saved);
+        let raw = capture_within(
+            &tmpl::render(source, &vars),
+            &self.probe_cwd(slug),
+            &state::env(&vars),
+        );
+        parse_links(&raw)
+    }
+
+    /// Where a worktree's probes run: its directory, or the main repository's
+    /// while it does not exist yet — `wt`'s own rule (`prompt_cwd`, which is
+    /// private to it).
+    fn probe_cwd(&self, slug: &str) -> PathBuf {
+        let dir = self.app.dir(slug);
+        if dir.is_dir() {
+            dir
+        } else {
+            self.app.project.main.clone()
+        }
+    }
+}
+
+/// What `[open] source` wrote, read the way `wt` reads it: one link per
+/// non-empty line, `url<TAB>label`, the label defaulting to the URL.
+fn parse_links(raw: &str) -> Vec<Endpoint> {
+    raw.lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| {
+            let (url, label) = match line.split_once('\t') {
+                Some((url, label)) => (url.trim(), label.trim()),
+                None => (line.trim(), ""),
+            };
+            (!url.is_empty()).then(|| Endpoint {
+                url: url.to_string(),
+                label: if label.is_empty() { url } else { label }.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// `util::capture` with a ceiling — see [`STATUS_TIMEOUT`]. What the command
+/// wrote on its standard output, trimmed; nothing when it failed to start, ran
+/// over, or wrote nothing, which is how `wt`'s own previews read it.
+fn capture_within(command: &str, cwd: &Path, env: &BTreeMap<String, String>) -> String {
+    match run_within(command, cwd, env) {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        Err(e) => {
+            log::warn!("{e:#}");
+            String::new()
+        }
     }
 }
 
 /// `util::succeeds` with a ceiling — see [`STATUS_TIMEOUT`].
+fn succeeds_within(command: &str, cwd: &Path, env: &BTreeMap<String, String>) -> bool {
+    match run_within(command, cwd, env) {
+        Ok(out) => out.status.success(),
+        Err(e) => {
+            log::warn!("{e:#}");
+            false
+        }
+    }
+}
+
+/// A project's shell line, run with the probe's ceiling.
 ///
 /// `WT_SHELL` and its `sh` default are `wt`'s own: hooks are written for a
 /// POSIX shell, whatever the user's login shell may be.
-fn succeeds_within(command: &str, cwd: &Path, env: &BTreeMap<String, String>) -> bool {
+fn run_within(
+    command: &str,
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+) -> Result<std::process::Output> {
     let shell = std::env::var("WT_SHELL").unwrap_or_else(|_| "sh".to_string());
     let mut cmd = std::process::Command::new(shell);
     cmd.arg("-c")
@@ -457,13 +573,7 @@ fn succeeds_within(command: &str, cwd: &Path, env: &BTreeMap<String, String>) ->
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    match crate::git::wait_with_timeout(cmd, STATUS_TIMEOUT, || format!("wt status: {command}")) {
-        Ok(out) => out.status.success(),
-        Err(e) => {
-            log::warn!("{e:#}");
-            false
-        }
-    }
+    crate::git::wait_with_timeout(cmd, STATUS_TIMEOUT, || format!("wt status: {command}"))
 }
 
 /// A task's arguments, from the answers to the prompts it declares.
@@ -580,6 +690,30 @@ mod tests {
         assert_eq!(check("/p/repo-wt/demo/src"), None);
         // The main repository is not under the root: `wt` does not know it.
         assert_eq!(check("/p/repo"), None);
+    }
+
+    /// What `[open] source` writes is read as `wt` reads it: a tab splits the
+    /// address from its label, a line without one is an address labelled by
+    /// itself, and blank lines are nothing.
+    #[test]
+    fn the_links_a_source_writes_are_read_like_wt_reads_them() {
+        let links = parse_links(
+            "http://itcs.demo.wt.localhost\titcs\n\n  http://acme.demo.wt.localhost  \n\t\n",
+        );
+        let pairs: Vec<(&str, &str)> = links
+            .iter()
+            .map(|link| (link.url.as_str(), link.label.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("http://itcs.demo.wt.localhost", "itcs"),
+                (
+                    "http://acme.demo.wt.localhost",
+                    "http://acme.demo.wt.localhost"
+                ),
+            ]
+        );
     }
 
     #[test]

@@ -564,8 +564,13 @@ pub struct ClaudhubApp {
     /// closure, and copying the list on every frame of the bar is what that
     /// used to cost.
     pub(super) just_recipes: HashMap<PathBuf, Option<std::rc::Rc<crate::just::Snapshot>>>,
-    /// What `wt` knows about each worktree: started or not, its addresses.
+    /// What `wt` knows about each worktree: started or not, its static
+    /// address, and the preview — options, ports, `[status.info]`.
     pub(super) wt_states: HashMap<PathBuf, crate::runtime::protocol::WtWorktree>,
+    /// What `[open] source` enumerated for a worktree, asked when its "open"
+    /// menu opens. `None`: asked, not answered yet — the menu shows an
+    /// ellipsis. Absent: never asked.
+    pub(super) wt_links: HashMap<PathBuf, Option<Vec<crate::wt::Endpoint>>>,
     /// The guided creation under way.
     pub(super) creation: Option<crate::ui::worktree_ops::WtPrompt>,
     /// The worktree whose integration has gone out, and its branch: it is on the
@@ -1110,6 +1115,7 @@ impl ClaudhubApp {
             lsp_asking: HashMap::new(),
             lsp_next_id: 1,
             wt_states: HashMap::new(),
+            wt_links: HashMap::new(),
             creation: None,
             integrated: None,
             explorers: HashMap::new(),
@@ -1768,6 +1774,22 @@ impl ClaudhubApp {
         let Some(active) = self.active.clone() else {
             return;
         };
+        // A project's `wt.toml`, re-read like the justfile below: a task or a
+        // question added while Claudhub is open has to reach the menu. Before
+        // the worktree guard because the file belongs to the **main**
+        // repository, and only the watched checkout reports it — which is to
+        // say it is seen when the main is the checkout on screen; edited from
+        // a linked worktree, it is read again the next time the main is shown.
+        if path.file_name().is_some_and(|name| name == "wt.toml") {
+            let main = self
+                .repos
+                .iter()
+                .map(|repo| repo.main.clone())
+                .find(|main| main.join("wt.toml") == path);
+            if let Some(main) = main {
+                self.reload_wt_project(&main);
+            }
+        }
         // The vault is not inside the worktree, and what changes there is not
         // read with `git status`: it is the folder itself that has to be re-read.
         if let Some(vault) = vault.clone() {
@@ -1902,6 +1924,12 @@ impl ClaudhubApp {
             } => self.wt_task_ready(worktree, task, launch, window, cx),
             Evt::WtStates { states } => {
                 self.wt_states.extend(states);
+            }
+            Evt::WtLinks {
+                worktree,
+                endpoints,
+            } => {
+                self.wt_links.insert(worktree, Some(endpoints));
             }
 
             // — Sentry ————————————————————————————————————————————

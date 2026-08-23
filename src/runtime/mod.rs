@@ -99,12 +99,20 @@ fn is_db(cmd: &Cmd) -> bool {
 /// It has its own queue for the same reason as the network: it covers every open
 /// worktree, it comes back every few seconds, and it must never get in front of
 /// the diff just asked for.
+///
+/// A project's **questions** are here too, and not with the reads where they
+/// started: a `[[prompt]]`'s `source` or `when` is a shell of the project —
+/// on Acetics, `ensure-infra mariadb` may start a container before querying
+/// it — and a diff asked for meanwhile waited behind it. Same for the links
+/// `[open] source` enumerates: an SQL query through `docker exec`.
 fn is_background(cmd: &Cmd) -> bool {
     matches!(
         cmd,
         Cmd::LoadSummaries { .. }
             | Cmd::ScanAgents { .. }
             | Cmd::WtScan { .. }
+            | Cmd::WtLinks { .. }
+            | Cmd::WtQuestions { .. }
             | Cmd::JustLoad { .. }
     )
 }
@@ -1025,6 +1033,19 @@ fn dispatch(cmd: Cmd) -> Vec<Evt> {
             Err(e) => vec![fail(Some(worktree), Action::Worktree, e)],
         },
         Cmd::WtScan { targets } => wt_scan(targets),
+        Cmd::WtLinks {
+            main,
+            worktree,
+            slug,
+        } => {
+            let endpoints = crate::wt::Session::open(&main)
+                .map(|session| session.links_of(&slug))
+                .unwrap_or_default();
+            vec![Evt::WtLinks {
+                worktree,
+                endpoints,
+            }]
+        }
         Cmd::JustLoad { worktree } => {
             let recipes = crate::just::snapshot(&worktree);
             vec![Evt::JustRecipes { worktree, recipes }]
@@ -1269,8 +1290,7 @@ fn wt_scan(targets: Vec<(PathBuf, PathBuf)>) -> Vec<Evt> {
                 .or_insert_with(|| crate::wt::Session::open(&main))
                 .as_ref()?;
             let slug = session.slug_of(&worktree)?;
-            let (up, endpoints) = session.state_of(&slug);
-            Some((worktree, protocol::WtWorktree { up, endpoints }))
+            Some((worktree, session.state_of(&slug)))
         })
         .collect();
     vec![Evt::WtStates { states }]
@@ -1532,6 +1552,32 @@ mod tests {
                 force_with_lease: false,
             }),
             Queue::Network
+        );
+    }
+
+    /// A project's questions and the links its `[open] source` enumerates are
+    /// shells of the project — one of them starts a container — and go with
+    /// the background sweep, never with the reads a frame waits for.
+    #[test]
+    fn a_projects_shells_never_hold_back_a_diff() {
+        assert_eq!(
+            queue_of(&Cmd::WtQuestions {
+                main: worktree(),
+                slug: "fix".into(),
+                answers: Default::default(),
+                phase: crate::wt::Phase::Up,
+                task: None,
+                round: 0,
+            }),
+            Queue::Background
+        );
+        assert_eq!(
+            queue_of(&Cmd::WtLinks {
+                main: worktree(),
+                worktree: worktree(),
+                slug: "fix".into(),
+            }),
+            Queue::Background
         );
     }
 
