@@ -1892,6 +1892,19 @@ la rangée d'onglets, ce qui permet de glisser un terminal dans un split.
   convertit tout seul en `PanelView` et le dock l'accepte sans rien dire, mais
   sans onglet, ni titre, ni contenu. C'est l'échec silencieux de la refonte du
   dock.
+- **Et l'ajout-puis-déplacement passe par `panels::dock_panel_at`** :
+  `add_panel_view` ne prend pas de cible — il pose le panneau dans le **premier
+  groupe d'onglets** du centre et l'y **active**, et le `move_panel` qui suit
+  l'en retire aussitôt. Retirer l'onglet qu'un groupe affiche laisse son index
+  actif un cran après la fin, et le rognage retombe sur le **dernier** onglet —
+  sur l'écran Git, le tableau du plugin CI, sur lequel chaque session s'ouvrait
+  malgré `app::open_on` : le terminal de session traverse ce groupe à chaque
+  démarrage. Le helper note l'onglet affiché avant l'ajout et le rend après le
+  déplacement ; il ne le rend pas quand la cible rejoint ce groupe même, ni
+  quand il n'y a pas de cible — le panneau qu'on vient d'ouvrir est alors celui
+  qu'on regarde. Le défaut restait invisible tant que le dernier onglet était
+  « Conflits », que son invisibilité faisait remplacer au rendu par le premier
+  visible.
 - **Le nom de l'onglet vient de l'application, pas de la vue** : il peut être
   donné à la main, et les six panneaux doivent dire la même chose. Un nom vide
   rend au programme le sien.

@@ -209,6 +209,72 @@ fn zoom_in_toolbar() -> Option<PanelControl> {
     Some(PanelControl::Toolbar)
 }
 
+/// Adds a panel to a screen's centre and moves it where the caller says,
+/// keeping the tab the centre's first group was displaying.
+///
+/// `add_panel_view` takes no target: it appends the panel to the centre's
+/// **first tab group** and activates it there, and the move takes it right
+/// back out. Removing the tab a group displays leaves its active index one
+/// past the end, and the clamp lands on the **last** tab — on the Git screen
+/// the CI plugin's board, which every session then opened on despite
+/// `app::open_on`: the session's terminal passes through that group at every
+/// start. Noting the displayed tab before the add and giving it back after
+/// the move is the whole cure.
+///
+/// Two exceptions, both meaning "the fresh panel is the one to look at": no
+/// target — the panel stays where the add put it — and a target joining the
+/// very group the add disturbed.
+///
+/// The target is computed **after** the add, which both callers need: a
+/// sibling's node is looked up in the tree the add has just edited.
+pub(super) fn dock_panel_at(
+    dock: &mut gpui_component::dock::DockArea,
+    handle: std::sync::Arc<dyn gpui_component::dock::BasePanelView>,
+    target: impl FnOnce(&gpui_component::dock::DockArea) -> Option<gpui_component::dock::InsertTarget>,
+    window: &mut Window,
+    cx: &mut Context<gpui_component::dock::DockArea>,
+) {
+    use gpui_component::dock::{DockPlacement, InsertTarget, NodeId, PaneNode, PaneRef, PanelId};
+
+    /// The first tab group's displayed panel — the group `add_panel_view`
+    /// lands in, found by the same walk it uses.
+    fn displayed(node: &PaneNode) -> Option<(NodeId, usize, PanelId)> {
+        match node.kind() {
+            PaneRef::Tabs { panels, active_ix } => panels
+                .get(active_ix)
+                .map(|panel| (node.id(), active_ix, *panel)),
+            PaneRef::Split { children, .. } => children.iter().find_map(displayed),
+            PaneRef::Tiles { .. } => None,
+        }
+    }
+
+    let id = handle.panel_id(cx);
+    let noted = dock
+        .layout(DockPlacement::Center)
+        .and_then(|tree| displayed(tree.root()));
+    dock.add_panel_view(handle, DockPlacement::Center, None, window, cx);
+    let Some(target) = target(dock) else {
+        return;
+    };
+    dock.move_panel(id, target, window, cx);
+    let Some((node, ix, panel)) = noted else {
+        return;
+    };
+    if matches!(target, InsertTarget::Tabs { node: joined, .. } if joined == node) {
+        return;
+    }
+    dock.move_panel(
+        panel,
+        InsertTarget::Tabs {
+            node,
+            ix: Some(ix),
+            activate: true,
+        },
+        window,
+        cx,
+    );
+}
+
 macro_rules! panels {
     ($($name:ident => ($id:literal, $title:literal, $render:ident, $pane:ident)),* $(,)?) => { $(
         pub struct $name {

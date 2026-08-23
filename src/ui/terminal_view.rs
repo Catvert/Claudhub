@@ -1295,71 +1295,71 @@ impl ClaudhubApp {
             .filter_map(|terminal| terminal.panels.get(workspace.index()).cloned())
             .rfind(|other| other.entity_id() != panel.entity_id());
         dock.update(cx, |dock, cx| {
-            // **`panel_handle` and `add_panel_view`, never `add_panel`.** An
+            // **`panel_handle` and `dock_panel_at`, never `add_panel`.** An
             // `Entity<P>` converts itself into base's `PanelView` and the dock
             // takes it without complaint — but without the presentation that
             // goes with it: no tab, no title, no content. It is the silent
             // failure of the dock rework, already written down in
             // `workspace.rs`, and it is what made a terminal open into nothing.
-            dock.add_panel_view(
+            crate::ui::panels::dock_panel_at(
+                dock,
                 gpui_component::dock::panel_handle(panel.clone()),
-                DockPlacement::Center,
-                None,
+                |dock| {
+                    sibling
+                        .and_then(|sibling| {
+                            let node = dock
+                                .layout(DockPlacement::Center)?
+                                .find_panel_node(PanelId::from(sibling.entity_id()))?;
+                            Some(InsertTarget::Tabs {
+                                node,
+                                ix: None,
+                                // The tab one has just opened is the tab one
+                                // looks at.
+                                activate: true,
+                            })
+                        })
+                        .or_else(|| {
+                            // The multiplexer holds nothing **but** terminals:
+                            // the first one takes the whole centre, which is
+                            // where the add has already put it. Splitting the
+                            // empty root would pin it into a band at the
+                            // bottom with nothing above.
+                            if workspace.shows_every_worktree() {
+                                return None;
+                            }
+                            // No terminal here yet: the slot under the
+                            // screen's **content**, which on every screen but
+                            // the review is the whole centre — and on the
+                            // review is its right-hand half.
+                            //
+                            // The review's list column lives in the centre
+                            // rather than in a dock of its own, so a terminal
+                            // opened under the whole row raised the file list
+                            // along with the diff, for nothing: one reads a
+                            // list beside a terminal, never above one. Taking
+                            // the last slot of a row says that in the one rule
+                            // that also gives the right answer where the
+                            // centre holds a single column.
+                            let tree = dock.layout(DockPlacement::Center)?;
+                            let node = match tree.root().kind() {
+                                gpui_component::dock::PaneRef::Split {
+                                    axis: gpui::Axis::Horizontal,
+                                    children,
+                                    ..
+                                } => children.last().map(|child| child.id()),
+                                _ => None,
+                            }
+                            .unwrap_or_else(|| tree.root().id());
+                            Some(InsertTarget::Split {
+                                node,
+                                placement: gpui_base::Placement::Bottom,
+                                size: Some(TERMINAL_HEIGHT),
+                            })
+                        })
+                },
                 window,
                 cx,
             );
-            let id = PanelId::from(panel.entity_id());
-            let target = sibling
-                .and_then(|sibling| {
-                    let node = dock
-                        .layout(DockPlacement::Center)?
-                        .find_panel_node(PanelId::from(sibling.entity_id()))?;
-                    Some(InsertTarget::Tabs {
-                        node,
-                        ix: None,
-                        // The tab one has just opened is the tab one looks at.
-                        activate: true,
-                    })
-                })
-                .or_else(|| {
-                    // The multiplexer holds nothing **but** terminals: the
-                    // first one takes the whole centre, which is where
-                    // `add_panel_view` has already put it. Splitting the empty
-                    // root would pin it into a band at the bottom with nothing
-                    // above.
-                    if workspace.shows_every_worktree() {
-                        return None;
-                    }
-                    // No terminal here yet: the slot under the screen's
-                    // **content**, which on every screen but the review is the
-                    // whole centre — and on the review is its right-hand half.
-                    //
-                    // The review's list column lives in the centre rather than
-                    // in a dock of its own, so a terminal opened under the
-                    // whole row raised the file list along with the diff, for
-                    // nothing: one reads a list beside a terminal, never above
-                    // one. Taking the last slot of a row says that in the one
-                    // rule that also gives the right answer where the centre
-                    // holds a single column.
-                    let tree = dock.layout(DockPlacement::Center)?;
-                    let node = match tree.root().kind() {
-                        gpui_component::dock::PaneRef::Split {
-                            axis: gpui::Axis::Horizontal,
-                            children,
-                            ..
-                        } => children.last().map(|child| child.id()),
-                        _ => None,
-                    }
-                    .unwrap_or_else(|| tree.root().id());
-                    Some(InsertTarget::Split {
-                        node,
-                        placement: gpui_base::Placement::Bottom,
-                        size: Some(TERMINAL_HEIGHT),
-                    })
-                });
-            if let Some(target) = target {
-                dock.move_panel(id, target, window, cx);
-            }
         });
     }
 

@@ -1865,10 +1865,9 @@ fn quote_object(text: &str, at: usize, around: bool, quote: char) -> Option<Rang
         .map(|(i, _)| start + i)
         .collect();
     let mut pair = None;
-    for couple in quotes.chunks_exact(2) {
-        let (open, close) = (couple[0], couple[1]);
-        if at <= close {
-            pair = Some((open, close));
+    for [open, close] in quotes.as_chunks::<2>().0 {
+        if at <= *close {
+            pair = Some((*open, *close));
             break;
         }
     }

@@ -1114,33 +1114,27 @@ impl ClaudhubApp {
             .cloned()
         {
             dock.update(cx, |dock, cx| {
-                dock.add_panel_view(
+                crate::ui::panels::dock_panel_at(
+                    dock,
                     gpui_component::dock::panel_handle(panel.clone()),
-                    gpui_component::dock::DockPlacement::Center,
-                    None,
+                    |dock| {
+                        dock.layout(gpui_component::dock::DockPlacement::Center)
+                            .and_then(|layout| {
+                                layout.find_panel_node(gpui_component::dock::PanelId::from(
+                                    sibling?.entity_id(),
+                                ))
+                            })
+                            .map(|node| gpui_component::dock::InsertTarget::Tabs {
+                                node,
+                                ix: None,
+                                // The file one has just opened is the file one
+                                // reads.
+                                activate: true,
+                            })
+                    },
                     window,
                     cx,
                 );
-                let Some(sibling) = sibling else {
-                    return;
-                };
-                let id = gpui_component::dock::PanelId::from(panel.entity_id());
-                let target = dock
-                    .layout(gpui_component::dock::DockPlacement::Center)
-                    .and_then(|layout| {
-                        layout.find_panel_node(gpui_component::dock::PanelId::from(
-                            sibling.entity_id(),
-                        ))
-                    })
-                    .map(|node| gpui_component::dock::InsertTarget::Tabs {
-                        node,
-                        ix: None,
-                        // The file one has just opened is the file one reads.
-                        activate: true,
-                    });
-                if let Some(target) = target {
-                    dock.move_panel(id, target, window, cx);
-                }
             });
         }
         // The file one has just opened is the file one reads. Said here as well
