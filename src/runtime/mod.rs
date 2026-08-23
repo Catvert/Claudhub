@@ -1104,17 +1104,42 @@ fn history(worktree: PathBuf, range: LogRange, limit: usize) -> Vec<Evt> {
 }
 
 /// A summary per worktree, for the sidebar.
+///
+/// **Four at a time, and not one after the other.** Each is a `git status` plus
+/// a `--numstat`, so a dozen open worktrees was a dozen round trips in a row on
+/// the single background worker — and the sidebar showed nothing until the last
+/// one came back. Four because the work is a subprocess waiting on the disk,
+/// not arithmetic: more lanes would only make the checkouts compete for it.
+///
+/// The order is the caller's, whatever the lanes finish in.
 fn summaries(worktrees: Vec<PathBuf>) -> Vec<Evt> {
-    let summaries = worktrees
-        .into_iter()
-        .filter_map(|worktree| {
-            // A worktree deleted under our feet is not an error to display: it
-            // will disappear from the list at the next `git worktree list`.
-            status::summary(&worktree)
-                .ok()
-                .map(|summary| (worktree, summary))
-        })
-        .collect();
+    const LANES: usize = 4;
+
+    let lane = worktrees.len().div_ceil(LANES).max(1);
+    let summaries = std::thread::scope(|scope| {
+        let threads: Vec<_> = worktrees
+            .chunks(lane)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .filter_map(|worktree| {
+                            // A worktree deleted under our feet is not an error
+                            // to display: it will disappear from the list at
+                            // the next `git worktree list`.
+                            status::summary(worktree)
+                                .ok()
+                                .map(|summary| (worktree.clone(), summary))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        threads
+            .into_iter()
+            .flat_map(|thread| thread.join().unwrap_or_default())
+            .collect()
+    });
     vec![Evt::Summaries { summaries }]
 }
 
@@ -1212,17 +1237,21 @@ fn vault_written(worktree: PathBuf, result: Result<()>) -> Vec<Evt> {
 
 /// What `wt` knows about each worktree of a project.
 fn wt_scan(targets: Vec<(PathBuf, PathBuf)>) -> Vec<Evt> {
+    // One session per project, kept for its worktrees: the three questions
+    // below each used to reopen it — a `git rev-parse`, the `wt.toml` parsed
+    // and the state read, three times per worktree of the scan.
+    let mut sessions: std::collections::HashMap<PathBuf, Option<crate::wt::Session>> =
+        std::collections::HashMap::new();
     let states = targets
         .into_iter()
         .filter_map(|(main, worktree)| {
-            let slug = crate::wt::slug_of(&main, &worktree)?;
-            Some((
-                worktree,
-                protocol::WtWorktree {
-                    up: crate::wt::is_up(&main, &slug),
-                    endpoints: crate::wt::endpoints(&main, &slug),
-                },
-            ))
+            let session = sessions
+                .entry(main.clone())
+                .or_insert_with(|| crate::wt::Session::open(&main))
+                .as_ref()?;
+            let slug = session.slug_of(&worktree)?;
+            let (up, endpoints) = session.state_of(&slug);
+            Some((worktree, protocol::WtWorktree { up, endpoints }))
         })
         .collect();
     vec![Evt::WtStates { states }]

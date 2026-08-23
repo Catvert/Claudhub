@@ -204,10 +204,10 @@ pub fn snapshot(main: &Path) -> Option<Snapshot> {
 ///
 /// `None` for the main repository and for any worktree placed elsewhere: `wt`
 /// only knows what it created, and asking it to act on the rest would produce
-/// paths that do not exist.
-pub fn slug_of(main: &Path, worktree: &Path) -> Option<String> {
-    let root = app(main)?.root;
-    let rest = worktree.strip_prefix(&root).ok()?;
+/// paths that do not exist. Pure, and tested as such — [`Session::slug_of`] is
+/// the way in, the root being what the project says it is.
+fn slug_under(root: &Path, worktree: &Path) -> Option<String> {
+    let rest = worktree.strip_prefix(root).ok()?;
     let mut parts = rest.components();
     let slug = parts.next()?.as_os_str().to_str()?.to_string();
     parts.next().is_none().then_some(slug)
@@ -384,35 +384,86 @@ pub fn task(
     })
 }
 
-/// Is the worktree running, according to `[status] up`?
+/// What is asked of a `[status] up` probe before it is given up on.
 ///
-/// `None` when the project does not declare it: there is then nothing to
-/// start, and showing "stopped" would be false information.
-pub fn is_up(main: &Path, slug: &str) -> Option<bool> {
-    let app = app(main)?;
-    let status = app.project.config.status.up.as_ref()?;
-    let saved = state::load(&app.root, slug);
-    let vars = app.vars(slug, &saved);
-    Some(util::succeeds(
-        &tmpl::render(status, &vars),
-        &app.dir(slug),
-        &state::env(&vars),
-    ))
+/// `wt`'s own runner waits for ever, and this one runs on the single background
+/// worker: a `docker compose ps` talking to a daemon that is not answering
+/// would take the scan with it — and the summaries and the agents queue behind
+/// it. A probe that does not answer is read as "not running", which is the same
+/// thing the user sees.
+const STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A project opened once, for the questions asked about each of its worktrees.
+///
+/// `slug_of`, `is_up` and `endpoints` used to take the repository's path and
+/// rebuild the whole thing — a `git rev-parse`, the `wt.toml` parsed, the state
+/// read — which the scan paid three times per worktree.
+pub struct Session {
+    app: App,
 }
 
-/// The addresses the project exposes for this worktree.
-pub fn endpoints(main: &Path, slug: &str) -> Vec<Endpoint> {
-    let Some(app) = app(main) else {
-        return Vec::new();
-    };
-    let saved = state::load(&app.root, slug);
-    app.links(slug, &saved)
-        .into_iter()
-        .map(|link: ops::Link| Endpoint {
-            url: link.url,
-            label: link.label,
-        })
-        .collect()
+impl Session {
+    /// `None` when the repository has no `wt.toml`, which is the common case.
+    pub fn open(main: &Path) -> Option<Self> {
+        Some(Self { app: app(main)? })
+    }
+
+    /// The slug of a worktree of this project: the directory right under the
+    /// root, and nothing deeper.
+    pub fn slug_of(&self, worktree: &Path) -> Option<String> {
+        slug_under(&self.app.root, worktree)
+    }
+
+    /// Whether the worktree runs, and the addresses it exposes.
+    ///
+    /// The two together because they read the same saved state, and reading it
+    /// twice is reading a file twice for one answer.
+    pub fn state_of(&self, slug: &str) -> (Option<bool>, Vec<Endpoint>) {
+        let saved = state::load(&self.app.root, slug);
+        let up = self.app.project.config.status.up.as_ref().map(|status| {
+            let vars = self.app.vars(slug, &saved);
+            succeeds_within(
+                &tmpl::render(status, &vars),
+                &self.app.dir(slug),
+                &state::env(&vars),
+            )
+        });
+        let endpoints = self
+            .app
+            .links(slug, &saved)
+            .into_iter()
+            .map(|link: ops::Link| Endpoint {
+                url: link.url,
+                label: link.label,
+            })
+            .collect();
+        (up, endpoints)
+    }
+}
+
+/// `util::succeeds` with a ceiling — see [`STATUS_TIMEOUT`].
+///
+/// `WT_SHELL` and its `sh` default are `wt`'s own: hooks are written for a
+/// POSIX shell, whatever the user's login shell may be.
+fn succeeds_within(command: &str, cwd: &Path, env: &BTreeMap<String, String>) -> bool {
+    let shell = std::env::var("WT_SHELL").unwrap_or_else(|_| "sh".to_string());
+    let mut cmd = std::process::Command::new(shell);
+    cmd.arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .envs(env)
+        // The same guard as every git command's: with stdin open, a probe
+        // asking anything of the user holds the worker for ever.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    match crate::git::wait_with_timeout(cmd, STATUS_TIMEOUT, || format!("wt status: {command}")) {
+        Ok(out) => out.status.success(),
+        Err(e) => {
+            log::warn!("{e:#}");
+            false
+        }
+    }
 }
 
 /// A task's arguments, from the answers to the prompts it declares.
@@ -521,14 +572,9 @@ mod tests {
     #[test]
     fn a_slug_is_the_directory_right_under_the_root() {
         let root = Path::new("/p/repo-wt");
-        // What `slug_of` does once the root is known. The function itself needs
-        // a `wt.toml`; it is the rule it applies that matters.
-        let check = |path: &str| -> Option<String> {
-            let rest = Path::new(path).strip_prefix(root).ok()?;
-            let mut parts = rest.components();
-            let slug = parts.next()?.as_os_str().to_str()?.to_string();
-            parts.next().is_none().then_some(slug)
-        };
+        // The rule `slug_of` applies once the root is known; the function
+        // itself needs a `wt.toml`.
+        let check = |path: &str| slug_under(root, Path::new(path));
         assert_eq!(check("/p/repo-wt/demo"), Some("demo".into()));
         // A subdirectory is not a worktree.
         assert_eq!(check("/p/repo-wt/demo/src"), None);
