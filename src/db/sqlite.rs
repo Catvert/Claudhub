@@ -16,7 +16,7 @@ use anyhow::{Context as _, Result};
 use futures::TryStreamExt as _;
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteConnection, SqliteRow},
-    Column as _, ConnectOptions as _, Either, Row as _, ValueRef as _,
+    Column as _, ConnectOptions as _, Either, Row as _, TypeInfo as _, ValueRef as _,
 };
 
 use super::{bytes_to_string, Cell, Column, Connection, Database, Rows, Table};
@@ -200,10 +200,35 @@ pub async fn query(
     limit: usize,
 ) -> Result<Rows> {
     let mut db = open(connection).await?;
+    // The page is asked of the engine when the query lets itself be wrapped —
+    // see `super::paged`. Reading from the start stays as the fallback, for
+    // what does not let itself be wrapped and for a wrap the engine refuses.
+    if let Some(paged) = super::paged(sql, offset, limit) {
+        match run(&mut db, &paged, offset, 0, limit).await {
+            Ok(rows) => return Ok(rows),
+            Err(error) => {
+                log::debug!("the paged query was refused, reading from the start: {error}")
+            }
+        }
+    }
+    run(&mut db, sql, offset, offset, limit).await
+}
+
+/// Runs `sql` and keeps `limit` rows, `skip` of them dropped on the way.
+///
+/// `offset` is what the page says of itself; `skip` is how many rows this has
+/// to throw away to get there — zero when the engine was asked for the page.
+async fn run(
+    db: &mut SqliteConnection,
+    sql: &str,
+    offset: usize,
+    skip: usize,
+    limit: usize,
+) -> Result<Rows> {
     // `raw_sql` accepts several statements — that is what one pastes from a
     // migration file — and `fetch_many` streams what each produces: a count of
     // affected rows for a write, rows for a read.
-    let mut stream = sqlx::raw_sql(sql).fetch_many(&mut db);
+    let mut stream = sqlx::raw_sql(sql).fetch_many(db);
     let mut out = Rows {
         offset,
         ..Default::default()
@@ -220,7 +245,7 @@ pub async fn query(
                         .map(|column| column.name().to_string())
                         .collect();
                 }
-                if skipped < offset {
+                if skipped < skip {
                     skipped += 1;
                     continue;
                 }
@@ -267,15 +292,53 @@ fn cells(row: &SqliteRow) -> Vec<Cell> {
         .collect()
 }
 
+/// A value, as text.
+///
+/// **SQLite has no type per column but a type per value**, so the decoding is
+/// chosen value by value and not once per column as MySQL allows. The name the
+/// value carries says which decoding can succeed; the cascade below stays as
+/// the fallback for anything else, and it is what keeps the choice invisible.
+/// Going through the cascade for every cell meant up to four failed `try_get`
+/// per value, each of them allocating an error.
 fn value_to_cell(row: &SqliteRow, index: usize) -> Cell {
-    match row.try_get_raw(index) {
-        Ok(value) if value.is_null() => return None,
-        Ok(_) => {}
-        Err(_) => return Some("?".to_string()),
+    let Ok(value) = row.try_get_raw(index) else {
+        return Some("?".to_string());
+    };
+    if value.is_null() {
+        return None;
     }
-    // The order matters: SQLite has no type per column but a type per value,
-    // and the first successful decode decides the display. Text first, because
-    // an integer stored as text has to read as it was written.
+    let kind = value.type_info();
+    match kind.name() {
+        "TEXT" => {
+            if let Ok(value) = row.try_get::<String, _>(index) {
+                return Some(value);
+            }
+        }
+        "INTEGER" => {
+            if let Ok(value) = row.try_get::<i64, _>(index) {
+                return Some(value.to_string());
+            }
+        }
+        "REAL" => {
+            if let Ok(value) = row.try_get::<f64, _>(index) {
+                return Some(value.to_string());
+            }
+        }
+        "BLOB" => {
+            if let Ok(value) = row.try_get::<Vec<u8>, _>(index) {
+                return Some(bytes_to_string(value));
+            }
+        }
+        _ => {}
+    }
+    cascade(row, index)
+}
+
+/// Every decoding, tried in turn.
+///
+/// The order matters: the first successful decode decides the display. Text
+/// first, because an integer stored as text has to read as it was written.
+fn cascade(row: &SqliteRow, index: usize) -> Cell {
     if let Ok(value) = row.try_get::<String, _>(index) {
         return Some(value);
     }

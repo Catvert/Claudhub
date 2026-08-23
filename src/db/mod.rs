@@ -379,12 +379,10 @@ pub async fn all_columns(
 
 /// Runs `sql` and returns the page of `limit` rows starting at `offset`.
 ///
-/// **Paging is done by reading, not by rewriting the query.** Adding a `LIMIT`
-/// to what the user wrote would mean understanding their query — a `LIMIT`
-/// already present, a union, a procedure — and rewriting it, which is the
-/// surest way to make them run something other than what they read. The rows
-/// preceding the page are therefore really produced by the engine, then thrown
-/// away; those that follow are never read.
+/// **The query is never rewritten**: it is either read from the start, the rows
+/// before the page being produced by the engine and thrown away here, or
+/// **wrapped** in a derived table carrying the `LIMIT` — see `paged`, and
+/// `order_by` for why a wrap is safe where an insertion would not be.
 pub async fn query(
     connection: &Connection,
     database: Option<&str>,
@@ -441,12 +439,30 @@ pub fn can_order(sql: &str, columns: &[String]) -> bool {
 /// **The parentheses are on their own line**, which puts the `)` out of reach of
 /// a `--` comment ending the query.
 ///
+/// `None` when the query does not let itself be wrapped — see `wrappable`.
+pub fn order_by(sql: &str, column: usize, ascending: bool) -> Option<String> {
+    let body = wrappable(sql)?;
+    let direction = if ascending { "ASC" } else { "DESC" };
+    Some(format!(
+        "SELECT * FROM (\n{body}\n) AS {SORT_ALIAS} ORDER BY {} {direction}",
+        column + 1
+    ))
+}
+
+/// The alias `order_by` gives the derived table it writes.
+const SORT_ALIAS: &str = "claudhub_result";
+
+/// The alias `paged` gives its own.
+const PAGE_ALIAS: &str = "claudhub_page";
+
+/// The body of a query that lets itself be wrapped in a derived table.
+///
 /// `None` when the query does not let itself be wrapped: several statements —
 /// the parenthesis would fall between two — or something other than a read. The
 /// semicolon is looked for in the raw text, so a query carrying a `;` inside a
-/// string literal loses sorting: that is the sense of the refusal, and it costs
-/// only one unavailable gesture.
-pub fn order_by(sql: &str, column: usize, ascending: bool) -> Option<String> {
+/// string literal loses the wrap: that is the sense of the refusal, and it
+/// costs only one unavailable gesture.
+fn wrappable(sql: &str) -> Option<&str> {
     let body = sql.trim().trim_end_matches(';').trim_end();
     if body.is_empty() || body.contains(';') {
         return None;
@@ -461,11 +477,54 @@ pub fn order_by(sql: &str, column: usize, ascending: bool) -> Option<String> {
     if !matches!(head.as_str(), "" | "SELECT" | "WITH" | "VALUES" | "TABLE") {
         return None;
     }
-    let direction = if ascending { "ASC" } else { "DESC" };
+    Some(body)
+}
+
+/// The query, asking the engine for the page instead of the whole result.
+///
+/// **Only past the first page**, which is where the waste is: without this, the
+/// twentieth page of a thousand rows has the engine produce twenty thousand
+/// rows and send nineteen thousand of them over the wire to be dropped on
+/// arrival. The first page is read exactly as it always was.
+///
+/// One row more than the page is asked for: it is what says the result
+/// continues, and it is the same row the plain read looks at before stopping.
+///
+/// `None` for what does not let itself be wrapped — and the wrap can still be
+/// refused at run time, so both engines keep the plain read as the fallback.
+pub fn paged(sql: &str, offset: usize, limit: usize) -> Option<String> {
+    if offset == 0 {
+        return None;
+    }
+    let body = wrappable(sql)?;
+    let wanted = limit.checked_add(1)?;
+    let clause = format!("LIMIT {wanted} OFFSET {offset}");
+    // A sort of ours is **extended**, not wrapped a second time: an `ORDER BY`
+    // buried in a derived table is one MySQL is free to drop, and the page
+    // would come back in whatever order the engine found convenient.
+    if is_sorted(body) {
+        return Some(format!("{body} {clause}"));
+    }
     Some(format!(
-        "SELECT * FROM (\n{body}\n) AS claudhub_result ORDER BY {} {direction}",
-        column + 1
+        "SELECT * FROM (\n{body}\n) AS {PAGE_ALIAS} {clause}"
     ))
+}
+
+/// True when `body` is what `order_by` wrote: our derived table, closed by an
+/// `ORDER BY <rank> ASC|DESC` and nothing after it.
+fn is_sorted(body: &str) -> bool {
+    let marker = format!("\n) AS {SORT_ALIAS} ORDER BY ");
+    let Some((_, tail)) = body.rsplit_once(&marker) else {
+        return false;
+    };
+    match tail.rsplit_once(' ') {
+        Some((rank, direction)) => {
+            !rank.is_empty()
+                && rank.bytes().all(|byte| byte.is_ascii_digit())
+                && matches!(direction, "ASC" | "DESC")
+        }
+        None => false,
+    }
 }
 
 /// One table row, values escaped and terminated by a newline.
@@ -825,6 +884,36 @@ mod tests {
         // ending the query.
         let commented = order_by("SELECT a FROM t -- all of it is here", 0, true).unwrap();
         assert!(commented.contains("\n)"), "{commented}");
+    }
+
+    /// Past the first page, the engine is asked for the page: one row more than
+    /// it holds, which is what says the result continues.
+    #[test]
+    fn a_page_is_asked_of_the_engine() {
+        assert_eq!(
+            paged("SELECT a FROM t ;", 20, 10).unwrap(),
+            "SELECT * FROM (\nSELECT a FROM t\n) AS claudhub_page LIMIT 11 OFFSET 20"
+        );
+        // The first page is read as it always was.
+        assert!(paged("SELECT a FROM t", 0, 10).is_none());
+        // And what cannot be wrapped is read from the start, whatever the page.
+        assert!(paged("SELECT 1; SELECT 2", 20, 10).is_none());
+        assert!(paged("UPDATE t SET a = 1", 20, 10).is_none());
+    }
+
+    /// A sort of ours is extended, not wrapped again: one derived table, whose
+    /// `ORDER BY` the `LIMIT` follows.
+    #[test]
+    fn a_sorted_query_keeps_one_wrap() {
+        let sorted = order_by("SELECT a, b FROM t", 1, false).unwrap();
+        let page = paged(&sorted, 20, 10).unwrap();
+        assert_eq!(page, format!("{sorted} LIMIT 11 OFFSET 20"));
+        assert_eq!(page.matches("SELECT * FROM (").count(), 1);
+        // Anything else, sort-looking or not, is wrapped.
+        let hand_written = "SELECT * FROM (\nSELECT a\n) AS claudhub_result ORDER BY x ASC";
+        assert!(paged(hand_written, 20, 10)
+            .unwrap()
+            .starts_with("SELECT * FROM (\nSELECT * FROM ("));
     }
 
     /// What cannot be wrapped is not sorted — rather than sorted wrong.

@@ -17,6 +17,7 @@
 //! reaching for. Only an explicit qualifier restricts: `u.` offers that table's
 //! columns and nothing else.
 
+use std::collections::HashSet;
 use std::ops::Range;
 
 use super::link::Key;
@@ -145,28 +146,40 @@ pub fn candidates(
     // The rest of the schema, one entry per name: what is not in the query yet
     // is what one is about to name. A column of a table the query names is
     // already in the list, one rank above, and twice over it says nothing.
-    let mut seen: Vec<String> = Vec::new();
+    //
+    // **The names are kept in a set and the prefix filters before the entry is
+    // built**: this runs on the interface thread at every keystroke, and a
+    // schema of three hundred tables walked with a comparison per name already
+    // seen is quadratic. `sql::eq` compares ASCII-case-insensitively, which
+    // lowercasing the key reproduces exactly.
+    let mut seen: HashSet<String> = HashSet::new();
     for candidate in local_columns(&sources, tables) {
-        if !seen.iter().any(|name| sql::eq(name, &candidate.label)) {
-            seen.push(candidate.label.clone());
+        seen.insert(candidate.label.to_ascii_lowercase());
+        if matches(&candidate.label, prefix).is_some() {
+            entries.push((local, candidate));
         }
-        entries.push((local, candidate));
     }
     for (table, columns) in tables {
-        entries.push((
-            slot_rank(Kind::Table, &expect),
-            Candidate {
-                text: table.clone(),
-                label: table.clone(),
-                detail: None,
-                kind: Kind::Table,
-            },
-        ));
+        if matches(table, prefix).is_some() {
+            entries.push((
+                slot_rank(Kind::Table, &expect),
+                Candidate {
+                    text: table.clone(),
+                    label: table.clone(),
+                    detail: None,
+                    kind: Kind::Table,
+                },
+            ));
+        }
         for column in columns {
-            if seen.iter().any(|name| sql::eq(name, column)) {
+            // The prefix decides first: two columns of the same name match or
+            // miss alike, so what the filter drops never had to be remembered.
+            if matches(column, prefix).is_none() {
                 continue;
             }
-            seen.push(column.clone());
+            if !seen.insert(column.to_ascii_lowercase()) {
+                continue;
+            }
             entries.push((
                 local + 1,
                 Candidate {
@@ -179,6 +192,9 @@ pub fn candidates(
         }
     }
     for keyword in keywords {
+        if matches(keyword, prefix).is_none() {
+            continue;
+        }
         entries.push((
             slot_rank(Kind::Keyword, &expect),
             Candidate {
