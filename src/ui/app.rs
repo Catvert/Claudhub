@@ -916,8 +916,9 @@ pub struct ClaudhubApp {
     /// several times while chasing something down, not a preference one expects
     /// to find again tomorrow — hence here and not in the settings file.
     pub(super) logs_level: log::LevelFilter,
-    /// The log records, copied from the ring only when it has moved.
-    pub(super) logs: std::rc::Rc<Vec<crate::logging::Entry>>,
+    /// The log records, laid out as the page paints them, copied from the ring
+    /// only when it has moved.
+    pub(super) logs: std::rc::Rc<Vec<crate::ui::settings_view::LogRow>>,
     pub(super) logs_seen: u64,
     /// The root's focus, and what a gesture hands the keyboard back to.
     ///

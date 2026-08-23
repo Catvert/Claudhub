@@ -120,8 +120,7 @@ impl ClaudhubApp {
         // The registry is populated asynchronously at startup and re-read here
         // rather than cached: it is watched, and a theme file dropped in the
         // folder while Claudhub runs has to show up in the list.
-        let light_themes = theme_choices(gpui_component::ThemeMode::Light, cx);
-        let dark_themes = theme_choices(gpui_component::ThemeMode::Dark, cx);
+        let (light_themes, dark_themes) = theme_choices(cx);
         let logs = LogView {
             records: self.log_records(),
             level: self.logs_level,
@@ -185,27 +184,34 @@ impl ClaudhubApp {
         self.settings_env = None;
     }
 
-    /// The log records, copied only when there are new ones.
+    /// The log records, laid out for the page, copied only when there are new
+    /// ones.
     ///
     /// `logging::records` copies the ring — two thousand entries — and this page
-    /// renders on every frame. The counter is what says the copy is out of date;
+    /// renders on every frame. Each record is turned into the strings the row
+    /// paints **here**, once: formatting the timestamp and the level in the
+    /// render closure was two hundred `format!` per frame. The counter is what says the copy is out of date;
     /// the buffer's own length would stop moving as soon as the ring is full.
     ///
     /// Nothing notifies the view when a record is written — a worker thread
     /// logs, it does not touch gpui — so the page follows the frames the rest of
     /// the application causes. The background sweep alone brings one every two
     /// seconds, which is what makes a log written elsewhere appear on its own.
-    fn log_records(&mut self) -> std::rc::Rc<Vec<crate::logging::Entry>> {
+    fn log_records(&mut self) -> std::rc::Rc<Vec<LogRow>> {
         let written = crate::logging::written();
         if self.logs_seen != written {
             self.logs_seen = written;
-            self.logs = std::rc::Rc::new(crate::logging::records());
+            self.logs =
+                std::rc::Rc::new(crate::logging::records().iter().map(LogRow::of).collect());
         }
         self.logs.clone()
     }
 }
 
-fn choices(names: Vec<String>) -> Vec<(SharedString, SharedString)> {
+/// What a menu offers: a value and the label that stands for it.
+type Choices = Vec<(SharedString, SharedString)>;
+
+fn choices(names: Vec<String>) -> Choices {
     names
         .into_iter()
         .map(|name| (SharedString::from(name.clone()), SharedString::from(name)))
@@ -486,14 +492,22 @@ fn edit_agent(index: usize, cx: &mut App, edit: impl FnOnce(&mut settings::Agent
     });
 }
 
-/// The registry's palettes for a given appearance.
-fn theme_choices(mode: gpui_component::ThemeMode, cx: &App) -> Vec<(SharedString, SharedString)> {
-    gpui_component::ThemeRegistry::global(cx)
-        .sorted_themes()
-        .into_iter()
-        .filter(|theme| theme.mode == mode)
-        .map(|theme| (theme.name.clone(), theme.name.clone()))
-        .collect()
+/// The registry's palettes, light ones and dark ones apart.
+///
+/// One reading of the registry and not one per appearance: `sorted_themes`
+/// copies and sorts the whole list, and this runs on every frame the settings
+/// screen paints.
+fn theme_choices(cx: &App) -> (Choices, Choices) {
+    let mut light: Choices = Vec::new();
+    let mut dark: Choices = Vec::new();
+    for theme in gpui_component::ThemeRegistry::global(cx).sorted_themes() {
+        let choice = (theme.name.clone(), theme.name.clone());
+        match theme.mode {
+            gpui_component::ThemeMode::Light => light.push(choice),
+            gpui_component::ThemeMode::Dark => dark.push(choice),
+        }
+    }
+    (light, dark)
 }
 
 fn appearance_page(
@@ -839,12 +853,12 @@ fn shortcuts_item() -> SettingItem {
                     .into_any_element(),
             );
             for entry in family {
-                let keys = entry.effective(&overrides).trim().to_string();
-                let conflict = !keys.is_empty()
+                let row = crate::ui::shortcuts::Setting::of(entry, &overrides, vim);
+                let conflict = !row.keys.is_empty()
                     && claimed
-                        .get(&(entry.predicate, keys))
+                        .get(&(entry.predicate, row.keys.clone()))
                         .is_some_and(|count| *count > 1);
-                rows.push(shortcut_row(entry, vim, conflict, window, cx).into_any_element());
+                rows.push(shortcut_row(entry, &row, conflict, window, cx).into_any_element());
             }
         }
         v_flex()
@@ -933,19 +947,21 @@ struct ShortcutField {
 /// itself — the state would otherwise keep the text one has just abandoned.
 fn shortcut_row(
     entry: &'static crate::ui::shortcuts::Entry,
-    vim: bool,
+    row: &crate::ui::shortcuts::Setting,
     conflict: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> impl IntoElement {
-    let id = entry.id();
-    let overrides = Settings::global(cx).shortcuts.clone();
-    let current = entry.effective(&overrides).to_string();
-    let customised = overrides.contains_key(&id);
-    let invalid = !crate::ui::shortcuts::valid_keys(&current);
-    // A vim binding while the mode is off is not an error, but it is not a key
-    // either: the row says so rather than offering a gesture that does nothing.
-    let idle = entry.vim && !vim;
+    // Everything the row says about the binding is decided once, for the whole
+    // list, by `shortcuts::Row`: reading the overrides here meant a copy of the
+    // map per row and per frame.
+    let crate::ui::shortcuts::Setting {
+        id,
+        keys: current,
+        customised,
+        invalid,
+        idle,
+    } = row.clone();
 
     let state = window.use_keyed_state(
         SharedString::from(format!("claudhub-shortcut-{id}")),
@@ -1909,9 +1925,38 @@ fn edit_database(index: usize, cx: &mut App, edit: impl FnOnce(&mut crate::db::C
 /// way back to the application — the level is a posture of reading, not a
 /// preference, and it lives in `ClaudhubApp` rather than in the settings file.
 struct LogView {
-    records: std::rc::Rc<Vec<crate::logging::Entry>>,
+    records: std::rc::Rc<Vec<LogRow>>,
     level: log::LevelFilter,
     app: Entity<ClaudhubApp>,
+}
+
+/// One record, as the page paints it.
+///
+/// Built when the ring moves and not when a frame is drawn: the level is what
+/// the filter and the colour read, and everything else is already a string.
+/// `line` is the clipboard's form — the same shape `env_logger` prints — kept
+/// beside the rest so copying joins what is there instead of formatting two
+/// thousand records again.
+pub(super) struct LogRow {
+    level: log::Level,
+    at: SharedString,
+    level_label: SharedString,
+    target: SharedString,
+    message: SharedString,
+    line: SharedString,
+}
+
+impl LogRow {
+    fn of(entry: &crate::logging::Entry) -> Self {
+        Self {
+            level: entry.level,
+            at: SharedString::from(entry.at.format("%H:%M:%S%.3f").to_string()),
+            level_label: SharedString::from(entry.level.to_string()),
+            target: SharedString::from(entry.target.clone()),
+            message: SharedString::from(entry.message.clone()),
+            line: SharedString::from(log_line(entry)),
+        }
+    }
 }
 
 /// How many rows are painted.
@@ -1977,7 +2022,7 @@ fn logs_page(view: LogView) -> SettingPage {
                 // Filtered before being cut: the last two hundred **warnings** are
                 // not the warnings among the last two hundred records, and the
                 // second reading is the one that makes a page look empty.
-                let shown: Vec<&crate::logging::Entry> = records
+                let shown: Vec<&LogRow> = records
                     .iter()
                     .filter(|entry| entry.level <= *level)
                     .collect();
@@ -1996,18 +2041,13 @@ fn logs_page(view: LogView) -> SettingPage {
                             .items_start()
                             .text_xs()
                             .font_family(mono.clone())
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_color(muted)
-                                    .child(entry.at.format("%H:%M:%S%.3f").to_string()),
-                            )
+                            .child(div().flex_none().text_color(muted).child(entry.at.clone()))
                             .child(
                                 div()
                                     .flex_none()
                                     .w(px(44.))
                                     .text_color(level_color(entry.level, cx))
-                                    .child(entry.level.to_string()),
+                                    .child(entry.level_label.clone()),
                             )
                             .child(
                                 div()
@@ -2077,17 +2117,22 @@ fn logs_page(view: LogView) -> SettingPage {
                                                 // Everything the filter kept, not
                                                 // the two hundred painted: what goes
                                                 // into a report is the log, not the
-                                                // end of it.
-                                                let text = shown
-                                                    .iter()
-                                                    .map(|entry| log_line(entry))
-                                                    .collect::<Vec<_>>()
-                                                    .join("\n");
+                                                // end of it. Joined **in the click**
+                                                // and not before it: a page that
+                                                // repaints on every frame was
+                                                // assembling two thousand lines for
+                                                // a button nobody had pressed.
+                                                let records = records.clone();
+                                                let level = *level;
                                                 move |_, _window, cx| {
+                                                    let text = records
+                                                        .iter()
+                                                        .filter(|entry| entry.level <= level)
+                                                        .map(|entry| entry.line.as_ref())
+                                                        .collect::<Vec<_>>()
+                                                        .join("\n");
                                                     cx.write_to_clipboard(
-                                                        gpui::ClipboardItem::new_string(
-                                                            text.clone(),
-                                                        ),
+                                                        gpui::ClipboardItem::new_string(text),
                                                     );
                                                 }
                                             }),
@@ -2311,6 +2356,36 @@ fn plugin_install_row(count: usize, window: &mut Window, cx: &mut App) -> impl I
         )
 }
 
+/// The revision of each plugin's directory, read once.
+///
+/// `install::revision` is a `git log -1`, and this row is painted on every
+/// frame the plugins page is up: one process per plugin per frame. Nothing
+/// invalidates it but a plugin moving — an install, an update, a removal, or a
+/// file changing under a plugin's folder — and `forget_plugin_revisions` is
+/// what those call.
+fn plugin_revision(manifest: &crate::plugin::manifest::Manifest) -> Option<SharedString> {
+    REVISIONS.with(|revisions| {
+        revisions
+            .borrow_mut()
+            .entry(manifest.id.clone())
+            .or_insert_with(|| {
+                crate::plugin::install::revision(&manifest.dir).map(SharedString::from)
+            })
+            .clone()
+    })
+}
+
+thread_local! {
+    static REVISIONS: std::cell::RefCell<
+        std::collections::HashMap<String, Option<SharedString>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// A plugin has moved: read its revision again.
+pub(super) fn forget_plugin_revisions() {
+    REVISIONS.with(|revisions| revisions.borrow_mut().clear());
+}
+
 fn plugin_row(
     count: usize,
     manifest: &'static crate::plugin::manifest::Manifest,
@@ -2391,7 +2466,7 @@ fn plugin_row(
     let fields = state.read(cx);
     let values = fields.values.clone();
     let secrets = fields.secrets.clone();
-    let revision = crate::plugin::install::revision(&manifest.dir);
+    let revision = plugin_revision(manifest);
     let muted = cx.theme().muted_foreground;
     let title = SharedString::from(manifest.title().to_string());
     let dir = manifest.dir.clone();
