@@ -10,7 +10,7 @@
 //! without those two, a commit typed at the keyboard would leave the panel
 //! showing files that are no longer modified.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::OnceLock;
@@ -65,11 +65,15 @@ impl Watcher {
         std::thread::Builder::new()
             .name("claudhub-watch-orders".into())
             .spawn(move || {
-                let mut watched: HashSet<PathBuf> = HashSet::new();
+                // What each order really watches, and not merely that it was
+                // watched: asking `watchable_directories` again to unwatch
+                // meant a second `git ls-files` for a list that may have moved
+                // in between — a folder created since was then left watched.
+                let mut watched: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
                 while let Ok(order) = order_rx.recv() {
                     match order {
                         Order::Watch(path) => {
-                            if !watched.insert(path.clone()) {
+                            if watched.contains_key(&path) {
                                 continue;
                             }
                             if on_windows_filesystem(&path) {
@@ -80,15 +84,20 @@ impl Watcher {
                                     path.display()
                                 );
                             }
-                            for (dir, mode) in watchable_directories(&path) {
-                                if let Err(e) = debouncer.watch(&dir, mode) {
-                                    log::warn!("cannot watch {}: {e}", dir.display());
-                                }
-                            }
+                            let dirs: Vec<PathBuf> = watchable_directories(&path)
+                                .into_iter()
+                                .map(|(dir, mode)| {
+                                    if let Err(e) = debouncer.watch(&dir, mode) {
+                                        log::warn!("cannot watch {}: {e}", dir.display());
+                                    }
+                                    dir
+                                })
+                                .collect();
+                            watched.insert(path, dirs);
                         }
                         Order::Unwatch(path) => {
-                            if watched.remove(&path) {
-                                for (dir, _) in watchable_directories(&path) {
+                            if let Some(dirs) = watched.remove(&path) {
+                                for dir in dirs {
                                     let _ = debouncer.unwatch(&dir);
                                 }
                             }
@@ -100,18 +109,18 @@ impl Watcher {
                             // up, otherwise the order sent again after creating
                             // it would be taken for a duplicate and set up
                             // nothing.
-                            if watched.contains(&path) || !path.is_dir() {
+                            if watched.contains_key(&path) || !path.is_dir() {
                                 continue;
                             }
                             match debouncer.watch(&path, RecursiveMode::NonRecursive) {
                                 Ok(()) => {
-                                    watched.insert(path);
+                                    watched.insert(path.clone(), vec![path]);
                                 }
                                 Err(e) => log::warn!("cannot watch {}: {e}", path.display()),
                             }
                         }
                         Order::UnwatchDir(path) => {
-                            if watched.remove(&path) {
+                            if watched.remove(&path).is_some() {
                                 let _ = debouncer.unwatch(&path);
                             }
                         }
@@ -126,10 +135,14 @@ impl Watcher {
             .spawn(move || {
                 while let Ok(result) = raw_rx.recv() {
                     let Ok(events) = result else { continue };
+                    // The order is kept — a batch is read as it happened — but
+                    // membership goes through a set: a save touching a
+                    // thousand files made a thousand linear scans.
                     let mut seen: Vec<PathBuf> = Vec::new();
+                    let mut known: HashSet<PathBuf> = HashSet::new();
                     for event in &events {
                         for path in interesting_paths(event) {
-                            if !seen.contains(&path) {
+                            if known.insert(path.clone()) {
                                 seen.push(path);
                             }
                         }
@@ -359,26 +372,17 @@ fn tracked_directories(worktree: &Path) -> Option<HashSet<PathBuf>> {
     Some(dirs)
 }
 
-/// A checkout's git directory.
+/// A checkout's git directory, read from disk.
 ///
 /// In the main repository it is `.git/`. In a linked worktree, `.git` is a
 /// *file* pointing at `<main>/.git/worktrees/<name>`: that is where this
 /// checkout's `HEAD` and `index` live, and watching them in the wrong place
 /// amounts to watching nothing at all.
+///
+/// The reading lives in the git layer, which needs the same answer on every
+/// status and used to fork a `rev-parse` for it.
 fn git_dir(worktree: &Path) -> Option<PathBuf> {
-    let entry = worktree.join(".git");
-    if entry.is_dir() {
-        return Some(entry);
-    }
-    let text = std::fs::read_to_string(&entry).ok()?;
-    let target = text.strip_prefix("gitdir:")?.trim();
-    let path = PathBuf::from(target);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        worktree.join(path)
-    };
-    path.is_dir().then_some(path)
+    crate::git::repo::git_dir_on_disk(worktree)
 }
 
 #[cfg(test)]

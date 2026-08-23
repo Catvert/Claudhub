@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use super::git_tolerant;
+use super::Sink;
 
 /// Past this, a line is an asset and not code. Counted in **bytes**, cut on a
 /// character boundary.
@@ -169,16 +169,21 @@ pub fn args(query: &Query) -> Vec<String> {
 
 /// Runs the search in a checkout.
 ///
-/// `git_tolerant` with a ceiling of 1: `git grep` exits with **1 when it finds
+/// **The output is read as it comes and the process is killed at the cap.** A
+/// bare word on a large repository makes `git grep` write tens of megabytes we
+/// would keep two thousand lines of: reading it whole first meant waiting for a
+/// walk whose answer had already been decided.
+///
+/// A ceiling of 1 on the exit code: `git grep` exits with **1 when it finds
 /// nothing**, which is an answer and not a failure — the same reason
 /// `diff --no-index` needed it. Past that it is a real error, a bad regular
 /// expression being the common one, and its message is what the panel shows.
+/// A process we interrupted ourselves has no code worth reading.
 pub fn run(dir: &Path, query: &Query) -> Result<Results> {
     if query.is_empty() {
         return Ok(Results::default());
     }
-    let out = git_tolerant(dir, &args(query), 1)?;
-    Ok(parse(&out))
+    super::run_streaming(dir, &args(query), 1, Collector::default())
 }
 
 /// Turns `path NUL line NUL text` records into files and their hits.
@@ -198,49 +203,72 @@ pub fn run(dir: &Path, query: &Query) -> Result<Results> {
 /// A record that does not parse is **skipped**, not fatal: the alternative is
 /// losing a whole search because one line came back malformed.
 pub fn parse(out: &str) -> Results {
-    let mut files: Vec<FileHits> = Vec::new();
-    let mut total = 0usize;
-    let mut truncated = false;
+    let mut collector = Collector::default();
     for record in out.lines() {
+        if !collector.line(record) {
+            break;
+        }
+    }
+    collector.finish(false)
+}
+
+/// The records as they arrive, since `run` reads them while git is still
+/// walking. Holds exactly what `parse` used to hold between two lines.
+#[derive(Default)]
+struct Collector {
+    files: Vec<FileHits>,
+    total: usize,
+    truncated: bool,
+}
+
+impl super::Sink for Collector {
+    type Output = Results;
+
+    fn line(&mut self, record: &str) -> bool {
         if record.is_empty() {
-            continue;
+            return true;
         }
         let mut fields = record.splitn(3, '\0');
         let (Some(path), Some(number), Some(text)) = (fields.next(), fields.next(), fields.next())
         else {
-            continue;
+            return true;
         };
         let Ok(line) = number.parse::<u32>() else {
-            continue;
+            return true;
         };
-        if total >= MAX_HITS {
-            truncated = true;
-            break;
+        if self.total >= MAX_HITS {
+            self.truncated = true;
+            // Enough: whoever is still writing can stop.
+            return false;
         }
-        total += 1;
+        self.total += 1;
         let hit = Hit {
             line,
             text: clip(text),
         };
-        match files.last_mut() {
+        match self.files.last_mut() {
             Some(last) if last.path.as_os_str() == path => last.hits.push(hit),
-            _ => files.push(FileHits {
+            _ => self.files.push(FileHits {
                 path: PathBuf::from(path),
                 hits: vec![hit],
                 capped: false,
             }),
         }
+        true
     }
-    for file in &mut files {
-        if file.hits.len() >= MAX_PER_FILE {
-            file.capped = true;
-            truncated = true;
+
+    fn finish(mut self, _interrupted: bool) -> Results {
+        for file in &mut self.files {
+            if file.hits.len() >= MAX_PER_FILE {
+                file.capped = true;
+                self.truncated = true;
+            }
         }
-    }
-    Results {
-        files,
-        total,
-        truncated,
+        Results {
+            files: self.files,
+            total: self.total,
+            truncated: self.truncated,
+        }
     }
 }
 

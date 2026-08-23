@@ -430,9 +430,33 @@ impl Pending {
 /// `<main>/.git/worktrees/<name>`: that is where its `HEAD`, its index and the
 /// in-progress operation markers live. Looking for them in `<dir>/.git` amounts
 /// to never finding anything.
+///
+/// **Read from disk first, `rev-parse` only as a fallback.** `status` asks for
+/// it on every refresh — and one refresh arrives per file write — where the
+/// answer is a `stat` on `<dir>/.git`. The subprocess stays for the case the
+/// disk cannot answer: a subdirectory of the checkout, a `.git` file written in
+/// a form we do not read.
 pub fn git_dir(dir: &Path) -> Option<PathBuf> {
+    if let Some(path) = git_dir_on_disk(dir) {
+        return Some(path);
+    }
     let path = git_opt(dir, &["rev-parse", "--git-dir"])?;
     Some(absolute(dir, Path::new(&path)))
+}
+
+/// The same answer without a subprocess, when `dir` is a checkout's root.
+///
+/// `None` means "ask git": either there is no `.git` here, or it points
+/// somewhere that is not a directory.
+pub(crate) fn git_dir_on_disk(dir: &Path) -> Option<PathBuf> {
+    let entry = dir.join(".git");
+    if entry.is_dir() {
+        return Some(entry);
+    }
+    let text = std::fs::read_to_string(&entry).ok()?;
+    let target = text.strip_prefix("gitdir:")?.trim();
+    let path = absolute(dir, Path::new(target));
+    path.is_dir().then_some(path)
 }
 
 /// The operation in progress, from the markers git leaves in its directory.

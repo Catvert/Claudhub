@@ -97,10 +97,16 @@ fn http(
     body: Option<&str>,
     secret: Option<&Secret>,
 ) -> Result<String, String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(HTTP_TIMEOUT))
-        .build()
-        .into();
+    // One agent for the whole process: it holds the connection pool and the
+    // TLS setup, and building one per call threw away the session a plugin
+    // polling the same host every ten seconds would have reused.
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    let agent = AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .timeout_global(Some(HTTP_TIMEOUT))
+            .build()
+            .into()
+    });
     let headers = resolve(headers, secret)?;
 
     // Four arms and not one loop over a generic builder: ureq 3 types a request

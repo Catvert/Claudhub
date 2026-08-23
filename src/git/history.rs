@@ -181,7 +181,9 @@ pub struct GraphRow {
 /// wrong commit.
 pub fn layout(commits: &[Commit]) -> Vec<GraphRow> {
     // Each slot is the commit that lane is waiting for, or `None` if free.
-    let mut lanes: Vec<Option<String>> = Vec::new();
+    // Borrowed from the commits: a thousand-commit history copied every
+    // identifier once per lane it travelled through.
+    let mut lanes: Vec<Option<&str>> = Vec::new();
     let mut rows = Vec::with_capacity(commits.len());
 
     for commit in commits {
@@ -190,7 +192,7 @@ pub fn layout(commits: &[Commit]) -> Vec<GraphRow> {
         let waiting: Vec<usize> = lanes
             .iter()
             .enumerate()
-            .filter(|(_, lane)| lane.as_deref() == Some(commit.id.as_str()))
+            .filter(|(_, lane)| **lane == Some(commit.id.as_str()))
             .map(|(ix, _)| ix)
             .collect();
 
@@ -218,7 +220,7 @@ pub fn layout(commits: &[Commit]) -> Vec<GraphRow> {
 
         // The first parent carries on in the commit's lane; with no parent, the
         // lane is freed (root commit).
-        lanes[column] = commit.parents.first().cloned();
+        lanes[column] = commit.parents.first().map(String::as_str);
 
         let mut outgoing = Vec::new();
         for parent in commit.parents.iter().skip(1) {
@@ -226,10 +228,10 @@ pub fn layout(commits: &[Commit]) -> Vec<GraphRow> {
             // the line joins the one that exists.
             let target = lanes
                 .iter()
-                .position(|lane| lane.as_deref() == Some(parent.as_str()))
+                .position(|lane| *lane == Some(parent.as_str()))
                 .unwrap_or_else(|| {
                     let ix = free_lane(&mut lanes);
-                    lanes[ix] = Some(parent.clone());
+                    lanes[ix] = Some(parent.as_str());
                     ix
                 });
             outgoing.push(target);
@@ -248,7 +250,7 @@ pub fn layout(commits: &[Commit]) -> Vec<GraphRow> {
 
 /// The first free lane, or a new one. Reusing the gaps rather than stacking
 /// keeps a graph from widening indefinitely along a slightly lively history.
-fn free_lane(lanes: &mut Vec<Option<String>>) -> usize {
+fn free_lane(lanes: &mut Vec<Option<&str>>) -> usize {
     match lanes.iter().position(Option::is_none) {
         Some(ix) => ix,
         None => {

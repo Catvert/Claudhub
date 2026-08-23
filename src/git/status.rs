@@ -7,6 +7,7 @@
 //! with null bytes — needed as soon as a file contains a space, a quote or a
 //! newline.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -171,9 +172,9 @@ pub fn status(dir: &Path) -> Result<Status> {
         ],
     )?;
     let mut status = parse(&out);
-    // One more `rev-parse` per refresh, and only one: the markers are then read
-    // from disk. That is the price of not leaving the user in a half-finished
-    // state nothing names.
+    // The git directory and the markers are both read from disk — no second
+    // process per refresh, and one refresh arrives per file write. That is the
+    // price of not leaving the user in a half-finished state nothing names.
     status.pending = super::repo::git_dir(dir)
         .as_deref()
         .and_then(super::repo::pending_in);
@@ -416,12 +417,56 @@ fn untracked_lines(dir: &std::path::Path, status: &Status) -> usize {
         .files
         .iter()
         .filter(|file| file.is_untracked())
-        .map(|file| dir.join(&file.path))
-        .filter(|path| std::fs::metadata(path).is_ok_and(|meta| meta.len() <= MAX_UNTRACKED_READ))
-        .filter_map(|path| std::fs::read(path).ok())
-        .filter(|bytes| !bytes.contains(&0))
-        .map(|bytes| bytes.iter().filter(|b| **b == b'\n').count())
+        .map(|file| lines_of(&dir.join(&file.path)))
         .sum()
+}
+
+/// What says a file has not moved since it was last counted: its size and the
+/// date it was modified — the same pair git itself trusts to skip a file.
+type Stamp = (u64, Option<std::time::SystemTime>);
+
+/// The line counts of the new files, from one summary to the next.
+///
+/// The summary runs over every open worktree every ten seconds, and re-reading
+/// a megabyte of new files that have not changed is all it costs. An entry is
+/// dropped when its file's stamp moves; the whole table is dropped when it
+/// grows past what a session plausibly touches, which is what keeps a deleted
+/// file from staying here for ever.
+static COUNTS: std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, (Stamp, usize)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Past this many remembered files, the table is cleared rather than pruned:
+/// forgetting costs one re-read, and pruning would need the list of what still
+/// exists.
+const MAX_REMEMBERED: usize = 10_000;
+
+fn lines_of(path: &std::path::Path) -> usize {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return 0;
+    };
+    if meta.len() > MAX_UNTRACKED_READ {
+        return 0;
+    }
+    let stamp: Stamp = (meta.len(), meta.modified().ok());
+    if let Ok(counts) = COUNTS.lock() {
+        if let Some((seen, lines)) = counts.get(path) {
+            if *seen == stamp {
+                return *lines;
+            }
+        }
+    }
+    let lines = match std::fs::read(path) {
+        // A binary file has no lines.
+        Ok(bytes) if !bytes.contains(&0) => bytes.iter().filter(|b| **b == b'\n').count(),
+        _ => 0,
+    };
+    if let Ok(mut counts) = COUNTS.lock() {
+        if counts.len() >= MAX_REMEMBERED {
+            counts.clear();
+        }
+        counts.insert(path.to_path_buf(), (stamp, lines));
+    }
+    lines
 }
 
 pub fn summary(dir: &std::path::Path) -> Result<Summary> {
@@ -437,4 +482,35 @@ pub fn summary(dir: &std::path::Path) -> Result<Summary> {
         added: changed.iter().map(|f| f.added).sum::<usize>() + untracked_lines(dir, &status),
         removed: changed.iter().map(|f| f.removed).sum(),
     })
+}
+
+#[cfg(test)]
+mod counting_tests {
+    use super::*;
+
+    /// A remembered count must not outlive the file it counted: a new file is
+    /// written, counted, then written again — and the second answer is the new
+    /// one.
+    #[test]
+    fn a_remembered_count_is_dropped_when_the_file_moves() {
+        let dir = std::env::temp_dir().join(format!("claudhub-lines-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("new.rs");
+
+        std::fs::write(&file, "one\ntwo\n").unwrap();
+        assert_eq!(lines_of(&file), 2);
+        // The same answer, this time from the table.
+        assert_eq!(lines_of(&file), 2);
+
+        std::fs::write(&file, "one\ntwo\nthree\n").unwrap();
+        assert_eq!(lines_of(&file), 3);
+
+        // A binary file has no lines, and neither has one that is gone.
+        std::fs::write(&file, [b'a', 0, b'b']).unwrap();
+        assert_eq!(lines_of(&file), 0);
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(lines_of(&file), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
