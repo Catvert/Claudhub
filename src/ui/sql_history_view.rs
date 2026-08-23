@@ -170,25 +170,19 @@ impl ClaudhubApp {
     ) -> impl IntoElement {
         let query = self.query(Pane::SqlHistory, cx);
         let find = self.render_find(Pane::SqlHistory, cx);
-        let bar = self.render_sql_history_bar(cx);
-
-        let key = self.sql_history_key();
-        let filter = Filter {
-            reach: self.sql_history_reach,
-            worktree: self.active.as_deref(),
-            connection: key.as_deref(),
-            query: &query,
+        let look = Look::of(cx);
+        self.refresh_sql_history_list(&query, look);
+        let Some(list) = self.sql_history_list.as_ref() else {
+            return div().into_any_element();
         };
-        // Cloned rather than borrowed: the row closure runs for every visible
-        // row on every frame, with the application already borrowed.
-        let entries: Rc<Vec<Entry>> = Rc::new(
-            self.sql_history
-                .matching(&filter)
-                .into_iter()
-                .cloned()
-                .collect(),
+        let (shown, rows, sizes, count) = (
+            list.shown.clone(),
+            list.rows.clone(),
+            list.sizes.clone(),
+            list.count,
         );
-        if entries.is_empty() {
+        let bar = self.render_sql_history_bar(count, cx);
+        if shown.is_empty() {
             return v_flex()
                 .size_full()
                 .child(bar)
@@ -197,41 +191,23 @@ impl ClaudhubApp {
                 .into_any_element();
         }
 
-        let borrowed: Vec<&Entry> = entries.iter().collect();
-        let rows = Rc::new(crate::ui::sql_history::rows(
-            &borrowed,
-            chrono::Local::now().date_naive(),
-        ));
-        let look = Look::of(cx);
-        let sizes = Rc::new(
-            rows.iter()
-                .map(|row| match row {
-                    Row::Day(_) => gpui::size(px(0.), look.day),
-                    Row::Entry(_) => gpui::size(px(0.), look.row),
-                })
-                .collect::<Vec<_>>(),
-        );
         let entity = cx.entity();
         let handle = self.sql_history_scroll.clone();
         // Read **here** and not in the row closure: that closure runs while the
         // application is being rendered, that is, in the middle of its own
         // update — reading the root entity there is the panic gpui refuses
         // (`cannot read … while it is already being updated`).
-        let shown = self.query.sent.clone();
-        let build = {
-            let rows = rows.clone();
-            let entries = entries.clone();
-            move |index: usize, cx: &mut App| match rows.get(index) {
-                Some(Row::Day(day)) => render_day(day, &look),
-                Some(Row::Entry(entry)) => match entries.get(*entry) {
-                    Some(entry) => {
-                        let current = shown.as_deref() == Some(entry.sql.as_str());
-                        render_entry(index, entry, current, &look, &entity, cx)
-                    }
-                    None => div().into_any_element(),
-                },
+        let sent = self.query.sent.clone();
+        let build = move |index: usize, cx: &mut App| match rows.get(index) {
+            Some(Row::Day(day)) => render_day(day, &look),
+            Some(Row::Entry(at)) => match shown.get(*at) {
+                Some(entry) => {
+                    let current = sent.as_deref() == Some(entry.entry.sql.as_str());
+                    render_entry(index, &shown, *at, current, &look, &entity, cx)
+                }
                 None => div().into_any_element(),
-            }
+            },
+            None => div().into_any_element(),
         };
 
         v_flex()
@@ -262,13 +238,68 @@ impl ClaudhubApp {
             .into_any_element()
     }
 
-    fn render_sql_history_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let reach = self.sql_history_reach;
-        let entity = cx.entity();
-        let count = match reach {
-            Reach::Worktree => self.sql_history.count_for(self.active.as_deref()),
+    /// Prepares what the list paints, and keeps it until something moves.
+    ///
+    /// All of it used to be done afresh on every frame: the filter walked the
+    /// whole journal, its entries were cloned one by one, their days laid out
+    /// and their heights measured — for a list that only changes on a gesture.
+    /// The key is what the result depends on, `History::version` included: the
+    /// journal is the one input that changes without the panel asking.
+    fn refresh_sql_history_list(&mut self, query: &str, look: Look) {
+        let key = Key {
+            reach: self.sql_history_reach,
+            worktree: self.active.clone(),
+            connection: self.sql_history_key(),
+            query: query.to_string(),
+            version: self.sql_history.version,
+            // The theme's row height, which is what the sizes are made of: a
+            // list kept across a change of font size would reserve the old one.
+            row: look.row,
+            // A history read past midnight has to move its headings.
+            today: chrono::Local::now().date_naive(),
+        };
+        if self
+            .sql_history_list
+            .as_ref()
+            .is_some_and(|list| list.key == key)
+        {
+            return;
+        }
+        let filter = Filter {
+            reach: key.reach,
+            worktree: key.worktree.as_deref(),
+            connection: key.connection.as_deref(),
+            query,
+        };
+        let matching = self.sql_history.matching(&filter);
+        let rows = Rc::new(crate::ui::sql_history::rows(&matching, key.today));
+        let shown: Rc<Vec<Shown>> = Rc::new(matching.into_iter().map(Shown::of).collect());
+        let sizes = Rc::new(
+            rows.iter()
+                .map(|row| match row {
+                    Row::Day(_) => gpui::size(px(0.), look.day),
+                    Row::Entry(_) => gpui::size(px(0.), look.row),
+                })
+                .collect::<Vec<_>>(),
+        );
+        // What the bar counts is not what the list shows: neither the search nor
+        // the connection enters into it.
+        let count = match key.reach {
+            Reach::Worktree => self.sql_history.count_for(key.worktree.as_deref()),
             _ => self.sql_history.count_for(None),
         };
+        self.sql_history_list = Some(HistoryList {
+            key,
+            shown,
+            rows,
+            sizes,
+            count,
+        });
+    }
+
+    fn render_sql_history_bar(&mut self, count: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let reach = self.sql_history_reach;
+        let entity = cx.entity();
         h_flex()
             .h(crate::ui::theme::bar_height(cx))
             .w_full()
@@ -339,6 +370,64 @@ fn reach_label(reach: Reach) -> SharedString {
     }
 }
 
+/// The list the panel shows, prepared once and kept until something moves.
+///
+/// The three vectors are handed to the virtual list, which reads them for every
+/// visible row of every frame; rebuilding them there is what this exists to
+/// stop. See `ClaudhubApp::refresh_sql_history_list` for what invalidates it.
+pub(super) struct HistoryList {
+    key: Key,
+    shown: Rc<Vec<Shown>>,
+    rows: Rc<Vec<Row>>,
+    sizes: Rc<Vec<gpui::Size<gpui::Pixels>>>,
+    /// What the bar counts, which is not the length of the list: the search is
+    /// not part of it.
+    count: usize,
+}
+
+/// Everything the prepared list depends on. It differs, it is rebuilt.
+#[derive(PartialEq)]
+struct Key {
+    reach: Reach,
+    worktree: Option<std::path::PathBuf>,
+    connection: Option<String>,
+    query: String,
+    /// `History::version`: the journal is the one input that changes without
+    /// the panel asking for it.
+    version: u64,
+    row: gpui::Pixels,
+    today: chrono::NaiveDate,
+}
+
+/// One query, as a row paints it: every string it needs, made once.
+///
+/// The entry comes along whole because the gestures on a row — replay, copy,
+/// forget — are about the query and not about its rendering.
+struct Shown {
+    entry: Entry,
+    headline: SharedString,
+    summary: SharedString,
+    time: SharedString,
+    sql: SharedString,
+    multiline: bool,
+    /// `×3`, when it has been run more than once.
+    runs: Option<SharedString>,
+}
+
+impl Shown {
+    fn of(entry: &Entry) -> Self {
+        Self {
+            headline: SharedString::from(entry.headline().to_string()),
+            summary: SharedString::from(summary(entry)),
+            time: SharedString::from(crate::ui::sql_history::time_of(entry.at)),
+            sql: SharedString::from(entry.sql.clone()),
+            multiline: entry.is_multiline(),
+            runs: (entry.runs > 1).then(|| SharedString::from(format!("×{}", entry.runs))),
+            entry: entry.clone(),
+        }
+    }
+}
+
 /// What the theme gives a row, read once per frame and not per row.
 #[derive(Clone, Copy)]
 struct Look {
@@ -393,9 +482,14 @@ fn render_day(day: &Day, look: &Look) -> gpui::AnyElement {
 /// what it answered — a row count, a duration, an error. A history that only
 /// said "SELECT * FROM users" three times over would not tell which of the
 /// three is the one worth recalling.
+///
+/// It is handed the whole prepared list and an index into it rather than an
+/// entry: the two gestures below need one that outlives the frame, and cloning
+/// it twice per row per frame is what the preparation exists to avoid.
 fn render_entry(
     index: usize,
-    entry: &Entry,
+    shown: &Rc<Vec<Shown>>,
+    at: usize,
     // The query the console is showing, decided by the caller: reading the
     // application from here would read it while it is being updated.
     current: bool,
@@ -403,9 +497,12 @@ fn render_entry(
     entity: &Entity<ClaudhubApp>,
     cx: &App,
 ) -> gpui::AnyElement {
+    let Some(row) = shown.get(at) else {
+        return div().into_any_element();
+    };
     let mono = cx.theme().mono_font_family.clone();
     let (open, menu) = (entity.clone(), entity.clone());
-    let (for_open, for_menu) = (entry.clone(), entry.clone());
+    let (for_open, for_menu) = (shown.clone(), shown.clone());
 
     v_flex()
         .id(("sql-history-row", index))
@@ -420,7 +517,9 @@ fn render_entry(
         .hover(|s| s.bg(look.accent.opacity(0.4)))
         .on_click(move |event, window, cx| {
             let run = event.click_count() > 1;
-            let entry = for_open.clone();
+            let Some(entry) = for_open.get(at).map(|row| row.entry.clone()) else {
+                return;
+            };
             open.update(cx, |this, cx| {
                 this.replay_sql_query(&entry, run, window, cx)
             });
@@ -430,7 +529,7 @@ fn render_entry(
                 .w_full()
                 .gap_1()
                 .items_center()
-                .when(!entry.ok, |el| {
+                .when(!row.entry.ok, |el| {
                     el.child(icon("triangle-alert").xsmall().text_color(look.danger))
                 })
                 .child(
@@ -440,13 +539,13 @@ fn render_entry(
                         .truncate()
                         .text_xs()
                         .font_family(mono)
-                        .text_color(if entry.ok { look.text } else { look.danger })
-                        .child(SharedString::from(entry.headline().to_string())),
+                        .text_color(if row.entry.ok { look.text } else { look.danger })
+                        .child(row.headline.clone()),
                 )
                 // The query goes on past the line shown: an ellipsis, because a
                 // one-line row and a twenty-line query look the same otherwise,
                 // and it is the tooltip that carries the rest.
-                .when(entry.is_multiline(), |el| {
+                .when(row.multiline, |el| {
                     el.child(
                         div()
                             .flex_none()
@@ -457,13 +556,13 @@ fn render_entry(
                 })
                 // A query run again is one row saying so, never several: the
                 // count is what the deduplication buys.
-                .when(entry.runs > 1, |el| {
+                .when_some(row.runs.clone(), |el, runs| {
                     el.child(
                         div()
                             .flex_none()
                             .text_xs()
                             .text_color(look.muted)
-                            .child(SharedString::from(format!("×{}", entry.runs))),
+                            .child(runs),
                     )
                 }),
         )
@@ -479,17 +578,15 @@ fn render_entry(
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .child(SharedString::from(summary(entry))),
+                        .child(row.summary.clone()),
                 )
-                .child(div().flex_none().child(SharedString::from(
-                    crate::ui::sql_history::time_of(entry.at),
-                ))),
+                .child(div().flex_none().child(row.time.clone())),
         )
         .tooltip({
-            let sql = SharedString::from(entry.sql.clone());
+            let sql = row.sql.clone();
             move |window, cx| gpui_component::tooltip::Tooltip::new(sql.clone()).build(window, cx)
         })
-        .context_menu(move |popup, _window, _cx| row_menu(popup, &menu, &for_menu))
+        .context_menu(move |popup, _window, _cx| row_menu(popup, &menu, &for_menu, at))
         .into_any_element()
 }
 
@@ -516,35 +613,47 @@ fn summary(entry: &Entry) -> String {
     parts.join(" · ")
 }
 
-fn row_menu(popup: PopupMenu, entity: &Entity<ClaudhubApp>, entry: &Entry) -> PopupMenu {
+fn row_menu(
+    popup: PopupMenu,
+    entity: &Entity<ClaudhubApp>,
+    shown: &Rc<Vec<Shown>>,
+    at: usize,
+) -> PopupMenu {
     let popup = popup.item({
-        let (entity, entry) = (entity.clone(), entry.clone());
+        let (entity, shown) = (entity.clone(), shown.clone());
         PopupMenuItem::new(tr!("sql-history-run"))
             .icon(icon("play"))
             .on_click(move |_, window, cx| {
-                let entry = entry.clone();
+                let Some(entry) = shown.get(at).map(|row| row.entry.clone()) else {
+                    return;
+                };
                 entity.update(cx, |this, cx| {
                     this.replay_sql_query(&entry, true, window, cx)
                 });
             })
     });
     let popup = popup.item({
-        let (entity, entry) = (entity.clone(), entry.clone());
+        let (entity, shown) = (entity.clone(), shown.clone());
         PopupMenuItem::new(tr!("sql-history-copy"))
             .icon(icon("copy"))
             .on_click(move |_, _window, cx| {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(entry.sql.clone()));
+                let Some(sql) = shown.get(at).map(|row| row.entry.sql.clone()) else {
+                    return;
+                };
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(sql));
                 entity.update(cx, |this, cx| {
                     this.announce(tr!("copied"), cx);
                 });
             })
     });
     popup.item({
-        let (entity, entry) = (entity.clone(), entry.clone());
+        let (entity, shown) = (entity.clone(), shown.clone());
         PopupMenuItem::new(tr!("sql-history-forget"))
             .icon(icon("trash-2"))
             .on_click(move |_, _window, cx| {
-                let entry = entry.clone();
+                let Some(entry) = shown.get(at).map(|row| row.entry.clone()) else {
+                    return;
+                };
                 entity.update(cx, |this, cx| this.forget_sql_query(&entry, cx));
             })
     })
