@@ -38,6 +38,14 @@ casserait les machines NVIDIA ; et rien n'exporte `LD_LIBRARY_PATH`, si bien que
 les sous-processus (`git`, `claude`, les shells) restent des programmes de
 l'hôte.
 
+**Le paquet nix** (`flake.nix`, `nix/package.nix`) est l'autre voie : `nix
+build`, ou l'entrée `claudhub` d'une configuration NixOS. Deux choses valent
+d'être sues. Les bibliothèques de rendu sont posées en **RPATH** et non en
+`LD_LIBRARY_PATH`, pour la raison qui précède — un `LD_LIBRARY_PATH` suivrait
+les sous-processus. Et `devShells.default` **importe `shell.nix`** au lieu de
+recopier ses dépendances : le justfile appelle `nix-shell`, et deux listes
+divergeraient au premier ajout.
+
 **La CI ne construit que des versions** (`.github/workflows/release.yml`, tag
 `v*` ou manuel) : chaque jambe recompile l'arbre gpui entier, et `just ci` le dit
 déjà ici. Elle relance les mêmes portes avant d'empaqueter — la machine qui
