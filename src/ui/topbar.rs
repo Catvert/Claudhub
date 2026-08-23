@@ -294,7 +294,6 @@ impl ClaudhubApp {
                             .clone()
                             .and_then(|worktree| self.render_wt_state(&worktree, cx)),
                     )
-                    .children(active.and_then(|worktree| self.render_wt_links(&worktree, cx)))
                     .children(self.render_worktree_actions(cx))
                     // The middle is empty on purpose, and the space is not
                     // lost: it is the window's drag region. Neither `fetch`, nor
@@ -304,6 +303,15 @@ impl ClaudhubApp {
                     // are dock tabs. And the terminals have gone down to the
                     // status bar, at the corner of the window they open on.
                     .child(div().flex_1())
+                    // Opening the worktree in the browser, then its actions,
+                    // then the run button: the right corner is the "act on
+                    // what I am looking at" corner, and the address a project
+                    // exposes is the gesture one makes most once it runs. The
+                    // actions live here **as well as** beside the picker: the
+                    // corner is where the hand already is when one has just
+                    // launched something.
+                    .children(active.and_then(|worktree| self.render_wt_links(&worktree, cx)))
+                    .children(self.render_worktree_actions(cx))
                     // The run button, at the far right and just before the two
                     // screens one does not work in. A `justfile` is the
                     // project's commands, and running one is a gesture of its

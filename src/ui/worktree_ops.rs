@@ -2272,7 +2272,7 @@ impl ClaudhubApp {
         .ghost()
         .xsmall()
         .icon(icon("external-link"))
-        .tooltip(tr!("wt-links-open"));
+        .label(tr!("wt-links-open"));
         let main = self.repo_of(worktree).map(|repo| repo.main.clone());
         let slug = main.as_deref().and_then(|main| {
             self.wt_project(main)
@@ -2306,13 +2306,20 @@ impl ClaudhubApp {
         });
         let prefetch = request.clone();
         Some(
-            button
+            // The prefetch hover lives on a wrapper: the dropdown's trigger
+            // installs an `on_hover` of its own on the button, and a second
+            // one on the same element is a gpui panic.
+            div()
+                .id(SharedString::from(format!(
+                    "wt-open-wrap-{}",
+                    worktree.display()
+                )))
                 .on_hover(move |hovered, _window, cx| {
                     if *hovered {
                         prefetch(cx);
                     }
                 })
-                .dropdown_menu(move |menu, _window, cx| {
+                .child(button.dropdown_menu(move |menu, _window, cx| {
                     request(cx);
                     let links = entity.read(cx).wt_links.get(&worktree).cloned().flatten();
                     let menu = menu
@@ -2324,7 +2331,7 @@ impl ClaudhubApp {
                             menu.link(SharedString::from(link.label), link.url)
                         }),
                     }
-                })
+                }))
                 .into_any_element(),
         )
     }
