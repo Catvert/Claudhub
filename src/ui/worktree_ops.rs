@@ -576,6 +576,10 @@ impl ClaudhubApp {
             from: setup.from.clone(),
         };
         creation.stage = Stage::Questions;
+        // The slug field dies with this page, and the focus with it — see
+        // `wt_questions_arrived`. Taken back at once: the waiting page has no
+        // field, and Escape must already reach the dialog.
+        window.focus_dialog(cx);
         self.after_setup(window, cx);
     }
 
@@ -809,6 +813,12 @@ impl ClaudhubApp {
             .cloned();
         if let Some(field) = first {
             crate::ui::dialogs::focus_field(&field, window, cx);
+        } else {
+            // A page of choices only: the focus died with the previous page's
+            // field, and with it every route to the dialog's bindings — Enter,
+            // Escape, and the actions the footer buttons dispatch from the
+            // focused node. The dialog itself takes it back.
+            window.focus_dialog(cx);
         }
         cx.notify();
     }
@@ -867,6 +877,7 @@ impl ClaudhubApp {
         match creation.target.clone() {
             WtTarget::Create { branch, from } => {
                 creation.stage = Stage::Running(Console::new(wt::Op::New));
+                window.focus_dialog(cx);
                 self.start(
                     None,
                     Action::Worktree,
@@ -882,6 +893,7 @@ impl ClaudhubApp {
             }
             WtTarget::Up { worktree } => {
                 creation.stage = Stage::Running(Console::new(wt::Op::Up));
+                window.focus_dialog(cx);
                 self.flight.set_wt_target(worktree);
                 self.start(
                     None,
