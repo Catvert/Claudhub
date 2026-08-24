@@ -98,17 +98,25 @@ pub fn report(mode: TermMode, event: Report) -> Option<Vec<u8>> {
         }
     }
 
-    let button = event.button.unwrap_or(Button::Left);
     // The original format has no per-button release: it returns the same code
     // for all three, and the program remembers which was down. SGR, for its
     // part, distinguishes them by the final letter.
     let released = event.action == Action::Release;
     let sgr = mode.contains(TermMode::SGR_MOUSE);
-    let mut code = if released && !sgr { 3 } else { button.code() };
+    // Two ways of naming no button in particular, and xterm gives them the same
+    // number: a release the original format cannot attribute, and a **hover**,
+    // which has no button by definition. Reporting a hover as button zero made
+    // every movement of the hand a left-button drag, and a program that asks
+    // for motion — mprocs, through crossterm, which turns on `1003` — was
+    // selecting text from the first move on, on every platform.
+    let mut code = match event.button {
+        Some(button) if !(released && !sgr) => button.code(),
+        _ => NO_BUTTON,
+    };
     if event.action == Action::Move {
         code += 32;
     }
-    code += modifier_bits(&event.modifiers, button);
+    code += modifier_bits(&event.modifiers, event.button);
 
     let column = event.column + 1;
     let line = event.line + 1;
@@ -134,6 +142,10 @@ pub fn report(mode: TermMode, event: Report) -> Option<Vec<u8>> {
     ])
 }
 
+/// The button number xterm uses for "none of them": the release the original
+/// format cannot name, and the hover that has no button.
+const NO_BUTTON: u8 = 3;
+
 /// The original format's offset of thirty-two, which puts every number in a
 /// printable byte. Past the 223rd cell there is no room left, and nothing
 /// honest to report.
@@ -146,8 +158,8 @@ fn offset(value: usize) -> Option<u32> {
 /// **Not on the wheel**: its codes 64 and 65 already carry bit 6, and adding
 /// Ctrl (16) would give a number no program reads as a wheel notch. Also,
 /// Ctrl+wheel belongs to the terminal, which turns it into zoom.
-fn modifier_bits(modifiers: &Modifiers, button: Button) -> u8 {
-    if button.is_wheel() {
+fn modifier_bits(modifiers: &Modifiers, button: Option<Button>) -> u8 {
+    if button.is_some_and(Button::is_wheel) {
         return 0;
     }
     let mut bits = 0;
@@ -245,6 +257,17 @@ mod tests {
         let drag = report(TermMode::MOUSE_DRAG | TermMode::SGR_MOUSE, dragging);
         assert_eq!(drag.as_deref(), Some(&b"\x1b[<32;2;2M"[..]), "bit 32");
         assert!(report(TermMode::MOUSE_MOTION | TermMode::SGR_MOUSE, hovering).is_some());
+    }
+
+    /// A hover is not a drag, and the difference is a single number: `35` is
+    /// motion with no button, `32` is motion with the left one down. Reporting
+    /// the first as the second made mprocs — which asks for `1003` — select
+    /// text the whole time the hand moved.
+    #[test]
+    fn a_hover_names_no_button_at_all() {
+        let hovering = at(None, Action::Move, 1, 1);
+        let report = report(TermMode::MOUSE_MOTION | TermMode::SGR_MOUSE, hovering);
+        assert_eq!(report.as_deref(), Some(&b"\x1b[<35;2;2M"[..]));
     }
 
     /// The original format cannot say "column 300". We give the event up: a
