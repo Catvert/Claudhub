@@ -208,11 +208,14 @@ impl ClaudhubApp {
             self.replaying.clear();
             return;
         };
-        let panel = self
+        let panels = self
             .editors(&open.worktree)
-            .and_then(|tabs| Some(tabs.open.get(tabs.index_of(&open.path)?)?.panel.clone()));
-        if let Some(panel) = panel {
-            crate::ui::panels::FilePanel::activate(&panel, window, cx);
+            .and_then(|tabs| Some(tabs.open.get(tabs.index_of(&open.path)?)?.panels.clone()))
+            .unwrap_or_default();
+        // Every screen's face, and not the editing screen's alone: the tab one
+        // was left on has to be the one showing wherever one comes back.
+        for panel in &panels {
+            crate::ui::panels::FilePanel::activate(panel, window, cx);
         }
         self.replaying.clear();
     }

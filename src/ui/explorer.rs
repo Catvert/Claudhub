@@ -607,10 +607,18 @@ pub struct Editing {
     /// trips for a state nobody asked about in between: the flag is what makes
     /// the debounce read the latest text once rather than every text in turn.
     pub lsp_pending: bool,
-    /// The tab showing this file. It is the dock that draws it, and closing it
-    /// — by the cross, by `Ctrl+W`, by the worktree going away — is what takes
-    /// the file down.
-    pub panel: Entity<crate::ui::panels::FilePanel>,
+    /// The tabs showing this file, one per screen that carries an editor, in
+    /// the order of `Workspace::WITH_EDITOR`. It is the dock that draws them,
+    /// and closing one — by the cross, by `Ctrl+W`, by the worktree going away
+    /// — is what takes the file down on every screen at once.
+    ///
+    /// **One per screen, as a terminal has one**: a panel belongs to a single
+    /// dock area at a time, and a file is read on the editing screen *and* in
+    /// the home screen's centre. All of them render the same `input`, and only
+    /// one dock is on screen at a time, so exactly one of them draws in a given
+    /// frame — which is what `FilePanel::render` relies on to say that the
+    /// panel being drawn is the file being read.
+    pub panels: Vec<Entity<crate::ui::panels::FilePanel>>,
     /// What `HEAD` holds for this file, and what the gutter compares against.
     /// `None` until the answer arrives, and for a file git does not track.
     pub base: Option<String>,
@@ -1266,7 +1274,7 @@ impl ClaudhubApp {
                     .editing()
                     .is_some_and(|editing| editing.path == spot.path)
                 {
-                    self.enter_workspace(crate::ui::workspace::Workspace::Files, window, cx);
+                    self.reveal(crate::ui::workspace::Workspace::Files, window, cx);
                     self.land(&Landing::Offset(spot.offset), window, cx);
                 } else {
                     // No origin: the step is already written in the trail, and
@@ -1435,25 +1443,27 @@ impl ClaudhubApp {
         input: &Entity<EditorState>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> (Option<usize>, Entity<crate::ui::panels::FilePanel>) {
+    ) -> (Option<usize>, Vec<Entity<crate::ui::panels::FilePanel>>) {
         let reopened = self
             .editings
             .get(worktree)
             .and_then(|tabs| tabs.index_of(path));
         let asked = self.asked_for(worktree, path).is_some();
-        let panel = match reopened {
+        let panels = match reopened {
             Some(ix) => {
-                let panel = self.editings[worktree].open[ix].panel.clone();
-                let fresh = input.clone();
-                panel.update(cx, |panel, cx| panel.rebind(fresh, cx));
-                if asked {
-                    crate::ui::panels::FilePanel::activate(&panel, window, cx);
+                let panels = self.editings[worktree].open[ix].panels.clone();
+                for panel in &panels {
+                    let fresh = input.clone();
+                    panel.update(cx, |panel, cx| panel.rebind(fresh, cx));
+                    if asked {
+                        crate::ui::panels::FilePanel::activate(panel, window, cx);
+                    }
                 }
-                panel
+                panels
             }
             None => self.open_file_tab(worktree, path, input.clone(), window, cx),
         };
-        (reopened, panel)
+        (reopened, panels)
     }
 
     /// Files a freshly built tab, and makes it the one being read.
@@ -1515,7 +1525,7 @@ impl ClaudhubApp {
         // one this worktree was left in: there is no gesture then, and the
         // screen that comes back is the place's own, set a step earlier.
         if !restored {
-            self.enter_workspace(crate::ui::workspace::Workspace::Files, window, cx);
+            self.reveal(crate::ui::workspace::Workspace::Files, window, cx);
             self.set_panel_visible(crate::ui::panels::EditorPanel::NAME, true, cx);
         } else {
             // The next remembered tab, one at a time: see `read_next_file`.
@@ -1599,7 +1609,7 @@ impl ClaudhubApp {
         self.close_previous_document(&worktree, &path);
         let host = crate::ui::surface::VimHost::new(&input, cx);
         let asked = self.asked_for(&worktree, &path).is_some();
-        let (reopened, panel) = self.tab_panel(&worktree, &path, &input, window, cx);
+        let (reopened, panels) = self.tab_panel(&worktree, &path, &input, window, cx);
         // The base a reread had is kept as a stand-in while the fresh one is on
         // its way: saving does not move `HEAD`, so it is almost always the same
         // answer, and dropping it would blank the gutter on every save.
@@ -1615,7 +1625,7 @@ impl ClaudhubApp {
             reveal_at: None,
             reveal_tries: 0,
             host,
-            panel,
+            panels,
             base,
             base_asked: false,
             hunks: Rc::default(),
@@ -1957,15 +1967,18 @@ impl ClaudhubApp {
         self.recompute_hunks(&worktree, &path, cx);
     }
 
-    /// Opens a tab for a file, and puts it in the editing screen's dock.
+    /// Opens a file's tabs, and puts one in the dock of each screen that reads
+    /// files.
     ///
     /// The dock's bar **is** the tab bar, as it is for the terminals: that is
     /// what lets a file be dragged into a split, zoomed, or sent beside
     /// another. A bar of our own would have been a second chrome painted under
     /// the one the window already has.
     ///
-    /// One panel and not one per screen, unlike a terminal: a file is only ever
-    /// read on the editing screen.
+    /// One panel **per screen**, as a terminal has one, and for the same
+    /// reason: a panel belongs to a single dock area at a time, and a file is
+    /// read both on the editing screen and in the home screen's centre. There
+    /// are two of them, not eight — see `Workspace::WITH_EDITOR`.
     pub(super) fn open_file_tab(
         &mut self,
         worktree: &Path,
@@ -1973,36 +1986,52 @@ impl ClaudhubApp {
         input: Entity<EditorState>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Entity<crate::ui::panels::FilePanel> {
+    ) -> Vec<Entity<crate::ui::panels::FilePanel>> {
         let app = cx.entity();
         // Handed over rather than read: the panel is built inside an `update`
         // on the application, so it cannot read the entity to find out for
         // itself. The observation set up in its constructor takes over.
         let visible = self.editing_root().as_deref() == Some(worktree)
             && self.panel_visible(crate::ui::panels::EditorPanel::NAME);
-        let panel = cx.new(|cx| {
-            crate::ui::panels::FilePanel::new(
-                &app,
-                worktree.to_path_buf(),
-                path.to_path_buf(),
-                input,
-                visible,
-                cx,
-            )
-        });
+        let panels: Vec<Entity<crate::ui::panels::FilePanel>> =
+            crate::ui::workspace::Workspace::WITH_EDITOR
+                .iter()
+                .map(|_| {
+                    let (app, input) = (app.clone(), input.clone());
+                    cx.new(|cx| {
+                        crate::ui::panels::FilePanel::new(
+                            &app,
+                            worktree.to_path_buf(),
+                            path.to_path_buf(),
+                            input,
+                            visible,
+                            cx,
+                        )
+                    })
+                })
+                .collect();
         // The tab group the new one joins is the one holding the files already
-        // open; failing that, `Anywhere` lands it in the centre — where the
-        // editor panel is, which is precisely the group wanted.
-        let sibling = self
+        // open **on that screen**; failing that, `Anywhere` lands it in the
+        // centre — where the editor panel is, which is precisely the group
+        // wanted. The sibling is read per screen: the same file's two faces sit
+        // in two docks, and the node of one means nothing in the other.
+        let previous = self
             .editings
             .get(worktree)
             .and_then(|tabs| tabs.open.last())
-            .map(|editing| editing.panel.clone());
-        if let Some(dock) = self
-            .docks
-            .get(&crate::ui::workspace::Workspace::Files)
-            .cloned()
+            .map(|editing| editing.panels.clone())
+            .unwrap_or_default();
+        for (rank, workspace) in crate::ui::workspace::Workspace::WITH_EDITOR
+            .into_iter()
+            .enumerate()
         {
+            let Some(panel) = panels.get(rank).cloned() else {
+                continue;
+            };
+            let sibling = previous.get(rank).cloned();
+            let Some(dock) = self.docks.get(&workspace).cloned() else {
+                continue;
+            };
             dock.update(cx, |dock, cx| {
                 crate::ui::panels::dock_panel_at(
                     dock,
@@ -2026,12 +2055,13 @@ impl ClaudhubApp {
                     cx,
                 );
             });
+            // The file one has just opened is the file one reads. Said here as
+            // well as in the insert target: with no sibling there is no move to
+            // carry the flag, and the group would go on showing whatever tab it
+            // had.
+            crate::ui::panels::FilePanel::activate(&panel, window, cx);
         }
-        // The file one has just opened is the file one reads. Said here as well
-        // as in the insert target: with no sibling there is no move to carry
-        // the flag, and the group would go on showing whatever tab it had.
-        crate::ui::panels::FilePanel::activate(&panel, window, cx);
-        panel
+        panels
     }
 
     /// Makes an open file the tab on screen.
@@ -2104,14 +2134,22 @@ impl ClaudhubApp {
         if empty {
             self.editings.remove(&worktree);
         }
-        if let Some(dock) = self
-            .docks
-            .get(&crate::ui::workspace::Workspace::Files)
-            .cloned()
+        // Every face goes, and it is the same rule as a terminal's: they are
+        // two views of one file, and leaving one behind would be a tab pointing
+        // at an editor nothing holds any more. `close_file` is idempotent —
+        // removing a panel makes the dock call `on_removed`, which comes back
+        // here with nothing left to find.
+        for (rank, workspace) in crate::ui::workspace::Workspace::WITH_EDITOR
+            .into_iter()
+            .enumerate()
         {
-            dock.update(cx, |dock, cx| {
-                dock.remove_panel(editing.panel.clone(), window, cx)
-            });
+            let Some(panel) = editing.panels.get(rank).cloned() else {
+                continue;
+            };
+            let Some(dock) = self.docks.get(&workspace).cloned() else {
+                continue;
+            };
+            dock.update(cx, |dock, cx| dock.remove_panel(panel, window, cx));
         }
         self.lsp_editor_closed(editing.worktree, editing.path);
         // The focus was on a node nobody renders any more, and such a handle

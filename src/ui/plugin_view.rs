@@ -464,6 +464,20 @@ impl ClaudhubApp {
         self.enter_workspace(elsewhere, window, cx);
     }
 
+    /// Has this plugin's panel nothing to show — see `Node::is_empty_state`.
+    ///
+    /// A plugin nobody loaded answers yes, which is the right answer: its tab
+    /// would carry the empty column `tree_of` hands back.
+    pub(super) fn plugin_panel_empty(&self, panel: &str) -> bool {
+        let Some(index) = self.plugin_index(panel) else {
+            return true;
+        };
+        let Some(spec) = self.plugins[index].manifest.panel_named(panel) else {
+            return true;
+        };
+        self.plugins[index].tree_of(&spec.id).is_empty_state()
+    }
+
     /// Asks before removing a plugin.
     ///
     /// `remove_dir_all` on a directory one may have edited: this is the one
@@ -518,7 +532,7 @@ impl ClaudhubApp {
             worktree: root,
             path,
         });
-        self.travel_to(crate::ui::workspace::Workspace::Files, window, cx);
+        self.travel_reveal(crate::ui::workspace::Workspace::Files, window, cx);
         cx.notify();
     }
 

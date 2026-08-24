@@ -175,11 +175,11 @@ impl ClaudhubApp {
     /// that leaves a file in the middle of a line to go and look elsewhere,
     /// which is precisely what the back arrow is for.
     pub(super) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Read **before** the screen changes: `enter_workspace` moves the focus,
+        // Read **before** the screen changes: `travel_reveal` moves the focus,
         // and the focus is what says which surface the selection is in.
         let selection = self.search_seed(window, cx);
-        self.travel_to(crate::ui::workspace::Workspace::Search, window, cx);
-        self.set_panel_visible(crate::ui::panels::SearchPanel::NAME, true, cx);
+        self.travel_reveal(crate::ui::workspace::Workspace::Search, window, cx);
+        self.show_panel(crate::ui::panels::SearchPanel::NAME, window, cx);
         let handle = gpui::Focusable::focus_handle(&self.search_input, cx);
         handle.focus(window, cx);
         if let Some(text) = selection {
@@ -676,7 +676,7 @@ impl ClaudhubApp {
             }
             1 => self.open_search_row(window, cx),
             _ => {
-                // `travel_to` and not `enter_workspace`: the screen was not
+                // `travel_reveal` and not `reveal`: the screen was not
                 // asked for, it was taken — one pressed a key on a name in a
                 // file, and the list of hits is where the code decided to
                 // answer. Without the step, one step back walks a trail whose
@@ -684,8 +684,8 @@ impl ClaudhubApp {
                 // tab one never left. The place written down is the caret one
                 // jumped from, `here` reading the editor while it is still the
                 // screen on show.
-                self.travel_to(crate::ui::workspace::Workspace::Search, window, cx);
-                self.set_panel_visible(crate::ui::panels::SearchPanel::NAME, true, cx);
+                self.travel_reveal(crate::ui::workspace::Workspace::Search, window, cx);
+                self.show_panel(crate::ui::panels::SearchPanel::NAME, window, cx);
                 // The list and not the field: the results are already there,
                 // and they are what the gesture asked for.
                 window.focus(&self.search_focus, cx);
@@ -802,6 +802,11 @@ impl ClaudhubApp {
             error,
         });
         self.reveal_preview_line(cx);
+        // And on the home screen the preview is a tab that was not there a
+        // moment ago — it only exists while there is a file to show. Bringing
+        // it forward is what makes clicking a hit change the centre; without
+        // it the tab appears and the group goes on showing the diff.
+        self.reveal_panel_later(crate::ui::panels::SearchPreviewPanel::NAME);
         cx.notify();
     }
 

@@ -797,10 +797,10 @@ impl ClaudhubApp {
         // from the schema tree, which lives there, but also from the menu of a
         // table opened elsewhere.
         //
-        // `enter_workspace` and not `travel_to`: the step has just been
-        // written, and it names the query rather than the room it is read in.
-        self.enter_workspace(crate::ui::workspace::Workspace::Db, window, cx);
-        self.set_panel_visible(crate::ui::panels::ConsolePanel::NAME, true, cx);
+        // `reveal` and not `travel_reveal`: the step has just been written, and
+        // it names the query rather than the room it is read in.
+        self.reveal(crate::ui::workspace::Workspace::Db, window, cx);
+        self.show_panel(crate::ui::panels::ConsolePanel::NAME, window, cx);
         self.persist_session(cx);
         cx.notify();
     }
@@ -1015,8 +1015,8 @@ impl ClaudhubApp {
         if elsewhere {
             self.reopen_db_console(target, database, String::new(), window, cx);
         }
-        self.enter_workspace(crate::ui::workspace::Workspace::Db, window, cx);
-        self.set_panel_visible(crate::ui::panels::ConsolePanel::NAME, true, cx);
+        self.reveal(crate::ui::workspace::Workspace::Db, window, cx);
+        self.show_panel(crate::ui::panels::ConsolePanel::NAME, window, cx);
         self.db_query_input.update(cx, |state, cx| {
             state.set_value(sql, window, cx);
         });

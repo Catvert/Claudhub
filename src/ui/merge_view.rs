@@ -171,7 +171,7 @@ impl ClaudhubApp {
             error: None,
         });
         self.git.send(Cmd::ReadMerge { worktree, path });
-        self.enter_workspace(crate::ui::workspace::Workspace::Git, window, cx);
+        self.reveal(crate::ui::workspace::Workspace::Git, window, cx);
         cx.notify();
     }
 

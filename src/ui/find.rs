@@ -283,12 +283,14 @@ impl ClaudhubApp {
     /// The seed is the project-wide search's, and deliberately so — the same
     /// gesture with the same answer to "what was selected", `Ctrl+P` looking
     /// for the file where `Ctrl+Shift+F` looks for the text. It is read
-    /// **before** the screen changes: `enter_workspace` moves the focus, and
-    /// the focus is what says which surface the selection is in.
+    /// **before** the screen changes: `reveal` moves the focus, and the focus is
+    /// what says which surface the selection is in.
     pub(super) fn open_file_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let seed = self.search_seed(window, cx);
-        self.enter_workspace(crate::ui::workspace::Workspace::Files, window, cx);
-        self.set_panel_visible(crate::ui::panels::FilesPanel::NAME, true, cx);
+        self.reveal(crate::ui::workspace::Workspace::Files, window, cx);
+        // The tree and not the centre: what this searches is the file list, and
+        // on the home screen that is one tab of a column of six.
+        self.show_panel(crate::ui::panels::FilesPanel::NAME, window, cx);
         self.pane = Pane::Files;
         let input = self.open_find_in(Pane::Files, window, cx);
         if let Some(text) = seed {

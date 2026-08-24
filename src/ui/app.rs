@@ -72,6 +72,27 @@ struct Layouts {
     workspaces: std::collections::BTreeMap<String, gpui_component::dock::DockAreaState>,
 }
 
+/// The screen the window opens on, filed for the panels built a moment later.
+///
+/// A panel's visibility is **cached**: `BasePanel::visible` is asked for while
+/// the layout is being built, so in the middle of `ClaudhubApp::new`, where
+/// reading the application entity is what gpui refuses with a panic — hence
+/// `panels::visible_at_startup`, which reads the settings instead. That is
+/// enough for the flag, and not for the home screen's `needed:` rule, which
+/// asks a question about the screen on show.
+///
+/// It is known before any panel exists — it is the first thing `build_docks`
+/// reads — and it cannot change before the first frame, so a `OnceLock` set
+/// there answers it. Without it the home screen's centre opens on its four
+/// tabs and drops them on the first notify: a flash, at every start.
+static OPENS_ON: std::sync::OnceLock<crate::ui::workspace::Workspace> = std::sync::OnceLock::new();
+
+/// The screen the window opens on — see `OPENS_ON`. The default until
+/// `build_docks` has read the file, which is the same answer it would give.
+pub(super) fn opens_on() -> crate::ui::workspace::Workspace {
+    OPENS_ON.get().copied().unwrap_or_default()
+}
+
 fn load_layouts() -> Layouts {
     let Some(path) = crate::ui::settings::layout_path() else {
         return Layouts::default();
@@ -799,6 +820,17 @@ pub struct ClaudhubApp {
     /// back in a spawned task. They are drained at the top of the root's
     /// render, the first place a window exists again after `cx.notify()`.
     pub(super) pending_notes: Vec<(SharedString, crate::ui::notify::Level)>,
+    /// A view the home screen has to bring forward, waiting for a frame.
+    ///
+    /// The same lane the notifications take, and for the same reason: selecting
+    /// a tab is `DockArea::move_panel`, which wants a `&mut Window`, and the
+    /// gestures that ask for one have none — opening a diff is `open_file`,
+    /// which takes a `cx` and nothing else, having had no use for a window in
+    /// its life. Filed here, drained at the top of the root's render.
+    ///
+    /// One and not a queue: two of them in the same frame would be two tabs
+    /// asked for at once, and only the last can be on screen.
+    pub(super) pending_reveal: Option<&'static str>,
     /// Worktrees whose status read has already gone out.
     ///
     /// The file watcher can produce several waves before an answer comes back;
@@ -1194,6 +1226,7 @@ impl ClaudhubApp {
             sql_history_list: None,
             awaiting_agent: None,
             pending_notes: Vec::new(),
+            pending_reveal: None,
             pending_status: std::collections::HashSet::new(),
             last_auto_fetch: None,
             suggesting_message: None,
@@ -1365,6 +1398,15 @@ impl ClaudhubApp {
         // and rebuilding from unknown names would give a window full of empty
         // frames.
         let saved = load_layouts();
+        // Filed before a single panel is built: `visible_at_startup` needs it,
+        // and it is built into every one of them below.
+        let _ = OPENS_ON.set(
+            saved
+                .current
+                .as_deref()
+                .and_then(crate::ui::workspace::Workspace::from_key)
+                .unwrap_or_default(),
+        );
         let mut needs_save = false;
         let mut docks = HashMap::new();
         let mut dock_skin = None;
@@ -3047,6 +3089,11 @@ impl ClaudhubApp {
         // where one is. The scrolling is non-strict — an already-visible file
         // does not make the list jump under one's eyes.
         self.reveal_file(&range, &path, cx);
+        // And on the home screen, the diff is one tab of a group that may be
+        // showing the console: clicking a file has to bring it forward, or the
+        // click reads as having done nothing. Deferred, this being the one
+        // opening gesture that never had a window.
+        self.reveal_panel_later(crate::ui::panels::DiffPanel::NAME);
         cx.notify();
     }
 
@@ -3444,6 +3491,42 @@ impl ClaudhubApp {
     }
 
     /// The current review, if there is one.
+    /// Is the home screen the one on show.
+    ///
+    /// What the `needed:` rule of the panel macro asks, and the reason it can
+    /// be asked of the application rather than of the panel: a panel does not
+    /// know which dock holds it — the registry rebuilds one from a name alone —
+    /// but **only one dock is drawn at a time**, so the visibility of a panel
+    /// in a dock nobody renders changes nothing anyone can see. The Git
+    /// screen's diff going invisible while the home screen is up costs nothing,
+    /// and comes back on the notify that changes screen.
+    pub(super) fn on_home(&self) -> bool {
+        self.workspace == crate::ui::workspace::Workspace::Home
+    }
+
+    /// The answer of a view that has no place on the home screen at all.
+    ///
+    /// The empty-editor placeholder is the **editing** screen's empty centre —
+    /// a tab group needs something to hold when no file is open there. The home
+    /// screen's centre is never empty for want of it: it has the diff, the
+    /// console, and every open file as its own tab. A tab saying "open a file"
+    /// beside them would be exactly one of the four names for empty rooms this
+    /// rule exists to remove.
+    pub(super) fn never_at_home(&self) -> bool {
+        false
+    }
+
+    /// Is there a diff to read — a file picked in one of the two lists, or a
+    /// merge taking that place.
+    pub(super) fn diff_on_screen(&self) -> bool {
+        self.merging.is_some() || self.active_review().is_some_and(|s| s.selected.is_some())
+    }
+
+    /// Is there a file under the search's cursor to show beside the hits.
+    pub(super) fn search_preview_open(&self) -> bool {
+        self.search.preview.is_some()
+    }
+
     pub(super) fn active_review(&self) -> Option<&ReviewState> {
         self.active.as_ref().and_then(|p| self.review.get(p))
     }
@@ -3472,6 +3555,31 @@ impl ClaudhubApp {
         self.pending_notes
             .push((text, crate::ui::notify::Level::Error));
         cx.notify();
+    }
+
+    /// Asks for a view to come forward at the next frame, from a gesture with
+    /// no window in hand.
+    ///
+    /// Nothing outside the home screen: everywhere else the view named is the
+    /// only thing in its place, and moving another screen's tab under the user
+    /// is exactly what this must not do.
+    pub(super) fn reveal_panel_later(&mut self, name: &'static str) {
+        if self.workspace == crate::ui::workspace::Workspace::Home {
+            self.pending_reveal = Some(name);
+        }
+    }
+
+    /// Brings forward what a windowless gesture asked for.
+    ///
+    /// Beside `flush_notes` and for its reason: the root is not leased at the
+    /// top of its own render, so the dock may be edited from here and nowhere
+    /// inside a closure the root calls back.
+    fn flush_reveal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self.pending_reveal.take() else {
+            return;
+        };
+        let dock = self.dock.clone();
+        crate::ui::panels::select_panel_named(&dock, name, window, cx);
     }
 
     /// Turns what was said between two frames into balloons.
@@ -3676,6 +3784,7 @@ impl Render for ClaudhubApp {
         // What was said between two frames, before anything is painted: see
         // `flush_notes`.
         self.flush_notes(window, cx);
+        self.flush_reveal(window, cx);
         v_flex()
             // Vim mode is read at render time and not at construction: the
             // context is what turns its bindings on, and the setting changes
@@ -3976,6 +4085,109 @@ impl ClaudhubApp {
         self.enter_workspace(workspace, window, cx);
     }
 
+    /// Brings a view out: visible, and its tab selected where it shares a group
+    /// with the rest of a screen.
+    ///
+    /// The selection is for the **home screen** and no other: elsewhere a view
+    /// made visible is alone in its place, or in a group whose tab the user
+    /// arranged and which a gesture has no business moving. Here every other
+    /// screen's column is one strip of tabs, so "show the search" names one of
+    /// six — and a gesture that then focused a field behind a tab nobody
+    /// selected would be typing into something invisible.
+    pub(super) fn show_panel(
+        &mut self,
+        name: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_panel_visible(name, true, cx);
+        if self.workspace == crate::ui::workspace::Workspace::Home {
+            let dock = self.dock.clone();
+            crate::ui::panels::select_panel_named(&dock, name, window, cx);
+        }
+    }
+
+    /// Shows what a screen is **for**, which is not always going to it.
+    ///
+    /// The funnel for every gesture where the code takes you somewhere because
+    /// it has just opened something there: a file, a diff, a query, a hit. On
+    /// any screen but the home one it is `enter_workspace` and nothing more.
+    /// On the home screen the four centres are four tabs of one group, so
+    /// "show me the editor" is "bring its tab forward" — leaving for the
+    /// editing screen would undo the one thing that screen is for.
+    ///
+    /// The two button groups that change screen do **not** come through here,
+    /// nor do the screen keys: those say "take me to that screen", and a bar
+    /// that answered by selecting a tab would be a bar that stopped working.
+    pub(super) fn reveal(
+        &mut self,
+        workspace: crate::ui::workspace::Workspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.revealed_at_home(workspace, window, cx) {
+            return;
+        }
+        self.enter_workspace(workspace, window, cx);
+    }
+
+    /// The same, for the gestures that **write the step down** — see
+    /// `travel_to`.
+    ///
+    /// No step is written when the home screen answers: nothing moved, and a
+    /// trail that recorded a screen one never left would be a back arrow that
+    /// does nothing.
+    pub(super) fn travel_reveal(
+        &mut self,
+        workspace: crate::ui::workspace::Workspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.revealed_at_home(workspace, window, cx) {
+            return;
+        }
+        self.travel_to(workspace, window, cx);
+    }
+
+    /// Answers a "show me that screen" without leaving the home screen, and
+    /// says whether it did.
+    ///
+    /// The editing screen is reached by **the file being read** and not by the
+    /// placeholder tab: `EditorPanel` hides itself as soon as a file is open,
+    /// and selecting a hidden tab shows nothing at all.
+    ///
+    /// Sentry answers `true` with nothing selected, deliberately: it has no
+    /// centre of ours, its plugins are already tabs here, and taking the window
+    /// off the home screen for one would be the move this whole funnel exists
+    /// to avoid.
+    fn revealed_at_home(
+        &mut self,
+        workspace: crate::ui::workspace::Workspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::ui::workspace::Workspace;
+        if self.workspace != Workspace::Home || !workspace.folds_into_home() {
+            return false;
+        }
+        if workspace == Workspace::Files {
+            if let Some(panel) = self
+                .editing()
+                .and_then(|editing| editing.panels.get(Workspace::Home.editor_index()?).cloned())
+            {
+                crate::ui::panels::FilePanel::activate(&panel, window, cx);
+                cx.notify();
+                return true;
+            }
+        }
+        if let Some(name) = workspace.centre_tab() {
+            let dock = self.dock.clone();
+            crate::ui::panels::select_panel_named(&dock, name, window, cx);
+        }
+        cx.notify();
+        true
+    }
+
     /// Writes one step into the trail of the worktree in hand.
     ///
     /// The single place the trail is written outside of an opening — which has
@@ -4020,6 +4232,11 @@ impl ClaudhubApp {
     fn focus_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use crate::ui::workspace::Workspace;
         match self.workspace {
+            // The home screen has no single centre to name: what one comes back
+            // to is whichever tab was left showing, and the panel that draws it
+            // already holds the focus it wants. The root handle is the honest
+            // answer — it is the one the window's shortcuts resolve against.
+            Workspace::Home => {}
             Workspace::Files => {
                 if self.panel_visible(super::panels::EditorPanel::NAME) {
                     if let Some(editing) = self.editing() {

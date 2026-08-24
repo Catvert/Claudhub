@@ -183,17 +183,13 @@ impl ClaudhubApp {
             end: rows.end.max(rows.start + 1),
         };
 
-        let from = self.here(cx);
-        self.record_step(
-            from,
-            crate::ui::jumps::Place::Screen(crate::ui::workspace::Workspace::Git),
-            cx,
-        );
         // The screen is called up before the answer: the list takes a `git log`
         // to arrive, and staying in the file until then reads as the menu
-        // having done nothing.
-        self.enter_workspace(crate::ui::workspace::Workspace::Git, window, cx);
-        self.set_panel_visible(crate::ui::panels::HistoryPanel::NAME, true, cx);
+        // having done nothing. **And the step is written down**, the screen
+        // having been taken rather than asked for — which is `travel_reveal`,
+        // step and all, rather than the two written out here.
+        self.travel_reveal(crate::ui::workspace::Workspace::Git, window, cx);
+        self.show_panel(crate::ui::panels::HistoryPanel::NAME, window, cx);
         self.set_history_range(range, cx);
     }
 

@@ -22,6 +22,13 @@
 //! the most visible thing the split buys — a tab whose title changed from
 //! "Diff" to "Editor" to "SQL" depending on what you had just done was saying
 //! plainly that it carried three things.
+//!
+//! **And one screen puts them back together**, which is not a retraction: the
+//! split is right for the hour spent on one job, and wrong for the half hour
+//! spent on all four — read the diff, fix the file it named, ask the database
+//! what the fix claims. `Workspace::Home` carries every other screen's panels,
+//! its columns as tabs of one sidebar and its centres as tabs of one group, and
+//! what opens there stays there. See the variant, and `ClaudhubApp::reveal`.
 
 use gpui::{prelude::*, px, App, Context, Entity, Window};
 use gpui_component::{
@@ -38,18 +45,44 @@ use crate::ui::panels;
 /// The initial width of the left column.
 const SIDEBAR_WIDTH: gpui::Pixels = px(280.);
 
+/// The same, for the home screen: its column carries the review's file list,
+/// which is the one panel of the lot that is read across rather than down.
+const HOME_SIDEBAR_WIDTH: gpui::Pixels = px(360.);
+
 /// The initial width of the column saying what to review, left of the diff.
 const REVIEW_LIST_WIDTH: gpui::Pixels = px(420.);
 
 /// A screen, and the order in which the bar offers them.
 ///
-/// The order is not arbitrary: it is the order of the work. You review, you fix
-/// what you read, you check in the database what the code claims, and Sentry is
-/// the starting point on days when you did not choose your subject. The
-/// settings come last, being the only one that is not work.
+/// The order is not arbitrary: it is the order of the work. Home is where one
+/// lands, then you review, you fix what you read, you check in the database
+/// what the code claims, and Sentry is the starting point on days when you did
+/// not choose your subject. The settings come last, being the only one that is
+/// not work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Workspace {
+    /// Every other screen at once: their columns as tabs of one sidebar, their
+    /// centres as tabs of one group.
+    ///
+    /// **The screen that undoes the split**, and it is not a contradiction of
+    /// what the rest of this module says: the split exists because four jobs
+    /// have almost nothing in common, and this is for the day one is doing all
+    /// four in the same half hour — read the diff, fix the file it named, ask
+    /// the database what the fix claims. Moving between them by the bar costs a
+    /// key and loses the arrangement of the previous screen; here they are
+    /// tabs, which is the gesture PhpStorm makes and the reason its users never
+    /// leave one window.
+    ///
+    /// **Its centre is where the others' centres go.** Opening a file, a diff,
+    /// a query while standing here does not leave for the screen that owns it:
+    /// it brings that screen's tab forward — see `ClaudhubApp::reveal`. Which
+    /// tab is `centre_tab`.
+    ///
+    /// It costs nothing the window did not already build: a screen is a dock,
+    /// the panels are the same types instantiated once more, and the state they
+    /// draw lives in `ClaudhubApp` and not in them.
     #[default]
+    Home,
     Git,
     Files,
     /// Searching the whole project — the magnifier. See `ui::search_view`.
@@ -97,7 +130,11 @@ impl Workspace {
         Self::ALL.iter().position(|w| *w == self).unwrap_or(0)
     }
 
-    pub const ALL: [Workspace; 7] = [
+    pub const ALL: [Workspace; 8] = [
+        // **First, and that is what `Alt+1` names.** The home screen is where
+        // one lands and where one comes back to, and a rank in this array is
+        // the key that reaches it.
+        Workspace::Home,
         Workspace::Git,
         Workspace::Files,
         Workspace::Search,
@@ -120,6 +157,62 @@ impl Workspace {
     /// the row of the work — see `topbar::render_topbar`. `working` is `ALL`
     /// less these two, so the two lists cannot drift apart.
     pub const ASIDE: [Workspace; 2] = [Workspace::Multiplexer, Workspace::Settings];
+
+    /// The screens the home screen gathers, in the order their tabs sit.
+    ///
+    /// `working()` less the home screen itself, written out rather than
+    /// derived: `working` filters on what a plugin puts where, and the layout
+    /// installed once at startup must not depend on that — a screen dropped
+    /// from the bar because no plugin landed on it still has panels of ours to
+    /// contribute here. Sentry is in it for the opposite reason: it has none,
+    /// and it is by this list that its plugins reach the home screen.
+    pub const AT_HOME: [Workspace; 5] = [
+        Workspace::Git,
+        Workspace::Files,
+        Workspace::Search,
+        Workspace::Db,
+        Workspace::Sentry,
+    ];
+
+    /// The screens that read files, in the order `Editing::panels` holds a
+    /// file's tabs.
+    ///
+    /// A file is a **panel**, and a panel belongs to one dock area at a time:
+    /// a file open in two centres is two panels rendering one editor state, the
+    /// arrangement a terminal already has. Two and not eight — the other six
+    /// have nowhere to put a file.
+    ///
+    /// The home screen comes first so that the order of this list is the order
+    /// of `ALL`, which is the one every other per-screen list is read in.
+    pub const WITH_EDITOR: [Workspace; 2] = [Workspace::Home, Workspace::Files];
+
+    /// A screen's rank in `WITH_EDITOR` — the index of its face in
+    /// `Editing::panels`. `None` for a screen that reads no file.
+    pub fn editor_index(self) -> Option<usize> {
+        Self::WITH_EDITOR.iter().position(|w| *w == self)
+    }
+
+    /// The panel this screen is reached by when its centre is a tab of the home
+    /// screen — what `reveal` brings forward instead of changing screen.
+    ///
+    /// `None` for a screen that has no centre of ours: Sentry's is whatever
+    /// plugin landed on it, and the two aside screens are not folded in at all.
+    pub fn centre_tab(self) -> Option<&'static str> {
+        use panels::*;
+        match self {
+            Self::Git => Some(DiffPanel::NAME),
+            Self::Files => Some(EditorPanel::NAME),
+            Self::Search => Some(SearchPreviewPanel::NAME),
+            Self::Db => Some(ConsolePanel::NAME),
+            Self::Home | Self::Sentry | Self::Settings | Self::Multiplexer => None,
+        }
+    }
+
+    /// Whether standing on the home screen answers a gesture that asks for this
+    /// screen — see `ClaudhubApp::reveal`.
+    pub fn folds_into_home(self) -> bool {
+        Self::AT_HOME.contains(&self)
+    }
 
     /// The screens the bar offers, in order.
     ///
@@ -167,6 +260,7 @@ impl Workspace {
             // "review" and not "git": the key is what a saved layout is read
             // back by, and renaming the screen must not lose where its panels
             // were. That is the whole point of it being a name of its own.
+            Self::Home => "home",
             Self::Git => "review",
             Self::Files => "files",
             Self::Search => "search",
@@ -184,6 +278,7 @@ impl Workspace {
     /// The i18n key of the name, the one in the tooltip.
     pub fn label(self) -> &'static str {
         match self {
+            Self::Home => "workspace-home",
             Self::Git => "workspace-git",
             Self::Files => "workspace-files",
             Self::Search => "workspace-search",
@@ -198,6 +293,7 @@ impl Workspace {
     /// called: it is what you aim at, the name only comes in the tooltip.
     pub fn icon(self) -> &'static str {
         match self {
+            Self::Home => "layout-dashboard",
             Self::Git => "file-diff",
             Self::Files => "file-code",
             Self::Search => "search",
@@ -225,6 +321,27 @@ impl Workspace {
     pub fn views(self) -> &'static [(&'static str, &'static str)] {
         use panels::*;
         match self {
+            // Every other screen's, in one list: this screen carries every one
+            // of those panels, and an entry missing here would be a view with
+            // no way back once hidden — the `…` menu is what hides it, and the
+            // main menu is the only place it is offered again.
+            Self::Home => &[
+                (ChangesPanel::NAME, "range-working"),
+                (BranchPanel::NAME, "range-branch"),
+                (FilesPanel::NAME, "panel-files"),
+                (SearchPanel::NAME, "panel-search"),
+                (DbPanel::NAME, "panel-databases"),
+                (NotesPanel::NAME, "panel-notes"),
+                (HistoryPanel::NAME, "panel-history"),
+                (TagsPanel::NAME, "panel-tags"),
+                (StashesPanel::NAME, "panel-stashes"),
+                (SqlHistoryPanel::NAME, "panel-sql-history"),
+                (DiffPanel::NAME, "panel-diff"),
+                (EditorPanel::NAME, "panel-editor"),
+                (SearchPreviewPanel::NAME, "panel-search-preview"),
+                (ConsolePanel::NAME, "panel-sql"),
+                (TerminalPanel::NAME, "panel-terminal"),
+            ],
             Self::Git => &[
                 (NotesPanel::NAME, "panel-notes"),
                 (ChangesPanel::NAME, "range-working"),
@@ -299,7 +416,18 @@ fn plugin_views(
     app: &Entity<ClaudhubApp>,
     cx: &mut Context<DockArea>,
 ) -> Vec<View> {
-    crate::ui::plugin_view::on_screen(workspace.key())
+    // The home screen holds every other one's panels, plugins included: it
+    // reads their screens' keys and not its own, which no plugin can name —
+    // `manifest::SCREENS` does not offer it, a plugin choosing "home" would be
+    // choosing to appear twice.
+    let screens: &[Workspace] = if workspace == Workspace::Home {
+        &Workspace::AT_HOME
+    } else {
+        std::slice::from_ref(&workspace)
+    };
+    screens
+        .iter()
+        .flat_map(|screen| crate::ui::plugin_view::on_screen(screen.key()))
         .flat_map(|found| found.panels.iter())
         .filter(|spec| spec.place == place)
         .map(|spec| {
@@ -374,6 +502,55 @@ pub fn install_default_layout(
     }
 
     let (left, center): (Option<DockLayout>, DockLayout) = match workspace {
+        // Every other screen at once, and the shape is the one PhpStorm has:
+        // **one column of tool tabs, one group of document tabs.**
+        //
+        // The column is split like the review's and the databases' are, and for
+        // the reason both give: the top half **chooses** what one works on —
+        // the changed files, the branch, the tree, the hits, the schema — and
+        // the bottom half says **where one stands** — the notes, what happened,
+        // what was already asked. Read together and not instead of each other,
+        // which is what a tab would have made of them.
+        //
+        // The centre holds the four centres, and that is the whole point of the
+        // screen: a file opened from the tree, a table's console, a hit one
+        // jumped to all land in the group already on screen instead of taking
+        // the window to another one. Open files join it as their own tabs, as
+        // they do on the editing screen — see `explorer::open_file_tab`.
+        Workspace::Home => {
+            let left = DockLayout::v_split()
+                .child(
+                    DockLayout::tabs()
+                        .panel_view(panel!(ChangesPanel), cx)
+                        .panel_view(panel!(BranchPanel), cx)
+                        .panel_view(panel!(ConflictsPanel), cx)
+                        .panel_view(panel!(FilesPanel), cx)
+                        .panel_view(panel!(SearchPanel), cx)
+                        .panel_view(panel!(DbPanel), cx),
+                    None,
+                )
+                .child(
+                    with!(
+                        listed,
+                        DockLayout::tabs()
+                            .panel_view(panel!(NotesPanel), cx)
+                            .panel_view(panel!(HistoryPanel), cx)
+                            .panel_view(panel!(TagsPanel), cx)
+                            .panel_view(panel!(StashesPanel), cx)
+                            .panel_view(panel!(SqlHistoryPanel), cx)
+                    ),
+                    Some(third),
+                );
+            let center = with!(
+                centred,
+                DockLayout::tabs()
+                    .panel_view(panel!(DiffPanel), cx)
+                    .panel_view(panel!(EditorPanel), cx)
+                    .panel_view(panel!(SearchPreviewPanel), cx)
+                    .panel_view(panel!(ConsolePanel), cx)
+            );
+            (Some(left), center)
+        }
         // The review takes the whole width: the ways of choosing what to review
         // — what changes now, what the branch wrote, what is already committed —
         // are tabs and not panels side by side, since they answer the same
@@ -523,8 +700,12 @@ pub fn install_default_layout(
 
     area.set_center(center, window, cx);
     if let Some(left) = left {
+        let sidebar = match workspace {
+            Workspace::Home => HOME_SIDEBAR_WIDTH,
+            _ => SIDEBAR_WIDTH,
+        };
         area.set_dock(DockPlacement::Left, left, window, cx);
-        area.set_dock_size(DockPlacement::Left, SIDEBAR_WIDTH, window, cx);
+        area.set_dock_size(DockPlacement::Left, sidebar, window, cx);
     }
 }
 

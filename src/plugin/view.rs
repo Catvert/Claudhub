@@ -246,6 +246,28 @@ impl Node {
         Node::Column(Vec::new())
     }
 
+    /// Whether this tree says "there is nothing here".
+    ///
+    /// What the home screen asks of a plugin's tab, the rule there being that a
+    /// centre holds no name for an empty room — see `ClaudhubApp::on_home`. A
+    /// plugin is a script, so the question cannot be put to it: it is read off
+    /// what it painted.
+    ///
+    /// Two shapes and no more. The empty column of a panel that has never run,
+    /// and an `Empty` on its own — what a script returns when it has nothing to
+    /// show. A column carrying a picker **and** an empty state is not one: what
+    /// it offers is the way out of being empty, which is precisely something to
+    /// show. A spinner is not one either — a panel waiting for an answer has
+    /// something to say, and a tab that vanished for the length of a round trip
+    /// would be worse than one that stayed.
+    pub fn is_empty_state(&self) -> bool {
+        match self {
+            Node::Column(children) => children.iter().all(|child| child.is_empty_state()),
+            Node::Empty { .. } => true,
+            _ => false,
+        }
+    }
+
     /// Does this tree hand its remaining height to one of its blocks.
     ///
     /// Only the root column's own children are looked at: a `Fill` buried
@@ -418,5 +440,31 @@ mod tests {
         let json = serde_json::to_string(&tree).expect("a tree serialises");
         let back: Node = serde_json::from_str(&json).expect("and reads back");
         assert_eq!(tree, back);
+    }
+
+    /// The home screen hides a plugin's centre tab on this answer, and a wrong
+    /// one is a tab that never comes back — a plugin panel one cannot reach.
+    #[test]
+    fn only_a_tree_with_nothing_in_it_is_an_empty_state() {
+        let empty = |message: &str| Node::Empty {
+            message: message.into(),
+        };
+        assert!(Node::nothing().is_empty_state());
+        assert!(empty("Choisissez une erreur.").is_empty_state());
+        assert!(Node::Column(vec![empty("rien")]).is_empty_state());
+        // A picker beside the message is the way out of being empty, which is
+        // something to show.
+        assert!(!Node::Column(vec![
+            Node::Field {
+                id: "project".into(),
+                value: String::new(),
+                placeholder: "acme/site".into(),
+                on_change: None,
+            },
+            empty("Quel projet ?"),
+        ])
+        .is_empty_state());
+        // And a panel waiting for an answer keeps its tab.
+        assert!(!Node::Column(vec![Node::Spinner]).is_empty_state());
     }
 }

@@ -677,6 +677,7 @@
   "workspace-db": "Databases",
   "workspace-files": "Editing",
   "workspace-git": "Git",
+  "workspace-home": "Home",
   "workspace-multiplexer": "Multiplexer",
   "workspace-search": "Search",
   "workspace-sentry": "Sentry",

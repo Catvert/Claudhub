@@ -296,7 +296,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         self.set_base(base, cx);
-        self.travel_to(crate::ui::workspace::Workspace::Git, window, cx);
+        self.travel_reveal(crate::ui::workspace::Workspace::Git, window, cx);
     }
 
     /// Checks an existing branch out into a fresh worktree.

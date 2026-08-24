@@ -162,7 +162,7 @@ src/
     topbar.rs   la barre de titre : le menu, les sélecteurs worktree et branche
     repos.rs        les dépôts ouverts et ceux qui manquent — sans gpui, testé
     inflight.rs     les écritures en vol, et ce que la barre en dit — testé
-    workspace.rs    les sept écrans, leur dock et la barre qui les choisit
+    workspace.rs    les huit écrans, leur dock et la barre qui les choisit
     multiplexer.rs  l'écran de tous les terminaux — le nom d'un projet
     diff_view.rs    la vue de diff, virtualisée
     history_view.rs l'historique et son graphe peint
@@ -380,10 +380,47 @@ Dans un worktree lié, `.git` est un *fichier* qui pointe vers
 
 ## Les écrans, et le dock
 
-Sept **écrans** (`ui::workspace::Workspace`) : Git, Édition, Recherche, Bases,
-Sentry, Réglages, Multiplexeur, atteints par `Alt+1` à `Alt+7`. Le premier
-s'appelle « Git » mais sa clé de disposition **reste `review`** : c'est par elle
-qu'une disposition enregistrée se relit.
+Huit **écrans** (`ui::workspace::Workspace`) : Accueil, Git, Édition, Recherche,
+Bases, Sentry, Réglages, Multiplexeur, atteints par `Alt+1` à `Alt+8`. L'écran
+Git a beau ne plus s'appeler ainsi, sa clé de disposition **reste `review`** :
+c'est par elle qu'une disposition enregistrée se relit.
+
+**L'accueil est les autres écrans réunis** : leurs colonnes en onglets d'une
+seule barre latérale, leurs centres en onglets d'un seul groupe. Il ne coûte rien
+que la fenêtre ne sache déjà faire — un écran est un dock, les panneaux sont les
+mêmes types instanciés une fois de plus, et ce qu'ils peignent vit dans
+`ClaudhubApp`. Ce qu'il ajoute est une règle : **ce qui *ouvre* quelque chose n'en
+sort pas**. Un fichier ouvert depuis l'arbre, la console d'une table, un résultat
+de recherche qu'on suit appelaient `enter_workspace` ; ils passent par
+`ClaudhubApp::reveal`, qui ailleurs change d'écran et ici **avance l'onglet** que
+`Workspace::centre_tab` nomme. Les deux groupes de boutons qui changent d'écran et
+les touches `Alt+N` n'y passent pas : ils disent « emmène-moi là », et une barre
+qui répondrait par un onglet serait une barre en panne. `AT_HOME` dit quels écrans
+s'y replient, `WITH_EDITOR` ceux qui lisent des fichiers — un fichier ouvert y a
+**une face par écran**, comme un terminal, un panneau n'appartenant qu'à un dock à
+la fois.
+
+Et une seconde règle, qui n'existe que là : **un onglet du centre ne s'affiche que
+s'il a quelque chose à montrer** (`needed:` dans la macro `panels!`). Ailleurs un
+centre porte un panneau et son état vide *est* l'écran ; ici quatre onglets
+nommant quatre pièces vides avant le premier clic seraient exactement ce que la
+séparation en écrans avait supprimé. La question se pose à l'**application** et
+non au panneau — un panneau ignore quel dock le tient, le registre en rebâtit un
+d'après un nom seul — et c'est licite parce qu'**un seul dock se peint à la
+fois** : la visibilité d'un panneau dans un dock que personne ne rend ne se voit
+nulle part. Corollaire : la valeur initiale est mise en cache avant que
+l'application soit lisible, d'où `app::OPENS_ON`, l'écran sur lequel la fenêtre
+s'ouvre, lu une fois avant le premier panneau — sans lui l'accueil s'ouvrirait sur
+ses quatre onglets et les lâcherait à la première notification.
+
+Un panneau de plugin y passe aussi, sa réponse se lisant sur ce qu'il a peint
+(`view::Node::is_empty_state`) — un script ne sait pas répondre à la question.
+Mais **au centre seulement** : un plugin démarre la première fois qu'un de ses
+panneaux est *peint* (`plugin_boot`), si bien qu'un panneau caché faute de contenu
+ne serait jamais peint, ne démarrerait jamais le script, et n'aurait jamais de
+contenu. C'est la liste à gauche qui l'amorce ; l'onglet de détail apparaît quand
+on choisit une ligne — et **se met devant** en apparaissant, sans quoi le geste ne
+changerait rien au centre.
 
 **Un dock par écran**, construits au démarrage — un dock se bâtit avec `window`,
 et le faire au rendu créerait des entités au milieu d'une frame. L'état vit dans
