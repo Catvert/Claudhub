@@ -239,13 +239,13 @@ fn emit(node: &Node, prefix: &Path, depth: usize, folds: Folds, out: &mut Vec<En
         // Without this, a Laravel project costs six levels before the first
         // file.
         let mut label = name.clone();
-        let mut path = prefix.join(name);
+        let mut path = crate::wslpath::join(prefix, name);
         let mut deepest = child;
         while deepest.own.is_none() && deepest.leaves.is_empty() && deepest.dirs.len() == 1 {
             let (name, child) = deepest.dirs.iter().next().expect("exactly one child");
             label.push('/');
             label.push_str(name);
-            path = path.join(name);
+            path = crate::wslpath::join(&path, name);
             deepest = child;
         }
 

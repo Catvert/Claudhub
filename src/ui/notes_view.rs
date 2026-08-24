@@ -286,7 +286,7 @@ impl ClaudhubApp {
         state.todo = Some(crate::ui::vault::parse_todo(&text));
         self.git.send(Cmd::WriteVaultFile {
             worktree,
-            path: dir.join(crate::ui::vault::TODO),
+            path: crate::wslpath::join(&dir, crate::ui::vault::TODO),
             text,
             expect,
         });
@@ -367,7 +367,7 @@ impl ClaudhubApp {
         }
         self.git.send(Cmd::WriteVaultFile {
             worktree,
-            path: dir.join(crate::ui::vault::TODO),
+            path: crate::wslpath::join(&dir, crate::ui::vault::TODO),
             text,
             expect,
         });
@@ -398,7 +398,7 @@ impl ClaudhubApp {
         }
         self.git.send(Cmd::WriteVaultFile {
             worktree,
-            path: dir.join(crate::ui::vault::TODO),
+            path: crate::wslpath::join(&dir, crate::ui::vault::TODO),
             text,
             expect,
         });

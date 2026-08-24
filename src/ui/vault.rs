@@ -263,7 +263,10 @@ fn replace_line(text: &str, line: usize, replacement: &str) -> String {
 /// same name would end up in the same place; that is the price of readability,
 /// and the notes would still be told apart by their `worktree`.
 pub fn dir_for(root: &Path, repo: &Path, worktree: &Path) -> PathBuf {
-    root.join(leaf(repo)).join(leaf(worktree))
+    // `wslpath::join` and not `Path::join`: the vault is the server's, and
+    // under Windows the interface would extend a Linux path with backslashes.
+    let repo = crate::wslpath::join(root, leaf(repo));
+    crate::wslpath::join(&repo, leaf(worktree))
 }
 
 fn leaf(path: &Path) -> String {

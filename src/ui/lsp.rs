@@ -64,7 +64,7 @@ use crate::ui::settings::Settings;
 /// at the one boundary, and never in the core, which is handed a path already
 /// made.
 fn full(worktree: &Path, path: &Path) -> PathBuf {
-    worktree.join(path)
+    crate::wslpath::join(worktree, path)
 }
 
 /// And back: what the rest of the window calls that file.

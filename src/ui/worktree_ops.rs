@@ -631,11 +631,11 @@ impl ClaudhubApp {
             .unwrap_or_else(|| "repo".into());
         let root = main
             .parent()
-            .map(|p| p.join(format!("{repo_name}-wt")))
+            .map(|p| crate::wslpath::join(p, format!("{repo_name}-wt")))
             .unwrap_or_else(|| PathBuf::from(format!("{repo_name}-wt")));
         self.git.send(Cmd::AddWorktree {
             main: main.to_path_buf(),
-            path: root.join(slug),
+            path: crate::wslpath::join(&root, slug),
             branch: format!("wt/{slug}"),
             from: from.map(str::to_string),
         });

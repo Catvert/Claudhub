@@ -1715,7 +1715,7 @@ impl ClaudhubApp {
         state.journal = text.clone();
         self.git.send(Cmd::WriteVaultFile {
             worktree,
-            path: dir.join(crate::ui::vault::NOTES),
+            path: crate::wslpath::join(&dir, crate::ui::vault::NOTES),
             text,
             expect,
         });
@@ -1792,7 +1792,7 @@ impl ClaudhubApp {
                 .repos
                 .iter()
                 .map(|repo| repo.main.clone())
-                .find(|main| main.join("wt.toml") == path);
+                .find(|main| crate::wslpath::join(main, "wt.toml") == path);
             if let Some(main) = main {
                 self.reload_wt_project(&main);
             }

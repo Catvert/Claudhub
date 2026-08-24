@@ -82,6 +82,32 @@ pub fn for_server(path: &Path) -> Option<PathBuf> {
     to_linux(path).map(|translated| translated.path)
 }
 
+/// Extends a path **of the server's**.
+///
+/// `Path::join` writes the separator of the machine it runs on: under Windows,
+/// `/home/zoé/notes` joined with `Projet` gives `/home/zoé/notes\\Projet`, which
+/// the distribution reads as one directory whose name carries a backslash. It
+/// is the failure nothing signals — the folder gets created, under a name
+/// nobody can type — and it is why the vault came out as
+/// `/mnt/c/…/notes\\Projet\\worktree`.
+///
+/// So every path that leaves this window is extended the Linux way, wherever
+/// the window runs. On Linux the result is `Path::join`'s, to the byte, which
+/// is what makes the tests below worth anything.
+pub fn join(base: &Path, part: impl AsRef<Path>) -> PathBuf {
+    let part = part.as_ref().to_string_lossy().into_owned();
+    // A part that starts at the root replaces the base, as `Path::join` does.
+    if part.starts_with('/') || base.as_os_str().is_empty() {
+        return PathBuf::from(part);
+    }
+    let mut out = base.to_string_lossy().into_owned();
+    if !out.ends_with('/') {
+        out.push('/');
+    }
+    out.push_str(&part);
+    PathBuf::from(out)
+}
+
 /// Translates a distribution path into a Windows path: `/mnt/c/…` becomes
 /// `C:\…` again, everything else goes through the `\\wsl.localhost\<distro>\…`
 /// share.
@@ -158,6 +184,26 @@ mod tests {
         assert_eq!(to_linux(Path::new(r"\\server\share\doc")), None);
         assert_eq!(to_linux(Path::new("/home/already/linux")), None);
         assert_eq!(to_linux(Path::new("C:relative")), None);
+    }
+
+    /// The one that cost the vault: a Linux path extended under Windows.
+    #[test]
+    fn a_server_path_is_extended_the_linux_way() {
+        assert_eq!(
+            join(Path::new("/mnt/c/Users/Arno/notes"), "Claudhub"),
+            PathBuf::from("/mnt/c/Users/Arno/notes/Claudhub")
+        );
+        // A root that already ends with its separator gains no second one.
+        assert_eq!(join(Path::new("/"), "srv"), PathBuf::from("/srv"));
+        // And a relative path stays relative: that is what the explorer's tree
+        // is made of, and what git prints.
+        assert_eq!(
+            join(Path::new("src/ui"), Path::new("topbar.rs")),
+            PathBuf::from("src/ui/topbar.rs")
+        );
+        // The two edges `Path::join` has, kept.
+        assert_eq!(join(Path::new("/var"), "/etc"), PathBuf::from("/etc"));
+        assert_eq!(join(Path::new(""), "notes"), PathBuf::from("notes"));
     }
 
     #[test]

@@ -293,6 +293,14 @@ l'explorateur, et les deux retours. `wslpath` est pur et testé sous Linux.
 `settings.json` et `state.json` restent côté Windows mais contiennent des chemins
 Linux.
 
+Corollaire : **un chemin du serveur s'allonge par `wslpath::join`**, jamais par
+`Path::join`, qui écrit le séparateur de la machine où il tourne — sous Windows
+`/home/x` plus `notes` donne `/home/x\notes`, un seul dossier dont le nom porte
+une contre-oblique. Rien ne le signale : le dossier est créé, sous un nom que
+personne ne tape. C'est ce qui a donné un coffre de notes
+`/mnt/c/…/notes\Projet\worktree`. Sous Linux les deux rendent le même octet,
+et c'est ce qui rend la règle testable ici.
+
 ### Pourquoi le binaire `git` et non libgit2
 
 Les credential helpers, `includeIf`, les hooks, la signature, les alias :

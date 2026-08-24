@@ -1072,7 +1072,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         let text = match (absolute, self.active.as_ref()) {
-            (true, Some(worktree)) => worktree.join(path).display().to_string(),
+            (true, Some(worktree)) => crate::wslpath::join(worktree, path).display().to_string(),
             _ => path.display().to_string(),
         };
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));

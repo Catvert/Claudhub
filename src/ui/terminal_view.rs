@@ -1507,7 +1507,9 @@ impl ClaudhubApp {
                 .insert("CLAUDHUB_NOTES_DIR".into(), vault.display().to_string());
             launch.env.insert(
                 "CLAUDHUB_TODO".into(),
-                vault.join(crate::ui::vault::TODO).display().to_string(),
+                crate::wslpath::join(&vault, crate::ui::vault::TODO)
+                    .display()
+                    .to_string(),
             );
         }
         // A pty we cannot open is a system problem: descriptor limit reached,
