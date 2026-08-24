@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use gpui::{div, prelude::*, px, Context, Entity, SharedString, Window};
+use gpui::{div, prelude::*, px, Context, Entity, MouseButton, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonGroup, ButtonVariants},
     h_flex,
@@ -23,6 +23,27 @@ use gpui_component::{
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
+
+/// A row of the title bar that is **not** the window's drag region.
+///
+/// Under Windows the bar answers `HTCAPTION` for its whole width — that is what
+/// `TitleBar` asks for, and what makes the window draggable by it. A press
+/// there arrives as `WM_NCLBUTTONDOWN`: gpui hands it to the view first, but
+/// **only consumes it if something stops it propagating**. gpui's own click
+/// listener merely records the press, so nothing did, and `DefWindowProc` then
+/// entered the window-move loop — which swallows the release. The press was
+/// seen, the click never happened: neither "Run", nor the multiplexer, nor the
+/// settings could be pressed.
+///
+/// So everything that has something to click consumes its own press, and the
+/// empty middle — which has nothing — stays the drag region. Windows only: on
+/// Linux the move is started by us, from a `mouse_move`, and the whole bar can
+/// go on being grabbed anywhere.
+fn actions() -> gpui::Div {
+    h_flex().items_center().gap_1().when(cfg!(windows), |this| {
+        this.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+    })
+}
 
 /// One row of the views menu: the tick, the name, and the gesture that toggles it.
 ///
@@ -268,31 +289,34 @@ impl ClaudhubApp {
                     .pr_2()
                     .gap_1()
                     .items_center()
-                    .child(self.render_main_menu(cx))
-                    // The trail, before the pickers: it is the one thing here
-                    // that speaks of *where one has been* rather than of what
-                    // one is looking at, and it belongs to the title bar
-                    // because it is the only chrome that crosses the screens
-                    // the trail crosses. The editor's bar keeps its own two,
-                    // on the same trail.
-                    .child(self.render_trail_buttons(cx))
-                    // The pinned checkouts come **before** the picker rather
-                    // than after it: they are the shortest way to the same
-                    // gesture, and what is put in front is what one reaches
-                    // for first. The picker stays right behind them, for the
-                    // checkouts one has not pinned.
-                    .children(self.render_pins(cx))
-                    // The two pickers that drive everything else, in the order
-                    // one goes through them: the worktree, then its branch.
-                    .child(self.render_worktree_picker(cx))
-                    .children(self.render_branch_picker(cx))
-                    // What the project says of this worktree — started or not,
-                    // and the address it exposes — then everything one can ask
-                    // of it. They followed the row they were on.
-                    .children(
-                        active
-                            .clone()
-                            .and_then(|worktree| self.render_wt_state(&worktree, cx)),
+                    .child(
+                        actions()
+                            .child(self.render_main_menu(cx))
+                            // The trail, before the pickers: it is the one thing here
+                            // that speaks of *where one has been* rather than of what
+                            // one is looking at, and it belongs to the title bar
+                            // because it is the only chrome that crosses the screens
+                            // the trail crosses. The editor's bar keeps its own two,
+                            // on the same trail.
+                            .child(self.render_trail_buttons(cx))
+                            // The pinned checkouts come **before** the picker rather
+                            // than after it: they are the shortest way to the same
+                            // gesture, and what is put in front is what one reaches
+                            // for first. The picker stays right behind them, for the
+                            // checkouts one has not pinned.
+                            .children(self.render_pins(cx))
+                            // The two pickers that drive everything else, in the order
+                            // one goes through them: the worktree, then its branch.
+                            .child(self.render_worktree_picker(cx))
+                            .children(self.render_branch_picker(cx))
+                            // What the project says of this worktree — started or not,
+                            // and the address it exposes — then everything one can ask
+                            // of it. They followed the row they were on.
+                            .children(
+                                active
+                                    .clone()
+                                    .and_then(|worktree| self.render_wt_state(&worktree, cx)),
+                            ),
                     )
                     // The middle is empty on purpose, and the space is not
                     // lost: it is the window's drag region. Neither `fetch`, nor
@@ -302,96 +326,104 @@ impl ClaudhubApp {
                     // are dock tabs. And the terminals have gone down to the
                     // status bar, at the corner of the window they open on.
                     .child(div().flex_1())
-                    // Opening the worktree in the browser, then its actions,
-                    // then the run button: the right corner is the "act on
-                    // what I am looking at" corner, and the address a project
-                    // exposes is the gesture one makes most once it runs.
-                    .children(active.and_then(|worktree| self.render_wt_links(&worktree, cx)))
-                    .children(self.render_worktree_actions(cx))
-                    // The run button, at the far right and just before the two
-                    // screens one does not work in. A `justfile` is the
-                    // project's commands, and running one is a gesture of its
-                    // own: not one of the pickers that say what the window is
-                    // talking about, and not one of the worktree's operations
-                    // either — it is the corner one reaches for, next to the
-                    // multiplexer, which is where what it starts ends up. It is
-                    // painted only where there is a justfile with a recipe in
-                    // it.
-                    .children(self.render_just(cx))
-                    // The two screens one does not work in, at the far right
-                    // of the title bar and in a group of their own: the
-                    // multiplexer is where one goes to see what is running
-                    // everywhere at once before leaving for the worktree it
-                    // pointed at, and the settings are where one changes how
-                    // the rest behaves. Neither is work, which is why they are
-                    // out of the screen picker — that row is the row of the
-                    // work — and a group is what says they are the same kind of
-                    // detour rather than two loose icons. They stay screens:
-                    // `Alt+6` and `Alt+7` still open them.
                     .child(
-                        ButtonGroup::new("aside-nav")
-                            .compact()
-                            .xsmall()
-                            .children(aside.map(|workspace| {
-                                Button::new(("aside", workspace as usize))
-                                    .icon(icon(workspace.icon()))
-                                    .tooltip(tr!(workspace.label()))
-                                    // The name is written, as in the screen
-                                    // picker: an icon alone is a rebus one
-                                    // learns rather than reads. **Except the
-                                    // gear**, the one icon of this window that
-                                    // needs no gloss: it is where an
-                                    // application's settings are on every one of
-                                    // them, and the word beside it only takes
-                                    // width from the pickers.
-                                    .when(
-                                        workspace != crate::ui::workspace::Workspace::Settings,
-                                        |button| button.label(tr!(workspace.label())),
-                                    )
-                                    // Solid against outline, as in the screen
-                                    // picker: the "selected" state of an
-                                    // outlined group is only a slightly lighter
-                                    // background, invisible on half the themes.
-                                    .map(|button| {
-                                        if self.workspace == workspace {
-                                            button.primary()
-                                        } else {
-                                            button.outline()
-                                        }
-                                    })
-                            }))
-                            .on_click(cx.listener(
-                                move |this, selected: &Vec<usize>, window, cx| {
-                                    let Some(workspace) =
-                                        selected.first().and_then(|ix| aside.get(*ix).copied())
-                                    else {
-                                        return;
-                                    };
-                                    // **The multiplexer button comes back.**
-                                    // It is the one screen of the two that
-                                    // answers a question rather than holding a
-                                    // form — which has finished, what is
-                                    // running — so pressing it is a glance, and
-                                    // a glance one takes back. Pressed a second
-                                    // time it returns to the last screen one
-                                    // **worked** in, which is where "work here"
-                                    // already sends a terminal: the two gestures
-                                    // leave the grid the same way. The gear does
-                                    // not, its screen being one where one stays
-                                    // and does something.
-                                    if this.workspace == workspace
-                                        && workspace == crate::ui::workspace::Workspace::Multiplexer
-                                    {
-                                        this.travel_to(this.worked_in, window, cx);
-                                        return;
-                                    }
-                                    // The step is written down, as in the
-                                    // screen picker: a detour to the settings
-                                    // or to the multiplexer is exactly what one
-                                    // wants `Ctrl+O` to undo.
-                                    this.travel_to(workspace, window, cx);
-                                },
-                            )),
+                        actions()
+                            // Opening the worktree in the browser, then its actions,
+                            // then the run button: the right corner is the "act on
+                            // what I am looking at" corner, and the address a project
+                            // exposes is the gesture one makes most once it runs.
+                            .children(
+                                active.and_then(|worktree| self.render_wt_links(&worktree, cx)),
+                            )
+                            .children(self.render_worktree_actions(cx))
+                            // The run button, at the far right and just before the two
+                            // screens one does not work in. A `justfile` is the
+                            // project's commands, and running one is a gesture of its
+                            // own: not one of the pickers that say what the window is
+                            // talking about, and not one of the worktree's operations
+                            // either — it is the corner one reaches for, next to the
+                            // multiplexer, which is where what it starts ends up. It is
+                            // painted only where there is a justfile with a recipe in
+                            // it.
+                            .children(self.render_just(cx))
+                            // The two screens one does not work in, at the far right
+                            // of the title bar and in a group of their own: the
+                            // multiplexer is where one goes to see what is running
+                            // everywhere at once before leaving for the worktree it
+                            // pointed at, and the settings are where one changes how
+                            // the rest behaves. Neither is work, which is why they are
+                            // out of the screen picker — that row is the row of the
+                            // work — and a group is what says they are the same kind of
+                            // detour rather than two loose icons. They stay screens:
+                            // `Alt+6` and `Alt+7` still open them.
+                            .child(
+                                ButtonGroup::new("aside-nav")
+                                    .compact()
+                                    .xsmall()
+                                    .children(aside.map(|workspace| {
+                                        Button::new(("aside", workspace as usize))
+                                            .icon(icon(workspace.icon()))
+                                            .tooltip(tr!(workspace.label()))
+                                            // The name is written, as in the screen
+                                            // picker: an icon alone is a rebus one
+                                            // learns rather than reads. **Except the
+                                            // gear**, the one icon of this window that
+                                            // needs no gloss: it is where an
+                                            // application's settings are on every one of
+                                            // them, and the word beside it only takes
+                                            // width from the pickers.
+                                            .when(
+                                                workspace
+                                                    != crate::ui::workspace::Workspace::Settings,
+                                                |button| button.label(tr!(workspace.label())),
+                                            )
+                                            // Solid against outline, as in the screen
+                                            // picker: the "selected" state of an
+                                            // outlined group is only a slightly lighter
+                                            // background, invisible on half the themes.
+                                            .map(|button| {
+                                                if self.workspace == workspace {
+                                                    button.primary()
+                                                } else {
+                                                    button.outline()
+                                                }
+                                            })
+                                    }))
+                                    .on_click(cx.listener(
+                                        move |this, selected: &Vec<usize>, window, cx| {
+                                            let Some(workspace) = selected
+                                                .first()
+                                                .and_then(|ix| aside.get(*ix).copied())
+                                            else {
+                                                return;
+                                            };
+                                            // **The multiplexer button comes back.**
+                                            // It is the one screen of the two that
+                                            // answers a question rather than holding a
+                                            // form — which has finished, what is
+                                            // running — so pressing it is a glance, and
+                                            // a glance one takes back. Pressed a second
+                                            // time it returns to the last screen one
+                                            // **worked** in, which is where "work here"
+                                            // already sends a terminal: the two gestures
+                                            // leave the grid the same way. The gear does
+                                            // not, its screen being one where one stays
+                                            // and does something.
+                                            if this.workspace == workspace
+                                                && workspace
+                                                    == crate::ui::workspace::Workspace::Multiplexer
+                                            {
+                                                this.travel_to(this.worked_in, window, cx);
+                                                return;
+                                            }
+                                            // The step is written down, as in the
+                                            // screen picker: a detour to the settings
+                                            // or to the multiplexer is exactly what one
+                                            // wants `Ctrl+O` to undo.
+                                            this.travel_to(workspace, window, cx);
+                                        },
+                                    )),
+                            ),
                     ),
             )
     }
