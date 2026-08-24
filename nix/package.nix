@@ -48,7 +48,7 @@ let
 in
 rustPlatform.buildRustPackage {
   pname = "claudhub";
-  version = "0.3.0";
+  version = "0.4.0";
 
   src = lib.cleanSource ../.;
 
@@ -62,7 +62,7 @@ rustPlatform.buildRustPackage {
   # bouge. Un `just ci` ne le dit pas : la porte qui le voit est `nix build`,
   # et elle n'est dans aucune des quatre. C'est ce qui a laissé la 0.2.1 sortir
   # avec un hash périmé.
-  cargoHash = "sha256-tg66gbv8iYzOCqgEMHJqmfnKM2N9GrlQw6T/wPlC5qU=";
+  cargoHash = "sha256-IqvPmyCiEH/gbWEz++VTlYSw1PSAhwnNZ6i5nvSv3Vs=";
 
   nativeBuildInputs = [
     pkg-config
