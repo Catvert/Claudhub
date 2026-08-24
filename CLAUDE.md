@@ -19,6 +19,9 @@ si les bibliothèques de `shell.nix` sont déjà dans le périmètre.
 - `just check-server` — le serveur headless sans la feature `ui` : le portillon
   qui prouve qu'aucun module du cœur ne tire gpui ni Rune
 - `just ci` — les quatre d'un coup
+- `just check-vendor` — **avant de poser un tag** : le `cargoHash` du paquet nix
+  change à chaque changement de `Cargo.lock`, numéro de version compris, et
+  aucune des quatre portes ne le voit. Ne compile rien
 - Un test isolé : `nix-shell --quiet --run "cargo test watch"`
 
 Le projet doit passer `cargo fmt --check`, `clippy --all-targets -- -D warnings`

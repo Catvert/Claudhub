@@ -31,6 +31,17 @@ test:
 # complet par essai.
 ci: fmt-check clippy test check-server
 
+# La porte qu'aucune des quatre ne voit : le `cargoHash` du paquet nix change à
+# chaque changement de `Cargo.lock`, **y compris quand seul le numéro de version
+# bouge** — le vendor en emporte une copie. Rien ne le signale, et c'est ce qui
+# a laissé la 0.2.1 sortir avec un hash périmé.
+#
+# Ne compile rien : seul le vendor est bâti, quelques minutes contre la
+# demi-heure d'un `nix build` entier. Hors de `ci`, qui doit tourner là où il
+# n'y a pas de nix.
+check-vendor:
+    nix build .#claudhub.cargoDeps --no-link
+
 fmt-check:
     {{_cargo}} "cargo fmt --check"
 

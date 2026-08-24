@@ -56,7 +56,13 @@ rustPlatform.buildRustPackage {
   # zed-industries, le fork gpui-component, wt) : `fetchCargoVendor` les
   # rassemble sous un seul hash, là où `cargoLock.outputHashes` en demanderait
   # un par dépôt.
-  cargoHash = "sha256-Apbyb6EuLCiPRosYf66PCx5UUDUQIEXlWKfPRBZjwG8=";
+  #
+  # Il change à **chaque** changement de `Cargo.lock` — le vendor en emporte
+  # une copie —, donc y compris quand seul le numéro de version de Claudhub
+  # bouge. Un `just ci` ne le dit pas : la porte qui le voit est `nix build`,
+  # et elle n'est dans aucune des quatre. C'est ce qui a laissé la 0.2.1 sortir
+  # avec un hash périmé.
+  cargoHash = "sha256-tg66gbv8iYzOCqgEMHJqmfnKM2N9GrlQw6T/wPlC5qU=";
 
   nativeBuildInputs = [
     pkg-config
