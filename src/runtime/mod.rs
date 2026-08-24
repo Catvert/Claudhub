@@ -51,6 +51,9 @@ fn is_network(cmd: &Cmd) -> bool {
             // read queue.
             | Cmd::SuggestMessage { .. }
             | Cmd::Push { .. }
+            // The divergence dialog's answer: a pull, sometimes followed by the
+            // push it is clearing the way for — round trips both.
+            | Cmd::Reconcile { .. }
             // A tag pushed, a tag removed from the remote, the remote's tag
             // list: three round trips, and they belong where the round trips
             // are.
@@ -699,6 +702,17 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
         } => write_then_refresh(worktree, Action::Push, |dir| {
             repo::push(dir, force_with_lease)
         }),
+        Cmd::Reconcile {
+            worktree,
+            rebase,
+            push,
+        } => write_then_refresh(
+            worktree,
+            // The action the gesture that failed had worn: it is the same
+            // button that spins again, and the same key `finish` will find.
+            if push { Action::Push } else { Action::Pull },
+            |dir| repo::reconcile(dir, rebase, push),
+        ),
         Cmd::Checkout { worktree, branch } => {
             write_then_refresh(worktree, Action::Checkout, |dir| {
                 repo::checkout(dir, &branch).map(|_| String::new())
@@ -1665,6 +1679,16 @@ mod tests {
             queue_of(&Cmd::Push {
                 worktree: worktree(),
                 force_with_lease: false,
+            }),
+            Queue::Network
+        );
+        // The divergence dialog's answer pulls and pushes: it belongs where
+        // the round trips are, even when it ends without the push.
+        assert_eq!(
+            queue_of(&Cmd::Reconcile {
+                worktree: worktree(),
+                rebase: false,
+                push: false,
             }),
             Queue::Network
         );

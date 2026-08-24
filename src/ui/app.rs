@@ -2641,6 +2641,21 @@ impl ClaudhubApp {
                 self.project_files_failed(worktree);
             }
         }
+        // A push the remote rejected because it moved on, or a pull the
+        // fast-forward rule refuses, is not an error to read: it is a question
+        // — merge or rebase? — and the dialog asks it, the way PhpStorm does.
+        // The balloon is skipped, the dialog being the report; cancelling it is
+        // answering "leave things as they are". Only for a failure that names
+        // its worktree: `UpdateBranch` answers with none, and reconciling would
+        // then run on whatever branch the main repository has checked out.
+        if matches!(action, Action::Push | Action::Pull | Action::CommitPush)
+            && crate::git::repo::diverged(&message)
+        {
+            if let Some(worktree) = worktree {
+                self.offer_reconcile(worktree, action != Action::Pull, window, cx);
+                return;
+            }
+        }
         // A failure always gets a balloon: the bar is overwritten by the next
         // message that goes through it, and the balloon is what one comes back
         // to read.
@@ -2653,6 +2668,64 @@ impl ClaudhubApp {
         );
         // A `wt` console stays on failure, with the steps that led to the error.
         self.wt_operation_ended(action, false, window, cx);
+    }
+
+    /// The divergence dialog: merge, rebase, or leave it.
+    ///
+    /// Enter merges — the answer that rewrites nothing — the middle button
+    /// rebases, and both send the one command that pulls and, when a push is
+    /// what brought us here, pushes again behind it.
+    fn offer_reconcile(
+        &mut self,
+        worktree: PathBuf,
+        push: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entity = cx.entity();
+        let body = if push {
+            tr!("diverge-body-push")
+        } else {
+            tr!("diverge-body-pull")
+        };
+        let rebasing = {
+            let (entity, worktree) = (entity.clone(), worktree.clone());
+            move |_: &mut Window, cx: &mut App| {
+                let worktree = worktree.clone();
+                entity.update(cx, |this, cx| this.reconcile(worktree, true, push, cx));
+            }
+        };
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let (entity, worktree, rebasing) = (entity.clone(), worktree.clone(), rebasing.clone());
+            dialog
+                .title(tr!("diverge-title"))
+                .overlay_closable(false)
+                .close_button(false)
+                .child(div().text_sm().child(body.clone()))
+                .footer(super::dialogs::choose(
+                    tr!("diverge-merge"),
+                    tr!("diverge-rebase"),
+                    rebasing,
+                ))
+                .on_ok(move |_, _window, cx| {
+                    let worktree = worktree.clone();
+                    entity.update(cx, |this, cx| this.reconcile(worktree, false, push, cx));
+                    true
+                })
+        });
+    }
+
+    /// Sends the reconciliation, under the action the failed gesture had worn:
+    /// it is the same button that spins again, and the same key the worker's
+    /// answer will take back.
+    fn reconcile(&mut self, worktree: PathBuf, rebase: bool, push: bool, cx: &mut Context<Self>) {
+        let action = if push { Action::Push } else { Action::Pull };
+        let cmd = Cmd::Reconcile {
+            worktree: worktree.clone(),
+            rebase,
+            push,
+        };
+        self.start(Some(worktree), action, cmd, cx);
     }
 
     /// An outcome, of either sign, as a balloon.

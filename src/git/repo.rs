@@ -272,6 +272,49 @@ pub fn pull(dir: &Path) -> Result<String> {
     git_reporting(dir, &["pull", "--ff-only"])
 }
 
+/// Brings the diverged branch back in line with its upstream — the choice the
+/// user made in the divergence dialog — then pushes again when a push is what
+/// started it all.
+///
+/// One function and not three commands, for the reason `Commit { push }` is one:
+/// the halves would go into different queues, and nothing orders those. `git
+/// pull` does the fetch itself, which matters after a rejected push: the
+/// remote-tracking ref is stale — a rejection updates nothing — and merging it
+/// as it stands would resolve nothing.
+pub fn reconcile(dir: &Path, rebase: bool, then_push: bool) -> Result<String> {
+    // `--no-rebase` spelled out: `pull.rebase` in the user's config would
+    // otherwise decide, and the button pressed said "merge".
+    let mode = if rebase { "--rebase" } else { "--no-rebase" };
+    let pulled = git_reporting(dir, &["pull", mode])?;
+    if !then_push {
+        return Ok(pulled);
+    }
+    // The push's report over the pull's, the tags' precedent: the round trip is
+    // the half one waited for, and the merge shows in the history that follows.
+    let pushed = push(dir, false)?;
+    Ok(match pushed.trim().is_empty() {
+        true => pulled,
+        false => pushed,
+    })
+}
+
+/// Does this failure say the branch and its upstream have diverged?
+///
+/// Read off git's message — `LC_ALL=C` makes it stable — because the exit code
+/// says nothing: a rejected push and a wrong URL both exit with 1. Three
+/// phrases, one per road here: a push rejected because the branch is behind
+/// (`non-fast-forward`), one rejected because the remote holds commits never
+/// fetched (`fetch first`), and a `pull --ff-only` that refuses.
+pub fn diverged(message: &str) -> bool {
+    [
+        "(non-fast-forward)",
+        "(fetch first)",
+        "Not possible to fast-forward",
+    ]
+    .iter()
+    .any(|phrase| message.contains(phrase))
+}
+
 /// Pushes the current branch. `--set-upstream` covers the first push of a
 /// branch created by Claudhub, whose remote does not exist yet.
 pub fn push(dir: &Path, force_with_lease: bool) -> Result<String> {
@@ -770,6 +813,41 @@ pub fn absolute(dir: &Path, rel: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three messages git writes for a divergence, verbatim, and the
+    /// failures that must not pass for one: offering a merge over a typoed URL
+    /// or a refused lease would run `git pull` on a repository whose problem is
+    /// elsewhere.
+    #[test]
+    fn a_divergence_is_read_off_gits_own_words() {
+        // `push` while the branch is behind its upstream.
+        assert!(diverged(
+            " ! [rejected]        feat -> feat (non-fast-forward)\n\
+             error: failed to push some refs to 'origin'\n\
+             hint: Updates were rejected because the tip of your current branch is behind"
+        ));
+        // `push` while the remote holds commits never fetched.
+        assert!(diverged(
+            " ! [rejected]        feat -> feat (fetch first)\n\
+             error: failed to push some refs to 'origin'"
+        ));
+        // `pull --ff-only` on a branch that has its own commits.
+        assert!(diverged(
+            "hint: Diverging branches can't be fast-forwarded, you need to either:\n\
+             fatal: Not possible to fast-forward, aborting."
+        ));
+
+        assert!(!diverged("fatal: could not read from remote repository"));
+        // A refused lease is the protection doing its work, not a divergence
+        // to smooth over.
+        assert!(!diverged(
+            " ! [rejected]        feat -> feat (stale info)\n\
+             error: failed to push some refs to 'origin'"
+        ));
+        assert!(!diverged(
+            "fatal: 'origin' does not appear to be a git repository"
+        ));
+    }
 
     /// A small real repository: tracked code, a new file, an ignored folder.
     fn scratch_repo(name: &str) -> PathBuf {

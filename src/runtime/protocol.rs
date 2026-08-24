@@ -175,6 +175,18 @@ pub enum Cmd {
         worktree: WorktreeId,
         force_with_lease: bool,
     },
+    /// Resolves a divergence the way the user chose in the dialog a rejected
+    /// push or a refused pull opened: fetch and merge (or rebase onto) the
+    /// upstream, then push again when a push is what was being attempted.
+    ///
+    /// **One command and not a `Pull` then a `Push`**, the precedent being
+    /// `Commit { push }`: two commands would go into two queues, and nothing
+    /// orders those.
+    Reconcile {
+        worktree: WorktreeId,
+        rebase: bool,
+        push: bool,
+    },
     Checkout {
         worktree: WorktreeId,
         branch: String,
@@ -830,6 +842,7 @@ impl Cmd {
             Self::AutoFetch { .. } => "AutoFetch",
             Self::Pull { .. } => "Pull",
             Self::Push { .. } => "Push",
+            Self::Reconcile { .. } => "Reconcile",
             Self::Checkout { .. } => "Checkout",
             Self::CreateBranch { .. } => "CreateBranch",
             Self::DeleteBranch { .. } => "DeleteBranch",
