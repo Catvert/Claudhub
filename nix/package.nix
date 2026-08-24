@@ -56,7 +56,7 @@ rustPlatform.buildRustPackage {
   # zed-industries, le fork gpui-component, wt) : `fetchCargoVendor` les
   # rassemble sous un seul hash, là où `cargoLock.outputHashes` en demanderait
   # un par dépôt.
-  cargoHash = "sha256-bUkjmDUZjwKsCHuE3o0vhpKMhT9ZuCqaU23JwNE1CTY=";
+  cargoHash = "sha256-Apbyb6EuLCiPRosYf66PCx5UUDUQIEXlWKfPRBZjwG8=";
 
   nativeBuildInputs = [
     pkg-config
@@ -90,8 +90,11 @@ rustPlatform.buildRustPackage {
   # à sable plutôt que d'être sautés.
   nativeCheckInputs = [ git ];
 
+  # Le logo, celui dont sortent aussi l'AppImage et l'icône Windows : un tracé
+  # monochrome sur fond transparent — ce qu'était `icons/git-branch.svg` ici —
+  # disparaît sur un dock de la même teinte.
   postInstall = ''
-    install -Dm644 assets/icons/git-branch.svg \
+    install -Dm644 assets/claudhub.svg \
       $out/share/icons/hicolor/scalable/apps/claudhub.svg
   '';
 

@@ -2441,14 +2441,19 @@ impl ClaudhubApp {
         .detach();
     }
 
-    /// The path the native picker returned, as the server will understand it.
+    /// A path from the Windows side, as the server will understand it — what
+    /// the native picker returned, or what was named on the command line.
     ///
     /// On Windows the dialog returns `\\wsl.localhost\Ubuntu\home\…` or `C:\…`;
     /// the wire, for its part, carries only Linux paths — the server's disk is
     /// authoritative. It is one of the few points where a path **enters** from
     /// the Windows world, and therefore one of the few where it has to be
     /// translated. Elsewhere there is nothing to do.
-    fn repo_path_for_server(&self, path: PathBuf, cx: &App) -> Result<PathBuf, SharedString> {
+    pub(super) fn repo_path_for_server(
+        &self,
+        path: PathBuf,
+        cx: &App,
+    ) -> Result<PathBuf, SharedString> {
         if !cfg!(windows) {
             return Ok(path);
         }

@@ -199,10 +199,21 @@ impl ClaudhubApp {
             ServerState::Starting(tr!("server-starting", { distro: distro.clone() }));
         cx.notify();
         // The server's start directory decides which repository opens: the one
-        // being looked at, or none.
-        let cwd = self
-            .active
-            .as_ref()
+        // named on the command line, the one being looked at, or none. It is
+        // the only way an argument reaches the remote case — the handle was
+        // empty when the window opened, and everything sent then was dropped.
+        //
+        // The argument is a *Windows* path, since that is what the Explorer's
+        // verb passes; the wire carries Linux ones. A path that translates to
+        // nothing is simply not the start directory — the failure is reported
+        // when it is a folder somebody picked, not when it is a command line
+        // whose repository will be looked for again as the session is restored.
+        let named = self
+            .launch_arg
+            .clone()
+            .and_then(|path| self.repo_path_for_server(path, cx).ok());
+        let cwd = named
+            .or_else(|| self.active.clone())
             .and_then(|path| path.to_str().map(str::to_string));
         cx.spawn_in(window, async move |this, cx| {
             let opened = in_a_thread(move || remote::connect_wsl(&distro, cwd.as_deref())).await;
@@ -222,6 +233,11 @@ impl ClaudhubApp {
     }
 
     /// Connects an explicit command line.
+    ///
+    /// No start directory here, unlike `connect_wsl`: the server inherits ours,
+    /// so a folder named on the command line is not what it opens on. This is
+    /// the `CLAUDHUB_SERVER_CMD` lever — a test path, and the only place where
+    /// the argument goes unheard.
     fn connect_argv(&mut self, argv: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.server_state = ServerState::Starting(tr!("server-listing"));
         cx.notify();

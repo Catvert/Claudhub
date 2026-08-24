@@ -136,7 +136,13 @@ fn install_fonts(cx: &mut App) {
     }
 }
 
-pub fn run() {
+/// `folder` is what the command line named, and `handoffs` is what later
+/// launches hand over instead of opening a window of their own
+/// (`crate::instance`).
+pub fn run(
+    folder: Option<std::path::PathBuf>,
+    handoffs: async_channel::Receiver<Option<std::path::PathBuf>>,
+) {
     // Before any read: what the user configured under the project's former
     // name is picked up here, otherwise they would find a brand-new window.
     settings::migrate_from_perch();
@@ -193,7 +199,7 @@ pub fn run() {
                     ..gpui_component::TitleBar::window_options()
                 },
                 |window, cx| {
-                    let main = cx.new(|cx| app::ClaudhubApp::new(window, cx));
+                    let main = cx.new(|cx| app::ClaudhubApp::new(folder, handoffs, window, cx));
                     cx.new(|cx| Root::new(main, window, cx))
                 },
             );

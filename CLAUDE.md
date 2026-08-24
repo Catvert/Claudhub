@@ -46,6 +46,29 @@ les sous-processus. Et `devShells.default` **importe `shell.nix`** au lieu de
 recopier ses dépendances : le justfile appelle `nix-shell`, et deux listes
 divergeraient au premier ajout.
 
+**L'installeur Windows** (`tools/claudhub.iss`, Inno Setup) est le troisième
+paquet, et il ne remplace pas le `.exe` nu : il ajoute ce qu'un fichier
+téléchargé ne peut pas avoir — l'icône du bureau, le menu Démarrer, « Ouvrir
+avec Claudhub » sur un dossier, et de quoi désinstaller. Quatre choses à ne pas
+défaire. Il s'installe **sans droits d'administrateur** dans
+`%LOCALAPPDATA%\Programs` : Claudhub n'écrit rien hors du profil, et un
+exécutable posé dans Program Files ne serait plus remplaçable sans une invite
+UAC à chaque mise à jour. L'`AppId` ne change **jamais** — c'est par lui que
+Windows reconnaît une installation déjà là, et deux GUID laissent deux Claudhub
+dans la liste des applications, dont un que plus rien ne désinstalle. Le script
+est en **UTF-8 avec BOM**, sans quoi Inno 6 le lit comme de l'ANSI et les
+messages français arrivent en mojibake, sans erreur de compilation. Et la
+version n'est écrite nulle part : elle se lit dans l'exécutable, où `build.rs`
+a mis celle de `Cargo.toml`.
+
+**L'icône** vient de `assets/claudhub.svg`, engendrée en `.ico` par
+`tools/make_icon.sh` — un fichier **versionné**, la jambe Windows n'ayant pas
+ImageMagick. `build.rs` la pose en ressource dans le `.exe` ; sans elle les
+raccourcis, la barre des tâches et l'explorateur montrent l'icône générique de
+Windows. Le logo porte une **tuile**, et pas seulement le glyphe `git-branch` :
+un tracé monochrome sur fond transparent disparaît sur une barre des tâches de
+la même teinte. L'AppImage et le paquet nix en sortent aussi.
+
 **La CI ne construit que des versions** (`.github/workflows/release.yml`, tag
 `v*` ou manuel) : chaque jambe recompile l'arbre gpui entier, et `just ci` le dit
 déjà ici. Elle relance les mêmes portes avant d'empaqueter — la machine qui
@@ -71,16 +94,18 @@ toucherait à gpui — `tr!` compris — casse ce build. C'est la règle des tro
 couches, vérifiée par le compilateur.
 
 ```
-build.rs        embarque le serveur musl, s'il y en a un (`CLAUDHUB_EMBED_SERVER`)
+build.rs        embarque le serveur musl, s'il y en a un (`CLAUDHUB_EMBED_SERVER`),
+                et sous Windows l'icône et la version en ressource
 src/
   lib.rs        les modules, l'i18n et `tr!` (feature `ui`)
-  main.rs       le binaire de l'interface — trois lignes
+  main.rs       le binaire de l'interface : le verrou d'instance, puis `ui::run`
   bin/server.rs le serveur headless
   cmdline.rs    découpe et recompose une ligne de commande (guillemets POSIX)
   wsl.rs        la distro : la lister, y installer le serveur, l'y lancer
   wslpath.rs    chemins Windows ⇄ distro WSL, textuel et pur
   commit_msg.rs le message de commit proposé : prompt, nettoyage, agent
   files.rs      lire, écrire (sous condition), ranger, éditeur externe
+  instance.rs   une seule fenêtre par machine, et le dossier qu'on lui passe
   db/           bases de données — `sqlx`, asynchrone, testable sans gpui
     mod.rs      connexions, schémas, résultats ; le choix du moteur
     scope.rs    quelles bases appartiennent au worktree regardé — motifs
@@ -286,10 +311,19 @@ dans l'**entrée standard** d'un `cat` lancé là-bas — ni partage réseau, ni
 - **`wsl.exe --list` répond en UTF-16** avant `WSL_UTF8` ; `wsl::decode` gère les
   deux.
 
+**Un dossier nommé en argument** (`claudhub <chemin>`) l'emporte sur le
+répertoire de lancement — et si une fenêtre est déjà ouverte, il lui est passé
+plutôt qu'ouvert ici (`instance.rs`) — c'est ce que passe « Ouvrir avec Claudhub » du menu
+contextuel, le répertoire courant d'un verbe de l'explorateur étant celui que
+l'explorateur avait, pas celui sur lequel on a cliqué. Il n'arrive au serveur
+que par son **répertoire de démarrage** (`server::connect_wsl`) : le manche est
+vide tant que le serveur n'a pas répondu, et tout ce qu'on lui enverrait avant
+serait jeté.
+
 **Le fil ne transporte que des chemins Linux**, et la traduction n'existe qu'aux
-cinq endroits où un chemin change de monde : le sélecteur de dossier, le coffre
-de notes, la cible d'un export CSV, ce qu'un glissement dépose dans
-l'explorateur, et les deux retours. `wslpath` est pur et testé sous Linux.
+six endroits où un chemin change de monde : le sélecteur de dossier, le dossier
+nommé en argument, le coffre de notes, la cible d'un export CSV, ce qu'un
+glissement dépose dans l'explorateur, et les deux retours. `wslpath` est pur et testé sous Linux.
 `settings.json` et `state.json` restent côté Windows mais contiennent des chemins
 Linux.
 
@@ -588,6 +622,37 @@ se lisant sur la **capacité** ; ajouter un nom au vocabulaire peut casser un
 plugin installé (`use claudhub::*`) ; les secrets ne passent pas par le script,
 c'est le **worker** qui substitue. Le trousseau est l'endroit par défaut,
 résolu **côté interface** — un trousseau appartient à une session de bureau.
+
+**L'instance unique** (`instance.rs`) — « Ouvrir avec Claudhub » est sur
+*chaque* dossier, et un deuxième clic donnait un deuxième processus : deux
+fenêtres, deux serveurs WSL, deux jeux de surveillances sur les mêmes worktrees.
+Le dossier part donc à la fenêtre déjà ouverte, par une socket locale — tube
+nommé sous Windows, socket abstraite sous Linux, `GenericNamespaced` des deux
+côtés parce qu'aucun des deux ne laisse de fichier : un nom libéré à la mort du
+processus n'a pas d'histoire de verrou périmé. Quatre choses. **Rien ici ne peut
+empêcher la fenêtre de s'ouvrir** : toute panne retombe sur « vous êtes seul »,
+ce que le programme faisait avant ce module, et `CLAUDHUB_ALLOW_MULTIPLE` le dit
+exprès — le `justfile` le pose, sans quoi `just run` rendrait la main à un
+Claudhub installé sans rien afficher. **Le nom porte l'utilisateur**, les deux
+espaces de noms étant à l'échelle de la machine. **Ce qui arrive n'est pas de
+confiance** : une socket abstraite Linux n'a aucun contrôle d'accès, la charge
+est donc lue en UTF-8 et refusée sinon, jamais passée à
+`OsStr::from_encoded_bytes_unchecked` dont elle ne tient pas le contrat — ce
+qu'un programme local y gagne est de faire remonter la fenêtre et ouvrir un
+dossier, ce que le geste fait déjà. Et **le rang de sélection
+retombe à zéro** quand un dossier arrive : `pick_worktree` note un répertoire de
+lancement `SELECTION_CHOSEN`, qui ne déplace pas un `SELECTION_CHOSEN` déjà là —
+la réponse arriverait et ne changerait rien.
+
+Un dossier qui arrive alors que le serveur WSL démarre encore **attend la
+poignée de main** (`pending_handoff`) : le manche est vide tant que le serveur
+n'a pas répondu, et une commande jetée là est un clic qui n'a rien fait.
+
+Sous Windows, remonter la fenêtre demande le consentement de celui qui a le
+premier plan : c'est le processus lancé par l'explorateur qui l'a, et la fenêtre
+à remonter est à un autre. D'où `AllowSetForegroundWindow` **côté secondaire**,
+avant de passer le chemin ; sans lui, `SetForegroundWindow` là-bas ne fait que
+clignoter un bouton de la barre des tâches.
 
 **Les remisages** (`git/stash.rs`, `ui/stashes.rs`) — `refs/stash` vit dans le
 `.git` commun : la pile est **celle du dépôt**, la même vue de tous les

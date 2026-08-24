@@ -16,5 +16,14 @@ fn main() {
     // a sub-session of its own.
     claudhub::agent::disinherit_session();
     claudhub::logging::init();
-    claudhub::ui::run();
+    // And before the window is paid for: a folder right-clicked in the
+    // Explorer usually belongs to a Claudhub already up, and the answer is to
+    // give it to that one rather than to open a second of everything — window,
+    // WSL server, watchers on the same worktrees.
+    let folder = claudhub::instance::folder_named();
+    let handoffs = match claudhub::instance::claim(folder.as_deref()) {
+        claudhub::instance::Instance::Handed => return,
+        claudhub::instance::Instance::Only(handoffs) => handoffs,
+    };
+    claudhub::ui::run(folder, handoffs);
 }

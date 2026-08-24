@@ -79,8 +79,15 @@ Sans Nix, les recettes retombent sur `cargo` nu ; à vous d'avoir les
 bibliothèques dans le périmètre. gpui rend via Vulkan : sans `vulkan-loader`
 accessible, rien ne s'affiche.
 
-Lancé depuis un dépôt git, Claudhub l'ouvre. Les dépôts ouverts sont rouverts au
+Lancé depuis un dépôt git, Claudhub l'ouvre — ou depuis n'importe où, si on le
+lui nomme : `claudhub ~/projets/machin`. Les dépôts ouverts sont rouverts au
 démarrage suivant.
+
+**Une seule fenêtre par machine.** Relancer Claudhub pendant qu'il tourne ne
+donne pas une deuxième fenêtre : le dossier demandé est passé à celle qui est
+là, qui l'ouvre et revient au premier plan. `CLAUDHUB_ALLOW_MULTIPLE=1` pour
+outrepasser — c'est ce que `just run` pose, afin qu'un build de développement ne
+rende jamais la main à un Claudhub installé.
 
 ## Sous Windows : une fenêtre native, les workers dans WSL2
 
@@ -94,13 +101,26 @@ jamais la frontière autrement que par des messages.
 WSLg a été essayé d'abord, et écarté : le rendu y passe par un Vulkan émulé
 sur D3D12 qui n'est pas à la hauteur.
 
-**L'installation tient en deux gestes.** Téléchargez `Claudhub-x86_64.exe` de
-la dernière [version](../../releases) et lancez-le. Un seul fichier : le
-serveur est **dans** l'exécutable, qui le pose dans la distribution au premier
-démarrage — après avoir demandé laquelle — puis s'y connecte. Rien à
-compiler, rien à copier à la main, rien à garder à côté, et les mises à jour
-s'installent d'elles-mêmes : le serveur est adressé par l'empreinte de son
-contenu.
+**L'installation tient en deux gestes.** Téléchargez
+`Claudhub-Setup-x86_64.exe` de la dernière [version](../../releases) et
+lancez-le. L'installeur ne demande **aucun droit d'administrateur** : il pose
+Claudhub dans `%LOCALAPPDATA%\Programs`, met son icône sur le bureau et dans le
+menu Démarrer, ajoute « Ouvrir avec Claudhub » au menu contextuel d'un dossier,
+et s'inscrit dans « Applications installées » avec de quoi désinstaller. Les
+deux raccourcis et le menu contextuel se décochent dans l'assistant.
+
+« Ouvrir avec Claudhub » sur un dossier ouvre ce dépôt dans la fenêtre déjà
+là — elle revient au premier plan — plutôt que d'en lancer une deuxième.
+
+Qui préfère un fichier unique et rien d'installé prend `Claudhub-x86_64.exe` :
+c'est le même programme, sans les raccourcis — on le lance depuis ses
+téléchargements et il n'écrit que ses réglages.
+
+Dans les deux cas, un seul fichier : le serveur est **dans** l'exécutable, qui
+le pose dans la distribution au premier démarrage — après avoir demandé
+laquelle — puis s'y connecte. Rien à compiler, rien à copier à la main, rien à
+garder à côté, et les mises à jour s'installent d'elles-mêmes : le serveur est
+adressé par l'empreinte de son contenu.
 
 Ce qu'il faut avoir : **WSL2** avec une distribution, et dedans **git** ainsi
 que l'agent que vous pilotez (`claude`, ou un autre). Il n'y a plus rien à
@@ -111,8 +131,9 @@ Les terminaux s'ouvrent eux aussi dans la distribution : leur émulation reste
 locale, mais le shell — et donc l'agent — tourne là-bas, dans le worktree, et
 voit le dépôt. Les chemins se traduisent d'un monde à l'autre aux quelques
 endroits où c'est nécessaire : le sélecteur de dossier accepte
-`\\wsl.localhost\<distribution>\home\…`, et le bouton qui ouvre le coffre de
-notes le rend à l'explorateur Windows.
+`\\wsl.localhost\<distribution>\home\…`, « Ouvrir avec Claudhub » traduit le
+dossier sur lequel on a cliqué, et le bouton qui ouvre le coffre de notes le
+rend à l'explorateur Windows.
 
 Et une règle qui n'est pas un détail de confort : **gardez vos dépôts dans le
 système de fichiers Linux** (`~/projets/…`), jamais sous `/mnt/c`. Sur les

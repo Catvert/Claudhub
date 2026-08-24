@@ -5,11 +5,15 @@ _cargo := if `command -v nix-shell >/dev/null 2>&1 && echo yes || echo no` == "y
 
 default: run
 
+# `CLAUDHUB_ALLOW_MULTIPLE` : sans lui, lancer une deuxième fois pendant qu'un
+# Claudhub est ouvert donnerait la main à celui-là et rendrait aussitôt la main
+# — le build qu'on vient de faire ne s'afficherait nulle part, sans rien dire.
+# Pour éprouver l'instance unique elle-même, lancer le binaire directement.
 run:
-    {{_cargo}} "cargo run --bin claudhub"
+    {{_cargo}} "CLAUDHUB_ALLOW_MULTIPLE=1 cargo run --bin claudhub"
 
 release:
-    {{_cargo}} "cargo run --release --bin claudhub"
+    {{_cargo}} "CLAUDHUB_ALLOW_MULTIPLE=1 cargo run --release --bin claudhub"
 
 check:
     {{_cargo}} "cargo check --all-targets"

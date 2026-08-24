@@ -1,0 +1,16 @@
+<!-- Le logo de l'application : la tuile dont sortent l'icône Windows
+     (assets/claudhub.ico, engendrée par tools/make_icon.sh) et celle du
+     raccourci Linux. Le glyphe est `icons/git-branch.svg`, la même que porte
+     la barre de titre ; ce qui s'ajoute est la tuile, sans laquelle un tracé
+     monochrome sur fond transparent disparaît sur une barre des tâches de la
+     même teinte. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <rect width="256" height="256" rx="56" ry="56" fill="#22272e"/>
+  <g transform="translate(32 32) scale(8)" fill="none" stroke="#58a6ff"
+     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="6" x2="6" y1="3" y2="15"/>
+    <circle cx="18" cy="6" r="3"/>
+    <circle cx="6" cy="18" r="3"/>
+    <path d="M18 9a9 9 0 0 1-9 9"/>
+  </g>
+</svg>

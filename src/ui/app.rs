@@ -478,6 +478,22 @@ pub struct ClaudhubApp {
     /// worktree. Remotely it is the **server's** directory, which arrives with
     /// its handshake — ours names nothing over there.
     launch_dir: Option<PathBuf>,
+    /// The directory named on the command line, when there was one.
+    ///
+    /// It outranks the directory `claudhub` was launched *from* — that is what
+    /// naming one means — and it is kept rather than consumed because the
+    /// remote case cannot use it yet: on Windows the handle is empty until the
+    /// server answers, and it is the server's start directory that has to carry
+    /// it (`server::connect_wsl`).
+    pub(super) launch_arg: Option<PathBuf>,
+    /// A folder handed over while the workers were out of reach.
+    ///
+    /// On Windows the handle is empty until the server answers, and everything
+    /// sent then is dropped: a click on "Open with Claudhub" a second after
+    /// launching would have opened nothing, silently. Kept as the server's
+    /// path — it is translated the moment it arrives — and let go in
+    /// `server_hello`.
+    pending_handoff: Option<PathBuf>,
     /// How firm the current selection is, so a weaker one cannot displace it.
     ///
     /// The repositories answer in the order the workers happen to finish, and
@@ -1003,7 +1019,12 @@ impl ClaudhubApp {
         (git, events, false)
     }
 
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        folder: Option<PathBuf>,
+        handoffs: async_channel::Receiver<Option<PathBuf>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (git, events, remote) = Self::spawn_backend();
 
         let commit_input =
@@ -1094,6 +1115,8 @@ impl ClaudhubApp {
             pending_files: Vec::new(),
             restoring_files: false,
             launch_dir: None,
+            launch_arg: folder,
+            pending_handoff: None,
             selection_rank: crate::ui::session::SELECTION_NONE,
             terminal_started: false,
             opening_repos: 0,
@@ -1221,6 +1244,7 @@ impl ClaudhubApp {
         }
         cx.set_global(AppHandle(cx.entity().downgrade()));
         app.pump_events(events, window, cx);
+        app.pump_handoffs(handoffs, window, cx);
         // Before the sweep: the sweep is also what expires a plugin's requests,
         // and it has to find a list to look at rather than build one.
         app.start_plugins(cx);
@@ -1257,9 +1281,10 @@ impl ClaudhubApp {
         app
     }
 
-    /// The previous session's repositories, then the current directory if it is
-    /// one — that is what somebody launching `claudhub` from their project
-    /// expects.
+    /// The previous session's repositories, then the directory named on the
+    /// command line — or, failing that, the current one — if it is a
+    /// repository: that is what somebody launching `claudhub` from their
+    /// project expects.
     ///
     /// The check goes to the worker: `is_repo` costs a git subprocess, which the
     /// constructor is not allowed to pay for.
@@ -1272,9 +1297,13 @@ impl ClaudhubApp {
         // Remotely, the directory that counts is the **server's**: it arrives
         // with `Evt::ServerHello`, and ours names nothing over there.
         if !remote {
-            if let Ok(cwd) = std::env::current_dir() {
-                self.launch_dir = Some(cwd.clone());
-                self.git.send(Cmd::OpenIfRepo(cwd));
+            let launched_in = self
+                .launch_arg
+                .clone()
+                .or_else(|| std::env::current_dir().ok());
+            if let Some(dir) = launched_in {
+                self.launch_dir = Some(dir.clone());
+                self.git.send(Cmd::OpenIfRepo(dir));
             }
         }
     }
@@ -1605,6 +1634,81 @@ impl ClaudhubApp {
             }
         })
         .detach();
+    }
+
+    /// The folders later launches hand over (`crate::instance`).
+    ///
+    /// No batching, unlike the events: these arrive at the speed of a hand on a
+    /// context menu, and each one is a gesture whose answer is a window coming
+    /// forward.
+    fn pump_handoffs(
+        &mut self,
+        handoffs: async_channel::Receiver<Option<PathBuf>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok(folder) = handoffs.recv().await {
+                let alive = this
+                    .update_in(cx, |app, window, cx| app.handed_folder(folder, window, cx))
+                    .is_ok();
+                if !alive {
+                    break; // the window is closed
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// A second launch gave us its folder, or asked for nothing but the window.
+    ///
+    /// The selection rank is **put back to nothing**: the folder is a choice
+    /// made by hand, and `pick_worktree` grades a launch directory
+    /// `SELECTION_CHOSEN` — which would not displace the `SELECTION_CHOSEN`
+    /// already there, so the answer would arrive and change nothing.
+    fn handed_folder(
+        &mut self,
+        folder: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // First, and whatever the folder turns out to be: what was asked for is
+        // this window, and a click that raises nothing looks like a click that
+        // did nothing. The other process handed us the right to do it
+        // (`instance::allow_foreground`). Under Wayland the compositor keeps
+        // the last word — raising a window one did not click is exactly what it
+        // is there to refuse — and the request may come out as a highlight in
+        // the dock rather than a window in front. Nothing to fix here: it is
+        // the platform's answer, and it is the same one every editor gets.
+        window.activate_window();
+        let Some(folder) = folder else {
+            return;
+        };
+        // Translated before it is remembered: `launch_dir` is compared against
+        // the worktrees git enumerates, which are the **server's** paths.
+        match self.repo_path_for_server(folder, cx) {
+            // Nothing reaches a server that is starting up or down, and a
+            // dropped command is a click that did nothing: it waits for the
+            // handshake instead.
+            Ok(folder) => match self.server_state {
+                super::server::ServerState::Local | super::server::ServerState::Up => {
+                    self.open_handed(folder)
+                }
+                _ => self.pending_handoff = Some(folder),
+            },
+            Err(message) => self.announce(message, cx),
+        }
+        cx.notify();
+    }
+
+    /// Opens a folder somebody handed over, on the server's terms.
+    fn open_handed(&mut self, folder: PathBuf) {
+        self.launch_dir = Some(folder.clone());
+        self.selection_rank = crate::ui::session::SELECTION_NONE;
+        // `OpenRepo` and not `OpenIfRepo`, as in the folder picker: a folder
+        // named by hand deserves an answer, including "this is not a
+        // repository".
+        self.git.send(Cmd::OpenRepo(folder));
     }
 
     // — A worktree's free note ————————————————————————————————————
@@ -2769,6 +2873,12 @@ impl ClaudhubApp {
         // directory that says so, not ours.
         self.launch_dir = Some(cwd.clone());
         self.git.send(Cmd::OpenIfRepo(cwd));
+        // And what was handed over while there was nobody to hear it. **After**
+        // the line above, whose `launch_dir` it must displace: a folder somebody
+        // clicked outranks the directory the server happens to have started in.
+        if let Some(folder) = self.pending_handoff.take() {
+            self.open_handed(folder);
+        }
     }
 
     // — Selection ————————————————————————————————————————————————

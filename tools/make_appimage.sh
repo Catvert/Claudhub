@@ -83,11 +83,15 @@ Categories=Development;
 Terminal=false
 EOF
 
+# Le logo de l'application, celui dont sort aussi l'icône Windows : un tracé
+# monochrome sur fond transparent — ce qu'était `icons/git-branch.svg` ici —
+# disparaît sur un dock de la même teinte.
+#
 # Par nix-shell comme le squashfs plus bas : ImageMagick n'est pas dans le
 # shell du projet, et la machine qui construit — un runner de CI, notamment —
 # n'a aucune raison de l'avoir, ni sous ce nom-là.
 nix-shell --quiet -p imagemagick --run \
-  "magick -background none -density 300 '$PROJ/assets/icons/git-branch.svg' \
+  "magick -background none -density 300 '$PROJ/assets/claudhub.svg' \
     -resize 256x256 -gravity center -extent 256x256 '$APPDIR/claudhub.png'"
 ln -sf claudhub.png "$APPDIR/.DirIcon"
 

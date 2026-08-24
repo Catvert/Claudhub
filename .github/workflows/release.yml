@@ -7,11 +7,14 @@
 # machine that checks and the machine that ships are not the same one — and
 # the Windows leg compiles code the developer's machine never compiles at all.
 #
-# Two deliverables, one per platform, and each is a single self-contained
-# file — nothing to unzip, nothing to place beside anything:
+# Each deliverable is a single self-contained file — nothing to unzip, nothing
+# to place beside anything:
 #   - Windows: one .exe carrying the musl server inside it (build.rs), which it
 #     installs into the WSL distribution on first launch. Hence the ordering
-#     here: the server leg must finish before the Windows leg compiles.
+#     here: the server leg must finish before the Windows leg compiles. Beside
+#     it, an Inno Setup installer built from that same .exe
+#     (tools/claudhub.iss) — same file, plus the shortcuts, the context menu
+#     entry and an uninstaller that a downloaded executable cannot have.
 #   - Linux: an AppImage and a self-extracting .run, both carrying the whole
 #     nix closure (see tools/make_appimage.sh).
 
@@ -142,15 +145,27 @@ jobs:
         env:
           CLAUDHUB_EMBED_SERVER: ${{ github.workspace }}\server\claudhub-server
         run: cargo build --release --bin claudhub
-      - name: Name the executable for the release page
+      # Inno Setup ships with the runner image; the fallback is there because
+      # that is somebody else's decision, and losing a release over a tool that
+      # left the image is a bad trade.
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          & $iscc tools\claudhub.iss
+      # Both under one root, so the publish job names them without knowing
+      # where in the tree each was built.
+      - name: Name the files for the release page
         shell: bash
         run: |
           mkdir -p bundle
           cp target/release/claudhub.exe bundle/Claudhub-x86_64.exe
+          cp target/setup/Claudhub-Setup-x86_64.exe bundle/
       - uses: actions/upload-artifact@v4
         with:
           name: claudhub-windows-x86_64
-          path: bundle/Claudhub-x86_64.exe
+          path: bundle
           if-no-files-found: error
 
   linux:
@@ -207,11 +222,18 @@ jobs:
           body: |
             ## Installation
 
-            **Windows** — `Claudhub-x86_64.exe`, un seul fichier, rien à
-            installer. Au premier démarrage il demande dans quelle distribution
-            WSL2 travailler, y pose le serveur qu'il porte en lui, et s'y
-            connecte. La machine doit avoir WSL2 avec une distribution, et
-            `git` dedans.
+            **Windows** — `Claudhub-Setup-x86_64.exe` : l'installeur, qui
+            n'a pas besoin de droits d'administrateur. Il pose l'icône sur le
+            bureau et dans le menu Démarrer, ajoute « Ouvrir avec Claudhub » au
+            menu contextuel d'un dossier, et s'inscrit dans « Applications
+            installées » avec de quoi désinstaller. Qui préfère un fichier
+            unique et rien d'installé prend `Claudhub-x86_64.exe` : c'est le
+            même programme, sans les raccourcis.
+
+            Dans les deux cas, au premier démarrage il demande dans quelle
+            distribution WSL2 travailler, y pose le serveur qu'il porte en lui,
+            et s'y connecte. La machine doit avoir WSL2 avec une distribution,
+            et `git` dedans.
 
             **Linux** — `Claudhub-x86_64.run` de préférence : il ne demande que
             `sh`, `tar` et `gzip`, et se déballe une fois dans `~/.cache`.
@@ -222,6 +244,7 @@ jobs:
 
             ---
           files: |
+            artifacts/claudhub-windows-x86_64/Claudhub-Setup-x86_64.exe
             artifacts/claudhub-windows-x86_64/Claudhub-x86_64.exe
             artifacts/claudhub-linux-x86_64/Claudhub-x86_64.AppImage
             artifacts/claudhub-linux-x86_64/Claudhub-x86_64.run
