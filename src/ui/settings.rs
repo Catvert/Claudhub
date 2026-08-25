@@ -370,7 +370,9 @@ pub struct Settings {
     pub repositories: Vec<PathBuf>,
     /// Number of context lines around a hunk in the review.
     pub diff_context: usize,
-    /// The file list as a folder tree rather than flat.
+    /// The file list as a folder tree rather than flat. Flat by default: a
+    /// change set is a handful of files, and the folder rows were mostly
+    /// chrome between them.
     pub review_tree: bool,
     /// Diff in two columns — old version on the left, new on the right — rather
     /// than as a single list.
@@ -601,7 +603,7 @@ impl Default for Settings {
             terminal: TerminalSettings::default(),
             repositories: Vec::new(),
             diff_context: 3,
-            review_tree: true,
+            review_tree: false,
             diff_split: true,
             diff_whole_file: false,
             diff_wrap: true,
