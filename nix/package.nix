@@ -48,7 +48,9 @@ let
 in
 rustPlatform.buildRustPackage {
   pname = "claudhub";
-  version = "0.4.0";
+  # Lue dans Cargo.toml : écrite en dur, elle a laissé la 0.5.0 sortir sous un
+  # chemin de store nommé 0.4.0 — aucune des quatre portes ne la voyait.
+  version = (lib.importTOML ../Cargo.toml).package.version;
 
   src = lib.cleanSource ../.;
 

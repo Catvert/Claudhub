@@ -62,6 +62,37 @@ jobs:
       - name: Check the headless server
         run: cargo check --no-default-features --bin claudhub-server
 
+  # The nix package, built here so cachix serves it to the NixOS machines.
+  #
+  # The other legs enter nix-shell and let cargo build: cachix only ever saw
+  # the shell's closure, never the `claudhub` package — the NixOS machines
+  # that install the flake each rebuilt the whole gpui tree on their own.
+  # This is also the one gate that catches a stale `cargoHash` in
+  # `nix/package.nix` (`just check-vendor` locally); none of the cargo legs
+  # can see it.
+  #
+  # It builds with the nixpkgs pinned by *this* flake's lock, and that is the
+  # contract: a consumer must not `follows` its own nixpkgs onto the input,
+  # or the store path diverges from the one pushed here and the cache is
+  # silently useless.
+  nix:
+    name: Nix package
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      # Skipped unless the CACHIX_CACHE repository variable names a cache,
+      # like the other legs. The build still runs: it is a gate even when
+      # nothing gets pushed.
+      - uses: cachix/cachix-action@v15
+        if: vars.CACHIX_CACHE != ''
+        with:
+          name: ${{ vars.CACHIX_CACHE }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Build the package
+        run: nix build .#claudhub --print-build-logs
+
   # The other two thirds of the test suite.
   #
   # `cargo test --no-default-features` above runs about a hundred tests; the
@@ -206,7 +237,7 @@ jobs:
 
   publish:
     name: Publish
-    needs: [windows, linux, ui]
+    needs: [windows, linux, ui, nix]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
