@@ -105,14 +105,22 @@ pub fn key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
                 });
             }
             // The ordinary case: the character the keyboard layout actually
-            // produced, accents and non-Latin layouts included. `key` alone
-            // would give the key's ASCII equivalent.
-            let text = keystroke.key_char.as_deref().or({
-                // A single-letter key with no key_char (some layouts) stays
-                // usable as it is.
-                (key.chars().count() == 1).then_some(key)
-            })?;
-            alt(text.as_bytes().to_vec())
+            // produced, accents and non-Latin layouts included. When there is
+            // none, `key` is NOT a substitute: during dead-key composition
+            // (the Belgian ^, ¨, ´…) gpui still delivers a KeyDown with no
+            // key_char, and `key` is then the character *guessed from the US
+            // layout* of the physical key — `[` for the Belgian circumflex.
+            // Falling back on it typed a stray `[` before every ê; the
+            // composed character arrives with the next keystroke, in its
+            // key_char. The one keystroke legitimately without a key_char is
+            // Alt+letter — the platform may withhold the character there —
+            // hence the readline escape prefix stays available from `key`.
+            if let Some(text) = keystroke.key_char.as_deref() {
+                return alt(text.as_bytes().to_vec());
+            }
+            (m.alt && key.is_ascii() && key.chars().count() == 1)
+                .then(|| alt(key.as_bytes().to_vec()))
+                .flatten()
         }
     }
 }
@@ -206,6 +214,20 @@ mod tests {
         assert_eq!(bytes("delete", TermMode::empty()), b"\x1b[3~");
         assert_eq!(bytes("ctrl-delete", TermMode::empty()), b"\x1b[3;5~");
         assert_eq!(bytes("pageup", TermMode::empty()), b"\x1b[5~");
+    }
+
+    #[test]
+    fn a_dead_key_sends_nothing() {
+        // A Belgian ^ while composing: gpui guesses the US-layout character
+        // of the physical key (`[`) and delivers no key_char. Nothing must
+        // reach the pty — the composed ê comes with the next keystroke.
+        assert_eq!(key_bytes(&stroke("["), TermMode::empty()), None);
+    }
+
+    #[test]
+    fn the_composed_character_is_what_goes_out() {
+        // ^ then e: the second keystroke carries ê in its key_char.
+        assert_eq!(bytes("e->ê", TermMode::empty()), "ê".as_bytes());
     }
 
     #[test]
