@@ -27,9 +27,9 @@ pub const DEFAULT_MONO_FONT: &str = "Iosevka Nerd Font Mono";
 ///
 /// `-p` makes `claude` a filter: it reads its prompt from standard input and
 /// writes its answer to the output, with no session and no interface. The model
-/// is named because summarising a diff is no work for the biggest one, and this
-/// one answers in a few seconds.
-pub const DEFAULT_COMMIT_MESSAGE_COMMAND: &str = "claude -p --model sonnet";
+/// is named: a smaller one was tried first and its messages missed the point of
+/// a change often enough to need rewriting by hand.
+pub const DEFAULT_COMMIT_MESSAGE_COMMAND: &str = "claude -p --model opus";
 
 /// Fallback palettes: the ones gpui-component provides, and which therefore
 /// exist even if the theme directory is empty or unreadable.
@@ -439,8 +439,8 @@ pub struct Settings {
     ///
     /// A program and not an API: that is Claudhub's framing decision, and it
     /// holds here as for the terminal's agents. The diff reaches it on standard
-    /// input, its standard output is the message. A fast model is enough — hence
-    /// `sonnet` by default, writing a summary being no work for the biggest one.
+    /// input, its standard output is the message. `opus` by default: a faster
+    /// model wrote messages that missed the point of the change.
     /// Empty, the button disappears.
     pub commit_message_command: String,
     /// The Sentry organisation. The *project*, for its part, belongs to the
