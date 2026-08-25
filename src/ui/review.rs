@@ -866,6 +866,157 @@ impl ClaudhubApp {
         });
         cx.notify();
     }
+
+    /// Stages one hunk of the remainder panel — the part of a partially
+    /// staged file that is not in the index yet.
+    ///
+    /// The patch is built from the **unstaged** diff (index → working tree),
+    /// which is exactly the base `git apply --cached` applies against; the
+    /// displayed diff would not do, its hunks being measured from HEAD.
+    pub(super) fn stage_remainder_hunk(&mut self, hunk: usize, cx: &mut Context<Self>) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let Some((path, diff)) = self
+            .active_review()
+            .and_then(|state| state.unstaged.clone())
+        else {
+            return;
+        };
+        let Some(hunk) = diff.hunks.get(hunk) else {
+            return;
+        };
+        let patch = crate::git::diff::hunk_patch(&path, None, hunk, false);
+        self.git.send(Cmd::ApplyHunk {
+            worktree,
+            patch,
+            reverse: false,
+        });
+        cx.notify();
+    }
+
+    /// The "other part" of a partially staged file: the hunks the next commit
+    /// would leave behind, each with the gesture that adds it to the index.
+    ///
+    /// Under the diff and not in it: the displayed diff shows the whole
+    /// change, and marking which of its lines are staged would mean stitching
+    /// two diffs together line by line. This panel shows the remainder as git
+    /// tells it, and disappears when there is none.
+    pub(super) fn render_unstaged_panel(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let state = self.active_review()?;
+        if !matches!(state.range, DiffRange::Working) {
+            return None;
+        }
+        let path = state.selected.clone()?;
+        let (kept, diff) = state.unstaged.clone()?;
+        if kept != path || diff.hunks.is_empty() {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let colors = crate::ui::theme::DiffColors::of(cx);
+        let mono = theme.mono_font_family.clone();
+        let font_size = gpui::px(crate::ui::settings::Settings::global(cx).diff_font_size);
+        let count = diff.hunks.len();
+
+        let hunks = diff.hunks.iter().enumerate().map(|(ix, hunk)| {
+            v_flex()
+                .child(
+                    h_flex()
+                        .px_2()
+                        .gap_2()
+                        .items_center()
+                        .bg(colors.hunk_bg)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(hunk.header.clone()),
+                        )
+                        .child(
+                            Button::new(("stage-remainder", ix))
+                                .ghost()
+                                .xsmall()
+                                .icon(icon("plus"))
+                                .label(tr!("diff-unstaged-add"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.stage_remainder_hunk(ix, cx);
+                                })),
+                        ),
+                )
+                .children(hunk.lines.iter().map(|line| {
+                    use crate::git::DiffLineKind;
+                    let (bg, fg, sign) = match line.kind {
+                        DiffLineKind::Added => (Some(colors.added_bg), Some(colors.added_fg), "+"),
+                        DiffLineKind::Removed => {
+                            (Some(colors.removed_bg), Some(colors.removed_fg), "-")
+                        }
+                        DiffLineKind::Context => (None, None, " "),
+                        DiffLineKind::NoNewline => (None, None, "\\"),
+                    };
+                    div()
+                        .px_2()
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .when_some(bg, |el, bg| el.bg(bg))
+                        .when_some(fg, |el, fg| el.text_color(fg))
+                        .child(format!("{sign}{}", line.text))
+                }))
+        });
+
+        Some(
+            v_flex()
+                .flex_none()
+                .border_t_1()
+                .border_color(theme.border)
+                .child(
+                    h_flex()
+                        .h(crate::ui::theme::bar_height(cx))
+                        .px_2()
+                        .gap_2()
+                        .items_center()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(tr!("diff-unstaged-title", { count: count })),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            Button::new("stage-remainder-all")
+                                .ghost()
+                                .xsmall()
+                                .label(tr!("diff-unstaged-add-all"))
+                                .on_click(cx.listener({
+                                    let worktree = self.active.clone();
+                                    let path = path.clone();
+                                    move |this, _, _, cx| {
+                                        if let Some(worktree) = worktree.clone() {
+                                            this.set_staged(worktree, vec![path.clone()], true, cx);
+                                        }
+                                    }
+                                })),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("unstaged-remainder")
+                        .max_h(gpui::px(240.))
+                        .overflow_y_scroll()
+                        .font_family(mono)
+                        .text_size(font_size)
+                        .child(v_flex().children(hunks)),
+                )
+                .into_any_element(),
+        )
+    }
 }
 
 /// Renders one row of the list: a group heading or a file.

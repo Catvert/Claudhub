@@ -138,6 +138,23 @@ pub fn file(dir: &Path, range: &Range, path: &Path, context: usize) -> Result<Fi
     Ok(parse_unified(&out))
 }
 
+/// The unstaged remainder of one file: index → working tree, plain
+/// `git diff` with no range. On a partially staged file this is exactly what
+/// the next commit would leave behind; on a fully staged one it is empty.
+pub fn unstaged_file(dir: &Path, path: &Path, context: usize) -> Result<FileDiff> {
+    let args: Vec<String> = vec![
+        "diff".into(),
+        format!("-U{context}"),
+        "-M".into(),
+        "--no-ext-diff".into(),
+        "--no-color".into(),
+        "--".into(),
+        path.to_string_lossy().into_owned(),
+    ];
+    let out = git(dir, &args)?;
+    Ok(parse_unified(&out))
+}
+
 /// The raw text of what is staged, as git writes it.
 ///
 /// Neither `DiffFile` nor `FileDiff`: that diff is not displayed, it is **read

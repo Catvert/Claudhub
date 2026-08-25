@@ -60,6 +60,15 @@ pub enum Cmd {
         worktree: WorktreeId,
         range: DiffRange,
     },
+    /// The unstaged remainder of a partially staged file: index → working
+    /// tree, plain `git diff`. What the next commit would leave behind — the
+    /// review shows it beside the file's diff so those hunks can still be
+    /// added.
+    LoadUnstagedDiff {
+        worktree: WorktreeId,
+        path: PathBuf,
+        context: usize,
+    },
     /// A file's diff; `untracked` switches to `--no-index`, git not knowing the
     /// file yet.
     LoadFileDiff {
@@ -831,6 +840,7 @@ impl Cmd {
             Self::RefreshRepo { .. } => "RefreshRepo",
             Self::RefreshStatus { .. } => "RefreshStatus",
             Self::LoadDiffFiles { .. } => "LoadDiffFiles",
+            Self::LoadUnstagedDiff { .. } => "LoadUnstagedDiff",
             Self::LoadFileDiff { .. } => "LoadFileDiff",
             Self::LoadBranches { .. } => "LoadBranches",
             Self::LoadTags { .. } => "LoadTags",
@@ -959,6 +969,14 @@ pub enum Evt {
         files: Vec<DiffFile>,
     },
     FileDiff {
+        worktree: WorktreeId,
+        path: PathBuf,
+        diff: FileDiff,
+    },
+    /// The unstaged remainder of a partially staged file. It carries the
+    /// path for the same reason `CommitDetail` carries its id: the selection
+    /// may have moved during the read.
+    UnstagedDiff {
         worktree: WorktreeId,
         path: PathBuf,
         diff: FileDiff,

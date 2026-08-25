@@ -242,6 +242,11 @@ pub struct ReviewState {
     /// several thousand of its lines per frame would cancel out the benefit of
     /// virtualisation.
     pub diff: Option<std::rc::Rc<Rendered>>,
+    /// The unstaged remainder of the selected file, when it is partially
+    /// staged: what the next commit would leave behind, shown under the diff
+    /// so those hunks can still be added. Keyed by path because the answer
+    /// arrives after a git command — the selection may have moved on.
+    pub unstaged: Option<(PathBuf, std::rc::Rc<crate::git::FileDiff>)>,
     /// The lines selected in the diff: the anchor and the head, as indices into
     /// the flattened list. Two indices and not a sorted range, because it is the
     /// direction of the gesture that decides which one moves on the next
@@ -407,6 +412,7 @@ impl Default for ReviewState {
             pending_files: std::collections::HashSet::new(),
             selected: None,
             diff: None,
+            unstaged: None,
             diff_selection: None,
             collapsed: std::collections::HashSet::new(),
             base: None,
@@ -2043,6 +2049,11 @@ impl ClaudhubApp {
                 path,
                 diff,
             } => self.file_diff_arrived(worktree, path, diff, cx),
+            Evt::UnstagedDiff {
+                worktree,
+                path,
+                diff,
+            } => self.unstaged_arrived(worktree, path, diff, cx),
             Evt::CommitDetail {
                 worktree,
                 id,
@@ -2436,6 +2447,22 @@ impl ClaudhubApp {
                 });
             }
         }
+        // The remainder panel follows the index: a hunk just added from it
+        // must leave it, and a stage done in a terminal next door must make
+        // it appear.
+        if matches!(state.range, DiffRange::Working) {
+            if let Some(path) = state.selected.clone() {
+                if partially_staged(&state.status, &path) {
+                    self.git.send(Cmd::LoadUnstagedDiff {
+                        worktree,
+                        path,
+                        context: Settings::global(cx).context_lines(),
+                    });
+                } else {
+                    state.unstaged = None;
+                }
+            }
+        }
     }
 
     fn diff_files_arrived(
@@ -2488,6 +2515,7 @@ impl ClaudhubApp {
         if gone {
             state.selected = None;
             state.diff = None;
+            state.unstaged = None;
             state.diff_selection = None;
         }
         if pruned {
@@ -2496,6 +2524,27 @@ impl ClaudhubApp {
         if let Some(path) = first {
             self.open_file(worktree, path, range, cx);
         }
+    }
+
+    /// The unstaged remainder of a partially staged file, for the panel under
+    /// the diff. A late answer for a file no longer shown is dropped.
+    fn unstaged_arrived(
+        &mut self,
+        worktree: PathBuf,
+        path: PathBuf,
+        diff: crate::git::FileDiff,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.review.get_mut(&worktree) else {
+            return;
+        };
+        if state.selected.as_deref() != Some(path.as_path())
+            || !matches!(state.range, DiffRange::Working)
+        {
+            return;
+        }
+        state.unstaged = Some((path, std::rc::Rc::new(diff)));
+        cx.notify();
     }
 
     fn file_diff_arrived(
@@ -3233,6 +3282,7 @@ impl ClaudhubApp {
         // length of the read would give the impression that the click did
         // nothing, and then that the content changes by itself.
         state.diff = None;
+        state.unstaged = None;
         state.diff_selection = None;
         // A jump armed by an arrow does not survive another gesture: opening a
         // file with the mouse has to open it at the top.
@@ -3243,18 +3293,28 @@ impl ClaudhubApp {
             .files
             .iter()
             .any(|f| f.path == path && f.is_untracked());
+        let partial = matches!(range, DiffRange::Working) && partially_staged(&state.status, &path);
         // Opening a file is leaving the merge: the centre shows one or the
         // other, and what one has just clicked is what one wants to see. After
         // the state above and not before, so that one lookup serves for all of
         // it — nothing between the two reads either.
         self.merging = None;
         self.git.send(Cmd::LoadFileDiff {
-            worktree,
+            worktree: worktree.clone(),
             range: range.clone(),
             path: path.clone(),
             context: Settings::global(cx).context_lines(),
             untracked,
         });
+        // The remainder: only a partially staged file has an "other part",
+        // and only the working range commits.
+        if partial {
+            self.git.send(Cmd::LoadUnstagedDiff {
+                worktree,
+                path: path.clone(),
+                context: Settings::global(cx).context_lines(),
+            });
+        }
         // The list follows the open file: an arrow that changes file would
         // otherwise leave it out of view, and one would review without knowing
         // where one is. The scrolling is non-strict — an already-visible file
@@ -4670,6 +4730,15 @@ impl ClaudhubApp {
 /// Whether git still reports this file as unmerged.
 fn unmerged(state: &ReviewState, path: &Path) -> bool {
     state.status.conflicted().any(|file| file.path == path)
+}
+
+/// Part of the file is in the index and part is not — what git writes `MM`.
+/// The remainder panel under the diff only exists for those.
+pub(super) fn partially_staged(status: &Status, path: &Path) -> bool {
+    status
+        .files
+        .iter()
+        .any(|f| f.path == path && f.is_staged() && f.is_unstaged() && !f.is_untracked())
 }
 
 #[cfg(test)]

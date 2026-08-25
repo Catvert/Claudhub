@@ -583,6 +583,18 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             }],
             Err(e) => vec![fail(Some(worktree), Action::Diff, e)],
         },
+        Cmd::LoadUnstagedDiff {
+            worktree,
+            path,
+            context,
+        } => match crate::git::diff::unstaged_file(&worktree, &path, context) {
+            Ok(diff) => vec![Evt::UnstagedDiff {
+                worktree,
+                path,
+                diff,
+            }],
+            Err(e) => vec![fail(Some(worktree), Action::Diff, e)],
+        },
         Cmd::LoadFileDiff {
             worktree,
             range,

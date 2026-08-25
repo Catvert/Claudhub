@@ -1688,6 +1688,10 @@ impl ClaudhubApp {
                         move |menu, _window, _cx| diff_menu(menu, &entity)
                     }),
             )
+            // The remainder of a partially staged file, under the diff: what
+            // the next commit would leave behind, still one click from going
+            // in. Absent for every other file.
+            .children(self.render_unstaged_panel(cx))
             .into_any_element()
     }
 
