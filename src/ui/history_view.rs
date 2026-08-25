@@ -334,6 +334,7 @@ impl ClaudhubApp {
             _ => None,
         };
         let lines_only = self.history_lines_only;
+        let show_graph = crate::ui::settings::Settings::global(cx).history_graph;
         let header = h_flex()
             .h(crate::ui::theme::bar_height(cx))
             .w_full()
@@ -344,8 +345,10 @@ impl ClaudhubApp {
             .border_color(cx.theme().border)
             .children(
                 [
-                    (LogRange::All, tr!("history-all")),
+                    // The current branch first: it is the default, and the
+                    // default reads left to right.
                     (LogRange::Head, tr!("history-head")),
+                    (LogRange::All, tr!("history-all")),
                 ]
                 .into_iter()
                 .enumerate()
@@ -416,7 +419,28 @@ impl ClaudhubApp {
                                 cx.notify();
                             })),
                     )
-            });
+            })
+            .child(div().flex_1())
+            // At the far end because it changes how the list is drawn, not
+            // what it shows — the same seat as the review's tree toggle.
+            .child(
+                Button::new("history-graph")
+                    .ghost()
+                    .xsmall()
+                    .icon(crate::ui::icons::icon("git-merge"))
+                    .selected(show_graph)
+                    .tooltip(if show_graph {
+                        tr!("history-graph-hide")
+                    } else {
+                        tr!("history-graph-show")
+                    })
+                    .on_click(cx.listener(|_this, _, _, cx| {
+                        crate::ui::settings::Settings::update_global(cx, |s| {
+                            s.history_graph = !s.history_graph;
+                        });
+                        cx.notify();
+                    })),
+            );
 
         let Some(history) = history else {
             return v_flex()
@@ -449,7 +473,14 @@ impl ClaudhubApp {
 
         let entity = cx.entity();
         let count = history.commits.len();
-        let gutter = LANE * history.width as f32 + px(6.);
+        // Without the graph the rows keep a sliver of left padding, not a
+        // gutter: the lanes are what took the width, and the width is the
+        // summary's.
+        let gutter = if show_graph {
+            LANE * history.width as f32 + px(6.)
+        } else {
+            px(6.)
+        };
 
         // Which of the row's fixed columns fit beside the summary. The summary
         // is what a history is read by — PhpStorm sheds its columns the same
@@ -466,6 +497,7 @@ impl ClaudhubApp {
         // the summary could use them.
         let width = (self.history_laid_out - gutter).max(px(0.));
         let columns = Columns {
+            graph: show_graph,
             hash: width >= px(560.),
             author: width >= px(440.),
             date: width >= px(300.),
@@ -604,6 +636,7 @@ pub fn commit_texts(commits: &[crate::git::Commit]) -> Vec<CommitText> {
 /// everything here gives way before it does.
 #[derive(Clone, Copy)]
 struct Columns {
+    graph: bool,
     hash: bool,
     author: bool,
     date: bool,
@@ -640,16 +673,20 @@ fn render_commit(
     // frame.
     let for_graph = history.clone();
     let entity = entity.clone();
-    let graph = canvas(
-        move |_, _, _| {},
-        move |bounds, _, window, cx| {
-            if let Some(row) = for_graph.graph.get(index) {
-                paint_graph(row, bounds, window, cx);
-            }
-        },
-    )
-    .w(gutter)
-    .h(row_height);
+    // Hidden, the gutter is a sliver of padding and there is nothing to
+    // paint in it — the canvas would draw lanes across the summary.
+    let graph = columns.graph.then(|| {
+        canvas(
+            move |_, _, _| {},
+            move |bounds, _, window, cx| {
+                if let Some(row) = for_graph.graph.get(index) {
+                    paint_graph(row, bounds, window, cx);
+                }
+            },
+        )
+        .w(gutter)
+        .h(row_height)
+    });
 
     h_flex()
         .id(("commit", index))
@@ -672,7 +709,8 @@ fn render_commit(
         .on_click(move |_, _window, cx| {
             entity.update(cx, |this, cx| this.open_commit(index, cx));
         })
-        .child(graph)
+        .children(graph)
+        .when(!columns.graph, |el| el.pl(px(6.)))
         .when(columns.hash, |el| {
             el.child(
                 div()

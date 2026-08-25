@@ -215,6 +215,8 @@
   "group-tracked": "Tracked files",
   "group-untracked": "Unversioned files",
   "history-all": "All branches",
+  "history-graph-hide": "Hide the graph",
+  "history-graph-show": "Show the graph",
   "history-empty": "No commit to show.",
   "history-head": "Current branch",
   "history-lines-close": "Back to the whole history",

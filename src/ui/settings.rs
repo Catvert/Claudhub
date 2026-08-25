@@ -370,6 +370,10 @@ pub struct Settings {
     pub repositories: Vec<PathBuf>,
     /// Number of context lines around a hunk in the review.
     pub diff_context: usize,
+    /// The commit graph drawn left of the history rows. Off by default: its
+    /// gutter is sized by the widest point of the whole graph, and the width
+    /// it reserves comes off the summary — the column a history is read by.
+    pub history_graph: bool,
     /// The file list as a folder tree rather than flat. Flat by default: a
     /// change set is a handful of files, and the folder rows were mostly
     /// chrome between them.
@@ -603,6 +607,7 @@ impl Default for Settings {
             terminal: TerminalSettings::default(),
             repositories: Vec::new(),
             diff_context: 3,
+            history_graph: false,
             review_tree: false,
             diff_split: true,
             diff_whole_file: false,

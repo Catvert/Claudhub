@@ -411,7 +411,9 @@ impl Default for ReviewState {
             collapsed: std::collections::HashSet::new(),
             base: None,
             history: None,
-            history_range: LogRange::All,
+            // The current branch: what one asks a history first. The whole
+            // graph is one click away.
+            history_range: LogRange::Head,
             history_pending: false,
             commit: None,
             commit_detail: None,
@@ -965,6 +967,12 @@ pub struct ClaudhubApp {
     /// layout, and a width that has moved since the last one is what asks for
     /// the frame that repaints it right.
     pub(super) diff_laid_out: gpui::Pixels,
+    /// The history list's measured width, by the same mechanism and for a
+    /// reason of its own: the panel lives in a resizable column, and the row's
+    /// fixed columns — hash, author, date — are dropped one by one when the
+    /// width no longer holds them beside the summary, which is what a history
+    /// is read by.
+    pub(super) history_laid_out: gpui::Pixels,
     /// The handle of the wrapped two-column view.
     ///
     /// A second handle and not the same one: the entries there no longer have
@@ -1270,6 +1278,7 @@ impl ClaudhubApp {
             merging: None,
             merge_scroll: gpui_component::VirtualListScrollHandle::new(),
             diff_laid_out: gpui::px(0.),
+            history_laid_out: gpui::px(0.),
             diff_wrap_scroll: gpui_component::VirtualListScrollHandle::new(),
             history_scroll: gpui::UniformListScrollHandle::new(),
             history_lines_only: true,
