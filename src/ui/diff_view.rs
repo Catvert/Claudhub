@@ -787,7 +787,7 @@ use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
     menu::ContextMenuExt,
-    v_flex, v_virtual_list, ActiveTheme, Selectable, Sizable,
+    v_flex, v_virtual_list, ActiveTheme, Selectable, Sizable, StyledExt,
 };
 
 use crate::git::DiffRange;
@@ -1332,6 +1332,96 @@ impl ClaudhubApp {
         centered_message(tr!("db-open-a-console"), cx)
     }
 
+    /// The block above a commit's diff: its message, its author, its hash.
+    ///
+    /// `None` outside a commit range — a working or branch diff has no single
+    /// story to tell — and while the message has not arrived: the block is a
+    /// caption, and a caption that appears with its text is better than one
+    /// that flashes empty. The detail is matched against the range's id, not
+    /// just trusted: it follows a git command, and the click may have moved on.
+    fn render_commit_block(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let state = self.active_review()?;
+        let DiffRange::Commit { id, .. } = &state.range else {
+            return None;
+        };
+        let detail = state.commit_detail.clone().filter(|d| &d.id == id)?;
+        let mono = cx.theme().mono_font_family.clone();
+        let muted = cx.theme().muted_foreground;
+        Some(
+            v_flex()
+                .w_full()
+                .flex_shrink_0()
+                .px_3()
+                .py_2()
+                .gap_1()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().secondary)
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_family(mono)
+                                .text_xs()
+                                .text_color(muted)
+                                .child(detail.short.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .font_semibold()
+                                .child(detail.subject.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(format!("{} · {}", detail.author, detail.date)),
+                        ),
+                )
+                .when(!detail.body.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .id("diff-commit-body")
+                            .w_full()
+                            // Capped, and scrollable past the cap: a release
+                            // message runs to dozens of lines, and the diff is
+                            // what the panel is for. Derived from the text
+                            // size, never a fixed pixel count.
+                            .max_h(crate::ui::theme::row_height(cx) * 8.)
+                            .overflow_y_scroll()
+                            .text_xs()
+                            .text_color(muted)
+                            .children(
+                                detail
+                                    .body
+                                    .split('\n')
+                                    .map(|line| {
+                                        // An empty child collapses to nothing:
+                                        // a blank line of the message has to
+                                        // keep its height.
+                                        div().child(if line.is_empty() {
+                                            SharedString::from(" ")
+                                        } else {
+                                            SharedString::from(line.to_string())
+                                        })
+                                    })
+                                    .collect::<Vec<_>>(),
+                            ),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
     pub(super) fn render_diff(
         &mut self,
         window: &mut Window,
@@ -1354,7 +1444,17 @@ impl ClaudhubApp {
             return div().into_any_element();
         };
         let Some(path) = state.selected.clone() else {
-            return centered_message(tr!("review-pick-a-file"), cx);
+            // An empty commit has no file to open, but it still has a story:
+            // its block stays above the hint.
+            let message = centered_message(tr!("review-pick-a-file"), cx);
+            return match self.render_commit_block(cx) {
+                Some(block) => v_flex()
+                    .size_full()
+                    .child(block)
+                    .child(div().flex_1().min_h_0().child(message))
+                    .into_any_element(),
+                None => message,
+            };
         };
         let stageable = state.range == DiffRange::Working;
         let diff = state.diff.clone();
@@ -1372,6 +1472,7 @@ impl ClaudhubApp {
         let Some(diff) = diff else {
             return v_flex()
                 .size_full()
+                .children(self.render_commit_block(cx))
                 .child(header)
                 .child(hint(tr!("review-loading"), cx))
                 .into_any_element();
@@ -1379,6 +1480,7 @@ impl ClaudhubApp {
         if diff.file.binary {
             return v_flex()
                 .size_full()
+                .children(self.render_commit_block(cx))
                 .child(header)
                 .child(hint(tr!("review-binary"), cx))
                 .into_any_element();
@@ -1386,6 +1488,7 @@ impl ClaudhubApp {
         if diff.rows.is_empty() {
             return v_flex()
                 .size_full()
+                .children(self.render_commit_block(cx))
                 .child(header)
                 .child(hint(tr!("review-no-change"), cx))
                 .into_any_element();
@@ -1533,6 +1636,9 @@ impl ClaudhubApp {
 
         v_flex()
             .size_full()
+            // Above the file bar: the commit captions the whole set of files,
+            // where the bar names the one being read.
+            .children(self.render_commit_block(cx))
             .child(header)
             .children(find)
             .child(

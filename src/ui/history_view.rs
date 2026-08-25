@@ -212,6 +212,7 @@ impl ClaudhubApp {
         };
 
         state.commit = Some(commit.id.clone());
+        state.commit_detail = None;
         // The first parent: it is the comparison a reviewer expects in front of
         // a merge, the one showing what the merge brought in.
         let range = DiffRange::Commit {
@@ -230,6 +231,13 @@ impl ClaudhubApp {
         state
             .pending_files
             .retain(|kept| !matches!(kept, DiffRange::Commit { .. }));
+        // The block above the diff wants the full message, which the history's
+        // one-line format does not carry. Asked for in the lines case too: the
+        // restricted patch shown there is captioned all the same.
+        self.git.send(Cmd::LoadCommitDetail {
+            worktree: worktree.clone(),
+            id: commit.id.clone(),
+        });
 
         // In a line history, the restricted patch is already here: it came with
         // the list, from the same `git log -L`. Showing it costs no command —

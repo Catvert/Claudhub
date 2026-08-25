@@ -103,6 +103,13 @@ pub enum Cmd {
         range: LogRange,
         limit: usize,
     },
+    /// One commit's full message, author and date — the block the diff shows
+    /// above the commit's files. Not part of the history list: two thousand
+    /// bodies would be read for the one that gets opened.
+    LoadCommitDetail {
+        worktree: WorktreeId,
+        id: String,
+    },
 
     Stage {
         worktree: WorktreeId,
@@ -831,6 +838,7 @@ impl Cmd {
             Self::LoadSummaries { .. } => "LoadSummaries",
             Self::ScanAgents { .. } => "ScanAgents",
             Self::LoadHistory { .. } => "LoadHistory",
+            Self::LoadCommitDetail { .. } => "LoadCommitDetail",
             Self::Stage { .. } => "Stage",
             Self::Unstage { .. } => "Unstage",
             Self::Discard { .. } => "Discard",
@@ -954,6 +962,19 @@ pub enum Evt {
         worktree: WorktreeId,
         path: PathBuf,
         diff: FileDiff,
+    },
+    /// The opened commit's full message, author and date.
+    ///
+    /// It carries the commit's id because it arrives after a git command: the
+    /// selection may have moved on, and this block above another commit's diff
+    /// would caption it with the wrong story.
+    CommitDetail {
+        worktree: WorktreeId,
+        id: String,
+        author: String,
+        date: String,
+        /// The raw message, subject line included.
+        message: String,
     },
     Branches {
         main: PathBuf,

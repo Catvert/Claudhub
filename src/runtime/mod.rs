@@ -595,6 +595,18 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             range,
             limit,
         } => history(worktree, range, limit),
+        Cmd::LoadCommitDetail { worktree, id } => {
+            match crate::git::history::detail(&worktree, &id) {
+                Ok(detail) => vec![Evt::CommitDetail {
+                    worktree,
+                    id,
+                    author: detail.author,
+                    date: detail.date,
+                    message: detail.message,
+                }],
+                Err(e) => vec![fail(Some(worktree), Action::History, e)],
+            }
+        }
         Cmd::LoadSummaries { worktrees } => summaries(worktrees),
         Cmd::ScanAgents {
             worktrees,

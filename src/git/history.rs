@@ -178,6 +178,41 @@ pub fn recent_subjects(dir: &Path, limit: usize) -> Vec<String> {
     .unwrap_or_default()
 }
 
+/// A commit's full story, read for the block the diff shows above its files.
+///
+/// Separate from `Commit` on purpose: the list carries two thousand of those,
+/// and the body — the only field the list does not show — is the one that can
+/// weigh a screenful each.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitDetail {
+    pub author: String,
+    pub date: String,
+    /// The raw message, subject line included (`%B`).
+    pub message: String,
+}
+
+/// Reads one commit's message, author and date.
+pub fn detail(dir: &Path, id: &str) -> Result<CommitDetail> {
+    let format = format!("--format=%an{f}%ar{f}%B", f = "%x1f");
+    let out = git(
+        dir,
+        &["show".into(), "--no-patch".into(), format, id.to_string()],
+    )?;
+    Ok(parse_detail(&out))
+}
+
+fn parse_detail(out: &str) -> CommitDetail {
+    let mut f = out.splitn(3, FIELD);
+    CommitDetail {
+        author: f.next().unwrap_or_default().to_string(),
+        date: f.next().unwrap_or_default().to_string(),
+        // `%B` keeps the newline every commit message ends with, and `git show`
+        // adds its own after the format: both belong to the plumbing, not to
+        // the message.
+        message: f.next().unwrap_or_default().trim_end().to_string(),
+    }
+}
+
 fn parse(out: &str) -> Vec<Commit> {
     super::split_nul(out).filter_map(parse_commit).collect()
 }
@@ -372,6 +407,15 @@ mod tests {
 
     fn record(fields: &[&str]) -> String {
         fields.join("\u{1f}")
+    }
+
+    #[test]
+    fn a_detail_keeps_its_body_and_sheds_the_plumbing_newlines() {
+        let out = "An author\u{1f}2 hours ago\u{1f}Fix the diff\n\nThe body,\non two lines.\n\n";
+        let detail = parse_detail(out);
+        assert_eq!(detail.author, "An author");
+        assert_eq!(detail.date, "2 hours ago");
+        assert_eq!(detail.message, "Fix the diff\n\nThe body,\non two lines.");
     }
 
     #[test]

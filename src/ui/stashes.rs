@@ -389,7 +389,8 @@ impl ClaudhubApp {
         let Some(state) = self.review.get_mut(&worktree) else {
             return;
         };
-        state.commit = Some(hash);
+        state.commit = Some(hash.clone());
+        state.commit_detail = None;
         state.range = range.clone();
         state.selected = None;
         state.diff = None;
@@ -400,6 +401,10 @@ impl ClaudhubApp {
         state
             .pending_files
             .retain(|kept| !matches!(kept, crate::git::DiffRange::Commit { .. }));
+        // The block above the diff: a stash's message says what the work was
+        // taken from, which is exactly what one asks a stash.
+        self.git
+            .send(crate::runtime::Cmd::LoadCommitDetail { worktree, id: hash });
         self.ensure_files(range, cx);
         cx.notify();
     }

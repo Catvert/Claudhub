@@ -266,6 +266,11 @@ pub struct ReviewState {
     pub history_pending: bool,
     /// The commit selected in the history, whose diff is shown.
     pub commit: Option<String>,
+    /// The opened commit's full message, author and date — the block the diff
+    /// paints above its files. `None` until the answer arrives, and cleared on
+    /// every commit change: a block left over would caption the next commit's
+    /// diff with the previous one's story.
+    pub commit_detail: Option<std::rc::Rc<CommitDetail>>,
     /// The review notes taken on this worktree, all files together.
     ///
     /// They live here and not in the diff: a note survives a reload of the file,
@@ -360,6 +365,24 @@ pub enum Jump {
     Last,
 }
 
+/// What the diff's commit block says, ready to paint.
+///
+/// `SharedString`s because the block is rendered on every frame the diff is on
+/// screen; behind an `Rc` so the render can clone the handle, not the message.
+pub struct CommitDetail {
+    /// The commit the detail was read for — the guard against a late answer
+    /// captioning another commit's diff.
+    pub id: String,
+    pub short: gpui::SharedString,
+    pub author: gpui::SharedString,
+    pub date: gpui::SharedString,
+    /// The message's first line.
+    pub subject: gpui::SharedString,
+    /// The rest of the message, blank separator gone. Empty for the common
+    /// one-line message.
+    pub body: gpui::SharedString,
+}
+
 /// The history as the view shows it.
 pub struct History {
     pub commits: Vec<Commit>,
@@ -391,6 +414,7 @@ impl Default for ReviewState {
             history_range: LogRange::All,
             history_pending: false,
             commit: None,
+            commit_detail: None,
             notes: Rc::new(Vec::new()),
             next_note: 1,
             reviewed: Vec::new(),
@@ -2010,6 +2034,13 @@ impl ClaudhubApp {
                 path,
                 diff,
             } => self.file_diff_arrived(worktree, path, diff, cx),
+            Evt::CommitDetail {
+                worktree,
+                id,
+                author,
+                date,
+                message,
+            } => self.commit_detail_arrived(worktree, id, author, date, message, cx),
             Evt::History {
                 worktree,
                 range,
@@ -2430,7 +2461,20 @@ impl ClaudhubApp {
                 })
         });
         let pruned = state.reviewed.len() != before;
-        state.files.insert(range, files);
+        // A commit just opened goes straight to its diff: the click on the
+        // history, a tag or a stash promised reading, and waiting for a second
+        // click on the file list left the centre saying "pick a file". Only
+        // while nothing is selected — a selection is the user's, and the lines
+        // shortcut of `open_commit` sets one before this list arrives — and
+        // only on the worktree being looked at: a late answer must not pull
+        // the screen towards a worktree one has left.
+        let first = (matches!(range, DiffRange::Commit { .. })
+            && state.range == range
+            && state.selected.is_none()
+            && self.active.as_deref() == Some(worktree.as_path()))
+        .then(|| files.first().map(|file| file.path.clone()))
+        .flatten();
+        state.files.insert(range.clone(), files);
         state.rows_changed();
         if gone {
             state.selected = None;
@@ -2439,6 +2483,9 @@ impl ClaudhubApp {
         }
         if pruned {
             self.persist_notes(&worktree, cx);
+        }
+        if let Some(path) = first {
+            self.open_file(worktree, path, range, cx);
         }
     }
 
@@ -2491,6 +2538,48 @@ impl ClaudhubApp {
             // that hunk under the eye, not wherever the list happened to be.
             self.reveal_diff_hunk(row, cx);
         }
+    }
+
+    /// The opened commit's message has arrived. Filed only while the commit is
+    /// still the one on screen: the answer follows a git command, and the
+    /// selection may have moved on during the read.
+    fn commit_detail_arrived(
+        &mut self,
+        worktree: PathBuf,
+        id: String,
+        author: String,
+        date: String,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.review.get_mut(&worktree) else {
+            return;
+        };
+        if state.commit.as_deref() != Some(id.as_str()) {
+            return;
+        }
+        // The abbreviated hash the history computed, when the commit came from
+        // there — a tag's or a stash's commit did not, and a plain truncation
+        // captions those well enough.
+        let short = state
+            .history
+            .as_ref()
+            .and_then(|history| history.commits.iter().find(|c| c.id == id))
+            .map(|c| c.short.clone())
+            .unwrap_or_else(|| id.chars().take(10).collect());
+        let (subject, body) = match message.split_once('\n') {
+            Some((subject, body)) => (subject.to_string(), body.trim_start().to_string()),
+            None => (message, String::new()),
+        };
+        state.commit_detail = Some(std::rc::Rc::new(CommitDetail {
+            id,
+            short: short.into(),
+            author: author.into(),
+            date: date.into(),
+            subject: subject.into(),
+            body: body.into(),
+        }));
+        cx.notify();
     }
 
     fn history_arrived(

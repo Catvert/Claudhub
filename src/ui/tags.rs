@@ -394,7 +394,8 @@ impl ClaudhubApp {
         let Some(state) = self.review.get_mut(&worktree) else {
             return;
         };
-        state.commit = Some(id);
+        state.commit = Some(id.clone());
+        state.commit_detail = None;
         state.range = range.clone();
         state.selected = None;
         state.diff = None;
@@ -407,6 +408,10 @@ impl ClaudhubApp {
         state
             .pending_files
             .retain(|kept| !matches!(kept, crate::git::DiffRange::Commit { .. }));
+        // The block above the diff: a tag's commit is not in the loaded history,
+        // and its message has to be read on its own account.
+        self.git
+            .send(crate::runtime::Cmd::LoadCommitDetail { worktree, id });
         self.ensure_files(range, cx);
         cx.notify();
     }
