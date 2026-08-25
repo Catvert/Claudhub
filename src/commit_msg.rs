@@ -49,16 +49,21 @@ pub fn prompt(recent: &[String], diff: &str) -> String {
         "You are writing the message of the commit these staged changes will produce.\n\n\
          Answer with the message alone: no introductory sentence, no code block, \
          no surrounding quotes.\n\
-         A summary line under 72 characters; then, if and only if the change \
-         calls for it, a blank line and a body saying why rather than what.\n",
+         A summary line under 72 characters; then a blank line and a body of a \
+         few bullet points saying why rather than what. When the diff mixes \
+         unrelated fixes or features, keep them clearly apart: one bullet per \
+         change, never a sentence that lumps them together.\n",
     );
     if recent.is_empty() {
         out.push_str(
             "\nThis repository has no commit yet: write the message in the language of the code.\n",
         );
     } else {
+        // Named as *subject lines*: shown bare, ten body-less examples would
+        // otherwise teach the model to skip the body it was just asked for.
         out.push_str(
-            "\nFollow the language and the conventions of this repository's recent messages:\n\n",
+            "\nFollow the language and the conventions of this repository's recent \
+             subject lines (their bodies are not shown):\n\n",
         );
         for subject in recent {
             out.push_str("  ");
