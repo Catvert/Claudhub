@@ -349,6 +349,11 @@ pub struct DiffColors {
     /// opposite the other. A neutral tint and not a transparent background,
     /// otherwise nothing tells "no line here" from an empty line.
     pub absent_bg: Hsla,
+    /// The words that changed inside a paired line, laid **over** the line's
+    /// tint: same hue, more weight, so the eye lands on the one identifier
+    /// that moved instead of rereading the whole line.
+    pub added_word_bg: Hsla,
+    pub removed_word_bg: Hsla,
 }
 
 impl DiffColors {
@@ -377,6 +382,14 @@ impl DiffColors {
                     a: 0.05,
                     ..rgb(0xc9d1d9)
                 },
+                added_word_bg: Hsla {
+                    a: 0.40,
+                    ..rgb(0x3fb950)
+                },
+                removed_word_bg: Hsla {
+                    a: 0.40,
+                    ..rgb(0xf85149)
+                },
             }
         } else {
             Self {
@@ -401,6 +414,14 @@ impl DiffColors {
                 absent_bg: Hsla {
                     a: 0.05,
                     ..rgb(0x1f2328)
+                },
+                added_word_bg: Hsla {
+                    a: 0.45,
+                    ..rgb(0x2da44e)
+                },
+                removed_word_bg: Hsla {
+                    a: 0.40,
+                    ..rgb(0xcf222e)
                 },
             }
         }

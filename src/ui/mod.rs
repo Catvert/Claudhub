@@ -38,6 +38,7 @@ mod panels;
 mod picker;
 pub mod plugin_view;
 mod preview;
+mod refine;
 mod repos;
 mod review;
 mod scroll;

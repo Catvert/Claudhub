@@ -165,6 +165,7 @@ src/
     workspace.rs    les huit écrans, leur dock et la barre qui les choisit
     multiplexer.rs  l'écran de tous les terminaux — le nom d'un projet
     diff_view.rs    la vue de diff, virtualisée
+    refine.rs       les mots qui changent entre deux versions d'une ligne — pur
     history_view.rs l'historique et son graphe peint
     tags.rs         le panneau des tags, et les quatre gestes sur un tag
     stashes.rs      le panneau des remisages, et les gestes sur un remisage
@@ -890,7 +891,7 @@ produit une liste plausible mais fausse.
 Le même motif partout : la décision vit dans un module **pur**, devant la vue qui
 la peint — `notes.rs`, `sql_history.rs`, `inflight.rs`, `vim.rs`, `motion.rs`,
 `jumps.rs`, `folds.rs`, `notify.rs`, `search.rs`, `merge.rs`, `hunks.rs`,
-`db/scope.rs`, `db/link.rs`.
+`refine.rs`, `db/scope.rs`, `db/link.rs`.
 
 `watch::tests::a_real_write_reaches_the_receiver` est le seul test qui touche le
 système de fichiers ; il prouve la chaîne complète de la surveillance.

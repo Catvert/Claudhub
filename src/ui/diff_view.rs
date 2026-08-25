@@ -40,6 +40,15 @@ pub struct Rendered {
     pub texts: Vec<Vec<SharedString>>,
     /// The `@@ … @@` headers, for the same reason.
     pub headers: Vec<SharedString>,
+    /// The words that changed **inside** a line, as byte ranges of its text,
+    /// indexed like `texts`.
+    ///
+    /// Only the lines the column pairing puts opposite each other carry any:
+    /// a removal facing an addition is two versions of one line, and the
+    /// ranges say which words differ — the block colour alone leaves the eye
+    /// hunting one identifier across a hundred unchanged columns. Computed
+    /// here once, like everything derived from the diff.
+    pub words: Vec<Vec<Vec<std::ops::Range<usize>>>>,
     pub gutter_digits: usize,
     /// The index of the widest row and its length in characters.
     ///
@@ -58,6 +67,16 @@ pub struct Rendered {
     /// produces one per frame — and rewalking the file's text every time would
     /// cost what virtualisation saves.
     pub row_chars: Vec<usize>,
+    /// The diff carries a single version of the file: brand new — only
+    /// additions — or deleted, only removals.
+    ///
+    /// It is what lets the two-column mode decline: pairing such a file puts a
+    /// full column of text against a full column of "nothing opposite" tint,
+    /// and the unified layout shows the same content at the full width. The
+    /// fallback is index-safe by construction — with no removal facing an
+    /// addition, every line becomes exactly one pair, so the split and unified
+    /// lists have the same entries in the same order.
+    pub one_sided: bool,
     /// The file's changes: each a maximal run of added and removed lines, as
     /// the first and last index of the unified list.
     ///
@@ -85,7 +104,10 @@ impl Rendered {
         // text where one does.
         let row_chars: Vec<usize> = rows.iter().map(|row| row_width(&file, *row)).collect();
         let (longest_row, longest_chars) = longest(&row_chars);
+        let split = split_rows(&file, &rows);
         Self {
+            one_sided: one_sided(&file),
+            words: word_marks(&file, &rows, &split),
             row_chars,
             changes: changes(&file, &rows),
             highlights: DiffHighlights::compute(path, &file, theme),
@@ -108,7 +130,7 @@ impl Rendered {
             gutter_digits: gutter_digits(&file),
             longest_row,
             longest_chars,
-            split: split_rows(&file, &rows),
+            split,
             wrap_sizes: std::cell::RefCell::new(None),
             rows,
             file,
@@ -140,6 +162,17 @@ impl Rendered {
     /// A line's text as gpui takes it: an `Arc` clone, not a copy.
     fn line_text(&self, hunk: usize, line: usize) -> Option<&SharedString> {
         self.texts.get(hunk)?.get(line)
+    }
+
+    /// The changed-word ranges of a line — empty for context lines, for a
+    /// change with no counterpart, and for lines the pairing declined to
+    /// refine.
+    pub fn word_ranges(&self, hunk: usize, line: usize) -> &[std::ops::Range<usize>] {
+        self.words
+            .get(hunk)
+            .and_then(|h| h.get(line))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// The text of a range of lines, ready to paste.
@@ -620,6 +653,61 @@ pub fn split_rows(diff: &FileDiff, rows: &[Row]) -> Vec<SplitRow> {
     out
 }
 
+/// The changed words of every paired line, indexed `[hunk][line]`.
+///
+/// The pairing is the one the column view shows: a removal facing an addition
+/// is two versions of one line, and those are the only rows worth refining —
+/// a context line has not changed, and a change with nothing opposite has no
+/// version to differ from. `refine::word_changes` declines the pairs that
+/// share no word, so rank-pairing two unrelated lines marks nothing.
+pub fn word_marks(
+    diff: &FileDiff,
+    rows: &[Row],
+    split: &[SplitRow],
+) -> Vec<Vec<Vec<std::ops::Range<usize>>>> {
+    let mut out: Vec<Vec<Vec<std::ops::Range<usize>>>> = diff
+        .hunks
+        .iter()
+        .map(|hunk| vec![Vec::new(); hunk.lines.len()])
+        .collect();
+    for row in split {
+        // A context line occupies both columns under one index: same line,
+        // nothing to compare.
+        let SplitRow::Pair {
+            old: Some(old),
+            new: Some(new),
+        } = row
+        else {
+            continue;
+        };
+        if old == new {
+            continue;
+        }
+        let line_at = |index: usize| match rows.get(index)? {
+            Row::Line { hunk, line } => Some((*hunk, *line)),
+            Row::Header { .. } => None,
+        };
+        let Some(((old_hunk, old_line), (new_hunk, new_line))) = line_at(*old).zip(line_at(*new))
+        else {
+            continue;
+        };
+        let text_of = |hunk: usize, line: usize, kind: DiffLineKind| {
+            let source = diff.hunks.get(hunk)?.lines.get(line)?;
+            (source.kind == kind).then_some(source.text.as_str())
+        };
+        let Some((old_text, new_text)) = text_of(old_hunk, old_line, DiffLineKind::Removed)
+            .zip(text_of(new_hunk, new_line, DiffLineKind::Added))
+        else {
+            continue;
+        };
+        if let Some((removed, added)) = crate::ui::refine::word_changes(old_text, new_text) {
+            out[old_hunk][old_line] = removed;
+            out[new_hunk][new_line] = added;
+        }
+    }
+    out
+}
+
 fn pair_up(olds: &mut Vec<usize>, news: &mut Vec<usize>, out: &mut Vec<SplitRow>) {
     for i in 0..olds.len().max(news.len()) {
         out.push(SplitRow::Pair {
@@ -629,6 +717,26 @@ fn pair_up(olds: &mut Vec<usize>, news: &mut Vec<usize>, out: &mut Vec<SplitRow>
     }
     olds.clear();
     news.clear();
+}
+
+/// Whether the diff carries a single version of the file — see
+/// `Rendered::one_sided`.
+///
+/// A context line proves two versions at once; otherwise it is the presence of
+/// exactly one of the two kinds that says so — a diff with both has lines to
+/// pair, and an empty one has no version at all.
+pub fn one_sided(file: &FileDiff) -> bool {
+    let mut added = false;
+    let mut removed = false;
+    for line in file.hunks.iter().flat_map(|hunk| hunk.lines.iter()) {
+        match line.kind {
+            DiffLineKind::Context => return false,
+            DiffLineKind::Added => added = true,
+            DiffLineKind::Removed => removed = true,
+            DiffLineKind::NoNewline => {}
+        }
+    }
+    added != removed
 }
 
 /// The number of digits of the file's largest line number.
@@ -1997,6 +2105,7 @@ fn render_row(
                 hunk,
                 line,
                 fg,
+                word_color(source.kind, colors),
                 &search.marks(hunk, line),
                 None,
                 style.armed.then(|| Armed {
@@ -2141,6 +2250,15 @@ fn line_colors(
     }
 }
 
+/// The background of a changed word, on the side that carries it.
+fn word_color(kind: DiffLineKind, colors: &DiffColors) -> Option<gpui::Hsla> {
+    match kind {
+        DiffLineKind::Added => Some(colors.added_word_bg),
+        DiffLineKind::Removed => Some(colors.removed_word_bg),
+        DiffLineKind::Context | DiffLineKind::NoNewline => None,
+    }
+}
+
 /// A line's text, coloured if it is.
 ///
 /// Tabs are rendered as they are by the font: replacing them here would keep the
@@ -2152,6 +2270,10 @@ fn line_content(
     hunk: usize,
     line: usize,
     fg: Option<gpui::Hsla>,
+    // `word_bg`: the background of the words that changed inside this line,
+    // on the side that carries them. `None` on a context line, which has no
+    // other version to differ from.
+    word_bg: Option<gpui::Hsla>,
     marks: &[(std::ops::Range<usize>, gpui::Hsla)],
     // `span`: the slice of the text to show, in **bytes**, when the line is
     // wrapped. Its ends are computed once per line by `wrap_offsets`, where
@@ -2165,35 +2287,52 @@ fn line_content(
     let Some(source) = diff.file.hunks.get(hunk).and_then(|h| h.lines.get(line)) else {
         return div().into_any_element();
     };
+    let words: Vec<(std::ops::Range<usize>, gpui::Hsla)> = match word_bg {
+        Some(bg) => diff
+            .word_ranges(hunk, line)
+            .iter()
+            .map(|range| (range.clone(), bg))
+            .collect(),
+        None => Vec::new(),
+    };
     // The whole line is borrowed — its text is an `Arc` clone and its runs stay
     // where they are; only a wrapped segment owns anything.
     let sliced;
-    let (text, styles, marks) = match span {
+    let (text, styles, words, marks) = match span {
         None => (
             diff.line_text(hunk, line).cloned().unwrap_or_default(),
             diff.highlights.line(hunk, line),
+            words.as_slice(),
             marks,
         ),
         Some(bytes) => {
             sliced = (
                 slice_runs(diff.highlights.line(hunk, line), &bytes),
+                slice_runs(&words, &bytes),
                 slice_runs(marks, &bytes),
             );
             (
                 SharedString::from(source.text[bytes].to_string()),
                 sliced.0.as_slice(),
                 sliced.1.as_slice(),
+                sliced.2.as_slice(),
             )
         }
     };
-    // Three layers, in the order they were decided: the grammar, the search
-    // hits over it, and the underline of the word being pointed at. Each is
-    // laid on the one below rather than replacing it — a hit in coloured code
-    // keeps its colours, and so does an underlined symbol.
-    let base = if marks.is_empty() {
+    // Four layers, in the order they were decided: the grammar, the changed
+    // words of the pair, the search hits, and the underline of the word being
+    // pointed at. Each is laid on the one below rather than replacing it — a
+    // hit in coloured code keeps its colours, and so does an underlined
+    // symbol.
+    let base = if words.is_empty() {
         styles.to_vec()
     } else {
-        crate::ui::highlight::overlay(styles, marks)
+        crate::ui::highlight::overlay(styles, words)
+    };
+    let base = if marks.is_empty() {
+        base
+    } else {
+        crate::ui::highlight::overlay(&base, marks)
     };
     let highlights = match follow.as_ref().and_then(|follow| follow.hovered.clone()) {
         Some(word) => crate::ui::highlight::underline(&base, word),
@@ -2367,6 +2506,7 @@ fn half(
     };
 
     let (bg, fg) = line_colors(source.kind, colors);
+    let word_bg = word_color(source.kind, colors);
     // *This* version's number: a context line has two, and showing the same one
     // on both sides would make the left column lie as soon as the file has
     // gained or lost lines above.
@@ -2428,7 +2568,16 @@ fn half(
         )
         .map(|el| {
             if !wrapped {
-                return el.child(line_content(diff, hunk, line, fg, &marks, None, follow(0)));
+                return el.child(line_content(
+                    diff,
+                    hunk,
+                    line,
+                    fg,
+                    word_bg,
+                    &marks,
+                    None,
+                    follow(0),
+                ));
             }
             // The entry's index, which `row_chars` indexes: finding it by
             // walking `rows` would cost a sweep of the file per visible half
@@ -2452,6 +2601,7 @@ fn half(
                                     hunk,
                                     line,
                                     fg,
+                                    word_bg,
                                     &marks,
                                     Some(bounds[segment]..bounds[segment + 1]),
                                     follow(segment),
@@ -2682,6 +2832,51 @@ mod tests {
         assert_eq!(paired[0].0, paired[0].1);
         assert_eq!(paired[1].1 - paired[1].0, 1);
         assert_eq!(rendered.change_of(paired[1].0, true), Some(1));
+    }
+
+    /// A brand-new or deleted file carries a single version; anything with a
+    /// context line, or with both kinds, has two.
+    #[test]
+    fn a_single_version_file_reads_as_one_sided() {
+        use DiffLineKind::*;
+        let of = |kinds: &[DiffLineKind]| FileDiff {
+            hunks: vec![hunk("@@ a @@", kinds)],
+            binary: false,
+            empty: false,
+        };
+        assert!(one_sided(&of(&[Added, Added, NoNewline])));
+        assert!(one_sided(&of(&[Removed])));
+        assert!(!one_sided(&of(&[Context, Added])));
+        assert!(!one_sided(&of(&[Removed, Added])));
+        assert!(!one_sided(&of(&[NoNewline])));
+    }
+
+    /// The words that changed inside a paired line reach `Rendered`: the
+    /// removal facing an addition carries the ranges of what differs, on both
+    /// sides, and the lines around them carry none.
+    #[test]
+    fn a_paired_line_carries_its_changed_words() {
+        use DiffLineKind::*;
+        let mut one = hunk("@@ a @@", &[Context, Removed, Added, Added]);
+        one.lines[0].text = "let total = 0;".into();
+        one.lines[1].text = "foo(alpha, beta)".into();
+        one.lines[2].text = "foo(alpha, gamma)".into();
+        one.lines[3].text = "bar()".into();
+        let diff = FileDiff {
+            hunks: vec![one],
+            binary: false,
+            empty: false,
+        };
+        let rendered = Rendered::new(Path::new("a.rs"), diff, &Theme::default_light());
+        assert!(rendered.word_ranges(0, 0).is_empty());
+        let removed = rendered.word_ranges(0, 1);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(&"foo(alpha, beta)"[removed[0].clone()], "beta");
+        let added = rendered.word_ranges(0, 2);
+        assert_eq!(&"foo(alpha, gamma)"[added[0].clone()], "gamma");
+        // The addition with nothing opposite has no other version to differ
+        // from.
+        assert!(rendered.word_ranges(0, 3).is_empty());
     }
 
     /// A trailing "no newline" marker belongs to the change before it, and a
