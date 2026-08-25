@@ -149,6 +149,7 @@
   "diff-edit": "Éditer",
   "diff-edit-line": "Éditer cette ligne",
   "diff-edit-tooltip": "Ouvrir le fichier dans l'éditeur",
+  "diff-file-position": "Fichier %{rank}/%{total}",
   "diff-hunks-only": "N'afficher que les modifications",
   "diff-nowrap": "Laisser les lignes courir",
   "diff-split": "Afficher en deux colonnes",

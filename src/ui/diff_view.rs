@@ -1365,7 +1365,9 @@ impl ClaudhubApp {
         let font_size = px(crate::ui::settings::Settings::global(cx).diff_font_size);
         let line_height = line_height(font_size);
 
-        let header = self.render_diff_header(&path, split, wrap, whole_file, mono.clone(), cx);
+        let position = self.diff_file_position(&path, cx);
+        let header =
+            self.render_diff_header(&path, position, split, wrap, whole_file, mono.clone(), cx);
 
         let Some(diff) = diff else {
             return v_flex()
@@ -1388,6 +1390,15 @@ impl ClaudhubApp {
                 .child(hint(tr!("review-no-change"), cx))
                 .into_any_element();
         }
+
+        // A single-version file — created, or deleted — is shown unified even
+        // in two-column mode: pairing it fills one column with "nothing
+        // opposite" tint from top to bottom. The indices survive the swap (see
+        // `Rendered::one_sided`), so everything that reads the setting
+        // elsewhere still names the same rows; the toggle keeps its state and
+        // applies again on the next two-sided file.
+        let split = split && !diff.one_sided;
+        let wrap = wrap && split;
 
         let cell = cell_width(&mono, font_size, window);
         let layout = self.diff_layout(&diff, split, wrap, cell, window, cx);
@@ -1576,9 +1587,13 @@ impl ClaudhubApp {
 
     /// The diff's bar: the path, and the gestures that act on the file as a
     /// whole.
+    #[allow(clippy::too_many_arguments)]
     fn render_diff_header(
         &self,
         path: &Path,
+        // `position`: the file's one-based rank in the displayed list, and the
+        // list's length. `None` when the list does not show the file.
+        position: Option<(usize, usize)>,
         split: bool,
         wrap: bool,
         whole_file: bool,
@@ -1613,13 +1628,48 @@ impl ClaudhubApp {
                     .child(self.step_button("prev-hunk", "arrow-up", -1, false, cx))
                     .child(self.step_button("next-hunk", "arrow-down", 1, false, cx))
                     .child(self.step_button("prev-file", "arrow-left", -1, true, cx))
-                    .child(self.step_button("next-file", "arrow-right", 1, true, cx))
-                    // The one gesture of the bar that carries its word, and it
-                    // sits with the moves rather than with the toggles on the
-                    // right: one walks the changes, something is wrong, one
-                    // opens the file where it is — the writing gesture is the
-                    // end of that walk, and among icons that all speak of
-                    // reading it is worth being read rather than guessed.
+                    // Between the two arrows it counts for: where one stands
+                    // in the walk the arrows make, and how far the end is.
+                    .when_some(position, |el, (rank, total)| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(tr!("diff-file-position", { rank: rank, total: total })),
+                        )
+                    })
+                    .child(self.step_button("next-file", "arrow-right", 1, true, cx)),
+            )
+            .child(
+                // The path and its opening gesture travel together: the button
+                // hugs the file's name — one reads which file, then opens that
+                // file — instead of sitting among the arrows at the far left.
+                // It is this group that gives way. Without `min_w_0` the bar
+                // is as wide as the longest path a review contains.
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .id("diff-path")
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .cursor_pointer()
+                            .font_family(mono)
+                            .tooltip(|window, cx| {
+                                gpui_component::tooltip::Tooltip::new(tr!("action-copy-path"))
+                                    .build(window, cx)
+                            })
+                            .on_click(cx.listener(|this, _, _window, cx| this.copy_diff_path(cx)))
+                            .child(path.display().to_string()),
+                    )
+                    // The one gesture of the bar that carries its word: among
+                    // icons that all speak of reading, the writing one is
+                    // worth being read rather than guessed.
                     .child(
                         Button::new("diff-edit")
                             .ghost()
@@ -1629,24 +1679,6 @@ impl ClaudhubApp {
                             .tooltip(tr!("diff-edit-tooltip"))
                             .on_click(cx.listener(|this, _, _window, cx| this.edit_diff_file(cx))),
                     ),
-            )
-            .child(
-                div()
-                    .id("diff-path")
-                    .flex_1()
-                    // The one that gives way. Without it the bar is as wide as
-                    // the longest path a review contains.
-                    .min_w_0()
-                    .truncate()
-                    .text_sm()
-                    .cursor_pointer()
-                    .font_family(mono)
-                    .tooltip(|window, cx| {
-                        gpui_component::tooltip::Tooltip::new(tr!("action-copy-path"))
-                            .build(window, cx)
-                    })
-                    .on_click(cx.listener(|this, _, _window, cx| this.copy_diff_path(cx)))
-                    .child(path.display().to_string()),
             )
             .child(
                 h_flex()

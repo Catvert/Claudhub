@@ -431,6 +431,24 @@ impl ClaudhubApp {
         self.open_file(worktree, path, range, cx);
     }
 
+    /// Where the reviewed file stands: its one-based rank in the displayed
+    /// list, and the list's length.
+    ///
+    /// The same list the arrows walk — folders collapsed, hidden files out —
+    /// so the count matches what the two buttons around it will actually do.
+    /// `None` when the list does not show the file.
+    pub(super) fn diff_file_position(
+        &mut self,
+        path: &Path,
+        cx: &gpui::App,
+    ) -> Option<(usize, usize)> {
+        let worktree = self.active.clone()?;
+        let range = self.review.get(&worktree)?.range.clone();
+        let files = self.visible_files(&range, cx);
+        let rank = files.iter().position(|file| file == path)? + 1;
+        Some((rank, files.len()))
+    }
+
     /// The changes panel's bar: what one does to the repository, then the
     /// display toggle.
     ///
