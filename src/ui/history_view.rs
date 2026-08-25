@@ -451,6 +451,29 @@ impl ClaudhubApp {
         let count = history.commits.len();
         let gutter = LANE * history.width as f32 + px(6.);
 
+        // Which of the row's fixed columns fit beside the summary. The summary
+        // is what a history is read by — PhpStorm sheds its columns the same
+        // way — so it is the metadata that gives way: without this, the hash,
+        // author and date columns are incompressible and a narrow panel
+        // truncated the summary to nothing. The measured width is the previous
+        // frame's (see the canvas below), `px(0.)` on the very first: starting
+        // bare and gaining columns a frame later beats starting full and
+        // losing them.
+        //
+        // What is measured is the room **beside the graph**: the gutter is
+        // sized by the widest point of the whole graph, and on an all-branches
+        // history it eats a hundred pixels the thresholds used to count as if
+        // the summary could use them.
+        let width = (self.history_laid_out - gutter).max(px(0.));
+        let columns = Columns {
+            hash: width >= px(560.),
+            author: width >= px(440.),
+            date: width >= px(300.),
+            // The chips give way with the author: a `origin/master` chip on a
+            // narrow panel was squeezing the one column a history is read by.
+            chip_cap: if width >= px(440.) { px(140.) } else { px(90.) },
+        };
+
         // The file list under the graph says what else a commit touched. In a
         // line history read line by line there is nothing else: the patch on
         // screen is the answer, and the list would be a second one for a
@@ -462,43 +485,69 @@ impl ClaudhubApp {
             .filter(|_| !(lines_only && matches!(range, LogRange::Lines { .. })));
 
         let graph = v_flex().size_full().child(header).children(find).child(
-            div().flex_1().min_h_0().child(
-                self.scrolled(
-                    "history-bar",
-                    &history_scroll,
-                    crate::ui::motion::Axes::Vertical,
-                    window,
-                    uniform_list("history", count, move |visible, _window, cx| {
-                        visible
-                            .map(|ix| {
-                                // Filtering is impossible here: the graph's
-                                // lines join a row to its neighbours, and
-                                // removing one from the middle would make every
-                                // one of them point at the wrong commit. What
-                                // does not match is dimmed, and stays in place.
-                                let dimmed = !query.is_empty()
-                                    && !history
-                                        .commits
-                                        .get(ix)
-                                        .is_some_and(|c| ClaudhubApp::commit_matches(c, &query));
-                                render_commit(
-                                    &history,
-                                    ix,
-                                    gutter,
-                                    selected.as_deref(),
-                                    row_height,
-                                    dimmed,
-                                    &entity,
-                                    cx,
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .size_full()
-                    .track_scroll(&self.history_scroll.clone()),
-                    cx,
+            div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                // The width the columns were chosen for is always the previous
+                // frame's — the `diff_laid_out` mechanism: measure after
+                // layout, and ask for one more frame when it has moved, which
+                // settles as soon as the resize stops.
+                .child(
+                    canvas(
+                        {
+                            let entity = entity.clone();
+                            move |bounds: Bounds<Pixels>, window, cx| {
+                                entity.update(cx, |this, _| {
+                                    if (bounds.size.width - this.history_laid_out).abs() > px(0.5) {
+                                        this.history_laid_out = bounds.size.width;
+                                        window.request_animation_frame();
+                                    }
+                                });
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+                .child(
+                    self.scrolled(
+                        "history-bar",
+                        &history_scroll,
+                        crate::ui::motion::Axes::Vertical,
+                        window,
+                        uniform_list("history", count, move |visible, _window, cx| {
+                            visible
+                                .map(|ix| {
+                                    // Filtering is impossible here: the graph's
+                                    // lines join a row to its neighbours, and
+                                    // removing one from the middle would make every
+                                    // one of them point at the wrong commit. What
+                                    // does not match is dimmed, and stays in place.
+                                    let dimmed = !query.is_empty()
+                                        && !history.commits.get(ix).is_some_and(|c| {
+                                            ClaudhubApp::commit_matches(c, &query)
+                                        });
+                                    render_commit(
+                                        &history,
+                                        ix,
+                                        gutter,
+                                        selected.as_deref(),
+                                        row_height,
+                                        dimmed,
+                                        columns,
+                                        &entity,
+                                        cx,
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .size_full()
+                        .track_scroll(&self.history_scroll.clone()),
+                        cx,
+                    ),
                 ),
-            ),
         );
 
         // The graph alone does not say what a commit touched: the list of its
@@ -550,6 +599,17 @@ pub fn commit_texts(commits: &[crate::git::Commit]) -> Vec<CommitText> {
         .collect()
 }
 
+/// Which fixed columns fit beside the summary, and how wide a ref chip may
+/// grow — see `render_history`. The summary is what a history is read by, so
+/// everything here gives way before it does.
+#[derive(Clone, Copy)]
+struct Columns {
+    hash: bool,
+    author: bool,
+    date: bool,
+    chip_cap: Pixels,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_commit(
     history: &Rc<History>,
@@ -559,6 +619,7 @@ fn render_commit(
     row_height: Pixels,
     // The commit does not match the running search.
     dimmed: bool,
+    columns: Columns,
     entity: &Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
@@ -612,17 +673,19 @@ fn render_commit(
             entity.update(cx, |this, cx| this.open_commit(index, cx));
         })
         .child(graph)
-        .child(
-            div()
-                .flex_none()
-                // Ten fixed-pitch characters: the length git gives `%h` on a
-                // repository this size, plus a margin.
-                .w(px(84.))
-                .font_family(cx.theme().mono_font_family.clone())
-                .text_xs()
-                .text_color(dot_color)
-                .child(text.short.clone()),
-        )
+        .when(columns.hash, |el| {
+            el.child(
+                div()
+                    .flex_none()
+                    // Ten fixed-pitch characters: the length git gives `%h` on a
+                    // repository this size, plus a margin.
+                    .w(px(84.))
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_xs()
+                    .text_color(dot_color)
+                    .child(text.short.clone()),
+            )
+        })
         .child(
             div()
                 .flex_1()
@@ -634,6 +697,10 @@ fn render_commit(
         .children(text.refs.iter().map(|reference| {
             div()
                 .flex_none()
+                // Capped for the summary's sake: a `origin/feature/…` chip
+                // left whole would squeeze the one column a history is read by.
+                .max_w(columns.chip_cap)
+                .truncate()
                 .px_1()
                 .rounded(cx.theme().radius)
                 .bg(dot_color.opacity(0.18))
@@ -641,24 +708,28 @@ fn render_commit(
                 .text_color(dot_color)
                 .child(reference.clone())
         }))
-        .child(
-            div()
-                .flex_none()
-                .max_w(px(110.))
-                .truncate()
-                .text_xs()
-                .text_color(muted)
-                .child(text.author.clone()),
-        )
-        .child(
-            div()
-                .flex_none()
-                .w(px(88.))
-                .text_right()
-                .text_xs()
-                .text_color(muted)
-                .child(text.date.clone()),
-        )
+        .when(columns.author, |el| {
+            el.child(
+                div()
+                    .flex_none()
+                    .max_w(px(110.))
+                    .truncate()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(text.author.clone()),
+            )
+        })
+        .when(columns.date, |el| {
+            el.child(
+                div()
+                    .flex_none()
+                    .w(px(88.))
+                    .text_right()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(text.date.clone()),
+            )
+        })
         .into_any_element()
 }
 
