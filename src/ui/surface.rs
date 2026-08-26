@@ -539,7 +539,12 @@ impl ClaudhubApp {
                 .filter(|pattern| *pattern != query)
                 .map(str::to_string)
         }) {
-            input.update(cx, |state, cx| state.set_search_query(pattern, false, cx));
+            // Smart case, as everywhere a pattern is read: all-lowercase
+            // ignores case, a capital respects it (`ui::find`'s rule).
+            let insensitive = !pattern.chars().any(char::is_uppercase);
+            input.update(cx, |state, cx| {
+                state.set_search_query(pattern, insensitive, cx)
+            });
         }
         cx.notify();
         true

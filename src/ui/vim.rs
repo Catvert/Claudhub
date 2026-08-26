@@ -2287,19 +2287,26 @@ fn find_in_line(
 
 /// The next occurrence of `needle`, wrapping around the end of the file — which
 /// is what vim does, and what makes `n` reach what is above the caret.
+///
+/// The comparison is `Ctrl+F`'s (smart case: an all-lowercase pattern ignores
+/// case, a capital respects it), and deliberately so — the two searches share
+/// one pattern (`Vim::set_search`), and `hlsearch` already lights occurrences
+/// with that reckoning: a case-sensitive `n` skipped matches it had lit.
 fn find_forward(text: &str, needle: &str, at: usize) -> Option<usize> {
     let from = next_boundary(text, at);
-    if let Some(hit) = text.get(from..).and_then(|rest| rest.find(needle)) {
-        return Some(from + hit);
+    if let Some(hit) = crate::ui::find::find_from(needle, text, from) {
+        return Some(hit.start);
     }
-    text.find(needle)
+    crate::ui::find::find_from(needle, text, 0).map(|hit| hit.start)
 }
 
 fn find_backward(text: &str, needle: &str, at: usize) -> Option<usize> {
-    if let Some(hit) = text[..at.min(text.len())].rfind(needle) {
-        return Some(hit);
-    }
-    text.rfind(needle)
+    let hits = crate::ui::find::find_all(needle, text);
+    hits.iter()
+        .rev()
+        .find(|hit| hit.end <= at)
+        .or_else(|| hits.last())
+        .map(|hit| hit.start)
 }
 
 #[cfg(test)]
@@ -2630,6 +2637,26 @@ tail
         assert_eq!(editor.cursor, 0);
         editor.press("N");
         assert_eq!(editor.cursor, 11);
+    }
+
+    /// The search reads case as `Ctrl+F` does — smart case: an all-lowercase
+    /// pattern ignores case, a capital respects it. The two share one pattern,
+    /// and `hlsearch` already lights occurrences with that reckoning.
+    #[test]
+    fn a_lowercase_search_ignores_case_a_capital_respects_it() {
+        let mut editor = Editor::new("x\nTodo here\ntodo there\n");
+        editor.press("/todo\n");
+        assert_eq!(editor.cursor, 2, "lowercase must reach the capitalised hit");
+        editor.press("n");
+        assert_eq!(editor.cursor, 12);
+        editor.press("N");
+        assert_eq!(editor.cursor, 2);
+
+        let mut editor = Editor::new("x\nTodo here\ntodo there\n");
+        editor.press("/Todo\n");
+        assert_eq!(editor.cursor, 2);
+        editor.press("n");
+        assert_eq!(editor.cursor, 2, "a capital in the pattern is exact");
     }
 
     /// The prompt is shown while it is being typed: it is the only thing that

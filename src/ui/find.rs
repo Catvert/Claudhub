@@ -135,6 +135,16 @@ pub fn find_all(query: &str, haystack: &str) -> Vec<Range<usize>> {
     out
 }
 
+/// The first occurrence at or after `from` — what vim's `/` and `n` step with,
+/// so that both searches read case the same way.
+pub fn find_from(query: &str, haystack: &str, from: usize) -> Option<Range<usize>> {
+    let query = query.trim();
+    if query.is_empty() {
+        return None;
+    }
+    first_match(query, haystack, from)
+}
+
 /// The first occurrence from a given offset.
 ///
 /// A character-by-character comparison rather than a search inside
