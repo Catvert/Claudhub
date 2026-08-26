@@ -1169,11 +1169,16 @@ impl ClaudhubApp {
                     .child(match editing == Some(line) {
                         true => div()
                             .flex_1()
+                            .min_w_0()
                             .child(Input::new(&self.task_edit_input).xsmall())
                             .into_any_element(),
+                        // `min_w_0`: a flex child's floor is its content, so a
+                        // long label widened the row past the panel instead of
+                        // wrapping inside it.
                         false => div()
                             .id(("todo-label", line))
                             .flex_1()
+                            .min_w_0()
                             .text_xs()
                             .cursor_text()
                             .when(done, |el| el.text_color(muted).line_through())
