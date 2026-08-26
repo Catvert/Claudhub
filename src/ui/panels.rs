@@ -1281,9 +1281,6 @@ impl Panel for TerminalPanel {
             .map(|app| app.read(cx).terminal_label(id, cx))
             .unwrap_or_default();
         let rename = app.clone();
-        let last = app
-            .upgrade()
-            .is_some_and(|app| app.read(cx).is_last_terminal(id));
         // In the multiplexer the dock holds every terminal of the window, so
         // the tab is the only thing that can say which project this one is: the
         // repository greyed, then the worktree, the way the picker writes it.
@@ -1391,21 +1388,17 @@ impl Panel for TerminalPanel {
                         });
                     }),
             )
-            // The "+" **follows the last tab** rather than sticking to the
-            // right edge of the bar. That is where the eye finishes reading the
-            // tabs, and a button at the other end of the panel makes one cross
-            // it to open the next terminal. It was the rule of the hand-painted
-            // strip this replaced, and the dock's bar offers no place for it —
-            // so it rides in the last tab's own title.
+            // The "+" rides in **every** tab's title rather than sticking to
+            // the right edge of the bar: the dock's bar offers no place for
+            // it, and carried by the last tab alone it went out of sight as
+            // soon as that tab did — a bar full of terminals scrolls.
             // In the grid it opens on **this tab's** worktree and not on the
             // one being looked at: the bar mixes the projects, so "the current
             // worktree" is not a thing one can read off it.
-            .when(last, |el| {
-                el.child(new_terminal_button(
-                    &self.app,
-                    in_grid.then(|| self.worktree.clone()),
-                ))
-            })
+            .child(new_terminal_button(
+                &self.app,
+                in_grid.then(|| self.worktree.clone()),
+            ))
     }
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {
