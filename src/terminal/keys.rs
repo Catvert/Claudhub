@@ -83,6 +83,11 @@ pub fn key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
         "f11" => tilde(23),
         "f12" => tilde(24),
 
+        // Shift+Enter sends ESC CR, the same bytes as Alt+Enter. There is no
+        // xterm sequence for a shifted Enter, and ESC CR is what the programs
+        // that distinguish "newline" from "submit" listen for — it is what
+        // Claude Code's `/terminal-setup` teaches iTerm2 and VS Code to send.
+        "enter" if m.shift => Some(b"\x1b\r".to_vec()),
         "enter" => alt(vec![b'\r']),
         "tab" if m.shift => Some(b"\x1b[Z".to_vec()),
         "tab" => alt(vec![b'\t']),
@@ -201,6 +206,12 @@ mod tests {
     #[test]
     fn backspace_sends_del_not_backspace() {
         assert_eq!(bytes("backspace", TermMode::empty()), vec![0x7f]);
+    }
+
+    #[test]
+    fn shift_enter_sends_escape_then_carriage_return() {
+        assert_eq!(bytes("shift-enter", TermMode::empty()), b"\x1b\r");
+        assert_eq!(bytes("enter", TermMode::empty()), vec![b'\r']);
     }
 
     #[test]
