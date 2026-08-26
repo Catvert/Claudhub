@@ -20,6 +20,14 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Paint {
     Default,
+    /// The default colour of the **other** role: what an inverse-video swap
+    /// turns `Default` into. It cannot stay `Default` through the swap — a
+    /// default foreground means "theme text colour" and a default background
+    /// means "paint nothing", so swapping the names alone leaves an inverse
+    /// cell on default colours drawn exactly like a normal one. That cell is
+    /// how programs paint a caret or a status bar (Claude Code's input field,
+    /// `less`), and it was invisible.
+    Inverted,
     Rgb(u8, u8, u8),
 }
 
@@ -269,6 +277,14 @@ fn style_of(
     let mut bg = resolve(cell.bg, colors, false, false);
     if inverse {
         std::mem::swap(&mut fg, &mut bg);
+        // A default colour changes meaning with the role it lands in: mark it,
+        // so the view knows to paint the theme's *other* default there.
+        if fg == Paint::Default {
+            fg = Paint::Inverted;
+        }
+        if bg == Paint::Default {
+            bg = Paint::Inverted;
+        }
     }
 
     Segment {
@@ -420,14 +436,27 @@ mod tests {
         assert_eq!(line.segments[1].fg, Paint::Default);
     }
 
+    /// SGR 7 on default colours is how programs paint a caret or a status bar
+    /// (Claude Code's input field, `less`). Swapping two `Default`s changes
+    /// nothing, so the swapped-in defaults must come out marked `Inverted` —
+    /// left `Default`, the cell was drawn like a normal one and the caret was
+    /// invisible.
     #[test]
-    fn inverse_swaps_foreground_and_background() {
+    fn inverse_on_default_colours_is_marked_not_swapped_away() {
         let snap = render("\x1b[7minverse");
         let seg = &snap.lines[0].segments[0];
         assert!(seg.inverse);
-        // The default background has moved to the foreground and vice versa.
-        assert_eq!(seg.fg, Paint::Default);
-        assert_eq!(seg.bg, Paint::Default);
+        assert_eq!(seg.fg, Paint::Inverted);
+        assert_eq!(seg.bg, Paint::Inverted);
+    }
+
+    /// With explicit colours the swap alone carries the inversion.
+    #[test]
+    fn inverse_swaps_explicit_colours() {
+        let snap = render("\x1b[31;7minverse");
+        let seg = &snap.lines[0].segments[0];
+        assert_eq!(seg.bg, Paint::Rgb(0xcd, 0x31, 0x31));
+        assert_eq!(seg.fg, Paint::Inverted);
     }
 
     #[test]

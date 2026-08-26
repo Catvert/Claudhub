@@ -887,6 +887,9 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus.is_focused(window);
         let default_fg = cx.theme().foreground;
+        // What an inverse cell on default colours paints its glyph in: the
+        // colour behind the grid, set on the root below.
+        let default_bg = cx.theme().background;
         self.sync_font(cx);
         // Both only answer for the snapshot on screen: they run when it — or
         // the font under it — has moved, never on a frame that repeats one.
@@ -953,6 +956,7 @@ impl Render for TerminalView {
                         cell,
                         &font_family,
                         default_fg,
+                        default_bg,
                         selection_bg,
                     ))
             })
@@ -1228,6 +1232,7 @@ fn line_boxes(
     cell: gpui::Size<Pixels>,
     family: &SharedString,
     default_fg: Hsla,
+    default_bg: Hsla,
     selection_bg: Hsla,
 ) -> Vec<gpui::Div> {
     let mut out = Vec::new();
@@ -1245,6 +1250,10 @@ fn line_boxes(
                 // The default background is the window's: painting nothing
                 // avoids one rectangle per cell.
                 Paint::Default => None,
+                // Inverse video on default colours: the background takes the
+                // theme's text colour — this is a program's caret or status
+                // bar, and it must show.
+                Paint::Inverted => Some(default_fg),
                 Paint::Rgb(r, g, b) => Some(rgb(r, g, b)),
             }
         };
@@ -1267,6 +1276,7 @@ fn line_boxes(
             },
             color: match seg.fg {
                 Paint::Default => default_fg,
+                Paint::Inverted => default_bg,
                 Paint::Rgb(r, g, b) => rgb(r, g, b),
             },
             background_color: None,
@@ -1466,9 +1476,8 @@ impl OpenTerminal {}
 
 impl ClaudhubApp {
     /// The terminals of the worktree being looked at, in the order they opened.
-    /// An iterator and not a list: three of its callers only ask whether there
-    /// is one, and one of them — `is_last_terminal` — is asked by every tab at
-    /// every frame.
+    /// An iterator and not a list: most of its callers only ask whether there
+    /// is one.
     pub(super) fn terminals_of<'a>(
         &'a self,
         worktree: &'a Path,
@@ -1723,28 +1732,6 @@ impl ClaudhubApp {
                 cx,
             );
         });
-    }
-
-    /// Is this the worktree's last terminal? The one whose tab carries the "+".
-    ///
-    /// The last of the **worktree** and not of the tab group: dragged into two
-    /// splits, the terminals still make one list, and one "+" is the right
-    /// number. Asked of the application and not of the group, which is in the
-    /// middle of its own render when a tab asks — reading it there is the
-    /// panic this module has already paid for twice.
-    pub(super) fn is_last_terminal(&self, view: gpui::EntityId) -> bool {
-        let Some(terminal) = self
-            .terminals
-            .iter()
-            .find(|terminal| terminal.view.entity_id() == view)
-        else {
-            return false;
-        };
-        // Walked from the end and stopped at the first: the answer is the
-        // worktree's last terminal, and every tab asks at every frame.
-        self.terminals_of(&terminal.worktree)
-            .next_back()
-            .is_some_and(|last| last.view.entity_id() == view)
     }
 
     /// What a terminal's tab says: the name given by hand, or the program.
