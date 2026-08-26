@@ -28,6 +28,11 @@ pub enum Paint {
     /// how programs paint a caret or a status bar (Claude Code's input field,
     /// `less`), and it was invisible.
     Inverted,
+    /// The default foreground, faint — SGR 2 on unstyled text, which is how a
+    /// program greys a placeholder or a hint. It cannot be a fixed grey: the
+    /// theme decides what "normal text" looks like, so it decides what "dim
+    /// normal text" looks like too.
+    DimDefault,
     Rgb(u8, u8, u8),
 }
 
@@ -320,7 +325,6 @@ fn resolve(
 ) -> Paint {
     let index = match color {
         Color::Spec(rgb) => return Paint::Rgb(rgb.r, rgb.g, rgb.b),
-        Color::Named(NamedColor::Foreground) if !bold && !dim => return Paint::Default,
         Color::Named(named) => {
             let named = if bold {
                 named.to_bright()
@@ -329,13 +333,21 @@ fn resolve(
             } else {
                 named
             };
-            if named == NamedColor::Background {
-                return Paint::Default;
+            match named {
+                NamedColor::Background => return Paint::Default,
+                // The theme's text colour, whatever the theme says it is —
+                // bold included, the weight already carrying the emphasis.
+                // These used to fall through to the palette fallback, whose
+                // answer past index 255 was a fixed near-white: "dim" text
+                // came out *brighter* than normal text on a dark theme
+                // (Claude Code's placeholder), and light-on-light on a pale
+                // one.
+                NamedColor::Foreground | NamedColor::BrightForeground => {
+                    return Paint::Default;
+                }
+                NamedColor::DimForeground => return Paint::DimDefault,
+                _ => named as usize,
             }
-            if named == NamedColor::Foreground {
-                return Paint::Default;
-            }
-            named as usize
         }
         Color::Indexed(ix) => {
             let ix = if bold && ix < 8 { ix + 8 } else { ix };
@@ -346,8 +358,25 @@ fn resolve(
     if let Some(rgb) = colors[index] {
         return Paint::Rgb(rgb.r, rgb.g, rgb.b);
     }
+    // The dim variants have no palette entry of their own: alacritty's
+    // renderer derives them by scaling the base colour, and so do we — the
+    // generic fallback below would answer near-white.
+    if (NamedColor::DimBlack as usize..=NamedColor::DimWhite as usize).contains(&index) {
+        let base = index - NamedColor::DimBlack as usize;
+        let (r, g, b) = match colors[base] {
+            Some(rgb) => (rgb.r, rgb.g, rgb.b),
+            None => default_palette(base),
+        };
+        return Paint::Rgb(dim_component(r), dim_component(g), dim_component(b));
+    }
     let (r, g, b) = default_palette(index);
     Paint::Rgb(r, g, b)
+}
+
+/// alacritty's DIM_FACTOR: what its own renderer multiplies an unconfigured
+/// dim colour by.
+fn dim_component(c: u8) -> u8 {
+    (f32::from(c) * 0.66) as u8
 }
 
 /// Default xterm palette: 16 named colours, a 6×6×6 cube, then 24 greys.
@@ -457,6 +486,41 @@ mod tests {
         let seg = &snap.lines[0].segments[0];
         assert_eq!(seg.bg, Paint::Rgb(0xcd, 0x31, 0x31));
         assert_eq!(seg.fg, Paint::Inverted);
+    }
+
+    /// SGR 2 on unstyled text — Claude Code's placeholder. The palette
+    /// fallback past index 255 answered a fixed near-white, so "dim" came out
+    /// *brighter* than normal text on a dark theme.
+    #[test]
+    fn dim_default_text_stays_the_themes_business() {
+        let snap = render("\x1b[2mfaint");
+        assert_eq!(snap.lines[0].segments[0].fg, Paint::DimDefault);
+    }
+
+    /// Bold on the default colour is a weight, not a repaint: promoted to
+    /// `BrightForeground` it fell on the same fixed near-white — light grey
+    /// on white under a pale theme.
+    #[test]
+    fn bold_default_text_keeps_the_default_colour() {
+        let snap = render("\x1b[1mloud");
+        let seg = &snap.lines[0].segments[0];
+        assert!(seg.bold);
+        assert_eq!(seg.fg, Paint::Default);
+    }
+
+    /// A dim *named* colour has no palette entry either: it is the base
+    /// colour scaled, as alacritty's own renderer draws it.
+    #[test]
+    fn dim_named_colours_scale_their_base() {
+        let snap = render("\x1b[2;31mfaint red");
+        assert_eq!(
+            snap.lines[0].segments[0].fg,
+            Paint::Rgb(
+                dim_component(0xcd),
+                dim_component(0x31),
+                dim_component(0x31)
+            )
+        );
     }
 
     #[test]

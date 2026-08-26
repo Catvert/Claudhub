@@ -1254,6 +1254,7 @@ fn line_boxes(
                 // theme's text colour — this is a program's caret or status
                 // bar, and it must show.
                 Paint::Inverted => Some(default_fg),
+                Paint::DimDefault => Some(default_fg.opacity(0.66)),
                 Paint::Rgb(r, g, b) => Some(rgb(r, g, b)),
             }
         };
@@ -1277,6 +1278,9 @@ fn line_boxes(
             color: match seg.fg {
                 Paint::Default => default_fg,
                 Paint::Inverted => default_bg,
+                // Faint through opacity rather than a mixed colour: the theme
+                // background shows through, which is what "dim" reads as.
+                Paint::DimDefault => default_fg.opacity(0.66),
                 Paint::Rgb(r, g, b) => rgb(r, g, b),
             },
             background_color: None,
