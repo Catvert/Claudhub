@@ -26,8 +26,6 @@ pub struct Upstream {
 pub struct Branch {
     pub name: String,
     pub kind: BranchKind,
-    /// True for HEAD's branch in the checkout being queried.
-    pub is_head: bool,
     /// Date of the last commit, relative ("3 days ago"), as git phrases it — we
     /// have no need to recompute it.
     pub date: String,
@@ -38,7 +36,19 @@ pub struct Branch {
     pub upstream: Option<Upstream>,
     /// Worktree that already has this branch checked out. Git refuses two
     /// checkouts of the same branch: saying so beforehand beats an error.
+    ///
+    /// It is also the only honest answer to "which branch is *here*": the list
+    /// is read once per repository, in the **main** worktree, so `%(HEAD)`
+    /// marked the main's branch whatever checkout was being looked at — the
+    /// picker said "here" on the wrong row from every linked worktree.
     pub checked_out_at: Option<PathBuf>,
+}
+
+impl Branch {
+    /// Is this the branch checked out in `worktree`?
+    pub fn is_head_in(&self, worktree: &Path) -> bool {
+        self.checked_out_at.as_deref() == Some(worktree)
+    }
 }
 
 /// Lists the branches, local first then the remotes with no local twin, from
@@ -102,7 +112,11 @@ const REFNAME_FIELD: usize = 7;
 fn parse_ref(line: &str, locals: &HashSet<&str>) -> Option<Branch> {
     let mut f = line.split('\0');
     let name = f.next()?.to_string();
-    let head = f.next().unwrap_or("").trim() == "*";
+    // `%(HEAD)` stays in the format so the field count holds, but it is not
+    // read: it marks the HEAD of the checkout the command ran in — the main
+    // worktree — and "here" is a per-worktree question, answered by
+    // `checked_out_at`.
+    let _head = f.next();
     let date = f.next().unwrap_or("").to_string();
     let subject = f.next().unwrap_or("").to_string();
     let upstream_name = f.next().unwrap_or("");
@@ -138,7 +152,6 @@ fn parse_ref(line: &str, locals: &HashSet<&str>) -> Option<Branch> {
     Some(Branch {
         name,
         kind,
-        is_head: head,
         date,
         subject,
         author,
@@ -341,7 +354,6 @@ mod tests {
         let b = parse_ref(line, &locals).unwrap();
         assert_eq!(b.name, "main");
         assert_eq!(b.kind, BranchKind::Local);
-        assert!(b.is_head);
         assert_eq!(b.subject, "Fix the rendering");
         assert_eq!(b.author, "Zoé");
         let up = b.upstream.unwrap();
@@ -354,7 +366,6 @@ mod tests {
         let line = "wt/try\0 \0yesterday\0Draft\0\0";
         let b = parse_ref(line, &HashSet::from(["wt/try"])).unwrap();
         assert_eq!(b.kind, BranchKind::Local, "a local name may contain a /");
-        assert!(!b.is_head);
         assert_eq!(b.upstream, None);
         // A missing field — output from before the author was added — does not
         // make the read fail.

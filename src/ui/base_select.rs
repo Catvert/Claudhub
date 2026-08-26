@@ -30,14 +30,16 @@ pub struct BaseChoice {
 }
 
 impl BaseChoice {
-    pub fn of(branch: &Branch) -> Self {
+    /// `worktree` is the checkout being looked at: "here" is its branch, not
+    /// the one git marks as HEAD where the list was read (the main worktree).
+    pub fn of(branch: &Branch, worktree: &std::path::Path) -> Self {
         Self {
             name: SharedString::from(branch.name.clone()),
             subject: SharedString::from(branch.subject.clone()),
             author: SharedString::from(branch.author.clone()),
             date: SharedString::from(branch.date.clone()),
             remote: branch.kind == BranchKind::Remote,
-            is_head: branch.is_head,
+            is_head: branch.is_head_in(worktree),
         }
     }
 

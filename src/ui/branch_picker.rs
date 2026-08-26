@@ -214,11 +214,14 @@ impl BranchPicker {
             return Vec::new();
         };
         let app = app.read(cx);
-        let Some(repo) = app.active_path().and_then(|w| app.repo_of(&w)) else {
+        let Some(worktree) = app.active_path() else {
+            return Vec::new();
+        };
+        let Some(repo) = app.repo_of(&worktree) else {
             return Vec::new();
         };
         let query = self.query.read(cx).value();
-        let rows = rows_for(&repo.branches, &query);
+        let rows = rows_for(&repo.branches, &query, Some(&worktree));
         // **A filter ignores the folds**, the window's rule for every foldable
         // list: a query that found something and shows nothing is read as a
         // query that found nothing.

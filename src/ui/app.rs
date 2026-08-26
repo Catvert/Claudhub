@@ -3402,7 +3402,11 @@ impl ClaudhubApp {
         let Some(repo) = self.repo_of(&worktree) else {
             return;
         };
-        let choices: Vec<BaseChoice> = repo.branches.iter().map(BaseChoice::of).collect();
+        let choices: Vec<BaseChoice> = repo
+            .branches
+            .iter()
+            .map(|branch| BaseChoice::of(branch, &worktree))
+            .collect();
         let current = self
             .review
             .get(&worktree)

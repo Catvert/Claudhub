@@ -9,7 +9,7 @@
 //! decision — which branch appears, under which heading — which is free of gpui
 //! and tested, and the two gestures, which are dialogs.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gpui::{prelude::*, Context, Window};
 
@@ -57,7 +57,12 @@ impl BranchRow {
 ///
 /// A free, tested function: it is this view's only decision — which one
 /// appears, under which group.
-pub(super) fn rows_for(branches: &[Branch], filter: &str) -> Vec<Row> {
+///
+/// `active` is the worktree being looked at, and it is what "here" means: the
+/// list is read once per repository, so git's own HEAD mark points at the main
+/// worktree's branch whatever checkout is on screen — the picker said "here"
+/// on `dev` from every linked worktree, and refused to merge it.
+pub(super) fn rows_for(branches: &[Branch], filter: &str, active: Option<&Path>) -> Vec<Row> {
     let needle = filter.trim().to_lowercase();
     let mut rows = Vec::new();
     for kind in [BranchKind::Local, BranchKind::Remote] {
@@ -69,7 +74,7 @@ pub(super) fn rows_for(branches: &[Branch], filter: &str) -> Vec<Row> {
                 Row::Branch(BranchRow {
                     name: branch.name.clone(),
                     kind: branch.kind,
-                    is_head: branch.is_head,
+                    is_head: active.is_some_and(|worktree| branch.is_head_in(worktree)),
                     detail: detail(branch),
                     ahead: branch.upstream.as_ref().map(|up| up.ahead).unwrap_or(0),
                     behind: branch.upstream.as_ref().map(|up| up.behind).unwrap_or(0),
@@ -353,7 +358,6 @@ mod tests {
         Branch {
             name: name.into(),
             kind,
-            is_head: false,
             date: "hier".into(),
             subject: "Un commit".into(),
             author: "Zoé".into(),
@@ -369,7 +373,7 @@ mod tests {
             branch("origin/feature", BranchKind::Remote),
             branch("wt/essai", BranchKind::Local),
         ];
-        let names: Vec<String> = rows_for(&branches, "")
+        let names: Vec<String> = rows_for(&branches, "", None)
             .into_iter()
             .map(|row| match row {
                 Row::Group(BranchKind::Local) => "== locales".into(),
@@ -395,14 +399,14 @@ mod tests {
             branch("main", BranchKind::Local),
             branch("origin/Feature-X", BranchKind::Remote),
         ];
-        let rows = rows_for(&branches, "feature");
+        let rows = rows_for(&branches, "feature", None);
         // No local matches any more: its heading disappears with it, otherwise
         // a title followed by nothing reads like a display glitch.
         assert_eq!(
             rows,
             vec![
                 Row::Group(BranchKind::Remote),
-                match rows_for(&branches, "")
+                match rows_for(&branches, "", None)
                     .into_iter()
                     .find(|r| matches!(r, Row::Branch(b) if b.name == "origin/Feature-X"))
                 {
@@ -423,6 +427,44 @@ mod tests {
         assert_eq!(detail(&b), "");
     }
 
+    /// The reported gesture: from the worktree `wt/integration-tests`, the
+    /// picker said "here" on `dev` — the **main** worktree's branch, the one
+    /// git marks as HEAD where the list is read — and refused to merge it.
+    /// "Here" is the branch the worktree on screen holds, nothing else.
+    #[test]
+    fn here_is_the_branch_of_the_worktree_looked_at_not_the_mains() {
+        let main = PathBuf::from("/repo");
+        let linked = PathBuf::from("/repo-wt/integration");
+        let mut dev = branch("dev", BranchKind::Local);
+        dev.checked_out_at = Some(main);
+        let mut wt = branch("wt/integration-tests", BranchKind::Local);
+        wt.checked_out_at = Some(linked.clone());
+        let branches = vec![dev, wt];
+
+        let heads: Vec<(String, bool)> = rows_for(&branches, "", Some(&linked))
+            .into_iter()
+            .filter_map(|row| match row {
+                Row::Branch(row) => Some((row.name, row.is_head)),
+                Row::Group(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            heads,
+            vec![("dev".into(), false), ("wt/integration-tests".into(), true)]
+        );
+        // And `dev`, held elsewhere, is "taken" — greyed, not mergeable-onto —
+        // while the branch of this very worktree is not.
+        let rows = rows_for(&branches, "", Some(&linked));
+        let taken: Vec<bool> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Branch(row) => Some(row.taken()),
+                Row::Group(_) => None,
+            })
+            .collect();
+        assert_eq!(taken, vec![true, false]);
+    }
+
     #[test]
     fn divergence_comes_from_the_upstream() {
         let mut b = branch("main", BranchKind::Local);
@@ -431,7 +473,7 @@ mod tests {
             ahead: 2,
             behind: 3,
         });
-        let rows = rows_for(std::slice::from_ref(&b), "");
+        let rows = rows_for(std::slice::from_ref(&b), "", None);
         let Some(Row::Branch(row)) = rows.into_iter().nth(1) else {
             panic!("une branche");
         };

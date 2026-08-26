@@ -1165,9 +1165,11 @@ impl ClaudhubApp {
             .find(|repo| repo.main == creation.main)
             .map(|repo| repo.branches.as_slice())
             .unwrap_or_default();
+        // The default start point: the branch the **main** worktree holds —
+        // what git's HEAD mark used to say, the list being read there.
         let head = branches
             .iter()
-            .find(|branch| branch.is_head)
+            .find(|branch| branch.is_head_in(&creation.main))
             .map(|branch| branch.name.clone());
         let danger = cx.theme().danger;
 
@@ -1310,7 +1312,10 @@ impl ClaudhubApp {
                 cx,
             ));
         }
-        for (index, entry) in crate::ui::branches::rows_for(branches, &needle)
+        // No worktree is "here" in this dialog: a branch checked out anywhere
+        // — the main's included — cannot take a second checkout, and `None`
+        // is what makes `taken()` say so for all of them.
+        for (index, entry) in crate::ui::branches::rows_for(branches, &needle, None)
             .into_iter()
             .enumerate()
         {
