@@ -503,6 +503,26 @@ impl ClaudhubApp {
                         }
                     })),
             )
+            // Throwing everything away sits beside putting it aside: the two
+            // gestures that act on *this list* as a whole, before the three
+            // that talk to the remote. Disabled on a clean tree — the button
+            // then says there is nothing to lose, which is the answer.
+            .child({
+                let clean = self
+                    .active_review()
+                    .map(|state| state.status.is_clean())
+                    .unwrap_or(true);
+                Button::new("rollback-all")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("undo-2"))
+                    .tooltip(tr!("action-rollback-all"))
+                    .loading(self.active_running(Action::Discard))
+                    .disabled(!has_active || clean)
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.confirm_rollback_all(window, cx)),
+                    )
+            })
             // Right after the fetch, and before the two that talk to the
             // remote: putting the changes aside is what one does *to this
             // list*, and it is the gesture that comes before pulling onto a
@@ -836,6 +856,36 @@ impl ClaudhubApp {
                             Cmd::Discard { worktree, paths }
                         });
                         cx.notify();
+                    });
+                    true
+                })
+        });
+    }
+
+    /// Asks for confirmation before rolling the whole worktree back to HEAD.
+    ///
+    /// The same dialog as `confirm_removal`, for the same reason, only wider:
+    /// this one takes every file in the list at once, untracked ones included.
+    fn confirm_rollback_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let entity = cx.entity();
+        let (title, warning) = (tr!("rollback-all-title"), tr!("rollback-all-warning"));
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let (worktree, entity) = (worktree.clone(), entity.clone());
+            dialog
+                .title(title.clone())
+                .child(div().text_xs().child(warning.clone()))
+                .overlay_closable(false)
+                .close_button(false)
+                .footer(super::dialogs::confirm())
+                .on_ok(move |_, _window, cx| {
+                    entity.update(cx, |this, cx| {
+                        let cmd = Cmd::RollbackAll {
+                            worktree: worktree.clone(),
+                        };
+                        this.start(Some(worktree.clone()), Action::Discard, cmd, cx);
                     });
                     true
                 })

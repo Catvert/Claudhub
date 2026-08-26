@@ -180,6 +180,21 @@ pub fn clean(dir: &Path, paths: &[PathBuf]) -> Result<()> {
     git(dir, &args).map(|_| ())
 }
 
+/// Puts the whole worktree back to `HEAD`: index, tracked files, and the
+/// untracked leftovers. Destructive on every count — nothing in git brings
+/// any of it back.
+///
+/// `reset --hard` and not a `restore` over the file list: a file staged as
+/// added is not in `HEAD`, so restoring it leaves it behind as untracked and
+/// the clean pass, computed before, would not know to take it. `clean` runs
+/// even if the reset failed for want of a `HEAD` (a repository with no
+/// commit): the untracked files are the only changes such a tree can have.
+pub fn rollback_all(dir: &Path) -> Result<()> {
+    let reset = git(dir, &["reset", "--hard", "HEAD"]).map(|_| ());
+    let clean = git(dir, &["clean", "-f", "-d"]).map(|_| ());
+    reset.and(clean)
+}
+
 /// What `HEAD` holds for a path, or `None` when it holds nothing.
 ///
 /// `None` covers the two cases the editor's gutter treats alike — a file git

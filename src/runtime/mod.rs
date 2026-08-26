@@ -659,6 +659,9 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
         Cmd::Delete { worktree, paths } => write_then_refresh(worktree, Action::Delete, |dir| {
             repo::clean(dir, &paths).map(|_| String::new())
         }),
+        Cmd::RollbackAll { worktree } => write_then_refresh(worktree, Action::Discard, |dir| {
+            repo::rollback_all(dir).map(|_| String::new())
+        }),
         Cmd::ApplyHunk {
             worktree,
             patch,

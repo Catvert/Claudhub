@@ -140,6 +140,14 @@ pub enum Cmd {
         worktree: WorktreeId,
         paths: Vec<PathBuf>,
     },
+    /// Rolls the whole worktree back to `HEAD` — index, tracked files and
+    /// untracked ones alike. One command and not a `Discard` plus a `Delete`
+    /// built from the file list: a file staged as added is in neither, and
+    /// three read workers share the queue, so nothing orders two commands.
+    /// Destructive: the confirmation is the caller's responsibility.
+    RollbackAll {
+        worktree: WorktreeId,
+    },
     /// Stages (or unstages, with `reverse`) a single hunk.
     ApplyHunk {
         worktree: WorktreeId,
@@ -853,6 +861,7 @@ impl Cmd {
             Self::Unstage { .. } => "Unstage",
             Self::Discard { .. } => "Discard",
             Self::Delete { .. } => "Delete",
+            Self::RollbackAll { .. } => "RollbackAll",
             Self::ApplyHunk { .. } => "ApplyHunk",
             Self::Commit { .. } => "Commit",
             Self::SuggestMessage { .. } => "SuggestMessage",
