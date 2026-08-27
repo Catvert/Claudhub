@@ -122,19 +122,37 @@ fn list(worktree: &Path, bin: &Path) -> Result<String> {
     crate::wsl::no_console(&mut cmd);
     let out = crate::git::wait_with_timeout(cmd, TIMEOUT, || "pest --list-tests".to_string())?;
     if !out.status.success() {
-        // Pest writes some failures to stdout (a test file that does not
-        // parse) and others to stderr (PHP itself missing): quote whichever
-        // said something.
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let said = if stderr.trim().is_empty() {
-            stdout
-        } else {
-            stderr
-        };
-        anyhow::bail!("{}", said.trim());
+        anyhow::bail!(
+            "{}",
+            complaint(
+                &String::from_utf8_lossy(&out.stdout),
+                &String::from_utf8_lossy(&out.stderr),
+                &out.status.to_string(),
+            )
+        );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// What a failed listing has to say, both streams read.
+///
+/// Pest writes its own failures to **stdout** (a test file that does not
+/// parse, a bootstrap that threw), PHP writes to stderr — and stderr also
+/// carries noise that is there on every run, like an ini loading Xdebug
+/// twice. Showing only one stream picked the noise over the explanation:
+/// that is exactly what happened, so both speak, stdout first. The exit
+/// status stands in when neither said anything.
+fn complaint(stdout: &str, stderr: &str, status: &str) -> String {
+    let said = [stdout.trim(), stderr.trim()]
+        .iter()
+        .filter(|part| !part.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if said.is_empty() {
+        return status.to_string();
+    }
+    said
 }
 
 /// Reads the listing: one `Test` per test, dataset entries collapsed.
@@ -386,6 +404,27 @@ mod tests {
     fn what_is_not_a_test_line_is_ignored() {
         assert!(parse("   INFO  No tests found.\n").is_empty());
         assert!(parse("").is_empty());
+    }
+
+    /// The failure the panel quotes must be the explanation, not the noise:
+    /// stderr carries lines that are there on every run — an ini loading
+    /// Xdebug twice — while Pest explains itself on stdout. Both are shown,
+    /// stdout first, and the exit status only when neither spoke.
+    #[test]
+    fn a_failure_quotes_both_streams_before_the_status() {
+        assert_eq!(
+            complaint(
+                "  ERROR  ParseError in tests/Unit/BrokenTest.php  ",
+                "Cannot load Xdebug - it was already loaded",
+                "exit status: 1",
+            ),
+            "ERROR  ParseError in tests/Unit/BrokenTest.php\nCannot load Xdebug - it was already loaded"
+        );
+        assert_eq!(
+            complaint("", "PHP Fatal error: out of memory", "exit status: 255"),
+            "PHP Fatal error: out of memory"
+        );
+        assert_eq!(complaint("", "  ", "exit status: 139"), "exit status: 139");
     }
 
     #[test]
