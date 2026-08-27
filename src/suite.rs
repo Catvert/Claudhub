@@ -1179,6 +1179,45 @@ pub fn group_prefix(group: &str, depth: usize) -> &str {
     short
 }
 
+/// Does a run's target cover this listed test? What the tree shows as
+/// loading while the run goes. The claim is structural — undone from the
+/// same builders that made the target — rather than the regexes played
+/// back: a filter is either the one `test_filter` writes for this very
+/// test, or a `^prefix` of the escaped `Class::`, which is what
+/// `class_filter` and `scope_filter` both emit.
+pub fn covers(target: &Target, test: &Test) -> bool {
+    if target.runner != test.runner {
+        return false;
+    }
+    match target.runner {
+        Runner::Pest => match &target.filter {
+            None => true,
+            Some(filter) => {
+                filter == &test_filter(test)
+                    || filter.strip_prefix('^').is_some_and(|body| {
+                        format!("{}::", escape_class(&test.class)).starts_with(body)
+                    })
+            }
+        },
+        Runner::Vitest => {
+            let in_path = match &target.path {
+                None => true,
+                Some(path) => test.class == *path || test.class.starts_with(&format!("{path}/")),
+            };
+            in_path
+                && match &target.filter {
+                    None => true,
+                    Some(filter) => filter == &format!("^{}$", test.pattern),
+                }
+        }
+        // A Jest row is a file; a target narrows by path or takes all.
+        Runner::Jest => match &target.path {
+            None => true,
+            Some(path) => test.method == *path || test.method.starts_with(&format!("{path}/")),
+        },
+    }
+}
+
 /// What runs one listed test, in its runner's words.
 pub fn test_target(test: &Test) -> Target {
     match test.runner {
@@ -1525,6 +1564,41 @@ at tests/Feature/HttpTest.php:3</failure>
         );
         // A class with no `Tests\` prefix is its own folder from depth zero.
         assert_eq!(scope_filter("LegacyTest", 0), "^LegacyTest::");
+    }
+
+    /// While a run goes, the tree shows as loading what it covers: the one
+    /// test, the class, a folder, or everything — never another runner's rows.
+    #[test]
+    fn a_target_covers_what_it_runs() {
+        let tests = pest_parse(LISTING);
+        let (math, sibling, feature) = (&tests[1], &tests[2], &tests[5]);
+        assert!(covers(&Target::everything(Runner::Pest), math));
+        assert!(!covers(&Target::everything(Runner::Vitest), math));
+        let one = test_target(math);
+        assert!(covers(&one, math));
+        assert!(!covers(&one, sibling));
+        let class = Target {
+            filter: Some(class_filter(&math.class)),
+            ..Target::everything(Runner::Pest)
+        };
+        assert!(covers(&class, math));
+        assert!(covers(&class, sibling));
+        assert!(!covers(&class, feature));
+        let scope = scope_target(math, 0);
+        assert!(covers(&scope, math));
+        assert!(!covers(&scope, feature));
+
+        let js = vitest_rows(
+            r#"[
+              {"name": "answers", "file": "/w/src/http.test.js"},
+              {"name": "sums", "file": "/w/tests/unit/math.test.js"}
+            ]"#,
+            Path::new("/w"),
+        );
+        assert!(covers(&test_target(&js[1]), &js[1]));
+        assert!(!covers(&test_target(&js[1]), &js[0]));
+        assert!(covers(&scope_target(&js[1], 1), &js[1]));
+        assert!(!covers(&scope_target(&js[1], 1), &js[0]));
     }
 
     #[test]

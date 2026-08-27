@@ -123,6 +123,9 @@ pub struct RunState {
     pub id: u64,
     /// What was launched, as the bar says it — "pest", "vitest src/x"…
     pub label: SharedString,
+    /// The campaign's targets, kept for the tree: while the run goes, the
+    /// rows a target covers show as loading instead of their last dot.
+    pub targets: Vec<Target>,
     pub running: bool,
     /// Unix seconds.
     pub started_at: i64,
@@ -181,6 +184,9 @@ pub enum Row {
         /// green when every one has run green, nothing while any is still
         /// unknown — a folder must not claim more than its rows do.
         status: Option<Status>,
+        /// A running campaign covers something under this folder: the header
+        /// shows as loading, so a closed tree still says what runs.
+        running: bool,
     },
     Test {
         test: usize,
@@ -205,6 +211,7 @@ pub fn rows(
     tests: &[Test],
     labels: &[SharedString],
     statuses: &[Option<Status>],
+    running: &[bool],
     query: &str,
     expanded: &HashSet<String>,
     only_failed: bool,
@@ -219,9 +226,9 @@ pub fn rows(
             || crate::ui::find::matches(query, crate::suite::short_class(&test.class))
     };
 
-    // First pass: how many kept tests under each folder, how many red, and
-    // how many carry a verdict at all.
-    let mut counts: HashMap<String, (u32, u32, u32)> = HashMap::new();
+    // First pass: how many kept tests under each folder, how many red, how
+    // many carry a verdict at all, and whether one is being run right now.
+    let mut counts: HashMap<String, (u32, u32, u32, bool)> = HashMap::new();
     for (at, test) in tests.iter().enumerate() {
         if !kept(at, test) {
             continue;
@@ -233,6 +240,7 @@ pub fn rows(
             entry.0 += 1;
             entry.1 += u32::from(status == Some(Status::Failed));
             entry.2 += u32::from(status.is_some());
+            entry.3 |= running.get(at).copied().unwrap_or(false);
         }
     }
 
@@ -258,7 +266,8 @@ pub fn rows(
             let above_open = chain.iter().all(|(_, open)| *open);
             let open = filtering || expanded.contains(prefix);
             if above_open {
-                let (tests, failed, marked) = counts.get(prefix).copied().unwrap_or_default();
+                let (tests, failed, marked, running) =
+                    counts.get(prefix).copied().unwrap_or_default();
                 let status = if failed > 0 {
                     Some(Status::Failed)
                 } else if tests > 0 && marked == tests {
@@ -273,6 +282,7 @@ pub fn rows(
                     tests,
                     failed,
                     status,
+                    running,
                 });
             }
             chain.push((prefix.clone(), open));
@@ -521,12 +531,12 @@ impl ClaudhubApp {
         }
         let since = self.pest_run_seq + 1;
         let mut id = since;
-        for target in targets {
+        for target in &targets {
             id = self.pest_run_seq + 1;
             self.pest_run_seq = id;
             self.git.send(Cmd::TestsRun {
                 worktree: worktree.clone(),
-                target,
+                target: target.clone(),
                 id,
             });
         }
@@ -536,6 +546,7 @@ impl ClaudhubApp {
                 since,
                 id,
                 label,
+                targets,
                 running: true,
                 started_at: now(),
                 lines: VecDeque::new(),
@@ -824,6 +835,19 @@ impl ClaudhubApp {
             .any(|test| test.runner == Runner::Pest)
             .then(|| self.pest_modes());
         let bar = self.render_pest_bar(tests.len(), pending, only_failed, modes, cx);
+        // What the campaign under way covers: those rows show as loading —
+        // the left panel says what runs, not only the run panel.
+        let running: Rc<Vec<bool>> = Rc::new(match self.pest_runs.get(&active) {
+            Some(run) if run.running => tests
+                .iter()
+                .map(|test| {
+                    run.targets
+                        .iter()
+                        .any(|target| crate::suite::covers(target, test))
+                })
+                .collect(),
+            _ => vec![false; tests.len()],
+        });
         let state = self.pest.get(&active);
         let statuses = state.map(|s| s.statuses.clone()).unwrap_or_default();
         let labels = state.map(|s| s.labels.clone()).unwrap_or_default();
@@ -833,6 +857,7 @@ impl ClaudhubApp {
             &tests,
             &labels,
             &statuses,
+            &running,
             &query,
             expanded,
             only_failed,
@@ -868,7 +893,8 @@ impl ClaudhubApp {
                                         render_dir(index, &tests, row, &look, &entity)
                                     }
                                     Some(row @ Row::Test { .. }) => render_test(
-                                        index, &tests, &labels, &statuses, row, &look, &entity,
+                                        index, &tests, &labels, &statuses, &running, row, &look,
+                                        &entity,
                                     ),
                                     None => div().into_any_element(),
                                 })
@@ -1116,6 +1142,7 @@ fn render_dir(
         tests: under,
         failed,
         status,
+        running,
     } = row
     else {
         return div().into_any_element();
@@ -1163,7 +1190,17 @@ fn render_dir(
             .xsmall()
             .text_color(look.muted),
         )
-        .child(icon(dot).xsmall().text_color(dot_colour))
+        // While a run covers something under here, the header spins: a
+        // closed tree still says what runs.
+        .child(if running {
+            Spinner::new()
+                .xsmall()
+                .icon(icon("loader-circle"))
+                .color(look.muted)
+                .into_any_element()
+        } else {
+            icon(dot).xsmall().text_color(dot_colour).into_any_element()
+        })
         .child(
             div()
                 .flex_1()
@@ -1222,6 +1259,7 @@ fn render_test(
     tests: &Rc<Vec<Test>>,
     labels: &Rc<Vec<SharedString>>,
     statuses: &Rc<Vec<Option<Status>>>,
+    running: &Rc<Vec<bool>>,
     row: Row,
     look: &Look,
     entity: &Entity<ClaudhubApp>,
@@ -1244,6 +1282,7 @@ fn render_test(
         // Never ran: a hollow dot, not a claim.
         None => ("circle-dashed", look.muted),
     };
+    let spinning = running.get(at).copied().unwrap_or(false);
     let run = entity.clone();
     let menu = entity.clone();
     let (for_click, for_menu) = (tests.clone(), tests.clone());
@@ -1271,7 +1310,15 @@ fn render_test(
                 });
             }
         })
-        .child(icon(dot).xsmall().text_color(colour))
+        .child(if spinning {
+            Spinner::new()
+                .xsmall()
+                .icon(icon("loader-circle"))
+                .color(look.muted)
+                .into_any_element()
+        } else {
+            icon(dot).xsmall().text_color(colour).into_any_element()
+        })
         .child(div().flex_1().min_w_0().truncate().text_sm().child(label))
         .when(test.datasets > 0, |el| {
             el.child(
@@ -1760,7 +1807,15 @@ mod tests {
         let tests = suite();
         let (labels, statuses) = plain(&tests);
         assert_eq!(
-            rows(&tests, &labels, &statuses, "", &HashSet::new(), false),
+            rows(
+                &tests,
+                &labels,
+                &statuses,
+                &vec![false; tests.len()],
+                "",
+                &HashSet::new(),
+                false
+            ),
             [
                 Row::Dir {
                     test: 0,
@@ -1769,6 +1824,7 @@ mod tests {
                     tests: 3,
                     failed: 0,
                     status: None,
+                    running: false,
                 },
                 Row::Dir {
                     test: 3,
@@ -1777,6 +1833,7 @@ mod tests {
                     tests: 1,
                     failed: 0,
                     status: None,
+                    running: false,
                 },
             ]
         );
@@ -1789,7 +1846,15 @@ mod tests {
         let tests = suite();
         let (labels, statuses) = plain(&tests);
         let expanded: HashSet<String> = [String::from("Unit")].into();
-        let shown = rows(&tests, &labels, &statuses, "", &expanded, false);
+        let shown = rows(
+            &tests,
+            &labels,
+            &statuses,
+            &vec![false; tests.len()],
+            "",
+            &expanded,
+            false,
+        );
         assert_eq!(
             shown,
             [
@@ -1800,6 +1865,7 @@ mod tests {
                     tests: 3,
                     failed: 0,
                     status: None,
+                    running: false,
                 },
                 Row::Dir {
                     test: 0,
@@ -1808,6 +1874,7 @@ mod tests {
                     tests: 2,
                     failed: 0,
                     status: None,
+                    running: false,
                 },
                 Row::Dir {
                     test: 2,
@@ -1816,6 +1883,7 @@ mod tests {
                     tests: 1,
                     failed: 0,
                     status: None,
+                    running: false,
                 },
                 Row::Dir {
                     test: 3,
@@ -1824,6 +1892,7 @@ mod tests {
                     tests: 1,
                     failed: 0,
                     status: None,
+                    running: false,
                 },
             ]
         );
@@ -1839,6 +1908,7 @@ mod tests {
             &tests,
             &labels,
             &statuses,
+            &vec![false; tests.len()],
             "answers",
             &HashSet::new(),
             false,
@@ -1853,6 +1923,7 @@ mod tests {
                     tests: 1,
                     failed: 0,
                     status: None,
+                    running: false,
                 },
                 Row::Dir {
                     test: 3,
@@ -1861,6 +1932,7 @@ mod tests {
                     tests: 1,
                     failed: 0,
                     status: None,
+                    running: false,
                 },
                 Row::Test { test: 3, depth: 2 },
             ]
@@ -1878,7 +1950,15 @@ mod tests {
             None,
             Some(Status::Passed),
         ];
-        let shown = rows(&tests, &labels, &statuses, "", &HashSet::new(), true);
+        let shown = rows(
+            &tests,
+            &labels,
+            &statuses,
+            &vec![false; tests.len()],
+            "",
+            &HashSet::new(),
+            true,
+        );
         assert_eq!(
             shown,
             [
@@ -1889,6 +1969,7 @@ mod tests {
                     tests: 1,
                     failed: 1,
                     status: Some(Status::Failed),
+                    running: false,
                 },
                 Row::Dir {
                     test: 1,
@@ -1897,6 +1978,7 @@ mod tests {
                     tests: 1,
                     failed: 1,
                     status: Some(Status::Failed),
+                    running: false,
                 },
                 Row::Test { test: 1, depth: 2 },
             ]
@@ -1911,7 +1993,15 @@ mod tests {
         let (labels, _) = plain(&tests);
         // Unit\MathTest both green, Unit\Forms\BillTest never ran.
         let statuses = vec![Some(Status::Passed), Some(Status::Passed), None, None];
-        let shown = rows(&tests, &labels, &statuses, "", &HashSet::new(), false);
+        let shown = rows(
+            &tests,
+            &labels,
+            &statuses,
+            &vec![false; tests.len()],
+            "",
+            &HashSet::new(),
+            false,
+        );
         let Some(Row::Dir { status, .. }) = shown.first() else {
             panic!("a folder first");
         };
@@ -1919,7 +2009,15 @@ mod tests {
         assert_eq!(*status, None);
         // Open it: MathTest is all green, Forms still hollow.
         let expanded: HashSet<String> = [String::from("Unit")].into();
-        let shown = rows(&tests, &labels, &statuses, "", &expanded, false);
+        let shown = rows(
+            &tests,
+            &labels,
+            &statuses,
+            &vec![false; tests.len()],
+            "",
+            &expanded,
+            false,
+        );
         let dirs: Vec<Option<Status>> = shown
             .iter()
             .filter_map(|row| match row {
@@ -1930,6 +2028,34 @@ mod tests {
             })
             .collect();
         assert_eq!(dirs, [Some(Status::Passed), None]);
+    }
+
+    /// While a campaign runs, the covered rows show as loading — and a
+    /// closed folder says so for what it hides.
+    #[test]
+    fn a_running_campaign_spins_its_folders() {
+        let tests = suite();
+        let (labels, statuses) = plain(&tests);
+        // The campaign runs Unit\MathTest only.
+        let running = vec![true, true, false, false];
+        let shown = rows(
+            &tests,
+            &labels,
+            &statuses,
+            &running,
+            "",
+            &HashSet::new(),
+            false,
+        );
+        let dirs: Vec<bool> = shown
+            .iter()
+            .filter_map(|row| match row {
+                Row::Dir { running, .. } => Some(*running),
+                _ => None,
+            })
+            .collect();
+        // `Unit` spins, `Feature` does not.
+        assert_eq!(dirs, [true, false]);
     }
 
     /// A narrated line is coloured by the symbol it starts with — the
