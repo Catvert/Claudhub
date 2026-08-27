@@ -59,6 +59,10 @@ pub struct PestState {
     pub expanded: HashSet<String>,
     /// Show only the tests whose last fate was a failure.
     pub only_failed: bool,
+    /// Run Pest with `--headed`: its browser tests then show the browser
+    /// instead of running headless. A session choice, not persisted — one
+    /// watches a test debug, one does not live like that.
+    pub headed: bool,
     /// Per-row caches aligned with the report's tests, rebuilt when the
     /// report or the marks change: reading two thousand marks through a
     /// `HashMap` on every frame is what this avoids.
@@ -467,6 +471,14 @@ impl ClaudhubApp {
             .is_some_and(|worktree| self.pest_runs.contains_key(worktree))
     }
 
+    /// Is the headed toggle on for the worktree being looked at?
+    fn headed_tests(&self) -> bool {
+        self.active
+            .as_deref()
+            .and_then(|worktree| self.pest.get(worktree))
+            .is_some_and(|state| state.headed)
+    }
+
     /// Launches a followed run — one target, or a campaign of several: "run
     /// everything" on a checkout carrying two runners is two commands, queued
     /// on the same worker and followed as one. The run panel comes forward,
@@ -474,7 +486,7 @@ impl ClaudhubApp {
     fn launch_tests(
         &mut self,
         label: SharedString,
-        targets: Vec<Target>,
+        mut targets: Vec<Target>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -483,6 +495,12 @@ impl ClaudhubApp {
         };
         if targets.is_empty() {
             return;
+        }
+        // The bar's headed toggle applies to every Pest launch, whatever the
+        // gesture that built the target — a mode, not a per-run choice.
+        let headed = self.headed_tests();
+        for target in &mut targets {
+            target.headed = headed && target.runner == Runner::Pest;
         }
         // One campaign at a time per worktree: the worker would only queue a
         // second one, and two accounts racing for the same dots would paint
@@ -709,12 +727,14 @@ impl ClaudhubApp {
         let Some(worktree) = self.active.clone() else {
             return;
         };
+        let mut target = target.clone();
+        target.headed = self.headed_tests() && target.runner == Runner::Pest;
         self.open_terminal(
             &worktree,
             crate::ui::terminal_view::Launch {
                 command: Some((
                     "sh".into(),
-                    vec!["-lc".into(), crate::suite::terminal_command(target)],
+                    vec!["-lc".into(), crate::suite::terminal_command(&target)],
                 )),
                 env: HashMap::new(),
                 label,
@@ -767,14 +787,14 @@ impl ClaudhubApp {
                 let message = SharedString::from(message.clone());
                 return v_flex()
                     .size_full()
-                    .child(self.render_pest_bar(0, pending, only_failed, cx))
+                    .child(self.render_pest_bar(0, pending, only_failed, None, cx))
                     .child(failed_pest(message, cx))
                     .into_any_element();
             }
             Some(Report::Missing) => {
                 return v_flex()
                     .size_full()
-                    .child(self.render_pest_bar(0, pending, only_failed, cx))
+                    .child(self.render_pest_bar(0, pending, only_failed, None, cx))
                     .child(missing_pest(pending, cx))
                     .into_any_element();
             }
@@ -783,7 +803,13 @@ impl ClaudhubApp {
 
         let query = self.query(Pane::Tests, cx);
         let find = self.render_find(Pane::Tests, cx);
-        let bar = self.render_pest_bar(tests.len(), pending, only_failed, cx);
+        // The headed toggle only shows where Pest is: `--headed` is its
+        // browser plugin's word, and the other runners never read it.
+        let headed = tests
+            .iter()
+            .any(|test| test.runner == Runner::Pest)
+            .then(|| self.headed_tests());
+        let bar = self.render_pest_bar(tests.len(), pending, only_failed, headed, cx);
         let state = self.pest.get(&active);
         let statuses = state.map(|s| s.statuses.clone()).unwrap_or_default();
         let labels = state.map(|s| s.labels.clone()).unwrap_or_default();
@@ -848,6 +874,7 @@ impl ClaudhubApp {
         count: usize,
         pending: bool,
         only_failed: bool,
+        headed: Option<bool>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let last = self
@@ -923,6 +950,24 @@ impl ClaudhubApp {
                         this.reset_tests(cx);
                     })),
             )
+            .when_some(headed, |el, headed| {
+                el.child(
+                    Button::new("pest-headed")
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("eye"))
+                        .tooltip(tr!("tests-headed"))
+                        .selected(headed)
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            if let Some(active) = this.active.clone() {
+                                if let Some(state) = this.pest.get_mut(&active) {
+                                    state.headed = !state.headed;
+                                }
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
             .child(
                 Button::new("pest-run-all")
                     .ghost()
@@ -1223,12 +1268,19 @@ fn row_menu(
             })
     });
     popup.item({
-        let line = crate::suite::terminal_command(&crate::suite::test_target(test));
+        let entity = entity.clone();
+        let target = crate::suite::test_target(test);
         // For the terminal one already has open: the panel's gesture, portable.
         PopupMenuItem::new(tr!("tests-copy-filter"))
             .icon(icon("copy"))
             .on_click(move |_, _window, cx| {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(line.clone()));
+                let mut target = target.clone();
+                entity.update(cx, |this, _| {
+                    target.headed = this.headed_tests() && target.runner == Runner::Pest;
+                });
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                    crate::suite::terminal_command(&target),
+                ));
             })
     })
 }

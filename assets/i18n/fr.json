@@ -680,6 +680,7 @@
   "tests-count": "%{n} tests",
   "tests-empty": "Aucun test.",
   "tests-failed": "Les tests n'ont pas pu être listés",
+  "tests-headed": "Navigateur visible (--headed) pour les prochains lancements Pest",
   "tests-loading": "Lecture des tests…",
   "tests-missing": "Aucun lanceur de tests ici — ni vendor/bin/pest, ni vitest ou jest dans node_modules.",
   "tests-more-failures": "%{n} autres échecs dans la sortie ci-dessous",

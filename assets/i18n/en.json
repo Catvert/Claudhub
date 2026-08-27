@@ -680,6 +680,7 @@
   "tests-count": "%{n} tests",
   "tests-empty": "No test.",
   "tests-failed": "The tests could not be listed",
+  "tests-headed": "Visible browser (--headed) for the next Pest runs",
   "tests-loading": "Reading the tests…",
   "tests-missing": "No test runner here — neither vendor/bin/pest, nor vitest or jest in node_modules.",
   "tests-more-failures": "%{n} more failures in the output below",

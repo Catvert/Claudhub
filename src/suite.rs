@@ -105,6 +105,10 @@ pub struct Target {
     /// The path names one exact file — `--runTestsByPath` for Jest, where a
     /// bare path is a pattern whose dots match anything.
     pub exact: bool,
+    /// Pest only: `--headed`, the flag its browser plugin reads to show the
+    /// browser instead of running it headless. Off for the other runners —
+    /// they never see the field.
+    pub headed: bool,
 }
 
 impl Target {
@@ -114,6 +118,7 @@ impl Target {
             filter: None,
             path: None,
             exact: false,
+            headed: false,
         }
     }
 }
@@ -603,6 +608,9 @@ pub fn run(
             cmd.arg("--colors=never")
                 .arg("--log-junit")
                 .arg(&account_file);
+            if target.headed {
+                cmd.arg("--headed");
+            }
             if let Some(filter) = &target.filter {
                 cmd.arg("--filter").arg(filter);
             }
@@ -1130,6 +1138,7 @@ pub fn test_target(test: &Test) -> Target {
             filter: Some(test_filter(test)),
             path: None,
             exact: false,
+            headed: false,
         },
         // The file narrows the collection, the anchored title picks the test.
         Runner::Vitest => Target {
@@ -1137,6 +1146,7 @@ pub fn test_target(test: &Test) -> Target {
             filter: Some(format!("^{}$", test.pattern)),
             path: Some(test.class.clone()),
             exact: true,
+            headed: false,
         },
         // A Jest row is a file: the path is the whole narrowing.
         Runner::Jest => Target {
@@ -1144,6 +1154,7 @@ pub fn test_target(test: &Test) -> Target {
             filter: None,
             path: Some(test.method.clone()),
             exact: true,
+            headed: false,
         },
     }
 }
@@ -1157,6 +1168,7 @@ pub fn scope_target(test: &Test, depth: usize) -> Target {
             filter: Some(scope_filter(&test.class, depth)),
             path: None,
             exact: false,
+            headed: false,
         },
         Runner::Vitest => {
             let prefix = group_prefix(&test.class, depth).to_string();
@@ -1167,6 +1179,7 @@ pub fn scope_target(test: &Test, depth: usize) -> Target {
                 filter: None,
                 path: Some(prefix),
                 exact,
+                headed: false,
             }
         }
         Runner::Jest => Target {
@@ -1174,6 +1187,7 @@ pub fn scope_target(test: &Test, depth: usize) -> Target {
             filter: None,
             path: Some(group_prefix(&test.class, depth).to_string()),
             exact: false,
+            headed: false,
         },
     }
 }
@@ -1184,6 +1198,9 @@ pub fn terminal_command(target: &Target) -> String {
     let mut parts: Vec<String> = vec![target.runner.binary().to_string()];
     match target.runner {
         Runner::Pest => {
+            if target.headed {
+                parts.push("--headed".into());
+            }
             if let Some(filter) = &target.filter {
                 parts.push("--filter".into());
                 parts.push(filter.clone());
@@ -1473,6 +1490,7 @@ at tests/Feature/HttpTest.php:3</failure>
                 filter: Some("^sums 2 \\+ 2$".into()),
                 path: Some("tests/unit/math.test.js".into()),
                 exact: true,
+                headed: false,
             }
         );
     }
@@ -1494,6 +1512,7 @@ at tests/Feature/HttpTest.php:3</failure>
                 filter: None,
                 path: Some("src/http.test.js".into()),
                 exact: true,
+                headed: false,
             }
         );
     }
@@ -1562,6 +1581,7 @@ at tests/Feature/HttpTest.php:3</failure>
                 filter: None,
                 path: Some("tests/unit".into()),
                 exact: false,
+                headed: false,
             }
         );
         assert!(scope_target(test, 2).exact);
@@ -1575,6 +1595,7 @@ at tests/Feature/HttpTest.php:3</failure>
             filter: Some("^LegacyTest::testOldSchool$".into()),
             path: None,
             exact: false,
+            headed: false,
         };
         // No quoting needed: `^`, `:` and a trailing `$` are all literal to a
         // POSIX shell, and `join_command` only quotes what would not be.
@@ -1582,11 +1603,22 @@ at tests/Feature/HttpTest.php:3</failure>
             terminal_command(&pest),
             "vendor/bin/pest --filter ^LegacyTest::testOldSchool$"
         );
+        // Headed comes first, before the narrowing — the browser plugin pops
+        // it from the arguments before PHPUnit reads them.
+        let headed = Target {
+            headed: true,
+            ..pest.clone()
+        };
+        assert_eq!(
+            terminal_command(&headed),
+            "vendor/bin/pest --headed --filter ^LegacyTest::testOldSchool$"
+        );
         let vitest = Target {
             runner: Runner::Vitest,
             filter: Some("^sums 2 \\+ 2$".into()),
             path: Some("tests/unit/math.test.js".into()),
             exact: true,
+            headed: false,
         };
         assert_eq!(
             terminal_command(&vitest),
@@ -1597,6 +1629,7 @@ at tests/Feature/HttpTest.php:3</failure>
             filter: None,
             path: Some("src/http.test.js".into()),
             exact: true,
+            headed: false,
         };
         assert_eq!(
             terminal_command(&jest),
