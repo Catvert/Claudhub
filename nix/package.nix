@@ -64,7 +64,7 @@ rustPlatform.buildRustPackage {
   # bouge. Un `just ci` ne le dit pas : la porte qui le voit est `nix build`,
   # et elle n'est dans aucune des quatre. C'est ce qui a laissé la 0.2.1 sortir
   # avec un hash périmé.
-  cargoHash = "sha256-60Oltw5hG0HYCALb/JlSg3IdlEtPTUyoVh8rX4a6Qfw=";
+  cargoHash = "sha256-JZFhpu/asXOI4Bfz45tJCQB7N4mb3BFyIbaRzU0aKe0=";
 
   nativeBuildInputs = [
     pkg-config
