@@ -538,6 +538,27 @@ pub struct Run {
 /// one's half-written file.
 static RUN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// The highest run id asked to stop. **Outside the queues**, like the watcher
+/// and the language servers, and for their reason: a stop has to reach a
+/// worker already busy with the very run it names — queued behind it, it
+/// would arrive after the death it asks for. Send ids only grow, so "stop
+/// everything up to this id" also empties the campaign's queued remainder,
+/// which each refuses on arrival.
+static STOP_BELOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Asks every run up to `id` to stop — the one in flight is killed at the
+/// next poll, the queued ones refuse as they arrive.
+pub fn request_stop(id: u64) {
+    STOP_BELOW.fetch_max(id, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn stop_requested(id: u64) -> bool {
+    STOP_BELOW.load(std::sync::atomic::Ordering::Relaxed) >= id
+}
+
+/// What a stopped run answers: recognisable, and shown as it is.
+pub const STOPPED: &str = "interrupted";
+
 /// Runs what the target names, saying each line as it comes, and reads the
 /// account at the end.
 ///
@@ -554,8 +575,14 @@ static RUN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new
 pub fn run(
     worktree: &Path,
     target: &Target,
+    id: u64,
     progress: &(dyn Fn(String) + Sync),
 ) -> std::result::Result<Run, String> {
+    // A campaign stopped while this command still queued: refuse on arrival
+    // rather than boot a suite nobody is waiting for.
+    if stop_requested(id) {
+        return Err(STOPPED.to_string());
+    }
     let bin = worktree.join(target.runner.binary());
     if !bin.is_file() {
         return Err(format!("{} is missing", target.runner.binary()));
@@ -605,7 +632,7 @@ pub fn run(
             }
         }
     }
-    let result = follow(cmd, target.runner.label(), progress);
+    let result = follow(cmd, target.runner.label(), id, progress);
     let account = std::fs::read_to_string(&account_file).unwrap_or_default();
     let _ = std::fs::remove_file(&account_file);
     let (status, kept, stderr, duration_ms) = result?;
@@ -654,6 +681,7 @@ pub fn run(
 fn follow(
     mut cmd: Command,
     what: &str,
+    id: u64,
     progress: &(dyn Fn(String) + Sync),
 ) -> std::result::Result<(String, Vec<String>, String, u64), String> {
     use std::io::BufRead;
@@ -696,12 +724,21 @@ fn follow(
     let deadline = started + RUN_TIMEOUT;
     let mut kept: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     let mut err_tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-    let overtime = loop {
+    // The wait wakes at least four times a second even when the suite says
+    // nothing: that poll is what lets the stop button reach a worker whose
+    // whole queue is this very run.
+    const POLL: Duration = Duration::from_millis(250);
+    let ended = loop {
+        if stop_requested(id) {
+            break Some(STOPPED.to_string());
+        }
         let now = std::time::Instant::now();
         if now >= deadline {
-            break true;
+            break Some(format!(
+                "{what} did not answer within {RUN_TIMEOUT:?} and was interrupted"
+            ));
         }
-        match incoming.recv_timeout(deadline - now) {
+        match incoming.recv_timeout((deadline - now).min(POLL)) {
             Ok((is_err, line)) => {
                 let line = strip_ansi(&line);
                 let tail = if is_err { &mut err_tail } else { &mut kept };
@@ -711,19 +748,17 @@ fn follow(
                 tail.push_back(line.clone());
                 progress(line);
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break false,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break true,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break None,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
         }
     };
-    if overtime {
+    if let Some(why) = ended {
         let _ = child.kill();
         let _ = child.wait();
         for reader in readers {
             let _ = reader.join();
         }
-        return Err(format!(
-            "{what} did not answer within {RUN_TIMEOUT:?} and was interrupted"
-        ));
+        return Err(why);
     }
     for reader in readers {
         let _ = reader.join();

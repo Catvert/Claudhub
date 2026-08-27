@@ -712,6 +712,13 @@ pub enum Cmd {
         /// worktree since closed must not paint another's panel.
         id: u64,
     },
+    /// Stops every test run up to `id` — the one in flight and its
+    /// campaign's queued remainder. **Never queued**: `Handle::send` hands it
+    /// straight to the suite module, the watcher's route — queued behind the
+    /// run it names, it would arrive after the death it asks for.
+    TestsStop {
+        id: u64,
+    },
 
     /// Reads the state and the addresses of a project's worktrees.
     ///
@@ -947,6 +954,7 @@ impl Cmd {
             Self::JustLoad { .. } => "JustLoad",
             Self::TestsLoad { .. } => "TestsLoad",
             Self::TestsRun { .. } => "TestsRun",
+            Self::TestsStop { .. } => "TestsStop",
             Self::WtScan { .. } => "WtScan",
             Self::WtLinks { .. } => "WtLinks",
             Self::PluginCall { .. } => "PluginCall",

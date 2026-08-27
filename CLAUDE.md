@@ -276,8 +276,10 @@ attend, et c'est la panne qu'on ne diagnostique pas.
   attendre un `wt up`. Le **relevé** des suites reste au fond, exprès :
   relire la liste ne doit pas attendre derrière un run.
 
-Hors des files, deux voies directes : la surveillance de fichiers, remise au
-thread du surveillant, et les serveurs de langage, remis à leur hôte.
+Hors des files, trois voies directes : la surveillance de fichiers, remise au
+thread du surveillant ; les serveurs de langage, remis à leur hôte ; et le
+**stop d'un run de tests**, posé en drapeau que le worker sonde — rangé dans
+sa file, il arriverait après la mort qu'il demande.
 
 ### Le mode distant
 

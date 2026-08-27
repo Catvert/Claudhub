@@ -320,6 +320,12 @@ impl Handle {
                 let Some(cmd) = route_lsp(lsp, cmd) else {
                     return;
                 };
+                // A stop must overtake the run it names: handed straight to
+                // the suite module, whose worker polls for it.
+                if let Cmd::TestsStop { id } = cmd {
+                    crate::suite::request_stop(id);
+                    return;
+                }
                 let queue = match queue_of(&cmd) {
                     Queue::Network => network,
                     Queue::Long => long,
@@ -1204,8 +1210,15 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
                     line,
                 })
             };
-            let run = crate::suite::run(&worktree, &target, &progress);
+            let run = crate::suite::run(&worktree, &target, id, &progress);
             vec![Evt::TestsRan { worktree, id, run }]
+        }
+        // Routed out of the queues by `Handle::send`; the arm exists because
+        // the match is exhaustive, and answers the same way if one ever
+        // arrives by another path.
+        Cmd::TestsStop { id } => {
+            crate::suite::request_stop(id);
+            vec![]
         }
         Cmd::AddWorktree {
             main,

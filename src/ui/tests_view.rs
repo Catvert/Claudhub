@@ -170,6 +170,10 @@ pub enum Row {
         /// Kept tests under this folder, and how many of them are red.
         tests: u32,
         failed: u32,
+        /// The folder's own verdict: red the moment one test under it is,
+        /// green when every one has run green, nothing while any is still
+        /// unknown — a folder must not claim more than its rows do.
+        status: Option<Status>,
     },
     Test {
         test: usize,
@@ -208,18 +212,20 @@ pub fn rows(
             || crate::ui::find::matches(query, crate::suite::short_class(&test.class))
     };
 
-    // First pass: how many kept tests, and how many red, under each folder.
-    let mut counts: HashMap<String, (u32, u32)> = HashMap::new();
+    // First pass: how many kept tests under each folder, how many red, and
+    // how many carry a verdict at all.
+    let mut counts: HashMap<String, (u32, u32, u32)> = HashMap::new();
     for (at, test) in tests.iter().enumerate() {
         if !kept(at, test) {
             continue;
         }
-        let failed = statuses.get(at).copied().flatten() == Some(Status::Failed);
+        let status = statuses.get(at).copied().flatten();
         let segments = crate::suite::segments(&test.class).len();
         for depth in 0..segments {
             let entry = counts.entry(dir_prefix(&test.class, depth)).or_default();
             entry.0 += 1;
-            entry.1 += u32::from(failed);
+            entry.1 += u32::from(status == Some(Status::Failed));
+            entry.2 += u32::from(status.is_some());
         }
     }
 
@@ -245,13 +251,21 @@ pub fn rows(
             let above_open = chain.iter().all(|(_, open)| *open);
             let open = filtering || expanded.contains(prefix);
             if above_open {
-                let (tests, failed) = counts.get(prefix).copied().unwrap_or_default();
+                let (tests, failed, marked) = counts.get(prefix).copied().unwrap_or_default();
+                let status = if failed > 0 {
+                    Some(Status::Failed)
+                } else if tests > 0 && marked == tests {
+                    Some(Status::Passed)
+                } else {
+                    None
+                };
                 rows.push(Row::Dir {
                     test: at,
                     depth,
                     expanded: open,
                     tests,
                     failed,
+                    status,
                 });
             }
             chain.push((prefix.clone(), open));
@@ -300,6 +314,41 @@ pub fn paired(tests: &[Test], outcomes: &[Outcome]) -> Vec<(usize, usize)> {
         }
     }
     pairs
+}
+
+/// What a narrated line announces, read from the symbol it starts with — the
+/// runners' own: `✓`/`PASS` (Pest, Vitest, Jest's `√` on some terminals),
+/// `⨯`/`✗`/`✕`/`FAIL`/`●` for the red, `-`/`↓`/`○` for what was put aside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineKind {
+    Pass,
+    Fail,
+    Skip,
+    Plain,
+}
+
+pub fn line_kind(line: &str) -> LineKind {
+    let line = line.trim_start();
+    if ["✓", "√", "PASS ", "PASS  "]
+        .iter()
+        .any(|mark| line.starts_with(mark))
+    {
+        return LineKind::Pass;
+    }
+    if ["⨯", "✗", "✕", "×", "FAIL", "●"]
+        .iter()
+        .any(|mark| line.starts_with(mark))
+    {
+        return LineKind::Fail;
+    }
+    // Pest writes `- it is skipped → later`; Vitest `↓ name`, Jest `○ name`.
+    if line.starts_with('↓')
+        || line.starts_with('○')
+        || (line.starts_with("- ") && line.contains('→'))
+    {
+        return LineKind::Skip;
+    }
+    LineKind::Plain
 }
 
 /// `14:32`, in local time — or nothing readable for a timestamp that is not.
@@ -601,6 +650,38 @@ impl ClaudhubApp {
         });
     }
 
+    /// Forgets every verdict of the worktree — the dots, the bar's totals,
+    /// the run panel — here and in the store. What a fresh look asks for
+    /// after a big rebase, when yesterday's reds say nothing about today.
+    fn reset_tests(&mut self, cx: &mut Context<Self>) {
+        let Some(active) = self.active.clone() else {
+            return;
+        };
+        // Not while a run goes: its account would repaint half of what was
+        // just wiped, and the half would read as the whole.
+        if self
+            .pest_runs
+            .get(&active)
+            .is_some_and(|state| state.running)
+        {
+            return;
+        }
+        self.pest_runs.remove(&active);
+        if let Some(state) = self.pest.get_mut(&active) {
+            state.marks.clear();
+            state.last_run = None;
+            state.refresh_cache();
+        }
+        if let Some(main) = self.main_of(&active) {
+            Store::update_global(cx, |store| {
+                let saved = store.worktree_mut(&active, &main);
+                saved.tests = Vec::new();
+                saved.tests_run = None;
+            });
+        }
+        cx.notify();
+    }
+
     fn toggle_pest_dir(&mut self, prefix: String, cx: &mut Context<Self>) {
         let Some(active) = self.active.as_deref() else {
             return;
@@ -833,6 +914,16 @@ impl ClaudhubApp {
                     })),
             )
             .child(
+                Button::new("tests-reset")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("eraser"))
+                    .tooltip(tr!("tests-reset"))
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.reset_tests(cx);
+                    })),
+            )
+            .child(
                 Button::new("pest-run-all")
                     .ghost()
                     .xsmall()
@@ -924,6 +1015,7 @@ fn render_dir(
         expanded,
         tests: under,
         failed,
+        status,
     } = row
     else {
         return div().into_any_element();
@@ -932,7 +1024,19 @@ fn render_dir(
         return div().into_any_element();
     };
     let prefix = dir_prefix(&first.class, depth);
-    let segment = prefix.rsplit('\\').next().unwrap_or(&prefix).to_string();
+    let segment = prefix
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(&prefix)
+        .to_string();
+    // The folder's own verdict, before its name: red the moment one test
+    // under it is, green when every one ran green, hollow while any is
+    // still unknown.
+    let (dot, dot_colour) = match status {
+        Some(Status::Failed) => ("circle-x", look.danger),
+        Some(_) => ("circle-check", look.success),
+        None => ("circle-dashed", look.muted),
+    };
     let toggle = entity.clone();
     let run = entity.clone();
     let for_run = tests.clone();
@@ -959,6 +1063,7 @@ fn render_dir(
             .xsmall()
             .text_color(look.muted),
         )
+        .child(icon(dot).xsmall().text_color(dot_colour))
         .child(
             div()
                 .flex_1()
@@ -1228,15 +1333,16 @@ impl ClaudhubApp {
                 .into_any_element();
         };
 
-        let bar = render_run_bar(state, cx);
         let with_failures = state.run.clone().filter(|run| run.failed > 0);
         let lines: Vec<SharedString> = state.lines.iter().cloned().collect();
+        let bar = self.render_run_bar(&active, cx);
         let failures = with_failures.map(|run| self.render_run_failures(&active, run, window, cx));
         let mono = cx.theme().mono_font_family.clone();
         let scroll = self.pest_run_scroll.clone();
         let count = lines.len();
         let lines = Rc::new(lines);
         let row = crate::ui::theme::row_height(cx);
+        let look = Look::of(cx);
         v_flex()
             .size_full()
             .child(bar)
@@ -1251,6 +1357,16 @@ impl ClaudhubApp {
                         uniform_list("pest-run-lines", count, move |visible, _window, _cx| {
                             visible
                                 .map(|index| {
+                                    let line = lines.get(index).cloned().unwrap_or_default();
+                                    // The colours the runner painted were
+                                    // stripped with the rest of its ANSI;
+                                    // what its symbols say is put back.
+                                    let colour = match line_kind(&line) {
+                                        LineKind::Pass => Some(look.success),
+                                        LineKind::Fail => Some(look.danger),
+                                        LineKind::Skip => Some(look.muted),
+                                        LineKind::Plain => None,
+                                    };
                                     div()
                                         .h(row)
                                         .w_full()
@@ -1258,7 +1374,8 @@ impl ClaudhubApp {
                                         .whitespace_nowrap()
                                         .text_xs()
                                         .font_family(mono.clone())
-                                        .child(lines.get(index).cloned().unwrap_or_default())
+                                        .when_some(colour, |el, colour| el.text_color(colour))
+                                        .child(line)
                                         .into_any_element()
                                 })
                                 .collect::<Vec<_>>()
@@ -1374,79 +1491,118 @@ impl ClaudhubApp {
 
 /// The run's headline: running with a spinner, failed to start, or the
 /// totals with when and how long.
-fn render_run_bar(state: &RunState, cx: &App) -> gpui::AnyElement {
-    let bar = h_flex()
-        .h(crate::ui::theme::bar_height(cx))
-        .w_full()
-        .px_2()
-        .gap_2()
-        .items_center()
-        .border_b_1()
-        .border_color(cx.theme().border)
-        .text_xs();
-    if state.running {
-        return bar
+impl ClaudhubApp {
+    /// The run's headline: running with a spinner and the button that stops
+    /// it, stopped, failed to start, or the totals with when and how long.
+    fn render_run_bar(&self, worktree: &Path, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(state) = self.pest_runs.get(worktree) else {
+            return div().into_any_element();
+        };
+        let bar = h_flex()
+            .h(crate::ui::theme::bar_height(cx))
+            .w_full()
+            .px_2()
+            .gap_2()
+            .items_center()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .text_xs();
+        if state.running {
+            let stop = state.id;
+            return bar
+                .child(
+                    Spinner::new()
+                        .xsmall()
+                        .icon(icon("loader-circle"))
+                        .color(cx.theme().muted_foreground),
+                )
+                .child(div().flex_none().child(state.label.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(tr!("tests-running")),
+                )
+                .child(
+                    Button::new("tests-stop")
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("circle-stop"))
+                        .tooltip(tr!("tests-stop"))
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            this.git.send(Cmd::TestsStop { id: stop });
+                            cx.notify();
+                        })),
+                )
+                .into_any_element();
+        }
+        if let Some(error) = &state.error {
+            // The stop the user asked for is not a failure: it is said in
+            // grey, with the button that asked it.
+            if error.as_ref() == crate::suite::STOPPED {
+                return bar
+                    .child(
+                        icon("circle-stop")
+                            .xsmall()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(div().flex_none().child(state.label.clone()))
+                    .child(
+                        div()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tr!("tests-stopped")),
+                    )
+                    .into_any_element();
+            }
+            return bar
+                .child(icon("alert-circle").xsmall().text_color(cx.theme().danger))
+                .child(div().flex_none().child(state.label.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(cx.theme().danger)
+                        .child(error.clone()),
+                )
+                .into_any_element();
+        }
+        let Some(run) = &state.run else {
+            return bar.child(state.label.clone()).into_any_element();
+        };
+        let secs = run.duration_ms as f64 / 1000.;
+        bar.child(div().flex_none().child(state.label.clone()))
             .child(
-                Spinner::new()
-                    .xsmall()
-                    .icon(icon("loader-circle"))
-                    .color(cx.theme().muted_foreground),
+                div()
+                    .text_color(cx.theme().success)
+                    .child(SharedString::from(format!("✓{}", run.passed))),
             )
-            .child(div().flex_none().child(state.label.clone()))
+            .when(run.failed > 0, |el| {
+                el.child(
+                    div()
+                        .text_color(cx.theme().danger)
+                        .child(SharedString::from(format!("⨯{}", run.failed))),
+                )
+            })
+            .when(run.skipped > 0, |el| {
+                el.child(
+                    div()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(SharedString::from(format!("−{}", run.skipped))),
+                )
+            })
             .child(
                 div()
                     .text_color(cx.theme().muted_foreground)
-                    .child(tr!("tests-running")),
+                    .child(SharedString::from(format!(
+                        "{secs:.1}s · {}",
+                        clock(state.started_at)
+                    ))),
             )
-            .into_any_element();
+            .into_any_element()
     }
-    if let Some(error) = &state.error {
-        return bar
-            .child(icon("alert-circle").xsmall().text_color(cx.theme().danger))
-            .child(div().flex_none().child(state.label.clone()))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(cx.theme().danger)
-                    .child(error.clone()),
-            )
-            .into_any_element();
-    }
-    let Some(run) = &state.run else {
-        return bar.child(state.label.clone()).into_any_element();
-    };
-    let secs = run.duration_ms as f64 / 1000.;
-    bar.child(div().flex_none().child(state.label.clone()))
-        .child(
-            div()
-                .text_color(cx.theme().success)
-                .child(SharedString::from(format!("✓{}", run.passed))),
-        )
-        .when(run.failed > 0, |el| {
-            el.child(
-                div()
-                    .text_color(cx.theme().danger)
-                    .child(SharedString::from(format!("⨯{}", run.failed))),
-            )
-        })
-        .when(run.skipped > 0, |el| {
-            el.child(
-                div()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(SharedString::from(format!("−{}", run.skipped))),
-            )
-        })
-        .child(
-            div()
-                .text_color(cx.theme().muted_foreground)
-                .child(SharedString::from(format!(
-                    "{secs:.1}s · {}",
-                    clock(state.started_at)
-                ))),
-        )
-        .into_any_element()
 }
 
 #[cfg(test)]
@@ -1499,14 +1655,16 @@ mod tests {
                     depth: 0,
                     expanded: false,
                     tests: 3,
-                    failed: 0
+                    failed: 0,
+                    status: None,
                 },
                 Row::Dir {
                     test: 3,
                     depth: 0,
                     expanded: false,
                     tests: 1,
-                    failed: 0
+                    failed: 0,
+                    status: None,
                 },
             ]
         );
@@ -1528,28 +1686,32 @@ mod tests {
                     depth: 0,
                     expanded: true,
                     tests: 3,
-                    failed: 0
+                    failed: 0,
+                    status: None,
                 },
                 Row::Dir {
                     test: 0,
                     depth: 1,
                     expanded: false,
                     tests: 2,
-                    failed: 0
+                    failed: 0,
+                    status: None,
                 },
                 Row::Dir {
                     test: 2,
                     depth: 1,
                     expanded: false,
                     tests: 1,
-                    failed: 0
+                    failed: 0,
+                    status: None,
                 },
                 Row::Dir {
                     test: 3,
                     depth: 0,
                     expanded: false,
                     tests: 1,
-                    failed: 0
+                    failed: 0,
+                    status: None,
                 },
             ]
         );
@@ -1577,14 +1739,16 @@ mod tests {
                     depth: 0,
                     expanded: true,
                     tests: 1,
-                    failed: 0
+                    failed: 0,
+                    status: None,
                 },
                 Row::Dir {
                     test: 3,
                     depth: 1,
                     expanded: true,
                     tests: 1,
-                    failed: 0
+                    failed: 0,
+                    status: None,
                 },
                 Row::Test { test: 3, depth: 2 },
             ]
@@ -1611,18 +1775,71 @@ mod tests {
                     depth: 0,
                     expanded: true,
                     tests: 1,
-                    failed: 1
+                    failed: 1,
+                    status: Some(Status::Failed),
                 },
                 Row::Dir {
                     test: 1,
                     depth: 1,
                     expanded: true,
                     tests: 1,
-                    failed: 1
+                    failed: 1,
+                    status: Some(Status::Failed),
                 },
                 Row::Test { test: 1, depth: 2 },
             ]
         );
+    }
+
+    /// A folder claims green only when every test under it has run green —
+    /// one unknown keeps it hollow, one red makes it red.
+    #[test]
+    fn a_folder_only_claims_what_its_rows_ran() {
+        let tests = suite();
+        let (labels, _) = plain(&tests);
+        // Unit\MathTest both green, Unit\Forms\BillTest never ran.
+        let statuses = vec![Some(Status::Passed), Some(Status::Passed), None, None];
+        let shown = rows(&tests, &labels, &statuses, "", &HashSet::new(), false);
+        let Some(Row::Dir { status, .. }) = shown.first() else {
+            panic!("a folder first");
+        };
+        // `Unit` holds an unknown: hollow, not green.
+        assert_eq!(*status, None);
+        // Open it: MathTest is all green, Forms still hollow.
+        let expanded: HashSet<String> = [String::from("Unit")].into();
+        let shown = rows(&tests, &labels, &statuses, "", &expanded, false);
+        let dirs: Vec<Option<Status>> = shown
+            .iter()
+            .filter_map(|row| match row {
+                Row::Dir {
+                    status, depth: 1, ..
+                } => Some(*status),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dirs, [Some(Status::Passed), None]);
+    }
+
+    /// A narrated line is coloured by the symbol it starts with — the
+    /// runners' own vocabulary, Pest, Vitest and Jest alike.
+    #[test]
+    fn a_line_is_coloured_by_its_symbol() {
+        assert_eq!(line_kind("  ✓ it sums 2 + 2"), LineKind::Pass);
+        assert_eq!(
+            line_kind("   PASS  Tests\\Unit\\ContractTest"),
+            LineKind::Pass
+        );
+        assert_eq!(line_kind("  ⨯ it will fail on purpose"), LineKind::Fail);
+        assert_eq!(
+            line_kind("   FAILED  Tests\\Feature\\HttpTest"),
+            LineKind::Fail
+        );
+        assert_eq!(line_kind("  ✕ answers"), LineKind::Fail);
+        assert_eq!(line_kind("  - it is skipped → later"), LineKind::Skip);
+        assert_eq!(line_kind("  ↓ name"), LineKind::Skip);
+        assert_eq!(line_kind("  Tests:    1 failed, 6 passed"), LineKind::Plain);
+        // A list dash without a reason arrow is prose, not a skip.
+        assert_eq!(line_kind("- some note"), LineKind::Plain);
     }
 
     /// The account's outcomes land on the listed tests they name — real
