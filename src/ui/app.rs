@@ -299,6 +299,11 @@ pub struct ReviewState {
     /// display differently — the input is there anyway, which is precisely what
     /// makes it available with no gesture.
     pub journal: String,
+    /// The commit message being written, parked here while another worktree is
+    /// shown: the input is unique, and without this the draft followed the
+    /// window from project to project — offered, and committed, on whichever
+    /// worktree one switched to.
+    pub commit_draft: String,
     /// The worktree's task list, if the vault carries one.
     ///
     /// `None` means "no `TODO.md`", not "no task": the two do not display alike,
@@ -427,6 +432,7 @@ impl Default for ReviewState {
             next_note: 1,
             reviewed: Vec::new(),
             journal: String::new(),
+            commit_draft: String::new(),
             todo: None,
             notes_loaded: false,
             notes_on_disk: false,
@@ -2728,10 +2734,19 @@ impl ClaudhubApp {
         // status refresh: one of those arrives on every file the watcher sees
         // change, and this asks git a question per open tab.
         self.refresh_editor_bases(worktree.as_deref());
-        if action == Action::Commit {
-            self.commit_input.update(cx, |input, cx| {
-                input.set_value("", window, cx);
-            });
+        // The committed message is spent — the parked draft too: the commit
+        // may finish after one has moved on, and the input then holds another
+        // worktree's draft, which a blind clear would erase. `CommitPush` as
+        // well: it is the same message, sent by the other button.
+        if matches!(action, Action::Commit | Action::CommitPush) {
+            if let Some(state) = worktree.as_deref().and_then(|w| self.review.get_mut(w)) {
+                state.commit_draft.clear();
+            }
+            if worktree.is_some() && worktree == self.active {
+                self.commit_input.update(cx, |input, cx| {
+                    input.set_value("", window, cx);
+                });
+            }
         }
         self.report(
             action,
@@ -3044,6 +3059,11 @@ impl ClaudhubApp {
                 input.set_value(message, window, cx);
             });
         } else {
+            // Parked in its worktree's draft rather than dropped: it will be
+            // in the field when one comes back.
+            if let Some(state) = self.review.get_mut(&worktree) {
+                state.commit_draft = message;
+            }
             self.announce(tr!("commit-suggest-elsewhere"), cx);
         }
     }
@@ -3221,8 +3241,26 @@ impl ClaudhubApp {
         if let Some(vault) = vault {
             self.git.send(Cmd::WatchDir { dir: vault });
         }
+        // The commit message belongs to its worktree: the draft written for
+        // one project is parked in its state and this worktree's is put back —
+        // the input is unique, and the text would otherwise follow the window.
+        if let Some(previous) = self.active.clone() {
+            let draft = self.commit_input.read(cx).value().to_string();
+            if let Some(state) = self.review.get_mut(&previous) {
+                state.commit_draft = draft;
+            }
+        }
         self.active = Some(path.clone());
         self.ensure_review(&path, cx);
+        let draft = self
+            .review
+            .get(&path)
+            .map(|state| state.commit_draft.clone())
+            .unwrap_or_default();
+        if self.commit_input.read(cx).value() != draft.as_str() {
+            self.commit_input
+                .update(cx, |input, cx| input.set_value(draft, window, cx));
+        }
         // What this checkout's justfile offers, for the run button. Asked here
         // and not while drawing the bar: it is a subprocess.
         self.ensure_just(&path);
