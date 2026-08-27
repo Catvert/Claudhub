@@ -63,6 +63,9 @@ pub struct PestState {
     /// instead of running headless. A session choice, not persisted — one
     /// watches a test debug, one does not live like that.
     pub headed: bool,
+    /// Run Pest with `--parallel`. Exclusive with `headed`: the browser
+    /// plugin refuses the pair, so turning one on turns the other off.
+    pub parallel: bool,
     /// Per-row caches aligned with the report's tests, rebuilt when the
     /// report or the marks change: reading two thousand marks through a
     /// `HashMap` on every frame is what this avoids.
@@ -471,12 +474,21 @@ impl ClaudhubApp {
             .is_some_and(|worktree| self.pest_runs.contains_key(worktree))
     }
 
-    /// Is the headed toggle on for the worktree being looked at?
-    fn headed_tests(&self) -> bool {
+    /// The (headed, parallel) toggles of the worktree being looked at.
+    fn pest_modes(&self) -> (bool, bool) {
         self.active
             .as_deref()
             .and_then(|worktree| self.pest.get(worktree))
-            .is_some_and(|state| state.headed)
+            .map(|state| (state.headed, state.parallel))
+            .unwrap_or((false, false))
+    }
+
+    /// Applies the two toggles to a target — Pest only, the other runners
+    /// never read the fields.
+    fn apply_pest_modes(&self, target: &mut Target) {
+        let (headed, parallel) = self.pest_modes();
+        target.headed = headed && target.runner == Runner::Pest;
+        target.parallel = parallel && target.runner == Runner::Pest;
     }
 
     /// Launches a followed run — one target, or a campaign of several: "run
@@ -496,11 +508,10 @@ impl ClaudhubApp {
         if targets.is_empty() {
             return;
         }
-        // The bar's headed toggle applies to every Pest launch, whatever the
-        // gesture that built the target — a mode, not a per-run choice.
-        let headed = self.headed_tests();
+        // The bar's toggles apply to every Pest launch, whatever the gesture
+        // that built the target — modes, not per-run choices.
         for target in &mut targets {
-            target.headed = headed && target.runner == Runner::Pest;
+            self.apply_pest_modes(target);
         }
         // One campaign at a time per worktree: the worker would only queue a
         // second one, and two accounts racing for the same dots would paint
@@ -728,7 +739,7 @@ impl ClaudhubApp {
             return;
         };
         let mut target = target.clone();
-        target.headed = self.headed_tests() && target.runner == Runner::Pest;
+        self.apply_pest_modes(&mut target);
         self.open_terminal(
             &worktree,
             crate::ui::terminal_view::Launch {
@@ -803,13 +814,13 @@ impl ClaudhubApp {
 
         let query = self.query(Pane::Tests, cx);
         let find = self.render_find(Pane::Tests, cx);
-        // The headed toggle only shows where Pest is: `--headed` is its
-        // browser plugin's word, and the other runners never read it.
-        let headed = tests
+        // The mode toggles only show where Pest is: `--headed` and
+        // `--parallel` are its words, and the other runners never read them.
+        let modes = tests
             .iter()
             .any(|test| test.runner == Runner::Pest)
-            .then(|| self.headed_tests());
-        let bar = self.render_pest_bar(tests.len(), pending, only_failed, headed, cx);
+            .then(|| self.pest_modes());
+        let bar = self.render_pest_bar(tests.len(), pending, only_failed, modes, cx);
         let state = self.pest.get(&active);
         let statuses = state.map(|s| s.statuses.clone()).unwrap_or_default();
         let labels = state.map(|s| s.labels.clone()).unwrap_or_default();
@@ -874,7 +885,7 @@ impl ClaudhubApp {
         count: usize,
         pending: bool,
         only_failed: bool,
-        headed: Option<bool>,
+        modes: Option<(bool, bool)>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let last = self
@@ -914,7 +925,7 @@ impl ClaudhubApp {
                         .child(SharedString::from(clock(last.at))),
                 )
             });
-        h_flex()
+        let top = h_flex()
             .h(crate::ui::theme::bar_height(cx))
             .w_full()
             .px_2()
@@ -950,24 +961,6 @@ impl ClaudhubApp {
                         this.reset_tests(cx);
                     })),
             )
-            .when_some(headed, |el, headed| {
-                el.child(
-                    Button::new("pest-headed")
-                        .ghost()
-                        .xsmall()
-                        .icon(icon("eye"))
-                        .tooltip(tr!("tests-headed"))
-                        .selected(headed)
-                        .on_click(cx.listener(|this, _, _window, cx| {
-                            if let Some(active) = this.active.clone() {
-                                if let Some(state) = this.pest.get_mut(&active) {
-                                    state.headed = !state.headed;
-                                }
-                            }
-                            cx.notify();
-                        })),
-                )
-            })
             .child(
                 Button::new("pest-run-all")
                     .ghost()
@@ -1019,7 +1012,66 @@ impl ClaudhubApp {
                         }
                         cx.notify();
                     })),
-            )
+            );
+        // Pest's run modes, on their own line: labelled toggles read better
+        // than one more icon squeezed into the bar. Exclusive — the browser
+        // plugin refuses `--headed --parallel`, so a toggle turns the other
+        // off rather than launching a run that only errors.
+        v_flex()
+            .w_full()
+            .child(top)
+            .when_some(modes, |el, (headed, parallel)| {
+                el.child(
+                    h_flex()
+                        .h(crate::ui::theme::bar_height(cx))
+                        .w_full()
+                        .px_2()
+                        .gap_1()
+                        .items_center()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(
+                            Button::new("pest-headed")
+                                .ghost()
+                                .xsmall()
+                                .icon(icon("eye"))
+                                .label(tr!("tests-headed-label"))
+                                .tooltip(tr!("tests-headed"))
+                                .selected(headed)
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    if let Some(active) = this.active.clone() {
+                                        if let Some(state) = this.pest.get_mut(&active) {
+                                            state.headed = !state.headed;
+                                            if state.headed {
+                                                state.parallel = false;
+                                            }
+                                        }
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("pest-parallel")
+                                .ghost()
+                                .xsmall()
+                                .icon(icon("zap"))
+                                .label(tr!("tests-parallel-label"))
+                                .tooltip(tr!("tests-parallel"))
+                                .selected(parallel)
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    if let Some(active) = this.active.clone() {
+                                        if let Some(state) = this.pest.get_mut(&active) {
+                                            state.parallel = !state.parallel;
+                                            if state.parallel {
+                                                state.headed = false;
+                                            }
+                                        }
+                                    }
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
     }
 }
 
@@ -1276,7 +1328,7 @@ fn row_menu(
             .on_click(move |_, _window, cx| {
                 let mut target = target.clone();
                 entity.update(cx, |this, _| {
-                    target.headed = this.headed_tests() && target.runner == Runner::Pest;
+                    this.apply_pest_modes(&mut target);
                 });
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                     crate::suite::terminal_command(&target),

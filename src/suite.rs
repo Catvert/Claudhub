@@ -109,6 +109,9 @@ pub struct Target {
     /// browser instead of running it headless. Off for the other runners —
     /// they never see the field.
     pub headed: bool,
+    /// Pest only: `--parallel`. Never together with `headed` — the browser
+    /// plugin refuses the pair — and the panel's toggles enforce it.
+    pub parallel: bool,
 }
 
 impl Target {
@@ -119,6 +122,7 @@ impl Target {
             path: None,
             exact: false,
             headed: false,
+            parallel: false,
         }
     }
 }
@@ -610,6 +614,9 @@ pub fn run(
                 .arg(&account_file);
             if target.headed {
                 cmd.arg("--headed");
+            }
+            if target.parallel {
+                cmd.arg("--parallel");
             }
             if let Some(filter) = &target.filter {
                 cmd.arg("--filter").arg(filter);
@@ -1139,6 +1146,7 @@ pub fn test_target(test: &Test) -> Target {
             path: None,
             exact: false,
             headed: false,
+            parallel: false,
         },
         // The file narrows the collection, the anchored title picks the test.
         Runner::Vitest => Target {
@@ -1147,6 +1155,7 @@ pub fn test_target(test: &Test) -> Target {
             path: Some(test.class.clone()),
             exact: true,
             headed: false,
+            parallel: false,
         },
         // A Jest row is a file: the path is the whole narrowing.
         Runner::Jest => Target {
@@ -1155,6 +1164,7 @@ pub fn test_target(test: &Test) -> Target {
             path: Some(test.method.clone()),
             exact: true,
             headed: false,
+            parallel: false,
         },
     }
 }
@@ -1169,6 +1179,7 @@ pub fn scope_target(test: &Test, depth: usize) -> Target {
             path: None,
             exact: false,
             headed: false,
+            parallel: false,
         },
         Runner::Vitest => {
             let prefix = group_prefix(&test.class, depth).to_string();
@@ -1180,6 +1191,7 @@ pub fn scope_target(test: &Test, depth: usize) -> Target {
                 path: Some(prefix),
                 exact,
                 headed: false,
+                parallel: false,
             }
         }
         Runner::Jest => Target {
@@ -1188,6 +1200,7 @@ pub fn scope_target(test: &Test, depth: usize) -> Target {
             path: Some(group_prefix(&test.class, depth).to_string()),
             exact: false,
             headed: false,
+            parallel: false,
         },
     }
 }
@@ -1200,6 +1213,9 @@ pub fn terminal_command(target: &Target) -> String {
         Runner::Pest => {
             if target.headed {
                 parts.push("--headed".into());
+            }
+            if target.parallel {
+                parts.push("--parallel".into());
             }
             if let Some(filter) = &target.filter {
                 parts.push("--filter".into());
@@ -1491,6 +1507,7 @@ at tests/Feature/HttpTest.php:3</failure>
                 path: Some("tests/unit/math.test.js".into()),
                 exact: true,
                 headed: false,
+                parallel: false,
             }
         );
     }
@@ -1513,6 +1530,7 @@ at tests/Feature/HttpTest.php:3</failure>
                 path: Some("src/http.test.js".into()),
                 exact: true,
                 headed: false,
+                parallel: false,
             }
         );
     }
@@ -1582,6 +1600,7 @@ at tests/Feature/HttpTest.php:3</failure>
                 path: Some("tests/unit".into()),
                 exact: false,
                 headed: false,
+                parallel: false,
             }
         );
         assert!(scope_target(test, 2).exact);
@@ -1596,6 +1615,7 @@ at tests/Feature/HttpTest.php:3</failure>
             path: None,
             exact: false,
             headed: false,
+            parallel: false,
         };
         // No quoting needed: `^`, `:` and a trailing `$` are all literal to a
         // POSIX shell, and `join_command` only quotes what would not be.
@@ -1613,12 +1633,21 @@ at tests/Feature/HttpTest.php:3</failure>
             terminal_command(&headed),
             "vendor/bin/pest --headed --filter ^LegacyTest::testOldSchool$"
         );
+        let parallel = Target {
+            parallel: true,
+            ..pest.clone()
+        };
+        assert_eq!(
+            terminal_command(&parallel),
+            "vendor/bin/pest --parallel --filter ^LegacyTest::testOldSchool$"
+        );
         let vitest = Target {
             runner: Runner::Vitest,
             filter: Some("^sums 2 \\+ 2$".into()),
             path: Some("tests/unit/math.test.js".into()),
             exact: true,
             headed: false,
+            parallel: false,
         };
         assert_eq!(
             terminal_command(&vitest),
@@ -1630,6 +1659,7 @@ at tests/Feature/HttpTest.php:3</failure>
             path: Some("src/http.test.js".into()),
             exact: true,
             headed: false,
+            parallel: false,
         };
         assert_eq!(
             terminal_command(&jest),
