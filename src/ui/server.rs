@@ -285,6 +285,9 @@ impl ClaudhubApp {
         for main in mains {
             self.git.send(crate::runtime::Cmd::OpenRepo(main));
         }
+        // The startup check was dropped with everything sent before the
+        // handshake: asked again here, like the repositories above.
+        self.git.send(crate::runtime::Cmd::ReleaseCheck);
         if let Some(active) = self.active.clone() {
             self.git.send(crate::runtime::Cmd::Watch {
                 worktree: active.clone(),

@@ -30,6 +30,7 @@ pub mod just;
 pub mod logging;
 pub mod lsp;
 pub mod plugin;
+pub mod release;
 pub mod runtime;
 pub mod suite;
 #[cfg(feature = "ui")]

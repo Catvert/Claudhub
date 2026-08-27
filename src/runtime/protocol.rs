@@ -192,6 +192,10 @@ pub enum Cmd {
     AutoFetch {
         main: PathBuf,
     },
+    /// Asks GitHub for the latest published Claudhub release, once per
+    /// launch. Network queue — an HTTP round trip — and, like `AutoFetch`,
+    /// **silent on failure**: offline is a normal day.
+    ReleaseCheck,
     Pull {
         worktree: WorktreeId,
     },
@@ -893,6 +897,7 @@ impl Cmd {
             Self::SuggestMessage { .. } => "SuggestMessage",
             Self::Fetch { .. } => "Fetch",
             Self::AutoFetch { .. } => "AutoFetch",
+            Self::ReleaseCheck => "ReleaseCheck",
             Self::Pull { .. } => "Pull",
             Self::Push { .. } => "Push",
             Self::Reconcile { .. } => "Reconcile",
@@ -1067,6 +1072,13 @@ pub enum Evt {
     /// changed, and they are read from the status.
     Fetched {
         main: PathBuf,
+    },
+    /// The latest published release, when the check reached GitHub. The
+    /// interface compares it with its **own** version — in remote mode the
+    /// fetcher is the server, and the window is what gets updated.
+    ReleaseChecked {
+        version: String,
+        url: String,
     },
     /// The message the agent proposes for what is staged.
     ///

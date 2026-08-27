@@ -713,6 +713,7 @@
   "vim-mode-visual": "VISUEL",
   "vim-mode-visual-block": "VISUEL BLOC",
   "vim-mode-visual-line": "VISUEL LIGNE",
+  "update-available": "Claudhub %{version} disponible",
   "watch-windows-filesystem": "Dépôt sur un disque Windows : rafraîchissement automatique inactif",
   "window-close-busy": "Des commandes tournent encore",
   "window-close-busy-help": "Fermer la fenêtre envoie SIGHUP à chacune : ce qui tourne s'arrête là où il en est.",

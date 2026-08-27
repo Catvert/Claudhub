@@ -46,6 +46,7 @@ fn is_network(cmd: &Cmd) -> bool {
         Cmd::Fetch { .. }
             | Cmd::Pull { .. }
             | Cmd::AutoFetch { .. }
+            | Cmd::ReleaseCheck
             // An agent writing a message takes ten to thirty seconds: exactly
             // the profile of the commands that made the network move out of the
             // read queue.
@@ -751,6 +752,7 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             }
         }
         Cmd::AutoFetch { main } => auto_fetch(main),
+        Cmd::ReleaseCheck => release_check(),
         Cmd::Fetch { worktree } => {
             write_then_refresh(worktree, Action::Fetch, |dir| repo::fetch(dir, true))
         }
@@ -1406,6 +1408,22 @@ fn auto_fetch(main: PathBuf) -> Vec<Evt> {
     }
 }
 
+/// Asks GitHub for the latest published release. Silent on failure, like the
+/// automatic fetch and for its reason: offline is a normal day, and this is
+/// asked without a gesture behind it.
+fn release_check() -> Vec<Evt> {
+    match crate::release::check() {
+        Ok(latest) => vec![Evt::ReleaseChecked {
+            version: latest.version,
+            url: latest.url,
+        }],
+        Err(e) => {
+            log::debug!("release check: {e:#}");
+            Vec::new()
+        }
+    }
+}
+
 /// Runs `f` with the Sentry token, or reports that there is none.
 ///
 /// `SENTRY_TOKEN` wins over what the command carries: the worker sometimes runs
@@ -2030,6 +2048,7 @@ mod tests {
             queue_of(&Cmd::AutoFetch { main: worktree() }),
             Queue::Network
         );
+        assert_eq!(queue_of(&Cmd::ReleaseCheck), Queue::Network);
     }
 
     /// A plugin never gets in front of a diff, and never behind a `composer

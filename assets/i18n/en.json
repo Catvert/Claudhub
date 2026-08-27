@@ -713,6 +713,7 @@
   "vim-mode-visual": "VISUAL",
   "vim-mode-visual-block": "VISUAL BLOCK",
   "vim-mode-visual-line": "VISUAL LINE",
+  "update-available": "Claudhub %{version} available",
   "watch-windows-filesystem": "Repository on a Windows drive: no automatic refresh",
   "window-close-busy": "Commands are still running",
   "window-close-busy-help": "Closing the window sends each of them SIGHUP: whatever is running stops where it is.",

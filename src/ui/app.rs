@@ -483,6 +483,10 @@ pub struct ClaudhubApp {
     /// path is a Windows mount" means something, and the view's machine cannot
     /// know it in its place.
     pub(super) server_wsl: bool,
+    /// A newer release is published: its version and its download page. Set
+    /// once the check has answered **and** the comparison says the window is
+    /// behind; the status bar then shows the link.
+    update: Option<(SharedString, SharedString)>,
     /// The selected worktree: the key to almost everything else.
     pub(super) active: Option<PathBuf>,
     /// The read of the file to put back has gone out.
@@ -1199,6 +1203,7 @@ impl ClaudhubApp {
             server_state: super::server::ServerState::default(),
             wsl_prompt: None,
             server_wsl: false,
+            update: None,
             active: None,
             restoring: crate::ui::store::Store::global(cx).session.clone(),
             settled: None,
@@ -1412,6 +1417,12 @@ impl ClaudhubApp {
                 self.git.send(Cmd::OpenIfRepo(dir));
             }
         }
+        // Once per launch, behind the repositories: on the network queue it
+        // costs nobody anything, and the answer paints the status bar's
+        // download link when this window is behind the published release.
+        // Remotely this send is dropped with the rest — `backend_ready`
+        // resends it with the repositories, and for the same reason.
+        self.git.send(Cmd::ReleaseCheck);
     }
 
     /// The SQL console's entities: its editor, its completion index, its table.
@@ -2131,6 +2142,15 @@ impl ClaudhubApp {
                 message,
             } => self.action_failed(worktree, action, message, window, cx),
             Evt::Fetched { main } => self.fetched(main),
+            Evt::ReleaseChecked { version, url } => {
+                // Compared against the window's own version, not the
+                // fetcher's: in remote mode the server did the round trip,
+                // and the window is what gets updated.
+                if crate::release::is_newer(&version, env!("CARGO_PKG_VERSION")) {
+                    self.update = Some((SharedString::from(version), SharedString::from(url)));
+                    cx.notify();
+                }
+            }
             Evt::CommitMessage { worktree, message } => {
                 self.commit_message_arrived(worktree, message, window, cx)
             }
@@ -4061,6 +4081,26 @@ impl ClaudhubApp {
                         .text_color(cx.theme().warning)
                         .child(icon("triangle-alert").xsmall())
                         .child(tr!("watch-windows-filesystem")),
+                )
+                .child(Divider::vertical().h(px(12.)))
+            })
+            // A newer release is out: the one message this bar still carries
+            // that asks for a click — the link opens the release's page,
+            // where the AppImage and the installer are.
+            .when_some(self.update.clone(), |el, (version, url)| {
+                el.child(
+                    h_flex()
+                        .id("release-update")
+                        .gap_1()
+                        .items_center()
+                        .text_color(cx.theme().info)
+                        .cursor_pointer()
+                        .hover(|s| s.underline())
+                        .child(icon("download").xsmall())
+                        .child(tr!("update-available", { version: version }))
+                        .on_click(move |_, _window, cx| {
+                            cx.open_url(&url);
+                        }),
                 )
                 .child(Divider::vertical().h(px(12.)))
             })
