@@ -6,7 +6,7 @@
 //! leaving it — which is what lets the list stay virtualised: a row draws
 //! without knowing anything about the ones out of sight.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::{
@@ -83,6 +83,44 @@ impl ClaudhubApp {
             limit: limit_of(&range),
             range,
         });
+        cx.notify();
+    }
+
+    /// Reloads the histories a git write has made stale — a pull, a merge, a
+    /// commit… Every worktree of the repository is concerned, not only the one
+    /// the write ran in: the graph decorates its commits with the branches and
+    /// tags of the whole repository. Only histories already loaded are asked
+    /// again, and the reload is silent — the list stays on screen until the
+    /// fresh one arrives, unlike a range change, where keeping it would
+    /// suggest the button did nothing.
+    pub(super) fn refresh_repo_history(&mut self, worktree: &Path, cx: &mut Context<Self>) {
+        let Some(main) = self.main_of(worktree) else {
+            return;
+        };
+        let stale: Vec<PathBuf> = self
+            .review
+            .keys()
+            .filter(|w| self.main_of(w).as_deref() == Some(main.as_path()))
+            .cloned()
+            .collect();
+        for worktree in stale {
+            let Some(state) = self.review.get_mut(&worktree) else {
+                continue;
+            };
+            // A line history stays as it is: it answers a gesture — its line
+            // numbers were mapped onto the HEAD of that moment — and its
+            // arrival opens the first commit, which would steal the view.
+            if state.history.is_none() || matches!(state.history_range, LogRange::Lines { .. }) {
+                continue;
+            }
+            state.history_pending = true;
+            let range = state.history_range.clone();
+            self.git.send(Cmd::LoadHistory {
+                worktree,
+                limit: limit_of(&range),
+                range,
+            });
+        }
         cx.notify();
     }
 

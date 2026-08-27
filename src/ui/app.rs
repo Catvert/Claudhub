@@ -2756,6 +2756,30 @@ impl ClaudhubApp {
                 self.git.send(Cmd::LoadBranches { main });
             }
         }
+        // And one that moved the refs — commits, branches or tags — has made
+        // the history panel stale: what it shows is the graph and its
+        // decorations, both read from the refs.
+        if matches!(
+            action,
+            Action::Commit
+                | Action::CommitPush
+                | Action::Fetch
+                | Action::Pull
+                | Action::Push
+                | Action::Checkout
+                | Action::Branch
+                | Action::Tag
+                | Action::PushTag
+                | Action::Merge
+                | Action::Integrate
+                | Action::Rebase
+                | Action::Abort
+                | Action::Resume
+        ) {
+            if let Some(worktree) = worktree.as_deref() {
+                self.refresh_repo_history(worktree, cx);
+            }
+        }
     }
 
     fn action_failed(
