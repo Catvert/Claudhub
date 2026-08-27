@@ -237,7 +237,20 @@ fn push_line(lines: &mut Vec<Line>, mut line: Line) {
     // Trailing spaces are what the terminal puts everywhere nothing was
     // written; keeping them would make every line pay for the grid's full
     // width, for an identical result on screen.
-    let trimmed = line.text.trim_end_matches(' ').len();
+    //
+    // Except the ones that *paint* — a background, an underline, the
+    // selection: a space then shows something. Claude Code's caret at the end
+    // of its prompt is an inverted space with nothing after it; trimmed with
+    // the blanks, the caret vanished exactly when the cursor reached the end
+    // of the line.
+    let blank = line.text.trim_end_matches(' ').len();
+    let painted = line
+        .segments
+        .iter()
+        .rev()
+        .find(|seg| seg.bg != Paint::Default || seg.underline || seg.strikethrough || seg.selected)
+        .map_or(0, |seg| seg.end);
+    let trimmed = blank.max(painted);
     if trimmed < line.text.len() {
         line.text.truncate(trimmed);
         line.segments.retain_mut(|seg| {
@@ -674,6 +687,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Claude Code's caret at the end of its prompt: an inverted space with
+    /// nothing after it. It is a trailing space, but it paints — trimmed with
+    /// the blanks, the caret was invisible whenever the cursor sat at the end
+    /// of the line (moved back inside the text, it covered a real character
+    /// and showed).
+    #[test]
+    fn an_inverted_trailing_space_survives_the_trim() {
+        let snap = render("> \x1b[7m \x1b[0m");
+        let line = &snap.lines[0];
+        assert_eq!(line.text, ">  ", "runs = {:?}", line.segments);
+        let seg = line.segments.last().unwrap();
+        assert!(seg.inverse);
+        assert_eq!((seg.col, seg.cells), (2, 1));
+    }
+
+    /// The blanks past the last thing painted still go: a line ending in plain
+    /// text must not pay for the grid's full width.
+    #[test]
+    fn plain_trailing_blanks_are_still_trimmed() {
+        let snap = render("\x1b[7mbar\x1b[0m ok");
+        assert_eq!(snap.lines[0].text, "bar ok");
     }
 
     #[test]
