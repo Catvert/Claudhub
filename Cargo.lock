@@ -1075,6 +1075,7 @@ dependencies = [
  "gpui_platform",
  "interprocess",
  "keyring",
+ "libc",
  "log",
  "lsp-types",
  "notify 8.2.0",

@@ -752,6 +752,14 @@ fn follow(
         // stderr without it.
         .env("NO_COLOR", "1");
     crate::wsl::no_console(&mut cmd);
+    // Its own process group, so the stop button can reach the whole tree: a
+    // suite is never one process — pest forks paratest workers under
+    // `--parallel`, the browser plugin holds a Playwright node server and a
+    // browser — and `Child::kill` only reaches the root. Orphaned, the
+    // workers finish their current test and die on the next write into a
+    // dead pipe: exactly the "stop waits for the test to end" one observes.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let mut child = cmd.spawn().map_err(|e| format!("{what}: {e}"))?;
 
     let (lines, incoming) = std::sync::mpsc::sync_channel::<(bool, String)>(256);
@@ -810,8 +818,7 @@ fn follow(
         }
     };
     if let Some(why) = ended {
-        let _ = child.kill();
-        let _ = child.wait();
+        kill_run(&mut child);
         for reader in readers {
             let _ = reader.join();
         }
@@ -827,8 +834,7 @@ fn follow(
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_run(&mut child);
                     return Err(format!(
                         "{what} did not answer within {RUN_TIMEOUT:?} and was interrupted"
                     ));
@@ -844,6 +850,29 @@ fn follow(
         Vec::from(err_tail).join("\n"),
         started.elapsed().as_millis() as u64,
     ))
+}
+
+/// Kills a run and everything it forked.
+///
+/// The group first (`spawn` put the run in its own), then the root as the
+/// fallback the group call cannot need on Unix — and the only thing there is
+/// on Windows, where local runs are JS suites whose runners fork less.
+///
+/// One tree survives this on purpose: through Sail the suite runs **in the
+/// container**, and killing the `docker compose exec` client does not stop
+/// the process it started over there — Docker's own semantics, the same one
+/// Ctrl+C hits in a terminal. Stopping that run for real would mean asking
+/// Docker for the container, which no gesture is worth yet.
+fn kill_run(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id() as i32;
+        // SIGKILL, not SIGTERM: what the button means is "now", and a PHP
+        // process wedged on a dead database ignores the polite one.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Colours out of a narrated line: the run is followed through a pipe, and

@@ -212,6 +212,11 @@ opt-level = 2
 # la règle des trois couches vaut aussi pour ce qu'on demande à cargo de bâtir.
 # `default-features = false` retire la lecture du `[package.metadata]`, que nous
 # ne remplissons pas — les champs sont écrits en toutes lettres dans `build.rs`.
+# Tuer le *groupe* d'un run de tests (suite.rs) : `Child::kill` n'atteint que
+# la racine, et une suite est un arbre — workers paratest, serveur Playwright.
+[target."cfg(unix)".dependencies]
+libc = "0.2"
+
 [target."cfg(windows)".build-dependencies]
 winresource = { version = "0.1.31", default-features = false }
 
