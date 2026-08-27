@@ -1266,6 +1266,9 @@ fn render_dir(
                     run.update(cx, |this, cx| {
                         this.launch_tests(label, vec![target], window, cx);
                     });
+                    // The row underneath folds the chevron: launching must
+                    // not also flip it.
+                    cx.stop_propagation();
                 }),
         )
         .into_any_element()
@@ -1659,6 +1662,7 @@ impl ClaudhubApp {
                             .ghost()
                             .xsmall()
                             .icon(icon("copy"))
+                            .label(tr!("tests-copy"))
                             .tooltip(tr!("tests-copy-result"))
                             .on_click({
                                 let text = outcome_text(outcome);
@@ -1666,6 +1670,9 @@ impl ClaudhubApp {
                                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                                         text.clone(),
                                     ));
+                                    // The row underneath opens the file:
+                                    // copying must not travel there.
+                                    cx.stop_propagation();
                                 }
                             }),
                     )
