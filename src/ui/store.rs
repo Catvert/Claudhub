@@ -427,6 +427,20 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Writes now what the deferred save still owes: the application is
+    /// quitting, and the half-second timer will not live to fire. A no-op
+    /// when nothing is pending.
+    pub fn flush(cx: &mut App) {
+        let pending = cx.update_global::<StateStore, _>(|store, _| {
+            std::mem::replace(&mut store.saving, false).then(|| store.store.clone())
+        });
+        if let Some(store) = pending {
+            store.save();
+        }
+    }
+}
+
 fn schedule_save(cx: &mut App) {
     let already_scheduled =
         cx.update_global::<StateStore, _>(|store, _| std::mem::replace(&mut store.saving, true));

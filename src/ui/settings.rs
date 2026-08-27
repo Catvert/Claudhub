@@ -970,6 +970,20 @@ fn affects_theme(before: &Settings, after: &Settings) -> bool {
         || before.mono_font() != after.mono_font()
 }
 
+impl Settings {
+    /// Writes now what the deferred save still owes: the application is
+    /// quitting, and the half-second timer will not live to fire. A no-op
+    /// when nothing is pending. The store's `flush` twin.
+    pub fn flush(cx: &mut App) {
+        let pending = cx.update_global::<SettingsStore, _>(|store, _| {
+            std::mem::replace(&mut store.saving, false).then(|| store.settings.clone())
+        });
+        if let Some(settings) = pending {
+            settings.save();
+        }
+    }
+}
+
 fn schedule_save(cx: &mut App) {
     let already_scheduled =
         cx.update_global::<SettingsStore, _>(|store, _| std::mem::replace(&mut store.saving, true));

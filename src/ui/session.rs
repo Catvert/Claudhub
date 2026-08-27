@@ -278,9 +278,18 @@ impl ClaudhubApp {
         // arrives before any repository has answered. Without this, typing one
         // letter on startup would erase the worktree one is about to be given
         // back.
+        //
+        // And a **stopgap stands aside for the same reason**: while
+        // repositories are still owed an answer, what the window shows is the
+        // first checkout of whichever replied first — filing it would replace
+        // the remembered worktree with a race's winner, and a close or a
+        // crash in that window teleports the next session to a project nobody
+        // chose. When nothing is pending any more, the stopgap *is* the
+        // answer — `session_terminal_due`, the first terminal's own rule.
         let worktree = self
             .active
             .clone()
+            .filter(|_| session_terminal_due(self.selection_rank, self.opening_repos))
             .or_else(|| self.restoring.worktree.clone());
         let repo = worktree.as_deref().and_then(|path| self.main_of(path));
         // No worktree, or one whose repository is not open: there is nowhere to

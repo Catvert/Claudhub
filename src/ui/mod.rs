@@ -171,6 +171,16 @@ pub fn run(
             // Per-worktree state follows the settings: the views read it just
             // the same, and it has to be there before the first of them.
             store::Store::load().init_global(cx);
+            // Both files are written on a half-second timer, and quitting is
+            // the one moment that timer does not survive: without this flush,
+            // the last change — the worktree one just switched to, most
+            // painfully — was lost exactly when it was about to matter.
+            cx.on_app_quit(|cx| {
+                store::Store::flush(cx);
+                settings::Settings::flush(cx);
+                async {}
+            })
+            .detach();
             // Before the window: a plugin's panel has to be in the dock's
             // registry before `layout.json` is read back, or its tab comes back
             // as an empty frame. That is why adding or removing a plugin takes
