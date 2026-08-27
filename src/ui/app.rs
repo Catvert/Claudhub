@@ -55,7 +55,8 @@ use crate::ui::terminal_view::OpenTerminal;
 // which is dear, and without it the new default is one nobody would ever see.
 // 23: the tests panel joined the review's bottom third, the home's column and
 // the editing screen's sidebar.
-const LAYOUT_VERSION: usize = 23;
+// 24: the tests screen arrived, and the run panel with it.
+const LAYOUT_VERSION: usize = 24;
 
 /// The saved layouts, one per screen.
 ///
@@ -645,6 +646,13 @@ pub struct ClaudhubApp {
     /// justfile, and for its reason: the tests are the checkout's files.
     pub(super) pest: HashMap<PathBuf, crate::ui::pest_view::PestState>,
     pub(super) pest_scroll: gpui::UniformListScrollHandle,
+    /// The run each worktree follows — or followed: the panel keeps the last
+    /// account until the next launch replaces it.
+    pub(super) pest_runs: HashMap<PathBuf, crate::ui::pest_view::PestRun>,
+    pub(super) pest_run_scroll: gpui::UniformListScrollHandle,
+    /// The send id `Evt::PestRan` hands back — a run launched for a state
+    /// since replaced must not paint the panel.
+    pub(super) pest_run_seq: u64,
     /// What `wt` knows about each worktree: started or not, its static
     /// address, and the preview — options, ports, `[status.info]`.
     pub(super) wt_states: HashMap<PathBuf, crate::runtime::protocol::WtWorktree>,
@@ -1270,6 +1278,9 @@ impl ClaudhubApp {
             tags_scroll: gpui::UniformListScrollHandle::new(),
             pest: HashMap::new(),
             pest_scroll: gpui::UniformListScrollHandle::new(),
+            pest_runs: HashMap::new(),
+            pest_run_scroll: gpui::UniformListScrollHandle::new(),
+            pest_run_seq: 0,
             stashes: HashMap::new(),
             stashes_scroll: gpui::UniformListScrollHandle::new(),
             sql_history: crate::ui::sql_history::History::load(),
@@ -2025,7 +2036,7 @@ impl ClaudhubApp {
         // A test added while Claudhub is open has to show up in the panel: the
         // suite is what one edits during the very session that runs it.
         if crate::ui::pest_view::reloads(&active, path) {
-            self.reload_pest(&active);
+            self.reload_pest(&active, cx);
         }
         self.request_status(active);
         cx.notify();
@@ -2121,6 +2132,8 @@ impl ClaudhubApp {
                     .insert(worktree, recipes.map(std::rc::Rc::new));
             }
             Evt::PestTests { worktree, report } => self.pest_arrived(worktree, report, cx),
+            Evt::PestLine { worktree, id, line } => self.pest_line(worktree, id, line, cx),
+            Evt::PestRan { worktree, id, run } => self.pest_ran(worktree, id, run, cx),
             Evt::WtQuestions {
                 main,
                 slug,
@@ -3280,7 +3293,7 @@ impl ClaudhubApp {
         self.ensure_just(&path);
         // And its Pest suite, for the tests panel — here and not at a first
         // paint, because the tab only exists once the answer says there is one.
-        self.ensure_pest(&path);
+        self.ensure_pest(&path, cx);
         // A plugin's panel speaks about the worktree the window shows, like
         // every other panel: changing it is starting over, not refreshing.
         self.plugins_follow_worktree(cx);

@@ -641,6 +641,9 @@ panels! {
     // The tab exists only where `vendor/bin/pest` does: on everything else the
     // honest panel is no panel — there is nothing to run.
     TestsPanel => ("ClaudhubTests", "panel-tests", render_pest, Tests, visible: tests_visible),
+    // The run being followed. On the home screen its tab only shows once a
+    // run exists, the console's rule.
+    TestRunPanel => ("ClaudhubTestRun", "panel-test-run", render_test_run, TestRun, needed: test_run_open),
     FilesPanel => ("ClaudhubFiles", "panel-files", render_files, Files),
     DbPanel => ("ClaudhubDb", "panel-databases", render_db, Db),
     SqlHistoryPanel => ("ClaudhubSqlHistory", "panel-sql-history", render_sql_history, SqlHistory),

@@ -57,10 +57,13 @@ pub struct Test {
     /// Pest puts on generated classes is stripped, because the filter is
     /// matched against the printable name, which does not carry it.
     pub class: String,
+    /// The method name as listed, mangling included: the key that pairs this
+    /// test with a run's outcome (`same_test`).
+    pub method: String,
     /// What the row shows. For a Pest test, the description read back from the
     /// mangled name — lost bytes become single spaces, so `it sums 2 + 2`
-    /// shows as "it sums 2 2"; honest, and the terminal prints the real one.
-    /// For a PHPUnit method, the method name itself.
+    /// shows as "it sums 2 2"; honest, and a run's account then supplies the
+    /// real one. For a PHPUnit method, the method name itself.
     pub name: String,
     /// The regex core matching this test's description in `--filter`, without
     /// anchors: what [`test_filter`] wraps.
@@ -197,6 +200,7 @@ fn parse(output: &str) -> Vec<Test> {
         seen.insert(key, tests.len());
         tests.push(Test {
             class,
+            method: method.to_string(),
             name: display(method),
             pattern: pattern_of(method),
             datasets: u32::from(dataset),
@@ -270,6 +274,371 @@ fn pattern_of(method: &str) -> String {
     pattern
 }
 
+// — Running ————————————————————————————————————————————————
+//
+// A run is a subprocess too, but a **followed** one: alongside the text a
+// human reads, `--log-junit` writes the machine's account — real
+// descriptions, one entry per dataset case, the failure message with its
+// `file:line`. That file is what turns "a terminal scrolled by" into a green
+// or red dot per test, and it is Pest's own format, not a parsing of its
+// screen.
+
+/// Beyond this, a run is killed. A suite is measured in minutes; this ceiling
+/// is for the one wedged on a dead database.
+const RUN_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// The lines kept for a failure message. The end is where Pest writes the
+/// failures and the summary; a runaway `dump()` loop can print millions.
+const COMPLAINT_KEPT: usize = 200;
+
+/// How one test ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Status {
+    Passed,
+    Failed,
+    Skipped,
+}
+
+/// One test's result, dataset cases folded — the row's dot, and what its
+/// failure said.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Outcome {
+    /// The class as the listing knows it (`Tests\Unit\MathTest`) — the JUnit
+    /// carries it without the `P\` prefix, which is what makes the two match.
+    pub class: String,
+    /// The **real** description, read from the JUnit — where the listing only
+    /// had the mangled name. "it sums 2 + 2", at last.
+    pub name: String,
+    pub status: Status,
+    /// The first failure's message, empty otherwise.
+    pub message: String,
+    /// The test's file, relative to the worktree; empty when the JUnit had
+    /// nothing that reads as a path.
+    pub file: String,
+    /// The line the failure points at, read from its message.
+    pub line: Option<u32>,
+    /// Dataset cases folded into this row; 1 for a plain test.
+    pub cases: u32,
+    pub time_ms: u64,
+}
+
+/// One run, as the panel shows it: the counts and each test's outcome. The
+/// text a human reads travelled already, line by line, while the run went.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Run {
+    pub passed: u32,
+    pub failed: u32,
+    pub skipped: u32,
+    pub duration_ms: u64,
+    pub outcomes: Vec<Outcome>,
+}
+
+/// Names the temporary JUnit file: the worker is single-threaded, but two
+/// windows are two processes, and a second Claudhub must not read the first
+/// one's half-written file.
+static RUN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Runs the suite — all of it, or what `filter` names — saying each line as
+/// it comes, and reads the account at the end.
+///
+/// A failing test is a **successful run**: Pest exits non-zero the moment one
+/// test fails, and that is the result, not an error. The error case is the
+/// run that produced no account at all — PHP missing, a suite that will not
+/// boot — and then the streams speak, as for the listing.
+///
+/// The lines go out through `progress` while the process runs, the shape
+/// `wt`'s hooks already have: a suite is measured in minutes, and a panel
+/// saying nothing for minutes reads as hung.
+pub fn run(
+    worktree: &Path,
+    filter: Option<&str>,
+    progress: &(dyn Fn(String) + Sync),
+) -> std::result::Result<Run, String> {
+    let bin = worktree.join("vendor/bin/pest");
+    if !bin.is_file() {
+        return Err("vendor/bin/pest is missing".to_string());
+    }
+    let junit = std::env::temp_dir().join(format!(
+        "claudhub-pest-{}-{}.xml",
+        std::process::id(),
+        RUN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let result = follow(worktree, &bin, filter, &junit, progress);
+    let account = std::fs::read_to_string(&junit).unwrap_or_default();
+    let _ = std::fs::remove_file(&junit);
+    let (status, kept, stderr, duration_ms) = result?;
+    let outcomes = parse_junit(&account);
+    if outcomes.is_empty() {
+        // No account: the suite never ran. `--filter` finding nothing is the
+        // one benign shape — Pest then reports nothing and says "No tests
+        // found" on its stdout, which the message passes on.
+        return Err(complaint(&kept.join("\n"), &stderr, &status));
+    }
+    let (mut passed, mut failed, mut skipped) = (0, 0, 0);
+    for outcome in &outcomes {
+        match outcome.status {
+            Status::Passed => passed += 1,
+            Status::Failed => failed += 1,
+            Status::Skipped => skipped += 1,
+        }
+    }
+    Ok(Run {
+        passed,
+        failed,
+        skipped,
+        duration_ms,
+        outcomes,
+    })
+}
+
+/// The subprocess itself: spawned, followed line by line, killed at the
+/// ceiling. Returns the status, the last lines (for the message when there is
+/// no account), stderr, and the wall-clock time.
+///
+/// The lines travel through a channel rather than being read in place — the
+/// reason `git`'s streaming does the same: a read blocked on a command that
+/// says nothing would have no ceiling, and the ceiling is the point.
+#[allow(clippy::type_complexity)]
+fn follow(
+    worktree: &Path,
+    bin: &Path,
+    filter: Option<&str>,
+    junit: &Path,
+    progress: &(dyn Fn(String) + Sync),
+) -> std::result::Result<(String, Vec<String>, String, u64), String> {
+    use std::io::{BufRead, Read};
+
+    let started = std::time::Instant::now();
+    let mut cmd = Command::new(bin);
+    cmd.arg("--colors=never")
+        .arg("--log-junit")
+        .arg(junit)
+        .current_dir(worktree)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("LC_ALL", "C");
+    if let Some(filter) = filter {
+        cmd.arg("--filter").arg(filter);
+    }
+    crate::wsl::no_console(&mut cmd);
+    let mut child = cmd.spawn().map_err(|e| format!("vendor/bin/pest: {e}"))?;
+
+    let mut stderr = child.stderr.take().expect("stderr requested as piped");
+    let err_reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = stderr.read_to_end(&mut buffer);
+        buffer
+    });
+    let stdout = child.stdout.take().expect("stdout requested as piped");
+    let (lines, incoming) = std::sync::mpsc::sync_channel::<String>(256);
+    let reader = std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).split(b'\n') {
+            let Ok(line) = line else { break };
+            let mut line = String::from_utf8_lossy(&line).into_owned();
+            if line.ends_with('\r') {
+                line.pop();
+            }
+            if lines.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let deadline = started + RUN_TIMEOUT;
+    let mut kept: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    let overtime = loop {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break true;
+        }
+        match incoming.recv_timeout(deadline - now) {
+            Ok(line) => {
+                if kept.len() == COMPLAINT_KEPT {
+                    kept.pop_front();
+                }
+                kept.push_back(line.clone());
+                progress(line);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break false,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break true,
+        }
+    };
+    if overtime {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = reader.join();
+        let _ = err_reader.join();
+        return Err(format!(
+            "pest did not answer within {RUN_TIMEOUT:?} and was interrupted"
+        ));
+    }
+    let _ = reader.join();
+    // stdout is closed: the process is exiting. The bounded wait is for the
+    // one that closed its output and wedged anyway.
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = err_reader.join();
+                    return Err(format!(
+                        "pest did not answer within {RUN_TIMEOUT:?} and was interrupted"
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => return Err(format!("waiting on pest: {e}")),
+        }
+    };
+    let stderr = err_reader.join().unwrap_or_default();
+    Ok((
+        status.to_string(),
+        kept.into(),
+        String::from_utf8_lossy(&stderr).into_owned(),
+        started.elapsed().as_millis() as u64,
+    ))
+}
+
+/// Reads the JUnit account: one `Outcome` per test, dataset cases folded.
+///
+/// Every `<testcase>` is one case; its dataset suffix (` with data set …`) is
+/// PHPUnit's, and stripping it is what folds a dataset back into its test.
+/// A case that failed makes the test failed; skipped only counts when
+/// nothing ran.
+fn parse_junit(xml: &str) -> Vec<Outcome> {
+    let Ok(doc) = roxmltree::Document::parse(xml) else {
+        return Vec::new();
+    };
+    let mut outcomes: Vec<Outcome> = Vec::new();
+    let mut seen: std::collections::HashMap<(String, String), usize> =
+        std::collections::HashMap::new();
+    for case in doc
+        .descendants()
+        .filter(|node| node.has_tag_name("testcase"))
+    {
+        let Some(full_name) = case.attribute("name") else {
+            continue;
+        };
+        let Some(class) = case.attribute("class") else {
+            continue;
+        };
+        let name = full_name
+            .split(" with data set ")
+            .next()
+            .unwrap_or(full_name)
+            .to_string();
+        let mut status = Status::Passed;
+        let mut message = String::new();
+        for child in case.children() {
+            match child.tag_name().name() {
+                "failure" | "error" => {
+                    status = Status::Failed;
+                    message = child.text().unwrap_or_default().trim().to_string();
+                    break;
+                }
+                "skipped" => status = Status::Skipped,
+                _ => {}
+            }
+        }
+        let time_ms = case
+            .attribute("time")
+            .and_then(|time| time.parse::<f64>().ok())
+            .map(|secs| (secs * 1000.) as u64)
+            .unwrap_or(0);
+        // `file` reads `tests/Unit/MathTest.php::it sums 2 + 2` for a Pest
+        // test — and `Legacy::Old school` for a PHPUnit class, which is no
+        // path and is dropped.
+        let file = case
+            .attribute("file")
+            .map(|file| file.split("::").next().unwrap_or(file))
+            .filter(|file| file.ends_with(".php"))
+            .unwrap_or_default()
+            .to_string();
+        let key = (class.to_string(), name.clone());
+        if let Some(&row) = seen.get(&key) {
+            let test = &mut outcomes[row];
+            test.cases += 1;
+            test.time_ms += time_ms;
+            // A failing case fails the test; a skipped one only says so when
+            // nothing else ran.
+            match status {
+                Status::Failed if test.status != Status::Failed => {
+                    test.status = Status::Failed;
+                    test.line = failure_line(&message);
+                    test.message = message;
+                }
+                Status::Passed if test.status == Status::Skipped => {
+                    test.status = Status::Passed;
+                }
+                _ => {}
+            }
+            continue;
+        }
+        seen.insert(key, outcomes.len());
+        let line = failure_line(&message);
+        outcomes.push(Outcome {
+            class: class.to_string(),
+            name,
+            status,
+            message,
+            file,
+            line,
+            cases: 1,
+            time_ms,
+        });
+    }
+    outcomes
+}
+
+/// The line a failure points at, read from its message — the JUnit has no
+/// attribute for it, but Pest writes `at tests/Feature/HttpTest.php:3` in
+/// the text.
+fn failure_line(message: &str) -> Option<u32> {
+    message.lines().find_map(|line| {
+        let (_, number) = line.trim().strip_prefix("at ")?.rsplit_once(':')?;
+        number.parse().ok()
+    })
+}
+
+/// Pest's `Str::evaluable`, without its prefix: what a description becomes as
+/// a method name. Byte-wise, like the original — underscores double first,
+/// then spaces and every other lost byte become one `_` each.
+fn mangled(description: &str) -> String {
+    let doubled = description.replace('_', "__");
+    let bytes = doubled
+        .bytes()
+        .map(|byte| match byte {
+            b'_' | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | 0x80.. => byte,
+            _ => b'_',
+        })
+        .collect::<Vec<u8>>();
+    // Only ASCII bytes were replaced, so the UTF-8 sequences are intact.
+    String::from_utf8(bytes).expect("ASCII-only replacement keeps UTF-8 valid")
+}
+
+/// Is this outcome the listed test? The listing has the mangled method name,
+/// the account the real description: mangling the description back is exact
+/// for a Pest test. A PHPUnit method is compared loosely — its account name
+/// is prettified (`testOldSchool` reads "Old school") and only the letters
+/// survive that.
+pub fn same_test(method: &str, account_name: &str) -> bool {
+    match method.strip_prefix(MANGLE_PREFIX) {
+        Some(rest) => mangled(account_name) == rest,
+        None => loose(method.strip_prefix("test").unwrap_or(method)) == loose(account_name),
+    }
+}
+
+/// Lowercase alphanumerics, everything else dropped.
+fn loose(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 /// The `--filter` argument that runs every test of one class — one file, in
 /// Pest's world.
 ///
@@ -291,6 +660,21 @@ pub fn test_filter(test: &Test) -> String {
         escape_class(&test.class),
         test.pattern
     )
+}
+
+/// The `--filter` argument that runs everything under one folder of the tree
+/// — `Unit`, or `TenantFeature\Forms`. `short_depth` names the folder as a
+/// segment count of the **short** class (`Tests\` dropped), and `class` is
+/// any class under it, whose full name restores the hidden prefix.
+pub fn scope_filter(class: &str, short_depth: usize) -> String {
+    let segments: Vec<&str> = class.split('\\').collect();
+    let offset = segments.len() - short_class(class).split('\\').count();
+    let end = (offset + short_depth + 1).min(segments.len());
+    let prefix = segments[..end].join("\\");
+    if prefix == class {
+        return class_filter(class);
+    }
+    format!("^{}\\\\", escape_class(&prefix))
 }
 
 /// A PHP class name in a regex: only `\` needs escaping — the rest of what a
@@ -425,6 +809,112 @@ mod tests {
             "PHP Fatal error: out of memory"
         );
         assert_eq!(complaint("", "  ", "exit status: 139"), "exit status: 139");
+    }
+
+    /// `pest --log-junit` on the same suite: real descriptions, one entry per
+    /// dataset case, the failure's message carrying its `file:line`.
+    const ACCOUNT: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="Unit" tests="6">
+    <testsuite name="LegacyTest" file="Legacy">
+      <testcase name="Old school" file="Legacy::Old school" class="LegacyTest" classname="LegacyTest" assertions="1" time="0.000947"/>
+    </testsuite>
+    <testsuite name="Tests\Unit\MathTest" file="tests/Unit/MathTest.php">
+      <testcase name="it sums 2 + 2" file="tests/Unit/MathTest.php::it sums 2 + 2" class="Tests\Unit\MathTest" classname="Tests.Unit.MathTest" time="0.004124"/>
+      <testcase name="la casse UTF-8 : éléphant" file="tests/Unit/MathTest.php::u" class="Tests\Unit\MathTest" time="0.000100"/>
+      <testcase name="`inside a describe` &#8594; it nests fine" file="tests/Unit/MathTest.php::x" class="Tests\Unit\MathTest" time="0.000213"/>
+      <testsuite name="it runs on datasets">
+        <testcase name="it runs on datasets with data set &quot;(1)&quot;" file="tests/Unit/MathTest.php::y" class="Tests\Unit\MathTest" time="0.000252"/>
+        <testcase name="it runs on datasets with data set &quot;(2)&quot;" file="tests/Unit/MathTest.php::y" class="Tests\Unit\MathTest" time="0.000201"/>
+      </testsuite>
+      <testcase name="it is skipped" file="tests/Unit/MathTest.php::z" class="Tests\Unit\MathTest" time="0.001594">
+        <skipped/>
+      </testcase>
+    </testsuite>
+  </testsuite>
+  <testsuite name="Feature" tests="2">
+    <testsuite name="Tests\Feature\HttpTest" file="tests/Feature/HttpTest.php">
+      <testcase name="it answers" file="tests/Feature/HttpTest.php::it answers" class="Tests\Feature\HttpTest" time="0.001734"/>
+      <testcase name="it will fail on purpose" file="tests/Feature/HttpTest.php::it will fail on purpose" class="Tests\Feature\HttpTest" time="0.000448">
+        <failure type="PHPUnit\Framework\ExpectationFailedException">it will fail on purposeFailed asserting that 1 is identical to 2.
+at tests/Feature/HttpTest.php:3</failure>
+      </testcase>
+    </testsuite>
+  </testsuite>
+</testsuites>"#;
+
+    #[test]
+    fn the_account_gives_one_outcome_per_test() {
+        let outcomes = parse_junit(ACCOUNT);
+        let names: Vec<&str> = outcomes.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Old school",
+                "it sums 2 + 2",
+                "la casse UTF-8 : éléphant",
+                "`inside a describe` → it nests fine",
+                "it runs on datasets",
+                "it is skipped",
+                "it answers",
+                "it will fail on purpose",
+            ]
+        );
+        // The two dataset cases fold into one green row.
+        let datasets = &outcomes[4];
+        assert_eq!(datasets.cases, 2);
+        assert_eq!(datasets.status, Status::Passed);
+        assert_eq!(outcomes[5].status, Status::Skipped);
+        // The failure keeps its message and the line its text points at.
+        let failed = &outcomes[7];
+        assert_eq!(failed.status, Status::Failed);
+        assert_eq!(failed.file, "tests/Feature/HttpTest.php");
+        assert_eq!(failed.line, Some(3));
+        assert!(failed.message.contains("1 is identical to 2"));
+        // `Legacy::Old school` is no path.
+        assert_eq!(outcomes[0].file, "");
+    }
+
+    /// The listing's mangled name and the account's real description name the
+    /// same test — that pairing is what puts a dot on a row.
+    #[test]
+    fn the_listing_and_the_account_name_the_same_tests() {
+        let tests = parse(LISTING);
+        let outcomes = parse_junit(ACCOUNT);
+        for test in &tests {
+            let paired = outcomes
+                .iter()
+                .filter(|o| o.class == test.class && same_test(&test.method, &o.name))
+                .count();
+            // `it answers` and `it will fail on purpose` live in the account
+            // only; every listed test finds exactly one outcome.
+            assert_eq!(paired, 1, "{}::{} pairs once", test.class, test.method);
+        }
+        // And not by accident of looseness: a different description does not.
+        assert!(!same_test(
+            "__pest_evaluable_it_sums_2___2",
+            "it sums 2 + 3"
+        ));
+        assert!(same_test("testOldSchool", "Old school"));
+        assert!(!same_test("testOldSchool", "New school"));
+    }
+
+    /// A folder of the tree runs as a class-prefix regex; the folder that
+    /// *is* the class runs as the class.
+    #[test]
+    fn a_folder_runs_everything_under_it() {
+        let class = "Tests\\TenantFeature\\Forms\\BillTest";
+        assert_eq!(scope_filter(class, 0), "^Tests\\\\TenantFeature\\\\");
+        assert_eq!(
+            scope_filter(class, 1),
+            "^Tests\\\\TenantFeature\\\\Forms\\\\"
+        );
+        assert_eq!(
+            scope_filter(class, 2),
+            "^Tests\\\\TenantFeature\\\\Forms\\\\BillTest::"
+        );
+        // A class with no `Tests\` prefix is its own folder from depth zero.
+        assert_eq!(scope_filter("LegacyTest", 0), "^LegacyTest::");
     }
 
     #[test]

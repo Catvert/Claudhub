@@ -142,6 +142,20 @@ fn is_search(cmd: &Cmd) -> bool {
     matches!(cmd, Cmd::Search { .. })
 }
 
+/// A test run.
+///
+/// **Its own queue, one worker.** A suite is measured in minutes: with the
+/// background sweep it would starve the summaries and the agents for its
+/// whole length, with the project's hooks it would make a `wt up` wait on
+/// green. One worker, because two suites of the same worktree would fight
+/// over the framework's own locks — and a second run asked while one goes
+/// simply queues behind it, which is what a test runner is expected to do.
+/// The **listing** stays on the background queue on purpose: it is seconds,
+/// not minutes, and re-reading the list must not wait behind a run.
+fn is_tests(cmd: &Cmd) -> bool {
+    matches!(cmd, Cmd::PestRun { .. })
+}
+
 /// The `wt` operations that run the project's hooks.
 ///
 /// **Their own queue**, and not the network's. They were there first, for the
@@ -177,6 +191,7 @@ enum Queue {
     Background,
     Databases,
     Search,
+    Tests,
 }
 
 fn queue_of(cmd: &Cmd) -> Queue {
@@ -211,6 +226,8 @@ fn queue_of(cmd: &Cmd) -> Queue {
         Queue::Databases
     } else if is_search(cmd) {
         Queue::Search
+    } else if is_tests(cmd) {
+        Queue::Tests
     } else {
         Queue::Reads
     }
@@ -240,7 +257,9 @@ enum HandleInner {
         /// start: the orders are then dropped, and the review only refreshes by
         /// hand.
         watcher: Option<watch::Watcher>,
-        /// The seventh lane: the language servers. Outside the queues for the
+        /// The test runs — see `is_tests`.
+        tests: async_channel::Sender<Cmd>,
+        /// The eighth lane: the language servers. Outside the queues for the
         /// watcher's reason and one of its own — **order matters**. A
         /// `didChange` must reach the server before the completion that depends
         /// on it, which several workers sharing one channel cannot promise.
@@ -291,6 +310,7 @@ impl Handle {
                 background,
                 databases,
                 search,
+                tests,
                 watcher,
                 lsp,
             } => {
@@ -306,6 +326,7 @@ impl Handle {
                     Queue::Background => background,
                     Queue::Databases => databases,
                     Queue::Search => search,
+                    Queue::Tests => tests,
                     Queue::Reads => reads,
                 };
                 send_to(queue, cmd);
@@ -390,6 +411,7 @@ pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
     let (bg_tx, bg_rx) = async_channel::unbounded::<Cmd>();
     let (db_tx, db_rx) = async_channel::unbounded::<Cmd>();
     let (search_tx, search_rx) = async_channel::unbounded::<Cmd>();
+    let (tests_tx, tests_rx) = async_channel::unbounded::<Cmd>();
     let (evt_tx, evt_rx) = async_channel::unbounded::<Evt>();
 
     for n in 0..READERS {
@@ -407,6 +429,8 @@ pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
     }
     // One for the searches — see `is_search`.
     worker("claudhub-search".into(), search_rx, evt_tx.clone());
+    // And one for the test runs — see `is_tests`.
+    worker("claudhub-pest".into(), tests_rx, evt_tx.clone());
 
     // File watching lives here and not in the view: its batches become
     // `Evt::FilesChanged` on the same channel as everything else — a single
@@ -449,6 +473,7 @@ pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
                 background: bg_tx,
                 databases: db_tx,
                 search: search_tx,
+                tests: tests_tx,
                 watcher,
                 lsp,
             },
@@ -1165,6 +1190,23 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             let report = crate::pest::report(&worktree);
             vec![Evt::PestTests { worktree, report }]
         }
+        Cmd::PestRun {
+            worktree,
+            filter,
+            id,
+        } => {
+            // Narrated while it runs, like a `wt` hook: a suite is minutes,
+            // and its panel follows the lines live.
+            let progress = |line: String| {
+                emit(Evt::PestLine {
+                    worktree: worktree.clone(),
+                    id,
+                    line,
+                })
+            };
+            let run = crate::pest::run(&worktree, filter.as_deref(), &progress);
+            vec![Evt::PestRan { worktree, id, run }]
+        }
         Cmd::AddWorktree {
             main,
             path,
@@ -1751,6 +1793,28 @@ mod tests {
             Queue::Background
         );
         // Listing Pest tests boots PHP — a second or two on a real suite.
+        assert_eq!(
+            queue_of(&Cmd::PestLoad {
+                worktree: worktree(),
+            }),
+            Queue::Background
+        );
+    }
+
+    /// A suite is measured in minutes and runs alone: with the background
+    /// sweep it would starve the summaries and the agents for its whole
+    /// length, with the hooks it would make a `wt up` wait on green — and
+    /// re-reading the **list** must not wait behind a run.
+    #[test]
+    fn a_test_run_waits_in_its_own_queue() {
+        assert_eq!(
+            queue_of(&Cmd::PestRun {
+                worktree: worktree(),
+                filter: None,
+                id: 0,
+            }),
+            Queue::Tests
+        );
         assert_eq!(
             queue_of(&Cmd::PestLoad {
                 worktree: worktree(),

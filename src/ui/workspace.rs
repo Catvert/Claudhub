@@ -96,6 +96,12 @@ pub enum Workspace {
     Search,
     Db,
     Sentry,
+    /// The Pest suite: the tree of tests on the left, the run being followed
+    /// in the centre. A screen and not only a panel dropped elsewhere — a
+    /// run is read while walking the tree, the search screen's reasoning —
+    /// but its two panels do keep their tabs on the git, editing and home
+    /// screens, where a test is one gesture away from the code it covers.
+    Tests,
     /// Every terminal of the window at once, in a grid grouped by worktree.
     ///
     /// **A screen and not a panel**, and for the reason every other screen
@@ -130,7 +136,7 @@ impl Workspace {
         Self::ALL.iter().position(|w| *w == self).unwrap_or(0)
     }
 
-    pub const ALL: [Workspace; 8] = [
+    pub const ALL: [Workspace; 9] = [
         // **First, and that is what `Alt+1` names.** The home screen is where
         // one lands and where one comes back to, and a rank in this array is
         // the key that reaches it.
@@ -141,10 +147,13 @@ impl Workspace {
         Workspace::Db,
         Workspace::Sentry,
         Workspace::Settings,
-        // **Last, and it is not an aesthetic choice**: `Alt+1` to `Alt+7` are
-        // ranks in this array, and a screen inserted in the middle would move
-        // every key after it. See `shortcuts::go_to_workspace`.
+        // **A screen only ever joins at the end, and it is not an aesthetic
+        // choice**: `Alt+1` to `Alt+9` are ranks in this array, and a screen
+        // inserted in the middle would move every key after it — which is why
+        // Tests sits after the two aside screens rather than beside Sentry.
+        // See `shortcuts::go_to_workspace`.
         Workspace::Multiplexer,
+        Workspace::Tests,
     ];
 
     /// The two screens one does not **work** in, in the order they sit at the
@@ -166,12 +175,13 @@ impl Workspace {
     /// from the bar because no plugin landed on it still has panels of ours to
     /// contribute here. Sentry is in it for the opposite reason: it has none,
     /// and it is by this list that its plugins reach the home screen.
-    pub const AT_HOME: [Workspace; 5] = [
+    pub const AT_HOME: [Workspace; 6] = [
         Workspace::Git,
         Workspace::Files,
         Workspace::Search,
         Workspace::Db,
         Workspace::Sentry,
+        Workspace::Tests,
     ];
 
     /// The screens that read files, in the order `Editing::panels` holds a
@@ -204,6 +214,7 @@ impl Workspace {
             Self::Files => Some(EditorPanel::NAME),
             Self::Search => Some(SearchPreviewPanel::NAME),
             Self::Db => Some(ConsolePanel::NAME),
+            Self::Tests => Some(TestRunPanel::NAME),
             Self::Home | Self::Sentry | Self::Settings | Self::Multiplexer => None,
         }
     }
@@ -266,6 +277,7 @@ impl Workspace {
             Self::Search => "search",
             Self::Db => "db",
             Self::Sentry => "sentry",
+            Self::Tests => "tests",
             Self::Settings => "settings",
             Self::Multiplexer => "multiplexer",
         }
@@ -284,6 +296,7 @@ impl Workspace {
             Self::Search => "workspace-search",
             Self::Db => "workspace-db",
             Self::Sentry => "workspace-sentry",
+            Self::Tests => "workspace-tests",
             Self::Settings => "workspace-settings",
             Self::Multiplexer => "workspace-multiplexer",
         }
@@ -299,6 +312,7 @@ impl Workspace {
             Self::Search => "search",
             Self::Db => "database",
             Self::Sentry => "triangle-alert",
+            Self::Tests => "circle-check",
             Self::Settings => "settings",
             Self::Multiplexer => "grid-3x3",
         }
@@ -336,6 +350,7 @@ impl Workspace {
                 (TagsPanel::NAME, "panel-tags"),
                 (StashesPanel::NAME, "panel-stashes"),
                 (TestsPanel::NAME, "panel-tests"),
+                (TestRunPanel::NAME, "panel-test-run"),
                 (SqlHistoryPanel::NAME, "panel-sql-history"),
                 (DiffPanel::NAME, "panel-diff"),
                 (EditorPanel::NAME, "panel-editor"),
@@ -372,6 +387,11 @@ impl Workspace {
                 (TerminalPanel::NAME, "panel-terminal"),
             ],
             Self::Sentry => &[(TerminalPanel::NAME, "panel-terminal")],
+            Self::Tests => &[
+                (TestsPanel::NAME, "panel-tests"),
+                (TestRunPanel::NAME, "panel-test-run"),
+                (TerminalPanel::NAME, "panel-terminal"),
+            ],
             // The grid holds the terminals itself: there is no terminal panel
             // here to offer hiding, and hiding the grid would leave a screen
             // with nothing on it.
@@ -552,6 +572,7 @@ pub fn install_default_layout(
                     .panel_view(panel!(EditorPanel), cx)
                     .panel_view(panel!(SearchPreviewPanel), cx)
                     .panel_view(panel!(ConsolePanel), cx)
+                    .panel_view(panel!(TestRunPanel), cx)
             );
             (Some(left), center)
         }
@@ -694,6 +715,20 @@ pub fn install_default_layout(
             let left = (!listed.is_empty()).then(|| with!(listed, DockLayout::tabs()));
             let center = with!(centred, DockLayout::tabs());
             (left, center)
+        }
+        // The tests: the tree on the left, the run being followed in the
+        // centre — the search screen's shape, and its reason: one walks a
+        // list on one side and reads on the other.
+        Workspace::Tests => {
+            let left = with!(
+                listed,
+                DockLayout::tabs().panel_view(panel!(TestsPanel), cx)
+            );
+            let center = with!(
+                centred,
+                DockLayout::tabs().panel_view(panel!(TestRunPanel), cx)
+            );
+            (Some(left), center)
         }
         // The settings take the whole width: the form has a sidebar of its own,
         // and two side by side would be two lists of pages to read before

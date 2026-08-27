@@ -70,6 +70,38 @@ pub struct WorktreeState {
     pub next_note: u64,
     /// Where the work stood in this checkout.
     pub place: Place,
+    /// Each test's last known fate, sorted by (class, method) before writing.
+    /// It is where one is at — which tests were red when the session closed —
+    /// and the dots would otherwise all be grey every morning.
+    pub tests: Vec<TestMark>,
+    /// The last run's totals, for the panel's bar.
+    pub tests_run: Option<TestsRun>,
+}
+
+/// One test's last known fate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TestMark {
+    pub class: String,
+    /// The listing's method name, mangling included: the key `same_test`
+    /// pairs rows with.
+    pub method: String,
+    /// The real description, learned from the run's account — the listing
+    /// only has the mangled reading.
+    pub name: String,
+    pub status: crate::pest::Status,
+    /// Unix seconds of the run that said so.
+    pub at: i64,
+}
+
+/// A whole run's totals.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TestsRun {
+    /// Unix seconds.
+    pub at: i64,
+    pub passed: u32,
+    pub failed: u32,
+    pub skipped: u32,
+    pub duration_ms: u64,
 }
 
 /// The file open in the built-in editor, and the checkout it belongs to.

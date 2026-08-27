@@ -133,8 +133,10 @@ src/
     loaded.rs   un plugin tel que la fenêtre le tient : script, état, arbres
   wt.rs         le `wt.toml` d'un projet : questions, tâches, statut, URLs
   just.rs       les recettes du `justfile`, lues par `just --dump` (JSON)
-  pest.rs       la suite Pest d'un worktree : `pest --list-tests` relu, et le
-                `--filter` exact qui relance un test — règles vérifiées sur Pest 4
+  pest.rs       la suite Pest d'un worktree : `pest --list-tests` relu, le
+                `--filter` exact qui relance un test, et le run suivi ligne à
+                ligne dont `--log-junit` rend le compte — règles vérifiées sur
+                Pest 4
   git/          couche git — sous-processus `git`, testable sans gpui
     mod.rs      exécution (stdin fermé, LC_ALL=C, pas de pager)
     repo.rs     découverte, worktrees, écritures (stage, commit, push…)
@@ -171,9 +173,10 @@ src/
     history_view.rs l'historique et son graphe peint
     tags.rs         le panneau des tags, et les quatre gestes sur un tag
     stashes.rs      le panneau des remisages, et les gestes sur un remisage
-    pest_view.rs    le panneau des tests : la liste groupée par fichier, et le
-                    clic qui lance dans un terminal — l'onglet n'existe que si
-                    `vendor/bin/pest` existe
+    pest_view.rs    les deux panneaux des tests : l'arbre repliable (pastilles
+                    par test, filtre des échecs, replis par défaut) et le run
+                    suivi — l'onglet n'existe que si `vendor/bin/pest` existe,
+                    les verdicts persistent par worktree dans le magasin
     highlight.rs    coloration tree-sitter d'un diff
     blade.rs        les vues Blade : surcouche du diff, coloriseur de l'éditeur
     panels.rs       les panneaux du dock, leur macro et leur registre
@@ -244,7 +247,7 @@ conflit et le fil se retrouve avec deux protocoles sous un seul numéro.
 
 Toute écriture git est suivie d'une relecture du statut (`write_then_refresh`).
 
-### Les six files
+### Les sept files
 
 `queue_of` dit, du seul examen d'une commande, dans quelle file elle part. Une
 table qu'un test verrouille — une commande mal rangée n'échoue jamais, elle
@@ -265,6 +268,10 @@ attend, et c'est la panne qu'on ne diagnostique pas.
   plusieurs à la fois et qu'ils attendent une socket.
 - **Recherche** (un worker) : une recherche se **remplace** — c'est
   l'identifiant d'envoi qui trie.
+- **Tests** (un worker) : un run Pest se mesure en minutes — avec le fond il
+  affamerait les résumés, avec les hooks il ferait attendre un `wt up`. Le
+  **relevé** de la suite reste au fond, exprès : relire la liste ne doit pas
+  attendre derrière un run.
 
 Hors des files, deux voies directes : la surveillance de fichiers, remise au
 thread du surveillant, et les serveurs de langage, remis à leur hôte.
@@ -386,8 +393,10 @@ Dans un worktree lié, `.git` est un *fichier* qui pointe vers
 
 ## Les écrans, et le dock
 
-Huit **écrans** (`ui::workspace::Workspace`) : Accueil, Git, Édition, Recherche,
-Bases, Sentry, Réglages, Multiplexeur, atteints par `Alt+1` à `Alt+8`. L'écran
+Neuf **écrans** (`ui::workspace::Workspace`) : Accueil, Git, Édition, Recherche,
+Bases, Sentry, Réglages, Multiplexeur, Tests, atteints par `Alt+1` à `Alt+9` —
+un écran ne rejoint `ALL` que **par la fin**, les touches étant des rangs de ce
+tableau. L'écran
 Git a beau ne plus s'appeler ainsi, sa clé de disposition **reste `review`** :
 c'est par elle qu'une disposition enregistrée se relit.
 

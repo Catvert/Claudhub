@@ -30,7 +30,7 @@ const LONE_PANEL: &str = "main";
 /// manifest and a `layout.json` speak the same language — which is also why the
 /// first is still `review` after its screen was renamed "Git". The settings are
 /// not among them: that screen holds the form and nothing else.
-pub const SCREENS: [&str; 5] = ["review", "files", "search", "db", "sentry"];
+pub const SCREENS: [&str; 6] = ["review", "files", "search", "db", "sentry", "tests"];
 
 /// What a plugin says it needs.
 ///

@@ -51,6 +51,9 @@ pub enum Pane {
     /// The Pest suite. It filters: narrowing two thousand rows to the one
     /// worth running is the panel's whole point.
     Tests,
+    /// The run being followed. Its content is a process's account; the key
+    /// exists so `Ctrl+F` there does not go to the panel touched before it.
+    TestRun,
     Notes,
     Conflicts,
     Diff,

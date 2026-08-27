@@ -185,6 +185,9 @@ serde_json = "1"
 # entre les deux bouts, là où bincode 2 en a plusieurs.
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 toml = "0.9"
+# Le JUnit d'un run Pest. Déjà dans l'arbre par une dépendance de gpui : la
+# version épinglée est celle du lock, et n'ajoute rien au vendorage.
+roxmltree = "0.21"
 anyhow = "1"
 directories = "6"
 log = "0.4"

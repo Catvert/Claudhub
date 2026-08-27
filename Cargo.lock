@@ -1080,6 +1080,7 @@ dependencies = [
  "notify 8.2.0",
  "notify-debouncer-full",
  "postcard",
+ "roxmltree 0.21.1",
  "rune",
  "rust-embed",
  "rust-i18n",
