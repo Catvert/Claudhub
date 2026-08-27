@@ -540,6 +540,10 @@ pub struct ClaudhubApp {
     /// worktree. Remotely it is the **server's** directory, which arrives with
     /// its handshake — ours names nothing over there.
     launch_dir: Option<PathBuf>,
+    /// Whether `launch_dir` was **named** — an argument, a folder handed over
+    /// — rather than the shell's ambient working directory. Named outranks
+    /// the remembered session; ambient yields to it (`pick_worktree`).
+    launch_chosen: bool,
     /// The directory named on the command line, when there was one.
     ///
     /// It outranks the directory `claudhub` was launched *from* — that is what
@@ -1205,6 +1209,7 @@ impl ClaudhubApp {
             pending_files: Vec::new(),
             restoring_files: false,
             launch_dir: None,
+            launch_chosen: false,
             launch_arg: folder,
             pending_handoff: None,
             selection_rank: crate::ui::session::SELECTION_NONE,
@@ -1394,6 +1399,10 @@ impl ClaudhubApp {
         // Remotely, the directory that counts is the **server's**: it arrives
         // with `Evt::ServerHello`, and ours names nothing over there.
         if !remote {
+            // Named on the command line, or merely the shell's working
+            // directory: the first is a choice and outranks the session, the
+            // second is ambient and yields to it.
+            self.launch_chosen = self.launch_arg.is_some();
             let launched_in = self
                 .launch_arg
                 .clone()
@@ -1810,6 +1819,9 @@ impl ClaudhubApp {
     /// Opens a folder somebody handed over, on the server's terms.
     fn open_handed(&mut self, folder: PathBuf) {
         self.launch_dir = Some(folder.clone());
+        // Handed over is named: « Ouvrir avec Claudhub » on a folder is a
+        // choice, and it must beat the remembered session.
+        self.launch_chosen = true;
         self.selection_rank = crate::ui::session::SELECTION_NONE;
         // `OpenRepo` and not `OpenIfRepo`, as in the folder picker: a folder
         // named by hand deserves an answer, including "this is not a
@@ -2338,6 +2350,7 @@ impl ClaudhubApp {
             opened_at,
             &paths,
             self.launch_dir.as_deref(),
+            self.launch_chosen,
             self.restoring.worktree.as_deref(),
         );
         // `open` says no when the repository is already there: reopening must
@@ -3203,7 +3216,9 @@ impl ClaudhubApp {
         // that will be launched.
         self.forget_settings_environment();
         // Remote mode's "launched from its project": it is the server's
-        // directory that says so, not ours.
+        // directory that says so, not ours — and it was **named** exactly
+        // when a command-line argument put it there (`server::connect_wsl`).
+        self.launch_chosen = self.launch_arg.is_some();
         self.launch_dir = Some(cwd.clone());
         self.git.send(Cmd::OpenIfRepo(cwd));
         // And what was handed over while there was nobody to hear it. **After**

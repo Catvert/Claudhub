@@ -49,11 +49,17 @@ pub(super) const SELECTION_NONE: u8 = 0;
 /// window is never empty while the repository holding the remembered worktree
 /// is still being enumerated.
 const SELECTION_FALLBACK: u8 = 1;
+/// The checkout the shell **happened to sit in** when `claudhub` was
+/// launched with no argument. Ambient, not chosen: a terminal parked in some
+/// project for other reasons must not hijack the session — the remembered
+/// worktree displaces it. Firmer than the fallback: with nothing remembered,
+/// where one launched is the best guess there is.
+const SELECTION_LAUNCHED: u8 = 2;
 /// The worktree of the previous session.
-pub(super) const SELECTION_SESSION: u8 = 2;
-/// The checkout `claudhub` was launched from, and every choice made by hand.
-/// Nothing displaces it — launching in a worktree opens *that* worktree.
-pub(super) const SELECTION_CHOSEN: u8 = 3;
+pub(super) const SELECTION_SESSION: u8 = 3;
+/// The folder **named**: `claudhub <chemin>`, « Ouvrir avec Claudhub », the
+/// folder picker, and every choice made by hand. Nothing displaces it.
+pub(super) const SELECTION_CHOSEN: u8 = 4;
 
 /// Which checkout a repository that has just opened should show, and how firmly.
 ///
@@ -66,17 +72,29 @@ pub(super) const SELECTION_CHOSEN: u8 = 3;
 ///
 /// `opened_at` alone does not say "launched here": a remembered repository asks
 /// for its own root, so it too comes back with a checkout. It is the launch
-/// directory, which the view knows, that tells the two apart.
+/// directory, which the view knows, that tells the two apart — and `chosen`
+/// says whether that directory was **named** (an argument, a hand-over) or
+/// merely the shell's ambient working directory, which yields to the session.
 pub(super) fn pick_worktree(
     opened_at: Option<PathBuf>,
     worktrees: &[PathBuf],
     launch_dir: Option<&Path>,
+    chosen: bool,
     remembered: Option<&Path>,
 ) -> Option<(u8, PathBuf)> {
     let launched = opened_at
         .clone()
         .filter(|path| launch_dir.is_some_and(|dir| dir.starts_with(path)))
-        .map(|path| (SELECTION_CHOSEN, path));
+        .map(|path| {
+            (
+                if chosen {
+                    SELECTION_CHOSEN
+                } else {
+                    SELECTION_LAUNCHED
+                },
+                path,
+            )
+        });
     let remembered = remembered
         .filter(|path| worktrees.iter().any(|known| known == path))
         .map(|path| (SELECTION_SESSION, path.to_path_buf()));
@@ -401,16 +419,38 @@ mod tests {
     }
 
     #[test]
-    fn the_launch_directory_beats_everything() {
-        // Launching `claudhub` in a worktree opens *that* worktree, whatever
-        // the previous session was looking at.
+    fn a_named_folder_beats_everything() {
+        // `claudhub <chemin>` and « Ouvrir avec Claudhub » open *that*
+        // worktree, whatever the previous session was looking at.
         let chosen = pick_worktree(
             Some(PathBuf::from("/r/wt/b")),
             &paths(&["/r", "/r/wt/a", "/r/wt/b"]),
             Some(Path::new("/r/wt/b/app/Http")),
+            true,
             Some(Path::new("/r/wt/a")),
         );
         assert_eq!(chosen, Some((SELECTION_CHOSEN, PathBuf::from("/r/wt/b"))));
+    }
+
+    /// The bug this distinction exists for: a terminal parked in some project
+    /// — a `just run` from the checkout, a shell one forgot to leave — made
+    /// every launch "teleport" there, and then filed it as the session.
+    #[test]
+    fn an_ambient_launch_directory_yields_to_the_session() {
+        let ambient = pick_worktree(
+            Some(PathBuf::from("/r/wt/b")),
+            &paths(&["/r", "/r/wt/a", "/r/wt/b"]),
+            Some(Path::new("/r/wt/b/app/Http")),
+            false,
+            Some(Path::new("/r/wt/a")),
+        );
+        // Graded below the session — the remembered worktree displaces it,
+        // whichever repository answers first — and above the fallback: with
+        // nothing remembered, where one launched is the best guess.
+        assert_eq!(
+            ambient,
+            Some((SELECTION_LAUNCHED, PathBuf::from("/r/wt/b")))
+        );
     }
 
     #[test]
@@ -422,6 +462,7 @@ mod tests {
             Some(PathBuf::from("/r")),
             &paths(&["/r", "/r/wt/a"]),
             None,
+            false,
             Some(Path::new("/r/wt/a")),
         );
         assert_eq!(chosen, Some((SELECTION_SESSION, PathBuf::from("/r/wt/a"))));
@@ -436,6 +477,7 @@ mod tests {
             Some(PathBuf::from("/other")),
             &paths(&["/other"]),
             None,
+            false,
             Some(Path::new("/r/wt/a")),
         );
         assert_eq!(chosen, Some((SELECTION_FALLBACK, PathBuf::from("/other"))));
@@ -443,6 +485,6 @@ mod tests {
 
     #[test]
     fn a_repository_without_a_checkout_chooses_nothing() {
-        assert_eq!(pick_worktree(None, &[], None, None), None);
+        assert_eq!(pick_worktree(None, &[], None, false, None), None);
     }
 }
