@@ -745,7 +745,10 @@ impl ClaudhubApp {
             crate::ui::terminal_view::Launch {
                 command: Some((
                     "sh".into(),
-                    vec!["-lc".into(), crate::suite::terminal_command(&target)],
+                    vec![
+                        "-lc".into(),
+                        crate::suite::terminal_command(&worktree, &target),
+                    ],
                 )),
                 env: HashMap::new(),
                 label,
@@ -1327,12 +1330,17 @@ fn row_menu(
             .icon(icon("copy"))
             .on_click(move |_, _window, cx| {
                 let mut target = target.clone();
+                let mut line = None;
                 entity.update(cx, |this, _| {
                     this.apply_pest_modes(&mut target);
+                    line = this
+                        .active
+                        .as_deref()
+                        .map(|worktree| crate::suite::terminal_command(worktree, &target));
                 });
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                    crate::suite::terminal_command(&target),
-                ));
+                if let Some(line) = line {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(line));
+                }
             })
     })
 }

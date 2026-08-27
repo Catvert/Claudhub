@@ -242,9 +242,35 @@ fn listing(mut cmd: Command, what: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Laravel Sail, when the checkout carries it: PHP then lives in Sail's
+/// containers, and the host's `vendor/bin/pest` may have no PHP — or the
+/// wrong one — behind it. Every Pest command goes through `sail pest` there,
+/// which proxies to `docker compose exec … php vendor/bin/pest`. Containers
+/// down is an honest failure: the script answers "Sail is not running." and
+/// the panel shows it.
+const SAIL: &str = "vendor/bin/sail";
+
+fn sail_of(worktree: &Path) -> Option<std::path::PathBuf> {
+    let sail = worktree.join(SAIL);
+    sail.is_file().then_some(sail)
+}
+
+/// The start of a Pest invocation for this checkout: `sail pest`, or the
+/// binary bare.
+fn pest_command(worktree: &Path, bin: &Path) -> Command {
+    match sail_of(worktree) {
+        Some(sail) => {
+            let mut cmd = Command::new(sail);
+            cmd.arg("pest");
+            cmd
+        }
+        None => Command::new(bin),
+    }
+}
+
 /// Asks Pest what the suite declares.
 fn pest_list(worktree: &Path, bin: &Path) -> Result<String> {
-    let mut cmd = Command::new(bin);
+    let mut cmd = pest_command(worktree, bin);
     cmd.arg("--list-tests")
         // Without it the `INFO` badge arrives wrapped in escape codes; the
         // test lines themselves happen to be clean, but parsing should not
@@ -596,22 +622,38 @@ pub fn run(
     if !bin.is_file() {
         return Err(format!("{} is missing", target.runner.binary()));
     }
-    let account_file = std::env::temp_dir().join(format!(
-        "claudhub-tests-{}-{}.{}",
+    let account_name = format!(
+        ".claudhub-tests-{}-{}.{}",
         std::process::id(),
         RUN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         match target.runner {
             Runner::Jest => "json",
             _ => "xml",
         }
-    ));
-    let mut cmd = Command::new(&bin);
+    );
+    // Through Sail the suite runs in a container whose /tmp is not the
+    // host's: the one directory both sides share is the project itself, so
+    // the account lands there, dot-named and passed **relative** — the
+    // container's working directory is the project's mount. Removed right
+    // after, and `reloads` ignores it, so the watcher never re-lists over it.
+    let sail = target.runner == Runner::Pest && sail_of(worktree).is_some();
+    let (account_file, account_arg) = if sail {
+        (worktree.join(&account_name), account_name)
+    } else {
+        let file = std::env::temp_dir().join(&account_name);
+        let arg = file.display().to_string();
+        (file, arg)
+    };
+    let mut cmd = match target.runner {
+        Runner::Pest => pest_command(worktree, &bin),
+        _ => Command::new(&bin),
+    };
     cmd.current_dir(worktree);
     match target.runner {
         Runner::Pest => {
             cmd.arg("--colors=never")
                 .arg("--log-junit")
-                .arg(&account_file);
+                .arg(&account_arg);
             if target.headed {
                 cmd.arg("--headed");
             }
@@ -626,7 +668,7 @@ pub fn run(
             cmd.arg("run")
                 .arg("--reporter=default")
                 .arg("--reporter=junit")
-                .arg(format!("--outputFile.junit={}", account_file.display()));
+                .arg(format!("--outputFile.junit={account_arg}"));
             if let Some(path) = &target.path {
                 cmd.arg(path);
             }
@@ -635,7 +677,7 @@ pub fn run(
             }
         }
         Runner::Jest => {
-            cmd.arg("--json").arg("--outputFile").arg(&account_file);
+            cmd.arg("--json").arg("--outputFile").arg(&account_arg);
             if let Some(path) = &target.path {
                 if target.exact {
                     cmd.arg("--runTestsByPath");
@@ -1206,9 +1248,18 @@ pub fn scope_target(test: &Test, depth: usize) -> Target {
 }
 
 /// The line a terminal runs for the same target — where Ctrl+C exists, and
-/// where an interactive suite can ask.
-pub fn terminal_command(target: &Target) -> String {
-    let mut parts: Vec<String> = vec![target.runner.binary().to_string()];
+/// where an interactive suite can ask. The Sail detour is decided here too,
+/// on the same file the worker reads.
+pub fn terminal_command(worktree: &Path, target: &Target) -> String {
+    command_line(sail_of(worktree).is_some(), target)
+}
+
+fn command_line(sail: bool, target: &Target) -> String {
+    let mut parts: Vec<String> = if sail && target.runner == Runner::Pest {
+        vec![SAIL.to_string(), "pest".to_string()]
+    } else {
+        vec![target.runner.binary().to_string()]
+    };
     match target.runner {
         Runner::Pest => {
             if target.headed {
@@ -1620,7 +1671,7 @@ at tests/Feature/HttpTest.php:3</failure>
         // No quoting needed: `^`, `:` and a trailing `$` are all literal to a
         // POSIX shell, and `join_command` only quotes what would not be.
         assert_eq!(
-            terminal_command(&pest),
+            command_line(false, &pest),
             "vendor/bin/pest --filter ^LegacyTest::testOldSchool$"
         );
         // Headed comes first, before the narrowing — the browser plugin pops
@@ -1630,7 +1681,7 @@ at tests/Feature/HttpTest.php:3</failure>
             ..pest.clone()
         };
         assert_eq!(
-            terminal_command(&headed),
+            command_line(false, &headed),
             "vendor/bin/pest --headed --filter ^LegacyTest::testOldSchool$"
         );
         let parallel = Target {
@@ -1638,8 +1689,14 @@ at tests/Feature/HttpTest.php:3</failure>
             ..pest.clone()
         };
         assert_eq!(
-            terminal_command(&parallel),
+            command_line(false, &parallel),
             "vendor/bin/pest --parallel --filter ^LegacyTest::testOldSchool$"
+        );
+        // A Sail checkout runs Pest through the containers — and only Pest:
+        // the JS runners live on the host either way.
+        assert_eq!(
+            command_line(true, &pest),
+            "vendor/bin/sail pest --filter ^LegacyTest::testOldSchool$"
         );
         let vitest = Target {
             runner: Runner::Vitest,
@@ -1650,7 +1707,7 @@ at tests/Feature/HttpTest.php:3</failure>
             parallel: false,
         };
         assert_eq!(
-            terminal_command(&vitest),
+            command_line(false, &vitest),
             "node_modules/.bin/vitest run tests/unit/math.test.js -t \"^sums 2 \\\\+ 2$\""
         );
         let jest = Target {
@@ -1661,8 +1718,9 @@ at tests/Feature/HttpTest.php:3</failure>
             headed: false,
             parallel: false,
         };
+        // Sail leaves a JS runner untouched: node lives on the host.
         assert_eq!(
-            terminal_command(&jest),
+            command_line(true, &jest),
             "node_modules/.bin/jest --runTestsByPath src/http.test.js"
         );
     }
