@@ -29,9 +29,9 @@ pub mod instance;
 pub mod just;
 pub mod logging;
 pub mod lsp;
-pub mod pest;
 pub mod plugin;
 pub mod runtime;
+pub mod suite;
 #[cfg(feature = "ui")]
 pub mod terminal;
 #[cfg(feature = "ui")]

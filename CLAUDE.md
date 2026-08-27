@@ -133,10 +133,11 @@ src/
     loaded.rs   un plugin tel que la fenêtre le tient : script, état, arbres
   wt.rs         le `wt.toml` d'un projet : questions, tâches, statut, URLs
   just.rs       les recettes du `justfile`, lues par `just --dump` (JSON)
-  pest.rs       la suite Pest d'un worktree : `pest --list-tests` relu, le
-                `--filter` exact qui relance un test, et le run suivi ligne à
-                ligne dont `--log-junit` rend le compte — règles vérifiées sur
-                Pest 4
+  suite.rs      les suites de tests d'un worktree — Pest, Vitest, Jest,
+                détectés par leur binaire et fusionnés : relevé par l'outil
+                lui-même, le filtre exact qui relance un test, le run suivi
+                sur les deux flux dont le compte (JUnit ou JSON) colore les
+                lignes — règles vérifiées sur Pest 4, Vitest 4, Jest 30
   git/          couche git — sous-processus `git`, testable sans gpui
     mod.rs      exécution (stdin fermé, LC_ALL=C, pas de pager)
     repo.rs     découverte, worktrees, écritures (stage, commit, push…)
@@ -173,10 +174,12 @@ src/
     history_view.rs l'historique et son graphe peint
     tags.rs         le panneau des tags, et les quatre gestes sur un tag
     stashes.rs      le panneau des remisages, et les gestes sur un remisage
-    pest_view.rs    les deux panneaux des tests : l'arbre repliable (pastilles
-                    par test, filtre des échecs, replis par défaut) et le run
-                    suivi — l'onglet n'existe que si `vendor/bin/pest` existe,
-                    les verdicts persistent par worktree dans le magasin
+    tests_view.rs   les deux panneaux des tests : l'arbre repliable multi-
+                    lanceurs (pastilles par test, filtre des échecs, replis
+                    par défaut) et le run suivi — « tout lancer » est une
+                    campagne, une commande par lanceur fusionnée en un compte ;
+                    l'onglet n'existe que si un lanceur existe, les verdicts
+                    persistent par worktree dans le magasin
     highlight.rs    coloration tree-sitter d'un diff
     blade.rs        les vues Blade : surcouche du diff, coloriseur de l'éditeur
     panels.rs       les panneaux du dock, leur macro et leur registre
@@ -268,10 +271,10 @@ attend, et c'est la panne qu'on ne diagnostique pas.
   plusieurs à la fois et qu'ils attendent une socket.
 - **Recherche** (un worker) : une recherche se **remplace** — c'est
   l'identifiant d'envoi qui trie.
-- **Tests** (un worker) : un run Pest se mesure en minutes — avec le fond il
-  affamerait les résumés, avec les hooks il ferait attendre un `wt up`. Le
-  **relevé** de la suite reste au fond, exprès : relire la liste ne doit pas
-  attendre derrière un run.
+- **Tests** (un worker) : un run — Pest, Vitest ou Jest — se mesure en
+  minutes ; avec le fond il affamerait les résumés, avec les hooks il ferait
+  attendre un `wt up`. Le **relevé** des suites reste au fond, exprès :
+  relire la liste ne doit pas attendre derrière un run.
 
 Hors des files, deux voies directes : la surveillance de fichiers, remise au
 thread du surveillant, et les serveurs de langage, remis à leur hôte.

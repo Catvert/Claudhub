@@ -644,13 +644,13 @@ pub struct ClaudhubApp {
     pub(super) just_recipes: HashMap<PathBuf, Option<std::rc::Rc<crate::just::Snapshot>>>,
     /// Each visited worktree's Pest suite. Keyed by worktree like the
     /// justfile, and for its reason: the tests are the checkout's files.
-    pub(super) pest: HashMap<PathBuf, crate::ui::pest_view::PestState>,
+    pub(super) pest: HashMap<PathBuf, crate::ui::tests_view::PestState>,
     pub(super) pest_scroll: gpui::UniformListScrollHandle,
     /// The run each worktree follows — or followed: the panel keeps the last
     /// account until the next launch replaces it.
-    pub(super) pest_runs: HashMap<PathBuf, crate::ui::pest_view::PestRun>,
+    pub(super) pest_runs: HashMap<PathBuf, crate::ui::tests_view::RunState>,
     pub(super) pest_run_scroll: gpui::UniformListScrollHandle,
-    /// The send id `Evt::PestRan` hands back — a run launched for a state
+    /// The send id `Evt::TestsRan` hands back — a run launched for a state
     /// since replaced must not paint the panel.
     pub(super) pest_run_seq: u64,
     /// What `wt` knows about each worktree: started or not, its static
@@ -2035,7 +2035,7 @@ impl ClaudhubApp {
         }
         // A test added while Claudhub is open has to show up in the panel: the
         // suite is what one edits during the very session that runs it.
-        if crate::ui::pest_view::reloads(&active, path) {
+        if crate::ui::tests_view::reloads(&active, path) {
             self.reload_pest(&active, cx);
         }
         self.request_status(active);
@@ -2131,9 +2131,9 @@ impl ClaudhubApp {
                 self.just_recipes
                     .insert(worktree, recipes.map(std::rc::Rc::new));
             }
-            Evt::PestTests { worktree, report } => self.pest_arrived(worktree, report, cx),
-            Evt::PestLine { worktree, id, line } => self.pest_line(worktree, id, line, cx),
-            Evt::PestRan { worktree, id, run } => self.pest_ran(worktree, id, run, cx),
+            Evt::TestsFound { worktree, report } => self.pest_arrived(worktree, report, cx),
+            Evt::TestsLine { worktree, id, line } => self.pest_line(worktree, id, line, cx),
+            Evt::TestsRan { worktree, id, run } => self.pest_ran(worktree, id, run, cx),
             Evt::WtQuestions {
                 main,
                 slug,

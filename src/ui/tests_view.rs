@@ -1,13 +1,13 @@
-//! The tests panels: a worktree's Pest suite as a folding tree, and the run
-//! being followed.
+//! The tests panels: a worktree's suites — Pest, Vitest, Jest — as one
+//! folding tree, and the run being followed.
 //!
-//! The list is `crate::pest`'s reading of `pest --list-tests`, asked on the
-//! background queue when a worktree is first looked at and re-asked when a
-//! file of `tests/` changes. A run goes through the tests worker with
-//! `--log-junit`: its lines stream into the run panel while it goes, and the
+//! The list is `crate::suite`'s merged reading of every runner the checkout
+//! carries, asked on the background queue when a worktree is first looked at
+//! and re-asked when a test file changes. A run goes through the tests
+//! worker: its lines stream into the run panel while it goes, and the
 //! account at the end is what colours each row — green, red, skipped — and
-//! teaches the real descriptions the listing only had mangled. The fates are
-//! persisted per worktree, so the dots survive a restart. Everything the
+//! teaches the real descriptions Pest's listing only had mangled. The fates
+//! are persisted per worktree, so the dots survive a restart. Everything the
 //! rows decide — which rows a query leaves, where the folders open, what a
 //! run paired with which test — is pure and tested at the bottom.
 
@@ -24,8 +24,8 @@ use gpui_component::{
     v_flex, ActiveTheme, Disableable, Selectable, Sizable,
 };
 
-use crate::pest::{Outcome, Report, Run, Status, Test};
 use crate::runtime::Cmd;
+use crate::suite::{Outcome, Report, Run, Runner, Status, Target, Test};
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::find::Pane;
@@ -103,40 +103,60 @@ impl PestState {
 }
 
 /// A run being followed, or the last one followed.
-pub struct PestRun {
-    /// The send id `Evt::PestRan` hands back: a late answer for a run since
-    /// replaced must not paint this one.
+///
+/// "Tout lancer" on a checkout carrying several runners is a **campaign**:
+/// one command per runner, queued on the same worker, followed as one — the
+/// ids from `since` to `id` all belong to it, their lines append, their
+/// accounts merge.
+pub struct RunState {
+    /// The first send id of the campaign.
+    pub since: u64,
+    /// The last send id: the campaign ends when its answer lands. A late
+    /// answer from before `since` must not paint this panel.
     pub id: u64,
-    /// What was launched, as the bar says it — "pest", "pest Unit\MathTest"…
+    /// What was launched, as the bar says it — "pest", "vitest src/x"…
     pub label: SharedString,
     pub running: bool,
     /// Unix seconds.
     pub started_at: i64,
     /// The run's text so far, tail-capped at [`RUN_LINES_KEPT`].
     pub lines: VecDeque<SharedString>,
-    /// Why the suite never started, when it did not.
+    /// Why a suite never started, when one did not.
     pub error: Option<SharedString>,
-    /// The finished run's account.
+    /// The finished accounts so far, merged.
     pub run: Option<Rc<Run>>,
 }
 
-/// Does a change to this file call for re-reading the suite?
+/// Does a change to this file call for re-reading the suites?
 ///
-/// The tests themselves, and the two files that decide what a suite is:
-/// `phpunit.xml`, and `composer.json` — through which Pest arrives and leaves.
-/// Not every `.php` of the project: the watcher fires on each save, and a
-/// listing boots PHP.
+/// The tests themselves — `tests/**.php` for Pest, `*.test.*` and `*.spec.*`
+/// wherever they live for JS — and the files that decide what a suite is:
+/// `phpunit.xml`, the runners' configs, and the two manifests through which a
+/// runner arrives and leaves. Not every file of the project: the watcher
+/// fires on each save, and a listing boots PHP or node.
 pub fn reloads(worktree: &Path, path: &Path) -> bool {
     let Ok(rel) = path.strip_prefix(worktree) else {
         return false;
     };
-    if rel.starts_with("tests") {
-        return rel.extension().is_some_and(|ext| ext == "php");
-    }
-    matches!(
+    if matches!(
         rel.to_str(),
-        Some("phpunit.xml" | "phpunit.xml.dist" | "composer.json")
-    )
+        Some("phpunit.xml" | "phpunit.xml.dist" | "composer.json" | "package.json")
+    ) {
+        return true;
+    }
+    let name = rel
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    // The runners' own configuration, whatever the extension variant.
+    if name.starts_with("vitest.config.") || name.starts_with("jest.config.") {
+        return true;
+    }
+    // Pest tests live under `tests/`; JS tests are named, wherever they live.
+    if rel.starts_with("tests") && rel.extension().is_some_and(|ext| ext == "php") {
+        return true;
+    }
+    name.contains(".test.") || name.contains(".spec.")
 }
 
 /// One row of the tree: a folder, or a test. Both carry an index into the
@@ -160,11 +180,7 @@ pub enum Row {
 /// The folder a dir row names: the first `depth + 1` segments of the short
 /// class. This string is also the key `expanded` holds.
 pub fn dir_prefix(class: &str, depth: usize) -> String {
-    crate::pest::short_class(class)
-        .split('\\')
-        .take(depth + 1)
-        .collect::<Vec<_>>()
-        .join("\\")
+    crate::suite::group_prefix(class, depth).to_string()
 }
 
 /// Which rows are on screen: the tree, folded and filtered.
@@ -189,7 +205,7 @@ pub fn rows(
         }
         let label: &str = labels.get(at).map(|l| l.as_ref()).unwrap_or(&test.name);
         crate::ui::find::matches(query, label)
-            || crate::ui::find::matches(query, crate::pest::short_class(&test.class))
+            || crate::ui::find::matches(query, crate::suite::short_class(&test.class))
     };
 
     // First pass: how many kept tests, and how many red, under each folder.
@@ -199,7 +215,7 @@ pub fn rows(
             continue;
         }
         let failed = statuses.get(at).copied().flatten() == Some(Status::Failed);
-        let segments = crate::pest::short_class(&test.class).split('\\').count();
+        let segments = crate::suite::segments(&test.class).len();
         for depth in 0..segments {
             let entry = counts.entry(dir_prefix(&test.class, depth)).or_default();
             entry.0 += 1;
@@ -215,7 +231,7 @@ pub fn rows(
         if !kept(at, test) {
             continue;
         }
-        let segments: Vec<&str> = crate::pest::short_class(&test.class).split('\\').collect();
+        let segments = crate::suite::segments(&test.class);
         let prefixes: Vec<String> = (0..segments.len())
             .map(|depth| dir_prefix(&test.class, depth))
             .collect();
@@ -252,22 +268,34 @@ pub fn rows(
 
 /// Which outcome answers which listed test — (test index, outcome index).
 ///
-/// By class first, then by `same_test`: the listing has mangled names, the
-/// account real descriptions, and this pairing is what puts a dot on a row.
+/// Pest pairs by class then `same_test` (mangled name against real
+/// description); Vitest by file and exact title; a Jest **file** row collects
+/// every outcome of its file — several pairs per row, which `absorb_run`
+/// folds. This pairing is what puts a dot on a row.
 pub fn paired(tests: &[Test], outcomes: &[Outcome]) -> Vec<(usize, usize)> {
     let mut by_class: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut by_file: HashMap<&str, usize> = HashMap::new();
     for (at, test) in tests.iter().enumerate() {
-        by_class.entry(test.class.as_str()).or_default().push(at);
+        match test.runner {
+            Runner::Jest => {
+                by_file.insert(test.method.as_str(), at);
+            }
+            _ => by_class.entry(test.class.as_str()).or_default().push(at),
+        }
     }
     let mut pairs = Vec::new();
     for (o, outcome) in outcomes.iter().enumerate() {
-        let Some(candidates) = by_class.get(outcome.class.as_str()) else {
-            continue;
-        };
-        if let Some(&at) = candidates
-            .iter()
-            .find(|&&at| crate::pest::same_test(&tests[at].method, &outcome.name))
-        {
+        if let Some(candidates) = by_class.get(outcome.class.as_str()) {
+            if let Some(&at) = candidates.iter().find(|&&at| match tests[at].runner {
+                Runner::Pest => crate::suite::same_test(&tests[at].method, &outcome.name),
+                Runner::Vitest => tests[at].method == outcome.name,
+                Runner::Jest => false,
+            }) {
+                pairs.push((at, o));
+                continue;
+            }
+        }
+        if let Some(&at) = by_file.get(outcome.class.as_str()) {
             pairs.push((at, o));
         }
     }
@@ -319,7 +347,7 @@ impl ClaudhubApp {
             state.last_run = saved.tests_run.clone();
         }
         self.pest.insert(worktree.to_path_buf(), state);
-        self.git.send(Cmd::PestLoad {
+        self.git.send(Cmd::TestsLoad {
             worktree: worktree.to_path_buf(),
         });
     }
@@ -337,7 +365,7 @@ impl ClaudhubApp {
             return;
         }
         state.pending = true;
-        self.git.send(Cmd::PestLoad {
+        self.git.send(Cmd::TestsLoad {
             worktree: worktree.to_path_buf(),
         });
     }
@@ -355,7 +383,7 @@ impl ClaudhubApp {
         if state.stale {
             state.stale = false;
             state.pending = true;
-            self.git.send(Cmd::PestLoad { worktree });
+            self.git.send(Cmd::TestsLoad { worktree });
         }
         cx.notify();
     }
@@ -390,31 +418,44 @@ impl ClaudhubApp {
             .is_some_and(|worktree| self.pest_runs.contains_key(worktree))
     }
 
-    /// Launches a followed run: the suite, a folder, or one test — the
-    /// difference is the `--filter`, and building it is `crate::pest`'s
-    /// tested business. The run panel comes forward, and the run itself goes
-    /// through the tests worker, never a frame.
-    fn launch_pest(
+    /// Launches a followed run — one target, or a campaign of several: "run
+    /// everything" on a checkout carrying two runners is two commands, queued
+    /// on the same worker and followed as one. The run panel comes forward,
+    /// and the runs themselves go through the tests worker, never a frame.
+    fn launch_tests(
         &mut self,
         label: SharedString,
-        filter: Option<String>,
+        targets: Vec<Target>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(worktree) = self.active.clone() else {
             return;
         };
-        // One run at a time per worktree: the worker would only queue a
+        if targets.is_empty() {
+            return;
+        }
+        // One campaign at a time per worktree: the worker would only queue a
         // second one, and two accounts racing for the same dots would paint
         // whichever finished last.
         if self.pest_runs.get(&worktree).is_some_and(|run| run.running) {
             return;
         }
-        self.pest_run_seq += 1;
-        let id = self.pest_run_seq;
+        let since = self.pest_run_seq + 1;
+        let mut id = since;
+        for target in targets {
+            id = self.pest_run_seq + 1;
+            self.pest_run_seq = id;
+            self.git.send(Cmd::TestsRun {
+                worktree: worktree.clone(),
+                target,
+                id,
+            });
+        }
         self.pest_runs.insert(
             worktree.clone(),
-            PestRun {
+            RunState {
+                since,
                 id,
                 label,
                 running: true,
@@ -424,11 +465,6 @@ impl ClaudhubApp {
                 run: None,
             },
         );
-        self.git.send(Cmd::PestRun {
-            worktree,
-            filter,
-            id,
-        });
         self.travel_reveal(crate::ui::workspace::Workspace::Tests, window, cx);
         cx.notify();
     }
@@ -443,7 +479,7 @@ impl ClaudhubApp {
         let Some(state) = self.pest_runs.get_mut(&worktree) else {
             return;
         };
-        if state.id != id {
+        if id < state.since || id > state.id {
             return;
         }
         if state.lines.len() == RUN_LINES_KEPT {
@@ -466,53 +502,78 @@ impl ClaudhubApp {
         run: Result<Run, String>,
         cx: &mut Context<Self>,
     ) {
-        {
-            let Some(state) = self.pest_runs.get_mut(&worktree) else {
-                return;
-            };
-            if state.id != id {
-                return;
-            }
-            state.running = false;
-            match &run {
-                Ok(run) => state.run = Some(Rc::new(run.clone())),
-                Err(message) => state.error = Some(SharedString::from(message.clone())),
+        let mut absorb = None;
+        if let Some(state) = self.pest_runs.get_mut(&worktree) {
+            if id >= state.since && id <= state.id {
+                // The campaign ends with its last answer; the earlier ones
+                // fold their accounts in as they land.
+                if id == state.id {
+                    state.running = false;
+                }
+                match &run {
+                    Ok(run) => {
+                        let merged = match state.run.take() {
+                            Some(earlier) => Rc::new(merge_runs(&earlier, run)),
+                            None => Rc::new(run.clone()),
+                        };
+                        // The bar's totals are the campaign's, not the last
+                        // command's: two runners, one answer.
+                        let totals = TestsRun {
+                            at: now(),
+                            passed: merged.passed,
+                            failed: merged.failed,
+                            skipped: merged.skipped,
+                            duration_ms: merged.duration_ms,
+                        };
+                        state.run = Some(merged);
+                        absorb = Some((run.clone(), totals));
+                    }
+                    Err(message) => state.error = Some(SharedString::from(message.clone())),
+                }
             }
         }
-        if let Ok(run) = run {
-            self.absorb_run(&worktree, &run, cx);
+        if let Some((run, totals)) = absorb {
+            self.absorb_run(&worktree, &run, totals, cx);
         }
         cx.notify();
     }
 
     /// What a finished run teaches: each covered test's fate and real name,
-    /// the totals, and all of it into the store — the dots survive the
-    /// restart.
-    fn absorb_run(&mut self, worktree: &Path, run: &Run, cx: &mut App) {
-        let at = now();
+    /// the campaign's totals, and all of it into the store — the dots survive
+    /// the restart.
+    fn absorb_run(&mut self, worktree: &Path, run: &Run, totals: TestsRun, cx: &mut App) {
+        let at = totals.at;
         let Some(state) = self.pest.get_mut(worktree) else {
             return;
         };
         if let Some(Report::Tests(tests)) = state.report.as_deref() {
+            // Fold the pairs per row first: a Jest file row collects every
+            // outcome of its file, and one red case makes the file red.
+            let mut fates: HashMap<usize, (Status, String)> = HashMap::new();
             for (test, outcome) in paired(tests, &run.outcomes) {
-                let (test, outcome) = (&tests[test], &run.outcomes[outcome]);
+                let outcome = &run.outcomes[outcome];
+                let fate = fates
+                    .entry(test)
+                    .or_insert((outcome.status, outcome.name.clone()));
+                match outcome.status {
+                    Status::Failed => fate.0 = Status::Failed,
+                    Status::Passed if fate.0 == Status::Skipped => fate.0 = Status::Passed,
+                    _ => {}
+                }
+            }
+            for (test, (status, name)) in fates {
+                let test = &tests[test];
+                // A Jest row is a file: an outcome's title must not rename it.
+                let name = match test.runner {
+                    Runner::Jest => test.name.clone(),
+                    _ => name,
+                };
                 state.marks.insert(
                     (test.class.clone(), test.method.clone()),
-                    Mark {
-                        status: outcome.status,
-                        at,
-                        name: outcome.name.clone(),
-                    },
+                    Mark { status, at, name },
                 );
             }
         }
-        let totals = TestsRun {
-            at,
-            passed: run.passed,
-            failed: run.failed,
-            skipped: run.skipped,
-            duration_ms: run.duration_ms,
-        };
         state.last_run = Some(totals.clone());
         state.refresh_cache();
 
@@ -555,10 +616,12 @@ impl ClaudhubApp {
 
     /// The escape hatch the context menu keeps: the same run, in a terminal
     /// tab — where Ctrl+C exists, and where an interactive suite can ask.
-    fn run_pest_in_terminal(
+    /// Through a login shell, like a recipe: `php` and `node` are looked up
+    /// on the `PATH` the user's shell builds.
+    fn run_tests_in_terminal(
         &mut self,
         label: SharedString,
-        filter: Option<String>,
+        target: &Target,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -570,7 +633,7 @@ impl ClaudhubApp {
             crate::ui::terminal_view::Launch {
                 command: Some((
                     "sh".into(),
-                    vec!["-lc".into(), terminal_command(filter.as_deref())],
+                    vec!["-lc".into(), crate::suite::terminal_command(target)],
                 )),
                 env: HashMap::new(),
                 label,
@@ -582,15 +645,16 @@ impl ClaudhubApp {
     }
 }
 
-/// The line a terminal runs — through a login shell, like a recipe: `php` is
-/// looked up on the `PATH` the user's shell builds.
-fn terminal_command(filter: Option<&str>) -> String {
-    match filter {
-        None => "vendor/bin/pest".to_string(),
-        Some(filter) => format!(
-            "vendor/bin/pest {}",
-            crate::cmdline::join_command(["--filter", filter])
-        ),
+/// Two accounts of one campaign, read as one.
+fn merge_runs(earlier: &Run, later: &Run) -> Run {
+    let mut outcomes = earlier.outcomes.clone();
+    outcomes.extend(later.outcomes.iter().cloned());
+    Run {
+        passed: earlier.passed + later.passed,
+        failed: earlier.failed + later.failed,
+        skipped: earlier.skipped + later.skipped,
+        duration_ms: earlier.duration_ms + later.duration_ms,
+        outcomes,
     }
 }
 
@@ -719,7 +783,7 @@ impl ClaudhubApp {
             .child(
                 div()
                     .text_color(cx.theme().muted_foreground)
-                    .child(tr!("pest-count", { n: count })),
+                    .child(tr!("tests-count", { n: count })),
             )
             .when_some(last, |el, last| {
                 // The last run, and when: the question the bar answers is
@@ -757,7 +821,7 @@ impl ClaudhubApp {
                     .ghost()
                     .xsmall()
                     .icon(icon("circle-x"))
-                    .tooltip(tr!("pest-only-failed"))
+                    .tooltip(tr!("tests-only-failed"))
                     .selected(only_failed)
                     .on_click(cx.listener(|this, _, _window, cx| {
                         if let Some(active) = this.active.clone() {
@@ -773,10 +837,37 @@ impl ClaudhubApp {
                     .ghost()
                     .xsmall()
                     .icon(icon("play"))
-                    .tooltip(tr!("pest-run-all"))
+                    .tooltip(tr!("tests-run-all"))
                     .disabled(count == 0)
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.launch_pest(SharedString::from("pest"), None, window, cx);
+                        // Every runner the listing found, one command each —
+                        // a campaign, followed as one run.
+                        let runners: Vec<Runner> = this
+                            .active
+                            .as_deref()
+                            .and_then(|worktree| this.pest.get(worktree))
+                            .and_then(|state| match state.report.as_deref() {
+                                Some(Report::Tests(tests)) => Some(tests),
+                                _ => None,
+                            })
+                            .map(|tests| {
+                                let mut runners: Vec<Runner> =
+                                    tests.iter().map(|test| test.runner).collect();
+                                runners.dedup();
+                                runners.sort_by_key(|runner| runner.label());
+                                runners.dedup();
+                                runners
+                            })
+                            .unwrap_or_default();
+                        let label = SharedString::from(
+                            runners
+                                .iter()
+                                .map(|runner| runner.label())
+                                .collect::<Vec<_>>()
+                                .join(" + "),
+                        );
+                        let targets = runners.into_iter().map(Target::everything).collect();
+                        this.launch_tests(label, targets, window, cx);
                     })),
             )
             .child(
@@ -897,16 +988,22 @@ fn render_dir(
                 .ghost()
                 .xsmall()
                 .icon(icon("play"))
-                .tooltip(tr!("pest-run-class"))
+                .tooltip(tr!("tests-run-class"))
                 .on_click(move |_, window, cx| {
                     let Some(first) = for_run.get(test) else {
                         return;
                     };
-                    let label =
-                        SharedString::from(format!("pest {}", dir_prefix(&first.class, depth)));
-                    let filter = crate::pest::scope_filter(&first.class, depth);
+                    // Named by the first test under it: a folder mixing two
+                    // runners runs the first one's scope, and the runners'
+                    // roots never really share a name.
+                    let label = SharedString::from(format!(
+                        "{} {}",
+                        first.runner.label(),
+                        dir_prefix(&first.class, depth)
+                    ));
+                    let target = crate::suite::scope_target(first, depth);
                     run.update(cx, |this, cx| {
-                        this.launch_pest(label, Some(filter), window, cx);
+                        this.launch_tests(label, vec![target], window, cx);
                     });
                 }),
         )
@@ -962,10 +1059,10 @@ fn render_test(
                 let Some(test) = for_click.get(at) else {
                     return;
                 };
-                let run_label = SharedString::from(format!("pest {label}"));
-                let filter = crate::pest::test_filter(test);
+                let run_label = SharedString::from(format!("{} {label}", test.runner.label()));
+                let target = crate::suite::test_target(test);
                 run.update(cx, |this, cx| {
-                    this.launch_pest(run_label, Some(filter), window, cx);
+                    this.launch_tests(run_label, vec![target], window, cx);
                 });
             }
         })
@@ -995,35 +1092,35 @@ fn row_menu(
 ) -> PopupMenu {
     let popup = popup.item({
         let entity = entity.clone();
-        let filter = crate::pest::test_filter(test);
-        let label = SharedString::from(format!("pest {label}"));
-        PopupMenuItem::new(tr!("pest-run-test"))
+        let target = crate::suite::test_target(test);
+        let label = SharedString::from(format!("{} {label}", test.runner.label()));
+        PopupMenuItem::new(tr!("tests-run-test"))
             .icon(icon("play"))
             .on_click(move |_, window, cx| {
-                let (label, filter) = (label.clone(), filter.clone());
+                let (label, target) = (label.clone(), target.clone());
                 entity.update(cx, |this, cx| {
-                    this.launch_pest(label, Some(filter), window, cx);
+                    this.launch_tests(label, vec![target], window, cx);
                 });
             })
     });
     let popup = popup.item({
         let entity = entity.clone();
-        let filter = crate::pest::test_filter(test);
-        let label = SharedString::from(format!("pest {label}"));
+        let target = crate::suite::test_target(test);
+        let label = SharedString::from(format!("{} {label}", test.runner.label()));
         // Where Ctrl+C exists, and where an interactive suite can ask.
-        PopupMenuItem::new(tr!("pest-run-terminal"))
+        PopupMenuItem::new(tr!("tests-run-terminal"))
             .icon(icon("terminal"))
             .on_click(move |_, window, cx| {
-                let (label, filter) = (label.clone(), filter.clone());
+                let (label, target) = (label.clone(), target.clone());
                 entity.update(cx, |this, cx| {
-                    this.run_pest_in_terminal(label, Some(filter), window, cx);
+                    this.run_tests_in_terminal(label, &target, window, cx);
                 });
             })
     });
     popup.item({
-        let line = terminal_command(Some(&crate::pest::test_filter(test)));
+        let line = crate::suite::terminal_command(&crate::suite::test_target(test));
         // For the terminal one already has open: the panel's gesture, portable.
-        PopupMenuItem::new(tr!("pest-copy-filter"))
+        PopupMenuItem::new(tr!("tests-copy-filter"))
             .icon(icon("copy"))
             .on_click(move |_, _window, cx| {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(line.clone()));
@@ -1044,7 +1141,7 @@ fn failed_pest(message: SharedString, cx: &App) -> gpui::AnyElement {
                 .items_center()
                 .text_color(cx.theme().danger)
                 .child(icon("alert-circle").xsmall())
-                .child(div().text_sm().child(tr!("pest-failed"))),
+                .child(div().text_sm().child(tr!("tests-failed"))),
         )
         .child(
             div()
@@ -1063,9 +1160,9 @@ fn failed_pest(message: SharedString, cx: &App) -> gpui::AnyElement {
 /// screen; elsewhere the tab simply is not there.
 fn missing_pest(pending: bool, cx: &App) -> gpui::AnyElement {
     let message = if pending {
-        tr!("pest-loading")
+        tr!("tests-loading")
     } else {
-        tr!("pest-missing")
+        tr!("tests-missing")
     };
     v_flex()
         .size_full()
@@ -1083,11 +1180,11 @@ fn missing_pest(pending: bool, cx: &App) -> gpui::AnyElement {
 /// and saying the wrong one is how a panel reads as broken.
 fn empty_pest(query: &str, pending: bool, only_failed: bool, cx: &App) -> gpui::AnyElement {
     let message = if pending {
-        tr!("pest-loading")
+        tr!("tests-loading")
     } else if only_failed {
-        tr!("pest-none-failing")
+        tr!("tests-none-failing")
     } else if query.trim().is_empty() {
-        tr!("pest-empty")
+        tr!("tests-empty")
     } else {
         tr!("find-no-match")
     };
@@ -1127,7 +1224,7 @@ impl ClaudhubApp {
                 .gap_2()
                 .text_color(cx.theme().muted_foreground)
                 .child(icon("play"))
-                .child(div().text_sm().px_4().child(tr!("pest-no-run")))
+                .child(div().text_sm().px_4().child(tr!("tests-no-run")))
                 .into_any_element();
         };
 
@@ -1210,7 +1307,7 @@ impl ClaudhubApp {
                     .then(|| (worktree.join(&outcome.file), outcome.line));
                 let name = SharedString::from(outcome.name.clone());
                 let place =
-                    SharedString::from(crate::pest::short_class(&outcome.class).to_string());
+                    SharedString::from(crate::suite::short_class(&outcome.class).to_string());
                 let said = SharedString::from(
                     outcome
                         .message
@@ -1268,7 +1365,7 @@ impl ClaudhubApp {
                         .py_0p5()
                         .text_xs()
                         .text_color(look.muted)
-                        .child(tr!("pest-more-failures", { n: failed.len() - shown })),
+                        .child(tr!("tests-more-failures", { n: failed.len() - shown })),
                 )
             })
             .into_any_element()
@@ -1277,7 +1374,7 @@ impl ClaudhubApp {
 
 /// The run's headline: running with a spinner, failed to start, or the
 /// totals with when and how long.
-fn render_run_bar(state: &PestRun, cx: &App) -> gpui::AnyElement {
+fn render_run_bar(state: &RunState, cx: &App) -> gpui::AnyElement {
     let bar = h_flex()
         .h(crate::ui::theme::bar_height(cx))
         .w_full()
@@ -1299,7 +1396,7 @@ fn render_run_bar(state: &PestRun, cx: &App) -> gpui::AnyElement {
             .child(
                 div()
                     .text_color(cx.theme().muted_foreground)
-                    .child(tr!("pest-running")),
+                    .child(tr!("tests-running")),
             )
             .into_any_element();
     }
@@ -1358,6 +1455,7 @@ mod tests {
 
     fn test(class: &str, name: &str) -> Test {
         Test {
+            runner: Runner::Pest,
             class: class.to_string(),
             method: format!(
                 "__pest_evaluable_{}",
@@ -1533,6 +1631,7 @@ mod tests {
     fn a_run_lands_on_its_rows() {
         let tests = vec![
             Test {
+                runner: Runner::Pest,
                 class: "Tests\\Unit\\MathTest".into(),
                 method: "__pest_evaluable_it_sums_2___2".into(),
                 name: "it sums 2 2".into(),
@@ -1540,6 +1639,7 @@ mod tests {
                 datasets: 0,
             },
             Test {
+                runner: Runner::Pest,
                 class: "LegacyTest".into(),
                 method: "testOldSchool".into(),
                 name: "testOldSchool".into(),

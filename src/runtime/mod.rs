@@ -117,7 +117,7 @@ fn is_background(cmd: &Cmd) -> bool {
             | Cmd::WtLinks { .. }
             | Cmd::WtQuestions { .. }
             | Cmd::JustLoad { .. }
-            | Cmd::PestLoad { .. }
+            | Cmd::TestsLoad { .. }
     )
 }
 
@@ -153,7 +153,7 @@ fn is_search(cmd: &Cmd) -> bool {
 /// The **listing** stays on the background queue on purpose: it is seconds,
 /// not minutes, and re-reading the list must not wait behind a run.
 fn is_tests(cmd: &Cmd) -> bool {
-    matches!(cmd, Cmd::PestRun { .. })
+    matches!(cmd, Cmd::TestsRun { .. })
 }
 
 /// The `wt` operations that run the project's hooks.
@@ -1186,26 +1186,26 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             let recipes = crate::just::snapshot(&worktree);
             vec![Evt::JustRecipes { worktree, recipes }]
         }
-        Cmd::PestLoad { worktree } => {
-            let report = crate::pest::report(&worktree);
-            vec![Evt::PestTests { worktree, report }]
+        Cmd::TestsLoad { worktree } => {
+            let report = crate::suite::report(&worktree);
+            vec![Evt::TestsFound { worktree, report }]
         }
-        Cmd::PestRun {
+        Cmd::TestsRun {
             worktree,
-            filter,
+            target,
             id,
         } => {
             // Narrated while it runs, like a `wt` hook: a suite is minutes,
             // and its panel follows the lines live.
             let progress = |line: String| {
-                emit(Evt::PestLine {
+                emit(Evt::TestsLine {
                     worktree: worktree.clone(),
                     id,
                     line,
                 })
             };
-            let run = crate::pest::run(&worktree, filter.as_deref(), &progress);
-            vec![Evt::PestRan { worktree, id, run }]
+            let run = crate::suite::run(&worktree, &target, &progress);
+            vec![Evt::TestsRan { worktree, id, run }]
         }
         Cmd::AddWorktree {
             main,
@@ -1794,7 +1794,7 @@ mod tests {
         );
         // Listing Pest tests boots PHP — a second or two on a real suite.
         assert_eq!(
-            queue_of(&Cmd::PestLoad {
+            queue_of(&Cmd::TestsLoad {
                 worktree: worktree(),
             }),
             Queue::Background
@@ -1808,15 +1808,15 @@ mod tests {
     #[test]
     fn a_test_run_waits_in_its_own_queue() {
         assert_eq!(
-            queue_of(&Cmd::PestRun {
+            queue_of(&Cmd::TestsRun {
                 worktree: worktree(),
-                filter: None,
+                target: crate::suite::Target::everything(crate::suite::Runner::Pest),
                 id: 0,
             }),
             Queue::Tests
         );
         assert_eq!(
-            queue_of(&Cmd::PestLoad {
+            queue_of(&Cmd::TestsLoad {
                 worktree: worktree(),
             }),
             Queue::Background

@@ -693,20 +693,21 @@ pub enum Cmd {
     JustLoad {
         worktree: WorktreeId,
     },
-    /// Lists a worktree's Pest tests, for the tests panel.
+    /// Lists a worktree's tests — every runner it carries — for the tests
+    /// panel.
     ///
-    /// A subprocess that boots PHP (`vendor/bin/pest --list-tests`), a second
-    /// or two on a real suite: background queue, never in front of a diff.
-    PestLoad {
+    /// A subprocess that boots PHP or node per runner, a second or two on a
+    /// real suite: background queue, never in front of a diff.
+    TestsLoad {
         worktree: WorktreeId,
     },
-    /// Runs the suite, or what `filter` names, and reads the JUnit account.
+    /// Runs what the target names and reads the runner's account.
     ///
     /// Its own queue: a suite is measured in minutes, and neither the
     /// background sweep nor a project's hooks may wait behind it.
-    PestRun {
+    TestsRun {
         worktree: WorktreeId,
-        filter: Option<String>,
+        target: crate::suite::Target,
         /// Send id, handed back with the result: a run launched for a
         /// worktree since closed must not paint another's panel.
         id: u64,
@@ -944,8 +945,8 @@ impl Cmd {
             Self::WtDown { .. } => "WtDown",
             Self::WtTask { .. } => "WtTask",
             Self::JustLoad { .. } => "JustLoad",
-            Self::PestLoad { .. } => "PestLoad",
-            Self::PestRun { .. } => "PestRun",
+            Self::TestsLoad { .. } => "TestsLoad",
+            Self::TestsRun { .. } => "TestsRun",
             Self::WtScan { .. } => "WtScan",
             Self::WtLinks { .. } => "WtLinks",
             Self::PluginCall { .. } => "PluginCall",
@@ -1108,24 +1109,24 @@ pub enum Evt {
     },
     /// What a worktree's Pest suite declares — or that there is no Pest, or
     /// that listing failed: the panel shows all three truthfully.
-    PestTests {
+    TestsFound {
         worktree: WorktreeId,
-        report: crate::pest::Report,
+        report: crate::suite::Report,
     },
     /// One line of a running suite, as Pest says it — a run is measured in
     /// minutes, and the panel follows it live, the way `WtProgress` narrates
     /// a hook.
-    PestLine {
+    TestsLine {
         worktree: WorktreeId,
         id: u64,
         line: String,
     },
     /// A run's account — or why there was none. A failing test is a run, not
     /// an error: the error side is the suite that never started.
-    PestRan {
+    TestsRan {
         worktree: WorktreeId,
         id: u64,
-        run: std::result::Result<crate::pest::Run, String>,
+        run: std::result::Result<crate::suite::Run, String>,
     },
     WtStates {
         states: Vec<(WorktreeId, WtWorktree)>,

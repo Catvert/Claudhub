@@ -88,7 +88,7 @@ pub struct TestMark {
     /// The real description, learned from the run's account — the listing
     /// only has the mangled reading.
     pub name: String,
-    pub status: crate::pest::Status,
+    pub status: crate::suite::Status,
     /// Unix seconds of the run that said so.
     pub at: i64,
 }
