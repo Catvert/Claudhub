@@ -592,6 +592,8 @@
   "shortcut-sidebar": "Show/hide the sidebar",
   "shortcut-split": "One or two columns",
   "shortcut-stage": "Stage the open file",
+  "shortcut-terminal-backtab": "Shift+Tab, handed to the program",
+  "shortcut-terminal-tab": "Tab, handed to the program",
   "shortcut-terminal-copy": "Copy the selection",
   "shortcut-terminal-paste": "Paste",
   "shortcut-terminal-select-all": "Select all",

@@ -220,7 +220,13 @@ pub fn context(vim: bool) -> KeyContext {
 // module has in scope.
 actions!(
     claudhub_terminal,
-    [CopySelection, PasteClipboard, SelectAllText]
+    [
+        CopySelection,
+        PasteClipboard,
+        SelectAllText,
+        SendTab,
+        SendBacktab
+    ]
 );
 
 /// The context a terminal view declares. The three shortcuts below only exist
@@ -255,7 +261,13 @@ const EXPLORER_PREDICATE: &str = "ClaudhubExplorer";
 
 /// The same in vim mode. `ClaudhubVim` has to be declared **by the tree itself**
 /// and not by the root: see `VIM_PREDICATE`.
-const VIM_EXPLORER_PREDICATE: &str = "ClaudhubExplorer && ClaudhubVim";
+///
+/// `!Input` because these panels hold text fields too — the find bar, the
+/// search field — and a bare `j` typed there must be the letter, not a step
+/// in the list. A `Not` is the one predicate gpui evaluates against **every**
+/// depth of the context stack, which is what lets it see a field nested
+/// under the panel's own node.
+const VIM_EXPLORER_PREDICATE: &str = "ClaudhubExplorer && ClaudhubVim && !Input";
 
 /// The context the result list of the project-wide search declares.
 ///
@@ -266,7 +278,7 @@ const VIM_EXPLORER_PREDICATE: &str = "ClaudhubExplorer && ClaudhubVim";
 const SEARCH_PREDICATE: &str = "ClaudhubSearch";
 
 /// The same in vim mode.
-const VIM_SEARCH_PREDICATE: &str = "ClaudhubSearch && ClaudhubVim";
+const VIM_SEARCH_PREDICATE: &str = "ClaudhubSearch && ClaudhubVim && !Input";
 
 /// The identifier the search panel puts on its node.
 pub const SEARCH_CONTEXT: &str = "ClaudhubSearch";
@@ -313,7 +325,7 @@ const DB_PREDICATE: &str = "ClaudhubDb";
 
 /// The same in vim mode. `ClaudhubVim` has to be declared **by the tree
 /// itself**: see `VIM_PREDICATE`.
-const VIM_DB_PREDICATE: &str = "ClaudhubDb && ClaudhubVim";
+const VIM_DB_PREDICATE: &str = "ClaudhubDb && ClaudhubVim && !Input";
 
 pub fn db_context(vim: bool) -> KeyContext {
     let mut context = KeyContext::default();
@@ -821,6 +833,13 @@ table!(STANDARD, standard_bindings, false, [
     Terminal "secondary-shift-c" => CopySelection, TERMINAL_PREDICATE, "shortcut-terminal-copy";
     Terminal "secondary-shift-v" => PasteClipboard, TERMINAL_PREDICATE, "shortcut-terminal-paste";
     Terminal "secondary-shift-a" => SelectAllText, TERMINAL_PREDICATE, "shortcut-terminal-select-all";
+    // gpui-component's `Root` binds a bare `tab` to focus cycling, and a
+    // binding at the root still consumes the key before the terminal's
+    // `on_key_down` listener runs. These two match **deeper** — on the
+    // terminal's own node — and a deeper match wins: Tab belongs to the
+    // running program, like the rest of the bare keyboard.
+    Terminal "tab" => SendTab, TERMINAL_PREDICATE, "shortcut-terminal-tab";
+    Terminal "shift-tab" => SendBacktab, TERMINAL_PREDICATE, "shortcut-terminal-backtab";
 ]);
 
 table!(VIM, vim_bindings, true, [

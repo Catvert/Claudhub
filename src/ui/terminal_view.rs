@@ -550,17 +550,23 @@ impl TerminalView {
 
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(bytes) = key_bytes(&event.keystroke, self.terminal.mode()) {
-            // Typing invalidates the selection: what it named will have moved as
-            // soon as the program answers.
-            self.terminal.clear_selection();
-            // Every keystroke brings the view back to the bottom: that is what a
-            // terminal does, and typing after scrolling back without the view
-            // following would be disconcerting.
-            self.terminal.scroll_to_bottom();
-            self.terminal.write(bytes);
-            self.take_snapshot();
-            cx.notify();
+            self.send_bytes(bytes, cx);
         }
+    }
+
+    /// A keystroke's bytes into the pty — from `on_key`, or from the two
+    /// actions that reclaim Tab from the root's focus cycling.
+    fn send_bytes(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        // Typing invalidates the selection: what it named will have moved as
+        // soon as the program answers.
+        self.terminal.clear_selection();
+        // Every keystroke brings the view back to the bottom: that is what a
+        // terminal does, and typing after scrolling back without the view
+        // following would be disconcerting.
+        self.terminal.scroll_to_bottom();
+        self.terminal.write(bytes);
+        self.take_snapshot();
+        cx.notify();
     }
 
     /// Translates a window position into a viewport cell.
@@ -979,6 +985,16 @@ impl Render for TerminalView {
             .on_action(
                 cx.listener(|this, _: &crate::ui::shortcuts::SelectAllText, _, cx| {
                     this.select_all(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::ui::shortcuts::SendTab, _, cx| {
+                    this.send_bytes(b"\t".to_vec(), cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::ui::shortcuts::SendBacktab, _, cx| {
+                    this.send_bytes(b"\x1b[Z".to_vec(), cx)
                 }),
             )
             .size_full()

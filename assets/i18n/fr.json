@@ -592,6 +592,8 @@
   "shortcut-sidebar": "Afficher/masquer la barre latérale",
   "shortcut-split": "Une ou deux colonnes",
   "shortcut-stage": "Indexer le fichier ouvert",
+  "shortcut-terminal-backtab": "Maj+Tab, rendue au programme",
+  "shortcut-terminal-tab": "Tabulation, rendue au programme",
   "shortcut-terminal-copy": "Copier la sélection",
   "shortcut-terminal-paste": "Coller",
   "shortcut-terminal-select-all": "Tout sélectionner",
