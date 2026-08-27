@@ -681,6 +681,7 @@
   "tests-copy-filter": "Copy the run command",
   "tests-count": "%{n} tests",
   "tests-empty": "No test.",
+  "tests-copy-result": "Copy the failure — test, file and message",
   "tests-failed": "The tests could not be listed",
   "tests-headed": "Visible browser (--headed) for the next Pest runs",
   "tests-headed-label": "Browser (headed)",

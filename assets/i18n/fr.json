@@ -681,6 +681,7 @@
   "tests-copy-filter": "Copier la commande de lancement",
   "tests-count": "%{n} tests",
   "tests-empty": "Aucun test.",
+  "tests-copy-result": "Copier l'échec — test, fichier et message",
   "tests-failed": "Les tests n'ont pas pu être listés",
   "tests-headed": "Navigateur visible (--headed) pour les prochains lancements Pest",
   "tests-headed-label": "Browser (headed)",

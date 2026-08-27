@@ -368,6 +368,25 @@ pub fn line_kind(line: &str) -> LineKind {
     LineKind::Plain
 }
 
+/// What the copy button on a failure puts in the clipboard: where the test
+/// lives and everything it said — the shape one pastes into a bug report or
+/// an AI without editing it first.
+pub fn outcome_text(outcome: &Outcome) -> String {
+    let mut text = format!("{} :: {}", outcome.class, outcome.name);
+    if !outcome.file.is_empty() {
+        text.push('\n');
+        text.push_str(&outcome.file);
+        if let Some(line) = outcome.line {
+            text.push_str(&format!(":{line}"));
+        }
+    }
+    if !outcome.message.is_empty() {
+        text.push_str("\n\n");
+        text.push_str(&outcome.message);
+    }
+    text
+}
+
 /// `14:32`, in local time — or nothing readable for a timestamp that is not.
 fn clock(at: i64) -> String {
     chrono::DateTime::from_timestamp(at, 0)
@@ -1632,6 +1651,24 @@ impl ClaudhubApp {
                             .text_color(look.muted)
                             .child(said),
                     )
+                    .child(
+                        // One click, ready to paste elsewhere — a bug
+                        // report, an AI — with the file and the whole
+                        // message, not the row's truncated first line.
+                        Button::new(("pest-failure-copy", index))
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("copy"))
+                            .tooltip(tr!("tests-copy-result"))
+                            .on_click({
+                                let text = outcome_text(outcome);
+                                move |_, _window, cx| {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                        text.clone(),
+                                    ));
+                                }
+                            }),
+                    )
                     .into_any_element()
             }))
             .when(failed.len() > shown, |el| {
@@ -2028,6 +2065,39 @@ mod tests {
             })
             .collect();
         assert_eq!(dirs, [Some(Status::Passed), None]);
+    }
+
+    /// The copied failure is paste-ready: the test, its place, the whole
+    /// message — and nothing empty leaves stray lines behind.
+    #[test]
+    fn a_copied_failure_says_where_and_what() {
+        let outcome = Outcome {
+            class: "Tests\\Feature\\HttpTest".into(),
+            name: "it will fail on purpose".into(),
+            status: Status::Failed,
+            message: "Failed asserting that 1 is identical to 2.\nat tests/Feature/HttpTest.php:3"
+                .into(),
+            file: "tests/Feature/HttpTest.php".into(),
+            line: Some(3),
+            cases: 1,
+            time_ms: 0,
+        };
+        assert_eq!(
+            outcome_text(&outcome),
+            "Tests\\Feature\\HttpTest :: it will fail on purpose\n\
+             tests/Feature/HttpTest.php:3\n\n\
+             Failed asserting that 1 is identical to 2.\nat tests/Feature/HttpTest.php:3"
+        );
+        let bare = Outcome {
+            file: String::new(),
+            line: None,
+            message: String::new(),
+            ..outcome
+        };
+        assert_eq!(
+            outcome_text(&bare),
+            "Tests\\Feature\\HttpTest :: it will fail on purpose"
+        );
     }
 
     /// While a campaign runs, the covered rows show as loading — and a
