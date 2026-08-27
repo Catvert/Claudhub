@@ -117,6 +117,7 @@ fn is_background(cmd: &Cmd) -> bool {
             | Cmd::WtLinks { .. }
             | Cmd::WtQuestions { .. }
             | Cmd::JustLoad { .. }
+            | Cmd::PestLoad { .. }
     )
 }
 
@@ -1160,6 +1161,10 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             let recipes = crate::just::snapshot(&worktree);
             vec![Evt::JustRecipes { worktree, recipes }]
         }
+        Cmd::PestLoad { worktree } => {
+            let report = crate::pest::report(&worktree);
+            vec![Evt::PestTests { worktree, report }]
+        }
         Cmd::AddWorktree {
             main,
             path,
@@ -1742,6 +1747,13 @@ mod tests {
                 main: worktree(),
                 worktree: worktree(),
                 slug: "fix".into(),
+            }),
+            Queue::Background
+        );
+        // Listing Pest tests boots PHP — a second or two on a real suite.
+        assert_eq!(
+            queue_of(&Cmd::PestLoad {
+                worktree: worktree(),
             }),
             Queue::Background
         );

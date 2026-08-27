@@ -133,6 +133,8 @@ src/
     loaded.rs   un plugin tel que la fenêtre le tient : script, état, arbres
   wt.rs         le `wt.toml` d'un projet : questions, tâches, statut, URLs
   just.rs       les recettes du `justfile`, lues par `just --dump` (JSON)
+  pest.rs       la suite Pest d'un worktree : `pest --list-tests` relu, et le
+                `--filter` exact qui relance un test — règles vérifiées sur Pest 4
   git/          couche git — sous-processus `git`, testable sans gpui
     mod.rs      exécution (stdin fermé, LC_ALL=C, pas de pager)
     repo.rs     découverte, worktrees, écritures (stage, commit, push…)
@@ -169,6 +171,9 @@ src/
     history_view.rs l'historique et son graphe peint
     tags.rs         le panneau des tags, et les quatre gestes sur un tag
     stashes.rs      le panneau des remisages, et les gestes sur un remisage
+    pest_view.rs    le panneau des tests : la liste groupée par fichier, et le
+                    clic qui lance dans un terminal — l'onglet n'existe que si
+                    `vendor/bin/pest` existe
     highlight.rs    coloration tree-sitter d'un diff
     blade.rs        les vues Blade : surcouche du diff, coloriseur de l'éditeur
     panels.rs       les panneaux du dock, leur macro et leur registre

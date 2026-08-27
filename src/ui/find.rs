@@ -48,6 +48,9 @@ pub enum Pane {
     /// The work put aside. It filters, for the tags' reason: the order is the
     /// stack's, and nothing in it links one row to the next.
     Stashes,
+    /// The Pest suite. It filters: narrowing two thousand rows to the one
+    /// worth running is the panel's whole point.
+    Tests,
     Notes,
     Conflicts,
     Diff,

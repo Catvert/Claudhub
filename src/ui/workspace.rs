@@ -335,6 +335,7 @@ impl Workspace {
                 (HistoryPanel::NAME, "panel-history"),
                 (TagsPanel::NAME, "panel-tags"),
                 (StashesPanel::NAME, "panel-stashes"),
+                (TestsPanel::NAME, "panel-tests"),
                 (SqlHistoryPanel::NAME, "panel-sql-history"),
                 (DiffPanel::NAME, "panel-diff"),
                 (EditorPanel::NAME, "panel-editor"),
@@ -349,11 +350,13 @@ impl Workspace {
                 (HistoryPanel::NAME, "panel-history"),
                 (TagsPanel::NAME, "panel-tags"),
                 (StashesPanel::NAME, "panel-stashes"),
+                (TestsPanel::NAME, "panel-tests"),
                 (DiffPanel::NAME, "panel-diff"),
                 (TerminalPanel::NAME, "panel-terminal"),
             ],
             Self::Files => &[
                 (FilesPanel::NAME, "panel-files"),
+                (TestsPanel::NAME, "panel-tests"),
                 (EditorPanel::NAME, "panel-editor"),
                 (TerminalPanel::NAME, "panel-terminal"),
             ],
@@ -537,6 +540,7 @@ pub fn install_default_layout(
                             .panel_view(panel!(HistoryPanel), cx)
                             .panel_view(panel!(TagsPanel), cx)
                             .panel_view(panel!(StashesPanel), cx)
+                            .panel_view(panel!(TestsPanel), cx)
                             .panel_view(panel!(SqlHistoryPanel), cx)
                     ),
                     Some(third),
@@ -600,6 +604,10 @@ pub fn install_default_layout(
                             // "what happened", where the tabs above choose the
                             // file being read.
                             .panel_view(panel!(StashesPanel), cx)
+                            // The tests too — "does it pass" is read while
+                            // choosing what to review, not instead of. The tab
+                            // only shows on a Pest project.
+                            .panel_view(panel!(TestsPanel), cx)
                     ),
                     Some(third),
                 );
@@ -618,7 +626,11 @@ pub fn install_default_layout(
         Workspace::Files => {
             let left = with!(
                 listed,
-                DockLayout::tabs().panel_view(panel!(FilesPanel), cx)
+                DockLayout::tabs()
+                    .panel_view(panel!(FilesPanel), cx)
+                    // Run the test of what one is writing without leaving the
+                    // screen; hidden wherever there is no Pest suite.
+                    .panel_view(panel!(TestsPanel), cx)
             );
             let center = with!(
                 centred,

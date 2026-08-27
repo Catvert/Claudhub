@@ -35,6 +35,7 @@ mod notes;
 pub(crate) mod notes_view;
 mod notify;
 mod panels;
+mod pest_view;
 mod picker;
 pub mod plugin_view;
 mod preview;

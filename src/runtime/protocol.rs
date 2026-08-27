@@ -693,6 +693,13 @@ pub enum Cmd {
     JustLoad {
         worktree: WorktreeId,
     },
+    /// Lists a worktree's Pest tests, for the tests panel.
+    ///
+    /// A subprocess that boots PHP (`vendor/bin/pest --list-tests`), a second
+    /// or two on a real suite: background queue, never in front of a diff.
+    PestLoad {
+        worktree: WorktreeId,
+    },
 
     /// Reads the state and the addresses of a project's worktrees.
     ///
@@ -926,6 +933,7 @@ impl Cmd {
             Self::WtDown { .. } => "WtDown",
             Self::WtTask { .. } => "WtTask",
             Self::JustLoad { .. } => "JustLoad",
+            Self::PestLoad { .. } => "PestLoad",
             Self::WtScan { .. } => "WtScan",
             Self::WtLinks { .. } => "WtLinks",
             Self::PluginCall { .. } => "PluginCall",
@@ -1085,6 +1093,12 @@ pub enum Evt {
     JustRecipes {
         worktree: WorktreeId,
         recipes: Option<crate::just::Snapshot>,
+    },
+    /// What a worktree's Pest suite declares — or that there is no Pest, or
+    /// that listing failed: the panel shows all three truthfully.
+    PestTests {
+        worktree: WorktreeId,
+        report: crate::pest::Report,
     },
     WtStates {
         states: Vec<(WorktreeId, WtWorktree)>,

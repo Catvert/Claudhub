@@ -53,7 +53,9 @@ use crate::ui::terminal_view::OpenTerminal;
 // 19: the SQL history did the same on the databases screen, and it is the same
 // bargain — the only lever there is throws away every screen's arrangement,
 // which is dear, and without it the new default is one nobody would ever see.
-const LAYOUT_VERSION: usize = 22;
+// 23: the tests panel joined the review's bottom third, the home's column and
+// the editing screen's sidebar.
+const LAYOUT_VERSION: usize = 23;
 
 /// The saved layouts, one per screen.
 ///
@@ -639,6 +641,10 @@ pub struct ClaudhubApp {
     /// closure, and copying the list on every frame of the bar is what that
     /// used to cost.
     pub(super) just_recipes: HashMap<PathBuf, Option<std::rc::Rc<crate::just::Snapshot>>>,
+    /// Each visited worktree's Pest suite. Keyed by worktree like the
+    /// justfile, and for its reason: the tests are the checkout's files.
+    pub(super) pest: HashMap<PathBuf, crate::ui::pest_view::PestState>,
+    pub(super) pest_scroll: gpui::UniformListScrollHandle,
     /// What `wt` knows about each worktree: started or not, its static
     /// address, and the preview — options, ports, `[status.info]`.
     pub(super) wt_states: HashMap<PathBuf, crate::runtime::protocol::WtWorktree>,
@@ -1262,6 +1268,8 @@ impl ClaudhubApp {
             // own, a few hundred kilobytes at most, and nothing else writes it.
             tags: HashMap::new(),
             tags_scroll: gpui::UniformListScrollHandle::new(),
+            pest: HashMap::new(),
+            pest_scroll: gpui::UniformListScrollHandle::new(),
             stashes: HashMap::new(),
             stashes_scroll: gpui::UniformListScrollHandle::new(),
             sql_history: crate::ui::sql_history::History::load(),
@@ -2014,6 +2022,11 @@ impl ClaudhubApp {
         {
             self.reload_just(&active);
         }
+        // A test added while Claudhub is open has to show up in the panel: the
+        // suite is what one edits during the very session that runs it.
+        if crate::ui::pest_view::reloads(&active, path) {
+            self.reload_pest(&active);
+        }
         self.request_status(active);
         cx.notify();
     }
@@ -2107,6 +2120,7 @@ impl ClaudhubApp {
                 self.just_recipes
                     .insert(worktree, recipes.map(std::rc::Rc::new));
             }
+            Evt::PestTests { worktree, report } => self.pest_arrived(worktree, report, cx),
             Evt::WtQuestions {
                 main,
                 slug,
@@ -3264,6 +3278,9 @@ impl ClaudhubApp {
         // What this checkout's justfile offers, for the run button. Asked here
         // and not while drawing the bar: it is a subprocess.
         self.ensure_just(&path);
+        // And its Pest suite, for the tests panel — here and not at a first
+        // paint, because the tab only exists once the answer says there is one.
+        self.ensure_pest(&path);
         // A plugin's panel speaks about the worktree the window shows, like
         // every other panel: changing it is starting over, not refreshing.
         self.plugins_follow_worktree(cx);

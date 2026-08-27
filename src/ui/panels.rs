@@ -638,6 +638,9 @@ panels! {
     NotesPanel => ("ClaudhubNotes", "panel-notes", render_notes, Notes),
     TagsPanel => ("ClaudhubTags", "panel-tags", render_tags, Tags),
     StashesPanel => ("ClaudhubStashes", "panel-stashes", render_stashes, Stashes),
+    // The tab exists only where `vendor/bin/pest` does: on everything else the
+    // honest panel is no panel — there is nothing to run.
+    TestsPanel => ("ClaudhubTests", "panel-tests", render_pest, Tests, visible: tests_visible),
     FilesPanel => ("ClaudhubFiles", "panel-files", render_files, Files),
     DbPanel => ("ClaudhubDb", "panel-databases", render_db, Db),
     SqlHistoryPanel => ("ClaudhubSqlHistory", "panel-sql-history", render_sql_history, SqlHistory),

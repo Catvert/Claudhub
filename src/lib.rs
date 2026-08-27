@@ -29,6 +29,7 @@ pub mod instance;
 pub mod just;
 pub mod logging;
 pub mod lsp;
+pub mod pest;
 pub mod plugin;
 pub mod runtime;
 #[cfg(feature = "ui")]
