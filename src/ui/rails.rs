@@ -85,7 +85,12 @@ impl Anchor {
     pub fn of_place(place: crate::plugin::manifest::Place) -> Option<Anchor> {
         use crate::plugin::manifest::Place;
         match place {
-            Place::Left => Some(Anchor::new(Side::Left, Half::Bottom)),
+            // Beside the trees and the lists: a plugin that asks for the left
+            // is asking to sit among what one picks from, which is that edge's
+            // top half.
+            Place::Left => Some(Anchor::new(Side::Left, Half::Top)),
+            // And beside what happened: the queries already run, the branch's
+            // builds. That is the right's bottom half.
             Place::Right => Some(Anchor::new(Side::Right, Half::Bottom)),
             Place::Bottom => Some(Anchor::new(Side::Bottom, Half::Top)),
             Place::Centre => None,
@@ -131,9 +136,25 @@ impl Side {
     /// more than it wants columns.
     pub fn default_size(self) -> Pixels {
         match self {
-            Side::Left => px(280.),
+            Side::Left => px(350.),
             Side::Right => px(320.),
-            Side::Bottom => px(260.),
+            Side::Bottom => px(240.),
+        }
+    }
+
+    /// The height of the **bottom half**, which is the one given a size.
+    ///
+    /// A height and not the width above: inside a side zone the split runs
+    /// down, so the two are different measurements and one of them was being
+    /// read for the other. The right's half is the taller because what it holds
+    /// is read in paragraphs — the notes, the queries already run — where the
+    /// left's is a list one glances at.
+    pub fn half_size(self) -> Pixels {
+        match self {
+            Side::Left => px(240.),
+            Side::Right => px(460.),
+            // One slot: nothing to size against.
+            Side::Bottom => px(0.),
         }
     }
 }
@@ -194,11 +215,15 @@ pub struct Tool {
 /// the middle would move every key after it. It is the rule `Workspace::ALL`
 /// carried, and it survives it.
 ///
-/// The order says what the window is for: the left chooses, the right
-/// remembers, the bottom runs. Read down, it is the working day — what changed,
-/// on which branch, in which file, found where, in which table, does it pass;
-/// then what one had to say about it, what happened, what is put aside; then
-/// what is running.
+/// The order does two things at once, and both are read. It is the order the
+/// buttons sit in on a rail; and **within one half it is the order of the
+/// tabs**, so whichever comes first is the view that half shows — which is why
+/// the notes open the left's bottom half rather than the tests.
+///
+/// The first nine are the ones a key names, so they are the ones one reaches
+/// for: what changed, on which branch, in which file, found where; then what
+/// one had to say about it and whether it passes; then what happened, in which
+/// table, and the shell one says it to.
 pub const TOOLS: &[Tool] = &[
     Tool {
         panel: "ClaudhubChanges",
@@ -228,11 +253,14 @@ pub const TOOLS: &[Tool] = &[
         home: Anchor::new(Side::Left, Half::Top),
         conditional: false,
     },
+    // First of the bottom half, so it is the one that half shows: the notes are
+    // read *while* choosing a file, which is the whole reason they are not a
+    // tab of the four above.
     Tool {
-        panel: "ClaudhubDb",
-        title: Label::Key("panel-databases"),
-        icon: "database",
-        home: Anchor::new(Side::Left, Half::Top),
+        panel: "ClaudhubNotes",
+        title: Label::Key("panel-notes"),
+        icon: "pencil",
+        home: Anchor::new(Side::Left, Half::Bottom),
         conditional: false,
     },
     Tool {
@@ -245,42 +273,28 @@ pub const TOOLS: &[Tool] = &[
         conditional: true,
     },
     Tool {
-        panel: "ClaudhubTerminal",
-        title: Label::Key("panel-terminal"),
-        icon: "square-terminal",
-        home: Anchor::new(Side::Bottom, Half::Top),
-        conditional: false,
-    },
-    Tool {
-        panel: "ClaudhubNotes",
-        title: Label::Key("panel-notes"),
-        icon: "pencil",
-        home: Anchor::new(Side::Right, Half::Top),
-        conditional: false,
-    },
-    Tool {
         panel: "ClaudhubHistory",
         title: Label::Key("panel-history"),
         icon: "git-commit-horizontal",
         home: Anchor::new(Side::Right, Half::Top),
         conditional: false,
     },
+    Tool {
+        panel: "ClaudhubDb",
+        title: Label::Key("panel-databases"),
+        icon: "database",
+        home: Anchor::new(Side::Right, Half::Top),
+        conditional: false,
+    },
+    Tool {
+        panel: "ClaudhubTerminal",
+        title: Label::Key("panel-terminal"),
+        icon: "square-terminal",
+        home: Anchor::new(Side::Bottom, Half::Top),
+        conditional: false,
+    },
     // Past the ninth, no key names it: `Alt+1`… stop here, and the rest is
     // reached by its button.
-    Tool {
-        panel: "ClaudhubTags",
-        title: Label::Key("panel-tags"),
-        icon: "tags",
-        home: Anchor::new(Side::Right, Half::Bottom),
-        conditional: false,
-    },
-    Tool {
-        panel: "ClaudhubStashes",
-        title: Label::Key("panel-stashes"),
-        icon: "archive",
-        home: Anchor::new(Side::Right, Half::Bottom),
-        conditional: false,
-    },
     Tool {
         panel: "ClaudhubSqlHistory",
         title: Label::Key("panel-sql-history"),
@@ -288,20 +302,33 @@ pub const TOOLS: &[Tool] = &[
         home: Anchor::new(Side::Right, Half::Bottom),
         conditional: false,
     },
-    Tool {
-        panel: "ClaudhubTestRun",
-        title: Label::Key("panel-test-run"),
-        icon: "play",
-        home: Anchor::new(Side::Bottom, Half::Top),
-        conditional: true,
-    },
-    // Nothing to resolve, no tab: it shifts the others aside to serve one time
-    // in a hundred.
+    // Nothing to resolve, no button: one time in a hundred.
     Tool {
         panel: "ClaudhubConflicts",
         title: Label::Key("panel-conflicts"),
         icon: "git-merge",
         home: Anchor::new(Side::Left, Half::Bottom),
+        conditional: true,
+    },
+    Tool {
+        panel: "ClaudhubTags",
+        title: Label::Key("panel-tags"),
+        icon: "tags",
+        home: Anchor::new(Side::Left, Half::Bottom),
+        conditional: false,
+    },
+    Tool {
+        panel: "ClaudhubStashes",
+        title: Label::Key("panel-stashes"),
+        icon: "archive",
+        home: Anchor::new(Side::Left, Half::Bottom),
+        conditional: false,
+    },
+    Tool {
+        panel: "ClaudhubTestRun",
+        title: Label::Key("panel-test-run"),
+        icon: "play",
+        home: Anchor::new(Side::Bottom, Half::Top),
         conditional: true,
     },
 ];
@@ -781,7 +808,7 @@ mod tests {
             press("ClaudhubNotes", &[]),
             Press::Restore {
                 panel: "ClaudhubNotes",
-                anchor: Anchor::new(Side::Right, Half::Top),
+                anchor: Anchor::new(Side::Left, Half::Bottom),
             }
         );
     }
@@ -867,7 +894,9 @@ mod tests {
         ];
         assert_eq!(
             names(&rail(&rails(&seats, &none()), Side::Right).top),
-            vec!["ClaudhubNotes", "ClaudhubHistory"]
+            // The databases have their home here, so they join the two the
+            // seats put here — and after them, the table's order deciding.
+            vec!["ClaudhubNotes", "ClaudhubHistory", "ClaudhubDb"]
         );
     }
 

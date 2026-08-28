@@ -108,8 +108,9 @@ fn edge(side: Side, window: &mut Window, cx: &mut Context<DockArea>) -> DockLayo
         let group = tools_of(Anchor::new(side, *half), window, cx);
         // The **bottom** half is the one given a size, never the top: two fixed
         // sizes adding up to the region's height overflow it, and it is the top
-        // that should take what is left over.
-        let size = (ix > 0).then(|| side.default_size());
+        // that should take what is left over. A **height**, which is not the
+        // zone's width — the split inside a side zone runs down.
+        let size = (ix > 0).then(|| side.half_size());
         split = split.child(group, size);
     }
     split
@@ -311,7 +312,7 @@ fn target_for(area: &DockArea, anchor: Anchor) -> Option<gpui_component::dock::I
                 Half::Bottom => Some(InsertTarget::Split {
                     node,
                     placement: gpui_base::Placement::Bottom,
-                    size: Some(anchor.side.default_size()),
+                    size: Some(anchor.side.half_size()),
                 }),
             }
         }
