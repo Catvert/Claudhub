@@ -626,6 +626,10 @@ pub struct ClaudhubApp {
     /// The branch picker's surface, kept from one opening to the next: it holds
     /// the filter field, whose `InputState` may not be rebuilt at every frame.
     pub(super) branch_picker: Entity<crate::ui::branch_picker::BranchPicker>,
+    /// The same surface, as a tool window — see `ClaudhubApp::render_branches`.
+    /// A second instance and not the same one: the popover empties its filter
+    /// every time it opens, and a zone one leaves open must not.
+    pub(super) branches_dock: Entity<crate::ui::branch_picker::BranchPicker>,
     /// The worktree picker's surface, kept for its filter field's sake.
     pub(super) worktree_picker: Entity<crate::ui::worktree_picker::WorktreePicker>,
     /// A note's input field. Created **once**: recreated in a `render` or when
@@ -1217,7 +1221,16 @@ impl ClaudhubApp {
             needs_save: app_needs_layout_save,
         } = Self::build_dock(window, cx);
 
-        let branch_picker = crate::ui::branch_picker::BranchPicker::new(window, cx);
+        let branch_picker = crate::ui::branch_picker::BranchPicker::new(
+            crate::ui::branch_picker::Mode::Popover,
+            window,
+            cx,
+        );
+        let branches_dock = crate::ui::branch_picker::BranchPicker::new(
+            crate::ui::branch_picker::Mode::Docked,
+            window,
+            cx,
+        );
         let worktree_picker = crate::ui::worktree_picker::WorktreePicker::new(window, cx);
 
         let search_inputs = crate::ui::search_view::SearchInputs::new(window, cx);
@@ -1254,6 +1267,7 @@ impl ClaudhubApp {
             commit_input,
             base_select,
             branch_picker,
+            branches_dock,
             worktree_picker,
             note_input,
             prompt_input,

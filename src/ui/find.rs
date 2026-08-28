@@ -41,6 +41,10 @@ pub enum Pane {
     Db,
     Changes,
     Branch,
+    /// The repository's branches. Its field **is** the filter, so `Ctrl+F`
+    /// focuses that rather than opening a second bar over it — the project
+    /// search's rule, for the same reason.
+    Branches,
     History,
     /// The repository's tags. It filters: the list's order is ours — by date of
     /// tag — and nothing in it links one row to the next.
@@ -231,6 +235,12 @@ impl ClaudhubApp {
         // over it would be two places to type the same thing.
         if matches!(pane, Pane::Search | Pane::SearchPreview) {
             self.open_search(window, cx);
+            return;
+        }
+        // The branches have one too, and it is the one already under the list
+        // being read.
+        if matches!(pane, Pane::Branches) {
+            self.branches_dock.read(cx).filter(cx).focus(window, cx);
             return;
         }
         self.open_find_in(pane, window, cx);

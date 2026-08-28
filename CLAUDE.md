@@ -185,7 +185,9 @@ src/
     panels.rs       les panneaux du dock, leur macro et leur registre
     base_select.rs  le sélecteur de base de comparaison — ce qu'une entrée dit
     branches.rs     ce que le sélecteur de branches liste, et les gestes sur une
-    branch_picker.rs   le sélecteur de branches : le filtre, la liste, les actions
+    branch_picker.rs   le sélecteur de branches : le filtre, la liste, les actions —
+                       une surface, deux sièges : le popover de la barre de titre
+                       et la tool window « Branches »
     worktree_picker.rs le sélecteur de worktrees : le filtre, la liste, les actions
     worktrees.rs    ce que le sélecteur de worktrees liste — pur, testé
     picker.rs       ce que les deux sélecteurs partagent : le pas du curseur — pur

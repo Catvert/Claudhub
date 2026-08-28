@@ -297,6 +297,7 @@
   "notes-prompt-intro": "Voici mes remarques de relecture sur la branche %{branch}.",
   "notes-prompt-outro": "Ces notes sont des fichiers Markdown dans $CLAUDHUB_NOTES_DIR : réponds sous la remarque, dans le corps du fichier, sans toucher au frontmatter — c'est moi qui clos une note en la relisant. Tiens ta progression à jour dans $CLAUDHUB_TODO, une case à cocher par tâche.",
   "notify-failed": "L'opération a échoué",
+  "panel-branches": "Branches",
   "panel-conflicts": "Conflits",
   "panel-databases": "Bases",
   "panel-diff": "Diff",

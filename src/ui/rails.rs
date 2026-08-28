@@ -232,10 +232,13 @@ pub const TOOLS: &[Tool] = &[
         home: Anchor::new(Side::Left, Half::Top),
         conditional: false,
     },
+    // **Not `git-branch`**, which now names the list of branches: what this
+    // one shows is a branch weighed against its base, which is what a pull
+    // request is. Two buttons under one glyph is two buttons one cannot aim at.
     Tool {
         panel: "ClaudhubBranch",
         title: Label::Key("range-branch"),
-        icon: "git-branch",
+        icon: "git-pull-request",
         home: Anchor::new(Side::Left, Half::Top),
         conditional: false,
     },
@@ -330,6 +333,17 @@ pub const TOOLS: &[Tool] = &[
         icon: "play",
         home: Anchor::new(Side::Bottom, Half::Top),
         conditional: true,
+    },
+    // Beside the log, and not with what one picks from on the left: a branch
+    // is chosen by reading what it carries, and what it carries is the column
+    // next to it. It is the arrangement PhpStorm's Git window has, and the
+    // left rail is full — nine buttons is where a rail stops being aimable.
+    Tool {
+        panel: "ClaudhubBranches",
+        title: Label::Key("panel-branches"),
+        icon: "git-branch",
+        home: Anchor::new(Side::Right, Half::Top),
+        conditional: false,
     },
 ];
 
@@ -974,6 +988,20 @@ mod tests {
         for side in Side::ALL {
             let held = rail(&rails, side).buttons().count();
             assert!(held <= MAX_PER_RAIL, "{side:?} carries {held} buttons");
+        }
+    }
+
+    /// **No two buttons under one glyph.** A rail is aimed at by its icons,
+    /// and two views sharing one is a target that answers half the time. It is
+    /// what the branch list cost: the range comparing a branch to its base was
+    /// holding `git-branch`, and gave it up for `git-pull-request`.
+    #[test]
+    fn no_two_tools_share_an_icon() {
+        let mut seen = std::collections::BTreeMap::new();
+        for tool in TOOLS {
+            if let Some(other) = seen.insert(tool.icon, tool.panel) {
+                panic!("{} and {} both draw {}", other, tool.panel, tool.icon);
+            }
         }
     }
 

@@ -682,6 +682,7 @@ macro_rules! panels {
 panels! {
     ChangesPanel => ("ClaudhubChanges", "range-working", render_changes, Changes),
     BranchPanel => ("ClaudhubBranch", "range-branch", render_branch_review, Branch),
+    BranchesPanel => ("ClaudhubBranches", "panel-branches", render_branches, Branches),
     NotesPanel => ("ClaudhubNotes", "panel-notes", render_notes, Notes),
     TagsPanel => ("ClaudhubTags", "panel-tags", render_tags, Tags),
     StashesPanel => ("ClaudhubStashes", "panel-stashes", render_stashes, Stashes),

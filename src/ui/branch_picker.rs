@@ -68,6 +68,20 @@ const WIDTH: gpui::Pixels = px(420.);
 /// How tall the list grows before it scrolls.
 const LIST_HEIGHT: gpui::Pixels = px(320.);
 
+/// Where the picker is painted.
+///
+/// The same list and the same actions in both; what differs is what ends a
+/// gesture. A popover is dismissed by it — that is what one opened it for —
+/// while a tool window stays, so the gesture ends by going back to the list it
+/// started from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Mode {
+    /// The top bar's popover, called up on the branch one is on.
+    Popover,
+    /// The tool window, which is a zone and not a surface.
+    Docked,
+}
+
 /// Which of the two steps is on screen.
 enum Step {
     /// The filtered list of branches.
@@ -117,6 +131,7 @@ impl Look {
 pub(super) struct BranchPicker {
     app: WeakEntity<ClaudhubApp>,
     query: Entity<InputState>,
+    mode: Mode,
     step: Step,
     scroll: gpui_component::VirtualListScrollHandle,
     /// Keyboard cursor into the **displayed** list, group headings included:
@@ -142,7 +157,11 @@ pub(super) struct BranchPicker {
 }
 
 impl BranchPicker {
-    pub(super) fn new(window: &mut Window, cx: &mut Context<ClaudhubApp>) -> Entity<Self> {
+    pub(super) fn new(
+        mode: Mode,
+        window: &mut Window,
+        cx: &mut Context<ClaudhubApp>,
+    ) -> Entity<Self> {
         let owner = cx.entity();
         let app = owner.downgrade();
         let query = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("branch-filter")));
@@ -165,6 +184,7 @@ impl BranchPicker {
             Self {
                 app,
                 query,
+                mode,
                 step: Step::List,
                 scroll: gpui_component::VirtualListScrollHandle::new(),
                 cursor: 0,
@@ -189,10 +209,30 @@ impl BranchPicker {
         cx.notify();
     }
 
+    /// Ends the gesture the picker was standing in.
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(popover) = self.popover.clone() {
-            popover.update(cx, |state, cx| state.dismiss(window, cx));
+        match self.mode {
+            Mode::Popover => {
+                if let Some(popover) = self.popover.clone() {
+                    popover.update(cx, |state, cx| state.dismiss(window, cx));
+                }
+            }
+            // A zone has nothing to dismiss, and one that emptied itself after
+            // every action would be a tool window that closes when used. Back
+            // to the list it was opened from, which is where the next gesture
+            // starts.
+            Mode::Docked => {
+                self.step = Step::List;
+                cx.notify();
+            }
         }
+    }
+
+    /// The filter's focus handle, which is what `Ctrl+F` aims at in the tool
+    /// window: the panel has a field and it **is** the search, the rule the
+    /// project search already follows.
+    pub(super) fn filter(&self, cx: &App) -> gpui::FocusHandle {
+        self.query.focus_handle(cx)
     }
 
     /// The rows on screen, headings included.
@@ -331,6 +371,10 @@ impl BranchPicker {
 
     fn render_list(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let look = Look::of(cx);
+        // A popover is as tall as what it holds, up to a ceiling; a zone is as
+        // tall as it was dragged, and the list is what takes what is left over
+        // once the field and the footer have had theirs.
+        let docked = matches!(self.mode, Mode::Docked);
         let rows = self.rows(cx);
         let count = rows.len();
         let cursor = self.cursor;
@@ -359,6 +403,7 @@ impl BranchPicker {
         v_flex()
             .w_full()
             .min_h_0()
+            .when(docked, |el| el.flex_1())
             .child(
                 div()
                     .w_full()
@@ -372,6 +417,7 @@ impl BranchPicker {
                     .p_3()
                     .text_sm()
                     .text_color(look.muted)
+                    .when(docked, |el| el.flex_1())
                     .child(tr!("branch-none"))
                     .into_any_element()
             } else {
@@ -389,7 +435,8 @@ impl BranchPicker {
                     .size_full()
                     .track_scroll(&self.scroll),
                 )
-                .h(LIST_HEIGHT)
+                .when(docked, |el| el.flex_1().min_h_0())
+                .when(!docked, |el| el.h(LIST_HEIGHT))
                 .into_any_element()
             })
             .child(self.render_list_footer(look, cx))
@@ -793,8 +840,11 @@ impl Render for BranchPicker {
             }
         };
         v_flex()
-            .w(WIDTH)
             .min_h_0()
+            // A popover is a surface of its own and says how wide it is; a tool
+            // window takes the zone it was given.
+            .when(matches!(self.mode, Mode::Popover), |el| el.w(WIDTH))
+            .when(matches!(self.mode, Mode::Docked), |el| el.size_full())
             .capture_key_down(cx.listener(Self::on_key))
             .child(body)
     }
@@ -1074,6 +1124,24 @@ impl ClaudhubApp {
                 .appearance(true)
                 .p_0(),
         )
+    }
+
+    /// The branches, as a tool window.
+    ///
+    /// The same surface as the top bar's popover, painted in a zone: one list,
+    /// one set of gestures, and nothing here that the picker does not already
+    /// know how to do — see `branch_picker::Mode`.
+    ///
+    /// A **second instance**, and deliberately: the popover empties its filter
+    /// every time it opens, which is right for a surface one calls up and wrong
+    /// for a zone one leaves open, and the two would otherwise fight over the
+    /// step being shown.
+    pub(super) fn render_branches(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        self.branches_dock.clone()
     }
 }
 
