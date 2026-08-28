@@ -675,7 +675,6 @@ panels! {
     // The screens give each of them its own place.
     DiffPanel => ("ClaudhubDiff", "panel-diff", render_diff, Diff, needed: diff_on_screen),
     ConsolePanel => ("ClaudhubConsole", "panel-sql", render_console_panel, Console, needed: db_console_open),
-    SettingsPanel => ("ClaudhubSettings", "panel-settings", render_settings_panel, Settings),
     // The history needs loading the first time it is looked at.
     //
     // Doing it at render time rather than at construction is what avoids a

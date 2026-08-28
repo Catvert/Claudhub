@@ -948,6 +948,12 @@ pub struct ClaudhubApp {
     dock_skin: std::rc::Rc<DockSkin>,
     /// True when a deferred write of the layout is already scheduled.
     layout_save_scheduled: bool,
+    /// The settings form, built once and outliving its dialog.
+    ///
+    /// **An entity and not a closure**: `open_dialog` keeps a `Fn` called back
+    /// from the root's render, where reading the root entity is a panic. See
+    /// `settings_view::SettingsForm`.
+    pub(super) settings_form: Entity<crate::ui::settings_view::SettingsForm>,
     /// The edges the zen fold put away, to be given back on the way out.
     ///
     /// Empty when one is not in zen. It is not persisted: a window reopening in
@@ -1215,6 +1221,10 @@ impl ClaudhubApp {
         let worktree_picker = crate::ui::worktree_picker::WorktreePicker::new(window, cx);
 
         let search_inputs = crate::ui::search_view::SearchInputs::new(window, cx);
+        let settings_form = {
+            let app = cx.entity();
+            cx.new(|cx| crate::ui::settings_view::SettingsForm::new(&app, cx))
+        };
 
         let mut app = Self {
             git,
@@ -1327,6 +1337,7 @@ impl ClaudhubApp {
             layout_save_scheduled: false,
             terminals_everywhere: false,
             zen_folded: Vec::new(),
+            settings_form,
             hidden_panels: Settings::global(cx).hidden_panels.iter().cloned().collect(),
             summaries: HashMap::new(),
             agents: crate::agent::Tracker::default(),

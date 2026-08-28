@@ -353,11 +353,7 @@ impl ClaudhubApp {
                                     .ghost()
                                     .xsmall()
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.reveal_panel(
-                                            crate::ui::panels::SettingsPanel::NAME,
-                                            window,
-                                            cx,
-                                        );
+                                        this.open_settings(window, cx);
                                     })),
                             ),
                     ),
