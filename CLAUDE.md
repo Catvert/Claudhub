@@ -167,8 +167,8 @@ src/
     topbar.rs   la barre de titre : le menu, les sélecteurs worktree et branche
     repos.rs        les dépôts ouverts et ceux qui manquent — sans gpui, testé
     inflight.rs     les écritures en vol, et ce que la barre en dit — testé
-    workspace.rs    les huit écrans, leur dock et la barre qui les choisit
-    multiplexer.rs  l'écran de tous les terminaux — le nom d'un projet
+    rails.rs        les tool windows et leurs trois bandeaux — pur, testé
+    dock_layout.rs  l'aire unique : sa disposition, ses sièges, ses gestes
     diff_view.rs    la vue de diff, virtualisée
     refine.rs       les mots qui changent entre deux versions d'une ligne — pur
     history_view.rs l'historique et son graphe peint
@@ -396,81 +396,82 @@ Pas de repli par sondage.
 Dans un worktree lié, `.git` est un *fichier* qui pointe vers
 `<principal>/.git/worktrees/<nom>`.
 
-## Les écrans, et le dock
+## L'espace de travail, et le dock
 
-Neuf **écrans** (`ui::workspace::Workspace`) : Accueil, Git, Édition, Recherche,
-Bases, Sentry, Réglages, Multiplexeur, Tests, atteints par `Alt+1` à `Alt+9` —
-un écran ne rejoint `ALL` que **par la fin**, les touches étant des rangs de ce
-tableau. L'écran
-Git a beau ne plus s'appeler ainsi, sa clé de disposition **reste `review`** :
-c'est par elle qu'une disposition enregistrée se relit.
+**Une seule aire de dock** (`ui::dock_layout`) : trois zones d'outils autour d'un
+centre de documents, la forme que tout éditeur gardant ses utilisateurs dans une
+fenêtre finit par prendre. Il y a eu neuf écrans, chacun sa propre aire, puis un
+accueil qui les réunissait ; le double système coûtait quatre chemins pour
+« montre-moi ça », neuf panneaux par terminal et deux par fichier — un panneau
+n'appartient qu'à une aire à la fois — et neuf listes de vues recopiées.
 
-**L'accueil est les autres écrans réunis** : leurs colonnes en onglets d'une
-seule barre latérale, leurs centres en onglets d'un seul groupe. Il ne coûte rien
-que la fenêtre ne sache déjà faire — un écran est un dock, les panneaux sont les
-mêmes types instanciés une fois de plus, et ce qu'ils peignent vit dans
-`ClaudhubApp`. Ce qu'il ajoute est une règle : **ce qui *ouvre* quelque chose n'en
-sort pas**. Un fichier ouvert depuis l'arbre, la console d'une table, un résultat
-de recherche qu'on suit appelaient `enter_workspace` ; ils passent par
-`ClaudhubApp::reveal`, qui ailleurs change d'écran et ici **avance l'onglet** que
-`Workspace::centre_tab` nomme. Les deux groupes de boutons qui changent d'écran et
-les touches `Alt+N` n'y passent pas : ils disent « emmène-moi là », et une barre
-qui répondrait par un onglet serait une barre en panne. `AT_HOME` dit quels écrans
-s'y replient, `WITH_EDITOR` ceux qui lisent des fichiers — un fichier ouvert y a
-**une face par écran**, comme un terminal, un panneau n'appartenant qu'à un dock à
-la fois.
+La répartition se lit comme une phrase : **la gauche choisit, la droite se
+souvient, le bas tourne, le centre se lit.** À gauche ce qui désigne — les
+changements, la branche, les fichiers, la recherche, les bases, les tests ; à
+droite ce qui dit où l'on en est — les notes, l'historique, les tags, les
+remisages, les requêtes déjà jouées ; en bas ce qui tourne — les terminaux, le
+run suivi ; au centre ce qu'on relit — le diff, l'éditeur, la console, l'aperçu,
+et chaque fichier ouvert.
 
-Et une seconde règle, qui n'existe que là : **un onglet du centre ne s'affiche que
-s'il a quelque chose à montrer** (`needed:` dans la macro `panels!`). Ailleurs un
-centre porte un panneau et son état vide *est* l'écran ; ici quatre onglets
-nommant quatre pièces vides avant le premier clic seraient exactement ce que la
-séparation en écrans avait supprimé. La question se pose à l'**application** et
-non au panneau — un panneau ignore quel dock le tient, le registre en rebâtit un
-d'après un nom seul — et c'est licite parce qu'**un seul dock se peint à la
-fois** : la visibilité d'un panneau dans un dock que personne ne rend ne se voit
-nulle part. Corollaire : la valeur initiale est mise en cache avant que
-l'application soit lisible, d'où `app::OPENS_ON`, l'écran sur lequel la fenêtre
-s'ouvre, lu une fois avant le premier panneau — sans lui l'accueil s'ouvrirait sur
-ses quatre onglets et les lâcherait à la première notification.
+**Une tool window a un bouton, un document n'en a pas** — la différence n'est
+pas dans la nature du panneau mais dans sa place. `ui::rails` est pur et décide
+tout : l'ordre des boutons, lequel est allumé, ce qu'une pression veut dire, ce
+que le zen replie et rend.
+
+**Il n'y a pas de seconde liste.** Un bandeau se calcule à chaque frame depuis
+l'arbre du dock (`dock_layout::seats`) et rien n'en est gardé : un panneau
+traîné d'un bord à l'autre change de bandeau sans qu'on tienne rien à jour.
+`Tool::home` ne dit que le point de départ. Une tool window ne rejoint `TOOLS`
+que **par la fin**, `Alt+1` à `Alt+9` étant des rangs de ce tableau ; un bandeau
+ne défile pas, et `MAX_PER_RAIL` l'y tient.
+
+**Les bandeaux sont peints par nous, hors de l'aire**, et c'est ce qui permet à
+une zone de se replier à rien pendant que ses boutons restent. L'affordance du
+dock est un chevron dans une barre d'onglets : il nomme la zone d'à côté et s'en
+va avec elle, si bien que ce qu'il cachait ne revenait que par la barre d'un
+autre groupe. D'où `set_toggle_button_visible(false)`.
+
+**Un onglet du centre ne s'affiche que s'il a quelque chose à montrer**
+(`needed:` dans la macro `panels!`). La règle ne valait que sur l'accueil, les
+autres écrans ayant chacun un centre à eux dont l'état vide *était* l'écran ; le
+centre est maintenant toujours celui-là, donc elle vaut partout. La question se
+pose à l'**application** et non au panneau — un panneau ignore quelle région le
+tient, le registre en rebâtit un d'après un nom seul.
 
 Un panneau de plugin y passe aussi, sa réponse se lisant sur ce qu'il a peint
-(`view::Node::is_empty_state`) — un script ne sait pas répondre à la question.
-Mais **au centre seulement** : un plugin démarre la première fois qu'un de ses
-panneaux est *peint* (`plugin_boot`), si bien qu'un panneau caché faute de contenu
-ne serait jamais peint, ne démarrerait jamais le script, et n'aurait jamais de
-contenu. C'est la liste à gauche qui l'amorce ; l'onglet de détail apparaît quand
-on choisit une ligne — et **se met devant** en apparaissant, sans quoi le geste ne
-changerait rien au centre.
+(`view::Node::is_empty_state`). Mais **au centre seulement** : un plugin démarre
+la première fois qu'un de ses panneaux est *peint* (`plugin_boot`), si bien
+qu'un panneau caché faute de contenu ne démarrerait jamais le script, et
+n'aurait jamais de contenu. C'est la liste à gauche qui l'amorce ; l'onglet de
+détail apparaît quand on choisit une ligne, et **se met devant**.
 
-**Un dock par écran**, construits au démarrage — un dock se bâtit avec `window`,
-et le faire au rendu créerait des entités au milieu d'une frame. L'état vit dans
-`ClaudhubApp`, pas dans les panneaux : changer d'écran ne fait que changer de
-dock, **sauf le focus** (`focus_workspace`).
+**Le panneau d'accueil du centre** (`EditorPanel`) n'est plus une contrainte du
+moteur — `add_panel_view` sait fendre la racine d'une région vide, et fabrique
+même une zone absente. Il reste parce qu'une fenêtre qui s'ouvre sur rien ne dit
+rien de ce qu'elle sait faire : au premier démarrage, diff, console et aperçu
+sont tous conditionnels, donc absents.
 
-**Les Réglages et le Multiplexeur ne sont pas dans la barre** : ce sont des
-détours, un groupe de deux boutons à droite de la barre de titre, et des
-**bascules** — pressés une seconde fois ils rendent le dernier écran de travail
-(`worked_in`). `Workspace::working()` est `ALL` moins ces deux-là, si bien que
-les deux listes ne peuvent pas diverger.
+**Les Réglages sont une modale** et le **multiplexeur un état** : « tous les
+worktrees », bascule de la barre d'état, puisque c'était déjà son seul écart
+(`terminals_everywhere`). Le formulaire des réglages est une **entité enfant** et
+non une fermeture : `open_dialog` retient un `Fn` rappelé depuis le rendu de la
+racine, où lire l'entité racine est une panique.
 
-**Le multiplexeur n'est pas une vue : c'est un dock qui ne porte que les
-terminaux.** Une `TerminalView` a une face par écran ; celle-ci diffère par deux
-choses (`shows_every_worktree`) : elle se montre quel que soit le worktree
-regardé, et son onglet dit à quel projet elle appartient.
+La disposition est enregistrée dans `<config>/layout.json`, une seule.
+`LAYOUT_VERSION` la fait écarter quand les panneaux changent de nom, et c'est le
+**seul** numéro consulté à la lecture. Ce qu'une disposition relue porte et que
+le registre ne sait pas bâtir est **élagué** (`app::prune`,
+`panels::is_registered`) — et **seule une feuille se juge sur son nom**, un
+conteneur portant celui du dock. Les panneaux se déclarent au registre par la
+macro `panels!`, et `dock_layout` les bâtit **par ce registre** : deux listes
+divergeaient au premier ajout.
 
-La disposition est enregistrée dans `<config>/layout.json`, une par écran.
-`LAYOUT_VERSION` la fait écarter quand les panneaux changent de nom. Ce qu'une
-disposition relue porte et que le registre ne sait pas bâtir est **élagué**
-(`app::prune`, `panels::is_registered`) — et **seule une feuille se juge sur son
-nom**, un conteneur portant celui du dock. Les panneaux se déclarent au registre
-par la macro `panels!` (`register_generated`) : deux listes divergeaient au
-premier ajout.
-
-Six pièges du dock, tous rencontrés :
+Sept pièges du dock, tous rencontrés :
 
 - **Un panneau sans pile parente est verrouillé** (`is_locked`) : tout panneau
   doit être enveloppé, fût-ce dans une division d'un seul élément.
-- **`toggle_dock` ne notifie pas l'aire**, seulement le dock intérieur.
+- **`toggle_dock` ne notifie pas l'aire**, seulement le dock intérieur — or
+  c'est l'aire qu'on observe pour enregistrer.
 - **Le dernier panneau de l'*aire* ne se déplace pas** (`is_last_panel`) : le
   drapeau se comptait par arbre, or chaque zone est le sien.
 - **Les tailles d'une division se donnent toutes** : un `None` vaut cent pixels
@@ -480,18 +481,21 @@ Six pièges du dock, tous rencontrés :
 - **`panel_handle` et `add_panel_view`, jamais `add_panel`** : un `Entity<P>` se
   convertit tout seul et le dock l'accepte sans rien dire, mais sans onglet, ni
   titre, ni contenu. C'est l'échec silencieux de la refonte du dock. Et
-  l'ajout-puis-déplacement passe par `panels::dock_panel_at` : `add_panel_view`
-  pose le panneau dans le premier groupe du centre et l'y **active**.
+  l'ajout-puis-déplacement passe par `panels::dock_panel_at`, qui rend à la
+  région l'onglet que son premier groupe montrait.
+- **L'élagage d'une zone latérale passe par `DockState::new`** et ses quatre
+  lecteurs : les champs sont privés, mais démonter et remonter suffit. Sans lui
+  un terminal de la zone basse revient en « panel type is not registered » à
+  chaque démarrage — son contenu est un processus, rien ne le rebâtit.
 
-**Les terminaux sont des panneaux** : un par terminal et par écran qui en porte,
-rendant la **même** `Entity<TerminalView>`. La place se garde par l'invisibilité,
-pas par un déménagement. Ils sont retirés de `layout.json` avant écriture — leur
-contenu est un **processus**. Fermer un onglet dont une commande tourne se fait
-confirmer (`Terminal::busy`, lu dans `/proc/<pid>/stat`) ; un onglet **lancé sur
-une commande** — agent, tâche `wt`, recette `just` — est occupé tant qu'il vit,
-et ça ne se déduit pas du processus : `sh -lc` **exec** ce qu'on lui donne, si
-bien que l'enfant du pty tient le groupe de premier plan comme un shell à son
-invite.
+**Les terminaux sont des panneaux** : un par terminal, rendant sa propre
+`Entity<TerminalView>`. La place se garde par l'invisibilité, pas par un
+déménagement. Ils sont retirés de `layout.json` avant écriture — leur contenu est
+un **processus**. Fermer un onglet dont une commande tourne se fait confirmer
+(`Terminal::busy`, lu dans `/proc/<pid>/stat`) ; un onglet **lancé sur une
+commande** — agent, tâche `wt`, recette `just` — est occupé tant qu'il vit, et ça
+ne se déduit pas du processus : `sh -lc` **exec** ce qu'on lui donne, si bien que
+l'enfant du pty tient le groupe de premier plan comme un shell à son invite.
 
 ### Le grain de l'interface
 
@@ -687,7 +691,11 @@ pure**. Pièges : un `Ref<str>` et jamais un `String` dans une fonction hôte (R
 se lisant sur la **capacité** ; ajouter un nom au vocabulaire peut casser un
 plugin installé (`use claudhub::*`) ; les secrets ne passent pas par le script,
 c'est le **worker** qui substitue. Le trousseau est l'endroit par défaut,
-résolu **côté interface** — un trousseau appartient à une session de bureau.
+résolu **côté interface** — un trousseau appartient à une session de bureau. Un
+panneau nomme son bord par `place` — quatre valeurs, une tool window de plein
+droit — et le `screen` d'un manifeste posé avant que les écrans partent est
+**lu et ignoré** : `Declaration` refuse les clés inconnues, donc le retirer
+écarterait au chargement tous les plugins déjà installés.
 
 **L'instance unique** (`instance.rs`) — « Ouvrir avec Claudhub » est sur
 *chaque* dossier, et un deuxième clic donnait un deuxième processus : deux
@@ -741,8 +749,9 @@ en collage encadré, le retour chariot dans un **second** envoi.
 **Les raccourcis** (`shortcuts.rs`) — une seule table (`table!`) donne
 `bind_keys` et la fenêtre d'aide. Deux prédicats et pas un seul : sous Linux
 `secondary` **est** Ctrl, donc une lettre seule passe par `WINDOW_PREDICATE`, qui
-exclut le terminal. Les écrans s'atteignent par `Alt+N` et non `Ctrl+Maj+N` :
-gpui *retire* le Maj quand la touche est un caractère sans casse. Une touche que
+exclut le terminal. Les tool windows se replient par `Alt+N` et non
+`Ctrl+Maj+N` : gpui *retire* le Maj quand la touche est un caractère sans
+casse. Une touche que
 gpui lit n'est pas une touche qui existe (`valid_keys`) ; `KeyBinding::new`
 **panique** sur ce qu'elle ne sait pas lire, et `init` tourne au démarrage.
 
@@ -776,9 +785,12 @@ main, et une seule occurrence se suit, plusieurs ouvrent l'écran Recherche. La
 légende des jetons sémantiques est traduite dans le vocabulaire de nos thèmes
 (`lsp::theme_name`), un nom inconnu ne rendant **aucun** style.
 
-**La piste** (`jumps.rs`) — une place est un fichier *ou* un écran, et c'est une
-seule piste. Un écran ne porte que son nom ; la console SQL est l'exception, son
-état étant ce qu'un geste **remplace**. Une piste par worktree. Le départ est lu
+**La piste** (`jumps.rs`) — une place est un fichier *ou* un document du centre,
+et c'est une seule piste. Un document ne porte que son nom ; la console SQL est
+l'exception, son état étant ce qu'un geste **remplace**. Déplier une tool window
+n'est **pas** un déplacement : montrer l'historique à côté de ce qu'on lit ne
+change pas où l'on est, et une flèche arrière qui replierait une zone serait
+imprévisible. Une piste par worktree. Le départ est lu
 au moment du saut. Un nouveau saut jette ce qui était devant. Les boutons 4 et 5
 de la souris sont la même piste (`MouseButton::Navigate`).
 
@@ -795,7 +807,9 @@ absente ne se distinguerait pas d'une entrée d'un dépôt pas encore ouvert.
 reçoivent qu'un `App`. L'écriture est différée d'une demi-seconde. Ce qui dépend
 d'un réglage se **relit à chaque rendu**, jamais à la construction. La page
 demandée passe par l'**identifiant** du formulaire, `default_selected_index`
-n'étant lu qu'à la création de l'état.
+n'étant lu qu'à la création de l'état. Le formulaire est une **entité enfant**
+bâtie une fois : `open_dialog` retient un `Fn` rappelé depuis le rendu de la
+racine, et lire l'entité racine de là est une panique.
 
 **Le journal** (`logging.rs`) — notre `log::Log` par-dessus celui d'`env_logger`,
 un anneau de deux mille lignes. Une application graphique n'a pas de console sous

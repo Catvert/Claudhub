@@ -261,7 +261,15 @@ impl crate::ui::app::ClaudhubApp {
         let hidden: std::collections::BTreeSet<String> =
             self.hidden_panels.iter().cloned().collect();
         let rails = rails::rails(&seats, &hidden);
-        gpui_component::h_flex()
+        // **A bare flex row and not `h_flex`**: that helper centres its
+        // children (`items_center`), so the middle column would take the height
+        // of its content — and its content is a `flex_1` resolving against an
+        // undefined height, which is zero. The whole window came up empty, rails
+        // and nothing else. A row stretches its children by default, which is
+        // what a column between two rails needs.
+        gpui::div()
+            .flex()
+            .flex_row()
             .flex_1()
             .min_h_0()
             .min_w_0()
@@ -291,9 +299,9 @@ impl crate::ui::app::ClaudhubApp {
     /// one is a horizontal strip under the centre, and a permanent grey line
     /// there for a window with no terminal and no run would be thirty pixels
     /// spent saying nothing.
-    fn render_rail(&mut self, rail: &rails::Rail, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_rail(&mut self, rail: &rails::Rail, cx: &mut Context<Self>) -> gpui::AnyElement {
         use gpui_component::button::{Button, ButtonVariants as _};
-        use gpui_component::{h_flex, v_flex, ActiveTheme as _, Selectable as _, Sizable as _};
+        use gpui_component::{h_flex, v_flex, ActiveTheme as _, Sizable as _};
 
         let vertical = rail.side != Side::Bottom;
         let muted = cx.theme().muted_foreground;
@@ -302,12 +310,22 @@ impl crate::ui::app::ClaudhubApp {
             .iter()
             .map(|button| {
                 let panel = button.panel;
-                Button::new(("rail", panel.as_ptr() as usize))
+                Button::new(gpui::SharedString::from(panel))
                     .icon(crate::ui::icons::icon(button.icon))
                     .tooltip(crate::tr!(button.title))
-                    .ghost()
-                    .xsmall()
-                    .selected(button.active)
+                    .small()
+                    // **Solid against ghost**, the polarity of both ends of the
+                    // status bar: the "selected" state of a ghost button is a
+                    // background a few percent from the ground, invisible on
+                    // half the themes — and "what is on screen" is exactly the
+                    // question a rail has to answer without being looked for.
+                    .map(|this| {
+                        if button.active {
+                            this.primary()
+                        } else {
+                            this.ghost()
+                        }
+                    })
                     // A hidden view keeps its button, muted: it is where one
                     // calls it back from, and a button that vanished would be a
                     // target that moves.
@@ -317,40 +335,45 @@ impl crate::ui::app::ClaudhubApp {
                     }))
             })
             .collect();
-        gpui::div()
-            .when(!buttons.is_empty(), |this| {
-                this.map(|this| {
-                    if vertical {
-                        this.child(
-                            v_flex()
-                                .h_full()
-                                .flex_none()
-                                .gap(px(2.))
-                                .py(px(6.))
-                                .px(px(4.))
-                                // A rail does not scroll: one that has to be
-                                // scrolled is one that can no longer be aimed
-                                // at. `rails::MAX_PER_RAIL` is what keeps the
-                                // table inside what an edge can show, and a
-                                // test holds it there.
-                                .overflow_hidden()
-                                .children(buttons),
-                        )
-                    } else {
-                        this.child(
-                            h_flex()
-                                .w_full()
-                                .flex_none()
-                                .gap(px(2.))
-                                .px(px(8.))
-                                .pb(px(4.))
-                                .overflow_hidden()
-                                .children(buttons),
-                        )
-                    }
-                })
-            })
-            .into_any_element()
+        // Nothing to show, nothing painted — not an empty band: the bottom
+        // rail is a strip under the centre, and a permanent grey line there for
+        // a window with no terminal and no run would be pixels spent saying
+        // nothing.
+        if buttons.is_empty() {
+            return gpui::Empty.into_any_element();
+        }
+        // The flex is returned directly rather than wrapped: a `div()` is a
+        // **block**, where a child's `h_full` resolves against an undefined
+        // height.
+        if vertical {
+            v_flex()
+                .h_full()
+                .flex_none()
+                // Against the window's ground and not the cards': a rail is
+                // furniture at the edge, and painting it in the tone the cards
+                // sit on would make it read as one more card.
+                .bg(cx.theme().title_bar)
+                .gap(px(2.))
+                .py(px(6.))
+                .px(px(4.))
+                // A rail does not scroll: one that has to be scrolled is one
+                // that can no longer be aimed at. `rails::MAX_PER_RAIL` keeps
+                // the table inside what an edge can show.
+                .overflow_hidden()
+                .children(buttons)
+                .into_any_element()
+        } else {
+            h_flex()
+                .w_full()
+                .flex_none()
+                .bg(cx.theme().title_bar)
+                .gap(px(2.))
+                .px(px(6.))
+                .py(px(3.))
+                .overflow_hidden()
+                .children(buttons)
+                .into_any_element()
+        }
     }
 
     /// Folds the three zones away, and gives back exactly what was unfolded.
