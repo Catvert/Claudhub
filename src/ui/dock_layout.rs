@@ -210,14 +210,27 @@ pub fn seats(area: &DockArea, cx: &App) -> Vec<rails::Seat> {
     ) {
         match node.kind() {
             PaneRef::Tabs { panels, active_ix } => {
-                for (ix, id) in panels.iter().enumerate() {
+                // **What the group draws**, and not simply its active index:
+                // the displayed panel is the active one *if it is visible*, and
+                // the first visible one otherwise. Reading the index alone left
+                // a rail saying one view was on screen while another was.
+                let displayed = panels
+                    .get(active_ix)
+                    .filter(|id| area.panel(**id).is_some_and(|panel| panel.visible(cx)))
+                    .or_else(|| {
+                        panels
+                            .iter()
+                            .find(|id| area.panel(**id).is_some_and(|panel| panel.visible(cx)))
+                    })
+                    .copied();
+                for id in panels.iter() {
                     let Some(panel) = area.panel(*id) else {
                         continue;
                     };
                     out.push(rails::Seat {
                         panel: panel.panel_name(cx).to_string(),
                         anchor,
-                        shown: ix == active_ix,
+                        shown: displayed == Some(*id),
                         open,
                         visible: panel.visible(cx),
                     });

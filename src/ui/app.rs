@@ -4507,10 +4507,17 @@ impl ClaudhubApp {
             self.toggle_terminal_panel(window, cx);
             return;
         }
-        match crate::ui::rails::press(panel, &self.seats(cx)) {
-            // The view and not its zone: a half left with nothing visible stops
-            // being drawn on its own, and the other half takes the room.
-            Press::Hide { panel } => self.set_panel_visible(panel, false, cx),
+        let seats = self.seats(cx);
+        match crate::ui::rails::press(panel, &seats) {
+            // The half and not its zone: one left with nothing visible stops
+            // being drawn on its own, and the other takes the room. Putting
+            // away the view alone left the next tab of the half showing in its
+            // place, which is not what a press on a lit button asks for.
+            Press::Hide { anchor } => {
+                for name in crate::ui::rails::showing_in(anchor, &seats) {
+                    self.set_panel_visible(name, false, cx);
+                }
+            }
             Press::Reveal { panel, .. } | Press::Restore { panel, .. } => {
                 self.reveal_panel(panel, window, cx)
             }

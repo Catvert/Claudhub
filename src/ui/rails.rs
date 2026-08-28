@@ -411,15 +411,18 @@ impl Rail {
 pub enum Press {
     /// The zone is folded, or another tab is in front: unfold, bring forward.
     Reveal { panel: &'static str, side: Side },
-    /// It is already on screen: put it away.
+    /// It is already on screen: put its half away.
     ///
-    /// **The view and not the zone.** A zone holds two halves and each holds
-    /// several views; folding the lot to put one away would take the other
-    /// half's work off the screen with it. A half left with nothing visible
-    /// stops being drawn on its own, and the other takes the room — which is
-    /// what makes the two halves fold independently without a second notion of
-    /// folding beside the one the dock already has.
-    Hide { panel: &'static str },
+    /// **The half, and neither the view alone nor the whole zone.** Putting
+    /// away one view of a half left the next one showing in its place — one
+    /// asked to close the tests and got the errors, under a rail where nothing
+    /// was lit. Folding the zone would have taken the other half's work off the
+    /// screen with it.
+    ///
+    /// A half left with nothing visible stops being drawn on its own, and the
+    /// other takes the room: that is what makes the two fold independently
+    /// without a second notion of folding beside the dock's.
+    Hide { anchor: Anchor },
     /// The panel is not in the tree — hidden, or dragged out of everything:
     /// put it back where the default puts it.
     Restore { panel: &'static str, anchor: Anchor },
@@ -537,8 +540,8 @@ pub fn press(panel: &str, seats: &[Seat]) -> Press {
     };
     match seat(panel, seats) {
         Some(seat) => match seat.anchor {
-            // On screen: the press puts it away. Not the zone — see `Hide`.
-            Some(_) if seat.open && seat.shown && seat.visible => Press::Hide { panel: tool.panel },
+            // On screen: the press puts its half away — see `Hide`.
+            Some(anchor) if seat.open && seat.shown && seat.visible => Press::Hide { anchor },
             Some(anchor) => Press::Reveal {
                 panel: tool.panel,
                 side: anchor.side,
@@ -554,6 +557,23 @@ pub fn press(panel: &str, seats: &[Seat]) -> Press {
             anchor: tool.home,
         },
     }
+}
+
+/// The tool windows one half is showing — what putting that half away takes
+/// off the screen.
+///
+/// Named rather than counted: the caller hides them one by one, each by the
+/// name the dock knows it by.
+pub fn showing_in(anchor: Anchor, seats: &[Seat]) -> Vec<&'static str> {
+    tools()
+        .into_iter()
+        .filter(|tool| {
+            seats
+                .iter()
+                .any(|seat| seat.panel == tool.panel && seat.anchor == Some(anchor) && seat.visible)
+        })
+        .map(|tool| tool.panel)
+        .collect()
 }
 
 /// The zen fold, and the way back.
@@ -689,10 +709,11 @@ mod tests {
         assert!(!lit(false, true));
     }
 
-    /// Pressing what is on screen puts **the view** away, not its zone: the
-    /// other half of the edge is somebody else's work, and it stays.
+    /// Pressing what is on screen puts **its half** away — not the view alone,
+    /// which would leave the next tab of the half showing in its place, and not
+    /// the zone, whose other half is somebody else's work.
     #[test]
-    fn pressing_what_is_on_screen_puts_the_view_away() {
+    fn pressing_what_is_on_screen_puts_its_half_away() {
         let open = vec![seat(
             "ClaudhubNotes",
             at(Side::Right, Half::Top),
@@ -702,7 +723,7 @@ mod tests {
         assert_eq!(
             press("ClaudhubNotes", &open),
             Press::Hide {
-                panel: "ClaudhubNotes"
+                anchor: Anchor::new(Side::Right, Half::Top)
             }
         );
         // And pressing it again brings it back — from a view put away as from
@@ -763,6 +784,23 @@ mod tests {
                 anchor: Anchor::new(Side::Right, Half::Top),
             }
         );
+    }
+
+    /// And what goes with it is everything that half is showing: closing the
+    /// tests must not hand the half over to the errors beside them.
+    #[test]
+    fn putting_a_half_away_takes_what_it_shows() {
+        let here = at(Side::Right, Half::Bottom);
+        let seats = vec![
+            seat("ClaudhubTests", here, true, true),
+            seat("ClaudhubStashes", here, false, true),
+            // The other half stays: it is somebody else's work.
+            seat("ClaudhubNotes", at(Side::Right, Half::Top), true, true),
+        ];
+        let going = showing_in(Anchor::new(Side::Right, Half::Bottom), &seats);
+        assert!(going.contains(&"ClaudhubTests"));
+        assert!(going.contains(&"ClaudhubStashes"));
+        assert!(!going.contains(&"ClaudhubNotes"));
     }
 
     /// A situational view has no button while it has nothing to show — the
