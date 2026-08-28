@@ -16,6 +16,7 @@ use gpui::{
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
+    menu::{ContextMenuExt as _, PopupMenu},
     resizable::{resizable_panel, v_resizable},
     v_flex, ActiveTheme, Selectable, Sizable,
 };
@@ -24,6 +25,7 @@ use crate::git::{DiffRange, GraphRow, LogRange};
 use crate::runtime::Cmd;
 use crate::tr;
 use crate::ui::app::{ClaudhubApp, History};
+use crate::ui::icons::icon;
 
 /// Width of one graph column.
 const LANE: Pixels = px(14.);
@@ -709,6 +711,7 @@ fn render_commit(
     // row's three vectors of lanes was an allocation per visible row and per
     // frame.
     let for_graph = history.clone();
+    let menu_entity = entity.clone();
     let entity = entity.clone();
     // Hidden, the gutter is a sliver of padding and there is nothing to
     // paint in it — the canvas would draw lanes across the summary.
@@ -805,7 +808,80 @@ fn render_commit(
                     .child(text.date.clone()),
             )
         })
+        // **After the click and not before**: a context menu is not an
+        // interactive element, so there is nothing left to hang a click on once
+        // it wraps the row. The terminals' tabs learned this first.
+        .context_menu(commit_menu(commit, index, &menu_entity))
         .into_any_element()
+}
+
+/// What a right click offers on a commit.
+///
+/// A history is read to find one commit and then to *say* which — in a message,
+/// an issue, a `git` one types beside. Copying its reference is therefore the
+/// gesture, and everything else here is one the row already knew how to do and
+/// had no way of being asked for.
+fn commit_menu(
+    commit: &crate::git::Commit,
+    index: usize,
+    entity: &Entity<ClaudhubApp>,
+) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+    use gpui_component::menu::PopupMenuItem;
+
+    let entity = entity.clone();
+    // The three strings, taken now: the closure outlives the row, and the
+    // history it came from is replaced whole on every reload.
+    let (id, short, summary) = (
+        commit.id.clone(),
+        commit.short.clone(),
+        commit.summary.clone(),
+    );
+    move |menu, _window, _cx| {
+        let copy = |text: String| {
+            move |_: &gpui::ClickEvent, _window: &mut Window, cx: &mut gpui::App| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+            }
+        };
+        let (for_base, for_tag) = (entity.clone(), entity.clone());
+        let at = id.clone();
+        menu.item(
+            PopupMenuItem::new(tr!("commit-copy-ref"))
+                .icon(icon("copy"))
+                .on_click(copy(id.clone())),
+        )
+        .item(PopupMenuItem::new(tr!("commit-copy-short")).on_click(copy(short.clone())))
+        .item(PopupMenuItem::new(tr!("commit-copy-summary")).on_click(copy(summary.clone())))
+        .separator()
+        // What the review compares against. A commit read in the history is
+        // very often the answer to "since when", which is the one question the
+        // base picker exists for.
+        .item(
+            PopupMenuItem::new(tr!("commit-set-base"))
+                .icon(icon("file-diff"))
+                .on_click({
+                    let (entity, base) = (for_base.clone(), at.clone());
+                    move |_, _window, cx| {
+                        let base = base.clone();
+                        entity.update(cx, |this, cx| this.set_base(base, cx));
+                    }
+                }),
+        )
+        // The tag dialog marks the commit the history has selected, so the
+        // selection is the whole of what this has to arrange.
+        .item(
+            PopupMenuItem::new(tr!("commit-tag-here"))
+                .icon(icon("tags"))
+                .on_click({
+                    let entity = for_tag.clone();
+                    move |_, window, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.open_commit(index, cx);
+                            this.prompt_new_tag(window, cx);
+                        });
+                    }
+                }),
+        )
+    }
 }
 
 /// Paints a row's portion of the graph.
