@@ -193,7 +193,11 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
     // gutter, and a grey line on top would stitch back what we have just
     // unstitched. It stays grabbable — the grab zone is wider than the line —
     // and shows during the drag, where it is information.
-    base.resizable.handle = gpui::transparent_black();
+    //
+    // `Some` and not `None`: the field became an option upstream, and `None`
+    // falls back to the border colour rather than meaning "no line" — the very
+    // grey this exists to remove.
+    base.resizable.handle = Some(gpui::transparent_black());
 
     cx.refresh_windows();
 }
