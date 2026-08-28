@@ -134,9 +134,13 @@ pub struct Tool {
     /// Where the default layout puts it, and where `Press::Restore` puts it
     /// back. **Not** a reading of where it is: that is `anchor_of`.
     pub home: Anchor,
-    /// Its tab comes and goes with its content — the `needed:` clause of the
-    /// `panels!` macro. With no seat, no button: one offered for a panel that
-    /// nothing can make appear is a button that does nothing.
+    /// It shows itself only when it has something to show — the conflicts one
+    /// time in a hundred, the tests where a runner exists, the run once one
+    /// has been started.
+    ///
+    /// **No button while it has nothing**, which is what tells a situational
+    /// view from a permanent one: a target that is there but never answers is
+    /// one the eye learns to skip.
     pub conditional: bool,
 }
 
@@ -280,6 +284,12 @@ pub struct Seat {
     pub shown: bool,
     /// Its zone is unfolded.
     pub open: bool,
+    /// The panel draws itself at all — `BasePanel::visible`.
+    ///
+    /// Read off the panel and not worked out here: what makes a view invisible
+    /// is its own business, and the reasons differ — put away by hand, no
+    /// runner to run, nothing to resolve.
+    pub visible: bool,
 }
 
 /// One button of a rail, as the view has to paint it.
@@ -393,19 +403,27 @@ pub fn rails(seats: &[Seat], hidden: &std::collections::BTreeSet<String>) -> [Ra
         if seat.is_some_and(|seat| seat.anchor.is_none()) {
             continue;
         }
+        // **A situational view has no button while it has nothing to show.**
+        // The conflicts are the case that names the rule: they are one time in
+        // a hundred, and a permanent button for them is a target one learns to
+        // ignore. The tests and the run being followed are the same — no
+        // runner, no run, no button.
+        //
+        // Put away **by hand** is the exception, and it has to be: that is the
+        // one invisibility one calls the view back from, so its button stays.
+        let away = hidden.contains(tool.panel);
+        if tool.conditional && !away && !seat.is_some_and(|seat| seat.visible) {
+            continue;
+        }
         let anchor = match seat {
             Some(seat) => seat.anchor.expect("just tested"),
-            // Out of the tree. A button that puts it back, unless nothing
-            // could make it come back.
-            None if tool.conditional => continue,
             None => tool.home,
         };
         let button = Button {
             panel: tool.panel,
             title: tool.title,
             icon: tool.icon,
-            active: seat.is_some_and(|seat| seat.open && seat.shown)
-                && !hidden.contains(tool.panel),
+            active: seat.is_some_and(|seat| seat.open && seat.shown && seat.visible),
         };
         let rail = &mut rails[anchor.side.index()];
         match anchor.half {
@@ -426,7 +444,7 @@ pub fn rails(seats: &[Seat], hidden: &std::collections::BTreeSet<String>) -> [Ra
 }
 
 /// What pressing a button does.
-pub fn press(panel: &str, seats: &[Seat], hidden: &std::collections::BTreeSet<String>) -> Press {
+pub fn press(panel: &str, seats: &[Seat]) -> Press {
     let Some(tool) = tool(panel) else {
         // Not one of ours: nothing sensible to do, and the caller has no
         // button to have pressed.
@@ -438,9 +456,7 @@ pub fn press(panel: &str, seats: &[Seat], hidden: &std::collections::BTreeSet<St
     match seat(panel, seats) {
         Some(seat) => match seat.anchor {
             // On screen: the press puts it away. Not the zone — see `Hide`.
-            Some(_) if seat.open && seat.shown && !hidden.contains(panel) => {
-                Press::Hide { panel: tool.panel }
-            }
+            Some(_) if seat.open && seat.shown && seat.visible => Press::Hide { panel: tool.panel },
             Some(anchor) => Press::Reveal {
                 panel: tool.panel,
                 side: anchor.side,
@@ -494,6 +510,15 @@ mod tests {
             anchor,
             shown,
             open,
+            visible: true,
+        }
+    }
+
+    /// The same, put away by hand.
+    fn away(panel: &str, anchor: Option<Anchor>) -> Seat {
+        Seat {
+            visible: false,
+            ..seat(panel, anchor, true, true)
         }
     }
 
@@ -593,23 +618,23 @@ mod tests {
             true,
         )];
         assert_eq!(
-            press("ClaudhubNotes", &open, &none()),
+            press("ClaudhubNotes", &open),
             Press::Hide {
                 panel: "ClaudhubNotes"
             }
         );
         // And pressing it again brings it back — from a view put away as from
         // a folded zone.
-        let away = BTreeSet::from(["ClaudhubNotes".to_string()]);
+        let put_away = vec![away("ClaudhubNotes", at(Side::Right, Half::Top))];
         let folded = vec![seat(
             "ClaudhubNotes",
             at(Side::Right, Half::Top),
             true,
             false,
         )];
-        for (seats, hidden) in [(&open, &away), (&folded, &none())] {
+        for seats in [&put_away, &folded] {
             assert_eq!(
-                press("ClaudhubNotes", seats, hidden),
+                press("ClaudhubNotes", seats),
                 Press::Reveal {
                     panel: "ClaudhubNotes",
                     side: Side::Right,
@@ -627,7 +652,7 @@ mod tests {
             seat("ClaudhubHistory", at(Side::Right, Half::Top), false, true),
         ];
         assert_eq!(
-            press("ClaudhubHistory", &seats, &none()),
+            press("ClaudhubHistory", &seats),
             Press::Reveal {
                 panel: "ClaudhubHistory",
                 side: Side::Right,
@@ -640,12 +665,8 @@ mod tests {
     #[test]
     fn a_view_put_away_keeps_an_unlit_button() {
         let hidden = BTreeSet::from(["ClaudhubNotes".to_string()]);
-        let seats = vec![seat(
-            "ClaudhubNotes",
-            at(Side::Right, Half::Top),
-            true,
-            true,
-        )];
+        // Put away, so the panel draws nothing — which is what the seat says.
+        let seats = vec![away("ClaudhubNotes", at(Side::Right, Half::Top))];
         let button = rails(&seats, &hidden)[Side::Right.index()]
             .buttons()
             .find(|button| button.panel == "ClaudhubNotes")
@@ -654,12 +675,49 @@ mod tests {
         assert!(!button.active, "put away is not on screen");
         // Out of the tree entirely, the press puts it back where it belongs.
         assert_eq!(
-            press("ClaudhubNotes", &[], &none()),
+            press("ClaudhubNotes", &[]),
             Press::Restore {
                 panel: "ClaudhubNotes",
                 anchor: Anchor::new(Side::Right, Half::Top),
             }
         );
+    }
+
+    /// A situational view has no button while it has nothing to show — the
+    /// conflicts, which are one time in a hundred, and a target that is there
+    /// but never answers is one the eye learns to skip.
+    ///
+    /// Being in the tree is not enough: it is there from the first frame, and
+    /// invisible for all but a few of them.
+    #[test]
+    fn a_situational_view_with_nothing_to_show_has_no_button() {
+        let idle = vec![Seat {
+            visible: false,
+            ..seat(
+                "ClaudhubConflicts",
+                at(Side::Left, Half::Bottom),
+                false,
+                true,
+            )
+        }];
+        assert!(!all_names(rail(&rails(&idle, &none()), Side::Left)).contains(&"ClaudhubConflicts"));
+        let conflicting = vec![seat(
+            "ClaudhubConflicts",
+            at(Side::Left, Half::Bottom),
+            true,
+            true,
+        )];
+        assert!(all_names(rail(&rails(&conflicting, &none()), Side::Left))
+            .contains(&"ClaudhubConflicts"));
+    }
+
+    /// Put away **by hand** is the exception: that is the one invisibility one
+    /// calls the view back from, so its button stays.
+    #[test]
+    fn a_situational_view_put_away_by_hand_keeps_its_button() {
+        let hidden = BTreeSet::from(["ClaudhubTests".to_string()]);
+        let seats = vec![away("ClaudhubTests", at(Side::Left, Half::Bottom))];
+        assert!(all_names(rail(&rails(&seats, &hidden), Side::Left)).contains(&"ClaudhubTests"));
     }
 
     /// A panel whose tab comes and goes with its content gets no button while

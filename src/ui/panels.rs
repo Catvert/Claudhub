@@ -953,7 +953,11 @@ impl ConflictsPanel {
     pub fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
         cx.observe(app, |this: &mut Self, app, cx| {
             let app = app.read(cx);
-            let visible = app.pending_operation().is_some() || app.has_conflicts();
+            // Put away by hand like any other view, and situational on top: a
+            // panel whose visibility ignored the flag would keep a rail button
+            // that lights but never goes out.
+            let visible = app.panel_visible("ClaudhubConflicts")
+                && (app.pending_operation().is_some() || app.has_conflicts());
             if this.visible != visible {
                 this.visible = visible;
                 // The dock re-reads its tabs' visibility when the zone

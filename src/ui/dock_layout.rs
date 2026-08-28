@@ -227,6 +227,7 @@ pub fn seats(area: &DockArea, cx: &App) -> Vec<rails::Seat> {
                         anchor,
                         shown: ix == active_ix,
                         open,
+                        visible: panel.visible(cx),
                     });
                 }
             }
