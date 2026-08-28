@@ -1040,6 +1040,11 @@ pub struct ClaudhubApp {
     /// width no longer holds them beside the summary, which is what a history
     /// is read by.
     pub(super) history_laid_out: gpui::Pixels,
+    /// The history panel's own shape, measured the same way and read for one
+    /// question only: whether the graph sits beside the chosen commit's files
+    /// or above them — see `history_view::side_by_side`. Not the width above,
+    /// which is the room left *beside the graph's gutter*.
+    pub(super) history_shape: gpui::Size<gpui::Pixels>,
     /// The handle of the wrapped two-column view.
     ///
     /// A second handle and not the same one: the entries there no longer have
@@ -1076,8 +1081,15 @@ pub struct ClaudhubApp {
     /// The wheel smoothing, per panel, created on its first use. The key is the
     /// scrollbar's — see `ui::scroll`.
     pub(super) motions: HashMap<gpui::SharedString, crate::ui::motion::ScrollMotion>,
-    /// The split between the graph and the chosen commit's file list.
+    /// The split between the graph and the chosen commit's file list, stacked.
     pub(super) history_split: Entity<gpui_component::resizable::ResizableState>,
+    /// And the same split laid across, in a zone wide enough for it.
+    ///
+    /// **A second state and not the same one**: what a resizable keeps is the
+    /// sizes of its slots, and a height carried into a width would open the
+    /// side-by-side arrangement on whatever the stacked one was last dragged
+    /// to.
+    pub(super) history_split_side: Entity<gpui_component::resizable::ResizableState>,
     /// The write operations in flight — what the buttons carrying a spinner
     /// read, and what the status bar names.
     ///
@@ -1363,6 +1375,7 @@ impl ClaudhubApp {
             merge_scroll: gpui_component::VirtualListScrollHandle::new(),
             diff_laid_out: gpui::px(0.),
             history_laid_out: gpui::px(0.),
+            history_shape: gpui::size(gpui::px(0.), gpui::px(0.)),
             diff_wrap_scroll: gpui_component::VirtualListScrollHandle::new(),
             history_scroll: gpui::UniformListScrollHandle::new(),
             history_lines_only: true,
@@ -1376,6 +1389,7 @@ impl ClaudhubApp {
             pane: crate::ui::find::Pane::Diff,
             diff_search: crate::ui::find::DiffSearch::default(),
             history_split: cx.new(|_| gpui_component::resizable::ResizableState::default()),
+            history_split_side: cx.new(|_| gpui_component::resizable::ResizableState::default()),
             flight: crate::ui::inflight::InFlight::default(),
             settings_page: Default::default(),
             settings_epoch: 0,

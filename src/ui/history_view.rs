@@ -11,13 +11,13 @@ use std::rc::Rc;
 
 use gpui::{
     canvas, div, prelude::*, px, uniform_list, Bounds, Context, Entity, Hsla, PathBuilder, Pixels,
-    Point, SharedString, Window,
+    Point, SharedString, Size, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
     menu::{ContextMenuExt as _, PopupMenu},
-    resizable::{resizable_panel, v_resizable},
+    resizable::{h_resizable, resizable_panel, v_resizable},
     v_flex, ActiveTheme, Selectable, Sizable,
 };
 
@@ -511,6 +511,9 @@ impl ClaudhubApp {
         }
 
         let entity = cx.entity();
+        // Put aside before the list's closure takes the handle: the measuring
+        // canvas is built after it, and there is nothing left to clone by then.
+        let measured = entity.clone();
         let count = history.commits.len();
         // Without the graph the rows keep a sliver of left padding, not a
         // gutter: the lanes are what took the width, and the width is the
@@ -621,21 +624,82 @@ impl ClaudhubApp {
                 ),
         );
 
+        // The panel's own shape, measured the way the graph's width is and for
+        // a question of its own: which way the split below runs. The width
+        // above is the room left beside the gutter, and says nothing about the
+        // room a second column would have.
+        let measure = canvas(
+            {
+                move |bounds: Bounds<Pixels>, window, cx| {
+                    measured.update(cx, |this, _| {
+                        let shape = this.history_shape;
+                        if (bounds.size.width - shape.width).abs() > px(0.5)
+                            || (bounds.size.height - shape.height).abs() > px(0.5)
+                        {
+                            this.history_shape = bounds.size;
+                            window.request_animation_frame();
+                        }
+                    });
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+
         // The graph alone does not say what a commit touched: the list of its
-        // files goes underneath, otherwise selecting a commit opens only its
+        // files goes with it, otherwise selecting a commit opens only its
         // first file and the others stay invisible.
         let Some(range) = commit_range else {
-            return graph.into_any_element();
+            return div()
+                .relative()
+                .size_full()
+                .child(measure)
+                .child(graph)
+                .into_any_element();
         };
-        v_resizable("claudhub-history-split")
-            .with_state(&self.history_split)
-            .child(resizable_panel().size(px(420.)).child(graph))
-            .child(
-                resizable_panel()
-                    .child(self.render_file_list(range, window, cx).into_any_element()),
-            )
+        let files = self.render_file_list(range, window, cx).into_any_element();
+        // **Beside or underneath, from the shape and nothing else.** The same
+        // view has to read in a tall narrow column and in a wide short zone,
+        // which is the whole point of a panel one can drag anywhere; a split
+        // fixed one way is a panel that only belongs on one edge.
+        let split = if side_by_side(self.history_shape) {
+            h_resizable("claudhub-history-split-side")
+                .with_state(&self.history_split_side)
+                // **The files are the pane given a size**, never the graph:
+                // what one widens the zone for is the summary column, so the
+                // surplus has to fall to the slot no size fixes.
+                .child(resizable_panel().child(graph))
+                .child(resizable_panel().size(px(440.)).child(files))
+                .into_any_element()
+        } else {
+            v_resizable("claudhub-history-split")
+                .with_state(&self.history_split)
+                .child(resizable_panel().size(px(420.)).child(graph))
+                .child(resizable_panel().child(files))
+                .into_any_element()
+        };
+        div()
+            .relative()
+            .size_full()
+            .child(measure)
+            .child(split)
             .into_any_element()
     }
+}
+
+/// Does the graph sit **beside** the chosen commit's files rather than above
+/// them?
+///
+/// Two conditions and not one. Wider than tall is what tells a bottom zone
+/// from a side one, and it is the whole of the arrangement PhpStorm's Git
+/// window has. And **wide enough that both halves keep a list's width**: a
+/// panel four hundred pixels across is wider than it is tall as soon as it is
+/// short, and splitting it would leave two columns too narrow to carry a path.
+/// The floor is twice the right zone's own width — the narrowest column the
+/// window already asks a file list to live in.
+fn side_by_side(shape: Size<Pixels>) -> bool {
+    shape.width > shape.height && shape.width >= px(640.)
 }
 
 /// A row's texts, built once when the history arrives.
@@ -964,4 +1028,45 @@ fn paint_graph(row: &GraphRow, bounds: Bounds<Pixels>, window: &mut Window, cx: 
         ),
         own,
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shape(width: f32, height: f32) -> Size<Pixels> {
+        gpui::size(px(width), px(height))
+    }
+
+    /// The side zones are tall and narrow: the files go under the graph, which
+    /// is the only way both keep a readable width.
+    #[test]
+    fn a_side_zone_stacks_them() {
+        assert!(!side_by_side(shape(320., 760.)));
+        assert!(!side_by_side(shape(460., 900.)));
+    }
+
+    /// The bottom zone is wide and short, and that is the arrangement of the
+    /// screenshot this exists for: graph on the left, the commit's files on the
+    /// right.
+    #[test]
+    fn a_bottom_zone_lays_them_across() {
+        assert!(side_by_side(shape(1900., 240.)));
+        assert!(side_by_side(shape(700., 300.)));
+    }
+
+    /// Wider than tall is not enough on its own: a short **narrow** panel split
+    /// in two leaves two columns too narrow to carry a path.
+    #[test]
+    fn a_short_narrow_panel_still_stacks_them() {
+        assert!(!side_by_side(shape(400., 200.)));
+        assert!(!side_by_side(shape(639., 120.)));
+    }
+
+    /// Nothing measured yet — the first frame, before the canvas has run. It
+    /// starts stacked, which is what the panel was before this existed.
+    #[test]
+    fn an_unmeasured_panel_stacks_them() {
+        assert!(!side_by_side(shape(0., 0.)));
+    }
 }
