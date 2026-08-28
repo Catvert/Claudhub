@@ -24,14 +24,6 @@ pub const PANEL_PREFIX: &str = "ClaudhubPlugin:";
 /// The panel a manifest means when it declares none by name.
 const LONE_PANEL: &str = "main";
 
-/// The screens a plugin may put its panel on.
-///
-/// Named by the same keys the layout is saved under (`workspace::key`), so a
-/// manifest and a `layout.json` speak the same language — which is also why the
-/// first is still `review` after its screen was renamed "Git". The settings are
-/// not among them: that screen holds the form and nothing else.
-pub const SCREENS: [&str; 6] = ["review", "files", "search", "db", "sentry", "tests"];
-
 /// What a plugin says it needs.
 ///
 /// Declared and not inferred, so that reading a `plugin.toml` is enough to know
@@ -53,22 +45,29 @@ impl Capability {
     }
 }
 
-/// Where a panel starts out on its screen.
+/// Where a panel starts out.
 ///
 /// Only where it **starts**: the dock lets one drag a panel anywhere, and what
-/// a manifest picks is the arrangement one lands on, not a constraint. Two
-/// values and not four — `left` and `centre` are what a master/detail plugin
-/// needs, and a plugin that wants to sit under the centre is asking for the
-/// terminals' place, which one reaches by dragging.
+/// a manifest picks is the arrangement one lands on, not a constraint.
+///
+/// Four values since the screens went: a plugin's panel is a tool window of
+/// full standing — button on its rail included — instead of being the guest of
+/// somebody else's column, and the two edges it could not name are exactly the
+/// ones "what happened" and "what is running" belong to. `left` stays the
+/// default: it is what every installed manifest means by saying nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Place {
-    /// The screen's list column, beside the trees and the file lists. Where a
-    /// plugin's single panel has always gone, hence the default.
+    /// The column of trees and lists: what one picks from. Where a plugin's
+    /// single panel has always gone, hence the default.
     #[default]
     Left,
-    /// The wide half, beside the diff and the editor: what one reads rather
-    /// than what one picks from.
+    /// The other edge: where one stands — what happened, what was said.
+    Right,
+    /// Under the centre, beside the terminals: what runs.
+    Bottom,
+    /// The centre itself: what one reads rather than what one picks from, in
+    /// among the diff, the editor and the console.
     #[serde(alias = "center")]
     Centre,
 }
@@ -114,9 +113,16 @@ pub struct Declaration {
     /// The panels, when there is more than the one `title` describes.
     #[serde(default, rename = "panel")]
     pub panels: Vec<PanelDeclaration>,
-    /// The screen whose dock carries the panel.
-    #[serde(default = "default_screen")]
-    pub screen: String,
+    /// The screen whose dock used to carry the panel. **Read and ignored.**
+    ///
+    /// There is one workspace now, so a screen names nothing. The field stays
+    /// because `Declaration` refuses unknown keys and every installed
+    /// `plugin.toml` carries a `screen =`: dropping it would turn each of them
+    /// away at load, which is the opposite of what compatibility means. Where
+    /// a panel goes is `place`, which gained the two edges a screen used to
+    /// stand for.
+    #[serde(default)]
+    pub screen: Option<String>,
     /// The tab's icon, a Lucide name.
     #[serde(default)]
     pub icon: Option<String>,
@@ -143,10 +149,6 @@ pub struct Declaration {
     /// same thing, something the user has to say.
     #[serde(default)]
     pub required: Vec<String>,
-}
-
-fn default_screen() -> String {
-    "review".into()
 }
 
 fn lone_panel() -> String {
@@ -250,13 +252,6 @@ pub fn read(dir: &Path) -> Result<Option<Manifest>> {
         std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
     let declaration: Declaration =
         toml::from_str(&text).with_context(|| format!("reading {}", file.display()))?;
-    if !SCREENS.contains(&declaration.screen.as_str()) {
-        bail!(
-            "{id}: unknown screen `{}` (expected one of {})",
-            declaration.screen,
-            SCREENS.join(", ")
-        );
-    }
     if !dir.join("main.rn").is_file() {
         bail!("{id}: no main.rn beside its {MANIFEST}");
     }
@@ -443,22 +438,58 @@ mod tests {
             "this is not toml at all {{{",
             Some("pub fn view(s){}"),
         );
-        // A screen that does not exist: the panel would be registered against a
-        // dock nobody builds, and the plugin would simply never appear.
-        write(
-            &root,
-            "bbb",
-            "title = \"X\"\nscreen = \"nowhere\"\n",
-            Some("pub fn view(s){}"),
-        );
         // A manifest with no script beside it.
         write(&root, "ccc", "title = \"Y\"\n", None);
         write(&root, "ddd", "title = \"Good\"\n", Some("pub fn view(s){}"));
         let found = discover(&root);
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].id, "ddd");
-        // The default screen, when the manifest says nothing.
-        assert_eq!(found[0].declaration.screen, "review");
+        // A manifest that says nothing about a screen loads all the same:
+        // the field is read and ignored.
+        assert!(found[0].declaration.screen.is_none());
+    }
+
+    /// An installed `plugin.toml` naming a screen still loads.
+    ///
+    /// The screens are gone, so the name stands for nothing — but every plugin
+    /// posted before they went carries one, and `Declaration` refuses unknown
+    /// keys. Turning them all away at load is the opposite of what
+    /// compatibility means, so the field is read and dropped.
+    #[test]
+    fn a_manifest_still_naming_a_screen_loads() {
+        let root = scratch("legacy-screen");
+        write(
+            &root,
+            "ci",
+            "title = \"CI\"\nscreen = \"review\"\n",
+            Some("pub fn view(s){}"),
+        );
+        // And one naming a screen that never existed: nothing reads it, so
+        // nothing can find it wrong.
+        write(
+            &root,
+            "odd",
+            "title = \"Odd\"\nscreen = \"nowhere\"\n",
+            Some("pub fn view(s){}"),
+        );
+        let found = discover(&root);
+        assert_eq!(found.len(), 2, "{found:?}");
+    }
+
+    /// A panel may now name either edge, which is what makes it a tool window
+    /// of full standing instead of the guest of somebody else's column.
+    #[test]
+    fn a_panel_may_name_either_edge() {
+        let root = scratch("edges");
+        write(
+            &root,
+            "ci",
+            "title = \"CI\"\n\n[[panel]]\nid = \"runs\"\ntitle = \"Runs\"\nplace = \"right\"\n\n[[panel]]\nid = \"log\"\ntitle = \"Log\"\nplace = \"bottom\"\n",
+            Some("pub fn view(s){}"),
+        );
+        let found = discover(&root);
+        assert_eq!(found[0].panels[0].place, Place::Right);
+        assert_eq!(found[0].panels[1].place, Place::Bottom);
     }
 
     /// A plugin lays a list on the left and what one picked in the centre.

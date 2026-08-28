@@ -90,7 +90,7 @@ pub fn discover() {
     };
     let found = manifest::discover(&dir);
     for found in &found {
-        log::info!(target: "plugin", "{} on the {} screen", found.id, found.declaration.screen);
+        log::info!(target: "plugin", "{} loaded", found.id);
     }
     if let Ok(mut slot) = MANIFESTS.write() {
         *slot = Vec::leak(found);
@@ -117,9 +117,12 @@ pub fn manifests() -> &'static [Manifest] {
 
 /// The plugins whose panel belongs to one screen.
 pub fn on_screen(screen: &str) -> impl Iterator<Item = &'static Manifest> + '_ {
+    // The old default is applied here rather than by serde, so that a manifest
+    // saying nothing keeps landing where it always did. Both go with the
+    // screens themselves.
     manifests()
         .iter()
-        .filter(move |m| m.declaration.screen == screen)
+        .filter(move |m| m.declaration.screen.as_deref().unwrap_or("review") == screen)
 }
 
 /// The plugin a dock name belongs to, and which of its panels it is.

@@ -5,12 +5,22 @@
 # chaque démarrage** : pour le modifier, le copier sous un autre nom.
 
 title = "CI"
-screen = "review"
 icon = "play"
 
 # Déclarées et non devinées : un plugin qui atteint autre chose que ce qui est
 # écrit ici se le voit refuser avant que quoi que ce soit ne parte.
 capabilities = ["shell"]
+
+# À droite, avec l'historique et les tags : une exécution répond « ce qui est
+# arrivé à cette branche », pas « qu'y a-t-il à relire ». C'est le bord où l'on
+# lit où l'on en est.
+#
+# Les clés de premier niveau viennent **avant** ce tableau : `[[panel]]` ouvre
+# une table, et tout ce qui suit lui appartiendrait.
+[[panel]]
+id = "main"
+title = "CI"
+place = "right"
 
 [settings]
 # Le formatage est demandé à `gh` plutôt que fait ici : Rune n'a pas de lecteur
