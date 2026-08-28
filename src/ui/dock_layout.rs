@@ -20,12 +20,12 @@
 //! What it deliberately does not hold is any second opinion about where a panel
 //! is. The tree answers that, always.
 
-use gpui::{prelude::*, px, App, Context, Window};
+use gpui::{prelude::*, px, App, Context, Entity, Window};
 use gpui_component::dock::{
     BasePanelView, DockArea, DockLayout, DockPlacement, PanelInfo, PanelState,
 };
 
-use crate::ui::rails::{self, Side};
+use crate::ui::rails::{self, Anchor, Half, Side};
 
 /// The area's id, under which gpui files what it keeps for it.
 ///
@@ -60,7 +60,7 @@ fn side_of(placement: DockPlacement) -> Option<Side> {
 /// same question.
 pub fn home_of(panel: &str) -> DockPlacement {
     rails::tool(panel)
-        .map(|tool| placement_of(tool.home))
+        .map(|tool| placement_of(tool.home.side))
         .unwrap_or(DockPlacement::Center)
 }
 
@@ -87,21 +87,44 @@ pub fn build(
     gpui_component::dock::PanelRegistry::build_panel(name, context, window, cx)
 }
 
-/// The tool windows of one edge, in the table's order, followed by the plugin
-/// panels that asked for it.
-fn tools_of(side: Side, window: &mut Window, cx: &mut Context<DockArea>) -> DockLayout {
+/// One half of one edge, in the table's order, followed by the plugin panels
+/// that asked for it.
+fn tools_of(anchor: Anchor, window: &mut Window, cx: &mut Context<DockArea>) -> DockLayout {
     let mut group = DockLayout::tabs();
-    for tool in rails::TOOLS.iter().filter(|tool| tool.home == side) {
+    for tool in rails::TOOLS.iter().filter(|tool| tool.home == anchor) {
         if let Some(view) = build(tool.panel, window, cx) {
             group = group.panel_view(view, cx);
         }
     }
-    for name in plugin_panels(Some(side)) {
+    for name in plugin_panels(Some(anchor)) {
         if let Some(view) = build(name, window, cx) {
             group = group.panel_view(view, cx);
         }
     }
     group
+}
+
+/// A whole edge: its halves, stacked, or a single group where it has one.
+///
+/// **Two groups and not two tabs**: the halves are on screen together, which is
+/// what lets the file list and the tests be read at once without either being a
+/// tab of the other. It is the arrangement the review's column already had, now
+/// said once for every edge.
+fn edge(side: Side, window: &mut Window, cx: &mut Context<DockArea>) -> DockLayout {
+    let halves = side.halves();
+    if halves.len() == 1 {
+        return tools_of(Anchor::new(side, halves[0]), window, cx);
+    }
+    let mut split = DockLayout::v_split();
+    for (ix, half) in halves.iter().enumerate() {
+        let group = tools_of(Anchor::new(side, *half), window, cx);
+        // The **bottom** half is the one given a size, never the top: two fixed
+        // sizes adding up to the region's height overflow it, and it is the top
+        // that should take what is left over.
+        let size = (ix > 0).then(|| side.default_size());
+        split = split.child(group, size);
+    }
+    split
 }
 
 /// The centre: what one reads, as against what one picks from.
@@ -134,18 +157,22 @@ const DOCUMENTS: &[&str] = &[
 ];
 
 /// The plugin panels that asked for one place, in manifest order.
-fn plugin_panels(side: Option<Side>) -> Vec<&'static str> {
+fn plugin_panels(anchor: Option<Anchor>) -> Vec<&'static str> {
     use crate::plugin::manifest::Place;
+    // A manifest names an edge and not a half: which of the two a plugin's
+    // panel belongs in is an arrangement, and arrangements are the user's. It
+    // lands in the bottom half, beside what one keeps an eye on rather than
+    // among what one picks the file from.
     let wanted = |place: Place| match place {
-        Place::Left => Some(Side::Left),
-        Place::Right => Some(Side::Right),
-        Place::Bottom => Some(Side::Bottom),
+        Place::Left => Some(Anchor::new(Side::Left, Half::Bottom)),
+        Place::Right => Some(Anchor::new(Side::Right, Half::Bottom)),
+        Place::Bottom => Some(Anchor::new(Side::Bottom, Half::Top)),
         Place::Centre => None,
     };
     crate::ui::plugin_view::manifests()
         .iter()
         .flat_map(|manifest| manifest.panels.iter())
-        .filter(|spec| wanted(spec.place) == side)
+        .filter(|spec| wanted(spec.place) == anchor)
         .map(|spec| spec.name)
         .collect()
 }
@@ -174,7 +201,7 @@ pub fn install_default_layout(
     area.set_center(centre, window, cx);
 
     for side in Side::ALL {
-        let tools = tools_of(side, window, cx);
+        let tools = edge(side, window, cx);
         area.set_dock(placement_of(side), tools, window, cx);
         area.set_dock_size(placement_of(side), side.default_size(), window, cx);
     }
@@ -196,7 +223,7 @@ pub fn seats(area: &DockArea, cx: &App) -> Vec<rails::Seat> {
     fn walk(
         node: &PaneNode,
         area: &DockArea,
-        side: Option<Side>,
+        anchor: Option<Anchor>,
         open: bool,
         cx: &App,
         out: &mut Vec<rails::Seat>,
@@ -209,15 +236,25 @@ pub fn seats(area: &DockArea, cx: &App) -> Vec<rails::Seat> {
                     };
                     out.push(rails::Seat {
                         panel: panel.panel_name(cx).to_string(),
-                        side,
+                        anchor,
                         shown: ix == active_ix,
                         open,
                     });
                 }
             }
             PaneRef::Split { children, .. } => {
-                for child in children {
-                    walk(child, area, side, open, cx, out);
+                for (ix, child) in children.iter().enumerate() {
+                    // **The half is read off the tree and nowhere else.** A
+                    // region split in two is its two halves, in order; deeper
+                    // than that — a user's own split inside one of them — keeps
+                    // the half it is in. What decides is position, which is what
+                    // the layout wrote and what a drag rewrites.
+                    let anchor = anchor.map(|anchor| match children.len() {
+                        1 => anchor,
+                        _ if ix == 0 => Anchor::new(anchor.side, Half::Top),
+                        _ => Anchor::new(anchor.side, Half::Bottom),
+                    });
+                    walk(child, area, anchor, open, cx, out);
                 }
             }
             // A tile is its own window inside the region; nothing here docks
@@ -238,9 +275,134 @@ pub fn seats(area: &DockArea, cx: &App) -> Vec<rails::Seat> {
         };
         // The centre is never folded: it is what the zones are arranged around.
         let open = placement == DockPlacement::Center || area.is_dock_open(placement);
-        walk(tree.root(), area, side_of(placement), open, cx, &mut out);
+        // The top half until a split says otherwise — an edge holding one group
+        // has no second half to be in.
+        let anchor = side_of(placement).map(|side| Anchor::new(side, Half::Top));
+        walk(tree.root(), area, anchor, open, cx, &mut out);
     }
     out
+}
+
+/// Where a tool window should be inserted to land on one anchor.
+///
+/// `None` when the region does not exist yet: the caller then adds the panel to
+/// the region itself, which the area makes on the way.
+fn target_for(area: &DockArea, anchor: Anchor) -> Option<gpui_component::dock::InsertTarget> {
+    use gpui_component::dock::{InsertTarget, PaneRef};
+
+    let tree = area.layout(placement_of(anchor.side))?;
+    let root = tree.root();
+    let join = |node| InsertTarget::Tabs {
+        node,
+        ix: None,
+        // What one has just sent somewhere is what one wants to look at.
+        activate: true,
+    };
+    match root.kind() {
+        // Already two halves — or more, the user having split one further. The
+        // first slot is the top, the last is the bottom.
+        PaneRef::Split { children, .. } if children.len() > 1 => {
+            let child = match anchor.half {
+                Half::Top => children.first(),
+                Half::Bottom => children.last(),
+            }?;
+            Some(join(first_group(child)?))
+        }
+        // One group, and no way to tell which half it stands for: it is read as
+        // the top, so the bottom is a slot to be made below it.
+        _ => {
+            let node = first_group(root).unwrap_or_else(|| root.id());
+            match anchor.half {
+                Half::Top => Some(join(node)),
+                Half::Bottom => Some(InsertTarget::Split {
+                    node,
+                    placement: gpui_base::Placement::Bottom,
+                    size: Some(anchor.side.default_size()),
+                }),
+            }
+        }
+    }
+}
+
+/// Sends a panel to one anchor, wherever the dock holds it now.
+///
+/// It is a **move** and not an add when the dock already has the panel: adding
+/// one it holds would register the same id twice, and what the caller means is
+/// "put this there", not "make another".
+pub fn move_to(
+    dock: &Entity<DockArea>,
+    panel: &str,
+    anchor: Anchor,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    dock.update(cx, |area: &mut DockArea, cx: &mut Context<DockArea>| {
+        let id = seat_id(area, panel, cx);
+        match (id, target_for(area, anchor)) {
+            (Some(id), Some(target)) => area.move_panel(id, target, window, cx),
+            // Out of the tree, or the edge does not exist yet: the add makes
+            // the region on the way, and the move that follows puts it in the
+            // half asked for — a fresh region has one group, which is its top.
+            _ => {
+                let Some(handle) = build(panel, window, cx) else {
+                    return;
+                };
+                let id = handle.panel_id(cx);
+                let size = Some(anchor.side.default_size());
+                area.add_panel_view(handle, placement_of(anchor.side), size, window, cx);
+                if anchor.half == Half::Bottom {
+                    if let Some(target) = target_for(area, anchor) {
+                        area.move_panel(id, target, window, cx);
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// The dock's id for a panel of this name, if it holds one.
+///
+/// **By name**, as everything else here: a layout read back from `layout.json`
+/// was never built by us, so nothing outside the tree holds its entity.
+fn seat_id(area: &DockArea, panel: &str, cx: &App) -> Option<gpui_component::dock::PanelId> {
+    use gpui_component::dock::{PaneNode, PaneRef};
+
+    fn walk(
+        node: &PaneNode,
+        area: &DockArea,
+        panel: &str,
+        cx: &App,
+    ) -> Option<gpui_component::dock::PanelId> {
+        match node.kind() {
+            PaneRef::Tabs { panels, .. } => panels.iter().copied().find(|id| {
+                area.panel(*id)
+                    .is_some_and(|held| held.panel_name(cx) == panel)
+            }),
+            PaneRef::Split { children, .. } => children
+                .iter()
+                .find_map(|child| walk(child, area, panel, cx)),
+            PaneRef::Tiles { .. } => None,
+        }
+    }
+
+    [
+        DockPlacement::Center,
+        DockPlacement::Left,
+        DockPlacement::Right,
+        DockPlacement::Bottom,
+    ]
+    .into_iter()
+    .find_map(|placement| walk(area.layout(placement)?.root(), area, panel, cx))
+}
+
+/// The first tab group of a subtree, in depth order.
+fn first_group(node: &gpui_component::dock::PaneNode) -> Option<gpui_component::dock::NodeId> {
+    use gpui_component::dock::PaneRef;
+    match node.kind() {
+        PaneRef::Tabs { .. } => Some(node.id()),
+        PaneRef::Split { children, .. } => children.iter().find_map(first_group),
+        PaneRef::Tiles { .. } => None,
+    }
 }
 
 impl crate::ui::app::ClaudhubApp {
@@ -304,7 +466,7 @@ impl crate::ui::app::ClaudhubApp {
             .into_iter()
             .nth(Side::Bottom.index())
             .expect("three rails");
-        let buttons = self.rail_buttons(&rail, cx);
+        let buttons = self.rail_buttons(&rail.top, cx);
         if buttons.is_empty() {
             return gpui::Empty.into_any_element();
         }
@@ -324,14 +486,17 @@ impl crate::ui::app::ClaudhubApp {
     /// The buttons of one rail, shared by the two edges and the status bar.
     fn rail_buttons(
         &mut self,
-        rail: &rails::Rail,
+        buttons: &[rails::Button],
         cx: &mut Context<Self>,
-    ) -> Vec<gpui_component::button::Button> {
+    ) -> Vec<gpui::AnyElement> {
         use gpui_component::button::{Button, ButtonVariants as _};
+        use gpui_component::menu::ContextMenuExt as _;
         use gpui_component::{ActiveTheme as _, Sizable as _};
 
         let muted = cx.theme().muted_foreground;
-        rail.buttons
+        let seats = self.seats(cx);
+        let app = cx.entity();
+        buttons
             .iter()
             .map(|button| {
                 let panel = button.panel;
@@ -358,37 +523,72 @@ impl crate::ui::app::ClaudhubApp {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.press_tool(panel, window, cx);
                     }))
+                    // **Right click moves it.** Dragging works and is what one
+                    // reaches for with a panel already on screen; a tool window
+                    // one has folded away has no title to take hold of, and
+                    // sending it to the other edge would mean opening it,
+                    // dragging it, and folding it again.
+                    .context_menu({
+                        let app = app.clone();
+                        let targets = rails::moves(panel, &seats);
+                        move |menu, _window, _cx| {
+                            targets.iter().fold(menu, |menu, anchor| {
+                                let (app, anchor) = (app.clone(), *anchor);
+                                menu.item(
+                                    gpui_component::menu::PopupMenuItem::new(crate::tr!(
+                                        anchor.label()
+                                    ))
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            app.update(cx, |app, cx| {
+                                                app.move_tool(panel, anchor, window, cx)
+                                            });
+                                        },
+                                    ),
+                                )
+                            })
+                        }
+                    })
+                    .into_any_element()
             })
             .collect()
     }
 
-    /// One side rail: a column of buttons against the window's edge.
+    /// One side rail: two runs of buttons against the window's edge.
+    ///
+    /// The top half is pinned to the start and the bottom half pushed to the
+    /// end, which is what makes the two legible as two: a single run of nine
+    /// buttons says nothing about which of them can be on screen together.
     fn render_rail(&mut self, rail: &rails::Rail, cx: &mut Context<Self>) -> gpui::AnyElement {
         use gpui_component::{v_flex, ActiveTheme as _};
 
-        let buttons = self.rail_buttons(rail, cx);
-        // Nothing to show, nothing painted — not an empty band.
-        if buttons.is_empty() {
+        if rail.is_empty() {
+            // Nothing to show, nothing painted — not an empty band.
             return gpui::Empty.into_any_element();
         }
+        let top = self.rail_buttons(&rail.top, cx);
+        let bottom = self.rail_buttons(&rail.bottom, cx);
+        let run =
+            |buttons: Vec<gpui::AnyElement>| v_flex().flex_none().gap(px(2.)).children(buttons);
         // The flex is returned directly rather than wrapped: a `div()` is a
         // **block**, where a child's `h_full` resolves against an undefined
         // height.
         v_flex()
             .h_full()
             .flex_none()
+            .justify_between()
             // Against the window's ground and not the cards': a rail is
             // furniture at the edge, and painting it in the tone the cards sit
             // on would make it read as one more card.
             .bg(cx.theme().title_bar)
-            .gap(px(2.))
             .py(px(6.))
             .px(px(4.))
             // A rail does not scroll: one that has to be scrolled is one that
             // can no longer be aimed at. `rails::MAX_PER_RAIL` keeps the table
             // inside what an edge can show.
             .overflow_hidden()
-            .children(buttons)
+            .child(run(top))
+            .child(run(bottom))
             .into_any_element()
     }
 

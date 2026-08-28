@@ -1222,7 +1222,7 @@ impl ClaudhubApp {
     pub(super) fn front_document(&self, cx: &App) -> Option<String> {
         self.seats(cx)
             .into_iter()
-            .find(|seat| seat.side.is_none() && seat.shown)
+            .find(|seat| seat.anchor.is_none() && seat.shown)
             .map(|seat| seat.panel)
     }
 

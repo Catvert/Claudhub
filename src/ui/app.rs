@@ -4426,7 +4426,7 @@ impl ClaudhubApp {
         // makes the region when the area has none.
         if !seats.iter().any(|seat| seat.panel == name) {
             let placement = crate::ui::dock_layout::home_of(name);
-            let size = crate::ui::rails::tool(name).map(|tool| tool.home.default_size());
+            let size = crate::ui::rails::tool(name).map(|tool| tool.home.side.default_size());
             let dock = self.dock.clone();
             dock.update(cx, |area, cx| {
                 let Some(handle) = crate::ui::dock_layout::build(name, window, cx) else {
@@ -4506,6 +4506,29 @@ impl ClaudhubApp {
                 self.reveal_panel(panel, window, cx)
             }
         }
+    }
+
+    /// Sends a tool window to another place, and shows it there.
+    ///
+    /// The gesture a rail button's right click offers. Dragging does it too and
+    /// is what one reaches for with a panel already on screen; this is for the
+    /// one folded away, which has no title to take hold of — moving it would
+    /// otherwise mean opening it, dragging it, and folding it again.
+    pub(super) fn move_tool(
+        &mut self,
+        panel: &'static str,
+        anchor: crate::ui::rails::Anchor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_panel_visible(panel, true, cx);
+        crate::ui::dock_layout::move_to(&self.dock.clone(), panel, anchor, window, cx);
+        // A tool sent to a folded edge is a gesture that did nothing.
+        self.unfold(anchor.side, window, cx);
+        let dock = self.dock.clone();
+        crate::ui::panels::select_panel_named(&dock, panel, window, cx);
+        self.schedule_layout_save(cx);
+        cx.notify();
     }
 
     /// Unfolds one edge, if it is folded.
