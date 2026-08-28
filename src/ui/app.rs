@@ -201,6 +201,38 @@ fn prune(state: &mut gpui_component::dock::PanelState, doomed: &impl Fn(&str) ->
     state.children.is_empty()
 }
 
+/// The same pruning, for one of the three side zones.
+///
+/// **`DockState` keeps its fields to itself, but its constructor and its four
+/// readers are enough**: a zone is taken apart and put back together around a
+/// pruned tree. That is what brings a panel dragged into a side zone within
+/// reach — for a long time it was not, and the comment saying so was right
+/// only about the direct route.
+///
+/// It stops being a detail the moment the terminals live in the bottom zone:
+/// without this, `layout.json` keeps `ClaudhubTerminal` under `bottom_dock`,
+/// nothing can build one back — a terminal is a **process** — and the next
+/// start paints "panel type is not registered" across the strip, every time.
+///
+/// A zone whose tree is doomed whole becomes `None` rather than an empty
+/// `DockState`: an empty zone read back would reopen on nothing, and nothing
+/// is lost by letting it go — `add_panel_view` makes the region again for
+/// whoever names it.
+fn prune_dock(dock: &mut Option<gpui_component::dock::DockState>, doomed: &impl Fn(&str) -> bool) {
+    let Some(zone) = dock.as_ref() else {
+        return;
+    };
+    let mut tree = zone.panel().clone();
+    let (placement, size, open) = (zone.placement(), zone.size(), zone.open());
+    if prune(&mut tree, doomed) {
+        *dock = None;
+        return;
+    }
+    *dock = Some(gpui_component::dock::DockState::new(
+        tree, placement, size, open,
+    ));
+}
+
 fn save_layouts(layouts: &Layouts) {
     let Some(path) = crate::ui::settings::layout_path() else {
         return;
@@ -1536,12 +1568,16 @@ impl ClaudhubApp {
                     // the registry prints "panel type is not registered" across
                     // the screen, at every start.
                     //
-                    // The centre only, like the write-time pruning and with the
-                    // same known corollary: `DockState::panel` is private, so a
-                    // panel dragged into a side zone is out of reach.
-                    let empty = prune(&mut state.center, &|name| {
-                        !crate::ui::panels::is_registered(name)
-                    });
+                    // **The four regions**, and not the centre alone: a panel
+                    // dragged into a side zone was long out of reach, since
+                    // `DockState` keeps its fields to itself — but its
+                    // constructor and its readers are enough to take one apart
+                    // and put it back. See `prune_dock`.
+                    let doomed = |name: &str| !crate::ui::panels::is_registered(name);
+                    let empty = prune(&mut state.center, &doomed);
+                    prune_dock(&mut state.left_dock, &doomed);
+                    prune_dock(&mut state.right_dock, &doomed);
+                    prune_dock(&mut state.bottom_dock, &doomed);
                     // The Git screen opens on "Changes", whatever tab was on
                     // screen when the window last closed — see `open_on`.
                     if workspace == crate::ui::workspace::Workspace::Git {
@@ -1714,10 +1750,19 @@ impl ClaudhubApp {
                             // an empty frame. What the previous session had
                             // open is remembered where the rest of the place
                             // one was is: in the store, see `ui::session`.
-                            prune(&mut state.center, &|name| {
+                            //
+                            // The four regions, not the centre alone: the
+                            // terminals dock into a side zone, which is where
+                            // an unpruned one would come back as a name
+                            // nothing can build.
+                            let doomed = |name: &str| {
                                 name == super::panels::TerminalPanel::NAME
                                     || name == super::panels::FilePanel::NAME
-                            });
+                            };
+                            prune(&mut state.center, &doomed);
+                            prune_dock(&mut state.left_dock, &doomed);
+                            prune_dock(&mut state.right_dock, &doomed);
+                            prune_dock(&mut state.bottom_dock, &doomed);
                             (workspace.key().to_string(), state)
                         })
                         .collect(),
@@ -4915,6 +4960,16 @@ mod tests {
         state
     }
 
+    /// A side zone as `dump` writes one: a tree, a side, a size, an open flag.
+    fn dock(tree: PanelState, size: gpui::Pixels) -> Option<gpui_component::dock::DockState> {
+        Some(gpui_component::dock::DockState::new(
+            tree,
+            gpui_component::dock::DockPlacement::Bottom,
+            size,
+            true,
+        ))
+    }
+
     /// A session opens the Git screen on its changes, wherever the tab sits and
     /// whatever was on screen when the window closed — a plugin's board, here.
     #[test]
@@ -5042,5 +5097,80 @@ mod tests {
     fn an_emptied_container_is_dropped() {
         let mut state = stack(vec![px(260.)], vec![leaf("ClaudhubTerminal")]);
         assert!(prune(&mut state, &|name| name == "ClaudhubTerminal"));
+    }
+
+    /// A terminal docked in the bottom zone is taken out before writing, like
+    /// one in the centre. This is the whole reason `prune_dock` exists: a
+    /// terminal is a process, nothing can build one back, and the name left
+    /// behind is what paints "panel type is not registered" over the strip.
+    #[test]
+    fn a_terminal_of_a_side_zone_is_pruned() {
+        let mut zone = dock(
+            tabs(0, vec![leaf("ClaudhubTerminal"), leaf("ClaudhubTestRun")]),
+            px(260.),
+        );
+        prune_dock(&mut zone, &|name| name == "ClaudhubTerminal");
+        let zone = zone.expect("the zone still holds the run");
+        assert_eq!(zone.panel().children.len(), 1);
+        assert_eq!(zone.panel().children[0].panel_name, "ClaudhubTestRun");
+    }
+
+    /// A zone whose tree is doomed whole goes away entirely. Kept as an empty
+    /// `DockState`, it would reopen on nothing at the next start.
+    #[test]
+    fn a_zone_emptied_whole_goes_away() {
+        let mut zone = dock(tabs(0, vec![leaf("ClaudhubTerminal")]), px(260.));
+        prune_dock(&mut zone, &|name| name == "ClaudhubTerminal");
+        assert!(zone.is_none());
+    }
+
+    /// What the zone was — its side, its size, whether it was unfolded —
+    /// survives the taking apart. It is the reason the four readers are read
+    /// rather than a fresh `DockState` being made up.
+    #[test]
+    fn a_zone_keeps_its_size_and_its_opening() {
+        let mut zone = dock(
+            tabs(0, vec![leaf("ClaudhubTerminal"), leaf("ClaudhubTestRun")]),
+            px(260.),
+        );
+        prune_dock(&mut zone, &|name| name == "ClaudhubTerminal");
+        let zone = zone.expect("the zone survives");
+        assert_eq!(zone.size(), px(260.));
+        assert!(zone.open());
+        assert_eq!(
+            zone.placement(),
+            gpui_component::dock::DockPlacement::Bottom
+        );
+    }
+
+    /// A name nothing can build any more is taken out of a side zone too —
+    /// the case the reading side asks about, and the one a comment long said
+    /// was out of reach.
+    #[test]
+    fn a_dead_name_of_a_side_zone_is_pruned() {
+        let mut zone = dock(
+            tabs(0, vec![leaf("ClaudhubGone"), leaf("ClaudhubNotes")]),
+            px(320.),
+        );
+        prune_dock(&mut zone, &|name| name == "ClaudhubGone");
+        let zone = zone.expect("the notes are still there");
+        assert_eq!(zone.panel().children.len(), 1);
+    }
+
+    /// The rules of `prune` hold inside a zone as they do in the centre: a
+    /// split left with one slot drops the stale size with its wrapper.
+    #[test]
+    fn a_split_left_with_one_slot_flattens_in_a_zone_too() {
+        let mut zone = dock(
+            stack(
+                vec![px(300.), px(260.)],
+                vec![leaf("ClaudhubNotes"), leaf("ClaudhubTerminal")],
+            ),
+            px(560.),
+        );
+        prune_dock(&mut zone, &|name| name == "ClaudhubTerminal");
+        let zone = zone.expect("the notes are still there");
+        assert_eq!(zone.panel().panel_name, "ClaudhubNotes");
+        assert!(zone.panel().children.is_empty());
     }
 }
