@@ -672,6 +672,7 @@
   "terminal-close-busy": "A command is running in this terminal",
   "terminal-close-busy-help": "Closing it sends SIGHUP: whatever is running stops where it is.",
   "terminal-copy": "Copy",
+  "terminal-every-worktree": "Every worktree's terminals",
   "terminal-new": "New terminal",
   "terminal-paste": "Paste",
   "terminal-rename": "Rename the tab",

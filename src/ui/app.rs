@@ -4109,6 +4109,33 @@ impl ClaudhubApp {
                                 this.toggle_terminal_panel(window, cx);
                             })),
                     )
+                    // "Which of the agents I left running has finished" is the
+                    // one question that crosses the worktrees, and it used to
+                    // be a screen. It is a state of the terminals now, and its
+                    // switch belongs beside them.
+                    //
+                    // Here and not in the dock's tab bar: a control there would
+                    // follow the panel and repeat itself in every tab, which is
+                    // what the `+` had to do. This corner is the terminals'
+                    // whatever zone holds them.
+                    .child(
+                        Button::new("terminals-everywhere")
+                            .xsmall()
+                            .compact()
+                            .icon(icon("grid-3x3"))
+                            .tooltip(tr!("terminal-every-worktree"))
+                            .map(|button| {
+                                if self.terminals_everywhere {
+                                    button.primary()
+                                } else {
+                                    button.outline()
+                                }
+                            })
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.terminals_everywhere = !this.terminals_everywhere;
+                                cx.notify();
+                            })),
+                    )
                     .child(crate::ui::panels::new_terminal_button(
                         &cx.entity().downgrade(),
                         None,
