@@ -224,7 +224,7 @@ pub fn seats(area: &DockArea, cx: &App) -> Vec<rails::Seat> {
                             .find(|id| area.panel(**id).is_some_and(|panel| panel.visible(cx)))
                     })
                     .copied();
-                for id in panels.iter() {
+                for (order, id) in panels.iter().enumerate() {
                     let Some(panel) = area.panel(*id) else {
                         continue;
                     };
@@ -234,6 +234,7 @@ pub fn seats(area: &DockArea, cx: &App) -> Vec<rails::Seat> {
                         shown: displayed == Some(*id),
                         open,
                         visible: panel.visible(cx),
+                        order,
                     });
                 }
             }
@@ -394,6 +395,73 @@ fn seat_id(area: &DockArea, panel: &str, cx: &App) -> Option<gpui_component::doc
     .find_map(|placement| walk(area.layout(placement)?.root(), area, panel, cx))
 }
 
+/// Moves a tool window one place along its own rail.
+///
+/// The rail reads the tree, so reordering the buttons **is** reordering the
+/// tabs — there is no list of ours to permute, and nothing to keep in step.
+///
+/// The index given is one in the list **after the panel is taken out**: a move
+/// is a detach and an insert, so putting a panel back at `i + 1` lands it one
+/// place further along, and at `i - 1` one place back.
+pub fn shift(
+    dock: &Entity<DockArea>,
+    panel: &str,
+    delta: isize,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    use gpui_component::dock::{InsertTarget, PaneNode, PaneRef};
+
+    dock.update(cx, |area: &mut DockArea, cx: &mut Context<DockArea>| {
+        let Some(id) = seat_id(area, panel, cx) else {
+            return;
+        };
+        // The group holding it, and where it sits among its tabs.
+        fn group_of(
+            node: &PaneNode,
+            id: gpui_component::dock::PanelId,
+        ) -> Option<(gpui_component::dock::NodeId, usize, usize)> {
+            match node.kind() {
+                PaneRef::Tabs { panels, .. } => panels
+                    .iter()
+                    .position(|held| *held == id)
+                    .map(|ix| (node.id(), ix, panels.len())),
+                PaneRef::Split { children, .. } => children.iter().find_map(|c| group_of(c, id)),
+                PaneRef::Tiles { .. } => None,
+            }
+        }
+        let found = [
+            DockPlacement::Center,
+            DockPlacement::Left,
+            DockPlacement::Right,
+            DockPlacement::Bottom,
+        ]
+        .into_iter()
+        .find_map(|placement| group_of(area.layout(placement)?.root(), id));
+        let Some((node, ix, len)) = found else {
+            return;
+        };
+        let wanted = ix as isize + delta;
+        // At either end there is nowhere to go, and a move that wraps around is
+        // one nobody meant.
+        if wanted < 0 || wanted as usize >= len {
+            return;
+        }
+        area.move_panel(
+            id,
+            InsertTarget::Tabs {
+                node,
+                ix: Some(wanted as usize),
+                // Reordering is not showing: the tab in front stays in front,
+                // which is what makes two presses in a row do what they say.
+                activate: false,
+            },
+            window,
+            cx,
+        );
+    });
+}
+
 /// The first tab group of a subtree, in depth order.
 fn first_group(node: &gpui_component::dock::PaneNode) -> Option<gpui_component::dock::NodeId> {
     use gpui_component::dock::PaneRef;
@@ -526,20 +594,34 @@ impl crate::ui::app::ClaudhubApp {
                         let app = app.clone();
                         let targets = rails::moves(panel, &seats);
                         move |menu, _window, _cx| {
-                            targets.iter().fold(menu, |menu, anchor| {
-                                let (app, anchor) = (app.clone(), *anchor);
+                            use gpui_component::menu::{PopupMenu, PopupMenuItem};
+                            // **Along the rail first.** Where a view sits on
+                            // its own edge is what one adjusts often — the
+                            // files before the changes — and sending it to
+                            // another edge is the rarer decision.
+                            let shift = |menu: PopupMenu, key, delta, name| {
+                                let app = app.clone();
                                 menu.item(
-                                    gpui_component::menu::PopupMenuItem::new(crate::tr!(
-                                        anchor.label()
-                                    ))
-                                    .on_click(
-                                        move |_, window, cx| {
+                                    PopupMenuItem::new(crate::tr!(key))
+                                        .icon(crate::ui::icons::icon(name))
+                                        .on_click(move |_, window, cx| {
                                             app.update(cx, |app, cx| {
-                                                app.move_tool(panel, anchor, window, cx)
+                                                app.shift_tool(panel, delta, window, cx)
                                             });
-                                        },
-                                    ),
+                                        }),
                                 )
+                            };
+                            let menu = shift(menu, "tool-move-earlier", -1, "arrow-up");
+                            let menu = shift(menu, "tool-move-later", 1, "arrow-down");
+                            targets.iter().fold(menu.separator(), |menu, anchor| {
+                                let (app, anchor) = (app.clone(), *anchor);
+                                menu.item(PopupMenuItem::new(crate::tr!(anchor.label())).on_click(
+                                    move |_, window, cx| {
+                                        app.update(cx, |app, cx| {
+                                            app.move_tool(panel, anchor, window, cx)
+                                        });
+                                    },
+                                ))
                             })
                         }
                     })

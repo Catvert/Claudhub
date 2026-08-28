@@ -395,6 +395,8 @@ pub struct Seat {
     /// is its own business, and the reasons differ — put away by hand, no
     /// runner to run, nothing to resolve.
     pub visible: bool,
+    /// Its rank among its group's tabs, which is the order its rail shows.
+    pub order: usize,
 }
 
 /// One button of a rail, as the view has to paint it.
@@ -496,10 +498,24 @@ pub fn moves(panel: &str, seats: &[Seat]) -> Vec<Anchor> {
 /// A tool window with no seat still gets a button — that is how one calls back
 /// a view hidden from the menu — **unless** its tab comes and goes with its
 /// content: nothing would make a conditional panel appear, so its button would
-/// do nothing. The order is the table's and never the tabs': a rail that
-/// reordered itself under the hand could not be aimed at twice.
+/// do nothing.
+///
+/// **The order is the tree's**, tab by tab, and the table's only for what the
+/// tree does not hold. It was the table's alone, on the reasoning that a rail
+/// which reordered itself under the hand could not be aimed at twice — but a
+/// tab order does not move on its own, it moves when one moves it, and reading
+/// the tree is what lets one put the files before the changes without editing
+/// the source. What has no seat goes last: a view called back has to land
+/// somewhere, and the end is the one place that displaces nothing.
 pub fn rails(seats: &[Seat], hidden: &std::collections::BTreeSet<String>) -> [Rail; 3] {
-    let mut rails = Side::ALL.map(|side| Rail {
+    // Ranked while collecting, sorted once at the end: a button's place is its
+    // panel's place among its group's tabs.
+    struct Ranked {
+        side: Side,
+        top: Vec<(Option<usize>, Button)>,
+        bottom: Vec<(Option<usize>, Button)>,
+    }
+    let mut rails = Side::ALL.map(|side| Ranked {
         side,
         top: Vec::new(),
         bottom: Vec::new(),
@@ -533,12 +549,26 @@ pub fn rails(seats: &[Seat], hidden: &std::collections::BTreeSet<String>) -> [Ra
             icon: tool.icon,
             active: seat.is_some_and(|seat| seat.open && seat.shown && seat.visible),
         };
+        // Seated, so the tree says where it goes; loose, so it goes last.
+        let rank = seat.map(|seat| seat.order);
         let rail = &mut rails[anchor.side.index()];
         match anchor.half {
-            Half::Top => rail.top.push(button),
-            Half::Bottom => rail.bottom.push(button),
+            Half::Top => rail.top.push((rank, button)),
+            Half::Bottom => rail.bottom.push((rank, button)),
         }
     }
+    for rail in &mut rails {
+        // Stable, so two panels the tree cannot rank keep the table's order.
+        rail.top.sort_by_key(|(rank, _)| rank.unwrap_or(usize::MAX));
+        rail.bottom
+            .sort_by_key(|(rank, _)| rank.unwrap_or(usize::MAX));
+    }
+    let mut rails = rails.map(|rail| Rail {
+        side: rail.side,
+        top: rail.top.into_iter().map(|(_, button)| button).collect(),
+        bottom: rail.bottom.into_iter().map(|(_, button)| button).collect(),
+    });
+    let _ = &mut rails;
     // The rail does not scroll, so what it cannot show it hides. A **warning**
     // and not an assertion: our own table is held to the cap by a test, but a
     // plugin's panels join a rail at run time, and a window one has installed
@@ -640,6 +670,7 @@ mod tests {
             shown,
             open,
             visible: true,
+            order: 0,
         }
     }
 
@@ -884,20 +915,35 @@ mod tests {
         assert!(all_names(rail(&running, Side::Bottom)).contains(&"ClaudhubTestRun"));
     }
 
-    /// The buttons follow the table and never the tabs: a rail that reordered
-    /// itself under the hand could not be aimed at twice.
+    /// **The buttons follow the tabs**, which is what lets one put the files
+    /// before the changes without editing the table. A tab order does not move
+    /// on its own — it moves when one moves it.
     #[test]
-    fn the_buttons_follow_the_table_and_not_the_tabs() {
-        let seats = vec![
-            seat("ClaudhubHistory", at(Side::Right, Half::Top), true, true),
-            seat("ClaudhubNotes", at(Side::Right, Half::Top), false, true),
-        ];
-        assert_eq!(
-            names(&rail(&rails(&seats, &none()), Side::Right).top),
-            // The databases have their home here, so they join the two the
-            // seats put here — and after them, the table's order deciding.
-            vec!["ClaudhubNotes", "ClaudhubHistory", "ClaudhubDb"]
-        );
+    fn the_buttons_follow_the_tabs() {
+        let here = at(Side::Left, Half::Top);
+        let ranked = |panel, order| Seat {
+            order,
+            ..seat(panel, here, false, true)
+        };
+        let seats = vec![ranked("ClaudhubChanges", 1), ranked("ClaudhubFiles", 0)];
+        let rails = rails(&seats, &none());
+        let shown = names(&rail(&rails, Side::Left).top);
+        assert_eq!(&shown[..2], ["ClaudhubFiles", "ClaudhubChanges"]);
+    }
+
+    /// What the tree does not hold goes **last**, whatever the table says: a
+    /// view called back has to land somewhere, and the end displaces nothing.
+    #[test]
+    fn what_has_no_seat_goes_last() {
+        let here = at(Side::Left, Half::Top);
+        // Only the search is seated, and last in its group.
+        let seats = vec![Seat {
+            order: 7,
+            ..seat("ClaudhubSearch", here, true, true)
+        }];
+        let rails = rails(&seats, &none());
+        let shown = names(&rail(&rails, Side::Left).top);
+        assert_eq!(shown.first(), Some(&"ClaudhubSearch"));
     }
 
     /// A move offers every place but the one it is already in: a menu entry

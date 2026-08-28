@@ -4547,6 +4547,24 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    /// Moves a tool window one place along its own rail.
+    ///
+    /// The rail reads the tree, so this reorders the tabs of the half it is in
+    /// — there is no list of ours to permute. Wanting the files before the
+    /// changes is a thing one should be able to do without editing the source,
+    /// and this is where.
+    pub(super) fn shift_tool(
+        &mut self,
+        panel: &'static str,
+        delta: isize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::ui::dock_layout::shift(&self.dock.clone(), panel, delta, window, cx);
+        self.schedule_layout_save(cx);
+        cx.notify();
+    }
+
     /// Unfolds one edge, if it is folded.
     ///
     /// `toggle_dock` notifies the inner dock and not the area, and it is the

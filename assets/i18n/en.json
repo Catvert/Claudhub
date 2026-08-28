@@ -719,6 +719,8 @@
   "todo-progress": "%{done}/%{total} tasks done",
   "todo-remove": "Delete the task",
   "todo-title": "Tasks",
+  "tool-move-earlier": "Move earlier",
+  "tool-move-later": "Move later",
   "update-available": "Claudhub %{version} available",
   "vim-mode-insert": "INSERT",
   "vim-mode-normal": "NORMAL",
