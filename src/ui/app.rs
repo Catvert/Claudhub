@@ -3419,6 +3419,14 @@ impl ClaudhubApp {
             return;
         };
         state.selected = Some(path.clone());
+        // **And the diff comes back**, the tab having a cross now: closing it
+        // takes the panel out of the tree, and a click in the list that showed
+        // nothing would make the cross a gesture one cannot undo. Deferred
+        // because this has no window — see `reveal_panel_later`.
+        self.pending_reveal = Some(super::panels::DiffPanel::NAME);
+        let Some(state) = self.review.get_mut(&worktree) else {
+            return;
+        };
         // The previous diff is cleared at once: keeping another file's for the
         // length of the read would give the impression that the click did
         // nothing, and then that the content changes by itself.
@@ -3866,6 +3874,22 @@ impl ClaudhubApp {
         Store::update_global(cx, |store| store.forget_missing(&main, &alive));
     }
 
+    /// Closes the diff: the file it was showing stops being the picked one.
+    ///
+    /// The tab is conditional, so clearing the selection is the whole of
+    /// closing it — and picking another file brings it back, which is what
+    /// makes the cross a gesture one can undo without looking for how.
+    pub(super) fn close_diff(&mut self, cx: &mut Context<Self>) {
+        self.merging = None;
+        if let Some(state) = self.active_review_mut() {
+            state.selected = None;
+            state.diff = None;
+            state.unstaged = None;
+            state.diff_selection = None;
+        }
+        cx.notify();
+    }
+
     /// Is there a diff to read — a file picked in one of the two lists, or a
     /// merge taking that place.
     pub(super) fn diff_on_screen(&self) -> bool {
@@ -3922,8 +3946,10 @@ impl ClaudhubApp {
         let Some(name) = self.pending_reveal.take() else {
             return;
         };
-        let dock = self.dock.clone();
-        crate::ui::panels::select_panel_named(&dock, name, window, cx);
+        // **Quietly**: this runs between two frames, and a tab that has just
+        // grown content is not a reason to take the caret out of whatever is
+        // being typed in.
+        self.reveal_quietly(name, window, cx);
     }
 
     /// Turns what was said between two frames into balloons.
@@ -4419,6 +4445,18 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.reveal_quietly(name, window, cx);
+        // The focus follows a **document** and not a tool window: a view
+        // brought out beside what one is reading is not what one has come to
+        // type in, and taking the caret out of the editor to put it nowhere is
+        // exactly what the old `focus_workspace` was careful not to do.
+        if crate::ui::rails::side_of(name, &self.seats(cx)).is_none() {
+            self.focus_panel(name, window, cx);
+        }
+    }
+
+    /// The same, leaving the focus where it is — see `flush_reveal`.
+    fn reveal_quietly(&mut self, name: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         self.set_panel_visible(name, true, cx);
         // **The editor is reached by the file being read, and not by its
         // placeholder.** `EditorPanel` hides itself as soon as a file is open,
@@ -4431,7 +4469,6 @@ impl ClaudhubApp {
         if name == super::panels::EditorPanel::NAME {
             if let Some(panel) = self.editing().map(|editing| editing.panel.clone()) {
                 super::panels::FilePanel::activate(&panel, window, cx);
-                self.focus_panel(name, window, cx);
                 cx.notify();
                 return;
             }
@@ -4473,13 +4510,6 @@ impl ClaudhubApp {
         }
         let dock = self.dock.clone();
         crate::ui::panels::select_panel_named(&dock, name, window, cx);
-        // The focus follows a **document** and not a tool window: a view
-        // brought out beside what one is reading is not what one has come to
-        // type in, and taking the caret out of the editor to put it nowhere is
-        // exactly what the old `focus_workspace` was careful not to do.
-        if crate::ui::rails::side_of(name, &self.seats(cx)).is_none() {
-            self.focus_panel(name, window, cx);
-        }
         cx.notify();
     }
 

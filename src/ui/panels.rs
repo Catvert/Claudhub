@@ -517,6 +517,16 @@ macro_rules! panels {
     (@needed $app:expr) => { true };
     (@needed $app:expr, $needed:ident) => { $app.$needed() };
 
+    // Whether the tab carries a cross, and what pressing it does.
+    //
+    // Only a view whose tab **comes and goes with its content** closes: what
+    // closing means is "I am done with this", and for those it says something
+    // — the diff of no file, a console on no connection. For the rest there is
+    // nothing to be done with, and a cross that emptied a permanent view would
+    // leave a window one cannot put back together.
+    (@closable) => { false };
+    (@closable, $closes:ident) => { true };
+
     // The cached value the panel is born with, the application not being
     // readable then. See `visible_at_startup`.
     (@at_startup $name:expr, $cx:expr) => { visible_at_startup($name, $cx) };
@@ -529,6 +539,7 @@ macro_rules! panels {
     ($($name:ident => ($id:literal, $title:literal, $render:ident, $pane:ident
         $(, visible: $visible:ident)?
         $(, needed: $needed:ident)?
+        $(, closes: $closes:ident)?
         $(, prepare: $prepare:ident)?)),* $(,)?) => { $(
         pub struct $name {
             app: WeakEntity<ClaudhubApp>,
@@ -588,14 +599,31 @@ macro_rules! panels {
                 $id
             }
 
-            /// No panel closes: nothing would make it possible to reopen one,
-            /// and a review without its file list is no longer a review.
+            /// See the `@closable` arm.
             fn closable(&self, _: &App) -> bool {
-                false
+                panels!(@closable $(, $closes)?)
             }
 
             fn visible(&self, _: &App) -> bool {
                 self.visible
+            }
+
+            /// Closing clears what the tab was showing, and that is the whole
+            /// of it: the tab is conditional, so it goes when its content does.
+            ///
+            /// **Deferred**, like a file's: the dock is in the middle of
+            /// editing its own tree, and closing goes back through
+            /// `DockArea::remove_panel`.
+            #[allow(unused_variables)]
+            fn on_removed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+                $(
+                    let Some(app) = self.app.upgrade() else {
+                        return;
+                    };
+                    cx.defer_in(window, move |_, _window, cx| {
+                        app.update(cx, |app, cx| app.$closes(cx));
+                    });
+                )?
             }
         }
 
@@ -673,8 +701,8 @@ panels! {
     // the central slot, and a tab announcing "Diff", "Editor" or "SQL"
     // depending on the last gesture was saying plainly that it carried three.
     // The screens give each of them its own place.
-    DiffPanel => ("ClaudhubDiff", "panel-diff", render_diff, Diff, needed: diff_on_screen),
-    ConsolePanel => ("ClaudhubConsole", "panel-sql", render_console_panel, Console, needed: db_console_open),
+    DiffPanel => ("ClaudhubDiff", "panel-diff", render_diff, Diff, needed: diff_on_screen, closes: close_diff),
+    ConsolePanel => ("ClaudhubConsole", "panel-sql", render_console_panel, Console, needed: db_console_open, closes: close_db_console),
     // The history needs loading the first time it is looked at.
     //
     // Doing it at render time rather than at construction is what avoids a
