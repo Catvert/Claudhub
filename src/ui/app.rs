@@ -1527,6 +1527,21 @@ impl ClaudhubApp {
         // "Terminals" would not have the same band as their neighbours — two
         // chromes for one window.
         skin.set_panel_style(gpui_component::dock::PanelStyle::TabBar, cx);
+        // **The two edges carry a title, not a strip of tabs.** The rails
+        // already say what each zone holds and which of it is in front, one
+        // button per tool window; a tab bar beside them says it a second time,
+        // and the two disagree the moment one is truncated. The title stays a
+        // drag source, so a tool window can still be taken out by hand.
+        //
+        // The centre keeps its tabs — documents are chosen there and nowhere
+        // else — and so does the bottom, where several terminals live side by
+        // side and their tabs carry the name, the `+` and the cross.
+        for side in [
+            gpui_component::dock::DockPlacement::Left,
+            gpui_component::dock::DockPlacement::Right,
+        ] {
+            skin.set_panel_style_at(side, gpui_component::dock::PanelStyle::Title, cx);
+        }
         // **No collapse affordance in the tab bars.** The dock draws, in the tab
         // bar of the group nearest each edge, a chevron that folds the
         // neighbouring zone away. The zones fold from the rails now, which is
