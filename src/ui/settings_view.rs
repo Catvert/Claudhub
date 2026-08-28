@@ -145,9 +145,23 @@ impl ClaudhubApp {
             self.settings_epoch += 1;
         }
         let form = self.settings_form.clone();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
+        window.open_dialog(cx, move |dialog, window, _cx| {
+            // **The size is given, and given here.** In the dock the form
+            // filled its panel; a dialog is sized by its content, and this
+            // content is a sidebar of pages beside a column of fields — both of
+            // which ask for the room they are given rather than claiming any.
+            // Left alone it came up as a search box and a heading.
+            //
+            // Read off the window rather than fixed: `Dialog` takes a width and
+            // no height, and a form taller than the window is one whose last
+            // field cannot be reached. Recomputed on every frame the dialog is
+            // built, so it follows a resize.
+            let viewport = window.viewport_size();
+            let width = viewport.width.min(px(980.)) - px(64.);
+            let height = viewport.height.min(px(720.)) - px(120.);
             dialog
                 .title(tr!("workspace-settings"))
+                .w(width)
                 // A dialog one **reads**, so it closes rather than being
                 // answered: one button, the overlay dismisses, and the cross is
                 // there. The confirmations of this window do the opposite for
@@ -155,7 +169,10 @@ impl ClaudhubApp {
                 .overlay_closable(true)
                 .close_button(true)
                 .footer(crate::ui::dialogs::close())
-                .child(form.clone())
+                // A **definite box**, width and height: the form's root is a
+                // `size_full`, which resolves against nothing at all when its
+                // parent is sized by what it contains.
+                .child(div().w_full().h(height).child(form.clone()))
         });
         // **Deferred, and by the dialog's own handle.** A context menu gives
         // the focus back to whatever had it as it closes, *after* the handler
