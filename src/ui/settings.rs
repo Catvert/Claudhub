@@ -374,6 +374,10 @@ pub struct Settings {
     /// gutter is sized by the widest point of the whole graph, and the width
     /// it reserves comes off the summary — the column a history is read by.
     pub history_graph: bool,
+    /// The branches, in a column left of the history. On by default: the panel
+    /// only offers it where it is wide enough to hold three columns, and there
+    /// the branch one reads the log of is the thing one reaches for first.
+    pub history_branches: bool,
     /// The file list as a folder tree rather than flat. Flat by default: a
     /// change set is a handful of files, and the folder rows were mostly
     /// chrome between them.
@@ -608,6 +612,7 @@ impl Default for Settings {
             repositories: Vec::new(),
             diff_context: 3,
             history_graph: false,
+            history_branches: true,
             review_tree: false,
             diff_split: true,
             diff_whole_file: false,

@@ -232,9 +232,9 @@ pub const TOOLS: &[Tool] = &[
         home: Anchor::new(Side::Left, Half::Top),
         conditional: false,
     },
-    // **Not `git-branch`**, which now names the list of branches: what this
-    // one shows is a branch weighed against its base, which is what a pull
-    // request is. Two buttons under one glyph is two buttons one cannot aim at.
+    // **Not `git-branch`**: what this shows is not the branches but one branch
+    // weighed against its base, which is what a pull request is. The glyph is
+    // the history's, where it opens the column of branches.
     Tool {
         panel: "ClaudhubBranch",
         title: Label::Key("range-branch"),
@@ -333,17 +333,6 @@ pub const TOOLS: &[Tool] = &[
         icon: "play",
         home: Anchor::new(Side::Bottom, Half::Top),
         conditional: true,
-    },
-    // Beside the log, and not with what one picks from on the left: a branch
-    // is chosen by reading what it carries, and what it carries is the column
-    // next to it. It is the arrangement PhpStorm's Git window has, and the
-    // left rail is full — nine buttons is where a rail stops being aimable.
-    Tool {
-        panel: "ClaudhubBranches",
-        title: Label::Key("panel-branches"),
-        icon: "git-branch",
-        home: Anchor::new(Side::Right, Half::Top),
-        conditional: false,
     },
 ];
 

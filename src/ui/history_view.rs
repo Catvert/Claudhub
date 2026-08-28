@@ -374,6 +374,15 @@ impl ClaudhubApp {
         };
         let lines_only = self.history_lines_only;
         let show_graph = crate::ui::settings::Settings::global(cx).history_graph;
+        // The arrangement, decided once: the header reads it to know whether
+        // the branches have a column to be shown in, and the body to build it.
+        let roomy = Shape::of(self.history_shape) == Shape::Full;
+        let want_branches = crate::ui::settings::Settings::global(cx).history_branches;
+        let shape = if want_branches {
+            Shape::of(self.history_shape)
+        } else {
+            Shape::of(self.history_shape).without_branches()
+        };
         let header = h_flex()
             .h(crate::ui::theme::bar_height(cx))
             .w_full()
@@ -462,6 +471,30 @@ impl ClaudhubApp {
             .child(div().flex_1())
             // At the far end because it changes how the list is drawn, not
             // what it shows — the same seat as the review's tree toggle.
+            // **No button where there is no room for the column**, the rule
+            // the rails follow for a situational view: a target that never
+            // answers is one the eye learns to skip. In a side column the
+            // branches are the top bar's picker, which is where they were.
+            .when(roomy, |header| {
+                header.child(
+                    Button::new("history-branches")
+                        .ghost()
+                        .xsmall()
+                        .icon(crate::ui::icons::icon("git-branch"))
+                        .selected(want_branches)
+                        .tooltip(if want_branches {
+                            tr!("history-branches-hide")
+                        } else {
+                            tr!("history-branches-show")
+                        })
+                        .on_click(cx.listener(|_this, _, _, cx| {
+                            crate::ui::settings::Settings::update_global(cx, |s| {
+                                s.history_branches = !s.history_branches;
+                            });
+                            cx.notify();
+                        })),
+                )
+            })
             .child(
                 Button::new("history-graph")
                     .ghost()
@@ -649,57 +682,121 @@ impl ClaudhubApp {
 
         // The graph alone does not say what a commit touched: the list of its
         // files goes with it, otherwise selecting a commit opens only its
-        // first file and the others stay invisible.
-        let Some(range) = commit_range else {
-            return div()
-                .relative()
-                .size_full()
-                .child(measure)
-                .child(graph)
-                .into_any_element();
-        };
-        let files = self.render_file_list(range, window, cx).into_any_element();
-        // **Beside or underneath, from the shape and nothing else.** The same
-        // view has to read in a tall narrow column and in a wide short zone,
-        // which is the whole point of a panel one can drag anywhere; a split
-        // fixed one way is a panel that only belongs on one edge.
-        let split = if side_by_side(self.history_shape) {
-            h_resizable("claudhub-history-split-side")
-                .with_state(&self.history_split_side)
-                // **The files are the pane given a size**, never the graph:
-                // what one widens the zone for is the summary column, so the
-                // surplus has to fall to the slot no size fixes.
-                .child(resizable_panel().child(graph))
-                .child(resizable_panel().size(px(440.)).child(files))
-                .into_any_element()
-        } else {
-            v_resizable("claudhub-history-split")
+        // first file and the others stay invisible. Beside it where the panel
+        // is wide, under it where it is a column.
+        let files =
+            commit_range.map(|range| self.render_file_list(range, window, cx).into_any_element());
+        let body = match (files, shape) {
+            // No commit chosen: the log has its column to itself.
+            (None, _) => graph.into_any_element(),
+            (Some(files), Shape::Column) => v_resizable("claudhub-history-split")
                 .with_state(&self.history_split)
                 .child(resizable_panel().size(px(420.)).child(graph))
                 .child(resizable_panel().child(files))
-                .into_any_element()
+                .into_any_element(),
+            // **The files are the pane given a size**, never the graph: what
+            // one widens the zone for is the summary column, so the surplus
+            // has to fall to the slot no size fixes.
+            (Some(files), _) => h_resizable("claudhub-history-split-side")
+                .with_state(&self.history_split_side)
+                .child(resizable_panel().child(graph))
+                .child(resizable_panel().size(px(440.)).child(files))
+                .into_any_element(),
+        };
+        // And the branches, where there is a column for them. **Nested rather
+        // than a third slot**: dragging this divider would otherwise move the
+        // one between the graph and the files with it.
+        let body = match shape {
+            Shape::Full => h_resizable("claudhub-history-branches")
+                .with_state(&self.history_split_branches)
+                .child(
+                    resizable_panel()
+                        .size(px(260.))
+                        .child(self.render_history_branches(cx)),
+                )
+                .child(resizable_panel().child(body))
+                .into_any_element(),
+            _ => body,
         };
         div()
             .relative()
             .size_full()
             .child(measure)
-            .child(split)
+            .child(body)
             .into_any_element()
+    }
+
+    /// The branches, as the history's leftmost column.
+    ///
+    /// The same surface as the top bar's picker, and the one the tool window
+    /// held before the two were merged — see `branch_picker::Mode`. It has a
+    /// filter field of its own, so the click is filed under its own pane:
+    /// `Ctrl+F` standing here must aim at that field and not at the log's bar.
+    /// **Captured after** the panel's own, which runs first — capture goes
+    /// outside in — and files everything under the history.
+    fn render_history_branches(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let app = cx.entity();
+        div()
+            .size_full()
+            .border_r_1()
+            .border_color(cx.theme().border)
+            .child(self.branches_dock.clone())
+            .capture_any_mouse_down(move |_, _window, cx| {
+                app.update(cx, |app, cx| {
+                    app.touch_pane(crate::ui::find::Pane::Branches, cx)
+                });
+            })
     }
 }
 
-/// Does the graph sit **beside** the chosen commit's files rather than above
-/// them?
+/// How the panel lays out what it holds — from its own shape, and nothing else.
 ///
-/// Two conditions and not one. Wider than tall is what tells a bottom zone
-/// from a side one, and it is the whole of the arrangement PhpStorm's Git
-/// window has. And **wide enough that both halves keep a list's width**: a
-/// panel four hundred pixels across is wider than it is tall as soon as it is
-/// short, and splitting it would leave two columns too narrow to carry a path.
-/// The floor is twice the right zone's own width — the narrowest column the
-/// window already asks a file list to live in.
-fn side_by_side(shape: Size<Pixels>) -> bool {
-    shape.width > shape.height && shape.width >= px(640.)
+/// The same view has to read in a tall narrow column and in a wide short zone,
+/// which is the whole point of a panel one can drag anywhere; an arrangement
+/// fixed one way is a panel that belongs on one edge only. It is the rule the
+/// row's own columns already follow, one level up: what there is no room for
+/// is not drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// A tall narrow column. The graph, and the chosen commit's files under it.
+    Column,
+    /// Wide and short. The files move beside the graph.
+    Wide,
+    /// Room for a third column: the branches join them, on the left. It is the
+    /// arrangement of PhpStorm's Git window, and what a bottom zone gives.
+    Full,
+}
+
+impl Shape {
+    /// **Wider than tall** is what tells a bottom zone from a side one; the two
+    /// floors are what keeps every column able to carry a path. Below them a
+    /// panel four hundred pixels across is wider than it is tall as soon as it
+    /// is short, and splitting it would leave columns too narrow to read.
+    ///
+    /// The first floor is twice the right zone's own width — the narrowest
+    /// column the window already asks a file list to live in. The second adds
+    /// the branches' own column to it.
+    fn of(size: Size<Pixels>) -> Self {
+        if size.width <= size.height {
+            return Self::Column;
+        }
+        if size.width >= px(900.) {
+            Self::Full
+        } else if size.width >= px(640.) {
+            Self::Wide
+        } else {
+            Self::Column
+        }
+    }
+
+    /// The same shape with the branches column given up — what the header's
+    /// toggle asks for. It cannot turn a column into anything.
+    fn without_branches(self) -> Self {
+        match self {
+            Self::Full => Self::Wide,
+            other => other,
+        }
+    }
 }
 
 /// A row's texts, built once when the history arrives.
@@ -1034,39 +1131,55 @@ fn paint_graph(row: &GraphRow, bounds: Bounds<Pixels>, window: &mut Window, cx: 
 mod tests {
     use super::*;
 
-    fn shape(width: f32, height: f32) -> Size<Pixels> {
-        gpui::size(px(width), px(height))
+    fn shape(width: f32, height: f32) -> Shape {
+        Shape::of(gpui::size(px(width), px(height)))
     }
 
-    /// The side zones are tall and narrow: the files go under the graph, which
-    /// is the only way both keep a readable width.
+    /// The side zones are tall and narrow: everything stacks, which is the only
+    /// way what is left keeps a readable width.
     #[test]
     fn a_side_zone_stacks_them() {
-        assert!(!side_by_side(shape(320., 760.)));
-        assert!(!side_by_side(shape(460., 900.)));
+        assert_eq!(shape(320., 760.), Shape::Column);
+        assert_eq!(shape(460., 900.), Shape::Column);
     }
 
-    /// The bottom zone is wide and short, and that is the arrangement of the
-    /// screenshot this exists for: graph on the left, the commit's files on the
-    /// right.
+    /// Wide and short, but with room for two columns only: the commit's files
+    /// move beside the graph, the branches stay in the top bar's picker.
     #[test]
-    fn a_bottom_zone_lays_them_across() {
-        assert!(side_by_side(shape(1900., 240.)));
-        assert!(side_by_side(shape(700., 300.)));
+    fn a_narrow_bottom_zone_lays_out_two_columns() {
+        assert_eq!(shape(700., 300.), Shape::Wide);
+        assert_eq!(shape(899., 240.), Shape::Wide);
+    }
+
+    /// A real bottom zone: branches, graph and files, which is the arrangement
+    /// this exists for.
+    #[test]
+    fn a_wide_bottom_zone_lays_out_three() {
+        assert_eq!(shape(1900., 240.), Shape::Full);
+        assert_eq!(shape(900., 400.), Shape::Full);
     }
 
     /// Wider than tall is not enough on its own: a short **narrow** panel split
     /// in two leaves two columns too narrow to carry a path.
     #[test]
     fn a_short_narrow_panel_still_stacks_them() {
-        assert!(!side_by_side(shape(400., 200.)));
-        assert!(!side_by_side(shape(639., 120.)));
+        assert_eq!(shape(400., 200.), Shape::Column);
+        assert_eq!(shape(639., 120.), Shape::Column);
     }
 
     /// Nothing measured yet — the first frame, before the canvas has run. It
-    /// starts stacked, which is what the panel was before this existed.
+    /// starts stacked, which is what the panel was before any of this.
     #[test]
     fn an_unmeasured_panel_stacks_them() {
-        assert!(!side_by_side(shape(0., 0.)));
+        assert_eq!(shape(0., 0.), Shape::Column);
+    }
+
+    /// Giving up the branches column falls back to the arrangement without
+    /// them, and cannot make a column into anything.
+    #[test]
+    fn giving_up_the_branches_falls_back_one_step() {
+        assert_eq!(Shape::Full.without_branches(), Shape::Wide);
+        assert_eq!(Shape::Wide.without_branches(), Shape::Wide);
+        assert_eq!(Shape::Column.without_branches(), Shape::Column);
     }
 }

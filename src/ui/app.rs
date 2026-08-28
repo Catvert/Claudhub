@@ -626,9 +626,13 @@ pub struct ClaudhubApp {
     /// The branch picker's surface, kept from one opening to the next: it holds
     /// the filter field, whose `InputState` may not be rebuilt at every frame.
     pub(super) branch_picker: Entity<crate::ui::branch_picker::BranchPicker>,
-    /// The same surface, as a tool window — see `ClaudhubApp::render_branches`.
-    /// A second instance and not the same one: the popover empties its filter
-    /// every time it opens, and a zone one leaves open must not.
+    /// The same surface as a column of the history — see
+    /// `ClaudhubApp::render_history_branches`.
+    ///
+    /// A **second instance** and not the same one: the popover empties its
+    /// filter every time it opens, which is right for a surface one calls up
+    /// and wrong for a column one leaves open, and the two would otherwise
+    /// fight over the step being shown.
     pub(super) branches_dock: Entity<crate::ui::branch_picker::BranchPicker>,
     /// The worktree picker's surface, kept for its filter field's sake.
     pub(super) worktree_picker: Entity<crate::ui::worktree_picker::WorktreePicker>,
@@ -1083,6 +1087,13 @@ pub struct ClaudhubApp {
     pub(super) motions: HashMap<gpui::SharedString, crate::ui::motion::ScrollMotion>,
     /// The split between the graph and the chosen commit's file list, stacked.
     pub(super) history_split: Entity<gpui_component::resizable::ResizableState>,
+    /// The split between the branches and everything else, in a zone wide
+    /// enough for three columns.
+    ///
+    /// **Nested and not a third slot** of the split below: dragging the
+    /// branches wider would otherwise move the graph's divider with it, and
+    /// each state stays a pair one can reason about.
+    pub(super) history_split_branches: Entity<gpui_component::resizable::ResizableState>,
     /// And the same split laid across, in a zone wide enough for it.
     ///
     /// **A second state and not the same one**: what a resizable keeps is the
@@ -1390,6 +1401,8 @@ impl ClaudhubApp {
             diff_search: crate::ui::find::DiffSearch::default(),
             history_split: cx.new(|_| gpui_component::resizable::ResizableState::default()),
             history_split_side: cx.new(|_| gpui_component::resizable::ResizableState::default()),
+            history_split_branches: cx
+                .new(|_| gpui_component::resizable::ResizableState::default()),
             flight: crate::ui::inflight::InFlight::default(),
             settings_page: Default::default(),
             settings_epoch: 0,

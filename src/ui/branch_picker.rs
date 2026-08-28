@@ -1125,24 +1125,6 @@ impl ClaudhubApp {
                 .p_0(),
         )
     }
-
-    /// The branches, as a tool window.
-    ///
-    /// The same surface as the top bar's popover, painted in a zone: one list,
-    /// one set of gestures, and nothing here that the picker does not already
-    /// know how to do — see `branch_picker::Mode`.
-    ///
-    /// A **second instance**, and deliberately: the popover empties its filter
-    /// every time it opens, which is right for a surface one calls up and wrong
-    /// for a zone one leaves open, and the two would otherwise fight over the
-    /// step being shown.
-    pub(super) fn render_branches(
-        &mut self,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        self.branches_dock.clone()
-    }
 }
 
 #[cfg(test)]
