@@ -14,7 +14,14 @@ use alacritty_terminal::term::TermMode;
 use gpui::Keystroke;
 
 /// Returns the bytes to write to the pty, or `None` if the keystroke has no
-/// business there (a dead key, a lone modifier, a Claudhub shortcut).
+/// business there (plain text — which travels through the input handler —,
+/// a dead key, a lone modifier, a Claudhub shortcut).
+///
+/// The caller must **consume** the keystroke when bytes come back, and
+/// **propagate** it otherwise: on every platform, a propagated keystroke is
+/// what makes the platform hand the produced text to the input handler
+/// (Windows only emits its `WM_CHAR` for an unconsumed keydown), and a
+/// consumed one is what keeps the same text from arriving twice.
 pub fn key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
     let m = &keystroke.modifiers;
     let key = keystroke.key.as_str();
@@ -101,6 +108,17 @@ pub fn key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
 
         _ => {
             if m.control {
+                // AltGr reaches gpui as Ctrl+Alt on Windows. When the layout
+                // turned the combination into a character — `@` on a Belgian
+                // AltGr+2 — the keystroke is text, and text goes through the
+                // input handler (below); a control byte computed from the
+                // *base* key (`é`) would eat it, or worse, send a control
+                // character the user never asked for. Linux is untouched:
+                // AltGr carries no modifiers there, and a real Ctrl+Alt+letter
+                // has no key_char on either platform.
+                if m.alt && keystroke.key_char.is_some() {
+                    return None;
+                }
                 return control_byte(key).map(|b| {
                     let mut bytes = vec![b];
                     if m.alt {
@@ -109,23 +127,27 @@ pub fn key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
                     bytes
                 });
             }
-            // The ordinary case: the character the keyboard layout actually
-            // produced, accents and non-Latin layouts included. When there is
-            // none, `key` is NOT a substitute: during dead-key composition
-            // (the Belgian ^, ¨, ´…) gpui still delivers a KeyDown with no
-            // key_char, and `key` is then the character *guessed from the US
-            // layout* of the physical key — `[` for the Belgian circumflex.
-            // Falling back on it typed a stray `[` before every ê; the
-            // composed character arrives with the next keystroke, in its
-            // key_char. The one keystroke legitimately without a key_char is
-            // Alt+letter — the platform may withhold the character there —
-            // hence the readline escape prefix stays available from `key`.
-            if let Some(text) = keystroke.key_char.as_deref() {
-                return alt(text.as_bytes().to_vec());
+            // Meta: ESC prefix from the produced character, or from `key`
+            // itself when the platform withheld it (Windows delivers
+            // Alt+letter without a key_char).
+            if m.alt {
+                if let Some(text) = keystroke.key_char.as_deref() {
+                    return alt(text.as_bytes().to_vec());
+                }
+                return (key.is_ascii() && key.chars().count() == 1)
+                    .then(|| alt(key.as_bytes().to_vec()))
+                    .flatten();
             }
-            (m.alt && key.is_ascii() && key.chars().count() == 1)
-                .then(|| alt(key.as_bytes().to_vec()))
-                .flatten()
+            // Plain text does NOT leave here — it reaches the pty through the
+            // view's input handler, the only route that carries what the
+            // keyboard actually composed. On Windows the composed character
+            // (the ê of a dead ^, the @ of AltGr+2) exists *only* in the
+            // WM_CHAR that follows an unconsumed keydown — this keystroke's
+            // key_char is at best the dead key itself, a stray `^` if sent.
+            // On Linux the platform hands a propagated keystroke's key_char
+            // to the same input handler. Emitting it here as well typed
+            // every letter twice.
+            None
         }
     }
 }
@@ -230,15 +252,35 @@ mod tests {
     #[test]
     fn a_dead_key_sends_nothing() {
         // A Belgian ^ while composing: gpui guesses the US-layout character
-        // of the physical key (`[`) and delivers no key_char. Nothing must
-        // reach the pty — the composed ê comes with the next keystroke.
+        // of the physical key (`[`) and delivers no key_char (Linux), or
+        // delivers the dead character itself as key_char (Windows). Nothing
+        // must reach the pty either way — a `^` sent here shows up before
+        // every ê.
         assert_eq!(key_bytes(&stroke("["), TermMode::empty()), None);
+        assert_eq!(key_bytes(&stroke("^->^"), TermMode::empty()), None);
     }
 
     #[test]
-    fn the_composed_character_is_what_goes_out() {
-        // ^ then e: the second keystroke carries ê in its key_char.
-        assert_eq!(bytes("e->ê", TermMode::empty()), "ê".as_bytes());
+    fn plain_text_goes_through_the_input_handler_not_the_keystroke() {
+        // The composed ê, and any plain letter: the keystroke must propagate
+        // untouched so the platform hands the text to the input handler —
+        // emitting it here as well typed every letter twice.
+        assert_eq!(key_bytes(&stroke("e->ê"), TermMode::empty()), None);
+        assert_eq!(key_bytes(&stroke("a->a"), TermMode::empty()), None);
+    }
+
+    #[test]
+    fn altgr_is_text_not_a_control_sequence() {
+        // Windows reports AltGr as Ctrl+Alt, with the produced character in
+        // key_char and the *base* key in key. The `@` travels as text (input
+        // handler); a control byte derived from the base key must not go out —
+        // on the Belgian dead-^ key, AltGr+^ produces `[`, and the base key
+        // would have sent 0x1e.
+        assert_eq!(key_bytes(&stroke("ctrl-alt-é->@"), TermMode::empty()), None);
+        assert_eq!(key_bytes(&stroke("ctrl-alt-^->["), TermMode::empty()), None);
+        // A real Ctrl+Alt+letter has no key_char, and stays readline's ESC
+        // plus control byte.
+        assert_eq!(bytes("alt-ctrl-a", TermMode::empty()), vec![0x1b, 0x01]);
     }
 
     #[test]

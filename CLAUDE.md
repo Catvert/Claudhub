@@ -650,7 +650,13 @@ fixe ne suffit pas à aligner les colonnes : chaque run est posé **à sa colonn
 en absolu, et un caractère mesuré hors grille reçoit une case à lui. Les lignes
 de l'historique sont numérotées **négativement**. Le redimensionnement attend que
 la main s'arrête, l'attente repartant à chaque changement. Une ligne de terminal
-ne se laisse pas comprimer (`flex_shrink_0`).
+ne se laisse pas comprimer (`flex_shrink_0`). **Le texte nu passe par l'input
+handler, jamais par la frappe** : `key_bytes` ne rend que les touches spéciales
+et les combinaisons, `on_key` consomme ce qu'il rend, et la plateforme livre à
+`TerminalInputHandler` ce que le clavier a composé — le ê d'un ^ mort, le @
+d'AltGr+2, qui sous Windows n'existent que dans le `WM_CHAR` d'un keydown non
+consommé. Rompre un des trois maillons double chaque lettre ou la perd, sans
+erreur.
 
 **La recherche** — `Ctrl+F` cherche dans le panneau où l'on vient de **cliquer**
 (`panels::pane_root`, en capture). Là où la liste est libre de son ordre elle

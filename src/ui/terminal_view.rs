@@ -23,8 +23,9 @@ use std::path::{Path, PathBuf};
 
 use gpui::{
     div, prelude::*, px, App, Bounds, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, Render, ScrollWheelEvent, SharedString, StyledText, TextRun, Window,
+    Focusable, Hsla, InputHandler, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, Render, ScrollWheelEvent, SharedString, StyledText, TextRun,
+    UTF16Selection, Window,
 };
 use gpui_component::{
     dock::{DockPlacement, InsertTarget, PanelId},
@@ -550,6 +551,12 @@ impl TerminalView {
 
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(bytes) = key_bytes(&event.keystroke, self.terminal.mode()) {
+            // Consuming is half of `key_bytes`' contract: a propagated
+            // keystroke is re-delivered as text to the input handler by the
+            // platform (Linux directly, Windows through the WM_CHAR an
+            // unconsumed keydown generates), and a space or an enter handled
+            // here would then arrive twice.
+            cx.stop_propagation();
             self.send_bytes(bytes, cx);
         }
     }
@@ -914,7 +921,14 @@ impl Render for TerminalView {
             move |bounds, window, cx| {
                 entity.update(cx, |view, cx| view.sync_size(bounds, window, cx));
             },
-            |_, _, _, _| {},
+            {
+                // The paint phase is where an input handler registers, and
+                // registering is what routes composed text here — see
+                // `TerminalInputHandler`.
+                let handler = TerminalInputHandler { view: cx.entity() };
+                let focus = self.focus.clone();
+                move |_, _, window, cx| window.handle_input(&focus, handler, cx)
+            },
         )
         .absolute()
         .size_full();
@@ -1027,6 +1041,109 @@ impl Render for TerminalView {
             .children(self.render_cursor(focused, cx))
             // The grid on its way, while the hand is still moving.
             .children(self.render_pending_size(font_size, cx))
+    }
+}
+
+/// The window's text route into the terminal.
+///
+/// Everything the keyboard *composes* arrives here, not as keystrokes: the ê
+/// of a dead ^, the @ a Belgian AltGr+2 produces, what an IME commits. On
+/// Windows a composed character exists only in the `WM_CHAR` that follows an
+/// unconsumed keydown — the keydown itself carries at best the dead key — and
+/// `WM_CHAR` goes to the focused input handler; without one, the character
+/// vanished, and the Ctrl+Alt disguise of AltGr sent nothing at all. Linux
+/// hands a propagated keystroke's text and every IME commit to the same
+/// handler. `key_bytes` therefore emits nothing for plain text, and `on_key`
+/// consumes what it does emit — three pieces of one contract, and breaking any
+/// of them types letters twice or not at all.
+struct TerminalInputHandler {
+    view: Entity<TerminalView>,
+}
+
+impl InputHandler for TerminalInputHandler {
+    fn replace_text_in_range(
+        &mut self,
+        _range: Option<std::ops::Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.view
+            .update(cx, |view, cx| view.send_bytes(text.as_bytes().to_vec(), cx));
+    }
+
+    /// The IME preedit. Nothing is shown and nothing is sent: only committed
+    /// text belongs to the pty, and the candidate window shows the draft.
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range: Option<std::ops::Range<usize>>,
+        _text: &str,
+        _selection: Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) {
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut App) {}
+
+    /// A zero-width caret, so the platform has a selection to anchor the IME
+    /// candidate window to — a terminal has no text document to offer.
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled: bool,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection {
+            range: 0..0,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<std::ops::Range<usize>> {
+        None
+    }
+
+    fn text_for_range(
+        &mut self,
+        _range: std::ops::Range<usize>,
+        _adjusted: &mut Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<String> {
+        None
+    }
+
+    /// Where the IME candidate window opens: the cursor's cell.
+    fn bounds_for_range(
+        &mut self,
+        _range: std::ops::Range<usize>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Bounds<Pixels>> {
+        let view = self.view.read(cx);
+        let cell = view.cell;
+        let mut origin = view.bounds.origin;
+        if let Some(cursor) = view.snapshot.cursor {
+            if let Some(line) = cursor.line {
+                origin.x += cell.width * cursor.column as f32;
+                origin.y += cell.height * line as f32;
+            }
+        }
+        Some(Bounds { origin, size: cell })
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<usize> {
+        None
     }
 }
 
