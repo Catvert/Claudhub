@@ -21,8 +21,6 @@
 
 use std::path::PathBuf;
 
-use crate::ui::workspace::Workspace;
-
 /// How many places are kept. Vim keeps a hundred; the number matters less than
 /// having one, an unbounded trail being a file path per jump for a session that
 /// lasts a day.
@@ -51,16 +49,23 @@ impl Spot {
 
 /// A place one can come back to.
 ///
-/// A screen carries **nothing but its name**: what one comes back to on it —
-/// the issue a plugin has open, the text in the SQL console, the file list of a
-/// review — is that screen's own state, which has not moved while one was away.
-/// Copying it in here would be a second, ageing copy of what is already right.
+/// A document carries **nothing but its name**: what one comes back to in it —
+/// the issue a plugin has open, the file list of a review, the hit one was on —
+/// is that view's own state, which has not moved while one was away. Copying it
+/// in here would be a second, ageing copy of what is already right.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Place {
     /// A file, and where the caret was in it.
     Editor(Spot),
-    /// A screen, and only that.
-    Screen(Workspace),
+    /// A document of the centre, and only that — the diff, a plugin's detail,
+    /// the list of hits one jumped to.
+    ///
+    /// A **document** and not any panel: unfolding a tool window is not a
+    /// movement. Showing the history beside what one is reading does not change
+    /// where one is, and a back arrow that folded a zone would be one nobody
+    /// could predict. See `ClaudhubApp::travel_to_panel`, which asks the tree
+    /// which of the two a name is.
+    Panel(&'static str),
     /// A query in the SQL console, on the connection that answered it.
     ///
     /// The exception the rule above earns: the console's state is exactly what
@@ -86,7 +91,7 @@ impl Place {
     pub fn path(&self) -> Option<&std::path::Path> {
         match self {
             Place::Editor(spot) => Some(&spot.path),
-            Place::Screen(_) | Place::Query { .. } => None,
+            Place::Panel(_) | Place::Query { .. } => None,
         }
     }
 }
@@ -233,16 +238,16 @@ mod tests {
     #[test]
     fn a_screen_and_a_file_share_one_trail() {
         let mut jumps = Jumps::default();
-        jumps.jump(Place::Screen(Workspace::Sentry), spot("app/User.php", 400));
+        jumps.jump(Place::Panel("ClaudhubDiff"), spot("app/User.php", 400));
         assert_eq!(
             jumps.back(spot("app/User.php", 420)),
-            Some(Place::Screen(Workspace::Sentry)),
+            Some(Place::Panel("ClaudhubDiff")),
             "back leaves the editor for the screen one came from"
         );
         // And forward returns to where reading had got to, not to the frame's
         // line: the trail keeps the place one left, in a file as on a screen.
         assert_eq!(
-            jumps.forward(Place::Screen(Workspace::Sentry)),
+            jumps.forward(Place::Panel("ClaudhubDiff")),
             Some(spot("app/User.php", 420))
         );
     }
@@ -252,12 +257,12 @@ mod tests {
     #[test]
     fn the_same_place_twice_running_is_one_place() {
         let mut jumps = Jumps::default();
-        jumps.jump(Place::Screen(Workspace::Sentry), spot("a.php", 0));
+        jumps.jump(Place::Panel("ClaudhubDiff"), spot("a.php", 0));
         // Back to Sentry by hand — nothing recorded — then another frame.
-        jumps.jump(Place::Screen(Workspace::Sentry), spot("b.php", 0));
+        jumps.jump(Place::Panel("ClaudhubDiff"), spot("b.php", 0));
         assert_eq!(
             jumps.back(spot("b.php", 0)),
-            Some(Place::Screen(Workspace::Sentry))
+            Some(Place::Panel("ClaudhubDiff"))
         );
         assert!(!jumps.can_back(), "the screen is on the trail once");
     }

@@ -134,26 +134,29 @@ pub struct OpenConsole {
 
 /// Where the work stood in one checkout.
 ///
-/// **What one had chosen, never what one had obtained**: the screen, the tabs,
-/// the console's connection and the text of its query — no diff, no result
-/// grid, no status. A `SELECT` replayed on arrival is a query against a server
+/// **What one had chosen, never what one had obtained**: the document in
+/// front, the tabs, the console's connection and the text of its query — no
+/// diff, no result grid, no status. A `SELECT` replayed on arrival is a query against a server
 /// nobody asked to reach, and everything else comes back on its own from the
 /// reads the selection already triggers.
 ///
 /// It lives **per worktree** because that is what it describes: the file open in
-/// the editor is one of that checkout's files, and the screen one was on says
+/// the editor is one of that checkout's files, and the view one was reading says
 /// what one was doing *there*. A single global place meant that going to another
-/// project to check one thing and coming back cost the file, the screen and the
+/// project to check one thing and coming back cost the file, the view and the
 /// query — four gestures to get back to a state nobody had left on purpose.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Place {
-    /// The screen being looked at, by `Workspace::key`.
+    /// The document the centre was showing, by its panel name.
     ///
-    /// **Only a screen one works in**: the settings and the multiplexer are
-    /// detours, and coming back to a project should not put one back in the
-    /// detour one took while leaving it. It is the rule `worked_in` follows.
-    pub screen: Option<String>,
+    /// A **document** and not any panel: a tool window sits beside what one is
+    /// doing rather than being it, so which of them were unfolded is the
+    /// window's arrangement — `layout.json`'s business — and not this
+    /// checkout's. A state written before the screens went carries a `screen`
+    /// this no longer reads; `Place` takes unknown keys, so it opens all the
+    /// same, one field short.
+    pub document: Option<String>,
     /// The file that was **on screen**, among the tabs. Kept apart from the
     /// list so that a state written before tabs existed still opens what it
     /// named, and so that reopening knows which tab to bring forward.
@@ -487,7 +490,7 @@ mod tests {
 
     fn a_place() -> Place {
         Place {
-            screen: Some("db".into()),
+            document: Some("ClaudhubConsole".into()),
             editing: Some(OpenFile {
                 worktree: PathBuf::from("/r/wt/a"),
                 path: PathBuf::from("app/Models/User.php"),

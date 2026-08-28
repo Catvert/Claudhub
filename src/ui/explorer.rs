@@ -607,18 +607,14 @@ pub struct Editing {
     /// trips for a state nobody asked about in between: the flag is what makes
     /// the debounce read the latest text once rather than every text in turn.
     pub lsp_pending: bool,
-    /// The tabs showing this file, one per screen that carries an editor, in
-    /// the order of `Workspace::WITH_EDITOR`. It is the dock that draws them,
-    /// and closing one — by the cross, by `Ctrl+W`, by the worktree going away
-    /// — is what takes the file down on every screen at once.
+    /// The tab showing this file. It is the dock that draws it, and closing it
+    /// — by the cross, by `Ctrl+W`, by the worktree going away — is what takes
+    /// the file down.
     ///
-    /// **One per screen, as a terminal has one**: a panel belongs to a single
-    /// dock area at a time, and a file is read on the editing screen *and* in
-    /// the home screen's centre. All of them render the same `input`, and only
-    /// one dock is on screen at a time, so exactly one of them draws in a given
-    /// frame — which is what `FilePanel::render` relies on to say that the
-    /// panel being drawn is the file being read.
-    pub panels: Vec<Entity<crate::ui::panels::FilePanel>>,
+    /// One, as a terminal has one: a panel belongs to a single dock area at a
+    /// time, and a file used to be read on the editing screen *and* in the home
+    /// screen's centre. There is one area now.
+    pub panel: Entity<crate::ui::panels::FilePanel>,
     /// What `HEAD` holds for this file, and what the gutter compares against.
     /// `None` until the answer arrives, and for a file git does not track.
     pub base: Option<String>,
@@ -697,11 +693,15 @@ impl ClaudhubApp {
 
     /// Whether the "pick a file" panel has anything to say.
     ///
-    /// It is the centre of the editing screen only while there is no file: as
-    /// soon as one is open it is a tab of its own, and two tabs saying the same
-    /// thing would be one too many.
-    pub(super) fn empty_editor_visible(&self) -> bool {
+    /// It stands for the centre only while the centre has nothing else: as soon
+    /// as a file, a diff, a query or a hit arrives it is a tab beside them, and
+    /// a tab saying "open a file" among four documents is one of the empty
+    /// rooms the `needed:` rule exists to remove.
+    pub(super) fn empty_centre_visible(&self) -> bool {
         self.panel_visible(crate::ui::panels::EditorPanel::NAME)
+            && !self.diff_on_screen()
+            && !self.db_console_open()
+            && !self.search_preview_open()
             && self
                 .editing_root()
                 .and_then(|root| self.editings.get(&root))
@@ -1176,9 +1176,12 @@ impl ClaudhubApp {
         // Written out rather than imported: this file has a `Place` of its own,
         // which says where a line comes to rest on screen.
         use crate::ui::jumps::Place;
-        use crate::ui::workspace::Workspace;
-        match self.workspace {
-            Workspace::Files => {
+        use crate::ui::panels::*;
+        // The document in front of the centre is where one is. It used to be
+        // the screen, which said the same thing when a screen held one centre.
+        let front = self.front_document(cx);
+        match front.as_deref() {
+            Some(EditorPanel::NAME) => {
                 if let Some(editing) = self.editing() {
                     let offset = editing.input.read(cx).selected_range().start;
                     return Place::Editor(crate::ui::jumps::Spot::new(
@@ -1187,9 +1190,9 @@ impl ClaudhubApp {
                     ));
                 }
             }
-            // A console with nothing sent yet is the screen and no more: there
-            // is no result to come back to.
-            Workspace::Db => {
+            // A console with nothing sent yet is the view and no more: there is
+            // no result to come back to.
+            Some(ConsolePanel::NAME) => {
                 if let (Some(connection), Some(sql)) =
                     (self.query.connection.as_ref(), self.query.sent.clone())
                 {
@@ -1202,7 +1205,25 @@ impl ClaudhubApp {
             }
             _ => {}
         }
-        Place::Screen(self.workspace)
+        // A name the registry knows, so that a place can be replayed: the trail
+        // holds `&'static str`, and what a running tree gives back is a
+        // `String`.
+        front
+            .as_deref()
+            .and_then(crate::ui::panels::registered_name)
+            .map(Place::Panel)
+            .unwrap_or(Place::Panel(DiffPanel::NAME))
+    }
+
+    /// The document the centre is showing — a file's own tab included.
+    ///
+    /// `None` when the centre shows nothing at all, which a fresh window with
+    /// every conditional view still empty is entitled to.
+    pub(super) fn front_document(&self, cx: &App) -> Option<String> {
+        self.seats(cx)
+            .into_iter()
+            .find(|seat| seat.side.is_none() && seat.shown)
+            .map(|seat| seat.panel)
     }
 
     /// Goes to a place and writes the step down.
@@ -1258,10 +1279,9 @@ impl ClaudhubApp {
             return;
         };
         match place {
-            // A screen is put back by going to it: what it shows never left.
-            crate::ui::jumps::Place::Screen(workspace) => {
-                self.enter_workspace(workspace, window, cx)
-            }
+            // A document is put back by bringing it forward: what it shows
+            // never left.
+            crate::ui::jumps::Place::Panel(name) => self.reveal_panel(name, window, cx),
             crate::ui::jumps::Place::Query {
                 connection,
                 database,
@@ -1274,7 +1294,7 @@ impl ClaudhubApp {
                     .editing()
                     .is_some_and(|editing| editing.path == spot.path)
                 {
-                    self.reveal(crate::ui::workspace::Workspace::Files, window, cx);
+                    self.reveal_panel(crate::ui::panels::EditorPanel::NAME, window, cx);
                     self.land(&Landing::Offset(spot.offset), window, cx);
                 } else {
                     // No origin: the step is already written in the trail, and
@@ -1443,27 +1463,27 @@ impl ClaudhubApp {
         input: &Entity<EditorState>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> (Option<usize>, Vec<Entity<crate::ui::panels::FilePanel>>) {
+    ) -> (Option<usize>, Entity<crate::ui::panels::FilePanel>) {
         let reopened = self
             .editings
             .get(worktree)
             .and_then(|tabs| tabs.index_of(path));
         let asked = self.asked_for(worktree, path).is_some();
-        let panels = match reopened {
+        let panel = match reopened {
             Some(ix) => {
-                let panels = self.editings[worktree].open[ix].panels.clone();
-                for panel in &panels {
+                let panel = self.editings[worktree].open[ix].panel.clone();
+                {
                     let fresh = input.clone();
                     panel.update(cx, |panel, cx| panel.rebind(fresh, cx));
                     if asked {
-                        crate::ui::panels::FilePanel::activate(panel, window, cx);
+                        crate::ui::panels::FilePanel::activate(&panel, window, cx);
                     }
                 }
-                panels
+                panel
             }
             None => self.open_file_tab(worktree, path, input.clone(), window, cx),
         };
-        (reopened, panels)
+        (reopened, panel)
     }
 
     /// Files a freshly built tab, and makes it the one being read.
@@ -1525,8 +1545,7 @@ impl ClaudhubApp {
         // one this worktree was left in: there is no gesture then, and the
         // screen that comes back is the place's own, set a step earlier.
         if !restored {
-            self.reveal(crate::ui::workspace::Workspace::Files, window, cx);
-            self.set_panel_visible(crate::ui::panels::EditorPanel::NAME, true, cx);
+            self.reveal_panel(crate::ui::panels::EditorPanel::NAME, window, cx);
         } else {
             // The next remembered tab, one at a time: see `read_next_file`.
             self.continue_restore(window, cx);
@@ -1609,7 +1628,7 @@ impl ClaudhubApp {
         self.close_previous_document(&worktree, &path);
         let host = crate::ui::surface::VimHost::new(&input, cx);
         let asked = self.asked_for(&worktree, &path).is_some();
-        let (reopened, panels) = self.tab_panel(&worktree, &path, &input, window, cx);
+        let (reopened, panel) = self.tab_panel(&worktree, &path, &input, window, cx);
         // The base a reread had is kept as a stand-in while the fresh one is on
         // its way: saving does not move `HEAD`, so it is almost always the same
         // answer, and dropping it would blank the gutter on every save.
@@ -1625,7 +1644,7 @@ impl ClaudhubApp {
             reveal_at: None,
             reveal_tries: 0,
             host,
-            panels,
+            panel,
             base,
             base_asked: false,
             hunks: Rc::default(),
@@ -1975,10 +1994,9 @@ impl ClaudhubApp {
     /// another. A bar of our own would have been a second chrome painted under
     /// the one the window already has.
     ///
-    /// One panel **per screen**, as a terminal has one, and for the same
-    /// reason: a panel belongs to a single dock area at a time, and a file is
-    /// read both on the editing screen and in the home screen's centre. There
-    /// are two of them, not eight — see `Workspace::WITH_EDITOR`.
+    /// One panel, as a terminal has one. A file used to have a face on each
+    /// screen that read files, a panel belonging to a single area at a time;
+    /// there is one area now.
     pub(super) fn open_file_tab(
         &mut self,
         worktree: &Path,
@@ -1986,84 +2004,65 @@ impl ClaudhubApp {
         input: Entity<EditorState>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Vec<Entity<crate::ui::panels::FilePanel>> {
+    ) -> Entity<crate::ui::panels::FilePanel> {
         let app = cx.entity();
         // Handed over rather than read: the panel is built inside an `update`
         // on the application, so it cannot read the entity to find out for
         // itself. The observation set up in its constructor takes over.
         let visible = self.editing_root().as_deref() == Some(worktree)
             && self.panel_visible(crate::ui::panels::EditorPanel::NAME);
-        let panels: Vec<Entity<crate::ui::panels::FilePanel>> =
-            crate::ui::workspace::Workspace::WITH_EDITOR
-                .iter()
-                .map(|_| {
-                    let (app, input) = (app.clone(), input.clone());
-                    cx.new(|cx| {
-                        crate::ui::panels::FilePanel::new(
-                            &app,
-                            worktree.to_path_buf(),
-                            path.to_path_buf(),
-                            input,
-                            visible,
-                            cx,
-                        )
-                    })
-                })
-                .collect();
+        let panel = {
+            let (app, input) = (app.clone(), input.clone());
+            cx.new(|cx| {
+                crate::ui::panels::FilePanel::new(
+                    &app,
+                    worktree.to_path_buf(),
+                    path.to_path_buf(),
+                    input,
+                    visible,
+                    cx,
+                )
+            })
+        };
         // The tab group the new one joins is the one holding the files already
-        // open **on that screen**; failing that, `Anywhere` lands it in the
-        // centre — where the editor panel is, which is precisely the group
-        // wanted. The sibling is read per screen: the same file's two faces sit
-        // in two docks, and the node of one means nothing in the other.
-        let previous = self
+        // open; failing that, `Anywhere` lands it in the centre — where the
+        // empty-centre panel is, which is precisely the group wanted.
+        let sibling = self
             .editings
             .get(worktree)
             .and_then(|tabs| tabs.open.last())
-            .map(|editing| editing.panels.clone())
-            .unwrap_or_default();
-        for (rank, workspace) in crate::ui::workspace::Workspace::WITH_EDITOR
-            .into_iter()
-            .enumerate()
-        {
-            let Some(panel) = panels.get(rank).cloned() else {
-                continue;
-            };
-            let sibling = previous.get(rank).cloned();
-            let Some(dock) = self.docks.get(&workspace).cloned() else {
-                continue;
-            };
-            dock.update(cx, |dock, cx| {
-                crate::ui::panels::dock_panel_at(
-                    dock,
-                    gpui_component::dock::panel_handle(panel.clone()),
-                    gpui_component::dock::DockPlacement::Center,
-                    None,
-                    |dock| {
-                        dock.layout(gpui_component::dock::DockPlacement::Center)
-                            .and_then(|layout| {
-                                layout.find_panel_node(gpui_component::dock::PanelId::from(
-                                    sibling?.entity_id(),
-                                ))
-                            })
-                            .map(|node| gpui_component::dock::InsertTarget::Tabs {
-                                node,
-                                ix: None,
-                                // The file one has just opened is the file one
-                                // reads.
-                                activate: true,
-                            })
-                    },
-                    window,
-                    cx,
-                );
-            });
-            // The file one has just opened is the file one reads. Said here as
-            // well as in the insert target: with no sibling there is no move to
-            // carry the flag, and the group would go on showing whatever tab it
-            // had.
-            crate::ui::panels::FilePanel::activate(&panel, window, cx);
-        }
-        panels
+            .map(|editing| editing.panel.clone());
+        let dock = self.dock.clone();
+        dock.update(cx, |dock, cx| {
+            crate::ui::panels::dock_panel_at(
+                dock,
+                gpui_component::dock::panel_handle(panel.clone()),
+                gpui_component::dock::DockPlacement::Center,
+                None,
+                |dock| {
+                    dock.layout(gpui_component::dock::DockPlacement::Center)
+                        .and_then(|layout| {
+                            layout.find_panel_node(gpui_component::dock::PanelId::from(
+                                sibling?.entity_id(),
+                            ))
+                        })
+                        .map(|node| gpui_component::dock::InsertTarget::Tabs {
+                            node,
+                            ix: None,
+                            // The file one has just opened is the file one
+                            // reads.
+                            activate: true,
+                        })
+                },
+                window,
+                cx,
+            );
+        });
+        // The file one has just opened is the file one reads. Said here as well
+        // as in the insert target: with no sibling there is no move to carry
+        // the flag, and the group would go on showing whatever tab it had.
+        crate::ui::panels::FilePanel::activate(&panel, window, cx);
+        panel
     }
 
     /// Makes an open file the tab on screen.
@@ -2136,23 +2135,12 @@ impl ClaudhubApp {
         if empty {
             self.editings.remove(&worktree);
         }
-        // Every face goes, and it is the same rule as a terminal's: they are
-        // two views of one file, and leaving one behind would be a tab pointing
-        // at an editor nothing holds any more. `close_file` is idempotent —
-        // removing a panel makes the dock call `on_removed`, which comes back
-        // here with nothing left to find.
-        for (rank, workspace) in crate::ui::workspace::Workspace::WITH_EDITOR
-            .into_iter()
-            .enumerate()
-        {
-            let Some(panel) = editing.panels.get(rank).cloned() else {
-                continue;
-            };
-            let Some(dock) = self.docks.get(&workspace).cloned() else {
-                continue;
-            };
-            dock.update(cx, |dock, cx| dock.remove_panel(panel, window, cx));
-        }
+        // `close_file` is idempotent — removing the panel makes the dock call
+        // `on_removed`, which comes back here with nothing left to find.
+        let dock = self.dock.clone();
+        dock.update(cx, |dock, cx| {
+            dock.remove_panel(editing.panel.clone(), window, cx)
+        });
         self.lsp_editor_closed(editing.worktree, editing.path);
         // The focus was on a node nobody renders any more, and such a handle
         // resolves no binding: every shortcut would stay dead until a click put

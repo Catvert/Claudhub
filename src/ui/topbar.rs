@@ -249,10 +249,6 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active = self.active.clone();
-        // One list, read twice — by what the group shows and by what a click
-        // means. Two lists would drift at the first addition, and the drift is
-        // silent: the button would open the screen next door.
-        let aside = crate::ui::workspace::Workspace::ASIDE;
         // The top bar **is** the window's title bar.
         //
         // `TitleBar::title_bar_options()` asks the platform not to draw one: on
@@ -346,83 +342,23 @@ impl ClaudhubApp {
                             // painted only where there is a justfile with a recipe in
                             // it.
                             .children(self.render_just(cx))
-                            // The two screens one does not work in, at the far right
-                            // of the title bar and in a group of their own: the
-                            // multiplexer is where one goes to see what is running
-                            // everywhere at once before leaving for the worktree it
-                            // pointed at, and the settings are where one changes how
-                            // the rest behaves. Neither is work, which is why they are
-                            // out of the screen picker — that row is the row of the
-                            // work — and a group is what says they are the same kind of
-                            // detour rather than two loose icons. They stay screens:
-                            // `Alt+6` and `Alt+7` still open them.
+                            // The gear, at the far right of the title bar. It
+                            // needs no gloss: it is where an application's
+                            // settings are on every one of them, and a word
+                            // beside it would only take width from the pickers.
                             .child(
-                                ButtonGroup::new("aside-nav")
-                                    .compact()
+                                Button::new("settings")
+                                    .icon(icon("settings"))
+                                    .tooltip(tr!("workspace-settings"))
+                                    .ghost()
                                     .xsmall()
-                                    .children(aside.map(|workspace| {
-                                        Button::new(("aside", workspace as usize))
-                                            .icon(icon(workspace.icon()))
-                                            .tooltip(tr!(workspace.label()))
-                                            // The name is written, as in the screen
-                                            // picker: an icon alone is a rebus one
-                                            // learns rather than reads. **Except the
-                                            // gear**, the one icon of this window that
-                                            // needs no gloss: it is where an
-                                            // application's settings are on every one of
-                                            // them, and the word beside it only takes
-                                            // width from the pickers.
-                                            .when(
-                                                workspace
-                                                    != crate::ui::workspace::Workspace::Settings,
-                                                |button| button.label(tr!(workspace.label())),
-                                            )
-                                            // Solid against outline, as in the screen
-                                            // picker: the "selected" state of an
-                                            // outlined group is only a slightly lighter
-                                            // background, invisible on half the themes.
-                                            .map(|button| {
-                                                if self.workspace == workspace {
-                                                    button.primary()
-                                                } else {
-                                                    button.outline()
-                                                }
-                                            })
-                                    }))
-                                    .on_click(cx.listener(
-                                        move |this, selected: &Vec<usize>, window, cx| {
-                                            let Some(workspace) = selected
-                                                .first()
-                                                .and_then(|ix| aside.get(*ix).copied())
-                                            else {
-                                                return;
-                                            };
-                                            // **The multiplexer button comes back.**
-                                            // It is the one screen of the two that
-                                            // answers a question rather than holding a
-                                            // form — which has finished, what is
-                                            // running — so pressing it is a glance, and
-                                            // a glance one takes back. Pressed a second
-                                            // time it returns to the last screen one
-                                            // **worked** in, which is where "work here"
-                                            // already sends a terminal: the two gestures
-                                            // leave the grid the same way. The gear does
-                                            // not, its screen being one where one stays
-                                            // and does something.
-                                            if this.workspace == workspace
-                                                && workspace
-                                                    == crate::ui::workspace::Workspace::Multiplexer
-                                            {
-                                                this.travel_to(this.worked_in, window, cx);
-                                                return;
-                                            }
-                                            // The step is written down, as in the
-                                            // screen picker: a detour to the settings
-                                            // or to the multiplexer is exactly what one
-                                            // wants `Ctrl+O` to undo.
-                                            this.travel_to(workspace, window, cx);
-                                        },
-                                    )),
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.reveal_panel(
+                                            crate::ui::panels::SettingsPanel::NAME,
+                                            window,
+                                            cx,
+                                        );
+                                    })),
                             ),
                     ),
             )
@@ -558,32 +494,25 @@ impl ClaudhubApp {
                         for_shortcuts.update(cx, |this, cx| this.open_shortcuts(window, cx));
                     }),
                 )
-                // Hidden views have no tab left: this is the only place to call
-                // them back from, and therefore the only place that says what the
-                // window is not showing.
-                // The views of **this screen**, and not the eleven of the window:
-                // hiding the SQL console from the review would make nothing
-                // visibly change, and an entry with no effect reads as a broken
-                // entry.
-                .submenu(tr!("menu-views"), window, cx, move |menu, _window, cx| {
-                    let workspace = for_views.read(cx).workspace;
-                    let menu = workspace.views().iter().fold(menu, |menu, &(name, title)| {
-                        menu.item(view_toggle(for_views.clone(), name, title))
+                // A hidden view keeps its rail button, muted, which is where
+                // one calls it back from. This says the same thing in words,
+                // for the views that have no button — the documents.
+                //
+                // One list now, and not one per screen: there is one window.
+                .submenu(tr!("menu-views"), window, cx, move |menu, _window, _cx| {
+                    let menu = crate::ui::rails::TOOLS.iter().fold(menu, |menu, tool| {
+                        menu.item(view_toggle(for_views.clone(), tool.panel, tool.title))
                     });
-                    // The plugins of **this screen**, after the built-in views:
-                    // a hidden panel has no tab left, so this submenu is the
-                    // only place that says what the window is not showing.
-                    crate::ui::plugin_view::on_screen(workspace.key()).fold(
-                        menu,
-                        |menu, manifest| {
-                            // Each **panel**, not each plugin: a master/detail
-                            // plugin has two tabs, and hiding one is a gesture
-                            // one has to be able to undo.
+                    // The plugins after the built-in views. Each **panel**, not
+                    // each plugin: a master/detail plugin has two tabs, and
+                    // hiding one is a gesture one has to be able to undo.
+                    crate::ui::plugin_view::manifests()
+                        .iter()
+                        .fold(menu, |menu, manifest| {
                             manifest.panels.iter().fold(menu, |menu, panel| {
                                 menu.item(plugin_toggle(for_views.clone(), panel.name))
                             })
-                        },
-                    )
+                        })
                 })
                 .item(PopupMenuItem::new(tr!("menu-reset-layout")).on_click(
                     move |_, window, cx| {

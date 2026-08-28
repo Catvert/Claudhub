@@ -56,44 +56,23 @@ use crate::ui::terminal_view::OpenTerminal;
 // 23: the tests panel joined the review's bottom third, the home's column and
 // the editing screen's sidebar.
 // 24: the tests screen arrived, and the run panel with it.
-const LAYOUT_VERSION: usize = 24;
+// 25: the screens went. One area instead of nine, the panels shared out
+// between three tool zones and a centre of documents, and the file's shape
+// went with them — a table keyed by screen names builds nothing here.
+const LAYOUT_VERSION: usize = 25;
 
-/// The saved layouts, one per screen.
+/// The window's saved arrangement.
 ///
-/// **One file and not one per screen**: it is *one* window's state, and reading it in
-/// pieces would serve nobody — least of all whoever opens it to understand why
-/// their screen is crooked. The version wraps the whole thing: screens can
-/// appear, disappear and be renamed, and a map of unknown names builds nothing.
+/// One area now, so one state. The version wraps it: panels appear, disappear
+/// and are renamed, and a tree of unknown names builds nothing.
+///
+/// **This version is the gate**, and it is the only one consulted on reading.
+/// The number handed to `DockSkin::dock_area` is written into the area's own
+/// dump so the blob describes itself, and nothing ever compares it.
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct Layouts {
     version: Option<usize>,
-    /// The screen being looked at when closing.
-    ///
-    /// It lives here and not in the settings: it is a window's state, just like
-    /// the panels' places, and not a preference written by hand.
-    current: Option<String>,
-    workspaces: std::collections::BTreeMap<String, gpui_component::dock::DockAreaState>,
-}
-
-/// The screen the window opens on, filed for the panels built a moment later.
-///
-/// A panel's visibility is **cached**: `BasePanel::visible` is asked for while
-/// the layout is being built, so in the middle of `ClaudhubApp::new`, where
-/// reading the application entity is what gpui refuses with a panic — hence
-/// `panels::visible_at_startup`, which reads the settings instead. That is
-/// enough for the flag, and not for the home screen's `needed:` rule, which
-/// asks a question about the screen on show.
-///
-/// It is known before any panel exists — it is the first thing `build_docks`
-/// reads — and it cannot change before the first frame, so a `OnceLock` set
-/// there answers it. Without it the home screen's centre opens on its four
-/// tabs and drops them on the first notify: a flash, at every start.
-static OPENS_ON: std::sync::OnceLock<crate::ui::workspace::Workspace> = std::sync::OnceLock::new();
-
-/// The screen the window opens on — see `OPENS_ON`. The default until
-/// `build_docks` has read the file, which is the same answer it would give.
-pub(super) fn opens_on() -> crate::ui::workspace::Workspace {
-    OPENS_ON.get().copied().unwrap_or_default()
+    area: Option<gpui_component::dock::DockAreaState>,
 }
 
 fn load_layouts() -> Layouts {
@@ -230,6 +209,24 @@ fn prune_dock(dock: &mut Option<gpui_component::dock::DockState>, doomed: &impl 
     }
     *dock = Some(gpui_component::dock::DockState::new(
         tree, placement, size, open,
+    ));
+}
+
+/// `open_on`, for one of the three side zones — taken apart and put back the
+/// way `prune_dock` does, and for the same reason.
+fn open_dock_on(dock: &mut Option<gpui_component::dock::DockState>, name: &str) {
+    let Some(zone) = dock.as_ref() else {
+        return;
+    };
+    let mut tree = zone.panel().clone();
+    if !open_on(&mut tree, name) {
+        return;
+    }
+    *dock = Some(gpui_component::dock::DockState::new(
+        tree,
+        zone.placement(),
+        zone.size(),
+        zone.open(),
     ));
 }
 
@@ -939,37 +936,31 @@ pub struct ClaudhubApp {
     /// answer find the field it belongs to again — as it lets the button know
     /// which of the two panels is spinning.
     pub(super) suggesting_message: Option<PathBuf>,
-    /// The current screen. See `ui::workspace`.
-    pub(super) workspace: crate::ui::workspace::Workspace,
-    /// The last screen one **worked** in, which is where the multiplexer sends
-    /// a terminal back to.
+    /// The window's dock: three tool zones around a centre of documents.
     ///
-    /// Neither the settings nor the multiplexer are ever recorded here: they
-    /// are the two screens one only looks at, and "open this terminal where I
-    /// was" has to answer with a screen one was doing something on. It is not
-    /// persisted — the screen one comes back to is the arriving worktree's own
-    /// (`store::Place`), or `layout.json`'s while none has been selected.
-    pub(super) worked_in: crate::ui::workspace::Workspace,
-    /// The current screen's dock — the one the root view shows.
-    ///
-    /// A copy of the `docks` entry, and not an index: everything that talks to
-    /// the dock — collapsing the left zone, the zoom, the width the navigation
-    /// bar reads — addresses the one being looked at, and finding it by a key
-    /// every time would only add one more chance to get it wrong.
+    /// One and not nine. A screen used to be an area of its own, which is why a
+    /// terminal needed one panel per screen and a file two; there is one place
+    /// for each of them now. See `ui::dock_layout`.
     pub(super) dock: Entity<DockArea>,
-    /// The docks, one per screen.
-    ///
-    /// They are all **built at startup** rather than on first visit: a dock is
-    /// built with `window`, and doing it at render time would amount to creating
-    /// entities in the middle of a frame. The cost is a score of panels, which
-    /// carry no state.
-    pub(super) docks: HashMap<crate::ui::workspace::Workspace, Entity<DockArea>>,
     /// The dock's skin, kept alive: it is what draws the tabs, and it is through
     /// it that the presentation settings pass.
     #[allow(dead_code)]
     dock_skin: std::rc::Rc<DockSkin>,
     /// True when a deferred write of the layout is already scheduled.
     layout_save_scheduled: bool,
+    /// The edges the zen fold put away, to be given back on the way out.
+    ///
+    /// Empty when one is not in zen. It is not persisted: a window reopening in
+    /// zen with no memory of what it hid would be a window one has to rebuild.
+    pub(super) zen_folded: Vec<crate::ui::rails::Side>,
+    /// The terminals show every worktree's, not only the one being looked at.
+    ///
+    /// What the multiplexer used to be a screen for. It is not a preference but
+    /// where one stands — "which of the agents I left running has finished" —
+    /// so it lives in the store beside the rest of it. The panels are not
+    /// rebuilt when it turns over: their visibility is observed, and the tab
+    /// says which project it belongs to for as long as it holds.
+    pub(super) terminals_everywhere: bool,
     /// The views the user has hidden, by panel name.
     ///
     /// A set and not a flag per panel: it is `Panel::visible` that makes a view
@@ -1118,12 +1109,10 @@ struct Console {
     db_split: Entity<gpui_component::resizable::ResizableState>,
 }
 
-/// The screens' docks, and which of them was being looked at.
+/// The window's dock, and what its building found out.
 struct Docks {
-    docks: HashMap<crate::ui::workspace::Workspace, Entity<DockArea>>,
     dock: Entity<DockArea>,
     dock_skin: std::rc::Rc<DockSkin>,
-    workspace: crate::ui::workspace::Workspace,
     /// Whether a layout had to be built from scratch, and therefore has to be
     /// written at once: without that, the file keeps an earlier version's until
     /// the first move.
@@ -1212,17 +1201,15 @@ impl ClaudhubApp {
         })
         .detach();
 
-        // The docks and their panels. The panels carry no state: they delegate
-        // to this entity, of which they only keep a weak reference so as not to
+        // The dock and its panels. The panels carry no state: they delegate to
+        // this entity, of which they only keep a weak reference so as not to
         // form a cycle.
         crate::ui::panels::register(&cx.entity(), cx);
         let Docks {
-            docks,
             dock,
             dock_skin,
-            workspace,
             needs_save: app_needs_layout_save,
-        } = Self::build_docks(window, cx);
+        } = Self::build_dock(window, cx);
 
         let branch_picker = crate::ui::branch_picker::BranchPicker::new(window, cx);
         let worktree_picker = crate::ui::worktree_picker::WorktreePicker::new(window, cx);
@@ -1335,12 +1322,11 @@ impl ClaudhubApp {
             pending_status: std::collections::HashSet::new(),
             last_auto_fetch: None,
             suggesting_message: None,
-            workspace,
-            worked_in: crate::ui::workspace::Workspace::default(),
             dock,
-            docks,
             dock_skin,
             layout_save_scheduled: false,
+            terminals_everywhere: false,
+            zen_folded: Vec::new(),
             hidden_panels: Settings::global(cx).hidden_panels.iter().cloned().collect(),
             summaries: HashMap::new(),
             agents: crate::agent::Tracker::default(),
@@ -1391,9 +1377,6 @@ impl ClaudhubApp {
         app.watch_vault_inputs(window, cx);
         app.watch_query_input(cx);
 
-        // A layout remembering a screen whose plugin is no longer configured
-        // would open on a room with nothing in it.
-        app.leave_empty_workspace(window, cx);
         app.open_remembered_repositories(remote, cx);
         // Starting the server waits for the window to be mounted: a dialog needs
         // `Root`'s layers, which are only installed on the first render.
@@ -1507,117 +1490,86 @@ impl ClaudhubApp {
     /// The four are built at startup and not on first visit: a dock is built
     /// with `window`, and doing it at render time would amount to creating
     /// entities in the middle of a frame.
-    fn build_docks(window: &mut Window, cx: &mut Context<Self>) -> Docks {
-        let this = cx.entity();
+    fn build_dock(window: &mut Window, cx: &mut Context<Self>) -> Docks {
         // A saved layout takes precedence over the default one. The whole file
         // is discarded if its version differs: the panels may have changed name,
         // and rebuilding from unknown names would give a window full of empty
         // frames.
         let saved = load_layouts();
-        // Filed before a single panel is built: `visible_at_startup` needs it,
-        // and it is built into every one of them below.
-        let _ = OPENS_ON.set(
-            saved
-                .current
-                .as_deref()
-                .and_then(crate::ui::workspace::Workspace::from_key)
-                .unwrap_or_default(),
+        // **Through `DockSkin` and not through `DockArea::new`.** Since the
+        // layout engine moved into `gpui-base`, an area built without a skin
+        // docks, drags and persists perfectly well — but draws **no chrome** at
+        // all: no tab bar, no title, no frame. The panels then stack bare, which
+        // reads as a broken window without a single error being reported.
+        let (area, skin) = DockSkin::dock_area(
+            crate::ui::dock_layout::DOCK_ID,
+            Some(LAYOUT_VERSION),
+            window,
+            cx,
         );
-        let mut needs_save = false;
-        let mut docks = HashMap::new();
-        let mut dock_skin = None;
-        for workspace in crate::ui::workspace::Workspace::ALL {
-            // **Through `DockSkin` and not through `DockArea::new`.** Since the
-            // layout engine moved into `gpui-base`, an area built without a skin
-            // docks, drags and persists perfectly well — but draws **no chrome**
-            // at all: no tab bar, no title, no frame. The panels then stack bare,
-            // which reads as a broken window without a single error being
-            // reported.
-            let (area, skin) =
-                DockSkin::dock_area(workspace.dock_id(), Some(LAYOUT_VERSION), window, cx);
-            // `Segmented`: the rounded pill in a rail, in place of the bordered
-            // rectangle whose radius is a hard-coded zero. It is our commit on
-            // the fork that exposes this setting.
-            skin.set_tab_variant(gpui_component::tab::TabVariant::Segmented, cx);
-            // A tab bar everywhere, including on groups with a single panel: the
-            // default (`Auto`) renders a flat title there, and "Branches" or
-            // "Terminals" would not have the same band as their neighbours — two
-            // chromes for one window.
-            skin.set_panel_style(gpui_component::dock::PanelStyle::TabBar, cx);
-            // **No collapse affordance in the tab bars.** The dock draws, in
-            // the tab bar of the group nearest each edge, a button that folds
-            // the neighbouring zone away — and it is the one piece of chrome
-            // that says something false here: our panels are not fixed
-            // furniture on the side of a screen, they are tabs one drags
-            // anywhere, so "collapse the left dock" names a zone the user never
-            // arranged. What it hid came back only through a button on a
-            // different group's bar. Closing a view is dragging it out or
-            // hiding it from the `…` menu, both of which say what they do.
-            skin.set_toggle_button_visible(false, cx);
+        // `Segmented`: the rounded pill in a rail, in place of the bordered
+        // rectangle whose radius is a hard-coded zero. It is our commit on the
+        // fork that exposes this setting.
+        skin.set_tab_variant(gpui_component::tab::TabVariant::Segmented, cx);
+        // A tab bar everywhere, including on groups with a single panel: the
+        // default (`Auto`) renders a flat title there, and "Branches" or
+        // "Terminals" would not have the same band as their neighbours — two
+        // chromes for one window.
+        skin.set_panel_style(gpui_component::dock::PanelStyle::TabBar, cx);
+        // **No collapse affordance in the tab bars.** The dock draws, in the tab
+        // bar of the group nearest each edge, a chevron that folds the
+        // neighbouring zone away. The zones fold from the rails now, which is
+        // where one looks for them: a control that goes away with the zone it
+        // controls is a control one cannot come back through.
+        skin.set_toggle_button_visible(false, cx);
 
-            let restored = saved
-                .workspaces
-                .get(workspace.key())
-                .cloned()
-                .and_then(|mut state| {
-                    // **Anything the dock cannot build**, and not a list of
-                    // known culprits: a plugin uninstalled between two sessions
-                    // leaves its name behind, and so does a panel of ours that
-                    // has gone — the multiplexer's, the day that screen stopped
-                    // being a view and became the terminals' own dock. Left in,
-                    // the registry prints "panel type is not registered" across
-                    // the screen, at every start.
-                    //
-                    // **The four regions**, and not the centre alone: a panel
-                    // dragged into a side zone was long out of reach, since
-                    // `DockState` keeps its fields to itself — but its
-                    // constructor and its readers are enough to take one apart
-                    // and put it back. See `prune_dock`.
-                    let doomed = |name: &str| !crate::ui::panels::is_registered(name);
-                    let empty = prune(&mut state.center, &doomed);
-                    prune_dock(&mut state.left_dock, &doomed);
-                    prune_dock(&mut state.right_dock, &doomed);
-                    prune_dock(&mut state.bottom_dock, &doomed);
-                    // The Git screen opens on "Changes", whatever tab was on
-                    // screen when the window last closed — see `open_on`.
-                    if workspace == crate::ui::workspace::Workspace::Git {
-                        open_on(&mut state.center, crate::ui::panels::ChangesPanel::NAME);
-                    }
-                    // Nothing left of the centre: what was saved says only that
-                    // this screen used to hold a panel that has gone, and the
-                    // honest answer is the default layout rather than an empty
-                    // frame kept for a name.
-                    (!empty).then_some(state)
-                })
-                .and_then(|state| area.update(cx, |a, cx| a.load(state, window, cx)).ok())
-                .is_some();
-            if !restored {
-                area.update(cx, |a, cx| {
-                    crate::ui::workspace::install_default_layout(workspace, &this, a, window, cx);
-                });
-                // The initial layout is written at once: without that, the file
-                // keeps an earlier version's until the first move, and that is
-                // what would be read back on the next startup.
-                needs_save = true;
-            }
-            // The dock notifies on every move, resize or tab change: it is the
-            // save signal, deferred so a drag does not write one file per pixel.
-            cx.observe(&area, |this, _, cx| this.schedule_layout_save(cx))
-                .detach();
-            docks.insert(workspace, area);
-            dock_skin = Some(skin);
+        let restored = saved
+            .area
+            .and_then(|mut state| {
+                // **Anything the dock cannot build**, and not a list of known
+                // culprits: a plugin uninstalled between two sessions leaves its
+                // name behind, and so does a panel of ours that has gone. Left
+                // in, the registry prints "panel type is not registered" across
+                // the window, at every start.
+                //
+                // The four regions, and not the centre alone — see `prune_dock`.
+                let doomed = |name: &str| !crate::ui::panels::is_registered(name);
+                let empty = prune(&mut state.center, &doomed);
+                prune_dock(&mut state.left_dock, &doomed);
+                prune_dock(&mut state.right_dock, &doomed);
+                prune_dock(&mut state.bottom_dock, &doomed);
+                // The window opens on "Changes", whatever tab was in front of
+                // it when it last closed — see `open_on`. It sits in the left
+                // zone now, so the zones are asked as well as the centre.
+                let changes = crate::ui::panels::ChangesPanel::NAME;
+                open_on(&mut state.center, changes);
+                open_dock_on(&mut state.left_dock, changes);
+                open_dock_on(&mut state.right_dock, changes);
+                open_dock_on(&mut state.bottom_dock, changes);
+                // Nothing left of the centre: what was saved says only that the
+                // window used to hold panels that have gone, and the honest
+                // answer is the default layout rather than empty frames kept for
+                // their names.
+                (!empty).then_some(state)
+            })
+            .and_then(|state| area.update(cx, |a, cx| a.load(state, window, cx)).ok())
+            .is_some();
+        if !restored {
+            area.update(cx, |a, cx| {
+                crate::ui::dock_layout::install_default_layout(a, window, cx);
+            });
         }
-        let workspace = saved
-            .current
-            .as_deref()
-            .and_then(crate::ui::workspace::Workspace::from_key)
-            .unwrap_or_default();
+        // The dock notifies on every move, resize or tab change: it is the save
+        // signal, deferred so a drag does not write one file per pixel.
+        cx.observe(&area, |this, _, cx| this.schedule_layout_save(cx))
+            .detach();
         Docks {
-            dock: docks[&workspace].clone(),
-            docks,
-            dock_skin: dock_skin.expect("BUG: at least one screen"),
-            workspace,
-            needs_save,
+            dock: area,
+            dock_skin: skin,
+            // The initial layout is written at once: without that, the file
+            // keeps an earlier version's until the first move, and that is what
+            // would be read back on the next startup.
+            needs_save: !restored,
         }
     }
 
@@ -1730,42 +1682,33 @@ impl ClaudhubApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.layout_save_scheduled = false;
+                let mut state = this.dock.read(cx).dump(cx);
+                // The terminals are taken out before writing: a terminal is a
+                // **process**, and a layout is read long after that process has
+                // died. Rebuilding one from its name would be a tab showing
+                // nothing.
+                //
+                // A file's tab goes the same way, and for a reason one step
+                // removed: its content is a **text read off the disk**, which a
+                // builder cannot fetch without a round trip — a tab read back
+                // would be an empty frame. What the previous session had open is
+                // remembered where the rest of the place one was is: in the
+                // store, see `ui::session`.
+                //
+                // The four regions, not the centre alone: the terminals dock
+                // into a side zone, which is where an unpruned one would come
+                // back as a name nothing can build.
+                let doomed = |name: &str| {
+                    name == super::panels::TerminalPanel::NAME
+                        || name == super::panels::FilePanel::NAME
+                };
+                prune(&mut state.center, &doomed);
+                prune_dock(&mut state.left_dock, &doomed);
+                prune_dock(&mut state.right_dock, &doomed);
+                prune_dock(&mut state.bottom_dock, &doomed);
                 let layouts = Layouts {
                     version: Some(LAYOUT_VERSION),
-                    current: Some(this.workspace.key().to_string()),
-                    workspaces: this
-                        .docks
-                        .iter()
-                        .map(|(workspace, area)| {
-                            let mut state = area.read(cx).dump(cx);
-                            // The terminals are taken out before writing: a
-                            // terminal is a **process**, and a layout is read
-                            // long after that process has died. Rebuilding one
-                            // from its name would be a tab showing nothing.
-                            //
-                            // A file's tab goes the same way, and for a reason
-                            // one step removed: its content is a **text read
-                            // off the disk**, which a builder cannot fetch
-                            // without a round trip — a tab read back would be
-                            // an empty frame. What the previous session had
-                            // open is remembered where the rest of the place
-                            // one was is: in the store, see `ui::session`.
-                            //
-                            // The four regions, not the centre alone: the
-                            // terminals dock into a side zone, which is where
-                            // an unpruned one would come back as a name
-                            // nothing can build.
-                            let doomed = |name: &str| {
-                                name == super::panels::TerminalPanel::NAME
-                                    || name == super::panels::FilePanel::NAME
-                            };
-                            prune(&mut state.center, &doomed);
-                            prune_dock(&mut state.left_dock, &doomed);
-                            prune_dock(&mut state.right_dock, &doomed);
-                            prune_dock(&mut state.bottom_dock, &doomed);
-                            (workspace.key().to_string(), state)
-                        })
-                        .collect(),
+                    area: Some(state),
                 };
                 save_layouts(&layouts);
             });
@@ -3897,32 +3840,6 @@ impl ClaudhubApp {
         Store::update_global(cx, |store| store.forget_missing(&main, &alive));
     }
 
-    /// The current review, if there is one.
-    /// Is the home screen the one on show.
-    ///
-    /// What the `needed:` rule of the panel macro asks, and the reason it can
-    /// be asked of the application rather than of the panel: a panel does not
-    /// know which dock holds it — the registry rebuilds one from a name alone —
-    /// but **only one dock is drawn at a time**, so the visibility of a panel
-    /// in a dock nobody renders changes nothing anyone can see. The Git
-    /// screen's diff going invisible while the home screen is up costs nothing,
-    /// and comes back on the notify that changes screen.
-    pub(super) fn on_home(&self) -> bool {
-        self.workspace == crate::ui::workspace::Workspace::Home
-    }
-
-    /// The answer of a view that has no place on the home screen at all.
-    ///
-    /// The empty-editor placeholder is the **editing** screen's empty centre —
-    /// a tab group needs something to hold when no file is open there. The home
-    /// screen's centre is never empty for want of it: it has the diff, the
-    /// console, and every open file as its own tab. A tab saying "open a file"
-    /// beside them would be exactly one of the four names for empty rooms this
-    /// rule exists to remove.
-    pub(super) fn never_at_home(&self) -> bool {
-        false
-    }
-
     /// Is there a diff to read — a file picked in one of the two lists, or a
     /// merge taking that place.
     pub(super) fn diff_on_screen(&self) -> bool {
@@ -3966,14 +3883,8 @@ impl ClaudhubApp {
 
     /// Asks for a view to come forward at the next frame, from a gesture with
     /// no window in hand.
-    ///
-    /// Nothing outside the home screen: everywhere else the view named is the
-    /// only thing in its place, and moving another screen's tab under the user
-    /// is exactly what this must not do.
     pub(super) fn reveal_panel_later(&mut self, name: &'static str) {
-        if self.workspace == crate::ui::workspace::Workspace::Home {
-            self.pending_reveal = Some(name);
-        }
+        self.pending_reveal = Some(name);
     }
 
     /// Brings forward what a windowless gesture asked for.
@@ -4097,12 +4008,7 @@ impl ClaudhubApp {
             .bg(cx.theme().title_bar)
             .text_xs()
             .text_color(muted)
-            // The screen picker opens the bar. The branch and its divergence
-            // used to line up behind it; they have gone back up to the top bar,
-            // where they are a button one clicks rather than a word one reads.
-            .child(self.render_workspace_nav(cx))
-            .child(Divider::vertical().h(px(12.)))
-            // The active checkout's agent, right after the screens: the dot
+            // The active checkout's agent opens the bar: the dot
             // says a Claude works (or waits) in what the window is looking at,
             // read out of the corner of the eye. The rest of the fleet stays
             // in the worktree picker and on the pins.
@@ -4294,12 +4200,13 @@ impl Render for ClaudhubApp {
             .on_action(cx.listener(super::shortcuts::db_right))
             .on_action(cx.listener(super::shortcuts::db_open))
             .on_action(cx.listener(super::shortcuts::run_db_query))
-            .on_action(cx.listener(super::shortcuts::go_to_workspace))
+            .on_action(cx.listener(super::shortcuts::toggle_tool))
             .on_action(cx.listener(super::shortcuts::copy_db_result))
             .on_action(cx.listener(super::shortcuts::select_whole_result))
             .on_action(cx.listener(super::shortcuts::export_db_csv))
             .on_action(cx.listener(super::shortcuts::show_shortcuts))
             .on_action(cx.listener(super::shortcuts::toggle_sidebar))
+            .on_action(cx.listener(super::shortcuts::toggle_zen))
             .on_action(cx.listener(super::shortcuts::previous_terminal))
             .on_action(cx.listener(super::shortcuts::select_worktree))
             .on_action(cx.listener(super::shortcuts::fetch))
@@ -4342,15 +4249,7 @@ impl Render for ClaudhubApp {
             // and the status bar each close with a border, so four pixels there
             // read as a margin, while the same four against the bare window edge
             // read as nothing at all. Equal numbers looked equal nowhere.
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .py(px(4.))
-                    .px(px(8.))
-                    .child(self.dock.clone()),
-            )
+            .child(self.render_workspace(cx))
             .child(self.render_status_bar(cx))
             // gpui-component's layers have to be re-emitted by the root view,
             // otherwise dialogs and notifications appear nowhere.
@@ -4427,192 +4326,149 @@ impl ClaudhubApp {
         self.active.clone()
     }
 
-    /// Gives the current screen back its initial layout.
+    /// Gives the window back its initial arrangement.
     ///
     /// The escape hatch of a system where everything can be moved: a panel
-    /// dragged out of view has no other way back.
-    ///
-    /// **This one and not all four**: one breaks a screen's geometry by pulling
-    /// a separator crooked, not everyone's, and taking the other three along
-    /// would make a repair gesture expensive.
+    /// dragged out of sight has no other way back. It rebuilds the whole window
+    /// now rather than one screen out of nine, which is what makes it worth
+    /// reaching for — and folding a zone is not what it repairs, the rails
+    /// putting a folded zone one press from its return.
     pub(super) fn reset_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let this = cx.entity();
-        let workspace = self.workspace;
         self.dock.update(cx, |area, cx| {
-            crate::ui::workspace::install_default_layout(workspace, &this, area, window, cx);
+            crate::ui::dock_layout::install_default_layout(area, window, cx);
         });
         self.schedule_layout_save(cx);
         cx.notify();
     }
 
-    /// Switches to another screen.
-    ///
-    /// Nothing to do but change dock: the state — the chosen worktree, the open
-    /// file, the running query — lives in this entity and not in the panels, and
-    /// is therefore the same on all four sides.
-    ///
-    /// Nothing but the focus, that is. A screen is entered to work in what it
-    /// carries in the middle, and the focus stayed where the previous screen had
-    /// left it — usually a terminal, from which the arrows, the vim keys and the
-    /// copy all belong to the program running there.
-    pub(super) fn enter_workspace(
-        &mut self,
-        workspace: crate::ui::workspace::Workspace,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.workspace == workspace {
-            return;
-        }
-        // Noted before the move, and only for a screen one works in: it is
-        // where the multiplexer's "open this terminal" gives it back.
-        if !matches!(
-            self.workspace,
-            crate::ui::workspace::Workspace::Multiplexer
-                | crate::ui::workspace::Workspace::Settings
-        ) {
-            self.worked_in = self.workspace;
-        }
-        self.workspace = workspace;
-        self.dock = self.docks[&workspace].clone();
-        self.focus_workspace(window, cx);
-        // The screen is part of where the work stands in this checkout, so
-        // changing it is one of the gestures that file it — see `ui::session`.
-        self.persist_session(cx);
-        cx.notify();
+    /// Where each panel sits, as the dock's tree says it — see
+    /// `dock_layout::seats`.
+    pub(super) fn seats(&self, cx: &App) -> Vec<crate::ui::rails::Seat> {
+        crate::ui::dock_layout::seats(self.dock.read(cx), cx)
     }
 
-    /// Goes to another screen **and writes the step down**.
+    /// Brings a view out, wherever the dock holds it: visible, its zone
+    /// unfolded, its tab in front.
     ///
-    /// The difference with `enter_workspace` is who decided: this is for the
-    /// gestures where the code takes you somewhere — a table's console, a
-    /// plugin's script, a settings page a panel asked for — **and for the two
-    /// button groups that change screen**, the bar and the aside. A screen one
-    /// clicks is a place one leaves, and what one was doing there is what the
-    /// back arrow is for. The **screen keys** stay out: `Alt+4` is undone by
-    /// pressing the key one came from, and a trail that recorded it would fill
-    /// with round trips one made on purpose. A key that has no such counterpart
-    /// does come through — `Ctrl+Shift+F` leaves a file for a list of hits and
-    /// nothing puts that file back, which is a jump like any other.
-    ///
-    /// Opening a file does not come through here: it writes its own step, from
-    /// wherever one stood to the place in the file, and calling up the editing
-    /// screen on the way is the same movement and not a second one.
-    pub(super) fn travel_to(
-        &mut self,
-        workspace: crate::ui::workspace::Workspace,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.workspace == workspace {
-            return;
-        }
-        let from = self.here(cx);
-        self.record_step(from, crate::ui::jumps::Place::Screen(workspace), cx);
-        self.enter_workspace(workspace, window, cx);
-    }
-
-    /// Brings a view out: visible, and its tab selected where it shares a group
-    /// with the rest of a screen.
-    ///
-    /// The selection is for the **home screen** and no other: elsewhere a view
-    /// made visible is alone in its place, or in a group whose tab the user
-    /// arranged and which a gesture has no business moving. Here every other
-    /// screen's column is one strip of tabs, so "show the search" names one of
-    /// six — and a gesture that then focused a field behind a tab nobody
-    /// selected would be typing into something invisible.
-    pub(super) fn show_panel(
+    /// **The single funnel of every "show me that".** There used to be four —
+    /// `reveal`, `travel_reveal`, `show_panel` and `revealed_at_home` — because
+    /// the answer depended on whether one stood on the home screen, where the
+    /// other screens' centres were tabs rather than places. With one workspace
+    /// the question does not arise: showing a view is bringing its tab forward,
+    /// always, and the only thing left to decide is whether the tab exists.
+    pub(super) fn reveal_panel(
         &mut self,
         name: &'static str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.set_panel_visible(name, true, cx);
-        if self.workspace == crate::ui::workspace::Workspace::Home {
+        let seats = self.seats(cx);
+        // Out of the tree — hidden and pruned, or dragged out of everything —
+        // and it has to be put back before it can be shown. `dock_panel_at`
+        // makes the region when the area has none.
+        if !seats.iter().any(|seat| seat.panel == name) {
+            let placement = crate::ui::dock_layout::home_of(name);
+            let size = crate::ui::rails::tool(name).map(|tool| tool.home.default_size());
             let dock = self.dock.clone();
-            crate::ui::panels::select_panel_named(&dock, name, window, cx);
+            dock.update(cx, |area, cx| {
+                let Some(handle) = crate::ui::dock_layout::build(name, window, cx) else {
+                    return;
+                };
+                crate::ui::panels::dock_panel_at(
+                    area,
+                    handle,
+                    placement,
+                    size,
+                    |_| None,
+                    window,
+                    cx,
+                );
+            });
         }
-    }
-
-    /// Shows what a screen is **for**, which is not always going to it.
-    ///
-    /// The funnel for every gesture where the code takes you somewhere because
-    /// it has just opened something there: a file, a diff, a query, a hit. On
-    /// any screen but the home one it is `enter_workspace` and nothing more.
-    /// On the home screen the four centres are four tabs of one group, so
-    /// "show me the editor" is "bring its tab forward" — leaving for the
-    /// editing screen would undo the one thing that screen is for.
-    ///
-    /// The two button groups that change screen do **not** come through here,
-    /// nor do the screen keys: those say "take me to that screen", and a bar
-    /// that answered by selecting a tab would be a bar that stopped working.
-    pub(super) fn reveal(
-        &mut self,
-        workspace: crate::ui::workspace::Workspace,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.revealed_at_home(workspace, window, cx) {
-            return;
+        // Its zone, if it is in one and it is folded: a tab selected behind a
+        // folded edge is a gesture that did nothing.
+        if let Some(side) = crate::ui::rails::side_of(name, &self.seats(cx)) {
+            self.unfold(side, window, cx);
         }
-        self.enter_workspace(workspace, window, cx);
-    }
-
-    /// The same, for the gestures that **write the step down** — see
-    /// `travel_to`.
-    ///
-    /// No step is written when the home screen answers: nothing moved, and a
-    /// trail that recorded a screen one never left would be a back arrow that
-    /// does nothing.
-    pub(super) fn travel_reveal(
-        &mut self,
-        workspace: crate::ui::workspace::Workspace,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.revealed_at_home(workspace, window, cx) {
-            return;
-        }
-        self.travel_to(workspace, window, cx);
-    }
-
-    /// Answers a "show me that screen" without leaving the home screen, and
-    /// says whether it did.
-    ///
-    /// The editing screen is reached by **the file being read** and not by the
-    /// placeholder tab: `EditorPanel` hides itself as soon as a file is open,
-    /// and selecting a hidden tab shows nothing at all.
-    ///
-    /// Sentry answers `true` with nothing selected, deliberately: it has no
-    /// centre of ours, its plugins are already tabs here, and taking the window
-    /// off the home screen for one would be the move this whole funnel exists
-    /// to avoid.
-    fn revealed_at_home(
-        &mut self,
-        workspace: crate::ui::workspace::Workspace,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        use crate::ui::workspace::Workspace;
-        if self.workspace != Workspace::Home || !workspace.folds_into_home() {
-            return false;
-        }
-        if workspace == Workspace::Files {
-            if let Some(panel) = self
-                .editing()
-                .and_then(|editing| editing.panels.get(Workspace::Home.editor_index()?).cloned())
-            {
-                crate::ui::panels::FilePanel::activate(&panel, window, cx);
-                cx.notify();
-                return true;
-            }
-        }
-        if let Some(name) = workspace.centre_tab() {
-            let dock = self.dock.clone();
-            crate::ui::panels::select_panel_named(&dock, name, window, cx);
+        let dock = self.dock.clone();
+        crate::ui::panels::select_panel_named(&dock, name, window, cx);
+        // The focus follows a **document** and not a tool window: a view
+        // brought out beside what one is reading is not what one has come to
+        // type in, and taking the caret out of the editor to put it nowhere is
+        // exactly what the old `focus_workspace` was careful not to do.
+        if crate::ui::rails::side_of(name, &self.seats(cx)).is_none() {
+            self.focus_panel(name, window, cx);
         }
         cx.notify();
-        true
+    }
+
+    /// The same, writing the step down — see `travel_to_panel`'s callers.
+    ///
+    /// A step is a **document** and nothing else. Unfolding a tool window is
+    /// not a movement: showing the history beside what one is reading does not
+    /// change where one is, and a back arrow that folded a zone would be one
+    /// nobody could predict.
+    pub(super) fn travel_to_panel(
+        &mut self,
+        name: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let a_document = crate::ui::rails::side_of(name, &self.seats(cx)).is_none();
+        if a_document {
+            let from = self.here(cx);
+            self.record_step(from, crate::ui::jumps::Place::Panel(name), cx);
+        }
+        self.reveal_panel(name, window, cx);
+    }
+
+    /// Carries out what pressing a rail button means — see `rails::press`.
+    ///
+    /// The decision is made in the pure module and only carried out here, which
+    /// is what makes "pressing what is already in front puts the zone away, and
+    /// pressing a tab behind it selects it" a thing to test rather than a thing
+    /// to watch.
+    pub(super) fn press_tool(
+        &mut self,
+        panel: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::ui::rails::Press;
+        // The terminals are the one tool window nothing can build back: their
+        // content is a process. "Show me a terminal" is therefore "open one if
+        // there is none", which is the gesture `Ctrl+T` already makes.
+        if panel == super::panels::TerminalPanel::NAME {
+            self.toggle_terminal_panel(window, cx);
+            return;
+        }
+        match crate::ui::rails::press(panel, &self.seats(cx)) {
+            Press::Collapse { side } => self.toggle_zone(side, window, cx),
+            Press::Reveal { panel, .. } | Press::Restore { panel, .. } => {
+                self.reveal_panel(panel, window, cx)
+            }
+        }
+    }
+
+    /// Unfolds one edge, if it is folded.
+    ///
+    /// `toggle_dock` notifies the inner dock and not the area, and it is the
+    /// area we watch in order to save: without the `notify`, the window would
+    /// reopen with the zone in the state from before the gesture.
+    pub(super) fn unfold(
+        &mut self,
+        side: crate::ui::rails::Side,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let placement = crate::ui::dock_layout::placement_of(side);
+        self.dock.update(cx, |area, cx| {
+            if !area.is_dock_open(placement) {
+                area.toggle_dock(placement, window, cx);
+                cx.notify();
+            }
+        });
     }
 
     /// Writes one step into the trail of the worktree in hand.
@@ -4646,56 +4502,41 @@ impl ClaudhubApp {
         }
     }
 
-    /// Gives the focus to what the current screen is entered for.
+    /// Gives the focus to what a view is entered for.
     ///
-    /// The centre of a screen is what one comes to it for: the editor on
-    /// "Editing", the query on "Databases". Both are text fields, so they must
-    /// be named one by one; everywhere else — the diff, Sentry, the settings —
-    /// the root handle is the right answer, being the one the review's keys and
-    /// the window's shortcuts are resolved against.
+    /// Three views hold a text field, and they are named one by one; everywhere
+    /// else the root handle is the right answer, being the one the review's keys
+    /// and the window's shortcuts are resolved against.
     ///
     /// A field one cannot see is never focused: the panel may have been hidden,
     /// and there may be no file open nor any console at all.
-    fn focus_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        use crate::ui::workspace::Workspace;
-        match self.workspace {
-            // The home screen has no single centre to name: what one comes back
-            // to is whichever tab was left showing, and the panel that draws it
-            // already holds the focus it wants. The root handle is the honest
-            // answer — it is the one the window's shortcuts resolve against.
-            Workspace::Home => {}
-            Workspace::Files => {
-                if self.panel_visible(super::panels::EditorPanel::NAME) {
-                    if let Some(editing) = self.editing() {
-                        let handle = gpui::Focusable::focus_handle(&editing.input, cx);
-                        handle.focus(window, cx);
-                        return;
-                    }
-                }
-                // No file open: the tree is what there is to work in, and its
-                // arrows are the ones one reaches for on this screen.
-                if self.panel_visible(super::panels::FilesPanel::NAME) {
-                    self.explorer_focus.clone().focus(window, cx);
-                    return;
-                }
-            }
-            // The field is what one comes to this screen for, and a search
-            // screen whose caret is elsewhere is a screen one has to click
-            // before typing in.
-            Workspace::Search if self.panel_visible(super::panels::SearchPanel::NAME) => {
-                let handle = gpui::Focusable::focus_handle(&self.search_input, cx);
+    fn focus_panel(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::ui::panels::*;
+        if name == EditorPanel::NAME {
+            if let Some(editing) = self.editing() {
+                let handle = gpui::Focusable::focus_handle(&editing.input, cx);
                 handle.focus(window, cx);
                 return;
             }
-            Workspace::Db
-                if self.db_console_open()
-                    && self.panel_visible(super::panels::ConsolePanel::NAME) =>
-            {
-                let handle = gpui::Focusable::focus_handle(&self.db_query_input, cx);
-                handle.focus(window, cx);
+            // No file open: the tree is what there is to work in, and its arrows
+            // are the ones one reaches for.
+            if self.panel_visible(FilesPanel::NAME) {
+                self.explorer_focus.clone().focus(window, cx);
                 return;
             }
-            _ => {}
+        }
+        if name == SearchPanel::NAME && self.panel_visible(SearchPanel::NAME) {
+            let handle = gpui::Focusable::focus_handle(&self.search_input, cx);
+            handle.focus(window, cx);
+            return;
+        }
+        if name == ConsolePanel::NAME
+            && self.db_console_open()
+            && self.panel_visible(ConsolePanel::NAME)
+        {
+            let handle = gpui::Focusable::focus_handle(&self.db_query_input, cx);
+            handle.focus(window, cx);
+            return;
         }
         window.focus(&self.focus, cx);
     }
@@ -4718,10 +4559,10 @@ impl ClaudhubApp {
         if !self.terminal_visible(cx) {
             return false;
         }
-        // The multiplexer shows every worktree's, which is the whole of that
-        // screen: counting only the one being looked at would call the corner
+        // Showing every worktree's is what the multiplexer used to be a screen
+        // for: counting only the one being looked at would call the corner
         // empty in front of a dozen live shells.
-        if self.workspace.shows_every_worktree() {
+        if self.terminals_everywhere {
             return !self.terminals.is_empty();
         }
         self.active
@@ -4738,7 +4579,8 @@ impl ClaudhubApp {
     /// nothing moved — which is why a terminal dragged into a split is still
     /// there after a round trip through another worktree.
     pub(super) fn terminal_shown(&self, worktree: &Path, cx: &App) -> bool {
-        self.terminal_visible(cx) && self.active.as_deref() == Some(worktree)
+        self.terminal_visible(cx)
+            && (self.terminals_everywhere || self.active.as_deref() == Some(worktree))
     }
 
     pub(super) fn show_terminal_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4844,16 +4686,27 @@ impl ClaudhubApp {
         }
     }
 
-    /// Shows or hides the left zone — repositories, branches, files.
+    /// Folds one edge away, or brings it back.
     ///
     /// `toggle_dock` only notifies the inner dock, and it is the area we observe
     /// to save the layout: without this `notify`, the window would reopen with
     /// the zone in the state from before the gesture.
-    pub(super) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn toggle_zone(
+        &mut self,
+        side: crate::ui::rails::Side,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let placement = crate::ui::dock_layout::placement_of(side);
         self.dock.update(cx, |area, cx| {
-            area.toggle_dock(gpui_component::dock::DockPlacement::Left, window, cx);
+            area.toggle_dock(placement, window, cx);
             cx.notify();
         });
+    }
+
+    /// Shows or hides the left zone — what one picks from.
+    pub(super) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_zone(crate::ui::rails::Side::Left, window, cx);
     }
 
     /// The worktrees in the order the sidebar shows them.

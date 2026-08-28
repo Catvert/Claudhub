@@ -303,6 +303,13 @@ pub fn rails(seats: &[Seat], hidden: &std::collections::BTreeSet<String>) -> [Ra
             dimmed: hidden.contains(tool.panel),
         });
     }
+    // The rail does not scroll, so what it cannot show it hides. Said here as
+    // well as in the test: a plugin's panels join a rail at run time, where a
+    // table read at compile time cannot see them.
+    debug_assert!(
+        rails.iter().all(|rail| rail.buttons.len() <= MAX_PER_RAIL),
+        "a rail carries more buttons than it can show"
+    );
     rails
 }
 

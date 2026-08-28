@@ -226,8 +226,7 @@ impl ClaudhubApp {
         // having done nothing. **And the step is written down**, the screen
         // having been taken rather than asked for — which is `travel_reveal`,
         // step and all, rather than the two written out here.
-        self.travel_reveal(crate::ui::workspace::Workspace::Git, window, cx);
-        self.show_panel(crate::ui::panels::HistoryPanel::NAME, window, cx);
+        self.travel_to_panel(crate::ui::panels::DiffPanel::NAME, window, cx);
         self.set_history_range(range, cx);
     }
 

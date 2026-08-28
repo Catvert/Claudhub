@@ -1586,17 +1586,16 @@ impl Launch {
     }
 }
 
-/// One open terminal: its pty, and the panels that show it.
+/// One open terminal: its pty, and the panel that shows it.
 ///
 /// **One dock panel per terminal**, and no longer one panel holding a strip of
 /// tabs of its own. The dock's tab bar *is* that strip now, which is what lets
 /// a terminal be dragged into a split, on to another zone, or zoomed like any
 /// other view — none of which a strip drawn by hand could offer.
 ///
-/// The price is one panel **per screen**: a panel belongs to a single dock area
-/// at a time and there are five. All five render this same `view`, so there is
-/// still exactly one pty; and since only one dock is displayed at a time, no
-/// two of them ever draw the same grid in the same frame.
+/// One panel and no longer nine. A panel belongs to a single dock area at a
+/// time, and a screen was an area: a terminal therefore had a face on each, all
+/// rendering this same `view`. There is one area now, so there is one face.
 pub struct OpenTerminal {
     pub worktree: PathBuf,
     pub view: Entity<TerminalView>,
@@ -1605,13 +1604,44 @@ pub struct OpenTerminal {
     /// then three tabs called `bash`, and only what one is doing in each tells
     /// them apart — which is precisely what the program name cannot say.
     pub name: Option<SharedString>,
-    /// The panels, in the order of `Workspace::ALL`.
-    pub panels: Vec<Entity<crate::ui::panels::TerminalPanel>>,
+    pub panel: Entity<crate::ui::panels::TerminalPanel>,
 }
 
 impl OpenTerminal {}
 
 impl ClaudhubApp {
+    /// How a worktree is named where there is no room for a path: the
+    /// repository, then the worktree, the way the picker writes it.
+    ///
+    /// The two collapse into one when they say the same thing — a main checkout
+    /// is usually a folder named after its repository, and "nixos / nixos" is a
+    /// word wasted on a tab bar. Two worktrees called `main` in two
+    /// repositories is the case this exists for, and it is precisely the case
+    /// where they differ.
+    pub(super) fn project_label(&self, worktree: &Path) -> (Option<SharedString>, SharedString) {
+        let repo = self
+            .repo_of(worktree)
+            .map(|repo| SharedString::from(repo.name.clone()));
+        let label = SharedString::from(
+            self.repos
+                .worktree(worktree)
+                .map(|found| found.label())
+                // A worktree that went away while its terminals were still
+                // running: the path's last segment is what is recognised, and
+                // it is what the picker shows too.
+                .unwrap_or_else(|| {
+                    worktree
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| worktree.display().to_string())
+                }),
+        );
+        match repo {
+            Some(repo) if repo == label => (None, label),
+            repo => (repo, label),
+        }
+    }
+
     /// The terminals of the worktree being looked at, in the order they opened.
     /// An iterator and not a list: most of its callers only ask whether there
     /// is one.
@@ -1708,11 +1738,16 @@ impl ClaudhubApp {
         self.install_terminal(worktree.to_path_buf(), view, window, cx);
     }
 
-    /// Puts a terminal's faces into the docks that carry one, and shows it.
+    /// Puts a terminal's panel into the dock, and shows it.
     ///
     /// Split out from `open_terminal` because the layout registry takes the
     /// same path: a terminal read back from `layout.json` is a fresh pty that
     /// has to be adopted exactly like one just opened.
+    ///
+    /// **One panel and no longer one per screen.** A panel belongs to a single
+    /// area at a time, and there were nine areas; there is one, so a terminal
+    /// has one face and the whole business of keeping nine in step goes with
+    /// the screens.
     pub(super) fn install_terminal(
         &mut self,
         worktree: PathBuf,
@@ -1721,29 +1756,19 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         let app = cx.entity();
-        // Computed here and handed over: the panels are built inside this
-        // `update`, so they cannot read the application to find out for
-        // themselves — the entity is out of the table while this runs.
+        // Computed here and handed over: the panel is built inside this
+        // `update`, so it cannot read the application to find out for itself —
+        // the entity is out of the table while this runs.
         let visible = self.terminal_shown(&worktree, cx);
-        let mut panels = Vec::new();
-        for workspace in crate::ui::workspace::Workspace::ALL {
+        let panel = {
             let (app, worktree, view) = (app.clone(), worktree.clone(), view.clone());
-            // The multiplexer's face is the same panel, told two things the
-            // others are not: show yourself whatever worktree is being looked
-            // at, and say in your tab which project you belong to.
-            panels.push(cx.new(|cx| {
-                if workspace.shows_every_worktree() {
-                    crate::ui::panels::TerminalPanel::in_grid(&app, worktree, view, cx)
-                } else {
-                    crate::ui::panels::TerminalPanel::new(&app, worktree, view, visible, cx)
-                }
-            }));
-        }
+            cx.new(|cx| crate::ui::panels::TerminalPanel::new(&app, worktree, view, visible, cx))
+        };
         // A shell that exits closes its tab. `subscribe_in` and not
-        // `subscribe`: removing the panels and handing the focus on both need a
+        // `subscribe`: removing the panel and handing the focus on both need a
         // window, which the event does not carry. Held here and not in the view
         // — closing a terminal is the application's gesture, and the same one
-        // the cross goes through, panels of the five screens included.
+        // the cross goes through.
         cx.subscribe_in(
             &view,
             window,
@@ -1756,121 +1781,88 @@ impl ClaudhubApp {
             worktree: worktree.clone(),
             view: view.clone(),
             name: None,
-            panels: panels.clone(),
+            panel: panel.clone(),
         });
-        for (workspace, panel) in crate::ui::workspace::Workspace::ALL.into_iter().zip(panels) {
-            self.dock_terminal(workspace, &worktree, panel, window, cx);
-        }
+        self.dock_terminal(&worktree, panel, window, cx);
         let handle = view.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
         cx.notify();
     }
 
-    /// Places one terminal panel in one screen's dock.
+    /// Puts a terminal in the zone the settings name, beside the ones already
+    /// there.
+    ///
+    /// **A zone and no longer a split of the centre.** `TerminalPlacement`
+    /// named a side of the centre because the centre was all there was; it
+    /// names a dock now, which is what the setting meant all along.
+    ///
+    /// The detour by way of "the last slot of a horizontal row" goes with the
+    /// screens: it existed because the review's file list lived *in the
+    /// centre*, so a terminal opened under the whole row raised the list along
+    /// with the diff. The list is a tool window; "under the centre" is no
+    /// longer ambiguous.
     fn dock_terminal(
         &mut self,
-        workspace: crate::ui::workspace::Workspace,
         worktree: &Path,
         panel: Entity<crate::ui::panels::TerminalPanel>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(dock) = self.docks.get(&workspace).cloned() else {
-            return;
+        let dock = self.dock.clone();
+        let (placement, size) = match crate::ui::settings::Settings::global(cx).terminal.placement {
+            crate::ui::settings::TerminalPlacement::Right => (DockPlacement::Right, TERMINAL_WIDTH),
+            crate::ui::settings::TerminalPlacement::Bottom => {
+                (DockPlacement::Bottom, TERMINAL_HEIGHT)
+            }
         };
-        let side = crate::ui::settings::Settings::global(cx).terminal.placement;
-        // The node of a terminal already open on this worktree, in this dock:
-        // that is the tab group the new one joins.
+        // The node of a terminal already open on this worktree: that is the tab
+        // group the new one joins, which is what makes the dock's bar read as
+        // *the* terminal bar.
         let sibling = self
             .terminals
             .iter()
             .filter(|terminal| terminal.worktree == worktree)
-            .filter_map(|terminal| terminal.panels.get(workspace.index()).cloned())
+            .map(|terminal| terminal.panel.clone())
             .rfind(|other| other.entity_id() != panel.entity_id());
         dock.update(cx, |dock, cx| {
             // **`panel_handle` and `dock_panel_at`, never `add_panel`.** An
             // `Entity<P>` converts itself into base's `PanelView` and the dock
             // takes it without complaint — but without the presentation that
             // goes with it: no tab, no title, no content. It is the silent
-            // failure of the dock rework, already written down in
-            // `workspace.rs`, and it is what made a terminal open into nothing.
+            // failure of the dock rework, and it is what made a terminal open
+            // into nothing.
             crate::ui::panels::dock_panel_at(
                 dock,
                 gpui_component::dock::panel_handle(panel.clone()),
-                DockPlacement::Center,
-                None,
+                placement,
+                // The size the zone takes if the area has to make one: without
+                // it a fresh zone is born at twice the minimum panel size,
+                // which is nobody's choice.
+                Some(size),
                 |dock| {
-                    sibling
-                        .and_then(|sibling| {
-                            let node = dock
-                                .layout(DockPlacement::Center)?
-                                .find_panel_node(PanelId::from(sibling.entity_id()))?;
-                            Some(InsertTarget::Tabs {
-                                node,
-                                ix: None,
-                                // The tab one has just opened is the tab one
-                                // looks at.
-                                activate: true,
-                            })
-                        })
-                        .or_else(|| {
-                            // The multiplexer holds nothing **but** terminals:
-                            // the first one takes the whole centre, which is
-                            // where the add has already put it. Splitting the
-                            // empty root would pin it into a band at the
-                            // bottom with nothing above.
-                            if workspace.shows_every_worktree() {
-                                return None;
-                            }
-                            // No terminal here yet: the slot under the
-                            // screen's **content**, which on every screen but
-                            // the review is the whole centre — and on the
-                            // review is its right-hand half.
-                            //
-                            // The review's list column lives in the centre
-                            // rather than in a dock of its own, so a terminal
-                            // opened under the whole row raised the file list
-                            // along with the diff, for nothing: one reads a
-                            // list beside a terminal, never above one. Taking
-                            // the last slot of a row says that in the one rule
-                            // that also gives the right answer where the
-                            // centre holds a single column.
-                            let tree = dock.layout(DockPlacement::Center)?;
-                            // Beside the content, the whole row is the right
-                            // neighbour: a terminal opened to the right of the
-                            // diff alone would leave the review's list column
-                            // and the terminal sharing a height for no reason.
-                            // Under it, the last slot of the row — see above.
-                            let (node, placement, size) = match side {
-                                crate::ui::settings::TerminalPlacement::Right => (
-                                    tree.root().id(),
-                                    gpui_base::Placement::Right,
-                                    TERMINAL_WIDTH,
-                                ),
-                                crate::ui::settings::TerminalPlacement::Bottom => {
-                                    let node = match tree.root().kind() {
-                                        gpui_component::dock::PaneRef::Split {
-                                            axis: gpui::Axis::Horizontal,
-                                            children,
-                                            ..
-                                        } => children.last().map(|child| child.id()),
-                                        _ => None,
-                                    }
-                                    .unwrap_or_else(|| tree.root().id());
-                                    (node, gpui_base::Placement::Bottom, TERMINAL_HEIGHT)
-                                }
-                            };
-                            Some(InsertTarget::Split {
-                                node,
-                                placement,
-                                size: Some(size),
-                            })
-                        })
+                    let sibling = sibling?;
+                    let node = dock
+                        .layout(placement)?
+                        .find_panel_node(PanelId::from(sibling.entity_id()))?;
+                    Some(InsertTarget::Tabs {
+                        node,
+                        ix: None,
+                        // The tab one has just opened is the tab one looks at.
+                        activate: true,
+                    })
                 },
                 window,
                 cx,
             );
         });
+        // A terminal opened into a folded zone is a gesture that did nothing.
+        if let Some(side) = match placement {
+            DockPlacement::Right => Some(crate::ui::rails::Side::Right),
+            DockPlacement::Bottom => Some(crate::ui::rails::Side::Bottom),
+            _ => None,
+        } {
+            self.unfold(side, window, cx);
+        }
     }
 
     /// What a terminal's tab says: the name given by hand, or the program.
@@ -2047,15 +2039,8 @@ impl ClaudhubApp {
         let terminal = self.terminals.remove(ix);
         let worktree = terminal.worktree.clone();
         let had_focus = terminal.view.read(cx).focus_handle(cx).is_focused(window);
-        for (workspace, panel) in crate::ui::workspace::Workspace::ALL
-            .into_iter()
-            .zip(terminal.panels)
-        {
-            let Some(dock) = self.docks.get(&workspace).cloned() else {
-                continue;
-            };
-            dock.update(cx, |dock, cx| dock.remove_panel(panel, window, cx));
-        }
+        let dock = self.dock.clone();
+        dock.update(cx, |dock, cx| dock.remove_panel(terminal.panel, window, cx));
         // The focus was on what has just left the tree, and a focus handle
         // nobody renders any more resolves no binding: every shortcut would
         // stay dead until a click put the focus back on a live node. It goes to
@@ -2136,10 +2121,7 @@ impl ClaudhubApp {
         let next = (current + delta).rem_euclid(terminals.len() as isize) as usize;
         let (view, panel) = {
             let terminal = terminals[next];
-            (
-                terminal.view.clone(),
-                terminal.panels.get(self.workspace.index()).cloned(),
-            )
+            (terminal.view.clone(), Some(terminal.panel.clone()))
         };
         if let Some(panel) = panel {
             crate::ui::panels::TerminalPanel::activate(&panel, window, cx);
@@ -2162,12 +2144,11 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((view, panel)) = self.terminals_of(worktree).last().map(|terminal| {
-            (
-                terminal.view.clone(),
-                terminal.panels.get(self.workspace.index()).cloned(),
-            )
-        }) else {
+        let Some((view, panel)) = self
+            .terminals_of(worktree)
+            .last()
+            .map(|terminal| (terminal.view.clone(), Some(terminal.panel.clone())))
+        else {
             return;
         };
         if let Some(panel) = panel {
@@ -2258,7 +2239,7 @@ impl ClaudhubApp {
             .terminals
             .iter()
             .find(|terminal| terminal.view.entity_id() == view.entity_id())
-            .and_then(|terminal| terminal.panels.get(self.workspace.index()).cloned());
+            .map(|terminal| terminal.panel.clone());
         if let Some(panel) = panel {
             crate::ui::panels::TerminalPanel::activate(&panel, window, cx);
         }
@@ -2277,10 +2258,13 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let back = self.worked_in;
         self.select_worktree(worktree.to_path_buf(), window, cx);
         self.set_panel_visible(crate::ui::panels::TerminalPanel::NAME, true, cx);
-        self.enter_workspace(back, window, cx);
+        // And the grid goes away: one came to it to find out which of the
+        // agents had finished, and this is the answer being acted on. Leaving
+        // it up would show the eleven other checkouts' shells beside the one
+        // just chosen.
+        self.terminals_everywhere = false;
         cx.notify();
     }
 

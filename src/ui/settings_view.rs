@@ -102,11 +102,11 @@ impl ClaudhubApp {
             self.settings_page = page;
             self.settings_epoch += 1;
         }
-        let workspace = crate::ui::workspace::Workspace::Settings;
+        let form = crate::ui::panels::SettingsPanel::NAME;
         if travelled {
-            self.travel_to(workspace, window, cx);
+            self.travel_to_panel(form, window, cx);
         } else {
-            self.enter_workspace(workspace, window, cx);
+            self.reveal_panel(form, window, cx);
         }
         cx.notify();
     }
@@ -2521,16 +2521,11 @@ fn plugin_row(
                         .label(tr!("settings-plugin-enabled"))
                         .on_click({
                             let id = id.clone();
-                            move |_, window, cx| {
+                            move |_, _window, cx| {
                                 let switched = id.clone();
                                 Settings::update_global(cx, move |s| {
                                     let entry = s.plugins.entry(switched).or_default();
                                     entry.enabled = !entry.enabled;
-                                });
-                                // Switching the last plugin of a screen off
-                                // leaves the bar pointing at an empty room.
-                                with_app(window, cx, |app, window, cx| {
-                                    app.leave_empty_workspace(window, cx);
                                 });
                             }
                         }),
