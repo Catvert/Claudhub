@@ -4420,6 +4420,22 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         self.set_panel_visible(name, true, cx);
+        // **The editor is reached by the file being read, and not by its
+        // placeholder.** `EditorPanel` hides itself as soon as a file is open,
+        // and selecting a hidden tab shows nothing at all: the group falls back
+        // to its first visible panel, which is whatever was there before — the
+        // diff, most often. The tab arrived and the window did not move.
+        //
+        // It is the rule `revealed_at_home` carried, and it outlived the
+        // screens that made it necessary.
+        if name == super::panels::EditorPanel::NAME {
+            if let Some(panel) = self.editing().map(|editing| editing.panel.clone()) {
+                super::panels::FilePanel::activate(&panel, window, cx);
+                self.focus_panel(name, window, cx);
+                cx.notify();
+                return;
+            }
+        }
         let seats = self.seats(cx);
         // Out of the tree — hidden and pruned, or dragged out of everything —
         // and it has to be put back before it can be shown.
