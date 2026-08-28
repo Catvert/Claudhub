@@ -1031,6 +1031,7 @@ impl ClaudhubApp {
             hits: std::rc::Rc::new(hits),
             by_line: std::rc::Rc::new(by_line),
             current: 0,
+            landed: false,
         };
     }
 
@@ -1046,9 +1047,17 @@ impl ClaudhubApp {
         if total == 0 {
             return;
         }
-        let current =
-            (self.diff_search.current as isize + delta).rem_euclid(total as isize) as usize;
+        // A fresh search first reveals where it stands — the first occurrence
+        // forwards, the last backwards; only then does Enter step.
+        let current = if self.diff_search.landed {
+            (self.diff_search.current as isize + delta).rem_euclid(total as isize) as usize
+        } else if delta > 0 {
+            0
+        } else {
+            total - 1
+        };
         self.diff_search.current = current;
+        self.diff_search.landed = true;
         let Some(hit) = self.diff_search.hits.get(current).cloned() else {
             return;
         };

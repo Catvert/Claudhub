@@ -261,17 +261,18 @@ impl ClaudhubApp {
                 let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
                 // A keystroke changes the displayed list: without this
                 // subscription, the panel would keep the earlier picture.
-                cx.subscribe(&input, move |this, _, event, cx| match event {
-                    InputEvent::Change => {
+                // Enter is NOT subscribed to here: a single-line field
+                // propagates the key after emitting `PressEnter`, so the
+                // `enter`/`shift-enter` bindings on the bar fire anyway —
+                // subscribing too made Enter step twice, and Shift+Enter
+                // step forward and back, which is not at all.
+                cx.subscribe(&input, move |this, _, event, cx| {
+                    if let InputEvent::Change = event {
                         if pane.jumps() {
                             this.find_reset(pane);
                         }
                         cx.notify();
                     }
-                    // Enter moves to the next occurrence. A key binding would
-                    // not do: the field handles the key before it.
-                    InputEvent::PressEnter { .. } => this.find_step(1, cx),
-                    _ => {}
                 })
                 .detach();
                 self.finders.insert(
@@ -457,6 +458,11 @@ pub struct DiffSearch {
     /// does so for every visible line.
     pub by_line: MatchesByLine,
     pub current: usize,
+    /// Has `current` been brought into view since the query changed. False on
+    /// a fresh search, so the first Enter reveals the first occurrence instead
+    /// of stepping past it — an occurrence may be four thousand lines away,
+    /// and typing alone never scrolls.
+    pub landed: bool,
 }
 
 /// A line's occurrences, filed by `(hunk, line)`.
