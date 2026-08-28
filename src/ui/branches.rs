@@ -22,9 +22,27 @@ use gpui_component::WindowExt as _;
 /// One row of the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Row {
+    /// What the log beside the list is showing, above the branches.
+    ///
+    /// **Only where the list drives a log** — the docked column. The top bar's
+    /// popover checks a branch out, and a scope is not something one checks
+    /// out: the two rows would be two entries that do nothing there.
+    Scope(Scope),
     /// A group heading: the locals first, the remotes after.
     Group(BranchKind),
     Branch(BranchRow),
+}
+
+/// The two scopes that are not a branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Scope {
+    /// The checkout one is on, whatever its name — PhpStorm writes it
+    /// `HEAD (Current Branch)`, and it is the list's first row for the same
+    /// reason: it is where one comes back to.
+    Head,
+    /// Every reference at once. Not PhpStorm's, and kept because it is where
+    /// the graph earns its keep: parallel branches side by side.
+    All,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,9 +80,21 @@ impl BranchRow {
 /// list is read once per repository, so git's own HEAD mark points at the main
 /// worktree's branch whatever checkout is on screen — the picker said "here"
 /// on `dev` from every linked worktree, and refused to merge it.
-pub(super) fn rows_for(branches: &[Branch], filter: &str, active: Option<&Path>) -> Vec<Row> {
+pub(super) fn rows_for(
+    branches: &[Branch],
+    filter: &str,
+    active: Option<&Path>,
+    scopes: bool,
+) -> Vec<Row> {
     let needle = filter.trim().to_lowercase();
     let mut rows = Vec::new();
+    // **Dropped as soon as one types.** They are not branch names, so a filter
+    // that keeps them would leave two rows standing over an empty list and
+    // read as a search that found them.
+    if scopes && needle.is_empty() {
+        rows.push(Row::Scope(Scope::Head));
+        rows.push(Row::Scope(Scope::All));
+    }
     for kind in [BranchKind::Local, BranchKind::Remote] {
         let matching: Vec<Row> = branches
             .iter()
@@ -373,11 +403,12 @@ mod tests {
             branch("origin/feature", BranchKind::Remote),
             branch("wt/essai", BranchKind::Local),
         ];
-        let names: Vec<String> = rows_for(&branches, "", None)
+        let names: Vec<String> = rows_for(&branches, "", None, false)
             .into_iter()
             .map(|row| match row {
                 Row::Group(BranchKind::Local) => "== locales".into(),
                 Row::Group(BranchKind::Remote) => "== distantes".into(),
+                Row::Scope(scope) => format!("{scope:?}"),
                 Row::Branch(row) => row.name,
             })
             .collect();
@@ -399,14 +430,14 @@ mod tests {
             branch("main", BranchKind::Local),
             branch("origin/Feature-X", BranchKind::Remote),
         ];
-        let rows = rows_for(&branches, "feature", None);
+        let rows = rows_for(&branches, "feature", None, false);
         // No local matches any more: its heading disappears with it, otherwise
         // a title followed by nothing reads like a display glitch.
         assert_eq!(
             rows,
             vec![
                 Row::Group(BranchKind::Remote),
-                match rows_for(&branches, "", None)
+                match rows_for(&branches, "", None, false)
                     .into_iter()
                     .find(|r| matches!(r, Row::Branch(b) if b.name == "origin/Feature-X"))
                 {
@@ -441,11 +472,11 @@ mod tests {
         wt.checked_out_at = Some(linked.clone());
         let branches = vec![dev, wt];
 
-        let heads: Vec<(String, bool)> = rows_for(&branches, "", Some(&linked))
+        let heads: Vec<(String, bool)> = rows_for(&branches, "", Some(&linked), false)
             .into_iter()
             .filter_map(|row| match row {
                 Row::Branch(row) => Some((row.name, row.is_head)),
-                Row::Group(_) => None,
+                Row::Group(_) | Row::Scope(_) => None,
             })
             .collect();
         assert_eq!(
@@ -454,12 +485,12 @@ mod tests {
         );
         // And `dev`, held elsewhere, is "taken" — greyed, not mergeable-onto —
         // while the branch of this very worktree is not.
-        let rows = rows_for(&branches, "", Some(&linked));
+        let rows = rows_for(&branches, "", Some(&linked), false);
         let taken: Vec<bool> = rows
             .iter()
             .filter_map(|row| match row {
                 Row::Branch(row) => Some(row.taken()),
-                Row::Group(_) => None,
+                Row::Group(_) | Row::Scope(_) => None,
             })
             .collect();
         assert_eq!(taken, vec![true, false]);
@@ -473,10 +504,36 @@ mod tests {
             ahead: 2,
             behind: 3,
         });
-        let rows = rows_for(std::slice::from_ref(&b), "", None);
+        let rows = rows_for(std::slice::from_ref(&b), "", None, false);
         let Some(Row::Branch(row)) = rows.into_iter().nth(1) else {
             panic!("une branche");
         };
         assert_eq!((row.ahead, row.behind), (2, 3));
+    }
+
+    /// The two scope rows lead the docked list and belong to no group: they are
+    /// what the log is pointed at when it is pointed at no branch in
+    /// particular.
+    #[test]
+    fn the_docked_list_leads_with_the_two_scopes() {
+        let branches = vec![branch("main", BranchKind::Local)];
+        let rows = rows_for(&branches, "", None, true);
+        assert_eq!(rows.first(), Some(&Row::Scope(Scope::Head)));
+        assert_eq!(rows.get(1), Some(&Row::Scope(Scope::All)));
+        assert!(matches!(rows.get(2), Some(Row::Group(_))));
+        // And the popover, which checks out, has neither: a scope is not
+        // something one checks out.
+        assert!(!rows_for(&branches, "", None, false)
+            .iter()
+            .any(|row| matches!(row, Row::Scope(_))));
+    }
+
+    /// They go as soon as one types. They are not branch names, so keeping them
+    /// would leave two rows standing over an empty list and read as a search
+    /// that found them.
+    #[test]
+    fn a_filter_drops_the_scopes() {
+        let rows = rows_for(&[branch("main", BranchKind::Local)], "mai", None, true);
+        assert!(!rows.iter().any(|row| matches!(row, Row::Scope(_))));
     }
 }

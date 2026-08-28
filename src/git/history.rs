@@ -39,6 +39,11 @@ impl Commit {
 pub enum LogRange {
     /// The current checkout's history.
     Head,
+    /// One named reference's history — a branch picked from the list beside the
+    /// log, which is what reading a branch means before deciding to check it
+    /// out. A remote-tracking name works the same: `origin/main` is a ref like
+    /// any other.
+    Ref { name: String },
     /// What the branch has added since it diverged from `base` — the same range
     /// as the branch review, seen as a sequence of commits.
     Branch { base: String },
@@ -64,6 +69,7 @@ impl LogRange {
     fn args(&self) -> Vec<String> {
         match self {
             Self::Head => vec!["HEAD".into()],
+            Self::Ref { name } => vec![name.clone()],
             Self::Branch { base } => vec![format!("{base}..HEAD")],
             // `--all` without `--topo-order` would interleave the branches by
             // date, which gives an unreadable graph: the lines would jump from
@@ -568,6 +574,15 @@ mod tests {
     #[test]
     fn ranges_use_the_right_revision_syntax() {
         assert_eq!(LogRange::Head.args(), vec!["HEAD"]);
+        // A named ref is passed as it stands: `origin/main` is a revision, and
+        // dressing it up as one is what would break it.
+        assert_eq!(
+            LogRange::Ref {
+                name: "origin/main".into()
+            }
+            .args(),
+            vec!["origin/main"]
+        );
         assert_eq!(
             LogRange::Branch {
                 base: "main".into()

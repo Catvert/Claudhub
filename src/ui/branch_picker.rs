@@ -51,11 +51,11 @@ use gpui_component::{
     v_flex, v_virtual_list, ActiveTheme, Sizable as _, StyledExt as _,
 };
 
-use crate::git::BranchKind;
+use crate::git::{BranchKind, LogRange};
 use crate::runtime::{Action, Cmd};
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
-use crate::ui::branches::{rows_for, BranchRow, Row};
+use crate::ui::branches::{rows_for, BranchRow, Row, Scope};
 use crate::ui::icons::icon;
 
 /// How wide the surface is.
@@ -110,6 +110,9 @@ struct Look {
     /// A group's heading: one line, and shorter than a row — it is a rule with
     /// a name on it, not an entry.
     head: gpui::Pixels,
+    /// A scope row: one line, and an entry one aims at — so taller than a
+    /// heading and shorter than a branch, which carries two.
+    scope: gpui::Pixels,
 }
 
 impl Look {
@@ -124,6 +127,7 @@ impl Look {
             // show seven, and what one comes here to do is compare.
             row: unit * 1.45,
             head: unit * 0.95,
+            scope: unit * 1.15,
         }
     }
 }
@@ -261,7 +265,13 @@ impl BranchPicker {
             return Vec::new();
         };
         let query = self.query.read(cx).value();
-        let rows = rows_for(&repo.branches, &query, Some(&worktree));
+        // The scope rows only where the list drives a log — see `Row::Scope`.
+        let rows = rows_for(
+            &repo.branches,
+            &query,
+            Some(&worktree),
+            matches!(self.mode, Mode::Docked),
+        );
         // **A filter ignores the folds**, the window's rule for every foldable
         // list: a query that found something and shows nothing is read as a
         // query that found nothing.
@@ -293,6 +303,46 @@ impl BranchPicker {
             app.update(cx, |this, cx| f(this, window, cx));
         }
         self.close(window, cx);
+    }
+
+    /// What a click on a branch means — the third thing the mode decides.
+    ///
+    /// The popover **checks it out**: that is the gesture one opens it for, ten
+    /// times a day, and it has to stay one click. The column beside the log
+    /// **shows it** — one reads what a branch carries before deciding to take
+    /// it, and a list that switched branch under the pointer is a list one
+    /// cannot browse. Checking out from there is still one gesture, on the
+    /// row's `…`.
+    fn activate(&mut self, branch: &BranchRow, window: &mut Window, cx: &mut Context<Self>) {
+        match self.mode {
+            Mode::Popover => self.checkout(branch, window, cx),
+            Mode::Docked => self.scope(
+                LogRange::Ref {
+                    name: branch.name.clone(),
+                },
+                cx,
+            ),
+        }
+    }
+
+    /// Points the log beside the list at something else.
+    fn scope(&mut self, range: LogRange, cx: &mut Context<Self>) {
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        app.update(cx, |app, cx| app.set_history_range(range, cx));
+        cx.notify();
+    }
+
+    /// What that log is showing, for the row that says so. `None` in the
+    /// popover, which drives no log.
+    fn log_range(&self, cx: &App) -> Option<LogRange> {
+        if !matches!(self.mode, Mode::Docked) {
+            return None;
+        }
+        let app = self.app.upgrade()?;
+        let app = app.read(cx);
+        Some(app.active_review()?.history_range.clone())
     }
 
     fn checkout(&mut self, branch: &BranchRow, window: &mut Window, cx: &mut Context<Self>) {
@@ -328,7 +378,8 @@ impl BranchPicker {
         let rows = self.rows(cx);
         let Some(next) = crate::ui::picker::step_cursor(
             rows.len(),
-            |ix| matches!(rows[ix], Row::Branch(_)),
+            // A heading is not somewhere one can land; a scope is.
+            |ix| !matches!(rows[ix], Row::Group(_)),
             self.cursor,
             delta,
         ) else {
@@ -361,8 +412,10 @@ impl BranchPicker {
             "enter" => {
                 cx.stop_propagation();
                 let rows = self.rows(cx);
-                if let Some(Row::Branch(row)) = rows.get(self.cursor).cloned() {
-                    self.checkout(&row, window, cx);
+                match rows.get(self.cursor).cloned() {
+                    Some(Row::Branch(row)) => self.activate(&row, window, cx),
+                    Some(Row::Scope(scope)) => self.scope(range_of(scope), cx),
+                    _ => {}
                 }
             }
             _ => {}
@@ -386,18 +439,30 @@ impl BranchPicker {
             rows.iter()
                 .map(|row| match row {
                     Row::Group(_) => gpui::size(px(0.), look.head),
+                    Row::Scope(_) => gpui::size(px(0.), look.scope),
                     Row::Branch(_) => gpui::size(px(0.), look.row),
                 })
                 .collect::<Vec<_>>(),
         );
         let entity = cx.entity();
+        // What the log is pointed at, read once: the closure below runs for
+        // every visible row on every frame.
+        let log = self.log_range(cx);
+        let mode = self.mode;
         let build = {
             let rows = rows.clone();
             move |ix: usize, cx: &mut App| match &rows[ix] {
                 Row::Group(kind) => {
                     group_heading(&entity, ix, *kind, folded[group_ix(*kind)], look)
                 }
-                Row::Branch(row) => branch_row(&entity, ix, row, ix == cursor, look, cx),
+                Row::Scope(scope) => {
+                    let shown = log.as_ref() == Some(&range_of(*scope));
+                    scope_row(&entity, ix, *scope, shown, ix == cursor, look)
+                }
+                Row::Branch(row) => {
+                    let shown = matches!(&log, Some(LogRange::Ref { name }) if *name == row.name);
+                    branch_row(&entity, ix, row, ix == cursor, mode, shown, look, cx)
+                }
             }
         };
         v_flex()
@@ -850,6 +915,66 @@ impl Render for BranchPicker {
     }
 }
 
+/// The range a scope row asks for.
+fn range_of(scope: Scope) -> LogRange {
+    match scope {
+        Scope::Head => LogRange::Head,
+        Scope::All => LogRange::All,
+    }
+}
+
+/// One of the two rows above the branches: what the log is pointed at when it
+/// is pointed at no branch in particular.
+///
+/// Flush left, where a branch is set in under its heading: these belong to no
+/// group, and indenting them would read as if they did.
+fn scope_row(
+    picker: &Entity<BranchPicker>,
+    index: usize,
+    scope: Scope,
+    shown: bool,
+    at_cursor: bool,
+    look: Look,
+) -> gpui::AnyElement {
+    let picker = picker.clone();
+    h_flex()
+        .id(("branch-scope", index))
+        .h(look.scope)
+        .w_full()
+        .pl_1()
+        .pr(crate::ui::theme::scroll_gutter())
+        .gap_1()
+        .items_center()
+        .cursor_pointer()
+        .when(shown, |el| el.bg(look.accent))
+        .when(at_cursor && !shown, |el| el.bg(look.accent.opacity(0.5)))
+        .hover(|s| s.bg(look.accent.opacity(0.4)))
+        .on_click(move |_, _window, cx| {
+            picker.update(cx, |this, cx| this.scope(range_of(scope), cx));
+        })
+        .child(
+            icon(match scope {
+                Scope::Head => "crosshair",
+                Scope::All => "list-tree",
+            })
+            .xsmall()
+            .text_color(look.muted),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_sm()
+                .when(shown, |el| el.font_semibold())
+                .child(match scope {
+                    Scope::Head => tr!("history-head"),
+                    Scope::All => tr!("history-all"),
+                }),
+        )
+        .into_any_element()
+}
+
 /// Which of the two flags a group's fold lives in.
 fn group_ix(kind: BranchKind) -> usize {
     match kind {
@@ -871,6 +996,8 @@ fn fold(rows: Vec<Row>, folded: [bool; 2]) -> Vec<Row> {
                 true
             }
             Row::Branch(_) => !shut,
+            // Above the groups, and belonging to none of them.
+            Row::Scope(_) => true,
         })
         .collect()
 }
@@ -935,11 +1062,15 @@ fn group_heading(
 ///
 /// A band and not a pill — the window's rule for every list: what a selected row
 /// designates is the *row*, which is what the click and the `…` act on.
+#[allow(clippy::too_many_arguments)]
 fn branch_row(
     picker: &Entity<BranchPicker>,
     index: usize,
     row: &BranchRow,
     at_cursor: bool,
+    mode: Mode,
+    // `shown`: it is what the log beside the list is showing.
+    shown: bool,
     look: Look,
     _cx: &mut App,
 ) -> gpui::AnyElement {
@@ -954,6 +1085,10 @@ fn branch_row(
         None => row.detail.clone(),
     };
     let checkable = !row.is_head && !row.taken();
+    // **Every row answers in the docked list.** What a click does there is show
+    // the branch's commits, and there is no branch one cannot read — not the
+    // one checked out here, not the one checked out next door.
+    let clickable = checkable || matches!(mode, Mode::Docked);
     let (for_click, for_menu) = (picker.clone(), picker.clone());
     let (clicked, opened) = (row.clone(), row.clone());
 
@@ -968,12 +1103,15 @@ fn branch_row(
         .pr(crate::ui::theme::scroll_gutter())
         .gap_1()
         .items_center()
-        .when(at_cursor, |el| el.bg(look.accent.opacity(0.5)))
-        .when(checkable, |el| {
+        // The band says what the log is on; the fainter one says where the
+        // keyboard is. Two different questions, so two different weights.
+        .when(shown, |el| el.bg(look.accent))
+        .when(at_cursor && !shown, |el| el.bg(look.accent.opacity(0.5)))
+        .when(clickable, |el| {
             el.cursor_pointer()
                 .hover(|s| s.bg(look.accent.opacity(0.4)))
                 .on_click(move |_, window, cx| {
-                    for_click.update(cx, |this, cx| this.checkout(&clicked, window, cx));
+                    for_click.update(cx, |this, cx| this.activate(&clicked, window, cx));
                 })
         })
         .child(
@@ -994,7 +1132,7 @@ fn branch_row(
                                 .truncate()
                                 .text_sm()
                                 .when(row.is_head, |el| el.font_semibold())
-                                .when(!checkable && !row.is_head, |el| el.text_color(look.muted))
+                                .when(!clickable && !row.is_head, |el| el.text_color(look.muted))
                                 .child(SharedString::from(row.name.clone())),
                         )
                         .when(row.is_head, |el| el.child(tag(tr!("branch-here"), look))),
@@ -1149,6 +1287,7 @@ mod tests {
             .map(|row| match row {
                 Row::Group(BranchKind::Local) => "== locales".into(),
                 Row::Group(BranchKind::Remote) => "== distantes".into(),
+                Row::Scope(scope) => format!("{scope:?}"),
                 Row::Branch(row) => row.name.clone(),
             })
             .collect()

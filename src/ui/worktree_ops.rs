@@ -1315,11 +1315,14 @@ impl ClaudhubApp {
         // No worktree is "here" in this dialog: a branch checked out anywhere
         // — the main's included — cannot take a second checkout, and `None`
         // is what makes `taken()` say so for all of them.
-        for (index, entry) in crate::ui::branches::rows_for(branches, &needle, None)
+        for (index, entry) in crate::ui::branches::rows_for(branches, &needle, None, false)
             .into_iter()
             .enumerate()
         {
             match entry {
+                // Not asked for: this list picks a branch to build a worktree
+                // from, and there is no log beside it to point anywhere.
+                crate::ui::branches::Row::Scope(_) => {}
                 crate::ui::branches::Row::Group(kind) => rows.push(
                     div()
                         .px_2()

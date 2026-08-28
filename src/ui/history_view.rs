@@ -370,8 +370,14 @@ impl ClaudhubApp {
                 "{}:{start}\u{2013}{end}",
                 path.display()
             ))),
+            // The branch the log was pointed at, from the column beside it. It
+            // is said here too, and not only by the highlighted row: the column
+            // goes away when the panel narrows, and a list that shows one
+            // branch without saying which is a list one mistrusts.
+            LogRange::Ref { name } => Some(SharedString::from(name.clone())),
             _ => None,
         };
+        let lines_scope = matches!(range, LogRange::Lines { .. });
         let lines_only = self.history_lines_only;
         let show_graph = crate::ui::settings::Settings::global(cx).history_graph;
         // The arrangement, decided once: the header reads it to know whether
@@ -391,27 +397,33 @@ impl ClaudhubApp {
             .items_center()
             .border_b_1()
             .border_color(cx.theme().border)
-            .children(
-                [
-                    // The current branch first: it is the default, and the
-                    // default reads left to right.
-                    (LogRange::Head, tr!("history-head")),
-                    (LogRange::All, tr!("history-all")),
-                ]
-                .into_iter()
-                .enumerate()
-                .map(|(ix, (target, label))| {
-                    let selected = range == target;
-                    Button::new(("history-range", ix))
-                        .ghost()
-                        .xsmall()
-                        .label(label)
-                        .selected(selected)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_history_range(target.clone(), cx);
-                        }))
-                }),
-            )
+            // **Only where the column of branches is not on screen.** The two
+            // are the same two rows that column puts above the branches, and
+            // saying it twice would be two controls for one answer, one of
+            // which does not show the branch one is actually reading.
+            .when(shape != Shape::Full, |header| {
+                header.children(
+                    [
+                        // The current branch first: it is the default, and the
+                        // default reads left to right.
+                        (LogRange::Head, tr!("history-head")),
+                        (LogRange::All, tr!("history-all")),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, (target, label))| {
+                        let selected = range == target;
+                        Button::new(("history-range", ix))
+                            .ghost()
+                            .xsmall()
+                            .label(label)
+                            .selected(selected)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_history_range(target.clone(), cx);
+                            }))
+                    }),
+                )
+            })
             .when_some(scope, |header, scope| {
                 header
                     .child(
@@ -433,40 +445,51 @@ impl ClaudhubApp {
                             .xsmall()
                             .icon(crate::ui::icons::icon("x"))
                             .tooltip(tr!("history-lines-close"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.set_history_range(LogRange::All, cx);
+                            // Back to where each came from: a restricted patch
+                            // widens to every reference, a branch narrows back
+                            // to the checkout one is on.
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let back = if lines_scope {
+                                    LogRange::All
+                                } else {
+                                    LogRange::Head
+                                };
+                                this.set_history_range(back, cx);
                             })),
                     )
                     // The toggle: the patch restricted to those lines, or the
                     // commit whole. Both are one click away because both are
                     // read — the first says what happened to this code, the
-                    // second says what it was part of.
-                    .child(
-                        Button::new("history-lines-scope")
-                            .ghost()
-                            .xsmall()
-                            .label(if lines_only {
-                                tr!("history-lines-only")
-                            } else {
-                                tr!("history-lines-whole")
-                            })
-                            .tooltip(tr!("history-lines-toggle"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.history_lines_only = !this.history_lines_only;
-                                // The commit on screen was opened under the old
-                                // answer: re-opening it is what makes the toggle
-                                // show its effect rather than announce it.
-                                let index = this.active_review().and_then(|state| {
-                                    let history = state.history.as_ref()?;
-                                    let id = state.commit.as_deref()?;
-                                    history.commits.iter().position(|c| c.id == id)
-                                });
-                                if let Some(index) = index {
-                                    this.open_commit(index, cx);
-                                }
-                                cx.notify();
-                            })),
-                    )
+                    // second says what it was part of. A branch has no such
+                    // question: it is whole commits either way.
+                    .when(lines_scope, |header| {
+                        header.child(
+                            Button::new("history-lines-scope")
+                                .ghost()
+                                .xsmall()
+                                .label(if lines_only {
+                                    tr!("history-lines-only")
+                                } else {
+                                    tr!("history-lines-whole")
+                                })
+                                .tooltip(tr!("history-lines-toggle"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.history_lines_only = !this.history_lines_only;
+                                    // The commit on screen was opened under the old
+                                    // answer: re-opening it is what makes the toggle
+                                    // show its effect rather than announce it.
+                                    let index = this.active_review().and_then(|state| {
+                                        let history = state.history.as_ref()?;
+                                        let id = state.commit.as_deref()?;
+                                        history.commits.iter().position(|c| c.id == id)
+                                    });
+                                    if let Some(index) = index {
+                                        this.open_commit(index, cx);
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                    })
             })
             .child(div().flex_1())
             // At the far end because it changes how the list is drawn, not
