@@ -228,7 +228,7 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         panel: "ClaudhubChanges",
         title: Label::Key("range-working"),
-        icon: "file-diff",
+        icon: "git-commit-horizontal",
         home: Anchor::new(Side::Left, Half::Top),
         conditional: false,
     },
@@ -242,7 +242,7 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         panel: "ClaudhubFiles",
         title: Label::Key("panel-files"),
-        icon: "file-code",
+        icon: "pencil",
         home: Anchor::new(Side::Left, Half::Top),
         conditional: false,
     },
@@ -259,7 +259,7 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         panel: "ClaudhubNotes",
         title: Label::Key("panel-notes"),
-        icon: "pencil",
+        icon: "sticky-note",
         home: Anchor::new(Side::Left, Half::Bottom),
         conditional: false,
     },
@@ -275,7 +275,7 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         panel: "ClaudhubHistory",
         title: Label::Key("panel-history"),
-        icon: "git-commit-horizontal",
+        icon: "history",
         home: Anchor::new(Side::Right, Half::Top),
         conditional: false,
     },
