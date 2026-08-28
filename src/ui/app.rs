@@ -4422,26 +4422,33 @@ impl ClaudhubApp {
         self.set_panel_visible(name, true, cx);
         let seats = self.seats(cx);
         // Out of the tree — hidden and pruned, or dragged out of everything —
-        // and it has to be put back before it can be shown. `dock_panel_at`
-        // makes the region when the area has none.
+        // and it has to be put back before it can be shown.
         if !seats.iter().any(|seat| seat.panel == name) {
-            let placement = crate::ui::dock_layout::home_of(name);
-            let size = crate::ui::rails::tool(name).map(|tool| tool.home.side.default_size());
             let dock = self.dock.clone();
-            dock.update(cx, |area, cx| {
-                let Some(handle) = crate::ui::dock_layout::build(name, window, cx) else {
-                    return;
-                };
-                crate::ui::panels::dock_panel_at(
-                    area,
-                    handle,
-                    placement,
-                    size,
-                    |_| None,
-                    window,
-                    cx,
-                );
-            });
+            match crate::ui::rails::tool(name) {
+                // **Back to its own half**, and the split made if that half has
+                // gone. Put back by its region alone it landed in the region's
+                // first group — the top — so a tool of the bottom half came
+                // back as one more tab beside what it was meant to sit under.
+                // `move_to` is the path that knows the difference.
+                Some(tool) => crate::ui::dock_layout::move_to(&dock, name, tool.home, window, cx),
+                // A document: the centre, among the tabs it shares. The area
+                // splits an empty region's root to take the first one.
+                None => dock.update(cx, |area, cx| {
+                    let Some(handle) = crate::ui::dock_layout::build(name, window, cx) else {
+                        return;
+                    };
+                    crate::ui::panels::dock_panel_at(
+                        area,
+                        handle,
+                        gpui_component::dock::DockPlacement::Center,
+                        None,
+                        |_| None,
+                        window,
+                        cx,
+                    );
+                }),
+            }
         }
         // Its zone, if it is in one and it is folded: a tab selected behind a
         // folded edge is a gesture that did nothing.

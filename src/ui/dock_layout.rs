@@ -52,18 +52,6 @@ fn side_of(placement: DockPlacement) -> Option<Side> {
     }
 }
 
-/// Where a panel goes when it has to be put back: its edge if it is a tool
-/// window, the centre if it is a document.
-///
-/// A document has no rail button, so it is never *restored* by a press — but
-/// it is opened by a gesture that finds it absent from the tree, which is the
-/// same question.
-pub fn home_of(panel: &str) -> DockPlacement {
-    rails::tool(panel)
-        .map(|tool| placement_of(tool.home.side))
-        .unwrap_or(DockPlacement::Center)
-}
-
 /// Builds a panel from the dock's own registry, by name.
 ///
 /// **The registry and not a match of our own**, and that is what keeps the
@@ -338,13 +326,17 @@ pub fn move_to(
 ) {
     dock.update(cx, |area: &mut DockArea, cx: &mut Context<DockArea>| {
         let id = seat_id(area, panel, cx);
+        // The handle the dock already holds, so a move keeps the panel's
+        // identity. Building a second one for a panel already in the tree would
+        // put the same view in twice, under two ids.
+        let held = id.and_then(|id| area.panel(id).cloned());
         match (id, target_for(area, anchor)) {
             (Some(id), Some(target)) => area.move_panel(id, target, window, cx),
             // Out of the tree, or the edge does not exist yet: the add makes
             // the region on the way, and the move that follows puts it in the
             // half asked for — a fresh region has one group, which is its top.
             _ => {
-                let Some(handle) = build(panel, window, cx) else {
+                let Some(handle) = held.or_else(|| build(panel, window, cx)) else {
                     return;
                 };
                 let id = handle.panel_id(cx);
