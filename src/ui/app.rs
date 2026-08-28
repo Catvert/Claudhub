@@ -4507,8 +4507,12 @@ impl ClaudhubApp {
             self.toggle_terminal_panel(window, cx);
             return;
         }
-        match crate::ui::rails::press(panel, &self.seats(cx)) {
-            Press::Collapse { side } => self.toggle_zone(side, window, cx),
+        let hidden: std::collections::BTreeSet<String> =
+            self.hidden_panels.iter().cloned().collect();
+        match crate::ui::rails::press(panel, &self.seats(cx), &hidden) {
+            // The view and not its zone: a half left with nothing visible stops
+            // being drawn on its own, and the other half takes the room.
+            Press::Hide { panel } => self.set_panel_visible(panel, false, cx),
             Press::Reveal { panel, .. } | Press::Restore { panel, .. } => {
                 self.reveal_panel(panel, window, cx)
             }

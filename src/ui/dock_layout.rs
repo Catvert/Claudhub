@@ -483,9 +483,8 @@ impl crate::ui::app::ClaudhubApp {
     ) -> Vec<gpui::AnyElement> {
         use gpui_component::button::{Button, ButtonVariants as _};
         use gpui_component::menu::ContextMenuExt as _;
-        use gpui_component::{ActiveTheme as _, Sizable as _};
+        use gpui_component::Sizable as _;
 
-        let muted = cx.theme().muted_foreground;
         let seats = self.seats(cx);
         let app = cx.entity();
         buttons
@@ -508,10 +507,6 @@ impl crate::ui::app::ClaudhubApp {
                             this.ghost()
                         }
                     })
-                    // A hidden view keeps its button, muted: it is where one
-                    // calls it back from, and a button that vanished would be a
-                    // target that moves.
-                    .when(button.dimmed, |this| this.text_color(muted))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.press_tool(panel, window, cx);
                     }))

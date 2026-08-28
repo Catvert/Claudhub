@@ -207,14 +207,14 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         panel: "ClaudhubNotes",
         title: "panel-notes",
-        icon: "sticky-note",
+        icon: "pencil",
         home: Anchor::new(Side::Right, Half::Top),
         conditional: false,
     },
     Tool {
         panel: "ClaudhubHistory",
         title: "panel-history",
-        icon: "history",
+        icon: "git-commit-horizontal",
         home: Anchor::new(Side::Right, Half::Top),
         conditional: false,
     },
@@ -223,7 +223,7 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         panel: "ClaudhubTags",
         title: "panel-tags",
-        icon: "tag",
+        icon: "tags",
         home: Anchor::new(Side::Right, Half::Bottom),
         conditional: false,
     },
@@ -253,7 +253,7 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         panel: "ClaudhubConflicts",
         title: "panel-conflicts",
-        icon: "triangle-alert",
+        icon: "git-merge",
         home: Anchor::new(Side::Left, Half::Bottom),
         conditional: true,
     },
@@ -288,12 +288,12 @@ pub struct Button {
     pub panel: &'static str,
     pub title: &'static str,
     pub icon: &'static str,
-    /// Its zone is unfolded **and** it is the tab being displayed.
+    /// On screen: its zone unfolded, its tab in front, and not put away.
+    ///
+    /// The only state a button carries. A view put away and a view behind
+    /// another are both simply not on screen, and a rail that told them apart
+    /// would be answering a question nobody asks of it.
     pub active: bool,
-    /// Hidden from the "Views" menu: the button stays, muted. It is where one
-    /// calls the view back from, and a button that vanished would be a target
-    /// that moves.
-    pub dimmed: bool,
 }
 
 /// One edge's rail, read in two runs.
@@ -323,8 +323,15 @@ impl Rail {
 pub enum Press {
     /// The zone is folded, or another tab is in front: unfold, bring forward.
     Reveal { panel: &'static str, side: Side },
-    /// It is already the displayed tab of an unfolded zone: fold the zone.
-    Collapse { side: Side },
+    /// It is already on screen: put it away.
+    ///
+    /// **The view and not the zone.** A zone holds two halves and each holds
+    /// several views; folding the lot to put one away would take the other
+    /// half's work off the screen with it. A half left with nothing visible
+    /// stops being drawn on its own, and the other takes the room — which is
+    /// what makes the two halves fold independently without a second notion of
+    /// folding beside the one the dock already has.
+    Hide { panel: &'static str },
     /// The panel is not in the tree — hidden, or dragged out of everything:
     /// put it back where the default puts it.
     Restore { panel: &'static str, anchor: Anchor },
@@ -397,8 +404,8 @@ pub fn rails(seats: &[Seat], hidden: &std::collections::BTreeSet<String>) -> [Ra
             panel: tool.panel,
             title: tool.title,
             icon: tool.icon,
-            active: seat.is_some_and(|seat| seat.open && seat.shown),
-            dimmed: hidden.contains(tool.panel),
+            active: seat.is_some_and(|seat| seat.open && seat.shown)
+                && !hidden.contains(tool.panel),
         };
         let rail = &mut rails[anchor.side.index()];
         match anchor.half {
@@ -419,7 +426,7 @@ pub fn rails(seats: &[Seat], hidden: &std::collections::BTreeSet<String>) -> [Ra
 }
 
 /// What pressing a button does.
-pub fn press(panel: &str, seats: &[Seat]) -> Press {
+pub fn press(panel: &str, seats: &[Seat], hidden: &std::collections::BTreeSet<String>) -> Press {
     let Some(tool) = tool(panel) else {
         // Not one of ours: nothing sensible to do, and the caller has no
         // button to have pressed.
@@ -430,9 +437,10 @@ pub fn press(panel: &str, seats: &[Seat]) -> Press {
     };
     match seat(panel, seats) {
         Some(seat) => match seat.anchor {
-            // Folding is asked of a zone and not of a panel: what the button
-            // says is "put this away", and what is in the way is the zone.
-            Some(anchor) if seat.open && seat.shown => Press::Collapse { side: anchor.side },
+            // On screen: the press puts it away. Not the zone — see `Hide`.
+            Some(_) if seat.open && seat.shown && !hidden.contains(panel) => {
+                Press::Hide { panel: tool.panel }
+            }
             Some(anchor) => Press::Reveal {
                 panel: tool.panel,
                 side: anchor.side,
@@ -574,10 +582,10 @@ mod tests {
         assert!(!lit(false, true));
     }
 
-    /// Pressing what is already in front puts the zone away; pressing again
-    /// brings it back.
+    /// Pressing what is on screen puts **the view** away, not its zone: the
+    /// other half of the edge is somebody else's work, and it stays.
     #[test]
-    fn pressing_what_is_in_front_folds_the_zone() {
+    fn pressing_what_is_on_screen_puts_the_view_away() {
         let open = vec![seat(
             "ClaudhubNotes",
             at(Side::Right, Half::Top),
@@ -585,22 +593,29 @@ mod tests {
             true,
         )];
         assert_eq!(
-            press("ClaudhubNotes", &open),
-            Press::Collapse { side: Side::Right }
+            press("ClaudhubNotes", &open, &none()),
+            Press::Hide {
+                panel: "ClaudhubNotes"
+            }
         );
+        // And pressing it again brings it back — from a view put away as from
+        // a folded zone.
+        let away = BTreeSet::from(["ClaudhubNotes".to_string()]);
         let folded = vec![seat(
             "ClaudhubNotes",
             at(Side::Right, Half::Top),
             true,
             false,
         )];
-        assert_eq!(
-            press("ClaudhubNotes", &folded),
-            Press::Reveal {
-                panel: "ClaudhubNotes",
-                side: Side::Right,
-            }
-        );
+        for (seats, hidden) in [(&open, &away), (&folded, &none())] {
+            assert_eq!(
+                press("ClaudhubNotes", seats, hidden),
+                Press::Reveal {
+                    panel: "ClaudhubNotes",
+                    side: Side::Right,
+                }
+            );
+        }
     }
 
     /// Pressing a tab that is **not** in front selects it. Folding there would
@@ -612,7 +627,7 @@ mod tests {
             seat("ClaudhubHistory", at(Side::Right, Half::Top), false, true),
         ];
         assert_eq!(
-            press("ClaudhubHistory", &seats),
+            press("ClaudhubHistory", &seats, &none()),
             Press::Reveal {
                 panel: "ClaudhubHistory",
                 side: Side::Right,
@@ -620,21 +635,26 @@ mod tests {
         );
     }
 
-    /// Hidden from the menu, a panel keeps its button — muted — and pressing
-    /// it puts the panel back where the default layout has it. The button is
-    /// where one calls a hidden view back from.
+    /// A view put away keeps its button — unlit — and that is where one calls
+    /// it back from. A button that vanished would be a target that moves.
     #[test]
-    fn a_hidden_panel_keeps_a_muted_button_that_restores_it() {
+    fn a_view_put_away_keeps_an_unlit_button() {
         let hidden = BTreeSet::from(["ClaudhubNotes".to_string()]);
-        let rails = rails(&[], &hidden);
-        let button = rail(&rails, Side::Right)
+        let seats = vec![seat(
+            "ClaudhubNotes",
+            at(Side::Right, Half::Top),
+            true,
+            true,
+        )];
+        let button = rails(&seats, &hidden)[Side::Right.index()]
             .buttons()
             .find(|button| button.panel == "ClaudhubNotes")
+            .cloned()
             .expect("the button stays");
-        assert!(button.dimmed);
-        assert!(!button.active);
+        assert!(!button.active, "put away is not on screen");
+        // Out of the tree entirely, the press puts it back where it belongs.
         assert_eq!(
-            press("ClaudhubNotes", &[]),
+            press("ClaudhubNotes", &[], &none()),
             Press::Restore {
                 panel: "ClaudhubNotes",
                 anchor: Anchor::new(Side::Right, Half::Top),
