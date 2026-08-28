@@ -4019,7 +4019,11 @@ impl ClaudhubApp {
             .bg(cx.theme().title_bar)
             .text_xs()
             .text_color(muted)
-            // The active checkout's agent opens the bar: the dot
+            // The bottom edge's tool windows open the bar, where the screen
+            // picker used to be — see `render_bottom_tools` for why they are
+            // here rather than in a strip of their own.
+            .child(self.render_bottom_tools(cx))
+            // The active checkout's agent: the dot
             // says a Claude works (or waits) in what the window is looking at,
             // read out of the corner of the eye. The rest of the fleet stays
             // in the worktree picker and on the pins.

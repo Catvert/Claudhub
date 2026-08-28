@@ -275,22 +275,44 @@ impl crate::ui::app::ClaudhubApp {
             .min_w_0()
             .child(self.render_rail(&rails[Side::Left.index()], cx))
             .child(
-                gpui_component::v_flex()
+                gpui::div()
                     .flex_1()
-                    .min_w_0()
                     .min_h_0()
-                    .child(
-                        gpui::div()
-                            .flex_1()
-                            .min_h_0()
-                            .min_w_0()
-                            .py(px(4.))
-                            .px(px(8.))
-                            .child(self.dock.clone()),
-                    )
-                    .child(self.render_rail(&rails[Side::Bottom.index()], cx)),
+                    .min_w_0()
+                    .py(px(4.))
+                    .px(px(8.))
+                    .child(self.dock.clone()),
             )
             .child(self.render_rail(&rails[Side::Right.index()], cx))
+    }
+
+    /// The bottom edge's buttons, for the status bar to carry.
+    ///
+    /// **Merged with the status bar rather than a strip of its own.** The two
+    /// would have followed each other — thirty pixels between them to hold a
+    /// handful of icons, two grey bands stacked under the window where the dock
+    /// fights for every line — and they say the same kind of thing anyway. It
+    /// is the observation that moved the screen picker down here in the first
+    /// place, and it outlived the picker.
+    ///
+    /// No background of its own: the bar has one.
+    pub(super) fn render_bottom_tools(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let seats = self.seats(cx);
+        let hidden: std::collections::BTreeSet<String> =
+            self.hidden_panels.iter().cloned().collect();
+        let rail = rails::rails(&seats, &hidden)
+            .into_iter()
+            .nth(Side::Bottom.index())
+            .expect("three rails");
+        let buttons = self.rail_buttons(&rail, cx);
+        if buttons.is_empty() {
+            return gpui::Empty.into_any_element();
+        }
+        gpui_component::h_flex()
+            .flex_none()
+            .gap(px(2.))
+            .children(buttons)
+            .into_any_element()
     }
 
     /// One rail: a button per tool window that edge holds.
@@ -299,14 +321,17 @@ impl crate::ui::app::ClaudhubApp {
     /// one is a horizontal strip under the centre, and a permanent grey line
     /// there for a window with no terminal and no run would be thirty pixels
     /// spent saying nothing.
-    fn render_rail(&mut self, rail: &rails::Rail, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// The buttons of one rail, shared by the two edges and the status bar.
+    fn rail_buttons(
+        &mut self,
+        rail: &rails::Rail,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui_component::button::Button> {
         use gpui_component::button::{Button, ButtonVariants as _};
-        use gpui_component::{h_flex, v_flex, ActiveTheme as _, Sizable as _};
+        use gpui_component::{ActiveTheme as _, Sizable as _};
 
-        let vertical = rail.side != Side::Bottom;
         let muted = cx.theme().muted_foreground;
-        let buttons: Vec<_> = rail
-            .buttons
+        rail.buttons
             .iter()
             .map(|button| {
                 let panel = button.panel;
@@ -334,46 +359,37 @@ impl crate::ui::app::ClaudhubApp {
                         this.press_tool(panel, window, cx);
                     }))
             })
-            .collect();
-        // Nothing to show, nothing painted — not an empty band: the bottom
-        // rail is a strip under the centre, and a permanent grey line there for
-        // a window with no terminal and no run would be pixels spent saying
-        // nothing.
+            .collect()
+    }
+
+    /// One side rail: a column of buttons against the window's edge.
+    fn render_rail(&mut self, rail: &rails::Rail, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use gpui_component::{v_flex, ActiveTheme as _};
+
+        let buttons = self.rail_buttons(rail, cx);
+        // Nothing to show, nothing painted — not an empty band.
         if buttons.is_empty() {
             return gpui::Empty.into_any_element();
         }
         // The flex is returned directly rather than wrapped: a `div()` is a
         // **block**, where a child's `h_full` resolves against an undefined
         // height.
-        if vertical {
-            v_flex()
-                .h_full()
-                .flex_none()
-                // Against the window's ground and not the cards': a rail is
-                // furniture at the edge, and painting it in the tone the cards
-                // sit on would make it read as one more card.
-                .bg(cx.theme().title_bar)
-                .gap(px(2.))
-                .py(px(6.))
-                .px(px(4.))
-                // A rail does not scroll: one that has to be scrolled is one
-                // that can no longer be aimed at. `rails::MAX_PER_RAIL` keeps
-                // the table inside what an edge can show.
-                .overflow_hidden()
-                .children(buttons)
-                .into_any_element()
-        } else {
-            h_flex()
-                .w_full()
-                .flex_none()
-                .bg(cx.theme().title_bar)
-                .gap(px(2.))
-                .px(px(6.))
-                .py(px(3.))
-                .overflow_hidden()
-                .children(buttons)
-                .into_any_element()
-        }
+        v_flex()
+            .h_full()
+            .flex_none()
+            // Against the window's ground and not the cards': a rail is
+            // furniture at the edge, and painting it in the tone the cards sit
+            // on would make it read as one more card.
+            .bg(cx.theme().title_bar)
+            .gap(px(2.))
+            .py(px(6.))
+            .px(px(4.))
+            // A rail does not scroll: one that has to be scrolled is one that
+            // can no longer be aimed at. `rails::MAX_PER_RAIL` keeps the table
+            // inside what an edge can show.
+            .overflow_hidden()
+            .children(buttons)
+            .into_any_element()
     }
 
     /// Folds the three zones away, and gives back exactly what was unfolded.
