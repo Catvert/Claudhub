@@ -57,8 +57,12 @@ fn actions() -> gpui::Div {
 /// - A `checked` is frozen at the menu's construction, which happens only once.
 ///   The tick is therefore painted by the row, which re-reads the state on every
 ///   frame.
-fn view_toggle(app: Entity<ClaudhubApp>, name: &'static str, title: &'static str) -> PopupMenuItem {
-    toggle_row(app, name, move || tr!(title))
+fn view_toggle(
+    app: Entity<ClaudhubApp>,
+    name: &'static str,
+    title: crate::ui::rails::Label,
+) -> PopupMenuItem {
+    toggle_row(app, name, move || title.text())
 }
 
 /// The same, for a plugin: its title comes from its manifest and not from a

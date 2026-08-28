@@ -146,21 +146,13 @@ const DOCUMENTS: &[&str] = &[
 
 /// The plugin panels that asked for one place, in manifest order.
 fn plugin_panels(anchor: Option<Anchor>) -> Vec<&'static str> {
-    use crate::plugin::manifest::Place;
-    // A manifest names an edge and not a half: which of the two a plugin's
-    // panel belongs in is an arrangement, and arrangements are the user's. It
-    // lands in the bottom half, beside what one keeps an eye on rather than
-    // among what one picks the file from.
-    let wanted = |place: Place| match place {
-        Place::Left => Some(Anchor::new(Side::Left, Half::Bottom)),
-        Place::Right => Some(Anchor::new(Side::Right, Half::Bottom)),
-        Place::Bottom => Some(Anchor::new(Side::Bottom, Half::Top)),
-        Place::Centre => None,
-    };
+    // Where a manifest's `place` lands is `rails`' answer and not a second one
+    // here: the rail and the layout have to agree about a plugin's home, and
+    // two readings of one field are two readings to keep in step.
     crate::ui::plugin_view::manifests()
         .iter()
         .flat_map(|manifest| manifest.panels.iter())
-        .filter(|spec| wanted(spec.place) == anchor)
+        .filter(|spec| Anchor::of_place(spec.place) == anchor)
         .map(|spec| spec.name)
         .collect()
 }
@@ -494,7 +486,7 @@ impl crate::ui::app::ClaudhubApp {
                 let panel = button.panel;
                 Button::new(gpui::SharedString::from(panel))
                     .icon(crate::ui::icons::icon(button.icon))
-                    .tooltip(crate::tr!(button.title))
+                    .tooltip(button.title.text())
                     .small()
                     // **Solid against ghost**, the polarity of both ends of the
                     // status bar: the "selected" state of a ghost button is a

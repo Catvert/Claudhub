@@ -76,6 +76,22 @@ impl Anchor {
         all
     }
 
+    /// Where a plugin's manifest asks for its panel to start.
+    ///
+    /// A manifest names an **edge** and not a half: which of the two a panel
+    /// belongs in is an arrangement, and arrangements are the user's. It lands
+    /// in the bottom half, beside what one keeps an eye on rather than among
+    /// what one picks the file from.
+    pub fn of_place(place: crate::plugin::manifest::Place) -> Option<Anchor> {
+        use crate::plugin::manifest::Place;
+        match place {
+            Place::Left => Some(Anchor::new(Side::Left, Half::Bottom)),
+            Place::Right => Some(Anchor::new(Side::Right, Half::Bottom)),
+            Place::Bottom => Some(Anchor::new(Side::Bottom, Half::Top)),
+            Place::Centre => None,
+        }
+    }
+
     /// The i18n key naming this place in the menu.
     pub fn label(self) -> &'static str {
         match (self.side, self.half) {
@@ -122,13 +138,40 @@ impl Side {
     }
 }
 
+/// What a button is called.
+///
+/// A plugin's strings are its own: no catalogue of ours holds them, and asking
+/// one for a key it has never seen gives back the key. The two are therefore
+/// told apart here rather than guessed at the point of painting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Label {
+    /// A key of `assets/i18n`.
+    Key(&'static str),
+    /// A plugin's own words, already in the language it wrote them in.
+    Text(&'static str),
+}
+
+impl Label {
+    /// The words to paint.
+    ///
+    /// A `SharedString` and not a `String`: a rail is rebuilt every frame, and
+    /// a compiled catalogue hands back a borrow.
+    pub fn text(self) -> gpui::SharedString {
+        match self {
+            Label::Key(key) => crate::tr!(key),
+            Label::Text(text) => gpui::SharedString::from(text),
+        }
+    }
+}
+
 /// A tool window, as the rails know it.
+#[derive(Debug, Clone, Copy)]
 pub struct Tool {
     /// The name the dock's registry builds it by, and the one a saved layout
     /// holds.
     pub panel: &'static str,
-    /// The i18n key of its title — the same one its tab carries.
-    pub title: &'static str,
+    /// What its button is called — the same thing its tab says.
+    pub title: Label,
     /// A Lucide name from `assets/icons`.
     pub icon: &'static str,
     /// Where the default layout puts it, and where `Press::Restore` puts it
@@ -159,42 +202,42 @@ pub struct Tool {
 pub const TOOLS: &[Tool] = &[
     Tool {
         panel: "ClaudhubChanges",
-        title: "range-working",
+        title: Label::Key("range-working"),
         icon: "file-diff",
         home: Anchor::new(Side::Left, Half::Top),
         conditional: false,
     },
     Tool {
         panel: "ClaudhubBranch",
-        title: "range-branch",
+        title: Label::Key("range-branch"),
         icon: "git-branch",
         home: Anchor::new(Side::Left, Half::Top),
         conditional: false,
     },
     Tool {
         panel: "ClaudhubFiles",
-        title: "panel-files",
+        title: Label::Key("panel-files"),
         icon: "file-code",
         home: Anchor::new(Side::Left, Half::Top),
         conditional: false,
     },
     Tool {
         panel: "ClaudhubSearch",
-        title: "panel-search",
+        title: Label::Key("panel-search"),
         icon: "search",
         home: Anchor::new(Side::Left, Half::Top),
         conditional: false,
     },
     Tool {
         panel: "ClaudhubDb",
-        title: "panel-databases",
+        title: Label::Key("panel-databases"),
         icon: "database",
         home: Anchor::new(Side::Left, Half::Top),
         conditional: false,
     },
     Tool {
         panel: "ClaudhubTests",
-        title: "panel-tests",
+        title: Label::Key("panel-tests"),
         icon: "circle-check",
         home: Anchor::new(Side::Left, Half::Bottom),
         // Only where a runner exists: on everything else the honest panel is
@@ -203,21 +246,21 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         panel: "ClaudhubTerminal",
-        title: "panel-terminal",
+        title: Label::Key("panel-terminal"),
         icon: "square-terminal",
         home: Anchor::new(Side::Bottom, Half::Top),
         conditional: false,
     },
     Tool {
         panel: "ClaudhubNotes",
-        title: "panel-notes",
+        title: Label::Key("panel-notes"),
         icon: "pencil",
         home: Anchor::new(Side::Right, Half::Top),
         conditional: false,
     },
     Tool {
         panel: "ClaudhubHistory",
-        title: "panel-history",
+        title: Label::Key("panel-history"),
         icon: "git-commit-horizontal",
         home: Anchor::new(Side::Right, Half::Top),
         conditional: false,
@@ -226,28 +269,28 @@ pub const TOOLS: &[Tool] = &[
     // reached by its button.
     Tool {
         panel: "ClaudhubTags",
-        title: "panel-tags",
+        title: Label::Key("panel-tags"),
         icon: "tags",
         home: Anchor::new(Side::Right, Half::Bottom),
         conditional: false,
     },
     Tool {
         panel: "ClaudhubStashes",
-        title: "panel-stashes",
+        title: Label::Key("panel-stashes"),
         icon: "archive",
         home: Anchor::new(Side::Right, Half::Bottom),
         conditional: false,
     },
     Tool {
         panel: "ClaudhubSqlHistory",
-        title: "panel-sql-history",
+        title: Label::Key("panel-sql-history"),
         icon: "list",
         home: Anchor::new(Side::Right, Half::Bottom),
         conditional: false,
     },
     Tool {
         panel: "ClaudhubTestRun",
-        title: "panel-test-run",
+        title: Label::Key("panel-test-run"),
         icon: "play",
         home: Anchor::new(Side::Bottom, Half::Top),
         conditional: true,
@@ -256,12 +299,47 @@ pub const TOOLS: &[Tool] = &[
     // in a hundred.
     Tool {
         panel: "ClaudhubConflicts",
-        title: "panel-conflicts",
+        title: Label::Key("panel-conflicts"),
         icon: "git-merge",
         home: Anchor::new(Side::Left, Half::Bottom),
         conditional: true,
     },
 ];
+
+/// Every tool window, ours and the plugins'.
+///
+/// **The plugins' panels are tool windows of full standing**, button included:
+/// a side zone shows a title and not a strip of tabs, so a panel with no button
+/// is a panel with no way in. They come after ours and take no key — `Alt+1` to
+/// `Alt+9` are ranks of `TOOLS`, and a plugin installed between two sessions
+/// would otherwise move every key after it.
+///
+/// Built on each call rather than cached: what a plugin declares changes when
+/// one is installed, and a list held beside the manifests is the second list
+/// this module exists without.
+pub fn tools() -> Vec<Tool> {
+    let mut tools = TOOLS.to_vec();
+    for manifest in crate::ui::plugin_view::manifests() {
+        for spec in &manifest.panels {
+            // A plugin's panel in the centre is a document, reached by its tab
+            // among the ones it shares its group with.
+            let Some(home) = Anchor::of_place(spec.place) else {
+                continue;
+            };
+            tools.push(Tool {
+                panel: spec.name,
+                title: Label::Text(spec.title.as_str()),
+                icon: spec.icon.as_str(),
+                home,
+                // A plugin switched off, or still missing the setting it cannot
+                // work without, draws nothing: a button for it would be a
+                // target that never answers.
+                conditional: true,
+            });
+        }
+    }
+    tools
+}
 
 /// What one edge may carry before the rail stops being readable.
 ///
@@ -296,7 +374,7 @@ pub struct Seat {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Button {
     pub panel: &'static str,
-    pub title: &'static str,
+    pub title: Label,
     pub icon: &'static str,
     /// On screen: its zone unfolded, its tab in front, and not put away.
     ///
@@ -348,8 +426,8 @@ pub enum Press {
 }
 
 /// The tool this name declares, if it is one.
-pub fn tool(panel: &str) -> Option<&'static Tool> {
-    TOOLS.iter().find(|tool| tool.panel == panel)
+pub fn tool(panel: &str) -> Option<Tool> {
+    tools().into_iter().find(|tool| tool.panel == panel)
 }
 
 /// The seat a panel of this name holds, if the tree holds one.
@@ -396,7 +474,7 @@ pub fn rails(seats: &[Seat], hidden: &std::collections::BTreeSet<String>) -> [Ra
         top: Vec::new(),
         bottom: Vec::new(),
     });
-    for tool in TOOLS {
+    for tool in tools() {
         let seat = seat(tool.panel, seats);
         // At the centre it is a document: reached by its tab, among the ones
         // it shares its group with.
@@ -431,15 +509,19 @@ pub fn rails(seats: &[Seat], hidden: &std::collections::BTreeSet<String>) -> [Ra
             Half::Bottom => rail.bottom.push(button),
         }
     }
-    // The rail does not scroll, so what it cannot show it hides. Said here as
-    // well as in the test: a plugin's panels join a rail at run time, where a
-    // table read at compile time cannot see them.
-    debug_assert!(
-        rails
-            .iter()
-            .all(|rail| rail.buttons().count() <= MAX_PER_RAIL),
-        "a rail carries more buttons than it can show"
-    );
+    // The rail does not scroll, so what it cannot show it hides. A **warning**
+    // and not an assertion: our own table is held to the cap by a test, but a
+    // plugin's panels join a rail at run time, and a window one has installed
+    // too many plugins into is not a window that should stop.
+    for rail in &rails {
+        if rail.buttons().count() > MAX_PER_RAIL {
+            log::warn!(
+                "the {:?} rail carries {} buttons, more than it can show",
+                rail.side,
+                rail.buttons().count()
+            );
+        }
+    }
     rails
 }
 
@@ -771,6 +853,8 @@ mod tests {
 
     /// No edge carries more than a rail can be aimed at. A tool window too
     /// many is a decision to take, not an icon to crop.
+    /// Ours, at least: a plugin's panels join a rail at run time, and what
+    /// this holds is the table one can decide about at compile time.
     #[test]
     fn no_rail_carries_more_than_it_can_show() {
         let rails = rails(&[], &none());
@@ -811,9 +895,14 @@ mod tests {
             include_str!("../../assets/i18n/en.json"),
             include_str!("../../assets/i18n/fr.json"),
         );
+        // Ours only: a plugin's strings are its own, and no catalogue of ours
+        // holds them — which is the whole reason `Label` tells the two apart.
         let named = TOOLS
             .iter()
-            .map(|tool| tool.title)
+            .filter_map(|tool| match tool.title {
+                Label::Key(key) => Some(key),
+                Label::Text(_) => None,
+            })
             .chain(Anchor::all().into_iter().map(Anchor::label));
         for title in named {
             let key = format!("\"{title}\":");
