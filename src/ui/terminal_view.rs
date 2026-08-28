@@ -1797,6 +1797,8 @@ impl ClaudhubApp {
             crate::ui::panels::dock_panel_at(
                 dock,
                 gpui_component::dock::panel_handle(panel.clone()),
+                DockPlacement::Center,
+                None,
                 |dock| {
                     sibling
                         .and_then(|sibling| {

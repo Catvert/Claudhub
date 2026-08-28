@@ -2036,6 +2036,8 @@ impl ClaudhubApp {
                 crate::ui::panels::dock_panel_at(
                     dock,
                     gpui_component::dock::panel_handle(panel.clone()),
+                    gpui_component::dock::DockPlacement::Center,
+                    None,
                     |dock| {
                         dock.layout(gpui_component::dock::DockPlacement::Center)
                             .and_then(|layout| {

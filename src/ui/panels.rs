@@ -338,10 +338,16 @@ fn zoom_in_toolbar() -> Option<PanelControl> {
     Some(PanelControl::Toolbar)
 }
 
-/// Adds a panel to a screen's centre and moves it where the caller says,
-/// keeping the tab the centre's first group was displaying.
+/// Adds a panel to **a region** and moves it where the caller says, keeping
+/// the tab that region's first group was displaying.
 ///
-/// `add_panel_view` takes no target: it appends the panel to the centre's
+/// The region is named rather than assumed: a terminal does not land in the
+/// centre — the tool zones are docks. `add_panel_view` makes the region when
+/// the area has none (`size` is what it is born at, the one moment we choose a
+/// dock's extent), and knows how to place into an empty one by splitting its
+/// root.
+///
+/// `add_panel_view` takes no target: it appends the panel to the region's
 /// **first tab group** and activates it there, and the move takes it right
 /// back out. Removing the tab a group displays leaves its active index one
 /// past the end, and the clamp lands on the **last** tab — on the Git screen
@@ -359,11 +365,13 @@ fn zoom_in_toolbar() -> Option<PanelControl> {
 pub(super) fn dock_panel_at(
     dock: &mut gpui_component::dock::DockArea,
     handle: std::sync::Arc<dyn gpui_component::dock::BasePanelView>,
+    placement: gpui_component::dock::DockPlacement,
+    size: Option<gpui::Pixels>,
     target: impl FnOnce(&gpui_component::dock::DockArea) -> Option<gpui_component::dock::InsertTarget>,
     window: &mut Window,
     cx: &mut Context<gpui_component::dock::DockArea>,
 ) {
-    use gpui_component::dock::{DockPlacement, InsertTarget, NodeId, PaneNode, PaneRef, PanelId};
+    use gpui_component::dock::{InsertTarget, NodeId, PaneNode, PaneRef, PanelId};
 
     /// The first tab group's displayed panel — the group `add_panel_view`
     /// lands in, found by the same walk it uses.
@@ -379,9 +387,9 @@ pub(super) fn dock_panel_at(
 
     let id = handle.panel_id(cx);
     let noted = dock
-        .layout(DockPlacement::Center)
+        .layout(placement)
         .and_then(|tree| displayed(tree.root()));
-    dock.add_panel_view(handle, DockPlacement::Center, None, window, cx);
+    dock.add_panel_view(handle, placement, size, window, cx);
     let Some(target) = target(dock) else {
         return;
     };
