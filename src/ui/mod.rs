@@ -38,6 +38,10 @@ mod panels;
 mod picker;
 pub mod plugin_view;
 mod preview;
+// The rails are wired up in the step that paints them; until then the module
+// is written and tested against nothing.
+#[allow(dead_code)]
+mod rails;
 mod refine;
 mod repos;
 mod review;
