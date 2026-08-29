@@ -507,14 +507,15 @@ impl crate::ui::app::ClaudhubApp {
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
-                    .py(px(4.))
-                    // **Two pixels and not eight.** The rail already pads its
-                    // buttons by four, so eight here put twelve between an icon
-                    // and the card it calls up — a gap wide enough to read as a
-                    // separation between two things rather than as the seam of
-                    // one. What is wanted is that the card clears the rail, and
-                    // that is all this is for.
-                    .px(px(2.))
+                    // **Four pixels all round, not eight and not two.** Eight
+                    // put twelve between an icon and the card it calls up — the
+                    // rail pads its own buttons by four — a gap wide enough to
+                    // read as a separation between two things rather than as
+                    // the seam of one. Two closed it so far that the card sat
+                    // against the rail. What is wanted is that the card clears
+                    // the rail, by the same margin that already clears the
+                    // title bar above it.
+                    .p(px(4.))
                     .child(self.dock.clone()),
             )
             .child(self.render_rail(&rails[Side::Right.index()], cx))
