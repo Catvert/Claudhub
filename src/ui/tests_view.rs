@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gpui::{div, prelude::*, uniform_list, App, Context, Entity, SharedString, Window};
+use gpui::{div, img, prelude::*, uniform_list, App, Context, Entity, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
@@ -59,6 +59,13 @@ pub struct PestState {
     pub expanded: HashSet<String>,
     /// Show only the tests whose last fate was a failure.
     pub only_failed: bool,
+    /// Watch the browser a Pest run drives, streamed into the run panel.
+    /// Exclusive with `parallel`: each parallel worker gets a browser of its
+    /// own, and they would all be handed the same debugging port.
+    ///
+    /// Only the checkouts whose `BrowserTestCase` opens that port answer; the
+    /// others simply show no picture, and their run is unaffected.
+    pub cast: bool,
     /// Run Pest with `--headed`: its browser tests then show the browser
     /// instead of running headless. A session choice, not persisted — one
     /// watches a test debug, one does not live like that.
@@ -109,6 +116,15 @@ impl PestState {
     }
 }
 
+/// One frame of the browser a run drives, as the panel holds it.
+pub struct Cast {
+    pub image: std::sync::Arc<gpui::Image>,
+    /// The browser's own size, which sets the frame's shape: the panel is
+    /// rarely that ratio, and a stretched page reads as a broken one.
+    pub width: u32,
+    pub height: u32,
+}
+
 /// A run being followed, or the last one followed.
 ///
 /// "Tout lancer" on a checkout carrying several runners is a **campaign**:
@@ -131,6 +147,10 @@ pub struct RunState {
     pub started_at: i64,
     /// The run's text so far, tail-capped at [`RUN_LINES_KEPT`].
     pub lines: VecDeque<SharedString>,
+    /// The newest frame of the browser the run drives, when the target asked
+    /// to watch it. **One image, replaced in place**: a screencast is watched,
+    /// not replayed, and each frame kept would be a decoded texture kept.
+    pub cast: Option<Cast>,
     /// Why a suite never started, when one did not.
     pub error: Option<SharedString>,
     /// The finished accounts so far, merged.
@@ -500,19 +520,20 @@ impl ClaudhubApp {
             .is_some_and(|worktree| self.pest_runs.contains_key(worktree))
     }
 
-    /// The (headed, parallel) toggles of the worktree being looked at.
-    fn pest_modes(&self) -> (bool, bool) {
+    /// The (cast, headed, parallel) toggles of the worktree being looked at.
+    fn pest_modes(&self) -> (bool, bool, bool) {
         self.active
             .as_deref()
             .and_then(|worktree| self.pest.get(worktree))
-            .map(|state| (state.headed, state.parallel))
-            .unwrap_or((false, false))
+            .map(|state| (state.cast, state.headed, state.parallel))
+            .unwrap_or((false, false, false))
     }
 
-    /// Applies the two toggles to a target — Pest only, the other runners
+    /// Applies the three toggles to a target — Pest only, the other runners
     /// never read the fields.
     fn apply_pest_modes(&self, target: &mut Target) {
-        let (headed, parallel) = self.pest_modes();
+        let (cast, headed, parallel) = self.pest_modes();
+        target.cast = cast && target.runner == Runner::Pest;
         target.headed = headed && target.runner == Runner::Pest;
         target.parallel = parallel && target.runner == Runner::Pest;
     }
@@ -566,6 +587,7 @@ impl ClaudhubApp {
                 running: true,
                 started_at: now(),
                 lines: VecDeque::new(),
+                cast: None,
                 error: None,
                 run: None,
             },
@@ -597,6 +619,38 @@ impl ClaudhubApp {
             state.lines.len().saturating_sub(1),
             gpui::ScrollStrategy::Center,
         );
+        cx.notify();
+    }
+
+    /// The newest picture of the browser a run drives.
+    ///
+    /// The frame before it is evicted from gpui's asset cache as it is
+    /// replaced: `Image::from_bytes` keys the decoded texture by digesting the
+    /// bytes, so every frame is a new entry, and a run is thousands of them.
+    pub(super) fn pest_frame(
+        &mut self,
+        worktree: PathBuf,
+        id: u64,
+        frame: crate::suite::Frame,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.pest_runs.get_mut(&worktree) else {
+            return;
+        };
+        if id < state.since || id > state.id {
+            return;
+        }
+        let previous = state.cast.replace(Cast {
+            image: std::sync::Arc::new(gpui::Image::from_bytes(
+                gpui::ImageFormat::Jpeg,
+                frame.jpeg,
+            )),
+            width: frame.width,
+            height: frame.height,
+        });
+        if let Some(previous) = previous {
+            previous.image.remove_asset(cx);
+        }
         cx.notify();
     }
 
@@ -930,7 +984,7 @@ impl ClaudhubApp {
         count: usize,
         pending: bool,
         only_failed: bool,
-        modes: Option<(bool, bool)>,
+        modes: Option<(bool, bool, bool)>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let last = self
@@ -1060,13 +1114,14 @@ impl ClaudhubApp {
                     })),
             );
         // Pest's run modes, on their own line: labelled toggles read better
-        // than one more icon squeezed into the bar. Exclusive — the browser
-        // plugin refuses `--headed --parallel`, so a toggle turns the other
-        // off rather than launching a run that only errors.
+        // than one more icon squeezed into the bar. `--parallel` excludes the
+        // other two — the browser plugin refuses it with `--headed`, and a
+        // worker per browser leaves nothing single to watch — so a toggle
+        // turns it off rather than launching a run that only errors.
         v_flex()
             .w_full()
             .child(top)
-            .when_some(modes, |el, (headed, parallel)| {
+            .when_some(modes, |el, (cast, headed, parallel)| {
                 el.child(
                     h_flex()
                         .h(crate::ui::theme::bar_height(cx))
@@ -1076,6 +1131,26 @@ impl ClaudhubApp {
                         .items_center()
                         .border_b_1()
                         .border_color(cx.theme().border)
+                        .child(
+                            Button::new("pest-cast")
+                                .ghost()
+                                .xsmall()
+                                .icon(icon("monitor-play"))
+                                .label(tr!("tests-cast-label"))
+                                .tooltip(tr!("tests-cast"))
+                                .selected(cast)
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    if let Some(active) = this.active.clone() {
+                                        if let Some(state) = this.pest.get_mut(&active) {
+                                            state.cast = !state.cast;
+                                            if state.cast {
+                                                state.parallel = false;
+                                            }
+                                        }
+                                    }
+                                    cx.notify();
+                                })),
+                        )
                         .child(
                             Button::new("pest-headed")
                                 .ghost()
@@ -1110,6 +1185,7 @@ impl ClaudhubApp {
                                             state.parallel = !state.parallel;
                                             if state.parallel {
                                                 state.headed = false;
+                                                state.cast = false;
                                             }
                                         }
                                     }
@@ -1513,6 +1589,10 @@ impl ClaudhubApp {
         };
 
         let with_failures = state.run.clone().filter(|run| run.failed > 0);
+        let cast = state
+            .cast
+            .as_ref()
+            .map(|cast| (cast.image.clone(), cast.width, cast.height));
         let lines: Vec<SharedString> = state.lines.iter().cloned().collect();
         let bar = self.render_run_bar(&active, cx);
         let failures = with_failures.map(|run| self.render_run_failures(&active, run, window, cx));
@@ -1526,6 +1606,39 @@ impl ClaudhubApp {
             .size_full()
             .child(bar)
             .children(failures)
+            .children(cast.map(|(image, width, height)| {
+                div()
+                    .relative()
+                    .flex_none()
+                    .w_full()
+                    .h(gpui::px(360.))
+                    .bg(cx.theme().secondary)
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        // `Contain` and not the preview's `ScaleDown`: a frame
+                        // is 1280 wide whatever the panel is, and a browser
+                        // shown at a third of the pane is not worth watching.
+                        img(image)
+                            .w_full()
+                            .h_full()
+                            .object_fit(gpui::ObjectFit::Contain),
+                    )
+                    .child(
+                        // The viewport the browser reports, which is what a
+                        // responsive test is really being run at.
+                        div()
+                            .absolute()
+                            .bottom_1()
+                            .right_2()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SharedString::from(format!("{width}×{height}"))),
+                    )
+            }))
             .child(
                 div().flex_1().min_h_0().child(
                     self.scrolled(

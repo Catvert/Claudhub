@@ -1065,6 +1065,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "async-channel",
+ "base64 0.22.1",
  "chrono",
  "codebook-tree-sitter-just",
  "directories",

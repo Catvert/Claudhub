@@ -344,6 +344,13 @@ impl ClaudhubApp {
                             .child(
                                 Button::new("multiplex")
                                     .icon(icon("layout-grid"))
+                                    // The word beside the icon: this one leaves
+                                    // the window one is working in, and a lone
+                                    // glyph for that is a button one presses to
+                                    // find out what it does. The gloss says
+                                    // what one gets, the label what one asks
+                                    // for.
+                                    .label(tr!("multiplex-short"))
                                     .tooltip(tr!("multiplex-toggle"))
                                     .ghost()
                                     .xsmall()

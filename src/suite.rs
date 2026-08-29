@@ -44,7 +44,7 @@
 //! Nothing here may be called from the interface thread: it launches a
 //! process. It goes through a worker, on the background queue.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -112,6 +112,13 @@ pub struct Target {
     /// Pest only: `--parallel`. Never together with `headed` — the browser
     /// plugin refuses the pair — and the panel's toggles enforce it.
     pub parallel: bool,
+    /// Pest only: watch the browser the run drives, without touching it.
+    ///
+    /// Never together with `parallel`: each worker opens its own Playwright
+    /// connection, and the server launches one browser per connection — they
+    /// would all be handed the same debugging port and only the first would
+    /// bind it. See [`Screencast`].
+    pub cast: bool,
 }
 
 impl Target {
@@ -123,6 +130,7 @@ impl Target {
             exact: false,
             headed: false,
             parallel: false,
+            cast: false,
         }
     }
 }
@@ -253,6 +261,138 @@ const SAIL: &str = "vendor/bin/sail";
 fn sail_of(worktree: &Path) -> Option<std::path::PathBuf> {
     let sail = worktree.join(SAIL);
     sail.is_file().then_some(sail)
+}
+
+/// One JPEG the browser painted, on its way to the panel.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Frame {
+    pub jpeg: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The relay that watches the browser a Pest run drives, and the run's claim
+/// on a CDP port.
+///
+/// Three facts shape it, and none is obvious:
+///
+/// - **The Playwright websocket is the test's alone.** Its PHP client holds
+///   the connection, and a second Playwright client would be handed a browser
+///   of its own — the server launches one per connection. CDP is a separate
+///   channel onto the same browser, so watching disturbs nothing.
+/// - **The port only exists if the checkout opens it.** Playwright reads no
+///   environment variable for browser arguments, so the project's own
+///   `BrowserTestCase` has to pass `--remote-debugging-port`, and it learns
+///   which port from [`FLAG`] — written here, removed on drop. A checkout
+///   without that hook never answers, and the panel simply stays empty.
+/// - **`sail pest` forwards no environment.** It builds
+///   `exec -u <user> <service> php vendor/bin/pest` and passes APP_URL and
+///   DUSK_DRIVER_URL, nothing else — hence a file rather than a variable.
+///
+/// Chromium binds that port on the container's own loopback and ignores
+/// `--remote-debugging-address`, so nothing here can reach it: the relay runs
+/// **in the container** — pushed through `sail node -e`, never written to the
+/// project — and answers one line of JSON per frame.
+struct Screencast {
+    child: std::process::Child,
+    flag: PathBuf,
+}
+
+/// Where the checkout reads the port to open. At its root, like the run's
+/// account, because that is the one directory both sides of Sail share.
+const FLAG: &str = ".pest-cdp-port";
+
+/// Quality against bandwidth: every frame crosses a pipe, and in remote mode
+/// the wire too. 1280 wide at quality 55 is ~35 kB a frame, and one frame in
+/// two is still fluid enough to watch a form being filled.
+const FRAME_QUALITY: u32 = 55;
+const FRAME_WIDTH: u32 = 1280;
+const FRAME_HEIGHT: u32 = 900;
+const FRAME_EVERY: u32 = 2;
+
+impl Screencast {
+    /// Opens the port for this run and starts watching. `None` when the relay
+    /// will not start — Sail down, no node in the container: a run one cannot
+    /// watch still runs, and saying so is the panel's empty frame, not an
+    /// error that would fail the suite.
+    fn start(worktree: &Path, sail: &Path, port: u16) -> Option<Self> {
+        let flag = worktree.join(FLAG);
+        std::fs::write(&flag, port.to_string()).ok()?;
+
+        let script = include_str!("../assets/cdp-relay.mjs")
+            .replace("__PORT__", &port.to_string())
+            .replace("__QUALITY__", &FRAME_QUALITY.to_string())
+            .replace("__WIDTH__", &FRAME_WIDTH.to_string())
+            .replace("__HEIGHT__", &FRAME_HEIGHT.to_string())
+            .replace("__EVERY__", &FRAME_EVERY.to_string());
+
+        let mut cmd = Command::new(sail);
+        cmd.arg("node")
+            .arg("-e")
+            .arg(script)
+            .current_dir(worktree)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        crate::wsl::no_console(&mut cmd);
+
+        match cmd.spawn() {
+            Ok(child) => Some(Self { child, flag }),
+            Err(_) => {
+                let _ = std::fs::remove_file(&flag);
+                None
+            }
+        }
+    }
+
+    /// The port this run watches. Derived from the send id rather than drawn
+    /// from a free port here: it has to be free **in the container**, where
+    /// this process sees nothing, and the tests queue runs one at a time.
+    fn port_for(id: u64) -> u16 {
+        9500 + (id % 400) as u16
+    }
+}
+
+impl Drop for Screencast {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.flag);
+    }
+}
+
+/// Turns the relay's lines into frames until it closes — which is when the
+/// [`Screencast`] guard drops, at the end of the run.
+fn pump_frames(stdout: std::process::ChildStdout, frames: &(dyn Fn(Frame) + Sync)) {
+    use base64::Engine;
+    use std::io::BufRead;
+
+    for line in std::io::BufReader::new(stdout).lines() {
+        let Ok(line) = line else { break };
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if message.get("type").and_then(serde_json::Value::as_str) != Some("frame") {
+            continue;
+        }
+        let Some(data) = message.get("data").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Ok(jpeg) = base64::engine::general_purpose::STANDARD.decode(data) else {
+            continue;
+        };
+        let number = |key| {
+            message
+                .get(key)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default() as u32
+        };
+        frames(Frame {
+            jpeg,
+            width: number("width"),
+            height: number("height"),
+        });
+    }
 }
 
 /// The start of a Pest invocation for this checkout: `sail pest`, or the
@@ -612,6 +752,7 @@ pub fn run(
     target: &Target,
     id: u64,
     progress: &(dyn Fn(String) + Sync),
+    frames: &(dyn Fn(Frame) + Sync),
 ) -> std::result::Result<Run, String> {
     // A campaign stopped while this command still queued: refuse on arrival
     // rather than boot a suite nobody is waiting for.
@@ -636,7 +777,10 @@ pub fn run(
     // the account lands there, dot-named and passed **relative** — the
     // container's working directory is the project's mount. Removed right
     // after, and `reloads` ignores it, so the watcher never re-lists over it.
-    let sail = target.runner == Runner::Pest && sail_of(worktree).is_some();
+    let sail_bin = (target.runner == Runner::Pest)
+        .then(|| sail_of(worktree))
+        .flatten();
+    let sail = sail_bin.is_some();
     let (account_file, account_arg) = if sail {
         (worktree.join(&account_name), account_name)
     } else {
@@ -689,7 +833,26 @@ pub fn run(
             }
         }
     }
-    let result = follow(cmd, target.runner.label(), id, progress);
+    // The relay is started before the suite, so the browser's first page is
+    // already watched when it opens: the port it will bind is written now,
+    // and the harness reads it at the run's first browser test.
+    let mut cast = match (target.cast, &sail_bin) {
+        (true, Some(bin)) => Screencast::start(worktree, bin, Screencast::port_for(id)),
+        _ => None,
+    };
+    let watching = cast.as_mut().and_then(|cast| cast.child.stdout.take());
+
+    let result = std::thread::scope(|scope| {
+        if let Some(watching) = watching {
+            scope.spawn(move || pump_frames(watching, frames));
+        }
+        let result = follow(cmd, target.runner.label(), id, progress);
+        // Ends the relay, which closes the pipe the reader is blocked on:
+        // dropped after the scope instead, the scope would wait for a thread
+        // waiting for the drop.
+        drop(cast);
+        result
+    });
     let account = std::fs::read_to_string(&account_file).unwrap_or_default();
     let _ = std::fs::remove_file(&account_file);
     let (status, kept, stderr, duration_ms) = result?;
@@ -1257,6 +1420,7 @@ pub fn test_target(test: &Test) -> Target {
             exact: false,
             headed: false,
             parallel: false,
+            cast: false,
         },
         // The file narrows the collection, the anchored title picks the test.
         Runner::Vitest => Target {
@@ -1266,6 +1430,7 @@ pub fn test_target(test: &Test) -> Target {
             exact: true,
             headed: false,
             parallel: false,
+            cast: false,
         },
         // A Jest row is a file: the path is the whole narrowing.
         Runner::Jest => Target {
@@ -1275,6 +1440,7 @@ pub fn test_target(test: &Test) -> Target {
             exact: true,
             headed: false,
             parallel: false,
+            cast: false,
         },
     }
 }
@@ -1290,6 +1456,7 @@ pub fn scope_target(test: &Test, depth: usize) -> Target {
             exact: false,
             headed: false,
             parallel: false,
+            cast: false,
         },
         Runner::Vitest => {
             let prefix = group_prefix(&test.class, depth).to_string();
@@ -1302,6 +1469,7 @@ pub fn scope_target(test: &Test, depth: usize) -> Target {
                 exact,
                 headed: false,
                 parallel: false,
+                cast: false,
             }
         }
         Runner::Jest => Target {
@@ -1311,6 +1479,7 @@ pub fn scope_target(test: &Test, depth: usize) -> Target {
             exact: false,
             headed: false,
             parallel: false,
+            cast: false,
         },
     }
 }
@@ -1662,6 +1831,7 @@ at tests/Feature/HttpTest.php:3</failure>
                 exact: true,
                 headed: false,
                 parallel: false,
+                cast: false,
             }
         );
     }
@@ -1685,6 +1855,7 @@ at tests/Feature/HttpTest.php:3</failure>
                 exact: true,
                 headed: false,
                 parallel: false,
+                cast: false,
             }
         );
     }
@@ -1755,6 +1926,7 @@ at tests/Feature/HttpTest.php:3</failure>
                 exact: false,
                 headed: false,
                 parallel: false,
+                cast: false,
             }
         );
         assert!(scope_target(test, 2).exact);
@@ -1770,6 +1942,7 @@ at tests/Feature/HttpTest.php:3</failure>
             exact: false,
             headed: false,
             parallel: false,
+            cast: false,
         };
         // No quoting needed: `^`, `:` and a trailing `$` are all literal to a
         // POSIX shell, and `join_command` only quotes what would not be.
@@ -1789,6 +1962,7 @@ at tests/Feature/HttpTest.php:3</failure>
         );
         let parallel = Target {
             parallel: true,
+            cast: false,
             ..pest.clone()
         };
         assert_eq!(
@@ -1808,6 +1982,7 @@ at tests/Feature/HttpTest.php:3</failure>
             exact: true,
             headed: false,
             parallel: false,
+            cast: false,
         };
         assert_eq!(
             command_line(false, &vitest),
@@ -1820,6 +1995,7 @@ at tests/Feature/HttpTest.php:3</failure>
             exact: true,
             headed: false,
             parallel: false,
+            cast: false,
         };
         // Sail leaves a JS runner untouched: node lives on the host.
         assert_eq!(

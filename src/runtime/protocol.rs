@@ -1148,6 +1148,14 @@ pub enum Evt {
         id: u64,
         line: String,
     },
+    /// One frame of the browser a run drives, when the target asked to watch
+    /// it. Only the newest is worth painting — the panel keeps that one and
+    /// drops the rest, the way a screencast is watched and not replayed.
+    TestsFrame {
+        worktree: WorktreeId,
+        id: u64,
+        frame: crate::suite::Frame,
+    },
     /// A run's account — or why there was none. A failing test is a run, not
     /// an error: the error side is the suite that never started.
     TestsRan {

@@ -88,12 +88,22 @@ impl ClaudhubApp {
             .gap(px(4.))
             .p(px(4.))
             .children(rows(rest.len()).into_iter().map(|width| {
-                h_flex().flex_1().min_h_0().gap(px(4.)).children(
-                    rest.by_ref()
-                        .take(width)
-                        .map(|tile| tile.render(window, cx))
-                        .collect::<Vec<_>>(),
-                )
+                // **A bare flex row and not `h_flex`**, which centres its
+                // children: a centred tile takes the height of its content
+                // instead of the row's, so the grid came out as a strip of
+                // header floating in the middle of an empty window.
+                gpui::div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h_0()
+                    .gap(px(4.))
+                    .children(
+                        rest.by_ref()
+                            .take(width)
+                            .map(|tile| tile.render(window, cx))
+                            .collect::<Vec<_>>(),
+                    )
             }))
             .into_any_element()
     }
@@ -160,7 +170,10 @@ impl Tile {
                             .child(self.label.clone()),
                     ),
             )
-            .child(gpui::div().flex_1().min_h_0().child(self.view))
+            // **`v_flex` and not `div`**, for the other half of the same
+            // trap: a `div` is a *block*, the terminal under it asks for
+            // `size_full`, and a full height of an undefined height is zero.
+            .child(v_flex().flex_1().min_h_0().child(self.view))
             .into_any_element()
     }
 }

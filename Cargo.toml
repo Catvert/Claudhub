@@ -189,6 +189,7 @@ keyring = { version = "4", optional = true }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
 # Le format du fil entre l'interface et `claudhub-server` (runtime::wire).
 # Binaire et non JSON : `Evt::Agents` porte une `HashMap<PathBuf, …>` que JSON
 # refuse en clé, et un `Evt::FileDiff` de relecture d'agent pèse trois à cinq

@@ -2119,6 +2119,11 @@ impl ClaudhubApp {
             }
             Evt::TestsFound { worktree, report } => self.pest_arrived(worktree, report, cx),
             Evt::TestsLine { worktree, id, line } => self.pest_line(worktree, id, line, cx),
+            Evt::TestsFrame {
+                worktree,
+                id,
+                frame,
+            } => self.pest_frame(worktree, id, frame, cx),
             Evt::TestsRan { worktree, id, run } => self.pest_ran(worktree, id, run, cx),
             Evt::WtQuestions {
                 main,

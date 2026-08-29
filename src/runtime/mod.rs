@@ -1202,7 +1202,14 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
                     line,
                 })
             };
-            let run = crate::suite::run(&worktree, &target, id, &progress);
+            let frames = |frame: crate::suite::Frame| {
+                emit(Evt::TestsFrame {
+                    worktree: worktree.clone(),
+                    id,
+                    frame,
+                })
+            };
+            let run = crate::suite::run(&worktree, &target, id, &progress, &frames);
             vec![Evt::TestsRan { worktree, id, run }]
         }
         // Routed out of the queues by `Handle::send`; the arm exists because
