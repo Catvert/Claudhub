@@ -271,21 +271,6 @@ struct RawEntry {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct RawFrame {
-    filename: String,
-    #[serde(rename = "absPath")]
-    abs_path: String,
-    module: String,
-    function: String,
-    #[serde(rename = "lineNo")]
-    line_no: Option<usize>,
-    #[serde(rename = "inApp")]
-    in_app: bool,
-    context: Vec<serde_json::Value>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
 struct RawSpread {
     key: String,
     name: String,
@@ -384,6 +369,15 @@ pub fn parse_event(json: &str) -> Result<Option<Event>> {
     }))
 }
 
+/// A frame is read **field by field**, never deserialised into a struct.
+///
+/// `#[serde(default)]` fills in a field that is **absent**; it does nothing for
+/// one that is present and `null`, which fails the whole struct. Sentry writes
+/// `null` freely — a PHP frame with no `module`, a vendor frame with no
+/// `context` — so one such field dropped every frame of the trace on the floor
+/// and the page showed the tags, the distribution and the breadcrumbs with no
+/// stack between them. Read this way, a null is simply a field that is not
+/// there, which is what it means.
 fn collect_frames(stacktrace: Option<&serde_json::Value>, out: &mut Vec<Frame>) {
     let Some(list) = stacktrace
         .and_then(|s| s.get("frames"))
@@ -392,34 +386,48 @@ fn collect_frames(stacktrace: Option<&serde_json::Value>, out: &mut Vec<Frame>) 
         return;
     };
     for value in list {
-        let Ok(raw) = serde_json::from_value::<RawFrame>(value.clone()) else {
-            continue;
+        let text = |key: &str| {
+            value
+                .get(key)
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string()
         };
-        let filename = [raw.filename, raw.abs_path, raw.module]
+        // The first of the three that says anything: Sentry names a frame by a
+        // path, by an absolute path, or by a module, depending on the SDK.
+        let filename = [text("filename"), text("absPath"), text("module")]
             .into_iter()
             .find(|candidate| !candidate.is_empty())
             .unwrap_or_default();
         if filename.is_empty() {
             continue;
         }
+        // `context` is a list of `[number, source]` pairs; anything not of that
+        // shape is ignored rather than failing the read of the whole trace.
+        let context = value
+            .get("context")
+            .and_then(|context| context.as_array())
+            .map(|pairs| {
+                pairs
+                    .iter()
+                    .filter_map(|pair| {
+                        let pair = pair.as_array()?;
+                        let line = as_u64(pair.first()?) as usize;
+                        let text = pair.get(1)?.as_str().unwrap_or_default().to_string();
+                        Some((line, text))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         out.push(Frame {
             filename,
-            function: raw.function,
-            line: raw.line_no.unwrap_or(0),
-            in_app: raw.in_app,
-            // `context` is a list of `[number, source]` pairs; anything not of
-            // that shape is ignored rather than failing the read of the whole
-            // trace.
-            context: raw
-                .context
-                .iter()
-                .filter_map(|pair| {
-                    let pair = pair.as_array()?;
-                    let line = as_u64(pair.first()?) as usize;
-                    let text = pair.get(1)?.as_str().unwrap_or_default().to_string();
-                    Some((line, text))
-                })
-                .collect(),
+            function: text("function"),
+            line: value.get("lineNo").map(as_u64).unwrap_or(0) as usize,
+            in_app: value
+                .get("inApp")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            context,
         });
     }
 }
@@ -486,6 +494,44 @@ pub fn parse_tags(json: &str) -> Result<Vec<Spread>> {
                 .collect(),
         })
         .collect())
+}
+
+/// An ISO 8601 instant as Sentry writes it, read into a timestamp.
+///
+/// **Parsed here and not shown raw.** `2026-08-29T00:15:45.042637Z` is a fact
+/// about a machine, and what one wants of "last seen" is how long ago — the
+/// page said the header of an HTTP response where it meant a date.
+///
+/// By hand and not by a date parser: the shape is fixed, the field is Sentry's
+/// own, and what is wanted from it is six numbers. Anything else gives `None`,
+/// which the view shows as the text it was given — a format that changes must
+/// degrade to "unreadable", never to a wrong date.
+pub fn instant_of(text: &str) -> Option<i64> {
+    let (date, rest) = text.split_once('T')?;
+    let mut date = date.split('-');
+    let (year, month, day) = (date.next()?, date.next()?, date.next()?);
+    // UTC or nothing. The fraction is dropped — the second is the finest thing
+    // this page ever says — but an **offset** is not: reading `+02:00` and
+    // ignoring it would show a time two hours out with nothing to say so, which
+    // is the one failure this function exists to refuse. Sentry writes `Z`.
+    let rest = rest.strip_suffix('Z').unwrap_or(rest);
+    if rest.contains('+') || rest.matches('-').count() > 0 {
+        return None;
+    }
+    let time = rest.split('.').next()?;
+    let mut time = time.split(':');
+    let (hour, minute, second) = (time.next()?, time.next()?, time.next()?);
+    let at = chrono::NaiveDate::from_ymd_opt(
+        year.parse().ok()?,
+        month.parse().ok()?,
+        day.parse().ok()?,
+    )?
+    .and_hms_opt(
+        hour.parse().ok()?,
+        minute.parse().ok()?,
+        second.parse().ok()?,
+    )?;
+    Some(at.and_utc().timestamp())
 }
 
 // — What goes to the agent ——————————————————————————————————————————
@@ -712,6 +758,22 @@ mod tests {
             spreads[0].values,
             vec![("1.4.0".into(), 75), ("1.3.9".into(), 25)]
         );
+    }
+
+    #[test]
+    fn an_instant_is_read_to_the_second_and_a_shape_we_do_not_know_is_not_guessed() {
+        assert_eq!(instant_of("2026-08-29T00:15:45.042637Z"), Some(1787962545));
+        // The fraction is optional.
+        assert_eq!(instant_of("2026-08-29T00:15:45Z"), Some(1787962545));
+        // **An offset is refused, not ignored.** Reading it and dropping it
+        // would show a time two hours out with nothing to say so, which is the
+        // one failure this exists to refuse.
+        assert_eq!(instant_of("2026-08-29T00:15:45+02:00"), None);
+        // A shape we do not know degrades to "unreadable", never to a wrong
+        // date: the view then shows the text it was given.
+        assert_eq!(instant_of("29/08/2026"), None);
+        assert_eq!(instant_of(""), None);
+        assert_eq!(instant_of("2026-13-45T99:99:99Z"), None);
     }
 
     #[test]

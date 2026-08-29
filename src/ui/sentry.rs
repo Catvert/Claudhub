@@ -636,7 +636,8 @@ fn sentry_row(
     app: &gpui::Entity<ClaudhubApp>,
 ) -> gpui::AnyElement {
     let app = app.clone();
-    let subtitle = [issue.culprit.as_str(), issue.last_seen.as_str()]
+    let last = when(&issue.last_seen);
+    let subtitle = [issue.culprit.as_str(), last.as_str()]
         .into_iter()
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
@@ -760,12 +761,12 @@ impl ClaudhubApp {
                     .when(!issue.first_seen.is_empty(), |el| {
                         el.child(sentry_pair(
                             tr!("sentry-first"),
-                            issue.first_seen.clone(),
+                            when(&issue.first_seen),
                             cx,
                         ))
                     })
                     .when(!issue.last_seen.is_empty(), |el| {
-                        el.child(sentry_pair(tr!("sentry-last"), issue.last_seen.clone(), cx))
+                        el.child(sentry_pair(tr!("sentry-last"), when(&issue.last_seen), cx))
                     }),
             )
             .child(
@@ -967,6 +968,38 @@ impl ClaudhubApp {
                     })),
             )
             .when(!folded, |el| el.child(body))
+    }
+}
+
+/// When something happened, as one reads it rather than as Sentry writes it.
+///
+/// `2026-08-29T00:15:45.042637Z` is a fact about a machine; what one wants of
+/// "last seen" is how long ago, and of "first seen" is a date. Under a day the
+/// answer is a duration — that is the reading that says whether it is still
+/// happening — and past that it is the day itself, in the local timezone.
+///
+/// A text we cannot read is shown **as it stands**: it is Sentry's own, so a
+/// format that changes is better read raw than guessed at.
+fn when(text: &str) -> String {
+    let Some(at) = crate::sentry::instant_of(text) else {
+        return text.to_string();
+    };
+    let Some(instant) = chrono::DateTime::from_timestamp(at, 0) else {
+        return text.to_string();
+    };
+    let minutes = chrono::Local::now()
+        .signed_duration_since(instant)
+        .num_minutes();
+    match minutes {
+        // Ahead of us is a clock out of step, and "in three minutes" said of an
+        // error that has already happened reads as a bug in the page.
+        i64::MIN..=0 => tr!("when-just-now").to_string(),
+        1..=59 => tr!("when-minutes", { n: minutes }).to_string(),
+        60..=1439 => tr!("when-hours", { n: minutes / 60 }).to_string(),
+        _ => instant
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M")
+            .to_string(),
     }
 }
 

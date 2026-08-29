@@ -724,7 +724,12 @@ dans la barre du panneau ; l'organisation et le jeton appartiennent à la machin
 et sont dans les réglages — cinq worktrees d'un même code ont les mêmes erreurs,
 deux dépôts d'une même organisation non. Ce qui décide vit dans `sentry.rs`, pur
 et testé sur des fixtures : les URL, les formes que l'API rend, le filtre, le
-prompt. Le jeton ne traverse jamais le script d'un `Debug` : `{secret}` est
+prompt. **Une réponse se lit champ par champ, jamais en la désérialisant dans
+une structure** : `#[serde(default)]` remplit un champ *absent* et ne fait rien
+d'un champ présent à `null`, qui fait échouer la structure entière — Sentry écrit
+`null` librement, et un seul `module` nul jetait tous les cadres de la pile, si
+bien que la page montrait les tags, la répartition et le fil d'Ariane sans trace
+entre eux. Le jeton ne traverse jamais le script d'un `Debug` : `{secret}` est
 substitué **dans le worker** (`outside::Cap`), et `$SENTRY_TOKEN` est lu dans son
 environnement. La troisième forme, `keyring:sentry.token`, est résolue **côté
 interface** (`ui/keyring.rs`) : un trousseau appartient à une session de bureau,
