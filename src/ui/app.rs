@@ -964,6 +964,13 @@ pub struct ClaudhubApp {
     /// rebuilt when it turns over: their visibility is observed, and the tab
     /// says which project it belongs to for as long as it holds.
     pub(super) terminals_everywhere: bool,
+    /// The terminal grid, in place of the whole workspace — see `ui::multiplex`.
+    ///
+    /// A state of the window and not a panel: what it replaces is the rails,
+    /// the docks and the status bar, which is precisely what a panel cannot do.
+    /// Not remembered either — a screen with no way back to the code is not
+    /// where a window should come up.
+    pub(super) multiplex: bool,
     /// The views the user has hidden, by panel name.
     ///
     /// A set and not a flag per panel: it is `Panel::visible` that makes a view
@@ -1349,6 +1356,7 @@ impl ClaudhubApp {
             dock_skin,
             layout_save_scheduled: false,
             terminals_everywhere: false,
+            multiplex: false,
             zen_folded: Vec::new(),
             settings_form,
             off_panels: Settings::global(cx).hidden_panels.iter().cloned().collect(),
@@ -4290,8 +4298,17 @@ impl Render for ClaudhubApp {
             // and the status bar each close with a border, so four pixels there
             // read as a margin, while the same four against the bare window edge
             // read as nothing at all. Equal numbers looked equal nowhere.
-            .child(self.render_workspace(cx))
-            .child(self.render_status_bar(cx))
+            // The grid takes the place of everything below the title bar: the
+            // rails, the docks and the status bar. The title bar stays, and it
+            // has to — the button that came here is the way back.
+            .map(|el| {
+                if self.multiplex {
+                    el.child(self.render_multiplex(window, cx))
+                } else {
+                    el.child(self.render_workspace(cx))
+                        .child(self.render_status_bar(cx))
+                }
+            })
             // gpui-component's layers have to be re-emitted by the root view,
             // otherwise dialogs and notifications appear nowhere.
             .children(Root::render_dialog_layer(window, cx))

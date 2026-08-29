@@ -17,7 +17,7 @@ use gpui_component::{
     button::{Button, ButtonGroup, ButtonVariants},
     h_flex,
     menu::{DropdownMenu, PopupMenuItem},
-    ActiveTheme, Disableable, Sizable, TitleBar,
+    ActiveTheme, Disableable, Selectable, Sizable, TitleBar,
 };
 
 use crate::tr;
@@ -336,6 +336,22 @@ impl ClaudhubApp {
                             // painted only where there is a justfile with a recipe in
                             // it.
                             .children(self.render_just(cx))
+                            // The grid, right before the gear: it is the other
+                            // thing that takes the whole window, and the pair
+                            // reads as "leave what I am doing" — which is what
+                            // the corner is for. Lit while it is on, since
+                            // pressing it again is the only way back.
+                            .child(
+                                Button::new("multiplex")
+                                    .icon(icon("layout-grid"))
+                                    .tooltip(tr!("multiplex-toggle"))
+                                    .ghost()
+                                    .xsmall()
+                                    .selected(self.multiplex)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.toggle_multiplex(window, cx);
+                                    })),
+                            )
                             // The gear, at the far right of the title bar. It
                             // needs no gloss: it is where an application's
                             // settings are on every one of them, and a word
