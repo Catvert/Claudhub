@@ -789,6 +789,7 @@ impl ClaudhubApp {
                     .truncate()
                     .child(label.clone()),
             )
+            .child(self.find_button(crate::ui::find::Pane::Notes, cx))
             .when_some(dir, |el, dir| {
                 el.child(
                     Button::new("vault-open")

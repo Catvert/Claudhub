@@ -514,6 +514,7 @@ impl ClaudhubApp {
                     .text_color(cx.theme().muted_foreground)
                     .child(tr!("stashes-count", { n: count })),
             )
+            .child(self.find_button(Pane::Stashes, cx))
             .child(
                 Button::new("stash-new")
                     .ghost()

@@ -661,6 +661,7 @@ impl ClaudhubApp {
             // to the repository, one corrects it as often as one sets it, and a
             // field one has to break something to find is not a field.
             .child(div().flex_1().child(Input::new(&input).xsmall()))
+            .child(self.find_button(Pane::Sentry, cx))
             .child(
                 Button::new("sentry-refresh")
                     .ghost()

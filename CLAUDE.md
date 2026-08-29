@@ -411,7 +411,8 @@ fichiers, la recherche, les changements, la branche, les tests dans le haut ;
 les notes, les conflits, les remisages, les tags dans le bas ; à droite ce qui
 dit où l'on en est — les bases et, sous elles, les requêtes déjà jouées ; les
 erreurs de Sentry ; les exécutions de la CI ; en bas ce qui a
-besoin de la largeur — le run suivi, l'historique et son graphe, les terminaux ;
+besoin de la largeur — le run suivi, les branches et leur graphe, les
+terminaux ;
 au centre ce qu'on relit — le diff, l'éditeur, l'aperçu, et chaque fichier ouvert
 et chaque console SQL.
 
@@ -687,7 +688,11 @@ erreur.
 
 **La recherche** — `Ctrl+F` cherche dans le panneau où l'on vient de **cliquer**
 (`panels::pane_root`, en capture). Là où la liste est libre de son ordre elle
-**filtre** ; là où l'ordre porte du sens elle **saute**. `Ctrl+Maj+F` demande à
+**filtre** ; là où l'ordre porte du sens elle **saute**. Tout panneau qui répond
+à cette touche porte la **même loupe** dans sa barre (`find::find_button`), et
+elle fait ce que la touche fait : une touche que rien à l'écran ne mentionne est
+une touche qu'on ne sait pas là, et la moitié des panneaux le disaient quand
+l'autre moitié se taisait. `Ctrl+Maj+F` demande à
 `git grep` ce que le worktree contient — jamais un parcours à nous, et pas
 ripgrep : la question a été mesurée, l'écart est sous le seuil de perception et
 `rg` n'est promis par aucune machine cible. `-E` et non `-P` (PCRE est une option

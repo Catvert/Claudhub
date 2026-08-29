@@ -980,6 +980,7 @@ impl ClaudhubApp {
             .border_color(cx.theme().border)
             .child(icon("circle-check").xsmall())
             .child(summary)
+            .child(self.find_button(Pane::Tests, cx))
             .child(
                 Button::new("pest-only-failed")
                     .ghost()

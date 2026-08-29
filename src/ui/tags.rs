@@ -523,6 +523,15 @@ impl ClaudhubApp {
             })
             .unwrap_or(0);
         let checking = state.is_some_and(|state| state.remote_pending);
+        // Built before the bar: `state` borrows the application, and the button
+        // wants it mutably.
+        let known_remote = known.is_some();
+        let label = if known_remote {
+            tr!("tags-count-unpushed", { n: count, unpushed: unpushed })
+        } else {
+            tr!("tags-count", { n: count })
+        };
+        let find = self.find_button(Pane::Tags, cx);
         h_flex()
             .h(crate::ui::theme::bar_height(cx))
             .w_full()
@@ -542,12 +551,9 @@ impl ClaudhubApp {
                     // What the remote is worth is said, never assumed: as long
                     // as nobody has asked, the count of what is missing there is
                     // not a thing we know.
-                    .child(if known.is_some() {
-                        tr!("tags-count-unpushed", { n: count, unpushed: unpushed })
-                    } else {
-                        tr!("tags-count", { n: count })
-                    }),
+                    .child(label),
             )
+            .child(find)
             .child(
                 Button::new("tag-new")
                     .ghost()
@@ -572,7 +578,7 @@ impl ClaudhubApp {
                     .icon(icon("globe"))
                     .tooltip(tr!("tag-check-remote"))
                     .disabled(checking)
-                    .selected(known.is_some())
+                    .selected(known_remote)
                     .on_click(cx.listener(|this, _, _window, cx| this.load_remote_tags(cx))),
             )
             .child(

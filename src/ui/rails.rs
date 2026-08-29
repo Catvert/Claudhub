@@ -270,10 +270,16 @@ pub const TOOLS: &[Tool] = &[
         home: Anchor::new(Side::Bottom, Half::Top),
         conditional: true,
     },
+    // **"Branches" and not "History".** What this panel shows is the graph of a
+    // repository's branches and the commits along them, with the column that
+    // picks one down its left side: "history" named the shape of the data and
+    // not what one comes to it for. `git-branch` therefore goes back to it —
+    // the review beside it keeps `git-pull-request`, which is what one branch
+    // weighed against its base is.
     Tool {
         panel: "ClaudhubHistory",
-        title: Label("panel-history"),
-        icon: "history",
+        title: Label("panel-branches"),
+        icon: "git-branch",
         home: Anchor::new(Side::Bottom, Half::Top),
         conditional: false,
     },

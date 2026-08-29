@@ -1185,6 +1185,7 @@ impl ClaudhubApp {
                     .child(tr!("db-connections-count", { n: count })),
             )
             .children(self.render_db_scope(cx))
+            .child(self.find_button(Pane::Db, cx))
             // One more console, from where the tables are: a second query is
             // almost always a second query about what one is already looking at.
             .child(

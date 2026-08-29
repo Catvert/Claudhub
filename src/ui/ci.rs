@@ -493,6 +493,7 @@ impl ClaudhubApp {
                     .text_color(cx.theme().muted_foreground)
                     .child(tr!("ci-count", { n: count })),
             )
+            .child(self.find_button(Pane::Ci, cx))
             .child(
                 Button::new("ci-refresh")
                     .ghost()

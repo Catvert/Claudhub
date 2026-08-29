@@ -759,7 +759,7 @@ panels! {
     // Doing it at render time rather than at construction is what avoids a
     // `git log` on a tab nobody will open; `ensure_history` only asks once,
     // otherwise every frame would restart the command.
-    HistoryPanel => ("ClaudhubHistory", "panel-history", render_history, History, prepare: ensure_history),
+    HistoryPanel => ("ClaudhubHistory", "panel-branches", render_history, History, prepare: ensure_history),
     // The centre when **nothing** is open.
     //
     // No longer a constraint of the engine: `add_panel_view` splits an empty

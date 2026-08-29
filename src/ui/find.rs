@@ -372,6 +372,29 @@ impl ClaudhubApp {
     /// It sits under the panel header and not over the list: a floating band
     /// would cover the first entries, which are precisely the ones a search
     /// brings to the top.
+    /// The magnifier a panel's bar carries.
+    ///
+    /// **Every panel that answers `Ctrl+F` has one**, and it is the same
+    /// button: a key nothing on screen mentions is a key one does not know is
+    /// there, and half the panels were saying so while the other half were not.
+    /// It goes at the end of a bar, beside what acts on the whole panel.
+    ///
+    /// Pressing it does what the key does — `open_find_in`, then the focus —
+    /// so the two cannot come apart.
+    pub(super) fn find_button(&mut self, pane: Pane, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_component::button::{Button, ButtonVariants as _};
+        use gpui_component::Sizable as _;
+        Button::new("find-in-pane")
+            .ghost()
+            .xsmall()
+            .icon(crate::ui::icons::icon("search"))
+            .tooltip(pane.placeholder())
+            .on_click(cx.listener(move |this, _, window, cx| {
+                let input = this.open_find_in(pane, window, cx);
+                gpui::Focusable::focus_handle(&input, cx).focus(window, cx);
+            }))
+    }
+
     pub(super) fn render_find(
         &mut self,
         pane: Pane,
