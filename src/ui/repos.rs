@@ -146,6 +146,31 @@ impl Repos {
         self.worktree(path).is_some()
     }
 
+    /// Files the branch a fresh status reports for one worktree.
+    ///
+    /// **The list is enumerated once and the branch moves under it.** A
+    /// checkout rereads the status — every write does — but nothing rereads
+    /// `git worktree list`, so the name in the title bar stayed on the branch
+    /// one had just left. The status is the reading that follows a checkout, so
+    /// it is the one that files it.
+    ///
+    /// `true` when something moved, which is what says a frame is owed.
+    pub fn set_branch(&mut self, path: &Path, branch: Option<&str>) -> bool {
+        let Some(worktree) = self
+            .open
+            .iter_mut()
+            .flat_map(|repo| repo.worktrees.iter_mut())
+            .find(|w| w.path == path)
+        else {
+            return false;
+        };
+        if worktree.branch.as_deref() == branch {
+            return false;
+        }
+        worktree.branch = branch.map(str::to_string);
+        true
+    }
+
     pub fn first_worktree(&self) -> Option<PathBuf> {
         self.open
             .iter()
@@ -213,6 +238,44 @@ mod tests {
             vec![worktree("/p/api", Some("dev"))],
         );
         repos
+    }
+
+    /// A checkout rereads the status and nothing rereads the worktree list, so
+    /// this is the only thing that moves the branch under the title bar.
+    #[test]
+    fn a_status_moves_the_branch_of_the_worktree_it_is_about() {
+        let mut repos = repos();
+        assert!(repos.set_branch(Path::new("/p/site"), Some("release")));
+        assert_eq!(
+            repos
+                .worktree(Path::new("/p/site"))
+                .unwrap()
+                .branch
+                .as_deref(),
+            Some("release")
+        );
+        // Its neighbour has not moved: a status is about one checkout.
+        assert_eq!(
+            repos
+                .worktree(Path::new("/p/site-fix"))
+                .unwrap()
+                .branch
+                .as_deref(),
+            Some("fix")
+        );
+        // The same answer twice is no change, so no frame is owed — a status
+        // arrives on every file write.
+        assert!(!repos.set_branch(Path::new("/p/site"), Some("release")));
+        // A detached head has no name, and that is a change like any other.
+        assert!(repos.set_branch(Path::new("/p/site"), None));
+        assert!(repos
+            .worktree(Path::new("/p/site"))
+            .unwrap()
+            .branch
+            .is_none());
+        // A path nothing holds is not an error: a status can outlive a
+        // repository being closed.
+        assert!(!repos.set_branch(Path::new("/p/gone"), Some("main")));
     }
 
     #[test]

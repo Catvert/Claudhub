@@ -2458,8 +2458,14 @@ impl ClaudhubApp {
         let Some(state) = self.review.get_mut(&worktree) else {
             return;
         };
+        // The branch the status reports is the one that is checked out **now**:
+        // a checkout rereads the status, and nothing rereads the worktree list,
+        // so this is where the title bar's branch stops being the one one has
+        // just left.
+        let branch = status.branch.clone();
         state.status = status;
         state.rows_changed();
+        self.repos.set_branch(&worktree, branch.as_deref());
         if state.base.is_none() {
             state.base = base;
         }
