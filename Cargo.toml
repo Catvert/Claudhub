@@ -32,6 +32,8 @@ ui = [
     "dep:rust-embed",
     "dep:tree-sitter-php",
     "dep:tree-sitter-nix",
+    "dep:tree-sitter-containerfile",
+    "dep:codebook-tree-sitter-just",
     "dep:tree-sitter",
     "dep:alacritty_terminal",
     "dep:lsp-types",
@@ -83,6 +85,29 @@ tree-sitter-php = { version = "0.24", optional = true }
 # Nix non plus n'y est pas, et c'est le langage du `shell.nix` de ce dépôt : on
 # relit un diff de `shell.nix` ou de `flake.nix` en même temps que le reste.
 tree-sitter-nix = { version = "0.3", optional = true }
+
+# Dockerfile non plus, et c'est un fichier qu'on relit dans presque tous les
+# dépôts servis. `containerfile` et non `tree-sitter-dockerfile`, resté à
+# l'ABI de tree-sitter 0.20 : celui-ci est tenu à jour, et ses injections
+# rendent le corps d'un `RUN` à bash, ce qui est l'essentiel de ce qu'on lit
+# dans un Dockerfile. Il ne dépend que de `tree-sitter-language`, la passerelle
+# d'ABI, donc rien d'autre n'entre dans l'arbre.
+tree-sitter-containerfile = { version = "0.9", optional = true }
+
+# `just` est la porte d'entrée de ce dépôt et de ceux qu'il sert — le `justfile`
+# est le troisième niveau du système d'extension — et sa syntaxe n'est celle
+# d'aucun autre langage : `:=`, `{{…}}`, les attributs `[private]`. La colorer
+# en Make donnait des recettes justes et tout le reste faux.
+#
+# Le paquet est celui de `codebook` et non `tree-sitter-just`, l'officiel, pour
+# une raison qui n'est pas un goût : celui-ci déclare `tree-sitter ~0.25.5` en
+# dépendance **ferme** — alors qu'il ne s'en sert que dans ses tests — et la
+# caisse porte `links = "tree-sitter"`, dont cargo n'accepte qu'un exemplaire
+# dans tout le graphe. Deux versions ne se compilent donc pas côte à côte :
+# c'est une erreur de résolution, pas un doublon. Celui-ci le déclare en
+# dev-dependency, et expose ses requêtes — l'autre les laisse hors du paquet
+# publié, derrière un `cfg` toujours éteint.
+codebook-tree-sitter-just = { version = "0.1", optional = true }
 
 # L'arbre lui-même, pour les replis de l'éditeur d'une vue Blade : gpui-component
 # tient sa fonction d'extraction pour lui, et notre coloriseur doit la refaire

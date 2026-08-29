@@ -65,9 +65,11 @@ fn with_grammar<T>(language: &str, f: impl FnOnce(&mut SyntaxHighlighter) -> T) 
 ///
 /// PHP is missing from it, although it is the language of half the repositories
 /// Claudhub serves to review; Nix is missing too, and it is what this repository
-/// builds itself with. Both grammars are therefore linked directly and declared
-/// in the shared registry, from which the rest of the library will find them
-/// under the names `php` and `nix` like any other.
+/// builds itself with; Dockerfile and `just` likewise, and they are read in
+/// nearly every repository served. The four grammars are therefore linked
+/// directly and declared in the shared registry, from which the rest of the
+/// library will find them under the names `php`, `nix`, `dockerfile` and `just`
+/// like any other.
 ///
 /// To be called once at startup, before any render: the registry is a locked
 /// singleton, and registering under a keystroke would amount to doing it while a
@@ -103,6 +105,35 @@ pub fn register_languages() {
         "",
     );
     LanguageRegistry::singleton().register("nix", &nix);
+
+    // A Dockerfile is mostly shell: the body of every `RUN`, and the heredocs
+    // of a `COPY`, are injected — which is where the grammar earns its place,
+    // an instruction line being four coloured words. The languages the registry
+    // does not hold (`comment`, `xml`) are skipped rather than an error, so
+    // only those it can serve are declared.
+    let dockerfile = LanguageConfig::new(
+        "dockerfile",
+        tree_sitter_containerfile::LANGUAGE.into(),
+        vec!["bash".into(), "json".into(), "yaml".into(), "toml".into()],
+        tree_sitter_containerfile::HIGHLIGHTS_QUERY,
+        tree_sitter_containerfile::INJECTIONS_QUERY,
+        "",
+    );
+    LanguageRegistry::singleton().register("dockerfile", &dockerfile);
+
+    // A recipe body is a shell script, and that injection is most of what one
+    // reads in a justfile — the rest is a dozen keywords and the `{{…}}` of an
+    // interpolation. The crate is `codebook`'s rather than the official one;
+    // the reason is in `Cargo.toml`, and it is a resolution error, not a taste.
+    let just = LanguageConfig::new(
+        "just",
+        codebook_tree_sitter_just::LANGUAGE.into(),
+        vec!["bash".into()],
+        codebook_tree_sitter_just::HIGHLIGHTS_QUERY,
+        codebook_tree_sitter_just::INJECTIONS_QUERY,
+        "",
+    );
+    LanguageRegistry::singleton().register("just", &just);
 }
 
 /// A class constant, and with it every enum case.
@@ -574,18 +605,47 @@ fn cut_into_lines(text: &str, styles: &[(Range<usize>, HighlightStyle)]) -> Vec<
 /// The grammar associated with an extension.
 ///
 /// The list only covers what `gpui-component` embeds with the
-/// `tree-sitter-languages` feature, plus the two grammars `register_languages`
+/// `tree-sitter-languages` feature, plus the four grammars `register_languages`
 /// declares itself: a missing extension returns `None`, and the
 /// view shows bare text rather than wrong highlighting. Some embedded languages
 /// (`swift`, `csharp`, `proto`, `cmake`, `graphql`) have an empty highlight
 /// query upstream; listing them would bring nothing, so they are omitted.
 pub fn language_for_path(path: &Path) -> Option<&'static str> {
-    // A few files are recognised by their name, not by their extension.
+    // A whole family of files carries its kind in its **name** and has no
+    // extension at all, or an extension that says something else: `Dockerfile`,
+    // `Dockerfile.dev`, `justfile`, `.env.local`. Matched in lowercase, since
+    // each of them is written both ways depending on the repository.
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        match name {
-            "Makefile" | "makefile" | "GNUmakefile" => return Some("make"),
-            "Dockerfile" => return None,
-            _ => {}
+        let name = name.to_ascii_lowercase();
+        // A leading dot belongs to the convention and not to the name: `.env`
+        // and `.justfile` are the same thing as `env` and `justfile`. What
+        // follows therefore reads "the name *is* that word, or carries it as
+        // its first or last dotted part" — `Dockerfile.dev` and `dev.dockerfile`
+        // are both Dockerfiles, `.env.local` and `prod.env` are both `.env`.
+        let bare = name.strip_prefix('.').unwrap_or(&name);
+        let named = |stem: &str| {
+            bare == stem
+                || bare
+                    .strip_prefix(stem)
+                    .is_some_and(|rest| rest.starts_with('.'))
+                || bare
+                    .strip_suffix(stem)
+                    .is_some_and(|rest| rest.ends_with('.'))
+        };
+        if matches!(bare, "makefile" | "gnumakefile") {
+            return Some("make");
+        }
+        if named("dockerfile") || named("containerfile") {
+            return Some("dockerfile");
+        }
+        if named("justfile") || named("just") {
+            return Some("just");
+        }
+        // A `.env` is `KEY=value` and `#` comments, which is a shell's own
+        // syntax — the file exists to be sourced by one. Colouring it as bash
+        // is therefore a convention rather than a lie, like `.rn` below.
+        if named("env") {
+            return Some("bash");
         }
     }
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
@@ -955,6 +1015,97 @@ mod tests {
         // Unknown: no highlighting rather than a wrong one.
         assert_eq!(language_for_path(Path::new("data.bin")), None);
         assert_eq!(language_for_path(Path::new("LICENSE")), None);
+    }
+
+    /// The three families that carry their kind in their name, each written the
+    /// several ways repositories actually write it.
+    #[test]
+    fn recognizes_the_files_named_after_their_kind() {
+        for name in [
+            "Dockerfile",
+            "dockerfile",
+            "Dockerfile.dev",
+            "dev.Dockerfile",
+            "Containerfile",
+            "docker/Dockerfile.prod",
+        ] {
+            assert_eq!(
+                language_for_path(Path::new(name)),
+                Some("dockerfile"),
+                "{name}"
+            );
+        }
+        for name in ["justfile", "Justfile", ".justfile", "tools/deploy.just"] {
+            assert_eq!(language_for_path(Path::new(name)), Some("just"), "{name}");
+        }
+        // A `.env` is read as the shell script it is meant to be sourced by.
+        for name in [".env", ".env.local", ".env.example", "prod.env"] {
+            assert_eq!(language_for_path(Path::new(name)), Some("bash"), "{name}");
+        }
+        // Neighbours that must not be swept in with them.
+        assert_eq!(
+            language_for_path(Path::new("environment.ts")),
+            Some("typescript")
+        );
+        assert_eq!(language_for_path(Path::new("justify.py")), Some("python"));
+    }
+
+    /// The grammars `register_languages` links itself: what this proves is that
+    /// their queries **compile** against the grammar they are given — a query
+    /// naming a node the grammar does not have is rejected as a whole, and the
+    /// file then shows no colours at all without a word being said.
+    #[test]
+    fn the_grammars_we_register_ourselves_colour_their_files() {
+        register_languages();
+        for (path, text) in [
+            ("Dockerfile", "FROM debian:bookworm AS build"),
+            ("justfile", "run:"),
+            (".env", "APP_ENV=production"),
+            ("shell.nix", "{ pkgs ? import <nixpkgs> {} }:"),
+            ("app/User.php", "class User {}"),
+        ] {
+            let d = diff(vec![line(DiffLineKind::Context, text)]);
+            let hits =
+                DiffHighlights::compute(Path::new(path), &d, &HighlightTheme::default_dark());
+            assert!(!hits.line(0, 0).is_empty(), "{path} got no colours");
+        }
+    }
+
+    /// And that their injections reach the shell inside them, which is most of
+    /// what one reads in either file: the body of a `RUN`, the body of a
+    /// recipe. Both are one long text node to the outer grammar, so a missing
+    /// injection leaves them grey without failing anything.
+    ///
+    /// `shell_at` is where the shell starts on the second line, and it is what
+    /// makes the Dockerfile case a proof: its `RUN` is a keyword of the outer
+    /// grammar, so the line has colours either way — only a style *past* the
+    /// instruction can have come from bash. A recipe body has none of its own.
+    #[test]
+    fn a_recipe_body_and_a_run_are_read_as_shell() {
+        register_languages();
+        for (path, lines, shell_at) in [
+            (
+                "Dockerfile",
+                ["FROM debian AS build", "RUN test -f x && echo yes"],
+                "RUN ".len(),
+            ),
+            ("justfile", ["run:", "    test -f x && echo yes"], 0),
+        ] {
+            let d = diff(
+                lines
+                    .iter()
+                    .map(|text| line(DiffLineKind::Context, text))
+                    .collect(),
+            );
+            let hits =
+                DiffHighlights::compute(Path::new(path), &d, &HighlightTheme::default_dark());
+            assert!(
+                hits.line(0, 1)
+                    .iter()
+                    .any(|(range, _)| range.start >= shell_at),
+                "{path}: the shell inside it is not coloured"
+            );
+        }
     }
 
     #[test]
