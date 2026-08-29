@@ -636,8 +636,13 @@ premier.
 distinction est un détail de plomberie git, restitué par une case à cocher par
 fichier. `rows_for` est la seule vraie décision, libre et testée. `app::
 initial_range` choisit au **premier** statut ; ensuite la portée appartient à
-l'utilisateur (`range_chosen`). La base vient de git (`branch::default_base`),
-jamais d'un `main` codé en dur.
+l'utilisateur (`range_chosen`). La base vient de git (`branch::guess_base`),
+jamais d'un `main` codé en dur : **la branche dont celle-ci a le moins
+divergé** — git ne stocke aucun parent, ça se lit sur le graphe en un
+`for-each-ref %(ahead-behind:HEAD)` — et à défaut la branche d'intégration.
+Elle est demandée une fois par worktree (`Cmd::GuessBase`) et **n'est pas
+enregistrée** : le magasin garde ce qu'on a choisi, une devinette écrite y
+serait une devinette pour toujours.
 
 **L'explorateur** (`explorer.rs`, `tree.rs`) — l'arbre vient d'un seul appel git,
 jamais d'un parcours de disque. `tree` ne connaît que des chemins et rend des

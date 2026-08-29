@@ -650,6 +650,13 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
         } => vec![Evt::Agents {
             agents: crate::agent::scan(&worktrees, &programs),
         }],
+        // A read of the refs, in the reads' queue: it is `for-each-ref` walking
+        // the graph once, the same order of work as the status beside it, and
+        // the branch review waits on it to know what it compares against.
+        Cmd::GuessBase { worktree } => {
+            let base = branch::guess_base(&worktree);
+            vec![Evt::BaseGuessed { worktree, base }]
+        }
         Cmd::LoadBranches { main } => match branch::list(&main) {
             Ok(branches) => vec![branches_evt(main, branches)],
             Err(e) => vec![fail(None, Action::Branch, e)],
@@ -1338,14 +1345,8 @@ fn summaries(worktrees: Vec<PathBuf>) -> Vec<Evt> {
     vec![Evt::Summaries { summaries }]
 }
 
-/// The branch list, with the base git suggests for it.
 fn branches_evt(main: PathBuf, branches: Vec<crate::git::Branch>) -> Evt {
-    let default_base = branch::default_base(&main);
-    Evt::Branches {
-        main,
-        branches,
-        default_base,
-    }
+    Evt::Branches { main, branches }
 }
 
 /// Deletes a branch and re-reads the list: the panel shows it, and nothing else

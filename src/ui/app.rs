@@ -296,8 +296,14 @@ pub struct ReviewState {
     /// One set for both groups: collapsing `src/ui` means collapsing that
     /// folder, not "that folder among the tracked files".
     pub collapsed: std::collections::HashSet<PathBuf>,
-    /// The branch review's comparison base, guessed at opening.
+    /// The branch review's comparison base: what the store kept, what the user
+    /// chose, or failing both what `branch::guess_base` reads off the graph.
     pub base: Option<String>,
+    /// Has the guess been asked for. A status arrives on every file write, and
+    /// the question is a walk of the graph: it is asked once, and a `None`
+    /// answer — a repository with nothing to compare against — stays `None`
+    /// rather than being asked again on the next keystroke.
+    pub base_asked: bool,
     /// The history and its graph, loaded on demand — opening a worktree must not
     /// pay for a `git log` nobody will look at.
     pub history: Option<std::rc::Rc<History>>,
@@ -460,6 +466,7 @@ impl Default for ReviewState {
             diff_selection: None,
             collapsed: std::collections::HashSet::new(),
             base: None,
+            base_asked: false,
             history: None,
             // The current branch: what one asks a history first. The whole
             // graph is one click away.
@@ -2063,11 +2070,8 @@ impl ClaudhubApp {
                 graph,
                 patches,
             } => self.history_arrived(worktree, range, commits, graph, patches, cx),
-            Evt::Branches {
-                main,
-                branches,
-                default_base,
-            } => self.branches_arrived(main, branches, default_base, window, cx),
+            Evt::Branches { main, branches } => self.branches_arrived(main, branches, window, cx),
+            Evt::BaseGuessed { worktree, base } => self.base_guessed(worktree, base, window, cx),
             Evt::Tags { main, tags } => self.tags_arrived(main, tags, cx),
             Evt::RemoteTags { main, names } => self.remote_tags_arrived(main, names, cx),
             Evt::Stashes { main, stashes } => self.stashes_arrived(main, stashes, cx),
@@ -2408,7 +2412,6 @@ impl ClaudhubApp {
 
     fn status_arrived(&mut self, worktree: PathBuf, status: Status, cx: &mut Context<Self>) {
         self.pending_status.remove(&worktree);
-        let base = self.default_base_for(&worktree);
         self.ensure_review(&worktree, cx);
         // `ensure_review` has just put it there, so no key is copied to look it
         // up.
@@ -2423,9 +2426,12 @@ impl ClaudhubApp {
         state.status = status;
         state.rows_changed();
         self.repos.set_branch(&worktree, branch.as_deref());
-        if state.base.is_none() {
-            state.base = base;
-        }
+        // Nothing kept, and nothing asked yet: the base is guessed off the
+        // graph, which is a read and therefore a command. Asked here rather
+        // than when the panel is painted, because the panel needs the answer to
+        // show anything at all — and asked **once**, a status arriving on every
+        // file write.
+        let ask = state.base.is_none() && !std::mem::replace(&mut state.base_asked, true);
         // A merge open on a file git no longer reports as unmerged is a merge
         // that has been settled elsewhere — the two buttons of the conflicts
         // row, an abort, a `git checkout` in a terminal next door. What it
@@ -2440,6 +2446,11 @@ impl ClaudhubApp {
         });
         if settled {
             self.merging = None;
+        }
+        if ask {
+            self.git.send(Cmd::GuessBase {
+                worktree: worktree.clone(),
+            });
         }
         // The tree's rows read the status by path: filed once here rather than
         // at every frame of the panel.
@@ -2695,32 +2706,39 @@ impl ClaudhubApp {
         &mut self,
         main: PathBuf,
         branches: Vec<Branch>,
-        default_base: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if let Some(repo) = self.repos.iter_mut().find(|r| r.main == main) {
             repo.branches = branches;
-            repo.default_base = default_base;
         }
-        // The reviews already open may have been waiting for this base: the
-        // status arrives before the branches, and nothing will refresh them a
-        // second time.
-        let bases: Vec<(PathBuf, Option<String>)> = self
-            .review
-            .keys()
-            .map(|worktree| (worktree.clone(), self.default_base_for(worktree)))
-            .collect();
-        for (worktree, base) in bases {
-            if let Some(state) = self.review.get_mut(&worktree) {
-                if state.base.is_none() {
-                    state.base = base;
-                }
-            }
-        }
-        // After the propagation, not before: the selector has to show the base
-        // kept, and it has just been decided.
         self.refresh_base_choices(window, cx);
+    }
+
+    /// The base guessed for a checkout, from `git`'s reading of the graph.
+    ///
+    /// It only fills a gap: anything already there is a choice of the user's,
+    /// or an answer that has overtaken this one. And it is **not** written to
+    /// the store — the store keeps what was chosen, and a guess written down
+    /// would be a guess for good, deaf to a branch that has moved since.
+    fn base_guessed(
+        &mut self,
+        worktree: PathBuf,
+        base: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.review.get_mut(&worktree) else {
+            return;
+        };
+        if state.base.is_some() || base.is_none() {
+            return;
+        }
+        state.base = base;
+        // The selector shows the base: it is filled from the branch list, which
+        // may well have arrived before this.
+        self.refresh_base_choices(window, cx);
+        cx.notify();
     }
 
     // — Writes ————————————————————————————————————————————————————
@@ -3925,10 +3943,6 @@ impl ClaudhubApp {
 
     pub(super) fn first_worktree(&self) -> Option<PathBuf> {
         self.repos.first_worktree()
-    }
-
-    fn default_base_for(&self, worktree: &Path) -> Option<String> {
-        self.repos.default_base_for(worktree)
     }
 
     // — Rendering ——————————————————————————————————————————————————

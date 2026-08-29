@@ -321,6 +321,125 @@ pub fn default_base(main: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+/// A branch weighed as a comparison base: how far it stands from HEAD.
+///
+/// `ahead` and `behind` are git's, read from HEAD's point of view: `ahead` is
+/// what the branch has and HEAD does not, `behind` is what HEAD has and the
+/// branch does not — that is, how far this checkout has walked since it left.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub name: String,
+    pub ahead: usize,
+    pub behind: usize,
+    pub remote: bool,
+}
+
+/// Every branch, with its distance to HEAD, in **one** command.
+///
+/// `%(ahead-behind:HEAD)` walks the graph once for the lot, where a
+/// `merge-base` per branch would be one `fork` per branch. It wants git 2.41;
+/// an older one fails on the unknown field, the read comes back empty, and the
+/// caller falls back on the integration branch — which is what this replaced.
+///
+/// The full refname and not `%(refname:short)`: shortened, `refs/remotes/origin/HEAD`
+/// comes out as plain `origin`, a name that looks like a branch and is a
+/// symbolic ref to one that is already in the list.
+fn candidates(dir: &Path) -> Vec<Candidate> {
+    let out = git_opt(
+        dir,
+        &[
+            "for-each-ref",
+            "--format=%(refname)%09%(ahead-behind:HEAD)",
+            "refs/heads",
+            "refs/remotes",
+        ],
+    );
+    parse_candidates(&out.unwrap_or_default())
+}
+
+fn parse_candidates(out: &str) -> Vec<Candidate> {
+    out.lines()
+        .filter_map(|line| {
+            let (refname, counts) = line.split_once('\t')?;
+            let (ahead, behind) = counts.split_once(' ')?;
+            let (name, remote) = match refname.strip_prefix("refs/heads/") {
+                Some(name) => (name, false),
+                None => (refname.strip_prefix("refs/remotes/")?, true),
+            };
+            // `origin/HEAD` is not a branch, it is a pointer to one.
+            if remote && name.rsplit_once('/').is_some_and(|(_, tip)| tip == "HEAD") {
+                return None;
+            }
+            Some(Candidate {
+                name: name.to_string(),
+                ahead: ahead.trim().parse().ok()?,
+                behind: behind.trim().parse().ok()?,
+                remote,
+            })
+        })
+        .collect()
+}
+
+/// The branch this one most plausibly came out of.
+///
+/// **Git stores no parent**: a branch is a name on a commit, and where it was
+/// created from is not written anywhere the moment the reflog expires or the
+/// checkout is cloned. So this is read off the graph — the branch HEAD has
+/// diverged from *least* is the one it left most recently — and it is a guess,
+/// which is why the user can still say otherwise.
+///
+/// Three exclusions, each of which would otherwise win:
+///
+/// - **HEAD itself**, which would compare a branch to itself.
+/// - **Its own upstream**, `origin/<head>`: the difference against it is what
+///   has not been pushed, which is a true answer to another question.
+/// - **`behind == 0`**, a branch that already holds everything HEAD has — an
+///   ancestor, or the branch one has just been merged into. The comparison is
+///   empty, and an empty review reads as "nothing to review" rather than as a
+///   base badly chosen.
+///
+/// Ties are broken by `fallback` first — the integration branch git declares,
+/// which is what one means nine times out of ten — then local before remote,
+/// then by name so that two runs answer the same thing.
+///
+/// And the integration branch itself compares to **nothing**: what it holds is
+/// what everything else is measured against. Without that first line, a branch
+/// merged into it reads exactly like a parent — HEAD does descend from it, by
+/// twenty commits — and `master` would open its review against the last feature
+/// it swallowed.
+pub fn closest(candidates: &[Candidate], head: &str, fallback: Option<&str>) -> Option<String> {
+    if fallback == Some(head) {
+        return None;
+    }
+    let fallback = fallback.filter(|name| *name != head);
+    let own_upstream = |name: &str| {
+        name.split_once('/')
+            .is_some_and(|(_, rest)| rest == head && !head.is_empty())
+    };
+    candidates
+        .iter()
+        .filter(|c| c.behind > 0 && c.name != head && !own_upstream(&c.name))
+        .min_by_key(|c| {
+            (
+                c.behind,
+                Some(c.name.as_str()) != fallback,
+                c.remote,
+                c.name.clone(),
+            )
+        })
+        .map(|c| c.name.clone())
+        .or_else(|| fallback.map(str::to_string))
+}
+
+/// The base a checkout starts out compared against.
+///
+/// Read in the worktree and not in the main one: HEAD is what the question is
+/// about, and each checkout has its own.
+pub fn guess_base(dir: &Path) -> Option<String> {
+    let head = current(dir).unwrap_or_default();
+    closest(&candidates(dir), &head, default_base(dir).as_deref())
+}
+
 /// Attaches a branch with no upstream to `origin/<branch>` so the first `git
 /// push` does not need `-u`. The remote reference does not exist yet: that is
 /// precisely what the push will create.
@@ -345,6 +464,119 @@ pub(crate) fn ensure_upstream(main: &Path, branch: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn candidate(name: &str, ahead: usize, behind: usize) -> Candidate {
+        Candidate {
+            name: name.to_string(),
+            ahead,
+            behind,
+            remote: name.contains('/') && !name.starts_with("wt/"),
+        }
+    }
+
+    /// The shape `for-each-ref` answers with, and the one line in it that is
+    /// not a branch.
+    #[test]
+    fn reads_every_branch_with_its_distance_to_head() {
+        let out = "refs/heads/master\t0 0\n\
+                   refs/heads/dockv2\t0 20\n\
+                   refs/remotes/origin/HEAD\t0 50\n\
+                   refs/remotes/origin/master\t0 50\n";
+        let read = parse_candidates(out);
+        assert_eq!(
+            read.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["master", "dockv2", "origin/master"],
+            "origin/HEAD is a pointer, not a branch"
+        );
+        assert_eq!((read[1].ahead, read[1].behind), (0, 20));
+        assert!(!read[1].remote);
+        assert!(read[2].remote);
+    }
+
+    /// The ordinary case: a branch three commits out of `main`, next to a
+    /// neighbour it has nothing to do with.
+    #[test]
+    fn the_closest_branch_is_the_one_head_left_last() {
+        let list = [
+            candidate("main", 12, 3),
+            candidate("dev", 40, 9),
+            candidate("other-feature", 7, 25),
+        ];
+        assert_eq!(
+            closest(&list, "feature", Some("main")).as_deref(),
+            Some("main")
+        );
+    }
+
+    /// Its own upstream is the nearest thing on the graph and the wrong answer:
+    /// what it shows is what has not been pushed.
+    #[test]
+    fn a_branch_is_not_compared_against_its_own_upstream() {
+        let list = [candidate("origin/feature", 0, 1), candidate("main", 12, 3)];
+        assert_eq!(
+            closest(&list, "feature", Some("main")).as_deref(),
+            Some("main")
+        );
+    }
+
+    /// A branch already holding everything HEAD has — an ancestor, or the one
+    /// this branch has just been merged into — compares to nothing at all.
+    #[test]
+    fn a_branch_that_already_holds_head_is_not_a_base() {
+        let list = [candidate("main", 20, 0), candidate("dev", 30, 8)];
+        assert_eq!(
+            closest(&list, "merged", Some("main")).as_deref(),
+            Some("dev")
+        );
+    }
+
+    /// Two branches left at the same commit: the graph cannot tell them apart,
+    /// so the integration branch does.
+    #[test]
+    fn a_tie_goes_to_the_integration_branch() {
+        let list = [
+            candidate("aaa-sibling", 4, 3),
+            candidate("main", 12, 3),
+            candidate("origin/main", 12, 3),
+        ];
+        assert_eq!(
+            closest(&list, "feature", Some("main")).as_deref(),
+            Some("main")
+        );
+        // And without one, a local branch before a remote, then by name.
+        assert_eq!(
+            closest(&list, "feature", None).as_deref(),
+            Some("aaa-sibling")
+        );
+    }
+
+    /// Nothing left to choose from: the answer is the integration branch, which
+    /// is what was shown before any of this existed.
+    #[test]
+    fn with_no_candidate_the_integration_branch_stands() {
+        assert_eq!(
+            closest(&[], "feature", Some("main")).as_deref(),
+            Some("main")
+        );
+        // Except when that is the branch one is on: comparing it to itself
+        // shows nothing, and the panel says so rather than show an empty list.
+        assert_eq!(closest(&[], "main", Some("main")), None);
+        assert_eq!(closest(&[], "main", None), None);
+        // Including when it is right there in the list, which it always is.
+        let list = [candidate("main", 0, 0), candidate("origin/main", 0, 0)];
+        assert_eq!(closest(&list, "main", Some("main")), None);
+    }
+
+    /// Standing on the integration branch, every branch merged into it looks
+    /// like a parent: HEAD descends from each of them. It has no base.
+    #[test]
+    fn the_integration_branch_compares_to_nothing() {
+        let list = [
+            candidate("just-merged", 0, 20),
+            candidate("older-work", 0, 300),
+        ];
+        assert_eq!(closest(&list, "master", Some("master")), None);
+    }
 
     #[test]
     fn reads_a_local_branch_with_its_upstream() {

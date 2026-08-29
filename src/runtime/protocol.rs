@@ -94,6 +94,13 @@ pub enum Cmd {
     LoadBranches {
         main: PathBuf,
     },
+    /// Which branch this checkout most plausibly came out of.
+    ///
+    /// Named by the **worktree** and not by the repository: the question is
+    /// about its HEAD, and five checkouts of one repository have five answers.
+    GuessBase {
+        worktree: WorktreeId,
+    },
     /// The repository's tags, read from `refs/tags`. Milliseconds: a read like
     /// any other.
     LoadTags {
@@ -879,6 +886,7 @@ impl Cmd {
             Self::LoadUnstagedDiff { .. } => "LoadUnstagedDiff",
             Self::LoadFileDiff { .. } => "LoadFileDiff",
             Self::LoadBranches { .. } => "LoadBranches",
+            Self::GuessBase { .. } => "GuessBase",
             Self::LoadTags { .. } => "LoadTags",
             Self::LoadRemoteTags { .. } => "LoadRemoteTags",
             Self::LoadSummaries { .. } => "LoadSummaries",
@@ -1037,11 +1045,13 @@ pub enum Evt {
     Branches {
         main: PathBuf,
         branches: Vec<Branch>,
-        /// The repository's integration branch, as git declares it
-        /// (`origin/HEAD`, then `init.defaultBranch`, then the usual names that
-        /// really exist). `None` on a repository that has none: the branch
-        /// review then has nothing to compare itself against.
-        default_base: Option<String>,
+    },
+    /// The base guessed for a checkout, or `None` when nothing can be compared
+    /// — a repository with one branch, or the integration branch checked out
+    /// here.
+    BaseGuessed {
+        worktree: WorktreeId,
+        base: Option<String>,
     },
     Tags {
         main: PathBuf,

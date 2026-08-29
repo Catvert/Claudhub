@@ -16,11 +16,6 @@ pub struct RepoState {
     pub name: String,
     pub worktrees: Vec<Worktree>,
     pub branches: Vec<Branch>,
-    /// The integration branch, as git declares it. It is only known once the
-    /// worker has answered: until then the branch review has no base and its tab
-    /// stays inactive — offering an assumed `main` would produce an "unknown
-    /// revision" on any repository not called that.
-    pub default_base: Option<String>,
 }
 
 /// A remembered repository we could not open.
@@ -84,7 +79,6 @@ impl Repos {
             name,
             worktrees,
             branches: Vec::new(),
-            default_base: None,
         });
         true
     }
@@ -190,20 +184,6 @@ impl Repos {
             .iter()
             .flat_map(|repo| repo.worktrees.iter().map(|w| w.path.clone()))
             .collect()
-    }
-
-    /// A worktree's comparison base: the repository's integration branch, except
-    /// when that is precisely the one checked out there — comparing a branch
-    /// against itself shows nothing.
-    pub fn default_base_for(&self, worktree: &Path) -> Option<String> {
-        let repo = self.repo_of(worktree)?;
-        let base = repo.default_base.as_deref()?;
-        let current = repo
-            .worktrees
-            .iter()
-            .find(|w| w.path == worktree)
-            .and_then(|w| w.branch.as_deref());
-        (Some(base) != current).then(|| base.to_string())
     }
 }
 
@@ -338,24 +318,6 @@ mod tests {
             ]
         );
         assert_eq!(repos.first_worktree(), Some(PathBuf::from("/p/site")));
-    }
-
-    #[test]
-    fn a_branch_is_never_offered_as_its_own_base() {
-        let mut repos = repos();
-        repos
-            .get_mut(Path::new("/p/site"))
-            .expect("the repo")
-            .default_base = Some("main".into());
-        // The agent's worktree compares against `main`…
-        assert_eq!(
-            repos.default_base_for(Path::new("/p/site-fix")),
-            Some("main".into())
-        );
-        // …but the checkout that *is* `main` has nothing to compare to.
-        assert_eq!(repos.default_base_for(Path::new("/p/site")), None);
-        // And without git's answer there is no base to propose at all.
-        assert_eq!(repos.default_base_for(Path::new("/p/api")), None);
     }
 
     #[test]
