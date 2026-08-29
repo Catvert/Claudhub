@@ -172,7 +172,7 @@ dependencies = [
  "rustix-openpty",
  "serde",
  "signal-hook",
- "unicode-width 0.2.2",
+ "unicode-width",
  "vte",
  "windows-sys 0.59.0",
 ]
@@ -218,7 +218,7 @@ checksum = "f211a51805bc641f3ad5b7664c77d2547af685cc33b4cd8d31964027a46f13f1"
 dependencies = [
  "anstyle",
  "memchr",
- "unicode-width 0.2.2",
+ "unicode-width",
 ]
 
 [[package]]
@@ -703,7 +703,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.11.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1175,7 +1175,7 @@ checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width 0.1.14",
+ "unicode-width",
 ]
 
 [[package]]
@@ -1990,7 +1990,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2607,7 +2607,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.20",
- "windows 0.62.2",
+ "windows 0.58.0",
 ]
 
 [[package]]
@@ -2702,7 +2702,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.5.2"
-source = "git+https://github.com/Catvert/gpui-component?branch=claudhub#602391fe97994e5d44fd4bc77a96637ba0607864"
+source = "git+https://github.com/Catvert/gpui-component?branch=claudhub#23d6ecebbe4c2dead552a1f9afa26dd4be285cb6"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2734,7 +2734,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.5.2"
-source = "git+https://github.com/Catvert/gpui-component?branch=claudhub#602391fe97994e5d44fd4bc77a96637ba0607864"
+source = "git+https://github.com/Catvert/gpui-component?branch=claudhub#23d6ecebbe4c2dead552a1f9afa26dd4be285cb6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2814,7 +2814,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-assets"
 version = "0.5.1"
-source = "git+https://github.com/Catvert/gpui-component?branch=claudhub#602391fe97994e5d44fd4bc77a96637ba0607864"
+source = "git+https://github.com/Catvert/gpui-component?branch=claudhub#23d6ecebbe4c2dead552a1f9afa26dd4be285cb6"
 dependencies = [
  "anyhow",
  "gpui",
@@ -2828,7 +2828,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.5.1"
-source = "git+https://github.com/Catvert/gpui-component?branch=claudhub#602391fe97994e5d44fd4bc77a96637ba0607864"
+source = "git+https://github.com/Catvert/gpui-component?branch=claudhub#23d6ecebbe4c2dead552a1f9afa26dd4be285cb6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3396,7 +3396,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.58.0",
 ]
 
 [[package]]
@@ -5643,7 +5643,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6209,7 +6209,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7417,7 +7417,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8348,12 +8348,6 @@ name = "unicode-vo"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1d386ff53b415b7fe27b50bb44679e2cc4660272694b7b6f3326d8480823a94"
-
-[[package]]
-name = "unicode-width"
-version = "0.1.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
 
 [[package]]
 name = "unicode-width"
