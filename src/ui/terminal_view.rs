@@ -28,7 +28,7 @@ use gpui::{
     UTF16Selection, Window,
 };
 use gpui_component::{
-    dock::{DockPlacement, InsertTarget, PanelId},
+    dock::{DockPlacement, InsertTarget, PaneRef, PanelId},
     menu::{ContextMenuExt, PopupMenuItem},
     v_flex, ActiveTheme, WindowExt as _,
 };
@@ -1841,12 +1841,21 @@ impl ClaudhubApp {
                 Some(size),
                 |dock| {
                     let sibling = sibling?;
-                    let node = dock
-                        .layout(placement)?
-                        .find_panel_node(PanelId::from(sibling.entity_id()))?;
+                    let tree = dock.layout(placement)?;
+                    let node = tree.find_panel_node(PanelId::from(sibling.entity_id()))?;
+                    // **Right beside the one being looked at**, not at the far
+                    // end of the bar. A terminal is opened from another one —
+                    // the same task, one command further — and a tab landing
+                    // eight positions away after a day's work is a tab one has
+                    // to go and find. `None` would append; the active index is
+                    // where the eye is.
+                    let after = match tree.find_node(node)?.kind() {
+                        PaneRef::Tabs { active_ix, .. } => Some(active_ix + 1),
+                        _ => None,
+                    };
                     Some(InsertTarget::Tabs {
                         node,
-                        ix: None,
+                        ix: after,
                         // The tab one has just opened is the tab one looks at.
                         activate: true,
                     })

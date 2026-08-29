@@ -33,6 +33,7 @@ mod lsp;
 mod merge;
 mod merge_view;
 mod motion;
+mod multiplex;
 mod notes;
 pub(crate) mod notes_view;
 mod notify;

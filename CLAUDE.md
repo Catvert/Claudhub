@@ -186,6 +186,7 @@ src/
     worktree_picker.rs le sélecteur de worktrees : le filtre, la liste, les actions
     worktrees.rs    ce que le sélecteur de worktrees liste — pur, testé
     picker.rs       ce que les deux sélecteurs partagent : le pas du curseur — pur
+    multiplex.rs    la grille de tous les terminaux : un écran, pas un panneau
     review.rs / terminal_view.rs
     server.rs       la mise en route du serveur WSL
     settings.rs     les réglages et leur global
@@ -467,11 +468,19 @@ même une zone absente. Il reste parce qu'une fenêtre qui s'ouvre sur rien ne d
 rien de ce qu'elle sait faire : au premier démarrage, diff, console et aperçu
 sont tous conditionnels, donc absents.
 
-**Les Réglages sont une modale** et le **multiplexeur un état** : « tous les
-worktrees », bascule de la barre d'état, puisque c'était déjà son seul écart
-(`terminals_everywhere`). Le formulaire des réglages est une **entité enfant** et
-non une fermeture : `open_dialog` retient un `Fn` rappelé depuis le rendu de la
+**Les Réglages sont une modale.** Le formulaire est une **entité enfant** et non
+une fermeture : `open_dialog` retient un `Fn` rappelé depuis le rendu de la
 racine, où lire l'entité racine est une panique.
+
+**Le multiplexeur est un écran** (`ui::multiplex`), et c'est ce qu'une aire de
+dock ne sait pas faire : surveiller cinq agents demande de voir cinq terminaux
+*en même temps*, là où un groupe d'onglets en montre un. Il remplace tout ce
+qui est sous la barre de titre — bandeaux, docks, barre d'état — par des tuiles,
+tous worktrees confondus, chacune disant à quel projet elle appartient. La
+forme de la grille est pure et testée (`multiplex::rows`) ; le clavier est
+remis des deux côtés de la bascule, ce qui avait le focus n'étant plus peint
+après. À ne pas confondre avec `terminals_everywhere`, qui reste ce qu'il est :
+les terminaux de tous les worktrees dans le dock, la fenêtre entière autour.
 
 La disposition est enregistrée dans `<config>/layout.json`, une seule.
 `LAYOUT_VERSION` la fait écarter quand les panneaux changent de nom, et c'est le

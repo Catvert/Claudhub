@@ -277,6 +277,8 @@
   "merge-take-all-theirs": "Tout à droite",
   "merge-take-ours": "Prendre la nôtre",
   "merge-take-theirs": "Prendre la leur",
+  "multiplex-empty": "Aucun terminal ouvert. Ouvrez-en un et il arrive ici.",
+  "multiplex-toggle": "Grille des terminaux",
   "multiplexer-open-worktree": "Travailler dans ce worktree",
   "no-worktree": "Aucun worktree sélectionné",
   "note-add": "Annoter la sélection",
