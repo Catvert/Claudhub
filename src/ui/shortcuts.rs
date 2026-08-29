@@ -845,11 +845,17 @@ table!(STANDARD, standard_bindings, false, [
     Terminal "secondary-shift-c" => CopySelection, TERMINAL_PREDICATE, "shortcut-terminal-copy";
     Terminal "secondary-shift-v" => PasteClipboard, TERMINAL_PREDICATE, "shortcut-terminal-paste";
     Terminal "secondary-shift-a" => SelectAllText, TERMINAL_PREDICATE, "shortcut-terminal-select-all";
-    // gpui-component's `Root` binds a bare `tab` to focus cycling, and a
-    // binding at the root still consumes the key before the terminal's
-    // `on_key_down` listener runs. These two match **deeper** — on the
-    // terminal's own node — and a deeper match wins: Tab belongs to the
-    // running program, like the rest of the bare keyboard.
+    // gpui-component's `Root` binds a bare `tab` and `shift-tab` to focus
+    // cycling. These two match **deeper** — on the terminal's own node — and
+    // gpui tries every matching binding in turn, stopping at the first that
+    // consumes: Tab belongs to the running program, like the rest of the bare
+    // keyboard.
+    //
+    // Depth was not enough, and that is the fork's twenty-first commit: the
+    // root's handler fired first and consumed, so a Shift+Tab typed into a
+    // terminal teleported the focus out of it. It navigates only inside a
+    // modal surface now — a dialog, a sheet, a focus trap — and propagates
+    // everywhere else, which is what lets these two be reached at all.
     Terminal "tab" => SendTab, TERMINAL_PREDICATE, "shortcut-terminal-tab";
     Terminal "shift-tab" => SendBacktab, TERMINAL_PREDICATE, "shortcut-terminal-backtab";
 ]);

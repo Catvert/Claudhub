@@ -542,8 +542,8 @@ registre de gpui-component ne se charge **que depuis un répertoire**, qu'il
 surveille ; les thèmes sont donc écrits dans `<config>/themes/` au démarrage, et
 réécrits à chaque fois — pour en modifier un, le copier sous un autre nom.
 
-**Le fork de gpui-component** (voir `Cargo.toml`) est vingt commits au-dessus
-de leur `main`, chacun payé par un symptôme :
+**Le fork de gpui-component** (voir `Cargo.toml`) est vingt et un commits
+au-dessus de leur `main`, chacun payé par un symptôme :
 
 1. le `TabVariant` que `DockSkin` fait passer jusqu'au `TabBar` ;
 2. les coins en boîte bordée réservés au variant classique ;
@@ -596,6 +596,15 @@ de leur `main`, chacun payé par un symptôme :
     d'alignement plutôt que comme un onglet. Ça ne se voit qu'avec une barre
     sans bouton de tête, ce qui est exactement notre cas : les zones se
     replient depuis les bandeaux.
+
+21. **Tab appartient à la vue qui a le focus, hors surface modale** : `Root`
+    liait `tab` et `shift-tab` au parcours du focus, et sa liaison partait
+    la première **et consommait** — un Shift+Tab tapé dans un terminal
+    téléportait le focus hors de lui au lieu d'atteindre le shell. La
+    profondeur ne suffisait pas : gpui essaie chaque liaison qui correspond
+    et s'arrête à la première qui consomme. Elle ne parcourt plus que dans
+    un dialogue, une feuille ou un piège de focus — le cas pour lequel elle
+    existe — et propage ailleurs.
 
 Les commits ont vocation à partir en PR.
 
