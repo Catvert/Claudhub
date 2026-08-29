@@ -90,8 +90,10 @@ impl Anchor {
             // top half.
             Place::Left => Some(Anchor::new(Side::Left, Half::Top)),
             // And beside what happened: the queries already run, the branch's
-            // builds. That is the right's bottom half.
-            Place::Right => Some(Anchor::new(Side::Right, Half::Bottom)),
+            // builds. The right is read in one group and not two halves, so
+            // that is where it joins them — a plugin that opened a second half
+            // would split an edge the arrangement keeps whole.
+            Place::Right => Some(Anchor::new(Side::Right, Half::Top)),
             Place::Bottom => Some(Anchor::new(Side::Bottom, Half::Top)),
             Place::Centre => None,
         }
@@ -146,9 +148,10 @@ impl Side {
     ///
     /// A height and not the width above: inside a side zone the split runs
     /// down, so the two are different measurements and one of them was being
-    /// read for the other. The right's half is the taller because what it holds
-    /// is read in paragraphs — the notes, the queries already run — where the
-    /// left's is a list one glances at.
+    /// read for the other. Nothing starts in the right's bottom half — that
+    /// edge is one group — so its size is what a panel dragged there is given,
+    /// and it is the taller because what lands on that edge is read in
+    /// paragraphs, where the left's half is a list one glances at.
     pub fn half_size(self) -> Pixels {
         match self {
             Side::Left => px(240.),
@@ -225,6 +228,22 @@ pub struct Tool {
 /// one had to say about it and whether it passes; then what happened, in which
 /// table, and the shell one says it to.
 pub const TOOLS: &[Tool] = &[
+    // The left's top half, in the order the hand reaches for it: the tree of
+    // files first, because a project is opened on a file.
+    Tool {
+        panel: "ClaudhubFiles",
+        title: Label::Key("panel-files"),
+        icon: "pencil",
+        home: Anchor::new(Side::Left, Half::Top),
+        conditional: false,
+    },
+    Tool {
+        panel: "ClaudhubSearch",
+        title: Label::Key("panel-search"),
+        icon: "search",
+        home: Anchor::new(Side::Left, Half::Top),
+        conditional: false,
+    },
     Tool {
         panel: "ClaudhubChanges",
         title: Label::Key("range-working"),
@@ -242,23 +261,21 @@ pub const TOOLS: &[Tool] = &[
         home: Anchor::new(Side::Left, Half::Top),
         conditional: false,
     },
+    // **Beside the files and not under them**: a failing test is picked from
+    // the same way a file is — one reads the list, one opens what it names.
+    // The half below is for what one keeps an eye on while doing that.
     Tool {
-        panel: "ClaudhubFiles",
-        title: Label::Key("panel-files"),
-        icon: "pencil",
+        panel: "ClaudhubTests",
+        title: Label::Key("panel-tests"),
+        icon: "circle-check",
         home: Anchor::new(Side::Left, Half::Top),
-        conditional: false,
-    },
-    Tool {
-        panel: "ClaudhubSearch",
-        title: Label::Key("panel-search"),
-        icon: "search",
-        home: Anchor::new(Side::Left, Half::Top),
-        conditional: false,
+        // Only where a runner exists: on everything else the honest panel is
+        // no panel — there is nothing to run.
+        conditional: true,
     },
     // First of the bottom half, so it is the one that half shows: the notes are
     // read *while* choosing a file, which is the whole reason they are not a
-    // tab of the four above.
+    // tab of the five above.
     Tool {
         panel: "ClaudhubNotes",
         title: Label::Key("panel-notes"),
@@ -266,22 +283,9 @@ pub const TOOLS: &[Tool] = &[
         home: Anchor::new(Side::Left, Half::Bottom),
         conditional: false,
     },
-    Tool {
-        panel: "ClaudhubTests",
-        title: Label::Key("panel-tests"),
-        icon: "circle-check",
-        home: Anchor::new(Side::Left, Half::Bottom),
-        // Only where a runner exists: on everything else the honest panel is
-        // no panel — there is nothing to run.
-        conditional: true,
-    },
-    Tool {
-        panel: "ClaudhubHistory",
-        title: Label::Key("panel-history"),
-        icon: "history",
-        home: Anchor::new(Side::Right, Half::Top),
-        conditional: false,
-    },
+    // The right edge holds one group and not two halves: what it carries is
+    // read across rather than picked from, and a schema unfolded beside the
+    // queries already run is two lists competing for the same column.
     Tool {
         panel: "ClaudhubDb",
         title: Label::Key("panel-databases"),
@@ -289,6 +293,25 @@ pub const TOOLS: &[Tool] = &[
         home: Anchor::new(Side::Right, Half::Top),
         conditional: false,
     },
+    // The band across the width, and the two that want it: a run scrolls,
+    // and a graph of commits is read left to right. Neither fits a column.
+    Tool {
+        panel: "ClaudhubTestRun",
+        title: Label::Key("panel-test-run"),
+        icon: "play",
+        home: Anchor::new(Side::Bottom, Half::Top),
+        conditional: true,
+    },
+    Tool {
+        panel: "ClaudhubHistory",
+        title: Label::Key("panel-history"),
+        icon: "history",
+        home: Anchor::new(Side::Bottom, Half::Top),
+        conditional: false,
+    },
+    // Past the ninth, no key names it: `Alt+1`… stop here, and the rest is
+    // reached by its button. The terminals are what can afford to be there:
+    // `Ctrl+T` already calls them up by name, which no other tool window has.
     Tool {
         panel: "ClaudhubTerminal",
         title: Label::Key("panel-terminal"),
@@ -296,13 +319,11 @@ pub const TOOLS: &[Tool] = &[
         home: Anchor::new(Side::Bottom, Half::Top),
         conditional: false,
     },
-    // Past the ninth, no key names it: `Alt+1`… stop here, and the rest is
-    // reached by its button.
     Tool {
         panel: "ClaudhubSqlHistory",
         title: Label::Key("panel-sql-history"),
         icon: "list",
-        home: Anchor::new(Side::Right, Half::Bottom),
+        home: Anchor::new(Side::Right, Half::Top),
         conditional: false,
     },
     // Nothing to resolve, no button: one time in a hundred.
@@ -314,13 +335,6 @@ pub const TOOLS: &[Tool] = &[
         conditional: true,
     },
     Tool {
-        panel: "ClaudhubTags",
-        title: Label::Key("panel-tags"),
-        icon: "tags",
-        home: Anchor::new(Side::Left, Half::Bottom),
-        conditional: false,
-    },
-    Tool {
         panel: "ClaudhubStashes",
         title: Label::Key("panel-stashes"),
         icon: "archive",
@@ -328,11 +342,11 @@ pub const TOOLS: &[Tool] = &[
         conditional: false,
     },
     Tool {
-        panel: "ClaudhubTestRun",
-        title: Label::Key("panel-test-run"),
-        icon: "play",
-        home: Anchor::new(Side::Bottom, Half::Top),
-        conditional: true,
+        panel: "ClaudhubTags",
+        title: Label::Key("panel-tags"),
+        icon: "tags",
+        home: Anchor::new(Side::Left, Half::Bottom),
+        conditional: false,
     },
 ];
 

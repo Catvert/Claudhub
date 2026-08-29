@@ -77,43 +77,65 @@ pub fn build(
 
 /// One half of one edge, in the table's order, followed by the plugin panels
 /// that asked for it.
-fn tools_of(anchor: Anchor, window: &mut Window, cx: &mut Context<DockArea>) -> DockLayout {
+///
+/// `None` when nothing lands there. A half is a **group**, and a group with no
+/// tab is a strip of the edge that says nothing and cannot be filled except by
+/// dragging something onto it. The right's bottom half is that half: the whole
+/// edge is read in one run, and the size it would be given is what a panel
+/// dropped there gets instead.
+fn tools_of(anchor: Anchor, window: &mut Window, cx: &mut Context<DockArea>) -> Option<DockLayout> {
     let mut group = DockLayout::tabs();
+    let mut held = 0usize;
     for tool in rails::TOOLS.iter().filter(|tool| tool.home == anchor) {
         if let Some(view) = build(tool.panel, window, cx) {
             group = group.panel_view(view, cx);
+            held += 1;
         }
     }
     for name in plugin_panels(Some(anchor)) {
         if let Some(view) = build(name, window, cx) {
             group = group.panel_view(view, cx);
+            held += 1;
         }
     }
-    group
+    (held > 0).then_some(group)
 }
 
-/// A whole edge: its halves, stacked, or a single group where it has one.
+/// A whole edge: the halves that hold something, stacked.
 ///
 /// **Two groups and not two tabs**: the halves are on screen together, which is
 /// what lets the file list and the tests be read at once without either being a
 /// tab of the other. It is the arrangement the review's column already had, now
 /// said once for every edge.
+///
+/// **An empty half is not a slot**, it is nothing at all: the edge is then the
+/// one group that holds something, which is exactly what the dock leaves behind
+/// when a half is emptied by dragging. `seats` reads a lone group as the top
+/// half, so the survivors keep their anchor and the rail keeps its single run —
+/// and the right, where nothing starts below, is built whole rather than as a
+/// column with a gap under it.
 fn edge(side: Side, window: &mut Window, cx: &mut Context<DockArea>) -> DockLayout {
-    let halves = side.halves();
-    if halves.len() == 1 {
-        return tools_of(Anchor::new(side, halves[0]), window, cx);
+    let mut held: Vec<DockLayout> = side
+        .halves()
+        .iter()
+        .filter_map(|half| tools_of(Anchor::new(side, *half), window, cx))
+        .collect();
+    match held.len() {
+        // An edge nothing asked for still needs a root the area can hold.
+        0 => DockLayout::tabs(),
+        1 => held.remove(0),
+        _ => held
+            .into_iter()
+            .enumerate()
+            .fold(DockLayout::v_split(), |split, (ix, group)| {
+                // The **bottom** half is the one given a size, never the top:
+                // two fixed sizes adding up to the region's height overflow it,
+                // and it is the top that should take what is left over. A
+                // **height**, which is not the zone's width — the split inside
+                // a side zone runs down.
+                split.child(group, (ix > 0).then(|| side.half_size()))
+            }),
     }
-    let mut split = DockLayout::v_split();
-    for (ix, half) in halves.iter().enumerate() {
-        let group = tools_of(Anchor::new(side, *half), window, cx);
-        // The **bottom** half is the one given a size, never the top: two fixed
-        // sizes adding up to the region's height overflow it, and it is the top
-        // that should take what is left over. A **height**, which is not the
-        // zone's width — the split inside a side zone runs down.
-        let size = (ix > 0).then(|| side.half_size());
-        split = split.child(group, size);
-    }
-    split
 }
 
 /// The centre: what one reads, as against what one picks from.

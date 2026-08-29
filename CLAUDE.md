@@ -408,12 +408,20 @@ accueil qui les réunissait ; le double système coûtait quatre chemins pour
 n'appartient qu'à une aire à la fois — et neuf listes de vues recopiées.
 
 La répartition se lit comme une phrase : **la gauche choisit, la droite se
-souvient, le bas tourne, le centre se lit.** À gauche ce qui désigne — les
-changements, la branche, les fichiers, la recherche, les bases, les tests ; à
-droite ce qui dit où l'on en est — les notes, l'historique, les tags, les
-remisages, les requêtes déjà jouées ; en bas ce qui tourne — les terminaux, le
-run suivi ; au centre ce qu'on relit — le diff, l'éditeur, la console, l'aperçu,
-et chaque fichier ouvert.
+souvient, le bas s'étale, le centre se lit.** À gauche ce qui désigne — les
+fichiers, la recherche, les changements, la branche, les tests dans le haut ;
+les notes, les conflits, les remisages, les tags dans le bas ; à droite ce qui
+dit où l'on en est — les bases, les requêtes déjà jouées ; en bas ce qui a
+besoin de la largeur — le run suivi, l'historique et son graphe, les terminaux ;
+au centre ce qu'on relit — le diff, l'éditeur, la console, l'aperçu, et chaque
+fichier ouvert.
+
+**La droite est un seul groupe**, les deux autres bords en ont deux : rien n'y
+démarre dans la moitié basse, et une moitié vide n'est pas un emplacement mais
+une bande qui ne dit rien et qu'on ne remplit qu'en y traînant quelque chose
+(`dock_layout::edge`). Elle existe toujours — un panneau qu'on y dépose la
+fabrique — et `seats` lit un groupe seul comme la moitié haute, si bien que le
+bandeau de droite garde une seule série.
 
 **Une tool window a un bouton, un document n'en a pas** — la différence n'est
 pas dans la nature du panneau mais dans sa place. `ui::rails` est pur et décide
