@@ -287,13 +287,6 @@ pub const TOOLS: &[Tool] = &[
         home: Anchor::new(Side::Bottom, Half::Top),
         conditional: false,
     },
-    Tool {
-        panel: "ClaudhubSqlHistory",
-        title: Label("panel-sql-history"),
-        icon: "list",
-        home: Anchor::new(Side::Right, Half::Top),
-        conditional: false,
-    },
     // Nothing to resolve, no button: one time in a hundred.
     Tool {
         panel: "ClaudhubConflicts",

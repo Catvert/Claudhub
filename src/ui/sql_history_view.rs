@@ -192,6 +192,14 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    /// The queries already run, as the bottom half of the databases panel.
+    ///
+    /// **Not a panel of its own any more.** It was a tool window against the
+    /// right edge, one tab away from the tree its rows are about — and what one
+    /// does with a past query is run it against a schema one is looking at. The
+    /// two halves share the panel's height, and the share is adjustable: one
+    /// unfolds a schema, then reads a hundred rows of history, and no fixed
+    /// proportion suits both.
     pub(super) fn render_sql_history(
         &mut self,
         window: &mut Window,
@@ -376,6 +384,20 @@ impl ClaudhubApp {
                             )
                         })
                     }),
+            )
+            // **Its own magnifier.** `Ctrl+F` asks the panel the last click was
+            // in, and this half shares its panel with the tree: the key goes to
+            // the tree, so the filter of the rows below needs a way of its own.
+            .child(
+                Button::new("sql-history-find")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("search"))
+                    .tooltip(tr!("sql-history-find"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let input = this.open_find_in(Pane::SqlHistory, window, cx);
+                        gpui::Focusable::focus_handle(&input, cx).focus(window, cx);
+                    })),
             )
             .child(
                 Button::new("sql-history-clear")

@@ -22,6 +22,7 @@ use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
     menu::{ContextMenuExt, PopupMenu, PopupMenuItem},
+    resizable::{resizable_panel, v_resizable},
     v_flex, ActiveTheme, Disableable, Selectable, Sizable,
 };
 
@@ -1117,37 +1118,48 @@ impl ClaudhubApp {
         let entity = cx.entity();
         let count = entries.len();
 
-        v_flex()
-            .size_full()
-            .child(bar)
-            .children(find)
-            .child(
-                div()
-                    .id("db-tree")
-                    // The arrows belong to this tree when it has the focus, like
-                    // the explorer's to its own.
-                    .key_context(crate::ui::shortcuts::db_context(vim))
-                    .track_focus(&focus)
-                    .flex_1()
-                    .min_h_0()
-                    .child(
-                        self.scrolled(
-                            "db-tree-bar",
-                            &scroll,
-                            crate::ui::motion::Axes::Vertical,
-                            window,
-                            uniform_list("db-entries", count, move |visible, _window, cx| {
-                                visible
-                                    .map(|index| {
-                                        render_row(&entries, index, cursor, &look, &entity, cx)
-                                    })
-                                    .collect::<Vec<_>>()
-                            })
-                            .size_full()
-                            .track_scroll(&scroll.clone()),
-                            cx,
-                        ),
+        let tree = v_flex().size_full().child(bar).children(find).child(
+            div()
+                .id("db-tree")
+                // The arrows belong to this tree when it has the focus, like
+                // the explorer's to its own.
+                .key_context(crate::ui::shortcuts::db_context(vim))
+                .track_focus(&focus)
+                .flex_1()
+                .min_h_0()
+                .child(
+                    self.scrolled(
+                        "db-tree-bar",
+                        &scroll,
+                        crate::ui::motion::Axes::Vertical,
+                        window,
+                        uniform_list("db-entries", count, move |visible, _window, cx| {
+                            visible
+                                .map(|index| {
+                                    render_row(&entries, index, cursor, &look, &entity, cx)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .size_full()
+                        .track_scroll(&scroll.clone()),
+                        cx,
                     ),
+                ),
+        );
+        // **The queries already run live here**, under the tree they are about:
+        // what one does with a past query is run it against a schema one is
+        // looking at, and a tab away was one gesture too many for that. The
+        // share is adjustable — one unfolds a schema, then reads a hundred rows
+        // of history, and no fixed proportion suits both.
+        let history = self.render_sql_history(window, cx);
+        v_resizable("db-split-history")
+            .with_state(&self.db_history_split.clone())
+            .child(resizable_panel().child(tree))
+            .child(
+                resizable_panel()
+                    .size(px(220.))
+                    .size_range(px(80.)..px(720.))
+                    .child(history),
             )
             .into_any_element()
     }

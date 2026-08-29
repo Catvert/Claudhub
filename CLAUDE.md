@@ -198,7 +198,7 @@ src/
     db_query.rs     les consoles SQL — une par onglet : ce qu'elle montre, ce
                     qu'elle attend, ses complétions et sa table de résultats
     sql_history.rs  les requêtes déjà jouées : dédup, portée, jours — pur
-    sql_history_view.rs  le panneau « Historique » et ses gestes
+    sql_history_view.rs  les requêtes déjà jouées, moitié basse du panneau des bases
     search.rs       les lignes de la recherche projet — pur
     search_view.rs  la loupe : le champ, la liste, l'aperçu
     conflicts.rs    les conflits et le garde-fou d'une opération à mi-chemin
@@ -409,7 +409,8 @@ La répartition se lit comme une phrase : **la gauche choisit, la droite se
 souvient, le bas s'étale, le centre se lit.** À gauche ce qui désigne — les
 fichiers, la recherche, les changements, la branche, les tests dans le haut ;
 les notes, les conflits, les remisages, les tags dans le bas ; à droite ce qui
-dit où l'on en est — les bases, les requêtes déjà jouées ; en bas ce qui a
+dit où l'on en est — les bases et, sous elles, les requêtes déjà jouées ; les
+erreurs de Sentry ; les exécutions de la CI ; en bas ce qui a
 besoin de la largeur — le run suivi, l'historique et son graphe, les terminaux ;
 au centre ce qu'on relit — le diff, l'éditeur, l'aperçu, et chaque fichier ouvert
 et chaque console SQL.
@@ -708,7 +709,11 @@ connexion par requête, jamais gardée. La console est une **fenêtre** sur le
 résultat, pas « la page *n* » ; le tri est fait par le moteur en enveloppant la
 requête (`db::order_by`, par **rang**), et ce qu'on ne sait pas envelopper n'est
 pas triable. Un identifiant d'envoi, et non la requête, écarte le résultat en
-retard. Le motif de portée (`db::scope`) sépare les bases d'un worktree ; rien
+retard. **Les requêtes déjà jouées vivent sous l'arbre**, dans le même panneau :
+ce qu'on fait d'une requête passée est la rejouer contre un schéma qu'on
+regarde, et un onglet plus loin était un geste de trop. Le partage de hauteur
+est réglable, et cette moitié a sa propre loupe — `Ctrl+F` s'adresse au panneau
+où l'on vient de cliquer, donc à l'arbre. Le motif de portée (`db::scope`) sépare les bases d'un worktree ; rien
 n'est masqué en silence.
 
 **Sentry** (`sentry.rs`, `ui/sentry.rs`) — deux panneaux sur un état : la liste

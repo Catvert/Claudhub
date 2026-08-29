@@ -262,7 +262,7 @@ impl ClaudhubApp {
     /// Split out for the file search: `Ctrl+P` says which panel it wants —
     /// the explorer — where `Ctrl+F` asks the click. Returns the field so the
     /// caller can seed it.
-    fn open_find_in(
+    pub(super) fn open_find_in(
         &mut self,
         pane: Pane,
         window: &mut Window,

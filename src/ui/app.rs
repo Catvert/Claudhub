@@ -847,6 +847,11 @@ pub struct ClaudhubApp {
     /// a console: two consoles counting from one would each take the other's
     /// rows, and the number is the only thing the answer carries back.
     pub(super) db_request_seq: u64,
+    /// The height split between the databases tree and the queries already run,
+    /// which share the panel. An entity created once: rebuilt at render time,
+    /// the handle would go back to its place on every frame and would not let
+    /// itself be dragged.
+    pub(super) db_history_split: Entity<gpui_component::resizable::ResizableState>,
     /// The errors Sentry reports for the repository being looked at, and the
     /// one being read. One state for the window: arriving somewhere else is
     /// starting over, not refreshing.
@@ -1309,6 +1314,7 @@ impl ClaudhubApp {
             db_request_seq: 0,
             // Read once, at startup, like the state store: it is a file of our
             // own, a few hundred kilobytes at most, and nothing else writes it.
+            db_history_split: crate::ui::db_query::split_state(cx),
             sentry: Default::default(),
             sentry_seq: 0,
             sentry_project_input,

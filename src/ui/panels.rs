@@ -745,7 +745,6 @@ panels! {
     TestRunPanel => ("ClaudhubTestRun", "panel-test-run", render_test_run, TestRun, needed: test_run_open),
     FilesPanel => ("ClaudhubFiles", "panel-files", render_files, Files),
     DbPanel => ("ClaudhubDb", "panel-databases", render_db, Db),
-    SqlHistoryPanel => ("ClaudhubSqlHistory", "panel-sql-history", render_sql_history, SqlHistory),
     SearchPanel => ("ClaudhubSearch", "panel-search", render_search, Search),
     SearchPreviewPanel => ("ClaudhubSearchPreview", "panel-search-preview", render_search_preview, SearchPreview, needed: search_preview_open, closes: close_search_preview),
     // The centre of each screen. **Three panels and not one whose title
