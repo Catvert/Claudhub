@@ -160,12 +160,11 @@ fn documents(window: &mut Window, cx: &mut Context<DockArea>) -> DockLayout {
 /// to be ranked among, and nothing outside this list asks about it. The open
 /// files join them as tabs of their own, and so does the settings form the
 /// first time it is called up.
-const DOCUMENTS: &[&str] = &[
-    "ClaudhubDiff",
-    "ClaudhubEditor",
-    "ClaudhubSearchPreview",
-    "ClaudhubConsole",
-];
+/// The SQL consoles are **not** here, and neither are the open files: their
+/// content is state the registry cannot rebuild from a name — a console is one
+/// of several, each with its own query — so they are put back by the session,
+/// as the terminals are.
+const DOCUMENTS: &[&str] = &["ClaudhubDiff", "ClaudhubEditor", "ClaudhubSearchPreview"];
 
 /// The plugin panels that asked for one place, in manifest order.
 fn plugin_panels(anchor: Option<Anchor>) -> Vec<&'static str> {

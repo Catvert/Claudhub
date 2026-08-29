@@ -702,7 +702,6 @@ panels! {
     // depending on the last gesture was saying plainly that it carried three.
     // The screens give each of them its own place.
     DiffPanel => ("ClaudhubDiff", "panel-diff", render_diff, Diff, needed: diff_on_screen, closes: close_diff),
-    ConsolePanel => ("ClaudhubConsole", "panel-sql", render_console_panel, Console, needed: db_console_open, closes: close_db_console),
     // The history needs loading the first time it is looked at.
     //
     // Doing it at render time rather than at construction is what avoids a
@@ -955,6 +954,193 @@ impl Render for FilePanel {
             app.render_editor_panel(window, cx).into_any_element()
         });
         pane_root(&app, Pane::Editor, content, cx).into_any_element()
+    }
+}
+
+/// One SQL console, as the dock shows it.
+///
+/// **A panel per console**, like a panel per file and a panel per terminal: the
+/// dock's bar is the tab bar, which is what lets a console be dragged into a
+/// split, zoomed or set beside another without a strip of our own painted under
+/// the one the window already has. It is also what made several of them
+/// possible at all — there was one console because the centre was one slot.
+///
+/// It carries its worktree the way a terminal does, through the console it
+/// names: the tabs of the tree one is not looking at stay in the dock,
+/// invisible, keeping the place they were given.
+pub struct QueryPanel {
+    app: WeakEntity<ClaudhubApp>,
+    id: crate::ui::db_query::ConsoleId,
+    /// The tab group showing it, as the dock hands it over — the only way to
+    /// bring a tab forward from code. See `TerminalPanel::group`.
+    group: Option<gpui::WeakEntity<gpui_component::dock::TabGroup>>,
+    /// The console's editor, held rather than looked up: `focus_handle` is
+    /// asked for by the dock at moments when reading the application would read
+    /// it while it is being updated.
+    input: Entity<gpui_component::input::EditorState>,
+    /// What the tab says, worked out once: a rank never moves for as long as
+    /// the console lives, and the title is asked for on every frame the bar
+    /// paints.
+    title: gpui::SharedString,
+    visible: bool,
+}
+
+impl QueryPanel {
+    pub const NAME: &'static str = "ClaudhubQueryTab";
+
+    /// `visible` is **given** and not read off the application, as a terminal's
+    /// is: a console is opened from inside an `update` on `ClaudhubApp`, so the
+    /// entity is out of the table while this runs.
+    /// The editor, the title and the worktree are **given** and not read off
+    /// the application: this runs inside an `update` on `ClaudhubApp`, so the
+    /// entity is out of the table — reading it there panics with "cannot read …
+    /// while it is already being updated". Its caller has just built all three.
+    pub fn new(
+        app: &Entity<ClaudhubApp>,
+        id: crate::ui::db_query::ConsoleId,
+        input: Entity<gpui_component::input::EditorState>,
+        title: gpui::SharedString,
+        worktree: std::path::PathBuf,
+        visible: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mine = worktree;
+        cx.observe(app, move |this: &mut Self, app, cx| {
+            let app = app.read(cx);
+            let visible = app.active.as_deref() == Some(mine.as_path());
+            if this.visible != visible {
+                this.visible = visible;
+                cx.emit(PanelEvent::LayoutChanged);
+            }
+            cx.notify();
+        })
+        .detach();
+        Self {
+            app: app.downgrade(),
+            id,
+            group: None,
+            input,
+            title,
+            visible,
+        }
+    }
+
+    /// Makes this console the displayed tab of its group.
+    pub fn activate(panel: &Entity<Self>, window: &mut Window, cx: &mut App) {
+        let group = panel.read(cx).group.clone();
+        select_own_tab(group, panel.entity_id(), window, cx);
+    }
+}
+
+impl Focusable for QueryPanel {
+    /// The editor's, as a file's panel gives its editor's: what one types in is
+    /// the query, and the grid takes the keyboard from the click that lands on
+    /// it.
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.input.focus_handle(cx)
+    }
+}
+
+impl EventEmitter<PanelEvent> for QueryPanel {}
+
+impl BasePanel for QueryPanel {
+    fn panel_name(&self) -> &'static str {
+        Self::NAME
+    }
+
+    /// Closable, like a file and like a terminal: closing the tab is how one
+    /// closes a console. The bar underneath therefore has no cross of its own.
+    fn closable(&self, _: &App) -> bool {
+        true
+    }
+
+    fn visible(&self, _: &App) -> bool {
+        self.visible
+    }
+
+    fn on_added_to(
+        &mut self,
+        group: gpui::WeakEntity<gpui_component::dock::TabGroup>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        self.group = Some(group);
+    }
+
+    /// **Deferred**, for the reason a file's is: this is called from inside the
+    /// dock's own edit, and forgetting a console goes back through the very
+    /// area being updated. `console_gone` and not `close_console`: the tab is
+    /// already out, and asking the dock again would be asking it to remove what
+    /// it is removing.
+    fn on_removed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        let id = self.id;
+        cx.defer_in(window, move |_, window, cx| {
+            app.update(cx, |app, cx| app.console_gone(id, window, cx));
+        });
+    }
+}
+
+impl Panel for QueryPanel {
+    /// `SQL 1`, and a cross.
+    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let app = self.app.clone();
+        let id = self.id;
+        // The same closing as the cross's: the wheel button is the other way of
+        // making one gesture. One closure shared by both.
+        let closing: Closing = std::rc::Rc::new(move |window: &mut Window, cx: &mut App| {
+            let Some(app) = app.upgrade() else {
+                return;
+            };
+            window.defer(cx, move |window, cx| {
+                app.update(cx, |app, cx| app.close_console(id, window, cx));
+            });
+        });
+        let on_cross = closing.clone();
+        let tab = gpui_component::h_flex()
+            .id(("query-tab", id.0 as usize))
+            .gap_1()
+            .items_center()
+            .child(crate::ui::icons::icon("database"))
+            .child(self.title.clone())
+            .child(
+                Button::new("close-query")
+                    .ghost()
+                    .xsmall()
+                    .icon(crate::ui::icons::icon("x"))
+                    .on_click(move |_, window, cx| {
+                        // The tab under it selects on click: without this, the
+                        // cross would first bring forward what it is about to
+                        // close.
+                        cx.stop_propagation();
+                        on_cross(window, cx);
+                    }),
+            );
+        close_on_middle_click(tab, move |window, cx| closing(window, cx))
+    }
+
+    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
+        zoom_in_toolbar()
+    }
+}
+
+impl Render for QueryPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(app) = self.app.upgrade() else {
+            return div().into_any_element();
+        };
+        let id = self.id;
+        let content = app.update(cx, |app, cx| {
+            // Which console a binding is about is settled here, by the focus and
+            // not by the painting: two consoles can be drawn side by side in a
+            // split, and "the last one painted" would hand `Ctrl+Enter` to
+            // whichever the frame happened to end on.
+            app.console_focused(id, window, cx);
+            app.render_db_console(id, window, cx).into_any_element()
+        });
+        pane_root(&app, Pane::Console, content, cx).into_any_element()
     }
 }
 

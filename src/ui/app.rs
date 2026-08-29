@@ -858,22 +858,24 @@ pub struct ClaudhubApp {
     /// A handle of its own, like the project explorer's: it is what tells "the
     /// arrows browse the schema" from "the arrows browse the diff".
     pub(super) db_focus: FocusHandle,
-    /// The SQL console, when one is open.
-    pub(super) query: crate::ui::db_query::QueryState,
-    /// The console's editor. Created **once**: recreated at render time, it
-    /// would lose the cursor, the selection and the text on the first keystroke.
-    pub(super) db_query_input: Entity<gpui_component::input::EditorState>,
-    /// The console's modal harness — the same one the file editor holds, since
-    /// SQL is code read and written the same way. It lives here and not in
-    /// `QueryState`: that one is emptied whenever a query is replaced, and the
-    /// decoration layers must outlive the text they are laid over.
-    pub(super) db_host: crate::ui::surface::VimHost,
-    /// The names the console completes, shared with the completion provider the
-    /// editor holds.
-    pub(super) db_schema: std::rc::Rc<std::cell::RefCell<crate::ui::db_query::SchemaIndex>>,
-    /// The result table. An entity created once as well: rebuilding it on every
-    /// query would lose the column widths just adjusted with the mouse.
-    pub(super) db_table: Entity<gpui_component::table::TableState<crate::ui::db_query::Results>>,
+    /// Every open SQL console, in the order they were opened, all worktrees
+    /// together — the terminals' list, for the same reason: a panel per console,
+    /// and the ones of the worktree one is not looking at stay in the dock,
+    /// invisible.
+    pub(super) consoles: Vec<crate::ui::db_query::Console>,
+    /// The console a keystroke is about: the last one to have held the focus.
+    ///
+    /// The gestures that come from a console's own bar carry their id; the ones
+    /// that come from the keyboard — `Ctrl+Enter`, `Ctrl+C` on the grid — have
+    /// only the focus to go on, and the focus is what the dock moves when one
+    /// changes tab.
+    pub(super) active_console: Option<crate::ui::db_query::ConsoleId>,
+    /// What names the next console. Never reused, unlike the rank the tab says.
+    pub(super) console_seq: u64,
+    /// What identifies a query's answer, counted for the **window** and not for
+    /// a console: two consoles counting from one would each take the other's
+    /// rows, and the number is the only thing the answer carries back.
+    pub(super) db_request_seq: u64,
     /// What is known of each repository's tags, by main repository: tags live
     /// in the shared `.git` and are the same seen from every worktree.
     pub(super) tags: HashMap<PathBuf, crate::ui::tags::TagsState>,
@@ -898,12 +900,6 @@ pub struct ClaudhubApp {
     /// kept, their rows and their heights. Rebuilt when what it depends on
     /// moves, `History::version` included; see `refresh_sql_history_list`.
     pub(super) sql_history_list: Option<crate::ui::sql_history_view::HistoryList>,
-    /// The height split between the console's editor and its grid.
-    ///
-    /// An entity, because that is what `v_resizable` asks for, and created once:
-    /// recreated at render time, the handle would go back to its place on every
-    /// frame and would not let itself be dragged.
-    pub(super) db_split: Entity<gpui_component::resizable::ResizableState>,
     /// A worktree being waited for, and the prompt to deliver in it once created.
     ///
     /// `wt`'s creation runs hooks that take minutes; nothing but the arrival of
@@ -1133,15 +1129,6 @@ pub struct ClaudhubApp {
     pub(super) focus: FocusHandle,
 }
 
-/// The SQL console's entities, handed to the constructor in one piece.
-struct Console {
-    db_schema: std::rc::Rc<std::cell::RefCell<crate::ui::db_query::SchemaIndex>>,
-    db_query_input: Entity<gpui_component::input::EditorState>,
-    db_host: crate::ui::surface::VimHost,
-    db_table: Entity<gpui_component::table::TableState<crate::ui::db_query::Results>>,
-    db_split: Entity<gpui_component::resizable::ResizableState>,
-}
-
 /// The window's dock, and what its building found out.
 struct Docks {
     dock: Entity<DockArea>,
@@ -1206,14 +1193,6 @@ impl ClaudhubApp {
                 .auto_grow(3, 14)
                 .placeholder(tr!("journal-placeholder"))
         });
-
-        let Console {
-            db_schema,
-            db_query_input,
-            db_host,
-            db_table,
-            db_split,
-        } = Self::build_console(window, cx);
 
         let base_select = cx.new(|cx| {
             SelectState::new(
@@ -1342,12 +1321,10 @@ impl ClaudhubApp {
             db: Default::default(),
             db_scroll: gpui::UniformListScrollHandle::new(),
             db_focus: cx.focus_handle(),
-            query: Default::default(),
-            db_query_input,
-            db_host,
-            db_schema,
-            db_table,
-            db_split,
+            consoles: Vec::new(),
+            active_console: None,
+            console_seq: 0,
+            db_request_seq: 0,
             // Read once, at startup, like the state store: it is a file of our
             // own, a few hundred kilobytes at most, and nothing else writes it.
             tags: HashMap::new(),
@@ -1427,7 +1404,6 @@ impl ClaudhubApp {
         app.start_plugins(cx);
         app.start_scanning(cx);
         app.watch_vault_inputs(window, cx);
-        app.watch_query_input(cx);
 
         app.open_remembered_repositories(remote, cx);
         // Starting the server waits for the window to be mounted: a dialog needs
@@ -1490,50 +1466,6 @@ impl ClaudhubApp {
         // Remotely this send is dropped with the rest — `backend_ready`
         // resends it with the repositories, and for the same reason.
         self.git.send(Cmd::ReleaseCheck);
-    }
-
-    /// The SQL console's entities: its editor, its completion index, its table.
-    ///
-    /// All of them live as long as the window — that is the rule for gpui
-    /// entities — and the console only fills them.
-    fn build_console(window: &mut Window, cx: &mut Context<Self>) -> Console {
-        let db_schema: std::rc::Rc<std::cell::RefCell<crate::ui::db_query::SchemaIndex>> =
-            Default::default();
-        let db_query_input = cx.new(|cx| {
-            gpui_component::input::EditorState::new(window, cx)
-                .language("sql")
-                .line_number(true)
-                .placeholder("SELECT * FROM …")
-        });
-        db_query_input.update(cx, |state, cx| {
-            state.lsp_mut().completion_provider =
-                Some(std::rc::Rc::new(crate::ui::db_query::SqlCompletions {
-                    schema: db_schema.clone(),
-                }));
-            cx.notify();
-        });
-        // The modal harness, created with the editor and for its whole life:
-        // the decoration layers follow the text through its edits.
-        let db_host = crate::ui::surface::VimHost::new(&db_query_input, cx);
-        let db_table = cx.new(|cx| {
-            gpui_component::table::TableState::new(
-                crate::ui::db_query::Results::default(),
-                window,
-                cx,
-            )
-            // The headers carry their sort arrow. gpui-component's cell
-            // selection, for its part, stays off: it knows only one at a time,
-            // and what one copies from a result grid is almost always a block —
-            // see `db_query::Results::selection`.
-            .sortable(true)
-        });
-        Console {
-            db_schema,
-            db_query_input,
-            db_host,
-            db_table,
-            db_split: crate::ui::db_query::split_state(cx),
-        }
     }
 
     /// One dock per screen, restored or built, and the one that was being looked
@@ -1765,9 +1697,14 @@ impl ClaudhubApp {
                 // The four regions, not the centre alone: the terminals dock
                 // into a side zone, which is where an unpruned one would come
                 // back as a name nothing can build.
+                // A console's tab goes with them, and for the file's reason:
+                // its content is a query one was writing, several of them at a
+                // time, each on its own connection. What the previous session
+                // had open comes back from the store, beside the files.
                 let doomed = |name: &str| {
                     name == super::panels::TerminalPanel::NAME
                         || name == super::panels::FilePanel::NAME
+                        || name == super::panels::QueryPanel::NAME
                 };
                 prune(&mut state.center, &doomed);
                 prune_dock(&mut state.left_dock, &doomed);
@@ -1904,22 +1841,6 @@ impl ClaudhubApp {
     /// character would keep the sync busy permanently. No "save" button: it is a
     /// scratchpad, and having to confirm it would be the best way to lose three
     /// sentences in it.
-    /// The query being written is part of where one was, so it is filed as it
-    /// is typed.
-    ///
-    /// On the `Change` event and not on sending: what one comes back to
-    /// tomorrow is often precisely the query that was never sent. The store's
-    /// write is deferred by half a second, which is what keeps a keystroke from
-    /// costing a file.
-    fn watch_query_input(&mut self, cx: &mut Context<Self>) {
-        cx.subscribe(&self.db_query_input.clone(), |this, _, event, cx| {
-            if matches!(event, gpui_component::input::InputEvent::Change) {
-                this.persist_session(cx);
-            }
-        })
-        .detach();
-    }
-
     fn watch_vault_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use gpui_component::input::InputEvent;
         cx.subscribe(&self.journal_input.clone(), |this, _, event, cx| {
@@ -2501,6 +2422,7 @@ impl ClaudhubApp {
                 self.active = None;
                 self.review.remove(&active);
                 self.close_terminals_of(&active, window, cx);
+                self.close_consoles_of(&active, window, cx);
                 // The editors of a worktree that is gone go with it, as its
                 // terminals do: the files they hold are on a disk that no
                 // longer has them, and their tabs would stay in the dock.
@@ -4325,6 +4247,7 @@ impl Render for ClaudhubApp {
             .on_action(cx.listener(super::shortcuts::db_open))
             .on_action(cx.listener(super::shortcuts::run_db_query))
             .on_action(cx.listener(super::shortcuts::toggle_tool))
+            .on_action(cx.listener(super::shortcuts::new_db_console))
             .on_action(cx.listener(super::shortcuts::copy_db_result))
             .on_action(cx.listener(super::shortcuts::select_whole_result))
             .on_action(cx.listener(super::shortcuts::export_db_csv))
@@ -4728,14 +4651,6 @@ impl ClaudhubApp {
         }
         if name == SearchPanel::NAME && self.panel_visible(SearchPanel::NAME) {
             let handle = gpui::Focusable::focus_handle(&self.search_input, cx);
-            handle.focus(window, cx);
-            return;
-        }
-        if name == ConsolePanel::NAME
-            && self.db_console_open()
-            && self.panel_visible(ConsolePanel::NAME)
-        {
-            let handle = gpui::Focusable::focus_handle(&self.db_query_input, cx);
             handle.focus(window, cx);
             return;
         }

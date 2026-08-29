@@ -164,7 +164,7 @@ impl ClaudhubApp {
         {
             self.reveal_panel(name, window, cx);
         }
-        self.restore_console(place.console.clone(), window, cx);
+        self.restore_consoles(&worktree, place.consoles.clone(), window, cx);
         // The tabs on the **first** arrival only: a file's panel hides itself
         // when the editing root changes and comes back with it, so a worktree
         // visited earlier in this session still has its files.
@@ -247,34 +247,45 @@ impl ClaudhubApp {
                 .any(|open| open.worktree == worktree && open.path == path)
     }
 
-    /// Puts the SQL console back on the connection this checkout was using,
-    /// with the query that was in its editor — not sent.
+    /// Puts this checkout's SQL consoles back, each on the connection it was
+    /// using and with the query that was in its editor — not sent.
     ///
-    /// There is one console for the whole window, so arriving somewhere else
-    /// **clears** it first: leaving the previous project's query under the
-    /// cursor would be the one thing a per-worktree place must not do. The
-    /// connection is named by its key rather than copied, so one edited in the
-    /// meantime is the one that opens — and one that has been deleted simply
-    /// does not come back.
-    fn restore_console(
+    /// **Nothing is cleared any more**, where one console for the whole window
+    /// had to be: a console belongs to its worktree and keeps its tab, hidden,
+    /// while one looks elsewhere. That is also why this does nothing when the
+    /// checkout already has one — arriving is not opening a second set.
+    ///
+    /// A connection is named by its key rather than copied, so one edited in
+    /// the meantime is the one that opens — and one that has been deleted
+    /// simply does not come back.
+    fn restore_consoles(
         &mut self,
-        console: Option<OpenConsole>,
+        worktree: &Path,
+        consoles: Vec<OpenConsole>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.reset_db_console(cx);
-        let Some(console) = console else {
+        if self.consoles_of(worktree).next().is_some() {
             return;
-        };
-        let Some(connection) = Settings::global(cx)
-            .databases
-            .iter()
-            .find(|candidate| candidate.key() == console.connection)
-            .cloned()
-        else {
-            return;
-        };
-        self.reopen_db_console(connection, console.database, console.query, window, cx);
+        }
+        for console in consoles {
+            let Some(connection) = Settings::global(cx)
+                .databases
+                .iter()
+                .find(|candidate| candidate.key() == console.connection)
+                .cloned()
+            else {
+                continue;
+            };
+            self.reopen_db_console(
+                worktree.to_path_buf(),
+                connection,
+                console.database,
+                console.query,
+                window,
+                cx,
+            );
+        }
     }
 
     /// Files where one is, and schedules the store's deferred write.
@@ -346,15 +357,17 @@ impl ClaudhubApp {
                         .collect()
                 })
                 .unwrap_or_default(),
-            console: self
-                .query
-                .connection
-                .as_ref()
-                .map(|connection| OpenConsole {
-                    connection: connection.key(),
-                    database: self.query.database.clone(),
-                    query: self.db_query_input.read(cx).value().to_string(),
-                }),
+            consoles: self
+                .consoles_of(here.as_path())
+                .filter_map(|console| {
+                    let connection = console.state.connection.as_ref()?;
+                    Some(OpenConsole {
+                        connection: connection.key(),
+                        database: console.state.database.clone(),
+                        query: console.input.read(cx).value().to_string(),
+                    })
+                })
+                .collect(),
         };
         // One write for both: this runs on every keystroke of the query editor,
         // and each `update_global` used to copy the whole state to find out

@@ -35,7 +35,10 @@ impl ClaudhubApp {
     /// the filter borrows — the caller holds the string for as long as it uses
     /// it.
     fn sql_history_key(&self) -> Option<String> {
-        self.query.connection.as_ref().map(|c| c.key())
+        self.focused_console()
+            .and_then(|id| self.console(id))
+            .and_then(|console| console.state.connection.as_ref())
+            .map(|connection| connection.key())
     }
 
     /// Files a query that has just come back.
@@ -43,20 +46,34 @@ impl ClaudhubApp {
     /// Called from `db_rows_arrived`, which is where both halves are known: the
     /// query as it went out, and what the engine answered. A query that fails is
     /// recorded too — a typo one corrects is exactly what one wants back.
+    /// The answer is given whole rather than taken apart at the call site: it
+    /// is one thing the worker sent back, and four parameters of it were four
+    /// chances to file a success under an error's shape.
     pub(super) fn record_sql_query(
         &mut self,
-        ok: bool,
-        rows: Option<usize>,
-        affected: Option<u64>,
-        error: Option<String>,
+        console: crate::ui::db_query::ConsoleId,
+        answer: &crate::runtime::protocol::DbResult<crate::db::Rows>,
         elapsed_ms: u64,
         cx: &mut Context<Self>,
     ) {
+        let (ok, rows, affected, error) = match answer {
+            Ok(page) => (
+                true,
+                (!page.columns.is_empty()).then_some(page.rows.len()),
+                page.affected,
+                None,
+            ),
+            Err(message) => (false, None, None, Some(message.clone())),
+        };
+        let Some(console) = self.console(console) else {
+            return;
+        };
         let (Some(connection), Some(sql)) =
-            (self.query.connection.clone(), self.query.sent.clone())
+            (console.state.connection.clone(), console.state.sent.clone())
         else {
             return;
         };
+        let database = console.state.database.clone();
         if sql.trim().is_empty() {
             return;
         }
@@ -65,7 +82,7 @@ impl ClaudhubApp {
             worktree: self.active.clone().unwrap_or_default(),
             connection: connection.key(),
             label: connection.label(),
-            database: self.query.database.clone(),
+            database,
             sql,
             ok,
             rows,
@@ -124,17 +141,32 @@ impl ClaudhubApp {
             return;
         };
         let sql = entry.sql.clone();
-        self.start_db_console(config, entry.database.clone(), None, window, cx);
-        self.db_query_input.update(cx, |state, cx| {
-            state.set_value(sql, window, cx);
-        });
-        if run {
-            self.run_db_query(cx);
-        } else {
-            // The editor gets the focus: what one does with a recalled query is
-            // adjust it before running it.
-            let handle = gpui::Focusable::focus_handle(&self.db_query_input, cx);
-            handle.focus(window, cx);
+        // Into the console one is in, as everything the history recalls goes:
+        // a row clicked is a query to adjust, not a reason for one more tab.
+        self.start_db_console(
+            crate::ui::db_query::ConsoleTarget::Current,
+            config,
+            entry.database.clone(),
+            None,
+            window,
+            cx,
+        );
+        let Some(id) = self.focused_console() else {
+            return;
+        };
+        if let Some(console) = self.console(id) {
+            let input = console.input.clone();
+            input.update(cx, |state, cx| {
+                state.set_value(sql, window, cx);
+            });
+            if run {
+                self.run_db_query(id, cx);
+            } else {
+                // The editor gets the focus: what one does with a recalled
+                // query is adjust it before running it.
+                let handle = gpui::Focusable::focus_handle(&input, cx);
+                handle.focus(window, cx);
+            }
         }
         cx.notify();
     }
@@ -194,7 +226,10 @@ impl ClaudhubApp {
         // application is being rendered, that is, in the middle of its own
         // update — reading the root entity there is the panic gpui refuses
         // (`cannot read … while it is already being updated`).
-        let sent = self.query.sent.clone();
+        let sent = self
+            .focused_console()
+            .and_then(|id| self.console(id))
+            .and_then(|console| console.state.sent.clone());
         let build = move |index: usize, cx: &mut App| match rows.get(index) {
             Some(Row::Day(day)) => render_day(day, &look),
             Some(Row::Entry(at)) => match shown.get(*at) {

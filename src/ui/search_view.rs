@@ -267,8 +267,15 @@ impl ClaudhubApp {
             self.surface_input(surface)
                 .is_some_and(|input| gpui::Focusable::focus_handle(&input, cx).is_focused(window))
         };
-        if focused(&Surface::Query) {
-            return Some(Surface::Query);
+        // The consoles first, and each by its own id: what one is typing in is
+        // one of several, and the panel that draws is not the one that answers
+        // — two can be side by side in a split.
+        if let Some(console) = self
+            .consoles
+            .iter()
+            .find(|console| focused(&Surface::Query(console.id)))
+        {
+            return Some(Surface::Query(console.id));
         }
         let root = self.editing_root();
         let open = root.as_deref().and_then(|root| self.editors(root));
@@ -283,7 +290,11 @@ impl ClaudhubApp {
         // it used to be the screen, which said the same thing when a screen
         // held one centre.
         match self.front_document(cx).as_deref() {
-            Some(crate::ui::panels::ConsolePanel::NAME) => Some(Surface::Query),
+            // A console tab in front with the focus elsewhere: the last one
+            // that held the keyboard is what one is looking at.
+            Some(crate::ui::panels::QueryPanel::NAME) => {
+                Some(Surface::Query(self.focused_console()?))
+            }
             Some(crate::ui::panels::EditorPanel::NAME) => {
                 Some(Surface::File(self.editing()?.path.clone()))
             }

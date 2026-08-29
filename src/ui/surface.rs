@@ -50,7 +50,11 @@ use crate::ui::settings::Settings;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Surface {
     File(PathBuf),
-    Query,
+    /// **Named by its console**, and for the same reason a file is named by its
+    /// path: there are as many consoles as one opens, and two of them can be
+    /// side by side in a split. One key for all of them was one motion pushing
+    /// two editors.
+    Query(crate::ui::db_query::ConsoleId),
 }
 
 impl Surface {
@@ -245,7 +249,7 @@ impl ClaudhubApp {
     pub(super) fn surface_input(&self, surface: &Surface) -> Option<Entity<EditorState>> {
         match surface {
             Surface::File(path) => self.editing_at(path).map(|editing| editing.input.clone()),
-            Surface::Query => Some(self.db_query_input.clone()),
+            Surface::Query(id) => self.console(*id).map(|console| console.input.clone()),
         }
     }
 
@@ -260,14 +264,14 @@ impl ClaudhubApp {
                 .editing_at(path)
                 .map(|editing| editing.scroll_key.clone())
                 .unwrap_or_else(|| Surface::file_scroll_key(path)),
-            Surface::Query => SharedString::new_static("query-scroll"),
+            Surface::Query(id) => SharedString::from(format!("query-scroll:{}", id.0)),
         }
     }
 
     pub(super) fn surface_host(&self, surface: &Surface) -> Option<&VimHost> {
         match surface {
             Surface::File(path) => self.editing_at(path).map(|editing| &editing.host),
-            Surface::Query => Some(&self.db_host),
+            Surface::Query(id) => self.console(*id).map(|console| &console.host),
         }
     }
 
@@ -277,7 +281,10 @@ impl ClaudhubApp {
                 let path = path.clone();
                 self.editing_at_mut(&path).map(|editing| &mut editing.host)
             }
-            Surface::Query => Some(&mut self.db_host),
+            Surface::Query(id) => {
+                let id = *id;
+                self.console_mut(id).map(|console| &mut console.host)
+            }
         }
     }
 

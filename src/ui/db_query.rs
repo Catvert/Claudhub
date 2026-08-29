@@ -3,17 +3,16 @@
 //! An editor at the top, the result underneath: it is PhpStorm's console, and it
 //! is the shape of every one already under our fingers.
 //!
-//! **It takes the diff's place**, like the built-in editor and for the same
-//! reason: one looks at one *or* the other, and one more tab in the centre would
-//! be a round trip on every query. It is also what makes it reachable —
-//! gpui-component's dock cannot activate a tab from code
-//! (`TabPanel::set_active_ix` is private), so a panel of its own would have
-//! opened without showing itself.
+//! **A console is a document**, one panel each, the way an open file is: the
+//! centre is a tab group and the dock's bar is the tab bar. It was a single
+//! panel taking the diff's place, because the centre was one slot and two
+//! stacked consoles would have needed a tab bar of our own; the one dock area
+//! gave us that bar, so the count is whatever one opens.
 //!
-//! **One console at a time.** Zed opens one per tab; here the central slot is
-//! unique, and two stacked consoles would need a tab bar of our own. Opening a
-//! console on another table replaces the previous one, whose query is in the
-//! editor's history anyway.
+//! **Opening a table replaces the console one is in**, and does not add one:
+//! browsing a schema with the mouse would otherwise leave ten tabs behind. A
+//! console is added by asking for one — the `+` of the databases panel,
+//! `Ctrl+Shift+Q`, or "open in a new tab" on a table.
 //!
 //! ## The result window
 //!
@@ -32,7 +31,8 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use gpui::{
-    div, prelude::*, px, App, Context, Focusable as _, SharedString, Task, WeakEntity, Window,
+    div, prelude::*, px, App, Context, Entity, Focusable as _, SharedString, Task, WeakEntity,
+    Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
@@ -153,8 +153,88 @@ pub struct QueryState {
     pub affected: Option<u64>,
     pub has_columns: bool,
     pub elapsed_ms: u64,
-    /// An export has gone out and not come back.
-    pub exporting: bool,
+    /// The export that has gone out and not come back, by the path it writes.
+    ///
+    /// The path and not a flag: two consoles can be exporting at once, and the
+    /// answer has to find the one that asked. It is what the worker gives back,
+    /// so nothing had to be added to the wire for it.
+    pub exporting: Option<std::path::PathBuf>,
+}
+
+/// Which console a gesture is about.
+///
+/// A number and not a rank: the rank is what the tab says and it is given back
+/// when a console closes, so two consoles would share one over a session. What
+/// names a console has to outlive every other console.
+///
+/// `ConsoleId(0)` names none: the counter starts at one, so the `Default` an
+/// empty result grid carries points at nothing rather than at the first
+/// console.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ConsoleId(pub u64);
+
+/// Where a table asked for is opened.
+///
+/// The whole of the difference between the two gestures, and the reason there
+/// is an enum rather than a `bool` at fifteen call sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleTarget {
+    /// The console one is in, or a fresh one where there is none. What a click
+    /// in the schema tree means: browsing a schema with the mouse must not
+    /// leave ten tabs behind.
+    Current,
+    /// A console of its own, whatever is open.
+    NewTab,
+}
+
+/// One SQL console, as the window holds it.
+///
+/// **One console was the whole window's**, and the central slot was unique:
+/// opening a table replaced the query one was reading. The centre is a tab
+/// group like any other now — a console is a document among the documents, the
+/// way a file is — so there are as many as one opens.
+///
+/// Everything a console needs to survive a frame is here and not in
+/// `ClaudhubApp`: an entity created once, per the gpui rule, and the rule now
+/// reads "once per console". `state` is the exception in the other direction —
+/// it is emptied whenever a query is replaced, which is why the decoration
+/// layers of `host` are beside it rather than in it.
+pub struct Console {
+    pub id: ConsoleId,
+    /// What the tab says: `SQL 1`. The **lowest free** rank at opening, so
+    /// three open consoles are 1, 2 and 3 rather than 7, 9 and 12.
+    pub rank: usize,
+    /// The worktree it belongs to, as a terminal carries its own: the tabs of
+    /// the tree one is not looking at stay in the dock, invisible, keeping the
+    /// place they were given.
+    pub worktree: std::path::PathBuf,
+    pub state: QueryState,
+    /// The console's editor. Created **once**: recreated at render time, it
+    /// would lose the cursor, the selection and the text on the first keystroke.
+    pub input: Entity<gpui_component::input::EditorState>,
+    /// The modal harness — the same one the file editor holds, since SQL is
+    /// code read and written the same way.
+    pub host: crate::ui::surface::VimHost,
+    /// The names this console completes, shared with the completion provider
+    /// its editor holds. Per console and not per window: two consoles can be
+    /// open on two databases, and offering one's tables in the other is worse
+    /// than offering none.
+    pub schema: Rc<RefCell<SchemaIndex>>,
+    /// The result table. An entity created once as well: rebuilding it on every
+    /// query would lose the column widths just adjusted with the mouse.
+    pub table: Entity<TableState<Results>>,
+    /// The editor/results split.
+    pub split: Entity<ResizableState>,
+    pub panel: Entity<crate::ui::panels::QueryPanel>,
+}
+
+/// What a console's tab says.
+///
+/// A free function and not a method: the title is handed to the panel when it
+/// is built, which happens **before** the console is pushed — the panel cannot
+/// read an application it is being built inside an update of.
+pub fn console_title(rank: usize) -> SharedString {
+    SharedString::from(format!("SQL {rank}"))
 }
 
 /// The names the console knows how to complete.
@@ -226,6 +306,13 @@ pub struct Results {
     /// **Weak**, like the dock's panels: the application holds the table, and a
     /// strong reference would close the cycle.
     app: Option<WeakEntity<ClaudhubApp>>,
+    /// Whose grid this is.
+    ///
+    /// Carried and not looked up: a sort, a right click and a scroll to the
+    /// bottom all report back to the application, and "the console in front" is
+    /// not the answer — two consoles can be side by side in a split, and the
+    /// one being scrolled is not necessarily the one with the focus.
+    console: ConsoleId,
 }
 
 /// A cell's width, derived from the content.
@@ -249,6 +336,7 @@ fn column_width(rows: &db::Rows, index: usize) -> gpui::Pixels {
 
 impl Results {
     fn new(
+        console: ConsoleId,
         rows: db::Rows,
         links: Vec<Option<db::link::Target>>,
         state: &QueryState,
@@ -275,6 +363,7 @@ impl Results {
                 .unwrap_or_default(),
             armed: false,
             app: Some(cx.weak_entity()),
+            console,
         }
     }
 
@@ -461,7 +550,8 @@ impl TableDelegate for Results {
         cx: &mut Context<TableState<Self>>,
     ) {
         let next = self.next_sort(index);
-        self.report(cx, move |this, cx| this.sort_db_query(next, cx));
+        let console = self.console;
+        self.report(cx, move |this, cx| this.sort_db_query(console, next, cx));
     }
 
     /// The whole header is clickable, and not just its little arrow.
@@ -496,9 +586,10 @@ impl TableDelegate for Results {
             .cursor_pointer()
             .on_click(cx.listener(move |table, _, _window, cx| {
                 let next = table.delegate().next_sort(index);
+                let console = table.delegate().console;
                 table
                     .delegate()
-                    .report(cx, move |this, cx| this.sort_db_query(next, cx));
+                    .report(cx, move |this, cx| this.sort_db_query(console, next, cx));
             }))
             .into_any_element()
     }
@@ -568,9 +659,10 @@ impl TableDelegate for Results {
                         // window is needed all the same, the query being put
                         // into the editor's state.
                         if let Some(app) = table.delegate().app.clone() {
+                            let console = table.delegate().console;
                             window.defer(cx, move |window, cx| {
                                 app.update(cx, |this, cx| {
-                                    this.follow_db_key(row, column, window, cx);
+                                    this.follow_db_key(console, row, column, window, cx);
                                 })
                                 .ok();
                             });
@@ -633,6 +725,7 @@ impl TableDelegate for Results {
         let Some(app) = self.app.clone() else {
             return menu;
         };
+        let console = self.console;
         let selected = self.selection.is_some();
         // The cell aimed at is the selection's cursor: a right click outside the
         // selection has just put it there, and inside a block it is the last
@@ -661,8 +754,10 @@ impl TableDelegate for Results {
                     PopupMenuItem::new(tr!("db-follow-key", { target: label }))
                         .icon(icon("arrow-right"))
                         .on_click(move |_, window, cx| {
-                            app.update(cx, |this, cx| this.run_db_sql(sql.clone(), window, cx))
-                                .ok();
+                            app.update(cx, |this, cx| {
+                                this.run_db_sql(console, sql.clone(), window, cx)
+                            })
+                            .ok();
                         }),
                 )
                 .separator(),
@@ -673,7 +768,7 @@ impl TableDelegate for Results {
                 .icon(icon("copy"))
                 .disabled(!selected)
                 .on_click(move |_, _window, cx| {
-                    copy.update(cx, |this, cx| this.copy_db_selection(false, cx))
+                    copy.update(cx, |this, cx| this.copy_db_selection(console, false, cx))
                         .ok();
                 }),
         )
@@ -683,7 +778,7 @@ impl TableDelegate for Results {
                 .disabled(!selected)
                 .on_click(move |_, _window, cx| {
                     headers
-                        .update(cx, |this, cx| this.copy_db_selection(true, cx))
+                        .update(cx, |this, cx| this.copy_db_selection(console, true, cx))
                         .ok();
                 }),
         )
@@ -692,14 +787,16 @@ impl TableDelegate for Results {
             PopupMenuItem::new(tr!("db-copy-row"))
                 .icon(icon("copy"))
                 .on_click(move |_, _window, cx| {
-                    line.update(cx, |this, cx| this.copy_db_row(row, cx)).ok();
+                    line.update(cx, |this, cx| this.copy_db_row(console, row, cx))
+                        .ok();
                 }),
         )
         .item(
             PopupMenuItem::new(tr!("db-copy-result"))
                 .icon(icon("copy"))
                 .on_click(move |_, _window, cx| {
-                    all.update(cx, |this, cx| this.copy_db_all(cx)).ok();
+                    all.update(cx, |this, cx| this.copy_db_all(console, cx))
+                        .ok();
                 }),
         )
         .separator()
@@ -707,7 +804,9 @@ impl TableDelegate for Results {
             PopupMenuItem::new(tr!("db-export"))
                 .icon(icon("download"))
                 .on_click(move |_, _window, cx| {
-                    export.update(cx, |this, cx| this.export_db_csv(cx)).ok();
+                    export
+                        .update(cx, |this, cx| this.export_db_csv(console, cx))
+                        .ok();
                 }),
         )
     }
@@ -732,18 +831,331 @@ impl TableDelegate for Results {
             return;
         }
         self.loading = true;
-        self.report(cx, |this, cx| this.extend_db_rows(cx));
+        let console = self.console;
+        self.report(cx, move |this, cx| this.extend_db_rows(console, cx));
     }
 }
 
 impl ClaudhubApp {
-    /// Opens the console on a connection, and possibly on a table.
+    // — The consoles the window holds ————————————————————————————
+
+    /// The console this gesture is about, when it is still open.
+    pub(super) fn console(&self, id: ConsoleId) -> Option<&Console> {
+        self.consoles.iter().find(|console| console.id == id)
+    }
+
+    pub(super) fn console_mut(&mut self, id: ConsoleId) -> Option<&mut Console> {
+        self.consoles.iter_mut().find(|console| console.id == id)
+    }
+
+    /// The console a keystroke is about: the last one to have held the focus,
+    /// if it is still open.
     ///
-    /// A table gives a `SELECT * FROM …` **and runs it**: "query this table"
-    /// showing nothing until the button has been found would be a gesture half
-    /// done.
+    /// A gesture that comes from a console's own bar carries its id and never
+    /// asks this. What asks are the bindings — `Ctrl+Enter`, `Ctrl+C` on the
+    /// grid — which have only the focus to go on.
+    pub(super) fn focused_console(&self) -> Option<ConsoleId> {
+        let id = self.active_console?;
+        self.console(id).map(|console| console.id)
+    }
+
+    /// The consoles of one worktree, in the order they were opened.
+    pub(super) fn consoles_of<'a>(
+        &'a self,
+        worktree: &'a std::path::Path,
+    ) -> impl Iterator<Item = &'a Console> + 'a {
+        self.consoles
+            .iter()
+            .filter(move |console| console.worktree == worktree)
+    }
+
+    /// Whether a console is open on the worktree being looked at.
+    ///
+    /// What the status bar and the session ask. Not what decides a tab any
+    /// more: a console **is** a tab now, so it is there exactly as long as it
+    /// is open.
+    pub(super) fn db_console_open(&self) -> bool {
+        self.active
+            .as_deref()
+            .is_some_and(|worktree| self.consoles_of(worktree).next().is_some())
+    }
+
+    /// The lowest rank no open console holds.
+    ///
+    /// The **lowest free** and not the next of a counter: closing `SQL 1` and
+    /// opening another must give `SQL 1` back, or a long session ends up with
+    /// `SQL 12` beside `SQL 27`. Ranks are per window and not per worktree —
+    /// two tabs of the centre showing "SQL 1" would name the same thing twice.
+    fn free_console_rank(&self) -> usize {
+        (1..)
+            .find(|rank| !self.consoles.iter().any(|console| console.rank == *rank))
+            .unwrap_or(1)
+    }
+
+    /// Opens a console on a worktree, and gives back what names it.
+    ///
+    /// Everything a console needs is built here, which is the gpui rule said
+    /// once per console rather than once per window: an `EditorState` rebuilt
+    /// at render time loses the cursor, the selection and the text on the first
+    /// keystroke, and a `TableState` rebuilt loses the column widths.
+    ///
+    /// `asked_for` tells a gesture from a restoration: a console one has just
+    /// asked for takes the tab and the keyboard, one being put back by the
+    /// session takes neither — the document in front is the checkout's own, put
+    /// back a step earlier, and a console landing over it would be the window
+    /// choosing where one was.
+    pub(super) fn open_console(
+        &mut self,
+        worktree: std::path::PathBuf,
+        asked_for: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ConsoleId {
+        self.console_seq += 1;
+        let id = ConsoleId(self.console_seq);
+        let rank = self.free_console_rank();
+        let schema: Rc<RefCell<SchemaIndex>> = Default::default();
+        let input = cx.new(|cx| {
+            gpui_component::input::EditorState::new(window, cx)
+                .language("sql")
+                .line_number(true)
+                .placeholder("SELECT * FROM …")
+        });
+        input.update(cx, |state, cx| {
+            state.lsp_mut().completion_provider = Some(Rc::new(SqlCompletions {
+                schema: schema.clone(),
+            }));
+            cx.notify();
+        });
+        // The modal harness, created with the editor and for its whole life:
+        // the decoration layers follow the text through its edits.
+        let host = crate::ui::surface::VimHost::new(&input, cx);
+        let table = cx.new(|cx| {
+            TableState::new(Results::default(), window, cx)
+                // The headers carry their sort arrow. gpui-component's cell
+                // selection, for its part, stays off: it knows only one at a
+                // time, and what one copies from a result grid is almost always
+                // a block — see `db_query::Results::selection`.
+                .sortable(true)
+        });
+        // The query being written is part of where one was, so it is filed as
+        // it is typed — on `Change` and not on sending, because what one comes
+        // back to tomorrow is often precisely the query that was never sent.
+        // The store's write is deferred by half a second, which is what keeps a
+        // keystroke from costing a file.
+        cx.subscribe(&input, |this, _, event, cx| {
+            if matches!(event, gpui_component::input::InputEvent::Change) {
+                this.persist_session(cx);
+            }
+        })
+        .detach();
+        let app = cx.entity();
+        // Given and not read: the panel is built inside this `update`, so it
+        // cannot read the application to find out for itself.
+        let title = console_title(rank);
+        let visible = self.active.as_deref() == Some(worktree.as_path());
+        let panel = {
+            let (input, title, worktree) = (input.clone(), title, worktree.clone());
+            cx.new(|cx| {
+                crate::ui::panels::QueryPanel::new(&app, id, input, title, worktree, visible, cx)
+            })
+        };
+        self.consoles.push(Console {
+            id,
+            rank,
+            worktree,
+            state: QueryState::default(),
+            input,
+            host,
+            schema,
+            table,
+            split: split_state(cx),
+            panel: panel.clone(),
+        });
+        if asked_for {
+            self.active_console = Some(id);
+        }
+        self.dock_console(panel, asked_for, window, cx);
+        id
+    }
+
+    /// Puts a console's panel among the documents, beside the ones already
+    /// there.
+    ///
+    /// The centre, always: a console is what one reads, and the left picks
+    /// while the right remembers. A console already open is the group it joins,
+    /// which is what makes the dock's bar read as the row of consoles.
+    fn dock_console(
+        &mut self,
+        panel: Entity<crate::ui::panels::QueryPanel>,
+        asked_for: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use gpui_component::dock::{DockPlacement, InsertTarget, PanelId};
+        let dock = self.dock.clone();
+        let sibling = self
+            .consoles
+            .iter()
+            .map(|console| console.panel.clone())
+            .rfind(|other| other.entity_id() != panel.entity_id());
+        dock.update(cx, |dock, cx| {
+            // **`panel_handle` and `dock_panel_at`, never `add_panel`.** An
+            // `Entity<P>` converts itself into base's `PanelView` and the dock
+            // takes it without complaint — but without the presentation that
+            // goes with it: no tab, no title, no content.
+            crate::ui::panels::dock_panel_at(
+                dock,
+                gpui_component::dock::panel_handle(panel.clone()),
+                DockPlacement::Center,
+                None,
+                |dock| {
+                    let sibling = sibling?;
+                    let node = dock
+                        .layout(DockPlacement::Center)?
+                        .find_panel_node(PanelId::from(sibling.entity_id()))?;
+                    Some(InsertTarget::Tabs {
+                        node,
+                        ix: None,
+                        // The tab one has just opened is the tab one looks at.
+                        activate: asked_for,
+                    })
+                },
+                window,
+                cx,
+            );
+        });
+        if asked_for {
+            let handle = gpui::Focusable::focus_handle(&panel, cx);
+            window.focus(&handle, cx);
+        }
+        cx.notify();
+    }
+
+    /// Closes a console: the tab goes, and so does everything it held.
+    ///
+    /// The gesture of the cross on the tab, of the bar's own `×`, and of a
+    /// worktree going away. What the panel's `on_removed` calls is
+    /// `console_gone`: by then the dock has taken the tab out itself, and
+    /// asking it again would be asking it to remove what it is removing.
+    pub(super) fn close_console(
+        &mut self,
+        id: ConsoleId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.consoles.iter().position(|console| console.id == id) else {
+            return;
+        };
+        let panel = self.consoles[ix].panel.clone();
+        let dock = self.dock.clone();
+        dock.update(cx, |dock, cx| dock.remove_panel(panel, window, cx));
+        self.console_gone(id, window, cx);
+    }
+
+    /// Forgets a console whose tab has already gone.
+    ///
+    /// The focus was on what has just left the tree, and a focus handle nobody
+    /// renders any more resolves no binding: every shortcut would stay dead
+    /// until a click put the focus back on a live node.
+    pub(super) fn console_gone(
+        &mut self,
+        id: ConsoleId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.consoles.iter().position(|console| console.id == id) else {
+            return;
+        };
+        let console = self.consoles.remove(ix);
+        let had_focus = gpui::Focusable::focus_handle(&console.panel, cx).is_focused(window);
+        if self.active_console == Some(id) {
+            // The neighbour, which is what one is left looking at.
+            self.active_console = self.consoles.last().map(|console| console.id);
+        }
+        if had_focus {
+            match self.active_console.and_then(|id| self.console(id)) {
+                Some(console) => {
+                    let handle = gpui::Focusable::focus_handle(&console.panel, cx);
+                    window.focus(&handle, cx);
+                }
+                None => {
+                    let root = self.focus.clone();
+                    window.focus(&root, cx);
+                }
+            }
+        }
+        self.persist_session(cx);
+        cx.notify();
+    }
+
+    /// Drops every console of a worktree — the worktree is gone.
+    pub(super) fn close_consoles_of(
+        &mut self,
+        worktree: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let doomed: Vec<ConsoleId> = self
+            .consoles_of(worktree)
+            .map(|console| console.id)
+            .collect();
+        for id in doomed {
+            self.close_console(id, window, cx);
+        }
+    }
+
+    /// Notes which console a binding is about, from the frame that paints one.
+    ///
+    /// **The focus and not the painting.** Two consoles can be drawn side by
+    /// side in a split, so "the last one painted" alternates between them while
+    /// nothing is being clicked — the trap `Surface::File` exists for. A
+    /// console that holds the keyboard is the one `Ctrl+Enter` means; the last
+    /// one that did is the one a click in the schema tree reuses.
+    pub(super) fn console_focused(
+        &mut self,
+        id: ConsoleId,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(console) = self.console(id) else {
+            return;
+        };
+        let focused = gpui::Focusable::focus_handle(&console.input, cx).is_focused(window)
+            || gpui::Focusable::focus_handle(&console.table, cx).is_focused(window);
+        if focused {
+            self.active_console = Some(id);
+        }
+    }
+
+    /// Brings a console's tab forward, and gives it the keyboard.
+    pub(super) fn reveal_console(
+        &mut self,
+        id: ConsoleId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(console) = self.console(id) else {
+            return;
+        };
+        let panel = console.panel.clone();
+        crate::ui::panels::QueryPanel::activate(&panel, window, cx);
+        let handle = gpui::Focusable::focus_handle(&panel, cx);
+        window.focus(&handle, cx);
+        self.active_console = Some(id);
+    }
+
+    // — Opening one on a table ————————————————————————————————————
+
+    /// Opens a connection, and possibly a table, in a console.
+    ///
+    /// `target` is the whole of the difference between the two gestures: a
+    /// click in the schema tree **reuses** the console one is in, because
+    /// browsing a schema with the mouse would otherwise leave ten tabs behind;
+    /// the `+`, `Ctrl+Shift+Q` and "open in a new tab" ask for one of their own.
     pub(super) fn start_db_console(
         &mut self,
+        target: ConsoleTarget,
         connection: db::Connection,
         database: Option<String>,
         table: Option<String>,
@@ -753,17 +1165,31 @@ impl ClaudhubApp {
         // Read before anything moves: opening a table replaces the query one
         // was reading, and that is the thing which had nowhere to be written.
         let from = self.here(cx);
-        let changed =
-            self.query.connection.as_ref() != Some(&connection) || self.query.database != database;
-        self.query.connection = Some(connection.clone());
-        self.query.database = database.clone();
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let id = match target {
+            ConsoleTarget::Current => match self.focused_console() {
+                Some(id) => id,
+                // Nothing to reuse: the gesture opens the first one.
+                None => self.open_console(worktree, true, window, cx),
+            },
+            ConsoleTarget::NewTab => self.open_console(worktree, true, window, cx),
+        };
+        let Some(console) = self.console_mut(id) else {
+            return;
+        };
+        let changed = console.state.connection.as_ref() != Some(&connection)
+            || console.state.database != database;
+        console.state.connection = Some(connection.clone());
+        console.state.database = database.clone();
         if changed {
-            self.query.error = None;
-            self.query.sent = None;
-            self.query.sort = None;
-            self.query.can_sort = false;
-            self.set_db_rows(db::Rows::default(), cx);
-            self.index_db_schema(&connection, database.as_deref(), cx);
+            console.state.error = None;
+            console.state.sent = None;
+            console.state.sort = None;
+            console.state.can_sort = false;
+            self.set_db_rows(id, db::Rows::default(), cx);
+            self.index_db_schema(id, &connection, database.as_deref(), cx);
         }
         if let Some(table) = table {
             let quoted = match connection.engine {
@@ -773,10 +1199,13 @@ impl ClaudhubApp {
             // No `LIMIT`: the result window already stands for one, and a bound
             // written into the text would outlive the query one writes over it.
             let sql = format!("SELECT * FROM {quoted};");
-            self.db_query_input.update(cx, |state, cx| {
-                state.set_value(sql.clone(), window, cx);
-            });
-            self.run_db_query(cx);
+            if let Some(console) = self.console(id) {
+                let input = console.input.clone();
+                input.update(cx, |state, cx| {
+                    state.set_value(sql.clone(), window, cx);
+                });
+            }
+            self.run_db_query(id, cx);
             self.record_step(
                 from,
                 crate::ui::jumps::Place::Query {
@@ -786,80 +1215,58 @@ impl ClaudhubApp {
                 },
                 cx,
             );
-        } else {
-            self.record_step(
-                from,
-                crate::ui::jumps::Place::Panel(crate::ui::panels::ConsolePanel::NAME),
-                cx,
-            );
         }
-        // Opening a console brings the console forward: the gesture comes
-        // from the schema tree, but also from the menu of a table opened from
-        // somewhere else entirely.
+        // A console opened with no table is **not** a step of the trail: there
+        // is nothing in it to come back to, and a back arrow landing on an
+        // empty editor is a step that undoes nothing one can see.
         //
-        // `reveal_panel` and not `travel_to_panel`: the step has just been
-        // written, and it names the query rather than the view it is read in.
-        self.reveal_panel(crate::ui::panels::ConsolePanel::NAME, window, cx);
+        // Opening a console brings its tab forward: the gesture comes from the
+        // schema tree, but also from the menu of a table opened from somewhere
+        // else entirely.
+        self.reveal_console(id, window, cx);
         self.persist_session(cx);
         cx.notify();
     }
 
-    /// Puts the console back where the previous session left it.
+    /// Puts a console back where the previous session left it.
     ///
-    /// Everything `start_db_console` does apart from its two side effects: it
-    /// neither calls up the databases screen nor unhides the panel. Restoring
-    /// is not a gesture — the screen that comes back is the arriving worktree's
-    /// own, put back a step earlier by `settle_place`, and a console hidden when
-    /// quitting must stay hidden.
+    /// Everything `start_db_console` does apart from its side effects: it
+    /// neither calls up anything nor takes the focus. Restoring is not a
+    /// gesture.
     ///
     /// The query is put in the editor and **not sent**: what one comes back to
     /// is the text one was writing, and replaying a `SELECT` nobody asked for
     /// is a query against a server one did not ask to reach.
     pub(super) fn reopen_db_console(
         &mut self,
+        worktree: std::path::PathBuf,
         connection: db::Connection,
         database: Option<String>,
         query: String,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        self.query.connection = Some(connection.clone());
-        self.query.database = database.clone();
-        self.db_query_input.update(cx, |state, cx| {
-            state.set_value(query, window, cx);
-        });
-        self.index_db_schema(&connection, database.as_deref(), cx);
+    ) -> ConsoleId {
+        let id = self.open_console(worktree, false, window, cx);
+        if let Some(console) = self.console_mut(id) {
+            console.state.connection = Some(connection.clone());
+            console.state.database = database.clone();
+            let input = console.input.clone();
+            input.update(cx, |state, cx| {
+                state.set_value(query, window, cx);
+            });
+        }
+        self.index_db_schema(id, &connection, database.as_deref(), cx);
         cx.notify();
+        id
     }
 
-    /// Closes the console and gives the centre back to the diff.
-    pub(super) fn close_db_console(&mut self, cx: &mut Context<Self>) {
-        self.reset_db_console(cx);
-        self.persist_session(cx);
-        cx.notify();
-    }
-
-    /// Empties the console without filing anything.
-    ///
-    /// The half `close_db_console` shares with an arrival in another worktree:
-    /// there is one console for the whole window, so its place has to be
-    /// cleared before the next one is put in it — and writing the store in
-    /// between would file an empty console under a checkout that has one.
-    pub(super) fn reset_db_console(&mut self, cx: &mut Context<Self>) {
-        self.query = QueryState::default();
-        self.set_db_rows(db::Rows::default(), cx);
-    }
-
-    pub(super) fn db_console_open(&self) -> bool {
-        self.query.connection.is_some()
-    }
-
-    /// Asks for the names the console will complete.
+    /// Asks for the names one console will complete.
     ///
     /// It is the same command as the panel's: if the tree has already indexed
     /// this database, the answer fills both.
     fn index_db_schema(
         &mut self,
+        id: ConsoleId,
         connection: &db::Connection,
         database: Option<&str>,
         _cx: &mut Context<Self>,
@@ -871,14 +1278,21 @@ impl ClaudhubApp {
             // completions are limited to the keywords.
             (db::Engine::Mysql, None) => return,
         };
-        self.db_schema.borrow_mut().database = None;
+        if let Some(console) = self.console(id) {
+            console.schema.borrow_mut().database = None;
+        }
         self.git.send(Cmd::DbAllColumns {
             connection: connection.clone(),
             database,
         });
     }
 
-    /// Files a schema that has just arrived, if it is the console's.
+    /// Files a schema that has just arrived, in **every** console waiting for
+    /// it.
+    ///
+    /// Every one and not the first: two consoles open on the same database ask
+    /// the same question, and one answer fills both — a second command would be
+    /// a second round trip for a schema already in hand.
     pub(super) fn db_schema_indexed(
         &mut self,
         key: &str,
@@ -886,55 +1300,77 @@ impl ClaudhubApp {
         columns: &BTreeMap<String, Vec<db::Column>>,
         cx: &mut Context<Self>,
     ) {
-        let Some(connection) = self.query.connection.as_ref() else {
-            return;
-        };
-        if connection.key() != key {
-            return;
-        }
-        let expected = match connection.engine {
-            db::Engine::Sqlite => "main",
-            db::Engine::Mysql => self.query.database.as_deref().unwrap_or_default(),
-        };
-        if expected != database {
-            return;
-        }
-        let mut index = self.db_schema.borrow_mut();
-        index.database = Some(database.to_string());
-        index.tables = columns
+        let waiting: Vec<ConsoleId> = self
+            .consoles
             .iter()
-            .map(|(table, columns)| {
-                (
-                    table.clone(),
-                    columns.iter().map(|column| column.name.clone()).collect(),
-                )
+            .filter(|console| {
+                let Some(connection) = console.state.connection.as_ref() else {
+                    return false;
+                };
+                if connection.key() != key {
+                    return false;
+                }
+                let expected = match connection.engine {
+                    db::Engine::Sqlite => "main",
+                    db::Engine::Mysql => console.state.database.as_deref().unwrap_or_default(),
+                };
+                expected == database
             })
+            .map(|console| console.id)
             .collect();
-        index.foreign_keys = db::link::keys_of(columns);
-        drop(index);
-        // A result shown before the index arrived carries no key yet. The links
-        // are recomputed rather than the table refreshed: `refresh` would put
-        // the scrolling back to the top, and what changes here is only what the
-        // cells are painted with.
-        let columns = self.db_table.read(cx).delegate().rows.columns.clone();
-        let links = self.db_links(&columns);
-        self.db_table.update(cx, |state, cx| {
-            state.delegate_mut().links = links;
-            cx.notify();
-        });
+        for id in waiting {
+            let Some(console) = self.console(id) else {
+                continue;
+            };
+            {
+                let mut index = console.schema.borrow_mut();
+                index.database = Some(database.to_string());
+                index.tables = columns
+                    .iter()
+                    .map(|(table, columns)| {
+                        (
+                            table.clone(),
+                            columns.iter().map(|column| column.name.clone()).collect(),
+                        )
+                    })
+                    .collect();
+                index.foreign_keys = db::link::keys_of(columns);
+            }
+            // A result shown before the index arrived carries no key yet. The
+            // links are recomputed rather than the table refreshed: `refresh`
+            // would put the scrolling back to the top, and what changes here is
+            // only what the cells are painted with.
+            let table = console.table.clone();
+            let shown = table.read(cx).delegate().rows.columns.clone();
+            let links = self.db_links(id, &shown);
+            table.update(cx, |state, cx| {
+                state.delegate_mut().links = links;
+                cx.notify();
+            });
+        }
+        cx.notify();
     }
 
-    /// Tells the result grid whether the system key is held.
+    // — The gestures ——————————————————————————————————————————————
+
+    /// Tells every result grid whether the system key is held.
     ///
     /// Pushed and not read: see `Results::armed`. It costs a frame at each flip
-    /// of the modifier, and only when a console is on screen.
+    /// of the modifier, and only when a console is open.
     pub(super) fn arm_db_follow(&mut self, armed: bool, cx: &mut Context<Self>) {
-        self.db_table.update(cx, |state, cx| {
-            if state.delegate().armed != armed {
-                state.delegate_mut().armed = armed;
-                cx.notify();
-            }
-        });
+        let tables: Vec<_> = self
+            .consoles
+            .iter()
+            .map(|console| console.table.clone())
+            .collect();
+        for table in tables {
+            table.update(cx, |state, cx| {
+                if state.delegate().armed != armed {
+                    state.delegate_mut().armed = armed;
+                    cx.notify();
+                }
+            });
+        }
     }
 
     /// Follows the foreign key a cell carries.
@@ -944,36 +1380,53 @@ impl ClaudhubApp {
     /// same place would be one too many.
     pub(super) fn follow_db_key(
         &mut self,
+        id: ConsoleId,
         row: usize,
         column: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let results = self.db_table.read(cx).delegate();
+        let Some(console) = self.console(id) else {
+            return;
+        };
+        let results = console.table.read(cx).delegate();
         let sql = results
             .link(row, column)
             .map(|(target, value)| db::link::select_row(results.engine, target, value));
         if let Some(sql) = sql {
-            self.run_db_sql(sql, window, cx);
+            self.run_db_sql(id, sql, window, cx);
         }
     }
 
-    /// Puts a query into the editor and runs it.
+    /// Puts a query into a console's editor and runs it.
     ///
     /// It is what opening a table from the tree does, and following a key does
     /// the same: the text is what one goes on to adjust, and the previous query
     /// is one row up in the history panel — which is what makes this
     /// overwriting bearable.
-    pub(super) fn run_db_sql(&mut self, sql: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn run_db_sql(
+        &mut self,
+        id: ConsoleId,
+        sql: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let from = self.here(cx);
-        self.db_query_input.update(cx, |state, cx| {
+        let Some(console) = self.console(id) else {
+            return;
+        };
+        let input = console.input.clone();
+        input.update(cx, |state, cx| {
             state.set_value(sql.clone(), window, cx);
         });
-        self.run_db_query(cx);
-        if let Some(connection) = self.query.connection.as_ref() {
+        self.run_db_query(id, cx);
+        let Some(console) = self.console(id) else {
+            return;
+        };
+        if let Some(connection) = console.state.connection.as_ref() {
             let to = crate::ui::jumps::Place::Query {
                 connection: connection.key(),
-                database: self.query.database.clone(),
+                database: console.state.database.clone(),
                 sql,
             };
             self.record_step(from, to, cx);
@@ -984,9 +1437,11 @@ impl ClaudhubApp {
     ///
     /// It runs, where restoring a session does not: a step back is a gesture,
     /// asked for now, and what one is coming back to is the **result** — the
-    /// row a foreign key was followed from. Putting the text back and leaving
-    /// the previous result on screen would be a back button that undoes the
-    /// half one cannot see.
+    /// row a foreign key was followed from.
+    ///
+    /// It goes into the console one is in, and opens one where there is none: a
+    /// step back must land somewhere, and a tab of its own for every step would
+    /// turn the back arrow into a way of filling the centre.
     ///
     /// It is **not filed in the history**: the query is already there, one row
     /// up, and a `×2` counts the times a question was asked and not the times
@@ -1009,116 +1464,168 @@ impl ClaudhubApp {
         else {
             return;
         };
-        let elsewhere = self.query.connection.as_ref().map(|c| c.key()) != Some(connection)
-            || self.query.database != database;
-        if elsewhere {
-            self.reopen_db_console(target, database, String::new(), window, cx);
-        }
-        self.reveal_panel(crate::ui::panels::ConsolePanel::NAME, window, cx);
-        self.db_query_input.update(cx, |state, cx| {
-            state.set_value(sql, window, cx);
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let here = self.focused_console();
+        let elsewhere = here.and_then(|id| self.console(id)).is_none_or(|console| {
+            console.state.connection.as_ref().map(|c| c.key()) != Some(connection)
+                || console.state.database != database
         });
-        self.run_db_query(cx);
-        self.query.record = false;
+        let id = match (here, elsewhere) {
+            (Some(id), false) => id,
+            _ => self.reopen_db_console(worktree, target, database, String::new(), window, cx),
+        };
+        self.reveal_console(id, window, cx);
+        if let Some(console) = self.console(id) {
+            let input = console.input.clone();
+            input.update(cx, |state, cx| {
+                state.set_value(sql, window, cx);
+            });
+        }
+        self.run_db_query(id, cx);
+        if let Some(console) = self.console_mut(id) {
+            console.state.record = false;
+        }
         self.persist_session(cx);
         cx.notify();
     }
 
-    /// Runs whatever is in the editor.
+    /// Runs whatever is in a console's editor.
     ///
     /// The sort starts again from scratch: it is about a column of the result,
     /// and nothing says the new query has the same one.
-    pub(super) fn run_db_query(&mut self, cx: &mut Context<Self>) {
-        let sql = self.db_query_input.read(cx).value().to_string();
+    pub(super) fn run_db_query(&mut self, id: ConsoleId, cx: &mut Context<Self>) {
+        let Some(console) = self.console(id) else {
+            return;
+        };
+        let sql = console.input.read(cx).value().to_string();
         if sql.trim().is_empty() {
             return;
         }
-        self.query.sent = Some(sql);
-        self.query.sort = None;
-        self.query.can_sort = false;
-        self.query.record = true;
-        self.send_db_query(0, false, cx);
+        let Some(console) = self.console_mut(id) else {
+            return;
+        };
+        console.state.sent = Some(sql);
+        console.state.sort = None;
+        console.state.can_sort = false;
+        console.state.record = true;
+        self.send_db_query(id, 0, false, cx);
     }
 
-    /// Sorts the result, or removes its sort.
+    /// Sorts a result, or removes its sort.
     ///
     /// The window goes back to its start: the rows that filled it are no longer
     /// the first of anything.
-    pub(super) fn sort_db_query(&mut self, sort: Option<Sort>, cx: &mut Context<Self>) {
-        if !self.query.can_sort || self.query.sort == sort {
+    pub(super) fn sort_db_query(
+        &mut self,
+        id: ConsoleId,
+        sort: Option<Sort>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(console) = self.console_mut(id) else {
+            return;
+        };
+        if !console.state.can_sort || console.state.sort == sort {
             return;
         }
-        self.query.sort = sort;
-        self.query.record = false;
+        console.state.sort = sort;
+        console.state.record = false;
         // The arrow follows the gesture and not the answer: a query sometimes
         // takes a second, and a header that does not move reads as a lost click.
-        self.db_table.update(cx, |state, cx| {
+        let table = console.table.clone();
+        table.update(cx, |state, cx| {
             state.delegate_mut().sort = sort;
             state.refresh(cx);
         });
-        self.send_db_query(0, false, cx);
+        self.send_db_query(id, 0, false, cx);
     }
 
     /// Moves the window.
-    pub(super) fn page_db_query(&mut self, offset: usize, cx: &mut Context<Self>) {
-        self.query.record = false;
-        self.send_db_query(offset, false, cx);
+    pub(super) fn page_db_query(&mut self, id: ConsoleId, offset: usize, cx: &mut Context<Self>) {
+        if let Some(console) = self.console_mut(id) {
+            console.state.record = false;
+        }
+        self.send_db_query(id, offset, false, cx);
     }
 
     /// Extends the window: scrolling has reached the bottom.
-    pub(super) fn extend_db_rows(&mut self, cx: &mut Context<Self>) {
-        if self.query.running || !self.query.more {
+    pub(super) fn extend_db_rows(&mut self, id: ConsoleId, cx: &mut Context<Self>) {
+        let Some(console) = self.console_mut(id) else {
+            return;
+        };
+        if console.state.running || !console.state.more {
             // The table put itself in a waiting state before calling us; without
             // this, it would never come out of it.
-            self.db_table.update(cx, |state, _| {
+            let table = console.table.clone();
+            table.update(cx, |state, _| {
                 state.delegate_mut().loading = false;
             });
             return;
         }
-        self.query.record = false;
-        let next = self.query.offset + self.query.shown;
-        self.send_db_query(next, true, cx);
+        console.state.record = false;
+        let next = console.state.offset + console.state.shown;
+        self.send_db_query(id, next, true, cx);
     }
 
     /// The query as it really goes out: the one that was run, and the sort asked
     /// for around it.
-    fn effective_sql(&self) -> Option<String> {
-        let sent = self.query.sent.clone()?;
-        match self.query.sort {
+    fn effective_sql(&self, id: ConsoleId) -> Option<String> {
+        let state = &self.console(id)?.state;
+        let sent = state.sent.clone()?;
+        match state.sort {
             Some(sort) => Some(db::order_by(&sent, sort.column, sort.ascending).unwrap_or(sent)),
             None => Some(sent),
         }
     }
 
-    fn send_db_query(&mut self, offset: usize, append: bool, cx: &mut Context<Self>) {
-        let Some(connection) = self.query.connection.clone() else {
+    fn send_db_query(
+        &mut self,
+        id: ConsoleId,
+        offset: usize,
+        append: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sql) = self.effective_sql(id) else {
             return;
         };
-        let Some(sql) = self.effective_sql() else {
+        let Some(console) = self.console(id) else {
+            return;
+        };
+        let Some(connection) = console.state.connection.clone() else {
             return;
         };
         let limit = Settings::global(cx).db_page_size.max(1);
-        self.query.request += 1;
-        self.query.appending = append;
-        self.query.running = true;
-        self.query.error = None;
+        // Counted for the **window**: it is the only thing the answer carries
+        // back, and two consoles counting from one would each take the other's
+        // rows.
+        self.db_request_seq += 1;
+        let request = self.db_request_seq;
+        let Some(console) = self.console_mut(id) else {
+            return;
+        };
+        console.state.request = request;
+        console.state.appending = append;
+        console.state.running = true;
+        console.state.error = None;
+        let database = console.state.database.clone();
         self.git.send(Cmd::DbQuery {
             connection,
-            database: self.query.database.clone(),
+            database,
             sql,
             offset,
             limit,
-            request: self.query.request,
+            request,
         });
         cx.notify();
     }
 
-    /// A query's result.
+    /// A query's result, for whichever console is still waiting for it.
     ///
-    /// It is **dropped if it does not answer the last request**: one restarts
-    /// before the previous has come back — by changing page, by sorting, by
-    /// scrolling down — and showing the late answer would replace what is being
-    /// looked at with what is not.
+    /// It is **dropped if it does not answer that console's last request**: one
+    /// restarts before the previous has come back — by changing page, by
+    /// sorting, by scrolling down — and showing the late answer would replace
+    /// what is being looked at with what is not.
     pub(super) fn db_rows_arrived(
         &mut self,
         request: u64,
@@ -1126,71 +1633,78 @@ impl ClaudhubApp {
         elapsed_ms: u64,
         cx: &mut Context<Self>,
     ) {
-        if self.query.request != request {
+        let Some(id) = self
+            .consoles
+            .iter()
+            .find(|console| console.state.request == request)
+            .map(|console| console.id)
+        else {
             return;
-        }
-        self.query.running = false;
-        self.query.elapsed_ms = elapsed_ms;
+        };
+        let Some(console) = self.console_mut(id) else {
+            return;
+        };
+        console.state.running = false;
+        console.state.elapsed_ms = elapsed_ms;
         // Filed in the history, and only what a gesture asked for — see
         // `QueryState::record`.
-        if std::mem::take(&mut self.query.record) {
-            match &rows {
-                Ok(page) => self.record_sql_query(
-                    true,
-                    (!page.columns.is_empty()).then_some(page.rows.len()),
-                    page.affected,
-                    None,
-                    elapsed_ms,
-                    cx,
-                ),
-                Err(message) => {
-                    self.record_sql_query(false, None, None, Some(message.clone()), elapsed_ms, cx)
-                }
-            }
+        if std::mem::take(&mut console.state.record) {
+            self.record_sql_query(id, &rows, elapsed_ms, cx);
         }
         match rows {
             Ok(rows) => {
-                self.query.error = None;
-                let sent = self.query.sent.clone().unwrap_or_default();
-                self.query.can_sort = db::can_order(&sent, &rows.columns);
-                self.query.affected = rows.affected;
-                if self.query.appending {
-                    self.query.more = rows.more;
-                    self.query.shown += rows.rows.len();
-                    self.extend_db_table(rows, cx);
+                let Some(console) = self.console_mut(id) else {
+                    return;
+                };
+                console.state.error = None;
+                let sent = console.state.sent.clone().unwrap_or_default();
+                console.state.can_sort = db::can_order(&sent, &rows.columns);
+                console.state.affected = rows.affected;
+                if console.state.appending {
+                    console.state.more = rows.more;
+                    console.state.shown += rows.rows.len();
+                    self.extend_db_table(id, rows, cx);
                 } else {
-                    self.query.offset = rows.offset;
-                    self.query.shown = rows.rows.len();
-                    self.query.more = rows.more;
-                    self.query.has_columns = !rows.columns.is_empty();
-                    self.set_db_rows(rows, cx);
+                    console.state.offset = rows.offset;
+                    console.state.shown = rows.rows.len();
+                    console.state.more = rows.more;
+                    console.state.has_columns = !rows.columns.is_empty();
+                    self.set_db_rows(id, rows, cx);
                 }
             }
             Err(message) => {
-                self.query.error = Some(message.into());
-                self.query.has_columns = false;
-                self.query.can_sort = false;
-                self.query.more = false;
-                self.set_db_rows(db::Rows::default(), cx);
+                let Some(console) = self.console_mut(id) else {
+                    return;
+                };
+                console.state.error = Some(message.into());
+                console.state.has_columns = false;
+                console.state.can_sort = false;
+                console.state.more = false;
+                self.set_db_rows(id, db::Rows::default(), cx);
             }
         }
         cx.notify();
     }
 
-    /// Replaces the table's content.
+    /// Replaces a console's table content.
     ///
     /// The table is an entity created once: rebuilding it on every result would
     /// lose the widths just adjusted with the mouse and would put the scrolling
     /// back to the top in the middle of paging.
-    fn set_db_rows(&mut self, rows: db::Rows, cx: &mut Context<Self>) {
-        let links = self.db_links(&rows.columns);
-        let mut results = Results::new(rows, links, &self.query, cx);
+    fn set_db_rows(&mut self, id: ConsoleId, rows: db::Rows, cx: &mut Context<Self>) {
+        let links = self.db_links(id, &rows.columns);
+        let armed = self.follow_armed;
+        let Some(console) = self.console(id) else {
+            return;
+        };
+        let mut results = Results::new(id, rows, links, &console.state, cx);
         // A result that lands while the key is held is followable straight
         // away: the flag is only pushed when the modifier *flips*, and paging
         // with `Ctrl` down would otherwise paint a grid that says nothing can
         // be followed until one lets go of it.
-        results.armed = self.follow_armed;
-        self.db_table.update(cx, |state, cx| {
+        results.armed = armed;
+        let table = console.table.clone();
+        table.update(cx, |state, cx| {
             *state.delegate_mut() = results;
             state.refresh(cx);
         });
@@ -1201,11 +1715,14 @@ impl ClaudhubApp {
     /// Empty as long as the schema has not been indexed — the answer comes
     /// several seconds after the console opens, and `db_schema_indexed` asks
     /// again then.
-    fn db_links(&self, columns: &[String]) -> Vec<Option<db::link::Target>> {
-        let Some(sql) = self.query.sent.as_deref() else {
+    fn db_links(&self, id: ConsoleId, columns: &[String]) -> Vec<Option<db::link::Target>> {
+        let Some(console) = self.console(id) else {
             return vec![None; columns.len()];
         };
-        let index = self.db_schema.borrow();
+        let Some(sql) = console.state.sent.as_deref() else {
+            return vec![None; columns.len()];
+        };
+        let index = console.schema.borrow();
         db::link::targets(sql, columns, &index.foreign_keys)
     }
 
@@ -1216,8 +1733,12 @@ impl ClaudhubApp {
     /// eyes of whoever is scrolling. `refresh` is not called either — it would
     /// put the scrolling back to the top, which is exactly the opposite of what
     /// was just asked for.
-    fn extend_db_table(&mut self, rows: db::Rows, cx: &mut Context<Self>) {
-        self.db_table.update(cx, |state, cx| {
+    fn extend_db_table(&mut self, id: ConsoleId, rows: db::Rows, cx: &mut Context<Self>) {
+        let Some(console) = self.console(id) else {
+            return;
+        };
+        let table = console.table.clone();
+        table.update(cx, |state, cx| {
             let delegate = state.delegate_mut();
             delegate.rows.extend(rows);
             delegate.more = delegate.rows.more;
@@ -1227,8 +1748,12 @@ impl ClaudhubApp {
     }
 
     /// Selects the whole loaded result.
-    pub(super) fn select_whole_db_result(&mut self, cx: &mut Context<Self>) {
-        self.db_table.update(cx, |state, cx| {
+    pub(super) fn select_whole_db_result(&mut self, id: ConsoleId, cx: &mut Context<Self>) {
+        let Some(console) = self.console(id) else {
+            return;
+        };
+        let table = console.table.clone();
+        table.update(cx, |state, cx| {
             state.delegate_mut().select_all();
             cx.notify();
         });
@@ -1239,16 +1764,27 @@ impl ClaudhubApp {
     /// A null cell copies **nothing** and not the word "NULL": that word is how
     /// the grid shows the absence of a value, and it means nothing once pasted
     /// elsewhere.
-    pub(super) fn copy_db_selection(&mut self, headers: bool, cx: &mut Context<Self>) {
-        let Some(text) = self.db_table.read(cx).delegate().selected_text(headers) else {
+    pub(super) fn copy_db_selection(
+        &mut self,
+        id: ConsoleId,
+        headers: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(console) = self.console(id) else {
+            return;
+        };
+        let Some(text) = console.table.read(cx).delegate().selected_text(headers) else {
             return;
         };
         self.put_on_clipboard(text, cx);
     }
 
     /// Copies a whole row, with the column names above it.
-    pub(super) fn copy_db_row(&mut self, row: usize, cx: &mut Context<Self>) {
-        let Some(text) = self.db_table.read(cx).delegate().row_text(row) else {
+    pub(super) fn copy_db_row(&mut self, id: ConsoleId, row: usize, cx: &mut Context<Self>) {
+        let Some(console) = self.console(id) else {
+            return;
+        };
+        let Some(text) = console.table.read(cx).delegate().row_text(row) else {
             return;
         };
         self.put_on_clipboard(text, cx);
@@ -1256,8 +1792,11 @@ impl ClaudhubApp {
 
     /// Copies the whole **loaded** result — not the query's whole result, which
     /// is what the export writes.
-    pub(super) fn copy_db_all(&mut self, cx: &mut Context<Self>) {
-        let table = self.db_table.read(cx);
+    pub(super) fn copy_db_all(&mut self, id: ConsoleId, cx: &mut Context<Self>) {
+        let Some(console) = self.console(id) else {
+            return;
+        };
+        let table = console.table.read(cx);
         if table.delegate().rows.columns.is_empty() {
             return;
         }
@@ -1270,11 +1809,14 @@ impl ClaudhubApp {
     /// Copying everything for want of a selection is already what the diff view
     /// does: on a result grid the gesture has no other meaning, and refusing to
     /// act would be a polite refusal for no reason.
-    pub(super) fn copy_db_result(&mut self, cx: &mut Context<Self>) {
-        if self.db_table.read(cx).delegate().selection.is_some() {
-            self.copy_db_selection(false, cx);
+    pub(super) fn copy_db_result(&mut self, id: ConsoleId, cx: &mut Context<Self>) {
+        let selected = self
+            .console(id)
+            .is_some_and(|console| console.table.read(cx).delegate().selection.is_some());
+        if selected {
+            self.copy_db_selection(id, false, cx);
         } else {
-            self.copy_db_all(cx);
+            self.copy_db_all(id, cx);
         }
     }
 
@@ -1288,15 +1830,18 @@ impl ClaudhubApp {
     ///
     /// The native picker is asynchronous, hence the `spawn`: it is the same path
     /// as opening a repository.
-    pub(super) fn export_db_csv(&mut self, cx: &mut Context<Self>) {
-        if self.query.exporting || self.query.sent.is_none() {
+    pub(super) fn export_db_csv(&mut self, id: ConsoleId, cx: &mut Context<Self>) {
+        let Some(console) = self.console(id) else {
+            return;
+        };
+        if console.state.exporting.is_some() || console.state.sent.is_none() {
             return;
         }
         let directory = directories::UserDirs::new()
             .map(|dirs| dirs.home_dir().to_path_buf())
             .unwrap_or_else(std::env::temp_dir);
-        let name = self
-            .query
+        let name = console
+            .state
             .connection
             .as_ref()
             .map(|connection| format!("{}.csv", connection.label()))
@@ -1306,16 +1851,22 @@ impl ClaudhubApp {
             let Ok(Ok(Some(path))) = path.await else {
                 return; // cancelled
             };
-            let _ = this.update(cx, |this, cx| this.send_db_export(path, cx));
+            let _ = this.update(cx, |this, cx| this.send_db_export(id, path, cx));
         })
         .detach();
     }
 
-    fn send_db_export(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
-        let (Some(connection), Some(sql)) = (self.query.connection.clone(), self.effective_sql())
-        else {
+    fn send_db_export(&mut self, id: ConsoleId, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        let Some(sql) = self.effective_sql(id) else {
             return;
         };
+        let Some(console) = self.console(id) else {
+            return;
+        };
+        let Some(connection) = console.state.connection.clone() else {
+            return;
+        };
+        let database = console.state.database.clone();
         // The file is chosen here and written by the worker: on Windows, this is
         // therefore one of the few places where a path enters from this world
         // and has to come out in the server's. A folder the distribution cannot
@@ -1331,10 +1882,12 @@ impl ClaudhubApp {
         } else {
             path
         };
-        self.query.exporting = true;
+        if let Some(console) = self.console_mut(id) {
+            console.state.exporting = Some(path.clone());
+        }
         self.git.send(Cmd::DbExport {
             connection,
-            database: self.query.database.clone(),
+            database,
             sql,
             path,
         });
@@ -1342,14 +1895,19 @@ impl ClaudhubApp {
     }
 
     /// An export has come back. The path is given in full: it is the only thing
-    /// one needs to remember to find it again.
+    /// one needs to remember to find it again — and it is also what says which
+    /// console asked, the wire carrying nothing else back.
     pub(super) fn db_exported(
         &mut self,
         path: std::path::PathBuf,
         rows: crate::runtime::protocol::DbResult<u64>,
         cx: &mut Context<Self>,
     ) {
-        self.query.exporting = false;
+        for console in &mut self.consoles {
+            if console.state.exporting.as_deref() == Some(path.as_path()) {
+                console.state.exporting = None;
+            }
+        }
         match rows {
             Ok(count) => {
                 // The server returns the path it wrote, so a Linux path: we give
@@ -1372,35 +1930,117 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    // — What a binding means, with no console named ————————————————
+
+    /// The console a binding is about, or nothing to do.
+    ///
+    /// Four bindings live on the query context — running, copying, selecting
+    /// the grid, exporting — and that context is a console's own, so there is
+    /// one and it has the focus. It is looked up rather than carried because a
+    /// binding is dispatched by the window and knows no panel.
+    pub(super) fn run_focused_db_query(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.focused_console() {
+            self.run_db_query(id, cx);
+        }
+    }
+
+    pub(super) fn copy_focused_db_result(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.focused_console() {
+            self.copy_db_result(id, cx);
+        }
+    }
+
+    pub(super) fn select_whole_focused_db_result(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.focused_console() {
+            self.select_whole_db_result(id, cx);
+        }
+    }
+
+    pub(super) fn export_focused_db_csv(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.focused_console() {
+            self.export_db_csv(id, cx);
+        }
+    }
+
+    /// `Ctrl+Shift+Q`: one more console, on what the current one is open on.
+    ///
+    /// It carries the connection over: asking for a second console is almost
+    /// always asking for a second query against the same database, and making
+    /// one pick the connection again would be a gesture undone by hand every
+    /// time.
+    pub(super) fn open_another_console(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let here = self
+            .focused_console()
+            .and_then(|id| self.console(id))
+            .map(|console| {
+                (
+                    console.state.connection.clone(),
+                    console.state.database.clone(),
+                )
+            });
+        match here {
+            Some((Some(connection), database)) => {
+                self.start_db_console(
+                    ConsoleTarget::NewTab,
+                    connection,
+                    database,
+                    None,
+                    window,
+                    cx,
+                );
+            }
+            _ => {
+                let Some(worktree) = self.active.clone() else {
+                    return;
+                };
+                let id = self.open_console(worktree, true, window, cx);
+                self.reveal_console(id, window, cx);
+                self.persist_session(cx);
+            }
+        }
+    }
+
+    // — Painting one ——————————————————————————————————————————————
+
     pub(super) fn render_db_console(
         &mut self,
+        id: ConsoleId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let editor = self.db_query_input.clone();
-        let split = self.db_split.clone();
+        let Some(console) = self.console(id) else {
+            return div().into_any_element();
+        };
+        let editor = console.input.clone();
+        let split = console.split.clone();
+        let surface = Surface::Query(id);
         let vim = crate::ui::settings::Settings::global(cx).vim_mode;
         // The same four pieces the file editor installs, on the same harness:
         // see `ui::surface`. SQL is code, read and written the same way, and the
         // console was the one code panel that had none of them.
-        self.advance_surface_scroll(&Surface::Query, &editor, window, cx);
-        self.sync_block_cursor(&Surface::Query, vim, cx);
+        self.advance_surface_scroll(&surface, &editor, window, cx);
+        self.sync_block_cursor(&surface, vim, cx);
         // The occurrences of the last search, lit as `Ctrl+F` lights them:
         // see `sync_search_matches`.
-        self.sync_search_matches(&Surface::Query, vim, cx);
+        self.sync_search_matches(&surface, vim, cx);
         // And the occurrence the bar has just jumped to, put in the middle of
         // the panel rather than on its edge: see `centre_search_match`.
-        self.centre_search_match(&Surface::Query, cx);
-        let bar = self.render_console_bar(cx);
-        let results = self.render_db_results(window, cx);
+        self.centre_search_match(&surface, cx);
+        let bar = self.render_console_bar(id, cx);
+        let results = self.render_db_results(id, window, cx);
         // SQL is code: same family, same size as the diff and the file editor,
         // and the line height said explicitly — `Input`'s rem-based default is
         // deaf to the text size (see the file editor, `explorer.rs`).
         let mono = cx.theme().mono_font_family.clone();
         let code_size = px(crate::ui::settings::Settings::global(cx).diff_font_size);
         let border = cx.theme().border;
+        let rank = id.0 as usize;
         v_flex()
-            .id("db-console")
+            // **Keyed by the console and not by the panel**: two consoles can be
+            // side by side in a split, and one element id used twice is two
+            // views gpui takes for one — the scroll of the second landing in the
+            // first, which is the same trap `Surface::File` exists for.
+            .id(("db-console", rank))
             // The console's context: it is what gives `Ctrl+Enter` to the query
             // rather than to the commit, and `Ctrl+C` to the grid rather than to
             // the diff.
@@ -1411,7 +2051,7 @@ impl ClaudhubApp {
                 // The editor and the grid share the height, and the share is
                 // adjustable: one writes a twenty-line query, then reads three
                 // hundred rows of result, and no fixed proportion suits both.
-                v_resizable("db-split")
+                v_resizable(("db-split", rank))
                     .with_state(&split)
                     .child(
                         resizable_panel()
@@ -1419,7 +2059,7 @@ impl ClaudhubApp {
                             .size_range(px(72.)..px(640.))
                             .child(
                                 div()
-                                    .id("db-query-editor")
+                                    .id(("db-query-editor", rank))
                                     .relative()
                                     .size_full()
                                     .overflow_hidden()
@@ -1433,7 +2073,11 @@ impl ClaudhubApp {
                                             let el = el.key_context(
                                                 crate::ui::shortcuts::query_editor_context(),
                                             );
-                                            crate::ui::surface::vim_capture(el, Surface::Query, cx)
+                                            crate::ui::surface::vim_capture(
+                                                el,
+                                                Surface::Query(id),
+                                                cx,
+                                            )
                                         }
                                         false => el,
                                     })
@@ -1455,30 +2099,42 @@ impl ClaudhubApp {
                                     )
                                     // The wheel, taken before the editor sees
                                     // it: see `surface::wheel_capture`.
-                                    .child(crate::ui::surface::wheel_capture(Surface::Query, cx)),
+                                    .child(crate::ui::surface::wheel_capture(
+                                        Surface::Query(id),
+                                        cx,
+                                    )),
                             ),
                     )
                     .child(resizable_panel().child(results)),
             )
+            .into_any_element()
     }
 
-    fn render_console_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let target = match (&self.query.connection, &self.query.database) {
+    fn render_console_bar(&mut self, id: ConsoleId, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(console) = self.console(id) else {
+            return div().into_any_element();
+        };
+        let state = &console.state;
+        let target = match (&state.connection, &state.database) {
             (Some(connection), Some(database)) => format!("{} · {database}", connection.label()),
             (Some(connection), None) => connection.label(),
             (None, _) => String::new(),
         };
-        let running = self.query.running;
-        let has_result = self.query.has_columns && self.query.shown > 0;
+        let running = state.running;
+        let failed = state.error.is_some();
+        let exporting = state.exporting.is_some();
+        let has_result = state.has_columns && state.shown > 0;
         // The mode, where the eye already is: on the console's own bar, as the
         // file editor puts it on the file's.
         let vim = crate::ui::settings::Settings::global(cx).vim_mode;
-        let mode = self.db_host.vim.mode();
-        let hint = self
-            .db_host
+        let mode = console.host.vim.mode();
+        let hint = console
+            .host
             .vim
             .prompt()
-            .unwrap_or_else(|| self.db_host.vim.pending().to_string());
+            .unwrap_or_else(|| console.host.vim.pending().to_string());
+        let status = self.db_status_text(id);
+        let rank = id.0 as usize;
         h_flex()
             .h(crate::ui::theme::bar_height(cx))
             .w_full()
@@ -1488,13 +2144,13 @@ impl ClaudhubApp {
             .border_b_1()
             .border_color(cx.theme().border)
             .child(
-                Button::new("db-run")
+                Button::new(("db-run", rank))
                     .ghost()
                     .xsmall()
                     .icon(icon("play"))
                     .tooltip(tr!("db-run"))
                     .disabled(running)
-                    .on_click(cx.listener(|this, _, _window, cx| this.run_db_query(cx))),
+                    .on_click(cx.listener(move |this, _, _window, cx| this.run_db_query(id, cx))),
             )
             .child(
                 div()
@@ -1509,113 +2165,119 @@ impl ClaudhubApp {
                 div()
                     .truncate()
                     .text_xs()
-                    .text_color(if self.query.error.is_some() {
+                    .text_color(if failed {
                         cx.theme().danger
                     } else {
                         cx.theme().muted_foreground
                     })
-                    .child(self.db_status_text()),
+                    .child(status),
             )
-            .children(self.render_db_pagination(cx))
+            .children(self.render_db_pagination(id, cx))
             .child(self.render_page_size(cx))
             .child(
-                Button::new("db-copy")
+                Button::new(("db-copy", rank))
                     .ghost()
                     .xsmall()
                     .icon(icon("copy"))
                     .tooltip(tr!("db-copy-result"))
                     .disabled(!has_result)
-                    .on_click(cx.listener(|this, _, _window, cx| this.copy_db_result(cx))),
+                    .on_click(cx.listener(move |this, _, _window, cx| this.copy_db_result(id, cx))),
             )
             .child(
-                Button::new("db-export")
+                Button::new(("db-export", rank))
                     .ghost()
                     .xsmall()
                     .icon(icon("download"))
                     .tooltip(tr!("db-export"))
-                    .disabled(!has_result || self.query.exporting)
-                    .on_click(cx.listener(|this, _, _window, cx| this.export_db_csv(cx))),
+                    .disabled(!has_result || exporting)
+                    .on_click(cx.listener(move |this, _, _window, cx| this.export_db_csv(id, cx))),
             )
-            .child(
-                Button::new("db-close")
-                    .ghost()
-                    .xsmall()
-                    .icon(icon("x"))
-                    .tooltip(tr!("db-close-console"))
-                    .on_click(cx.listener(|this, _, _window, cx| this.close_db_console(cx))),
-            )
+            // No `×` of our own any more: the tab has one, which is the cross
+            // every other document of the centre is closed by. A second one on
+            // the bar underneath would be the same gesture twice, an inch apart.
+            .into_any_element()
     }
 
     /// What the bar says about the displayed window.
-    fn db_status_text(&self) -> SharedString {
-        if self.query.running {
+    fn db_status_text(&self, id: ConsoleId) -> SharedString {
+        let Some(console) = self.console(id) else {
+            return SharedString::default();
+        };
+        let state = &console.state;
+        if state.running {
             return tr!("db-running");
         }
-        if self.query.error.is_some() {
+        if state.error.is_some() {
             return tr!("db-failed");
         }
-        let ms = self.query.elapsed_ms;
-        if self.query.sent.is_none() {
+        let ms = state.elapsed_ms;
+        if state.sent.is_none() {
             return SharedString::default();
         }
-        if !self.query.has_columns {
-            let affected = self.query.affected.unwrap_or(0);
+        if !state.has_columns {
+            let affected = state.affected.unwrap_or(0);
             return tr!("db-affected", { n: affected, ms: ms });
         }
-        if self.query.offset == 0 && !self.query.more {
-            return tr!("db-row-count", { n: self.query.shown, ms: ms });
+        if state.offset == 0 && !state.more {
+            return tr!("db-row-count", { n: state.shown, ms: ms });
         }
-        let first = self.query.offset + 1;
-        let last = self.query.offset + self.query.shown;
+        let first = state.offset + 1;
+        let last = state.offset + state.shown;
         tr!("db-row-range", {
             first: first,
             last: last,
-            more: if self.query.more { "+" } else { "" },
+            more: if state.more { "+" } else { "" },
             ms: ms,
         })
     }
 
     /// The two gestures that move the window, when the result overflows it.
-    fn render_db_pagination(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        if !self.query.has_columns || (self.query.offset == 0 && !self.query.more) {
+    fn render_db_pagination(
+        &mut self,
+        id: ConsoleId,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let state = &self.console(id)?.state;
+        if !state.has_columns || (state.offset == 0 && !state.more) {
             return None;
         }
+        let (offset, shown, more) = (state.offset, state.shown, state.more);
         let size = Settings::global(cx).db_page_size.max(1);
-        let (offset, shown, more) = (self.query.offset, self.query.shown, self.query.more);
+        let rank = id.0 as usize;
         Some(
             h_flex()
                 .gap_0p5()
                 .child(
-                    Button::new("db-first")
+                    Button::new(("db-first", rank))
                         .ghost()
                         .xsmall()
                         .icon(icon("chevrons-left"))
                         .tooltip(tr!("db-first-page"))
                         .disabled(offset == 0)
                         .on_click(
-                            cx.listener(move |this, _, _window, cx| this.page_db_query(0, cx)),
+                            cx.listener(move |this, _, _window, cx| this.page_db_query(id, 0, cx)),
                         ),
                 )
                 .child(
-                    Button::new("db-previous")
+                    Button::new(("db-previous", rank))
                         .ghost()
                         .xsmall()
                         .icon(icon("chevron-left"))
                         .tooltip(tr!("db-previous-page"))
                         .disabled(offset == 0)
                         .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.page_db_query(offset.saturating_sub(size), cx)
+                            this.page_db_query(id, offset.saturating_sub(size), cx)
                         })),
                 )
                 .child(
-                    Button::new("db-next")
+                    Button::new(("db-next", rank))
                         .ghost()
                         .xsmall()
                         .icon(icon("chevron-right"))
                         .tooltip(tr!("db-next-page"))
                         .disabled(!more)
                         .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.page_db_query(offset + shown, cx)
+                            this.page_db_query(id, offset + shown, cx)
                         })),
                 ),
         )
@@ -1648,6 +2310,7 @@ impl ClaudhubApp {
 
     fn render_db_results(
         &mut self,
+        id: ConsoleId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -1666,11 +2329,16 @@ impl ClaudhubApp {
                 .child(message)
                 .into_any_element()
         };
-        if let Some(error) = self.query.error.clone() {
+        let Some(console) = self.console(id) else {
+            return div().into_any_element();
+        };
+        let state = &console.state;
+        let rank = id.0 as usize;
+        if let Some(error) = state.error.clone() {
             // The engine's error, as it is: it is what says the offending line
             // and column, and rewording it would only add approximations.
             return div()
-                .id("db-error")
+                .id(("db-error", rank))
                 .size_full()
                 .overflow_scroll()
                 .p_3()
@@ -1680,30 +2348,34 @@ impl ClaudhubApp {
                 .child(error)
                 .into_any_element();
         }
-        if self.query.sent.is_none() {
+        if state.sent.is_none() {
             return centered(tr!("db-run-hint"), false, cx);
         }
-        if !self.query.has_columns {
+        if !state.has_columns {
             return centered(
-                tr!("db-affected-short", { n: self.query.affected.unwrap_or(0) }),
+                tr!("db-affected-short", { n: state.affected.unwrap_or(0) }),
                 false,
                 cx,
             );
         }
-        if self.query.shown == 0 {
+        if state.shown == 0 {
             return centered(tr!("db-no-rows"), false, cx);
         }
         // Wheel smoothing, as everywhere else: the grid routinely runs to a
         // thousand rows, and a notch jumping three lines at once makes the eye
         // lose its place. The table paints its own bars, hence `smoothed` and
         // not `scrolled`.
-        let handle = self.db_table.read(cx).vertical_scroll_handle.clone();
+        //
+        // **One key per console**, as the file editor keys by path: a shared
+        // motion hands one grid's destination to the other.
+        let table = console.table.clone();
+        let handle = table.read(cx).vertical_scroll_handle.clone();
         self.smoothed(
-            "db-results",
+            SharedString::from(format!("db-results:{rank}")),
             &handle,
             Axes::Vertical,
             window,
-            DataTable::new(&self.db_table).stripe(true).bordered(false),
+            DataTable::new(&table).stripe(true).bordered(false),
             cx,
         )
         .into_any_element()
@@ -1785,7 +2457,7 @@ impl CompletionProvider for SqlCompletions {
     }
 }
 
-/// The editor/results split state, created once with the window.
+/// The editor/results split state, created once with the console that holds it.
 pub fn split_state(cx: &mut App) -> gpui::Entity<ResizableState> {
     cx.new(|_| ResizableState::default())
 }

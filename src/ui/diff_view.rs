@@ -1328,19 +1328,6 @@ impl ClaudhubApp {
         }
     }
 
-    /// The centre of the databases screen: the console, or enough to know where
-    /// it opens from.
-    pub(super) fn render_console_panel(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        if self.db_console_open() {
-            return self.render_db_console(window, cx).into_any_element();
-        }
-        centered_message(tr!("db-open-a-console"), cx)
-    }
-
     /// The block above a commit's diff: its message, its author, its hash.
     ///
     /// `None` outside a commit range — a working or branch diff has no single

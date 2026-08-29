@@ -1191,16 +1191,20 @@ impl ClaudhubApp {
                 }
             }
             // A console with nothing sent yet is the view and no more: there is
-            // no result to come back to.
-            Some(ConsolePanel::NAME) => {
-                if let (Some(connection), Some(sql)) =
-                    (self.query.connection.as_ref(), self.query.sent.clone())
-                {
-                    return Place::Query {
-                        connection: connection.key(),
-                        database: self.query.database.clone(),
-                        sql,
-                    };
+            // no result to come back to. Which console is the one holding the
+            // keyboard: several are open, and only one is being read.
+            Some(QueryPanel::NAME) => {
+                if let Some(console) = self.focused_console().and_then(|id| self.console(id)) {
+                    if let (Some(connection), Some(sql)) = (
+                        console.state.connection.as_ref(),
+                        console.state.sent.clone(),
+                    ) {
+                        return Place::Query {
+                            connection: connection.key(),
+                            database: console.state.database.clone(),
+                            sql,
+                        };
+                    }
                 }
             }
             _ => {}

@@ -163,7 +163,13 @@ pub struct Place {
     pub editing: Option<OpenFile>,
     /// Every file the editor had open, in tab order.
     pub tabs: Vec<OpenFile>,
-    pub console: Option<OpenConsole>,
+    /// The SQL consoles that were open on this checkout, in tab order.
+    ///
+    /// A list since a console became a document among the documents. A state
+    /// written when there was one carries a `console` key this no longer reads:
+    /// `Place` takes unknown keys, so such a checkout opens with no console —
+    /// one tab to reopen, once.
+    pub consoles: Vec<OpenConsole>,
 }
 
 impl Place {
@@ -490,7 +496,7 @@ mod tests {
 
     fn a_place() -> Place {
         Place {
-            document: Some("ClaudhubConsole".into()),
+            document: Some("ClaudhubDiff".into()),
             editing: Some(OpenFile {
                 worktree: PathBuf::from("/r/wt/a"),
                 path: PathBuf::from("app/Models/User.php"),
@@ -505,11 +511,11 @@ mod tests {
                     path: PathBuf::from("app/Models/User.php"),
                 },
             ],
-            console: Some(OpenConsole {
+            consoles: vec![OpenConsole {
                 connection: "mysql:root@localhost:3306/".into(),
                 database: Some("shop".into()),
                 query: "SELECT * FROM users".into(),
-            }),
+            }],
         }
     }
 

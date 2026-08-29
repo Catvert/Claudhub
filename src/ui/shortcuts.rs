@@ -91,6 +91,7 @@ actions!(
         DbRight,
         DbOpen,
         RunDbQuery,
+        NewDbConsole,
         CopyDbResult,
         ExportDbCsv,
         SelectWholeResult,
@@ -791,6 +792,10 @@ table!(STANDARD, standard_bindings, false, [
     Database "secondary-c" => CopyDbResult, QUERY_COPY_PREDICATE, "shortcut-db-copy";
     Database "secondary-a" => SelectWholeResult, QUERY_COPY_PREDICATE, "shortcut-db-select-all";
     Database "secondary-shift-e" => ExportDbCsv, QUERY_PREDICATE, "shortcut-db-export";
+    // One more console. On the **window** predicate and not the query one: what
+    // one most often wants a second console from is the schema tree, where the
+    // table one has just found is, and the query context is a console's own.
+    Database "secondary-shift-q" => NewDbConsole, WINDOW_PREDICATE, "shortcut-db-new-console";
 
     // ── Search ──────────────────────────────────────────────────────────────
     // `Ctrl+F` searches in the panel where the last click happened. It is
@@ -1607,7 +1612,7 @@ pub fn run_db_query(
     _window: &mut Window,
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
-    this.run_db_query(cx);
+    this.run_focused_db_query(cx);
 }
 
 /// `Alt+N` folds a tool window away, or brings it out.
@@ -1626,13 +1631,23 @@ pub fn toggle_tool(
     }
 }
 
+/// `Ctrl+Shift+Q`: one more SQL console.
+pub fn new_db_console(
+    this: &mut ClaudhubApp,
+    _: &NewDbConsole,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.open_another_console(window, cx);
+}
+
 pub fn copy_db_result(
     this: &mut ClaudhubApp,
     _: &CopyDbResult,
     _window: &mut Window,
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
-    this.copy_db_result(cx);
+    this.copy_focused_db_result(cx);
 }
 
 pub fn select_whole_result(
@@ -1641,7 +1656,7 @@ pub fn select_whole_result(
     _window: &mut Window,
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
-    this.select_whole_db_result(cx);
+    this.select_whole_focused_db_result(cx);
 }
 
 pub fn export_db_csv(
@@ -1650,7 +1665,7 @@ pub fn export_db_csv(
     _window: &mut Window,
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
-    this.export_db_csv(cx);
+    this.export_focused_db_csv(cx);
 }
 
 pub fn find(

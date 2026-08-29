@@ -200,7 +200,8 @@ src/
     explorer.rs     l'explorateur, l'éditeur intégré et ses onglets
     preview.rs      regarder un fichier au lieu de l'éditer : images et SVG
     db.rs           l'arbre des bases : connexion, base, table, colonne
-    db_query.rs     la console SQL, ses complétions et sa table de résultats
+    db_query.rs     les consoles SQL — une par onglet : ce qu'elle montre, ce
+                    qu'elle attend, ses complétions et sa table de résultats
     sql_history.rs  les requêtes déjà jouées : dédup, portée, jours — pur
     sql_history_view.rs  le panneau « Historique » et ses gestes
     search.rs       les lignes de la recherche projet — pur
@@ -413,8 +414,8 @@ fichiers, la recherche, les changements, la branche, les tests dans le haut ;
 les notes, les conflits, les remisages, les tags dans le bas ; à droite ce qui
 dit où l'on en est — les bases, les requêtes déjà jouées ; en bas ce qui a
 besoin de la largeur — le run suivi, l'historique et son graphe, les terminaux ;
-au centre ce qu'on relit — le diff, l'éditeur, la console, l'aperçu, et chaque
-fichier ouvert.
+au centre ce qu'on relit — le diff, l'éditeur, l'aperçu, et chaque fichier ouvert
+et chaque console SQL.
 
 **La droite est un seul groupe**, les deux autres bords en ont deux : rien n'y
 démarre dans la moitié basse, et une moitié vide n'est pas un emplacement mais
@@ -682,6 +683,14 @@ de compilation de git). Trois plafonds, et chacun est dit. La recherche est
 amortie par un **compteur de frappes** relu à l'échéance, pas par un drapeau.
 
 **Les bases** (`db/`, `db.rs`, `db_query.rs`) — un seul pilote, `sqlx`.
+**Une console est un document**, un panneau chacune, comme un fichier ouvert :
+il y en avait une parce que le centre était un emplacement unique, l'aire de
+dock a donné la barre d'onglets. Un clic sur une table **réutilise** la console
+où l'on est — parcourir un schéma à la souris laisserait dix onglets — et l'on
+en ajoute en le demandant : le bouton du panneau des bases, `Ctrl+Maj+Q`, ou
+« interroger dans un nouvel onglet ». L'identifiant d'envoi est compté pour la
+**fenêtre** : c'est tout ce que la réponse rapporte, et deux consoles comptant
+depuis un prendraient chacune les lignes de l'autre.
 `db::Cell` est un `Option<String>` : `NULL` n'est pas la chaîne « NULL ». Un
 `DECIMAL` se décode par `try_get_unchecked`, seul de tous les types. Une
 connexion par requête, jamais gardée. La console est une **fenêtre** sur le

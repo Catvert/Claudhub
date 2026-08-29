@@ -996,7 +996,12 @@ impl ClaudhubApp {
         };
         match entry {
             Entry::Connection { .. } | Entry::Database { .. } => self.db_toggle(index, cx),
-            Entry::Table { .. } | Entry::Column { .. } => self.open_db_console(&entry, window, cx),
+            Entry::Table { .. } | Entry::Column { .. } => self.open_db_console(
+                &entry,
+                crate::ui::db_query::ConsoleTarget::Current,
+                window,
+                cx,
+            ),
             Entry::Status { .. } => {}
         }
     }
@@ -1006,9 +1011,14 @@ impl ClaudhubApp {
     /// A table gives a ready-made `SELECT * FROM …`: it is the first thing one
     /// writes after finding a table, and typing it every time is what makes
     /// people not use an explorer.
+    ///
+    /// `target` is what tells the click from the menu entry beside it: a click
+    /// **reuses** the console one is in, because browsing a schema with the
+    /// mouse would otherwise leave ten tabs behind.
     pub(super) fn open_db_console(
         &mut self,
         entry: &Entry,
+        target: crate::ui::db_query::ConsoleTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1045,7 +1055,7 @@ impl ClaudhubApp {
         let Some(config) = self.connection_at(connection).map(|s| s.config.clone()) else {
             return;
         };
-        self.start_db_console(config, database, table, window, cx);
+        self.start_db_console(target, config, database, table, window, cx);
     }
 
     // — Rendering ———————————————————————————————————————————————————
@@ -1163,6 +1173,18 @@ impl ClaudhubApp {
                     .child(tr!("db-connections-count", { n: count })),
             )
             .children(self.render_db_scope(cx))
+            // One more console, from where the tables are: a second query is
+            // almost always a second query about what one is already looking at.
+            .child(
+                Button::new("db-new-console")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("file-code"))
+                    .tooltip(tr!("db-new-console"))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_another_console(window, cx)),
+                    ),
+            )
             .child(
                 Button::new("db-index-all")
                     .ghost()
@@ -1604,13 +1626,20 @@ fn tooltip_of(app: &ClaudhubApp, entry: &Entry) -> Option<SharedString> {
 fn row_menu(popup: PopupMenu, entity: &Entity<ClaudhubApp>, entry: &Entry) -> PopupMenu {
     let is_table = matches!(entry, Entry::Table { .. } | Entry::Column { .. });
     let is_connection = matches!(entry, Entry::Connection { .. });
-    let (console, refresh, copy, remove) = (
+    let (console, tab, refresh, copy, remove) = (
+        entity.clone(),
         entity.clone(),
         entity.clone(),
         entity.clone(),
         entity.clone(),
     );
-    let (e1, e2, e3, e4) = (entry.clone(), entry.clone(), entry.clone(), entry.clone());
+    let (e1, e5, e2, e3, e4) = (
+        entry.clone(),
+        entry.clone(),
+        entry.clone(),
+        entry.clone(),
+        entry.clone(),
+    );
     popup
         .item(
             PopupMenuItem::new(if is_table {
@@ -1620,8 +1649,32 @@ fn row_menu(popup: PopupMenu, entity: &Entity<ClaudhubApp>, entry: &Entry) -> Po
             })
             .icon(icon("play"))
             .on_click(move |_, window, cx| {
-                console.update(cx, |this, cx| this.open_db_console(&e1, window, cx));
+                console.update(cx, |this, cx| {
+                    this.open_db_console(
+                        &e1,
+                        crate::ui::db_query::ConsoleTarget::Current,
+                        window,
+                        cx,
+                    )
+                });
             }),
+        )
+        // The same thing in a console of its own: the one gesture that makes
+        // two tables readable side by side, which is what a click cannot do
+        // without leaving a tab behind on every row one passes.
+        .item(
+            PopupMenuItem::new(tr!("db-query-in-new-tab"))
+                .icon(icon("file-code"))
+                .on_click(move |_, window, cx| {
+                    tab.update(cx, |this, cx| {
+                        this.open_db_console(
+                            &e5,
+                            crate::ui::db_query::ConsoleTarget::NewTab,
+                            window,
+                            cx,
+                        )
+                    });
+                }),
         )
         .separator()
         .item(
