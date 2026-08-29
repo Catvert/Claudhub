@@ -539,7 +539,7 @@ registre de gpui-component ne se charge **que depuis un répertoire**, qu'il
 surveille ; les thèmes sont donc écrits dans `<config>/themes/` au démarrage, et
 réécrits à chaque fois — pour en modifier un, le copier sous un autre nom.
 
-**Le fork de gpui-component** (voir `Cargo.toml`) est dix-neuf commits au-dessus
+**Le fork de gpui-component** (voir `Cargo.toml`) est vingt commits au-dessus
 de leur `main`, chacun payé par un symptôme :
 
 1. le `TabVariant` que `DockSkin` fait passer jusqu'au `TabBar` ;
@@ -585,6 +585,14 @@ de leur `main`, chacun payé par un symptôme :
 19. **un dialogue peut reprendre le focus** (`focus_dialog`) : un dialogue à
     pages perd le sien quand le champ de la page précédente meurt — et avec lui
     Entrée, Échap et les actions que ses boutons dispatchent.
+
+20. **une barre d'onglets sans préfixe garde le retrait du préfixe** : les
+    boutons de dock se rembourrent de deux, et chaque onglet est décalé par
+    celui d'avant — le premier était donc la seule chose de la fenêtre à
+    toucher le bord de sa propre carte, et ça se lisait comme un défaut
+    d'alignement plutôt que comme un onglet. Ça ne se voit qu'avec une barre
+    sans bouton de tête, ce qui est exactement notre cas : les zones se
+    replient depuis les bandeaux.
 
 Les commits ont vocation à partir en PR.
 
