@@ -516,13 +516,25 @@ impl ClaudhubApp {
                         });
                     // The plugins after the built-in views. Each **panel**, not
                     // each plugin: a master/detail plugin has two tabs, and
-                    // hiding one is a gesture one has to be able to undo.
+                    // taking one off is a gesture one has to be able to undo.
+                    //
+                    // Its panels of the **centre** are left out, for the reason
+                    // the diff is: a document has no button, so there is
+                    // nothing for this menu to put back — a detail tab taken
+                    // off would be a view with no way in at all. What one does
+                    // with a document is close it.
                     crate::ui::plugin_view::manifests()
                         .iter()
                         .fold(menu, |menu, manifest| {
-                            manifest.panels.iter().fold(menu, |menu, panel| {
-                                menu.item(plugin_toggle(for_views.clone(), panel.name))
-                            })
+                            manifest
+                                .panels
+                                .iter()
+                                .filter(|panel| {
+                                    crate::ui::rails::Anchor::of_place(panel.place).is_some()
+                                })
+                                .fold(menu, |menu, panel| {
+                                    menu.item(plugin_toggle(for_views.clone(), panel.name))
+                                })
                         })
                 })
                 .item(PopupMenuItem::new(tr!("menu-reset-layout")).on_click(

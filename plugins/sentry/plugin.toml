@@ -36,7 +36,7 @@ secrets = ["token"]
 # Ce qui les distingue est l'identifiant que `view` reçoit en second argument.
 [[panel]]
 id = "issues"
-title = "Erreurs"
+title = "Sentry"
 
 [[panel]]
 id = "issue"
