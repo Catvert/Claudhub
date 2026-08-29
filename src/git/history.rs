@@ -39,6 +39,11 @@ impl Commit {
 pub enum LogRange {
     /// The current checkout's history.
     Head,
+    /// One named reference's history — a branch picked from the list beside the
+    /// log, which is what reading a branch means before deciding to check it
+    /// out. A remote-tracking name works the same: `origin/main` is a ref like
+    /// any other.
+    Ref { name: String },
     /// What the branch has added since it diverged from `base` — the same range
     /// as the branch review, seen as a sequence of commits.
     Branch { base: String },
@@ -61,9 +66,23 @@ pub enum LogRange {
 }
 
 impl LogRange {
+    /// The revisions this range names, **and the terminator that closes them**.
+    ///
+    /// A branch and a file may bear the same name — a `dev` directory beside a
+    /// `dev` branch is the case that found this — and git refuses to guess:
+    /// `ambiguous argument 'dev': both revision and filename`. Nothing here
+    /// ever passes a pathspec, so the list is closed with nothing after it.
+    /// `-L` carries its own path inside the option and is unaffected.
     fn args(&self) -> Vec<String> {
+        let mut args = self.revisions();
+        args.push("--".into());
+        args
+    }
+
+    fn revisions(&self) -> Vec<String> {
         match self {
             Self::Head => vec!["HEAD".into()],
+            Self::Ref { name } => vec![name.clone()],
             Self::Branch { base } => vec![format!("{base}..HEAD")],
             // `--all` without `--topo-order` would interleave the branches by
             // date, which gives an unreadable graph: the lines would jump from
@@ -567,16 +586,34 @@ mod tests {
 
     #[test]
     fn ranges_use_the_right_revision_syntax() {
-        assert_eq!(LogRange::Head.args(), vec!["HEAD"]);
+        assert_eq!(LogRange::Head.args(), vec!["HEAD", "--"]);
+        // A named ref is passed as it stands: `origin/main` is a revision, and
+        // dressing it up as one is what would break it.
+        assert_eq!(
+            LogRange::Ref {
+                name: "origin/main".into()
+            }
+            .args(),
+            vec!["origin/main", "--"]
+        );
         assert_eq!(
             LogRange::Branch {
                 base: "main".into()
             }
             .args(),
-            vec!["main..HEAD"]
+            vec!["main..HEAD", "--"]
         );
         // Topological order is what keeps the branches grouped.
         assert!(LogRange::All.args().contains(&"--topo-order".to_string()));
+        // And every one of them ends the revision list: a branch named like a
+        // directory is refused outright otherwise.
+        for range in [
+            LogRange::Head,
+            LogRange::All,
+            LogRange::Ref { name: "dev".into() },
+        ] {
+            assert_eq!(range.args().last().map(String::as_str), Some("--"));
+        }
         assert_eq!(
             LogRange::Lines {
                 path: "src/ui/app.rs".into(),
@@ -584,7 +621,7 @@ mod tests {
                 end: 20,
             }
             .args(),
-            vec!["-L", "12,20:src/ui/app.rs"]
+            vec!["-L", "12,20:src/ui/app.rs", "--"]
         );
     }
 

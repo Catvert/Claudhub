@@ -237,6 +237,21 @@ pub fn is_registered(name: &str) -> bool {
         .is_ok_and(|names| names.contains(name))
 }
 
+/// The registry's own copy of a name, which is a `&'static str`.
+///
+/// What a recorded place needs: the store and the dock's tree hand back a
+/// `String`, and every gesture that shows a panel wants the static name the
+/// dock knows it by. The registry already holds one of each, leaked for the
+/// window's life — a plugin's included, `manifest` leaking it too.
+pub fn registered_name(name: &str) -> Option<&'static str> {
+    REGISTERED
+        .get_or_init(Default::default)
+        .lock()
+        .ok()?
+        .get(name)
+        .copied()
+}
+
 /// Declares the panels to the dock's registry.
 ///
 /// That is what makes it possible to rebuild a saved layout: it holds only
@@ -311,18 +326,6 @@ fn visible_at_startup(name: &str, cx: &App) -> bool {
     !Settings::global(cx).hidden_panels.iter().any(|n| n == name)
 }
 
-/// The same, for a panel that declares `needed:`.
-///
-/// Nothing is open when the window is built — no file picked, no console, no
-/// hit — so on the home screen such a panel starts **hidden**, and on any other
-/// screen it starts shown, its centre's empty state being the screen itself.
-/// The first notify replaces this with the real answer; what it buys is that
-/// the first frame is not a different one. See `app::OPENS_ON`.
-fn needed_at_startup(name: &str, cx: &App) -> bool {
-    visible_at_startup(name, cx)
-        && crate::ui::app::opens_on() != crate::ui::workspace::Workspace::Home
-}
-
 /// Zoom is a **button**, not a menu entry.
 ///
 /// It is the only action the dock puts in its `…` menu — none of our panels
@@ -338,10 +341,16 @@ fn zoom_in_toolbar() -> Option<PanelControl> {
     Some(PanelControl::Toolbar)
 }
 
-/// Adds a panel to a screen's centre and moves it where the caller says,
-/// keeping the tab the centre's first group was displaying.
+/// Adds a panel to **a region** and moves it where the caller says, keeping
+/// the tab that region's first group was displaying.
 ///
-/// `add_panel_view` takes no target: it appends the panel to the centre's
+/// The region is named rather than assumed: a terminal does not land in the
+/// centre — the tool zones are docks. `add_panel_view` makes the region when
+/// the area has none (`size` is what it is born at, the one moment we choose a
+/// dock's extent), and knows how to place into an empty one by splitting its
+/// root.
+///
+/// `add_panel_view` takes no target: it appends the panel to the region's
 /// **first tab group** and activates it there, and the move takes it right
 /// back out. Removing the tab a group displays leaves its active index one
 /// past the end, and the clamp lands on the **last** tab — on the Git screen
@@ -359,11 +368,13 @@ fn zoom_in_toolbar() -> Option<PanelControl> {
 pub(super) fn dock_panel_at(
     dock: &mut gpui_component::dock::DockArea,
     handle: std::sync::Arc<dyn gpui_component::dock::BasePanelView>,
+    placement: gpui_component::dock::DockPlacement,
+    size: Option<gpui::Pixels>,
     target: impl FnOnce(&gpui_component::dock::DockArea) -> Option<gpui_component::dock::InsertTarget>,
     window: &mut Window,
     cx: &mut Context<gpui_component::dock::DockArea>,
 ) {
-    use gpui_component::dock::{DockPlacement, InsertTarget, NodeId, PaneNode, PaneRef, PanelId};
+    use gpui_component::dock::{InsertTarget, NodeId, PaneNode, PaneRef, PanelId};
 
     /// The first tab group's displayed panel — the group `add_panel_view`
     /// lands in, found by the same walk it uses.
@@ -379,9 +390,9 @@ pub(super) fn dock_panel_at(
 
     let id = handle.panel_id(cx);
     let noted = dock
-        .layout(DockPlacement::Center)
+        .layout(placement)
         .and_then(|tree| displayed(tree.root()));
-    dock.add_panel_view(handle, DockPlacement::Center, None, window, cx);
+    dock.add_panel_view(handle, placement, size, window, cx);
     let Some(target) = target(dock) else {
         return;
     };
@@ -491,25 +502,44 @@ macro_rules! panels {
     (@shown $app:expr, $id:literal) => { $app.panel_visible($id) };
     (@shown $app:expr, $id:literal, $visible:ident) => { $app.$visible() };
 
-    // And, **on the home screen only**, whether it has anything to show.
+    // And whether it has anything to show.
     //
-    // That screen gathers the four centres into one tab group, and a group
+    // The centre gathers the documents into one tab group, and a group
     // announcing "Diff", "Editor", "Search" and "SQL" before one has clicked
-    // anything is four names for four empty rooms — the very thing the split
-    // was made to stop. Everywhere else a centre holds one panel and its empty
-    // state *is* the screen, so the rule is asked of the application and not of
-    // the panel: see `ClaudhubApp::on_home`.
+    // anything is four names for four empty rooms. The rule used to hold on the
+    // home screen alone, the other screens each having a centre of their own
+    // whose empty state *was* the screen; with one workspace the centre is
+    // always that group, so it holds everywhere.
+    //
+    // It is asked of the **application** and not of the panel, which is licit
+    // for the reason it always was: a panel does not know which region holds it
+    // — the registry rebuilds one from a name alone.
     (@needed $app:expr) => { true };
-    (@needed $app:expr, $needed:ident) => { !$app.on_home() || $app.$needed() };
+    (@needed $app:expr, $needed:ident) => { $app.$needed() };
+
+    // Whether the tab carries a cross, and what pressing it does.
+    //
+    // Only a view whose tab **comes and goes with its content** closes: what
+    // closing means is "I am done with this", and for those it says something
+    // — the diff of no file, a console on no connection. For the rest there is
+    // nothing to be done with, and a cross that emptied a permanent view would
+    // leave a window one cannot put back together.
+    (@closable) => { false };
+    (@closable, $closes:ident) => { true };
 
     // The cached value the panel is born with, the application not being
-    // readable then. See `needed_at_startup`.
+    // readable then. See `visible_at_startup`.
     (@at_startup $name:expr, $cx:expr) => { visible_at_startup($name, $cx) };
-    (@at_startup $name:expr, $cx:expr, $needed:ident) => { needed_at_startup($name, $cx) };
+    // Nothing is open when the window is built — no file picked, no console, no
+    // hit — so a panel that answers `needed:` starts hidden and the first notify
+    // replaces this with the real answer. What it buys is that the first frame
+    // is not a different one.
+    (@at_startup $name:expr, $cx:expr, $needed:ident) => { false };
 
     ($($name:ident => ($id:literal, $title:literal, $render:ident, $pane:ident
         $(, visible: $visible:ident)?
         $(, needed: $needed:ident)?
+        $(, closes: $closes:ident)?
         $(, prepare: $prepare:ident)?)),* $(,)?) => { $(
         pub struct $name {
             app: WeakEntity<ClaudhubApp>,
@@ -569,14 +599,31 @@ macro_rules! panels {
                 $id
             }
 
-            /// No panel closes: nothing would make it possible to reopen one,
-            /// and a review without its file list is no longer a review.
+            /// See the `@closable` arm.
             fn closable(&self, _: &App) -> bool {
-                false
+                panels!(@closable $(, $closes)?)
             }
 
             fn visible(&self, _: &App) -> bool {
                 self.visible
+            }
+
+            /// Closing clears what the tab was showing, and that is the whole
+            /// of it: the tab is conditional, so it goes when its content does.
+            ///
+            /// **Deferred**, like a file's: the dock is in the middle of
+            /// editing its own tree, and closing goes back through
+            /// `DockArea::remove_panel`.
+            #[allow(unused_variables)]
+            fn on_removed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+                $(
+                    let Some(app) = self.app.upgrade() else {
+                        return;
+                    };
+                    cx.defer_in(window, move |_, _window, cx| {
+                        app.update(cx, |app, cx| app.$closes(cx));
+                    });
+                )?
             }
         }
 
@@ -654,23 +701,26 @@ panels! {
     // the central slot, and a tab announcing "Diff", "Editor" or "SQL"
     // depending on the last gesture was saying plainly that it carried three.
     // The screens give each of them its own place.
-    DiffPanel => ("ClaudhubDiff", "panel-diff", render_diff, Diff, needed: diff_on_screen),
-    ConsolePanel => ("ClaudhubConsole", "panel-sql", render_console_panel, Console, needed: db_console_open),
-    SettingsPanel => ("ClaudhubSettings", "panel-settings", render_settings_panel, Settings),
+    DiffPanel => ("ClaudhubDiff", "panel-diff", render_diff, Diff, needed: diff_on_screen, closes: close_diff),
+    ConsolePanel => ("ClaudhubConsole", "panel-sql", render_console_panel, Console, needed: db_console_open, closes: close_db_console),
     // The history needs loading the first time it is looked at.
     //
     // Doing it at render time rather than at construction is what avoids a
     // `git log` on a tab nobody will open; `ensure_history` only asks once,
     // otherwise every frame would restart the command.
     HistoryPanel => ("ClaudhubHistory", "panel-history", render_history, History, prepare: ensure_history),
-    // The centre of the editing screen when **nothing** is open.
+    // The centre when **nothing** is open.
     //
-    // One panel and no more: every open file is a `FilePanel` of its own, and
-    // a tab group needs something to hold when there is none — a dock with an
-    // empty centre has nowhere to drop the first file. It says what to do, and
-    // steps aside as soon as a file arrives, the way the conflicts panel
-    // appears only when there is something to conflict about.
-    EditorPanel => ("ClaudhubEditor", "panel-editor", render_editor_panel, Editor, visible: empty_editor_visible, needed: never_at_home),
+    // No longer a constraint of the engine: `add_panel_view` splits an empty
+    // region's root to place the first panel, so a centre with no tab has
+    // somewhere to drop a file after all. What is left is a choice — a window
+    // that opens on nothing at all says nothing of what it can do, and at a
+    // first start the diff, the console and the preview are every one of them
+    // conditional and therefore absent.
+    //
+    // So it stands for the whole centre and not for the editor alone, and it
+    // steps aside as soon as anything arrives there.
+    EditorPanel => ("ClaudhubEditor", "panel-editor", render_editor_panel, Editor, visible: empty_centre_visible),
 }
 
 /// One open file, as the dock shows it.
@@ -931,7 +981,11 @@ impl ConflictsPanel {
     pub fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
         cx.observe(app, |this: &mut Self, app, cx| {
             let app = app.read(cx);
-            let visible = app.pending_operation().is_some() || app.has_conflicts();
+            // Put away by hand like any other view, and situational on top: a
+            // panel whose visibility ignored the flag would keep a rail button
+            // that lights but never goes out.
+            let visible = app.panel_visible("ClaudhubConflicts")
+                && (app.pending_operation().is_some() || app.has_conflicts());
             if this.visible != visible {
                 this.visible = visible;
                 // The dock re-reads its tabs' visibility when the zone
@@ -1026,16 +1080,6 @@ pub struct TerminalPanel {
     /// while the layout is being built, so in the middle of
     /// `ClaudhubApp::new`.
     visible: bool,
-    /// True for the face that lives in the multiplexer's dock.
-    ///
-    /// It does two things, and they are the same thing said twice. It is
-    /// **always visible**: the other faces show themselves only for the
-    /// worktree being looked at — which is what keeps a terminal's place in
-    /// each dock without moving it — and the multiplexer's whole subject is
-    /// the worktrees one is *not* looking at. And its tab **says which project
-    /// it belongs to**: that dock mixes them, so the tab is the only thing that
-    /// can say it, and it is where one is already reading the terminal's name.
-    in_grid: bool,
 }
 
 impl TerminalPanel {
@@ -1055,35 +1099,14 @@ impl TerminalPanel {
         visible: bool,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::build(app, worktree, view, visible, false, cx)
-    }
-
-    /// The face that lives in the multiplexer's grid, which shows itself
-    /// whatever worktree is being looked at.
-    pub fn in_grid(
-        app: &Entity<ClaudhubApp>,
-        worktree: std::path::PathBuf,
-        view: Entity<crate::ui::terminal_view::TerminalView>,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        Self::build(app, worktree, view, true, true, cx)
-    }
-
-    fn build(
-        app: &Entity<ClaudhubApp>,
-        worktree: std::path::PathBuf,
-        view: Entity<crate::ui::terminal_view::TerminalView>,
-        visible: bool,
-        in_grid: bool,
-        cx: &mut Context<Self>,
-    ) -> Self {
         let mine = worktree.clone();
         cx.observe(app, move |this: &mut Self, app, cx| {
-            let visible = if this.in_grid {
-                true
-            } else {
-                app.read(cx).terminal_shown(&mine, cx)
-            };
+            // `terminal_shown` answers the grid too: with every worktree's
+            // terminals on, a panel shows itself whatever is being looked at.
+            // It used to be a second kind of panel — the multiplexer's face —
+            // built once and never told otherwise; it is a state now, read like
+            // any other.
+            let visible = app.read(cx).terminal_shown(&mine, cx);
             if this.visible != visible {
                 this.visible = visible;
                 cx.emit(PanelEvent::LayoutChanged);
@@ -1097,7 +1120,6 @@ impl TerminalPanel {
         Self {
             app: app.downgrade(),
             visible,
-            in_grid,
             worktree,
             view,
             group: None,
@@ -1287,10 +1309,13 @@ impl Panel for TerminalPanel {
             .map(|app| app.read(cx).terminal_label(id, cx))
             .unwrap_or_default();
         let rename = app.clone();
-        // In the multiplexer the dock holds every terminal of the window, so
-        // the tab is the only thing that can say which project this one is: the
+        // With the grid on, the dock holds every terminal of the window, so the
+        // tab is the only thing that can say which project this one is: the
         // repository greyed, then the worktree, the way the picker writes it.
-        let project = (self.in_grid)
+        let in_grid = app
+            .upgrade()
+            .is_some_and(|app| app.read(cx).terminals_everywhere);
+        let project = in_grid
             .then(|| {
                 app.upgrade()
                     .map(|app| app.read(cx).project_label(&self.worktree))
@@ -1299,7 +1324,6 @@ impl Panel for TerminalPanel {
         let muted = cx.theme().muted_foreground;
         let mine = self.worktree.clone();
         let go = app.clone();
-        let in_grid = self.in_grid;
         // The wheel button closes, like the cross — the confirmation included:
         // what dies with a terminal is a build half done, and the question does
         // not depend on which gesture asked.
@@ -1458,12 +1482,15 @@ impl PluginPanel {
             // Three reasons a plugin's tab is not there: hidden from the
             // "Views" menu like any other panel, the plugin switched off —
             // which is not the same gesture and does not live in the same file
-            // — and, in the home screen's centre, nothing to show.
+            // — and, in the centre, nothing to show. The third is the `needed:`
+            // rule of the macro, asked of a panel a script draws: it answers on
+            // what it has painted, a script having no way to answer the
+            // question itself.
             let visible = {
                 let read = app.read(cx);
                 read.panel_visible(this.name)
                     && crate::ui::plugin_view::panel_enabled(this.name, cx)
-                    && !(this.centre && read.on_home() && read.plugin_panel_empty(this.name))
+                    && !(this.centre && read.plugin_panel_empty(this.name))
             };
             if this.visible != visible {
                 // A tab that has just come back is a tab one has just made
@@ -1488,11 +1515,11 @@ impl PluginPanel {
             focus: cx.focus_handle(),
             name,
             // Nothing has run when the window is built, so a centre panel opens
-            // hidden on the home screen — see `needed_at_startup`, which says
-            // the same thing for the panels of ours.
+            // hidden — the `@at_startup` arm of the macro says the same thing
+            // for the panels of ours.
             visible: visible_at_startup(name, cx)
                 && crate::ui::plugin_view::panel_enabled(name, cx)
-                && !(centre && crate::ui::app::opens_on() == crate::ui::workspace::Workspace::Home),
+                && !centre,
             centre,
         }
     }

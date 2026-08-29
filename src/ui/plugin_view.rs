@@ -90,7 +90,7 @@ pub fn discover() {
     };
     let found = manifest::discover(&dir);
     for found in &found {
-        log::info!(target: "plugin", "{} on the {} screen", found.id, found.declaration.screen);
+        log::info!(target: "plugin", "{} loaded", found.id);
     }
     if let Ok(mut slot) = MANIFESTS.write() {
         *slot = Vec::leak(found);
@@ -113,13 +113,6 @@ fn write_bundled(dir: &std::path::Path) -> std::io::Result<()> {
 
 pub fn manifests() -> &'static [Manifest] {
     MANIFESTS.read().map(|slot| *slot).unwrap_or_default()
-}
-
-/// The plugins whose panel belongs to one screen.
-pub fn on_screen(screen: &str) -> impl Iterator<Item = &'static Manifest> + '_ {
-    manifests()
-        .iter()
-        .filter(move |m| m.declaration.screen == screen)
 }
 
 /// The plugin a dock name belongs to, and which of its panels it is.
@@ -172,15 +165,6 @@ pub fn usable(manifest: &'static Manifest, cx: &gpui::App) -> bool {
 /// The same, from the panel's name — which is what the dock knows it by.
 pub fn panel_enabled(panel: &str, cx: &gpui::App) -> bool {
     by_panel(panel).is_none_or(|(manifest, _)| usable(manifest, cx))
-}
-
-/// Does this screen have anything at all to show.
-///
-/// A screen carrying panels of its own always does. One that carries **only**
-/// plugins — Sentry's, since Sentry became one — has something to show only
-/// while one of them is usable; otherwise the bar points at an empty room.
-pub fn screen_has_content(workspace: crate::ui::workspace::Workspace, cx: &gpui::App) -> bool {
-    workspace.carries_own_panels() || on_screen(workspace.key()).any(|m| usable(m, cx))
 }
 
 /// The script of a plugin, as a root and a path.
@@ -322,7 +306,6 @@ impl ClaudhubApp {
             Ok(what) => {
                 discover();
                 self.rebuild_plugins(cx);
-                self.leave_empty_workspace(window, cx);
                 self.announce(SharedString::from(format!("{op}: {what}")), cx);
             }
             Err(message) => self.plugin_failed(message, window, cx),
@@ -447,23 +430,6 @@ impl ClaudhubApp {
         .detach();
     }
 
-    /// Leaves a screen that has nothing left to show.
-    ///
-    /// Three moments make one: opening a window whose `layout.json` remembers a
-    /// screen whose plugin is no longer configured, switching that plugin off,
-    /// and uninstalling it. Staying would leave the bar pointing at a room with
-    /// nothing in it, and no button lit.
-    pub(super) fn leave_empty_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        use crate::ui::workspace::Workspace;
-        if self.workspace == Workspace::Settings
-            || crate::ui::plugin_view::screen_has_content(self.workspace, cx)
-        {
-            return;
-        }
-        let elsewhere = Workspace::working(cx).next().unwrap_or_default();
-        self.enter_workspace(elsewhere, window, cx);
-    }
-
     /// Has this plugin's panel nothing to show — see `Node::is_empty_state`.
     ///
     /// A plugin nobody loaded answers yes, which is the right answer: its tab
@@ -532,7 +498,7 @@ impl ClaudhubApp {
             worktree: root,
             path,
         });
-        self.travel_reveal(crate::ui::workspace::Workspace::Files, window, cx);
+        self.travel_to_panel(crate::ui::panels::EditorPanel::NAME, window, cx);
         cx.notify();
     }
 

@@ -147,24 +147,22 @@ impl ClaudhubApp {
             return;
         }
         self.settled = Some(worktree.clone());
-        // Nothing is filed while the three halves are being swapped one after
-        // another: `enter_workspace` files, and it is the first of them.
+        // Nothing is filed while the halves are being swapped one after
+        // another: the first of them files.
         self.settling = true;
         let place = self.place_of(&worktree, cx);
-        // The screen first: what follows opens files and a console, and doing
-        // it the other way round would show them landing on the screen one is
+        // The document first: what follows opens files and a console, and doing
+        // it the other way round would show them landing behind the tab one is
         // about to leave.
-        // A screen that has become empty is not one to come back to: the only
-        // plugin it carried may have been uninstalled, or left without the
-        // setting it cannot work without, and `leave_empty_workspace` would
-        // have to undo the arrival straight away.
-        if let Some(screen) = place
-            .screen
+        //
+        // A name nothing can build is no document to come back to: a plugin's
+        // detail, when that plugin has been uninstalled between two sessions.
+        if let Some(name) = place
+            .document
             .as_deref()
-            .and_then(crate::ui::workspace::Workspace::from_key)
-            .filter(|screen| crate::ui::plugin_view::screen_has_content(*screen, cx))
+            .and_then(crate::ui::panels::registered_name)
         {
-            self.enter_workspace(screen, window, cx);
+            self.reveal_panel(name, window, cx);
         }
         self.restore_console(place.console.clone(), window, cx);
         // The tabs on the **first** arrival only: a file's panel hides itself
@@ -226,13 +224,10 @@ impl ClaudhubApp {
             self.replaying.clear();
             return;
         };
-        let panels = self
+        let panel = self
             .editors(&open.worktree)
-            .and_then(|tabs| Some(tabs.open.get(tabs.index_of(&open.path)?)?.panels.clone()))
-            .unwrap_or_default();
-        // Every screen's face, and not the editing screen's alone: the tab one
-        // was left on has to be the one showing wherever one comes back.
-        for panel in &panels {
+            .and_then(|tabs| Some(tabs.open.get(tabs.index_of(&open.path)?)?.panel.clone()));
+        for panel in panel.iter() {
             crate::ui::panels::FilePanel::activate(panel, window, cx);
         }
         self.replaying.clear();
@@ -330,11 +325,10 @@ impl ClaudhubApp {
             return;
         }
         let place = Place {
-            // Only a screen one works in: the settings and the multiplexer are
-            // detours, and coming back to a project must not put one back in
-            // the detour one took while leaving it.
-            screen: (!crate::ui::workspace::Workspace::ASIDE.contains(&self.workspace))
-                .then(|| self.workspace.key().to_string()),
+            // The document in front of the centre, which is where one was: a
+            // tool window is beside what one is doing rather than what one is
+            // doing, so folding one is not a place to be brought back to.
+            document: self.front_document(cx),
             editing: self.editing().map(|editing| OpenFile {
                 worktree: editing.worktree.clone(),
                 path: editing.path.clone(),

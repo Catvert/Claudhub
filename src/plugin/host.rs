@@ -1182,7 +1182,7 @@ mod tests_support {
         Declaration {
             title: "Probe".into(),
             panels: Vec::new(),
-            screen: "review".into(),
+            screen: None,
             icon: None,
             capabilities,
             settings: BTreeMap::from([("base".to_string(), "https://api.test".to_string())]),

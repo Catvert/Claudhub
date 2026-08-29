@@ -171,7 +171,7 @@ impl ClaudhubApp {
             error: None,
         });
         self.git.send(Cmd::ReadMerge { worktree, path });
-        self.reveal(crate::ui::workspace::Workspace::Git, window, cx);
+        self.reveal_panel(crate::ui::panels::DiffPanel::NAME, window, cx);
         cx.notify();
     }
 

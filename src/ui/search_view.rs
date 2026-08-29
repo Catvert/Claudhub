@@ -175,11 +175,13 @@ impl ClaudhubApp {
     /// that leaves a file in the middle of a line to go and look elsewhere,
     /// which is precisely what the back arrow is for.
     pub(super) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Read **before** the screen changes: `travel_reveal` moves the focus,
-        // and the focus is what says which surface the selection is in.
+        // Read **before** the views come forward: `travel_to_panel` moves the
+        // focus, and the focus is what says which surface the selection is in.
         let selection = self.search_seed(window, cx);
-        self.travel_reveal(crate::ui::workspace::Workspace::Search, window, cx);
-        self.show_panel(crate::ui::panels::SearchPanel::NAME, window, cx);
+        // The preview writes the step — it is the document one lands on — and
+        // the list is brought out beside it.
+        self.travel_to_panel(crate::ui::panels::SearchPreviewPanel::NAME, window, cx);
+        self.reveal_panel(crate::ui::panels::SearchPanel::NAME, window, cx);
         let handle = gpui::Focusable::focus_handle(&self.search_input, cx);
         handle.focus(window, cx);
         if let Some(text) = selection {
@@ -277,9 +279,12 @@ impl ClaudhubApp {
         }) {
             return Some(Surface::File(editing.path.clone()));
         }
-        match self.workspace {
-            crate::ui::workspace::Workspace::Db => Some(Surface::Query),
-            crate::ui::workspace::Workspace::Files => {
+        // Nothing has the focus, so what the centre shows answers instead —
+        // it used to be the screen, which said the same thing when a screen
+        // held one centre.
+        match self.front_document(cx).as_deref() {
+            Some(crate::ui::panels::ConsolePanel::NAME) => Some(Surface::Query),
+            Some(crate::ui::panels::EditorPanel::NAME) => {
                 Some(Surface::File(self.editing()?.path.clone()))
             }
             _ => None,
@@ -684,8 +689,8 @@ impl ClaudhubApp {
                 // tab one never left. The place written down is the caret one
                 // jumped from, `here` reading the editor while it is still the
                 // screen on show.
-                self.travel_reveal(crate::ui::workspace::Workspace::Search, window, cx);
-                self.show_panel(crate::ui::panels::SearchPanel::NAME, window, cx);
+                self.travel_to_panel(crate::ui::panels::SearchPreviewPanel::NAME, window, cx);
+                self.reveal_panel(crate::ui::panels::SearchPanel::NAME, window, cx);
                 // The list and not the field: the results are already there,
                 // and they are what the gesture asked for.
                 window.focus(&self.search_focus, cx);

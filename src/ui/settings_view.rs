@@ -25,7 +25,9 @@ use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::setting::{
     NumberFieldOptions, SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage,
 };
-use gpui_component::{h_flex, v_flex, ActiveTheme, Disableable, Selectable, Sizable, StyledExt};
+use gpui_component::{
+    h_flex, v_flex, ActiveTheme, Disableable, Selectable, Sizable, StyledExt, WindowExt,
+};
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
@@ -69,6 +71,52 @@ impl Environment {
     }
 }
 
+/// The settings form, as an entity of its own.
+///
+/// **An entity and not a closure**, and that is what makes the dialog possible
+/// at all: `open_dialog` keeps a `Fn` that is called back **from the root
+/// view's render**, and reading the root entity from there is the panic gpui
+/// refuses. A child's `render` happens after the parent's closure has returned,
+/// which is the rule every dock panel already lived by — this is the same
+/// arrangement, minus the dock.
+///
+/// It is built once and outlives the dialog: closing the settings and opening
+/// them again lands on the page one had left, which is what `Page::First`
+/// means.
+pub(super) struct SettingsForm {
+    app: gpui::WeakEntity<ClaudhubApp>,
+    focus: gpui::FocusHandle,
+}
+
+impl SettingsForm {
+    pub(super) fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
+        // The form is a picture of the settings and of the log, both of which
+        // change under it while it is open.
+        cx.observe(app, |_, _, cx| cx.notify()).detach();
+        Self {
+            app: app.downgrade(),
+            focus: cx.focus_handle(),
+        }
+    }
+}
+
+impl gpui::Focusable for SettingsForm {
+    fn focus_handle(&self, _: &App) -> gpui::FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl Render for SettingsForm {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(app) = self.app.upgrade() else {
+            return div().into_any_element();
+        };
+        app.update(cx, |app, cx| {
+            app.render_settings_form(window, cx).into_any_element()
+        })
+    }
+}
+
 impl ClaudhubApp {
     pub(super) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_settings_at(Page::First, window, cx);
@@ -92,26 +140,52 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // A page asked for by name — "configure this plugin", "read the log" —
-        // is somewhere one has been taken, and the trail records it. `First`
-        // means the menu entry and its key, which name a screen rather than
-        // leave one: see `travel_to`. The gear of the aside group travels, like
-        // every button of the two screen pickers.
-        let travelled = !matches!(page, Page::First);
-        if travelled {
+        if !matches!(page, Page::First) {
             self.settings_page = page;
             self.settings_epoch += 1;
         }
-        let workspace = crate::ui::workspace::Workspace::Settings;
-        if travelled {
-            self.travel_to(workspace, window, cx);
-        } else {
-            self.enter_workspace(workspace, window, cx);
-        }
+        let form = self.settings_form.clone();
+        window.open_dialog(cx, move |dialog, window, _cx| {
+            // **The size is given, and given here.** In the dock the form
+            // filled its panel; a dialog is sized by its content, and this
+            // content is a sidebar of pages beside a column of fields — both of
+            // which ask for the room they are given rather than claiming any.
+            // Left alone it came up as a search box and a heading.
+            //
+            // Read off the window rather than fixed: `Dialog` takes a width and
+            // no height, and a form taller than the window is one whose last
+            // field cannot be reached. Recomputed on every frame the dialog is
+            // built, so it follows a resize.
+            let viewport = window.viewport_size();
+            let width = viewport.width.min(px(980.)) - px(64.);
+            let height = viewport.height.min(px(720.)) - px(120.);
+            dialog
+                .title(tr!("workspace-settings"))
+                .w(width)
+                // A dialog one **reads**, so it closes rather than being
+                // answered: one button, the overlay dismisses, and the cross is
+                // there. The confirmations of this window do the opposite for
+                // the opposite reason.
+                .overlay_closable(true)
+                .close_button(true)
+                .footer(crate::ui::dialogs::close())
+                // A **definite box**, width and height: the form's root is a
+                // `size_full`, which resolves against nothing at all when its
+                // parent is sized by what it contains.
+                .child(div().w_full().h(height).child(form.clone()))
+        });
+        // **Deferred, and by the dialog's own handle.** A context menu gives
+        // the focus back to whatever had it as it closes, *after* the handler
+        // that opened this — so a focus set at once loses the race and the
+        // dialog opens with no keyboard at all. `focus_dialog` and not
+        // `focus_field`: this form is a dialog of **pages**, and the field of
+        // the page one leaves dies with it, taking Escape and the buttons'
+        // actions with it. That is the commit on the fork this exists for.
+        window.defer(cx, |window, cx| window.focus_dialog(cx));
         cx.notify();
     }
 
-    pub(super) fn render_settings_panel(
+    pub(super) fn render_settings_form(
         &mut self,
         _window: &mut Window,
         cx: &mut Context<Self>,
@@ -2521,16 +2595,11 @@ fn plugin_row(
                         .label(tr!("settings-plugin-enabled"))
                         .on_click({
                             let id = id.clone();
-                            move |_, window, cx| {
+                            move |_, _window, cx| {
                                 let switched = id.clone();
                                 Settings::update_global(cx, move |s| {
                                     let entry = s.plugins.entry(switched).or_default();
                                     entry.enabled = !entry.enabled;
-                                });
-                                // Switching the last plugin of a screen off
-                                // leaves the bar pointing at an empty room.
-                                with_app(window, cx, |app, window, cx| {
-                                    app.leave_empty_workspace(window, cx);
                                 });
                             }
                         }),

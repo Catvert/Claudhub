@@ -41,6 +41,10 @@ pub enum Pane {
     Db,
     Changes,
     Branch,
+    /// The repository's branches. Its field **is** the filter, so `Ctrl+F`
+    /// focuses that rather than opening a second bar over it — the project
+    /// search's rule, for the same reason.
+    Branches,
     History,
     /// The repository's tags. It filters: the list's order is ours — by date of
     /// tag — and nothing in it links one row to the next.
@@ -66,9 +70,6 @@ pub enum Pane {
     /// The queries already run. It filters, like every list whose order is
     /// ours: what is left is what was being looked for.
     SqlHistory,
-    /// The settings. The form has a search of its own, in its sidebar; this key
-    /// exists so `Ctrl+F` there does not go to the panel touched before it.
-    Settings,
     /// The project-wide search. Its field **is** the search, so `Ctrl+F` there
     /// focuses it rather than opening a second bar over it — see
     /// `ClaudhubApp::open_find`.
@@ -236,6 +237,12 @@ impl ClaudhubApp {
             self.open_search(window, cx);
             return;
         }
+        // The branches have one too, and it is the one already under the list
+        // being read.
+        if matches!(pane, Pane::Branches) {
+            self.branches_dock.read(cx).filter(cx).focus(window, cx);
+            return;
+        }
         self.open_find_in(pane, window, cx);
     }
 
@@ -300,14 +307,13 @@ impl ClaudhubApp {
     /// The seed is the project-wide search's, and deliberately so — the same
     /// gesture with the same answer to "what was selected", `Ctrl+P` looking
     /// for the file where `Ctrl+Shift+F` looks for the text. It is read
-    /// **before** the screen changes: `reveal` moves the focus, and the focus is
-    /// what says which surface the selection is in.
+    /// **before** the tree comes forward: `reveal_panel` moves the focus, and
+    /// the focus is what says which surface the selection is in.
     pub(super) fn open_file_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let seed = self.search_seed(window, cx);
-        self.reveal(crate::ui::workspace::Workspace::Files, window, cx);
-        // The tree and not the centre: what this searches is the file list, and
-        // on the home screen that is one tab of a column of six.
-        self.show_panel(crate::ui::panels::FilesPanel::NAME, window, cx);
+        // The tree and not the centre: what this searches is the file list, one
+        // tab of the column one picks from.
+        self.reveal_panel(crate::ui::panels::FilesPanel::NAME, window, cx);
         self.pane = Pane::Files;
         let input = self.open_find_in(Pane::Files, window, cx);
         if let Some(text) = seed {

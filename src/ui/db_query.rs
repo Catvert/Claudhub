@@ -789,18 +789,17 @@ impl ClaudhubApp {
         } else {
             self.record_step(
                 from,
-                crate::ui::jumps::Place::Screen(crate::ui::workspace::Workspace::Db),
+                crate::ui::jumps::Place::Panel(crate::ui::panels::ConsolePanel::NAME),
                 cx,
             );
         }
-        // Opening a console calls up the databases screen: the gesture comes
-        // from the schema tree, which lives there, but also from the menu of a
-        // table opened elsewhere.
+        // Opening a console brings the console forward: the gesture comes
+        // from the schema tree, but also from the menu of a table opened from
+        // somewhere else entirely.
         //
-        // `reveal` and not `travel_reveal`: the step has just been written, and
-        // it names the query rather than the room it is read in.
-        self.reveal(crate::ui::workspace::Workspace::Db, window, cx);
-        self.show_panel(crate::ui::panels::ConsolePanel::NAME, window, cx);
+        // `reveal_panel` and not `travel_to_panel`: the step has just been
+        // written, and it names the query rather than the view it is read in.
+        self.reveal_panel(crate::ui::panels::ConsolePanel::NAME, window, cx);
         self.persist_session(cx);
         cx.notify();
     }
@@ -1015,8 +1014,7 @@ impl ClaudhubApp {
         if elsewhere {
             self.reopen_db_console(target, database, String::new(), window, cx);
         }
-        self.reveal(crate::ui::workspace::Workspace::Db, window, cx);
-        self.show_panel(crate::ui::panels::ConsolePanel::NAME, window, cx);
+        self.reveal_panel(crate::ui::panels::ConsolePanel::NAME, window, cx);
         self.db_query_input.update(cx, |state, cx| {
             state.set_value(sql, window, cx);
         });

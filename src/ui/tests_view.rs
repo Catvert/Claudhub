@@ -481,9 +481,6 @@ impl ClaudhubApp {
         if !self.panel_visible(crate::ui::panels::TestsPanel::NAME) {
             return false;
         }
-        if self.workspace == crate::ui::workspace::Workspace::Tests {
-            return true;
-        }
         let Some(active) = self.active.as_deref() else {
             return false;
         };
@@ -573,7 +570,7 @@ impl ClaudhubApp {
                 run: None,
             },
         );
-        self.travel_reveal(crate::ui::workspace::Workspace::Tests, window, cx);
+        self.travel_to_panel(crate::ui::panels::TestRunPanel::NAME, window, cx);
         cx.notify();
     }
 

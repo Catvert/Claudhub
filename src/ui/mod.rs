@@ -15,6 +15,7 @@ mod db;
 mod db_query;
 mod dialogs;
 mod diff_view;
+mod dock_layout;
 mod explorer;
 mod file_icons;
 mod find;
@@ -30,7 +31,6 @@ mod lsp;
 mod merge;
 mod merge_view;
 mod motion;
-mod multiplexer;
 mod notes;
 pub(crate) mod notes_view;
 mod notify;
@@ -38,6 +38,7 @@ mod panels;
 mod picker;
 pub mod plugin_view;
 mod preview;
+mod rails;
 mod refine;
 mod repos;
 mod review;
@@ -63,7 +64,6 @@ mod topbar;
 mod tree;
 mod vault;
 mod vim;
-mod workspace;
 mod worktree_ops;
 mod worktree_picker;
 mod worktrees;
@@ -249,22 +249,6 @@ mod i18n_tests {
             missing_fr.is_empty() && missing_en.is_empty(),
             "missing from fr.json: {missing_fr:?}\nmissing from en.json: {missing_en:?}"
         );
-    }
-
-    /// The views menu renders the raw key when it is missing, and an entry
-    /// named "panel-sentry" in the middle of the menu is all you would see.
-    #[test]
-    fn every_view_has_a_title_in_both_catalogs() {
-        let (en, fr) = (keys(EN), keys(FR));
-        for workspace in crate::ui::workspace::Workspace::ALL {
-            let label = workspace.label();
-            assert!(en.contains(label), "missing from en.json: {label}");
-            assert!(fr.contains(label), "missing from fr.json: {label}");
-            for (_, title) in workspace.views() {
-                assert!(en.contains(*title), "missing from en.json: {title}");
-                assert!(fr.contains(*title), "missing from fr.json: {title}");
-            }
-        }
     }
 
     /// The status bar renders the raw key when it is missing: "running-push"

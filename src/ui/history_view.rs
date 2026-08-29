@@ -11,12 +11,13 @@ use std::rc::Rc;
 
 use gpui::{
     canvas, div, prelude::*, px, uniform_list, Bounds, Context, Entity, Hsla, PathBuilder, Pixels,
-    Point, SharedString, Window,
+    Point, SharedString, Size, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
-    resizable::{resizable_panel, v_resizable},
+    menu::{ContextMenuExt as _, PopupMenu},
+    resizable::{h_resizable, resizable_panel, v_resizable},
     v_flex, ActiveTheme, Selectable, Sizable,
 };
 
@@ -24,6 +25,7 @@ use crate::git::{DiffRange, GraphRow, LogRange};
 use crate::runtime::Cmd;
 use crate::tr;
 use crate::ui::app::{ClaudhubApp, History};
+use crate::ui::icons::icon;
 
 /// Width of one graph column.
 const LANE: Pixels = px(14.);
@@ -226,8 +228,7 @@ impl ClaudhubApp {
         // having done nothing. **And the step is written down**, the screen
         // having been taken rather than asked for — which is `travel_reveal`,
         // step and all, rather than the two written out here.
-        self.travel_reveal(crate::ui::workspace::Workspace::Git, window, cx);
-        self.show_panel(crate::ui::panels::HistoryPanel::NAME, window, cx);
+        self.travel_to_panel(crate::ui::panels::DiffPanel::NAME, window, cx);
         self.set_history_range(range, cx);
     }
 
@@ -369,10 +370,25 @@ impl ClaudhubApp {
                 "{}:{start}\u{2013}{end}",
                 path.display()
             ))),
+            // The branch the log was pointed at, from the column beside it. It
+            // is said here too, and not only by the highlighted row: the column
+            // goes away when the panel narrows, and a list that shows one
+            // branch without saying which is a list one mistrusts.
+            LogRange::Ref { name } => Some(SharedString::from(name.clone())),
             _ => None,
         };
+        let lines_scope = matches!(range, LogRange::Lines { .. });
         let lines_only = self.history_lines_only;
         let show_graph = crate::ui::settings::Settings::global(cx).history_graph;
+        // The arrangement, decided once: the header reads it to know whether
+        // the branches have a column to be shown in, and the body to build it.
+        let roomy = Shape::of(self.history_shape) == Shape::Full;
+        let want_branches = crate::ui::settings::Settings::global(cx).history_branches;
+        let shape = if want_branches {
+            Shape::of(self.history_shape)
+        } else {
+            Shape::of(self.history_shape).without_branches()
+        };
         let header = h_flex()
             .h(crate::ui::theme::bar_height(cx))
             .w_full()
@@ -381,27 +397,33 @@ impl ClaudhubApp {
             .items_center()
             .border_b_1()
             .border_color(cx.theme().border)
-            .children(
-                [
-                    // The current branch first: it is the default, and the
-                    // default reads left to right.
-                    (LogRange::Head, tr!("history-head")),
-                    (LogRange::All, tr!("history-all")),
-                ]
-                .into_iter()
-                .enumerate()
-                .map(|(ix, (target, label))| {
-                    let selected = range == target;
-                    Button::new(("history-range", ix))
-                        .ghost()
-                        .xsmall()
-                        .label(label)
-                        .selected(selected)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_history_range(target.clone(), cx);
-                        }))
-                }),
-            )
+            // **Only where the column of branches is not on screen.** The two
+            // are the same two rows that column puts above the branches, and
+            // saying it twice would be two controls for one answer, one of
+            // which does not show the branch one is actually reading.
+            .when(shape != Shape::Full, |header| {
+                header.children(
+                    [
+                        // The current branch first: it is the default, and the
+                        // default reads left to right.
+                        (LogRange::Head, tr!("history-head")),
+                        (LogRange::All, tr!("history-all")),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, (target, label))| {
+                        let selected = range == target;
+                        Button::new(("history-range", ix))
+                            .ghost()
+                            .xsmall()
+                            .label(label)
+                            .selected(selected)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_history_range(target.clone(), cx);
+                            }))
+                    }),
+                )
+            })
             .when_some(scope, |header, scope| {
                 header
                     .child(
@@ -423,44 +445,79 @@ impl ClaudhubApp {
                             .xsmall()
                             .icon(crate::ui::icons::icon("x"))
                             .tooltip(tr!("history-lines-close"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.set_history_range(LogRange::All, cx);
+                            // Back to where each came from: a restricted patch
+                            // widens to every reference, a branch narrows back
+                            // to the checkout one is on.
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let back = if lines_scope {
+                                    LogRange::All
+                                } else {
+                                    LogRange::Head
+                                };
+                                this.set_history_range(back, cx);
                             })),
                     )
                     // The toggle: the patch restricted to those lines, or the
                     // commit whole. Both are one click away because both are
                     // read — the first says what happened to this code, the
-                    // second says what it was part of.
-                    .child(
-                        Button::new("history-lines-scope")
-                            .ghost()
-                            .xsmall()
-                            .label(if lines_only {
-                                tr!("history-lines-only")
-                            } else {
-                                tr!("history-lines-whole")
-                            })
-                            .tooltip(tr!("history-lines-toggle"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.history_lines_only = !this.history_lines_only;
-                                // The commit on screen was opened under the old
-                                // answer: re-opening it is what makes the toggle
-                                // show its effect rather than announce it.
-                                let index = this.active_review().and_then(|state| {
-                                    let history = state.history.as_ref()?;
-                                    let id = state.commit.as_deref()?;
-                                    history.commits.iter().position(|c| c.id == id)
-                                });
-                                if let Some(index) = index {
-                                    this.open_commit(index, cx);
-                                }
-                                cx.notify();
-                            })),
-                    )
+                    // second says what it was part of. A branch has no such
+                    // question: it is whole commits either way.
+                    .when(lines_scope, |header| {
+                        header.child(
+                            Button::new("history-lines-scope")
+                                .ghost()
+                                .xsmall()
+                                .label(if lines_only {
+                                    tr!("history-lines-only")
+                                } else {
+                                    tr!("history-lines-whole")
+                                })
+                                .tooltip(tr!("history-lines-toggle"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.history_lines_only = !this.history_lines_only;
+                                    // The commit on screen was opened under the old
+                                    // answer: re-opening it is what makes the toggle
+                                    // show its effect rather than announce it.
+                                    let index = this.active_review().and_then(|state| {
+                                        let history = state.history.as_ref()?;
+                                        let id = state.commit.as_deref()?;
+                                        history.commits.iter().position(|c| c.id == id)
+                                    });
+                                    if let Some(index) = index {
+                                        this.open_commit(index, cx);
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                    })
             })
             .child(div().flex_1())
             // At the far end because it changes how the list is drawn, not
             // what it shows — the same seat as the review's tree toggle.
+            // **No button where there is no room for the column**, the rule
+            // the rails follow for a situational view: a target that never
+            // answers is one the eye learns to skip. In a side column the
+            // branches are the top bar's picker, which is where they were.
+            .when(roomy, |header| {
+                header.child(
+                    Button::new("history-branches")
+                        .ghost()
+                        .xsmall()
+                        .icon(crate::ui::icons::icon("git-branch"))
+                        .selected(want_branches)
+                        .tooltip(if want_branches {
+                            tr!("history-branches-hide")
+                        } else {
+                            tr!("history-branches-show")
+                        })
+                        .on_click(cx.listener(|_this, _, _, cx| {
+                            crate::ui::settings::Settings::update_global(cx, |s| {
+                                s.history_branches = !s.history_branches;
+                            });
+                            cx.notify();
+                        })),
+                )
+            })
             .child(
                 Button::new("history-graph")
                     .ghost()
@@ -510,6 +567,9 @@ impl ClaudhubApp {
         }
 
         let entity = cx.entity();
+        // Put aside before the list's closure takes the handle: the measuring
+        // canvas is built after it, and there is nothing left to clone by then.
+        let measured = entity.clone();
         let count = history.commits.len();
         // Without the graph the rows keep a sliver of left padding, not a
         // gutter: the lanes are what took the width, and the width is the
@@ -620,20 +680,145 @@ impl ClaudhubApp {
                 ),
         );
 
+        // The panel's own shape, measured the way the graph's width is and for
+        // a question of its own: which way the split below runs. The width
+        // above is the room left beside the gutter, and says nothing about the
+        // room a second column would have.
+        let measure = canvas(
+            {
+                move |bounds: Bounds<Pixels>, window, cx| {
+                    measured.update(cx, |this, _| {
+                        let shape = this.history_shape;
+                        if (bounds.size.width - shape.width).abs() > px(0.5)
+                            || (bounds.size.height - shape.height).abs() > px(0.5)
+                        {
+                            this.history_shape = bounds.size;
+                            window.request_animation_frame();
+                        }
+                    });
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+
         // The graph alone does not say what a commit touched: the list of its
-        // files goes underneath, otherwise selecting a commit opens only its
-        // first file and the others stay invisible.
-        let Some(range) = commit_range else {
-            return graph.into_any_element();
+        // files goes with it, otherwise selecting a commit opens only its
+        // first file and the others stay invisible. Beside it where the panel
+        // is wide, under it where it is a column.
+        let files =
+            commit_range.map(|range| self.render_file_list(range, window, cx).into_any_element());
+        let body = match (files, shape) {
+            // No commit chosen: the log has its column to itself.
+            (None, _) => graph.into_any_element(),
+            (Some(files), Shape::Column) => v_resizable("claudhub-history-split")
+                .with_state(&self.history_split)
+                .child(resizable_panel().size(px(420.)).child(graph))
+                .child(resizable_panel().child(files))
+                .into_any_element(),
+            // **The files are the pane given a size**, never the graph: what
+            // one widens the zone for is the summary column, so the surplus
+            // has to fall to the slot no size fixes.
+            (Some(files), _) => h_resizable("claudhub-history-split-side")
+                .with_state(&self.history_split_side)
+                .child(resizable_panel().child(graph))
+                .child(resizable_panel().size(px(440.)).child(files))
+                .into_any_element(),
         };
-        v_resizable("claudhub-history-split")
-            .with_state(&self.history_split)
-            .child(resizable_panel().size(px(420.)).child(graph))
-            .child(
-                resizable_panel()
-                    .child(self.render_file_list(range, window, cx).into_any_element()),
-            )
+        // And the branches, where there is a column for them. **Nested rather
+        // than a third slot**: dragging this divider would otherwise move the
+        // one between the graph and the files with it.
+        let body = match shape {
+            Shape::Full => h_resizable("claudhub-history-branches")
+                .with_state(&self.history_split_branches)
+                .child(
+                    resizable_panel()
+                        .size(px(260.))
+                        .child(self.render_history_branches(cx)),
+                )
+                .child(resizable_panel().child(body))
+                .into_any_element(),
+            _ => body,
+        };
+        div()
+            .relative()
+            .size_full()
+            .child(measure)
+            .child(body)
             .into_any_element()
+    }
+
+    /// The branches, as the history's leftmost column.
+    ///
+    /// The same surface as the top bar's picker, and the one the tool window
+    /// held before the two were merged — see `branch_picker::Mode`. It has a
+    /// filter field of its own, so the click is filed under its own pane:
+    /// `Ctrl+F` standing here must aim at that field and not at the log's bar.
+    /// **Captured after** the panel's own, which runs first — capture goes
+    /// outside in — and files everything under the history.
+    fn render_history_branches(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let app = cx.entity();
+        div()
+            .size_full()
+            .border_r_1()
+            .border_color(cx.theme().border)
+            .child(self.branches_dock.clone())
+            .capture_any_mouse_down(move |_, _window, cx| {
+                app.update(cx, |app, cx| {
+                    app.touch_pane(crate::ui::find::Pane::Branches, cx)
+                });
+            })
+    }
+}
+
+/// How the panel lays out what it holds — from its own shape, and nothing else.
+///
+/// The same view has to read in a tall narrow column and in a wide short zone,
+/// which is the whole point of a panel one can drag anywhere; an arrangement
+/// fixed one way is a panel that belongs on one edge only. It is the rule the
+/// row's own columns already follow, one level up: what there is no room for
+/// is not drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// A tall narrow column. The graph, and the chosen commit's files under it.
+    Column,
+    /// Wide and short. The files move beside the graph.
+    Wide,
+    /// Room for a third column: the branches join them, on the left. It is the
+    /// arrangement of PhpStorm's Git window, and what a bottom zone gives.
+    Full,
+}
+
+impl Shape {
+    /// **Wider than tall** is what tells a bottom zone from a side one; the two
+    /// floors are what keeps every column able to carry a path. Below them a
+    /// panel four hundred pixels across is wider than it is tall as soon as it
+    /// is short, and splitting it would leave columns too narrow to read.
+    ///
+    /// The first floor is twice the right zone's own width — the narrowest
+    /// column the window already asks a file list to live in. The second adds
+    /// the branches' own column to it.
+    fn of(size: Size<Pixels>) -> Self {
+        if size.width <= size.height {
+            return Self::Column;
+        }
+        if size.width >= px(900.) {
+            Self::Full
+        } else if size.width >= px(640.) {
+            Self::Wide
+        } else {
+            Self::Column
+        }
+    }
+
+    /// The same shape with the branches column given up — what the header's
+    /// toggle asks for. It cannot turn a column into anything.
+    fn without_branches(self) -> Self {
+        match self {
+            Self::Full => Self::Wide,
+            other => other,
+        }
     }
 }
 
@@ -710,6 +895,7 @@ fn render_commit(
     // row's three vectors of lanes was an allocation per visible row and per
     // frame.
     let for_graph = history.clone();
+    let menu_entity = entity.clone();
     let entity = entity.clone();
     // Hidden, the gutter is a sliver of padding and there is nothing to
     // paint in it — the canvas would draw lanes across the summary.
@@ -806,7 +992,80 @@ fn render_commit(
                     .child(text.date.clone()),
             )
         })
+        // **After the click and not before**: a context menu is not an
+        // interactive element, so there is nothing left to hang a click on once
+        // it wraps the row. The terminals' tabs learned this first.
+        .context_menu(commit_menu(commit, index, &menu_entity))
         .into_any_element()
+}
+
+/// What a right click offers on a commit.
+///
+/// A history is read to find one commit and then to *say* which — in a message,
+/// an issue, a `git` one types beside. Copying its reference is therefore the
+/// gesture, and everything else here is one the row already knew how to do and
+/// had no way of being asked for.
+fn commit_menu(
+    commit: &crate::git::Commit,
+    index: usize,
+    entity: &Entity<ClaudhubApp>,
+) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+    use gpui_component::menu::PopupMenuItem;
+
+    let entity = entity.clone();
+    // The three strings, taken now: the closure outlives the row, and the
+    // history it came from is replaced whole on every reload.
+    let (id, short, summary) = (
+        commit.id.clone(),
+        commit.short.clone(),
+        commit.summary.clone(),
+    );
+    move |menu, _window, _cx| {
+        let copy = |text: String| {
+            move |_: &gpui::ClickEvent, _window: &mut Window, cx: &mut gpui::App| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+            }
+        };
+        let (for_base, for_tag) = (entity.clone(), entity.clone());
+        let at = id.clone();
+        menu.item(
+            PopupMenuItem::new(tr!("commit-copy-ref"))
+                .icon(icon("copy"))
+                .on_click(copy(id.clone())),
+        )
+        .item(PopupMenuItem::new(tr!("commit-copy-short")).on_click(copy(short.clone())))
+        .item(PopupMenuItem::new(tr!("commit-copy-summary")).on_click(copy(summary.clone())))
+        .separator()
+        // What the review compares against. A commit read in the history is
+        // very often the answer to "since when", which is the one question the
+        // base picker exists for.
+        .item(
+            PopupMenuItem::new(tr!("commit-set-base"))
+                .icon(icon("file-diff"))
+                .on_click({
+                    let (entity, base) = (for_base.clone(), at.clone());
+                    move |_, _window, cx| {
+                        let base = base.clone();
+                        entity.update(cx, |this, cx| this.set_base(base, cx));
+                    }
+                }),
+        )
+        // The tag dialog marks the commit the history has selected, so the
+        // selection is the whole of what this has to arrange.
+        .item(
+            PopupMenuItem::new(tr!("commit-tag-here"))
+                .icon(icon("tags"))
+                .on_click({
+                    let entity = for_tag.clone();
+                    move |_, window, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.open_commit(index, cx);
+                            this.prompt_new_tag(window, cx);
+                        });
+                    }
+                }),
+        )
+    }
 }
 
 /// Paints a row's portion of the graph.
@@ -889,4 +1148,61 @@ fn paint_graph(row: &GraphRow, bounds: Bounds<Pixels>, window: &mut Window, cx: 
         ),
         own,
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shape(width: f32, height: f32) -> Shape {
+        Shape::of(gpui::size(px(width), px(height)))
+    }
+
+    /// The side zones are tall and narrow: everything stacks, which is the only
+    /// way what is left keeps a readable width.
+    #[test]
+    fn a_side_zone_stacks_them() {
+        assert_eq!(shape(320., 760.), Shape::Column);
+        assert_eq!(shape(460., 900.), Shape::Column);
+    }
+
+    /// Wide and short, but with room for two columns only: the commit's files
+    /// move beside the graph, the branches stay in the top bar's picker.
+    #[test]
+    fn a_narrow_bottom_zone_lays_out_two_columns() {
+        assert_eq!(shape(700., 300.), Shape::Wide);
+        assert_eq!(shape(899., 240.), Shape::Wide);
+    }
+
+    /// A real bottom zone: branches, graph and files, which is the arrangement
+    /// this exists for.
+    #[test]
+    fn a_wide_bottom_zone_lays_out_three() {
+        assert_eq!(shape(1900., 240.), Shape::Full);
+        assert_eq!(shape(900., 400.), Shape::Full);
+    }
+
+    /// Wider than tall is not enough on its own: a short **narrow** panel split
+    /// in two leaves two columns too narrow to carry a path.
+    #[test]
+    fn a_short_narrow_panel_still_stacks_them() {
+        assert_eq!(shape(400., 200.), Shape::Column);
+        assert_eq!(shape(639., 120.), Shape::Column);
+    }
+
+    /// Nothing measured yet — the first frame, before the canvas has run. It
+    /// starts stacked, which is what the panel was before any of this.
+    #[test]
+    fn an_unmeasured_panel_stacks_them() {
+        assert_eq!(shape(0., 0.), Shape::Column);
+    }
+
+    /// Giving up the branches column falls back to the arrangement without
+    /// them, and cannot make a column into anything.
+    #[test]
+    fn giving_up_the_branches_falls_back_one_step() {
+        assert_eq!(Shape::Full.without_branches(), Shape::Wide);
+        assert_eq!(Shape::Wide.without_branches(), Shape::Wide);
+        assert_eq!(Shape::Column.without_branches(), Shape::Column);
+    }
 }

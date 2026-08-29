@@ -138,7 +138,7 @@ impl ClaudhubApp {
         // the preview tab like a file, and by the same rule.
         let ephemeral = self.asked_for(&worktree, &path).unwrap_or(false);
         self.make_tab_room(&worktree, &path, ephemeral, window, cx);
-        let (reopened, panels) = self.tab_panel(&worktree, &path, &input, window, cx);
+        let (reopened, panel) = self.tab_panel(&worktree, &path, &input, window, cx);
         let editing = super::explorer::Editing {
             worktree: worktree.clone(),
             path: path.clone(),
@@ -150,7 +150,7 @@ impl ClaudhubApp {
             reveal_at: None,
             reveal_tries: 0,
             host,
-            panels,
+            panel,
             base: None,
             // Said to have been asked for, and it is what stops it being asked:
             // an image has no base to compare a buffer against, and the gutter

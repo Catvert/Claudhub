@@ -39,6 +39,7 @@ actions!(
         OpenSettings,
         ShowShortcuts,
         ToggleSidebar,
+        ToggleZen,
         ZoomIn,
         ZoomOut,
         ZoomReset,
@@ -100,13 +101,15 @@ actions!(
     ]
 );
 
-/// Go to the n-th screen.
+/// Fold the n-th tool window away, or bring it out.
 ///
-/// An action *with a payload* rather than four actions, as for the worktrees:
-/// `Alt+1` to `Alt+4` do the same thing up to an index.
+/// An action *with a payload* rather than nine actions, as for the worktrees:
+/// `Alt+1` to `Alt+9` do the same thing up to an index. The rank is
+/// `rails::TOOLS`'s, which is why a tool window only ever joins that table by
+/// the end.
 #[derive(Clone, PartialEq, Debug, Default, gpui::Action)]
 #[action(namespace = claudhub, no_json)]
-pub struct GoToWorkspace {
+pub struct ToggleTool {
     pub index: usize,
 }
 
@@ -653,6 +656,10 @@ table!(STANDARD, standard_bindings, false, [
     // Every editor's convention, including on Linux.
     Window "secondary-," => OpenSettings, PREDICATE, "shortcut-settings";
     Window "secondary-b" => ToggleSidebar, WINDOW_PREDICATE, "shortcut-sidebar";
+    // The three zones at once. `f12` and not a letter: the letters that were
+    // free are the ones a terminal wants, and this is a gesture one makes with
+    // the hand already on the keyboard.
+    Window "secondary-f12" => ToggleZen, PREDICATE, "shortcut-zen";
     // Zoom aims at the area that has the focus: the terminal when it has it,
     // the diffs otherwise. `secondary-=` as much as `secondary-+` because the
     // plus sign needs Shift on an azerty keyboard as on a qwerty one.
@@ -673,15 +680,15 @@ table!(STANDARD, standard_bindings, false, [
     // Valid right into the terminal: what we take from it is readline's numeric
     // argument prefix (`M-1`), and not a control character like `Ctrl+R` — see
     // `WINDOW_PREDICATE`.
-    Window "alt-1" => GoToWorkspace { index: 0 }, PREDICATE, "shortcut-workspace";
-    Window "alt-2" => GoToWorkspace { index: 1 }, PREDICATE, "shortcut-workspace";
-    Window "alt-3" => GoToWorkspace { index: 2 }, PREDICATE, "shortcut-workspace";
-    Window "alt-4" => GoToWorkspace { index: 3 }, PREDICATE, "shortcut-workspace";
-    Window "alt-5" => GoToWorkspace { index: 4 }, PREDICATE, "shortcut-workspace";
-    Window "alt-6" => GoToWorkspace { index: 5 }, PREDICATE, "shortcut-workspace";
-    Window "alt-7" => GoToWorkspace { index: 6 }, PREDICATE, "shortcut-workspace";
-    Window "alt-8" => GoToWorkspace { index: 7 }, PREDICATE, "shortcut-workspace";
-    Window "alt-9" => GoToWorkspace { index: 8 }, PREDICATE, "shortcut-workspace";
+    Window "alt-1" => ToggleTool { index: 0 }, PREDICATE, "shortcut-tool";
+    Window "alt-2" => ToggleTool { index: 1 }, PREDICATE, "shortcut-tool";
+    Window "alt-3" => ToggleTool { index: 2 }, PREDICATE, "shortcut-tool";
+    Window "alt-4" => ToggleTool { index: 3 }, PREDICATE, "shortcut-tool";
+    Window "alt-5" => ToggleTool { index: 4 }, PREDICATE, "shortcut-tool";
+    Window "alt-6" => ToggleTool { index: 5 }, PREDICATE, "shortcut-tool";
+    Window "alt-7" => ToggleTool { index: 6 }, PREDICATE, "shortcut-tool";
+    Window "alt-8" => ToggleTool { index: 7 }, PREDICATE, "shortcut-tool";
+    Window "alt-9" => ToggleTool { index: 8 }, PREDICATE, "shortcut-tool";
 
     // ── The worktrees ───────────────────────────────────────────────────────
     // Nine bindings and a single help line: `merge` recognises the run of digits
@@ -1603,17 +1610,19 @@ pub fn run_db_query(
     this.run_db_query(cx);
 }
 
-pub fn go_to_workspace(
+/// `Alt+N` folds a tool window away, or brings it out.
+///
+/// The convention of every editor that keeps its users in one window, and the
+/// ranks are `rails::TOOLS`'s — which is why a tool window only ever joins that
+/// table by the end.
+pub fn toggle_tool(
     this: &mut ClaudhubApp,
-    action: &GoToWorkspace,
+    action: &ToggleTool,
     window: &mut Window,
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
-    if let Some(workspace) = crate::ui::workspace::Workspace::ALL
-        .get(action.index)
-        .copied()
-    {
-        this.enter_workspace(workspace, window, cx);
+    if let Some(tool) = crate::ui::rails::TOOLS.get(action.index) {
+        this.press_tool(tool.panel, window, cx);
     }
 }
 
@@ -1696,6 +1705,15 @@ pub fn toggle_sidebar(
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     this.toggle_sidebar(window, cx);
+}
+
+pub fn toggle_zen(
+    this: &mut ClaudhubApp,
+    _: &ToggleZen,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.toggle_zen(window, cx);
 }
 
 pub fn previous_terminal(

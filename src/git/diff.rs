@@ -113,6 +113,11 @@ pub struct FileDiff {
 pub fn files(dir: &Path, range: &Range) -> Result<Vec<DiffFile>> {
     let mut args: Vec<String> = vec!["diff".into(), "--numstat".into(), "-z".into(), "-M".into()];
     args.extend(range.args());
+    // The revision list is closed, as it is under `file` — which closes it
+    // because it has a path to add. A base named like a directory is refused
+    // outright otherwise: `ambiguous argument 'dev': both revision and
+    // filename`.
+    args.push("--".into());
     let out = git(dir, &args)?;
     Ok(parse_numstat(&out))
 }
