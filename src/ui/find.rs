@@ -342,14 +342,46 @@ impl ClaudhubApp {
 
     /// Closes the target panel's bar.
     pub(super) fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let key = self.find_key(self.pane);
+        self.close_find_in(self.pane, window, cx);
+    }
+
+    /// Closes **a named panel's** bar, and empties it.
+    ///
+    /// Emptying is the point: a closed bar already filters nothing — `query`
+    /// answers with an empty string — so keeping the text only mattered for
+    /// reopening, and what reopening then showed was the previous search
+    /// applied to a list one had stopped searching. Closing is closing, by
+    /// whichever of the three gestures: the cross, `Esc`, or the magnifier
+    /// pressed a second time.
+    ///
+    /// Whether the panel is open is not checked: the bar is closed either way,
+    /// and the focus has to come back regardless.
+    pub(super) fn close_find_in(
+        &mut self,
+        pane: Pane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = self.find_key(pane);
         if let Some(finder) = self.finders.get_mut(&key) {
             finder.open = false;
+            let input = finder.input.clone();
+            input.update(cx, |state, cx| state.set_value("", window, cx));
         }
+        // The panels that jump hold offsets computed for the query that is
+        // gone. `set_value` emits no change event, so nothing else says so.
+        self.find_reset(pane);
         // The focus goes back to the view: leaving it in a field just hidden
         // would make the review arrows inert.
         self.focus_handle(cx).focus(window, cx);
         cx.notify();
+    }
+
+    /// Whether a panel's bar is open — what makes the magnifier a toggle.
+    fn find_open(&self, pane: Pane) -> bool {
+        self.finders
+            .get(&self.find_key(pane))
+            .is_some_and(|finder| finder.open)
     }
 
     /// The current occurrence changes in the panels that jump.
@@ -381,15 +413,32 @@ impl ClaudhubApp {
     ///
     /// Pressing it does what the key does — `open_find_in`, then the focus —
     /// so the two cannot come apart.
+    ///
+    /// It is a **toggle**, and it shows which way it is: a button that opens a
+    /// bar already open does nothing visible, and the bar it would have opened
+    /// is right under it with a cross of its own. Pressed again it closes, and
+    /// closing empties, like the cross and like `Esc`.
     pub(super) fn find_button(&mut self, pane: Pane, cx: &mut Context<Self>) -> impl IntoElement {
         use gpui_component::button::{Button, ButtonVariants as _};
-        use gpui_component::Sizable as _;
+        use gpui_component::{Selectable as _, Sizable as _};
+        let open = self.find_open(pane);
         Button::new("find-in-pane")
             .ghost()
             .xsmall()
+            .selected(open)
             .icon(crate::ui::icons::icon("search"))
-            .tooltip(pane.placeholder())
+            // The tooltip says what the *next* press does, which is the only
+            // way a toggle announces the half it is on.
+            .tooltip(if open {
+                tr!("find-close")
+            } else {
+                pane.placeholder()
+            })
             .on_click(cx.listener(move |this, _, window, cx| {
+                if open {
+                    this.close_find_in(pane, window, cx);
+                    return;
+                }
                 let input = this.open_find_in(pane, window, cx);
                 gpui::Focusable::focus_handle(&input, cx).focus(window, cx);
             }))
