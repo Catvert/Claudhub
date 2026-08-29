@@ -508,7 +508,7 @@
   "settings-sentry-query": "Query",
   "settings-sentry-query-help": "Empty: is:unresolved. The project, for its part, belongs to the repository and is chosen in the panel.",
   "settings-sentry-token": "API token",
-  "settings-sentry-token-help": "Write $SENTRY_TOKEN to read it from the worker's environment rather than storing it here.",
+  "settings-sentry-token-help": "Three forms: the token itself; $SENTRY_TOKEN, read from the worker's environment; or keyring:sentry.token, read from the system keyring. The last two keep it out of a file that gets copied around.",
   "settings-shell": "Shell",
   "settings-shell-default": "Login shell",
   "settings-shell-detected": "Detected shells",

@@ -217,6 +217,7 @@ src/
     hunks.rs        la gouttière de l'éditeur, et la comparaison de lignes — pur
     merge.rs        la fusion à trois voies : ce que chaque côté a fait — pur
     merge_view.rs   les trois colonnes, et le clic qui tranche
+    keyring.rs      où vit un jeton : la valeur, `$NOM`, ou le trousseau
     sentry.rs       les deux vues Sentry : la liste et l'erreur qu'on lit
     ci.rs           les exécutions de la branche, lues par `gh`
     find.rs         la recherche d'un panneau, et son routage
@@ -720,7 +721,11 @@ deux dépôts d'une même organisation non. Ce qui décide vit dans `sentry.rs`,
 et testé sur des fixtures : les URL, les formes que l'API rend, le filtre, le
 prompt. Le jeton ne traverse jamais le script d'un `Debug` : `{secret}` est
 substitué **dans le worker** (`outside::Cap`), et `$SENTRY_TOKEN` est lu dans son
-environnement. Un identifiant d'envoi écarte la réponse en retard, comme la
+environnement. La troisième forme, `keyring:sentry.token`, est résolue **côté
+interface** (`ui/keyring.rs`) : un trousseau appartient à une session de bureau,
+qui est du côté Windows quand les workers tournent dans WSL, et le résoudre là-bas
+chercherait un bus de session qu'une distribution sans écran n'a pas. Lu une fois
+et gardé — ouvrir un trousseau peut demander de le déverrouiller. Un identifiant d'envoi écarte la réponse en retard, comme la
 console SQL.
 
 **La CI** (`ui/ci.rs`) — les exécutions de la branche, par `gh` et non par l'API

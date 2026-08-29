@@ -28,6 +28,7 @@ mod hunks;
 mod icons;
 mod inflight;
 mod jumps;
+mod keyring;
 mod lsp;
 mod merge;
 mod merge_view;

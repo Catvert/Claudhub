@@ -309,13 +309,15 @@ pub const TOOLS: &[Tool] = &[
         home: Anchor::new(Side::Left, Half::Bottom),
         conditional: false,
     },
-    // Beside what one picks from: an error one has read is a file one goes and
-    // opens, which is the left edge's whole business.
+    // **On the right, where one reads where things stand.** A list of errors
+    // answers "what is happening in production", which is of a kind with the
+    // history and the runs beside it — and what one does with one is open it in
+    // the centre, so it has no business among what fills that centre.
     Tool {
         panel: "ClaudhubSentry",
         title: Label("panel-sentry"),
         icon: "triangle-alert",
-        home: Anchor::new(Side::Left, Half::Bottom),
+        home: Anchor::new(Side::Right, Half::Top),
         conditional: false,
     },
     // And beside what happened: a run answers "what became of this branch",

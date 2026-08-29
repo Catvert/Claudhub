@@ -508,7 +508,7 @@
   "settings-sentry-query": "Requête",
   "settings-sentry-query-help": "Vide : is:unresolved. Le projet, lui, appartient au dépôt et se choisit dans le panneau.",
   "settings-sentry-token": "Jeton d'API",
-  "settings-sentry-token-help": "Écrivez $SENTRY_TOKEN pour le lire dans l'environnement du worker plutôt que de l'écrire ici.",
+  "settings-sentry-token-help": "Trois formes : le jeton lui-même ; $SENTRY_TOKEN, lu dans l'environnement du worker ; ou keyring:sentry.token, lu dans le trousseau du système. Les deux dernières le gardent hors d'un fichier qu'on recopie.",
   "settings-shell": "Shell",
   "settings-shell-default": "Shell de connexion",
   "settings-shell-detected": "Shells détectés",

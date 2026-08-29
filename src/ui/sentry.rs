@@ -80,8 +80,13 @@ impl ClaudhubApp {
     fn sentry_account(&self, cx: &App) -> Option<(String, String, crate::runtime::Secret)> {
         let settings = Settings::global(cx);
         let org = settings.sentry_org.trim().to_string();
-        let token = settings.sentry_token.trim().to_string();
-        if org.is_empty() || token.is_empty() {
+        // **Resolved here and not in the worker**, and only for the keyring
+        // form: a keyring belongs to a desktop session, which is the Windows
+        // side when the workers live in WSL. `$NAME` travels as it stands and
+        // is read in the worker's environment, which is where the request is
+        // made. See `ui::keyring`.
+        let token = crate::ui::keyring::resolve(&settings.sentry_token)?;
+        if org.is_empty() {
             return None;
         }
         let host = match settings.sentry_host.trim() {
