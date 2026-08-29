@@ -59,7 +59,14 @@ use crate::ui::terminal_view::OpenTerminal;
 // 25: the screens went. One area instead of nine, the panels shared out
 // between three tool zones and a centre of documents, and the file's shape
 // went with them — a table keyed by screen names builds nothing here.
-const LAYOUT_VERSION: usize = 25;
+// 26: the SQL console became one panel per tab, the plugins' panels went with
+// the plugins, and Sentry and the CI came back as views of our own. Pruning
+// would have carried the arrangement across — dead names are dropped and the
+// new ones are one button away — but three panels that arrangement has never
+// heard of are three one would put in place by hand. The default is the one
+// this window ended up giving itself, so rebuilding costs nothing to anyone
+// who had not moved anything since.
+const LAYOUT_VERSION: usize = 26;
 
 /// The window's saved arrangement.
 ///
