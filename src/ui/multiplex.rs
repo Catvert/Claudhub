@@ -17,13 +17,21 @@
 use std::path::PathBuf;
 
 use gpui::{prelude::*, px, Context, Entity, Focusable as _, SharedString, Window};
-use gpui_component::{h_flex, v_flex, ActiveTheme};
+use gpui_component::{
+    h_flex,
+    resizable::{h_resizable, resizable_panel, v_resizable},
+    v_flex, ActiveTheme,
+};
 
 use super::app::ClaudhubApp;
 use super::terminal_view::TerminalView;
 use crate::tr;
 
-/// How many tiles each row of the grid carries.
+/// How many tiles each row of the grid carries — the shape it **starts** at.
+///
+/// What it decides is where a terminal lands, not how much room it keeps: the
+/// rows and the tiles in them are resizable, and the sizes a hand has set live
+/// in the group's own state from then on.
 ///
 /// As square as the count allows, then **wider than tall**: a terminal is
 /// eighty columns of text, and a tall thin one wraps every command it is given.
@@ -82,29 +90,43 @@ impl ClaudhubApp {
                 .into_any_element();
         }
         let mut rest = tiles.into_iter();
+        let shape = rows(rest.len());
+        // **The rows resize, and so do the tiles inside each one.** The state
+        // is not held here: a group with no state of its own keeps one on the
+        // window, filed under its id — so the ids have to be stable, and they
+        // are the row's rank. A row that gains or loses a terminal has its
+        // sizes redistributed by the group itself (`sync_panels_count`), which
+        // is what makes `rows` a *starting* shape rather than a fixed one.
+        //
+        // Padding on each panel and not a `gap` on the group: the handle is
+        // drawn between two panels, four pixels of gap would put it in the
+        // middle of a strip of background. It is the reason the fork takes the
+        // dock's `split_gap` as padding too.
+        //
+        // And the group is wrapped in a flex item, which it has to be: it
+        // renders `size_full`, a hundred percent of the parent's **height** —
+        // not of what the title bar leaves. `flex_1` is what asks for the rest.
         v_flex()
             .flex_1()
             .min_h_0()
-            .gap(px(4.))
-            .p(px(4.))
-            .children(rows(rest.len()).into_iter().map(|width| {
-                // **A bare flex row and not `h_flex`**, which centres its
-                // children: a centred tile takes the height of its content
-                // instead of the row's, so the grid came out as a strip of
-                // header floating in the middle of an empty window.
-                gpui::div()
-                    .flex()
-                    .flex_row()
-                    .flex_1()
-                    .min_h_0()
-                    .gap(px(4.))
-                    .children(
-                        rest.by_ref()
-                            .take(width)
-                            .map(|tile| tile.render(window, cx))
-                            .collect::<Vec<_>>(),
-                    )
-            }))
+            .p(px(2.))
+            .child(
+                v_resizable("multiplex-rows").children(shape.into_iter().enumerate().map(
+                    |(row, width)| {
+                        let tiles: Vec<Tile> = rest.by_ref().take(width).collect();
+                        resizable_panel().child(
+                            h_resizable(("multiplex-row", row)).children(
+                                tiles
+                                    .into_iter()
+                                    .map(|tile| {
+                                        resizable_panel().p(px(2.)).child(tile.render(window, cx))
+                                    })
+                                    .collect::<Vec<_>>(),
+                            ),
+                        )
+                    },
+                )),
+            )
             .into_any_element()
     }
 }

@@ -116,9 +116,19 @@ impl PestState {
     }
 }
 
+/// Frees the texture a frame uploaded to the atlas. Nothing else does — see
+/// [`TestsView::pest_frame`] — and the window has to be named: it is taken out
+/// of the app's list while it updates, which is when every one of these runs.
+fn drop_cast(cast: Option<Cast>, window: &mut Window, cx: &mut gpui::App) {
+    if let Some(cast) = cast {
+        cx.drop_image(cast.image, Some(window));
+    }
+}
+
 /// One frame of the browser a run drives, as the panel holds it.
 pub struct Cast {
-    pub image: std::sync::Arc<gpui::Image>,
+    /// Decoded, not the JPEG: see [`TestsView::pest_frame`].
+    pub image: std::sync::Arc<gpui::RenderImage>,
     /// The browser's own size, which sets the frame's shape: the panel is
     /// rarely that ratio, and a stretched page reads as a broken one.
     pub width: u32,
@@ -577,7 +587,7 @@ impl ClaudhubApp {
                 id,
             });
         }
-        self.pest_runs.insert(
+        let replaced = self.pest_runs.insert(
             worktree.clone(),
             RunState {
                 since,
@@ -592,6 +602,7 @@ impl ClaudhubApp {
                 run: None,
             },
         );
+        drop_cast(replaced.and_then(|state| state.cast), window, cx);
         self.travel_to_panel(crate::ui::panels::TestRunPanel::NAME, window, cx);
         cx.notify();
     }
@@ -624,14 +635,22 @@ impl ClaudhubApp {
 
     /// The newest picture of the browser a run drives.
     ///
-    /// The frame before it is evicted from gpui's asset cache as it is
-    /// replaced: `Image::from_bytes` keys the decoded texture by digesting the
-    /// bytes, so every frame is a new entry, and a run is thousands of them.
+    /// Decoded here, rather than handed to `img()` as JPEG bytes: that path
+    /// goes through gpui's asset cache, which decodes off-thread and draws
+    /// **nothing** until it is done. A stream of one-shot images therefore
+    /// blinks — every frame starts as a hole. A `RenderImage` is drawn the
+    /// moment it is set, so the previous frame stays up until this one is
+    /// ready to replace it.
+    ///
+    /// The texture it leaves behind has to be dropped by hand: nothing else
+    /// reaches the atlas — `remove_asset` only forgets a decode task, and
+    /// `RenderImage` has no `Drop` — and a run is thousands of frames.
     pub(super) fn pest_frame(
         &mut self,
         worktree: PathBuf,
         id: u64,
         frame: crate::suite::Frame,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(state) = self.pest_runs.get_mut(&worktree) else {
@@ -640,17 +659,17 @@ impl ClaudhubApp {
         if id < state.since || id > state.id {
             return;
         }
+        let Ok(image) = gpui::Image::from_bytes(gpui::ImageFormat::Jpeg, frame.jpeg)
+            .to_image_data(cx.svg_renderer())
+        else {
+            return;
+        };
         let previous = state.cast.replace(Cast {
-            image: std::sync::Arc::new(gpui::Image::from_bytes(
-                gpui::ImageFormat::Jpeg,
-                frame.jpeg,
-            )),
+            image,
             width: frame.width,
             height: frame.height,
         });
-        if let Some(previous) = previous {
-            previous.image.remove_asset(cx);
-        }
+        drop_cast(previous, window, cx);
         cx.notify();
     }
 
@@ -763,7 +782,7 @@ impl ClaudhubApp {
     /// Forgets every verdict of the worktree — the dots, the bar's totals,
     /// the run panel — here and in the store. What a fresh look asks for
     /// after a big rebase, when yesterday's reds say nothing about today.
-    fn reset_tests(&mut self, cx: &mut Context<Self>) {
+    fn reset_tests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(active) = self.active.clone() else {
             return;
         };
@@ -776,7 +795,11 @@ impl ClaudhubApp {
         {
             return;
         }
-        self.pest_runs.remove(&active);
+        drop_cast(
+            self.pest_runs.remove(&active).and_then(|state| state.cast),
+            window,
+            cx,
+        );
         if let Some(state) = self.pest.get_mut(&active) {
             state.marks.clear();
             state.last_run = None;
@@ -1057,8 +1080,8 @@ impl ClaudhubApp {
                     .xsmall()
                     .icon(icon("eraser"))
                     .tooltip(tr!("tests-reset"))
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        this.reset_tests(cx);
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.reset_tests(window, cx);
                     })),
             )
             .child(

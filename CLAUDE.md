@@ -477,7 +477,10 @@ dock ne sait pas faire : surveiller cinq agents demande de voir cinq terminaux
 *en même temps*, là où un groupe d'onglets en montre un. Il remplace tout ce
 qui est sous la barre de titre — bandeaux, docks, barre d'état — par des tuiles,
 tous worktrees confondus, chacune disant à quel projet elle appartient. La
-forme de la grille est pure et testée (`multiplex::rows`) ; le clavier est
+forme **de départ** de la grille est pure et testée (`multiplex::rows`) —
+lignes et tuiles se redimensionnent ensuite à la main, par les groupes
+redimensionnables de gpui-component, dont l'état vit sur la fenêtre sous l'id
+du groupe et non chez nous ; le clavier est
 remis des deux côtés de la bascule, ce qui avait le focus n'étant plus peint
 après. À ne pas confondre avec `terminals_everywhere`, qui reste ce qu'il est :
 les terminaux de tous les worktrees dans le dock, la fenêtre entière autour.

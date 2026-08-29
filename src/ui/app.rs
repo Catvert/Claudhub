@@ -2123,7 +2123,7 @@ impl ClaudhubApp {
                 worktree,
                 id,
                 frame,
-            } => self.pest_frame(worktree, id, frame, cx),
+            } => self.pest_frame(worktree, id, frame, window, cx),
             Evt::TestsRan { worktree, id, run } => self.pest_ran(worktree, id, run, cx),
             Evt::WtQuestions {
                 main,
