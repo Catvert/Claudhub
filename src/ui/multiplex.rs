@@ -53,6 +53,45 @@ pub fn rows(count: usize) -> Vec<usize> {
         .collect()
 }
 
+/// Where two tiles change places, read off the order the grid walks.
+///
+/// A drop on the tile one picked up is a gesture that changed its mind, and a
+/// tile that went away while the pointer was down — a shell that exited — is
+/// one that has no place any more. Both answer `None`, which is what "do
+/// nothing" is spelt as here.
+pub fn exchange(order: &[u64], from: u64, to: u64) -> Option<(usize, usize)> {
+    if from == to {
+        return None;
+    }
+    let at = |wanted: u64| order.iter().position(|id| *id == wanted);
+    Some((at(from)?, at(to)?))
+}
+
+/// A tile being dragged.
+///
+/// The payload of the drag and the ghost that follows the pointer: a drag's
+/// value has to be a type of its own, since that is what a drop listener reads
+/// to know the drag is one of ours.
+#[derive(Clone)]
+pub struct DraggedTile {
+    view: u64,
+    label: SharedString,
+}
+
+impl gpui::Render for DraggedTile {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::div()
+            .px_2()
+            .py_1()
+            .rounded(cx.theme().radius)
+            .bg(cx.theme().secondary)
+            .border_1()
+            .border_color(cx.theme().border)
+            .text_xs()
+            .child(self.label.clone())
+    }
+}
+
 impl ClaudhubApp {
     /// The grid, in place of the whole workspace.
     pub(super) fn render_multiplex(
@@ -147,7 +186,14 @@ impl Tile {
         let (repo, checkout) = self.project;
         let muted = cx.theme().muted_foreground;
         let worktree = self.worktree.clone();
+        let label = self.label.clone();
+        let dropped = id.as_u64();
         v_flex()
+            // An id, because a drop target has to have one — and the whole
+            // tile is the target rather than its head: a strip of twenty-odd
+            // pixels is a thing one misses, and there is nothing else a tile
+            // can mean as a destination.
+            .id(("multiplex-tile", id))
             .flex_1()
             .min_w_0()
             .min_h_0()
@@ -155,6 +201,10 @@ impl Tile {
             .overflow_hidden()
             .bg(cx.theme().background)
             .border_1()
+            .drag_over::<DraggedTile>(|style, _, _, cx| style.border_color(cx.theme().ring))
+            .on_drop(cx.listener(move |this, dragged: &DraggedTile, _, cx| {
+                this.swap_tiles(dragged.view, dropped, cx);
+            }))
             // The one under the hand is outlined, and it has to be: five shells
             // side by side look alike, and what one types goes to exactly one
             // of them.
@@ -174,6 +224,20 @@ impl Tile {
                     .items_center()
                     .bg(cx.theme().secondary)
                     .text_xs()
+                    // The head is what one picks a tile up by, and only the
+                    // head: everything below it is a screen the program owns,
+                    // where dragging is how one selects text.
+                    .cursor_grab()
+                    .on_drag(
+                        DraggedTile {
+                            view: id.as_u64(),
+                            label,
+                        },
+                        |tile, _, _, cx| {
+                            let tile = tile.clone();
+                            cx.new(|_| tile)
+                        },
+                    )
                     // The head selects: it is the part of a tile with nothing
                     // in it, and clicking a terminal's own surface is a click
                     // the program receives.
@@ -230,6 +294,28 @@ impl ClaudhubApp {
                 window.focus(&view.focus_handle(cx), cx);
             }
         }
+        cx.notify();
+    }
+
+    /// Puts two tiles in each other's place.
+    ///
+    /// It reorders `self.terminals`, which is *the* order of the terminals —
+    /// the one `Ctrl+PageUp` steps through as well. There is no second list to
+    /// keep in step, and there had better not be: two orders for the same
+    /// terminals is two answers to "the next one".
+    ///
+    /// The dock's tabs do not follow, and cannot: this grid mixes the
+    /// worktrees, and their tab bars are one per checkout.
+    pub(super) fn swap_tiles(&mut self, from: u64, to: u64, cx: &mut Context<Self>) {
+        let order: Vec<u64> = self
+            .terminals
+            .iter()
+            .map(|terminal| terminal.view.entity_id().as_u64())
+            .collect();
+        let Some((from, to)) = exchange(&order, from, to) else {
+            return;
+        };
+        self.terminals.swap(from, to);
         cx.notify();
     }
 
@@ -306,6 +392,19 @@ mod tests {
         for count in 0..64 {
             assert_eq!(rows(count).iter().sum::<usize>(), count, "{count}");
         }
+    }
+
+    /// Two tiles change places; anything else changes nothing.
+    #[test]
+    fn a_drop_exchanges_the_two_tiles() {
+        let order = [10, 20, 30];
+        assert_eq!(exchange(&order, 10, 30), Some((0, 2)));
+        assert_eq!(exchange(&order, 30, 10), Some((2, 0)));
+        // Dropped on itself: a gesture that changed its mind.
+        assert_eq!(exchange(&order, 20, 20), None);
+        // A shell that exited while the pointer was down.
+        assert_eq!(exchange(&order, 99, 20), None);
+        assert_eq!(exchange(&order, 20, 99), None);
     }
 
     #[test]

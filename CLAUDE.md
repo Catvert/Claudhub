@@ -480,7 +480,10 @@ tous worktrees confondus, chacune disant à quel projet elle appartient. La
 forme **de départ** de la grille est pure et testée (`multiplex::rows`) —
 lignes et tuiles se redimensionnent ensuite à la main, par les groupes
 redimensionnables de gpui-component, dont l'état vit sur la fenêtre sous l'id
-du groupe et non chez nous ; le clavier est
+du groupe et non chez nous. Une tuile se prend par son en-tête et se dépose sur
+une autre pour **échanger** leurs places, ce qui réordonne `terminals` lui-même
+— l'ordre des terminaux est un seul, celui que `Ctrl+PageUp` parcourt aussi.
+Le clavier est
 remis des deux côtés de la bascule, ce qui avait le focus n'étant plus peint
 après. À ne pas confondre avec `terminals_everywhere`, qui reste ce qu'il est :
 les terminaux de tous les worktrees dans le dock, la fenêtre entière autour.
