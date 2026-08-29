@@ -84,7 +84,10 @@ fn toggle_row(
     label: impl Fn() -> gpui::SharedString + 'static,
 ) -> PopupMenuItem {
     PopupMenuItem::element(move |_window, cx| {
-        let visible = app.read(cx).panel_visible(name);
+        // **On the rail, and not on screen.** What this menu decides is whether
+        // a view can be reached at all; whether it is folded away right now is
+        // what its button says, one press from being undone.
+        let on_rail = !app.read(cx).panel_off(name);
         let app = app.clone();
         h_flex()
             .id(name)
@@ -96,12 +99,12 @@ fn toggle_row(
             .child(
                 div()
                     .w(px(14.))
-                    .when(visible, |this| this.child(icon("check").xsmall())),
+                    .when(on_rail, |this| this.child(icon("check").xsmall())),
             )
             .child(label())
             .on_click(move |_, _window, cx| {
                 cx.stop_propagation();
-                app.update(cx, |this, cx| this.toggle_panel(name, cx));
+                app.update(cx, |this, cx| this.toggle_panel_off(name, cx));
             })
     })
 }
@@ -494,15 +497,23 @@ impl ClaudhubApp {
                         for_shortcuts.update(cx, |this, cx| this.open_shortcuts(window, cx));
                     }),
                 )
-                // A hidden view keeps its rail button, muted, which is where
-                // one calls it back from. This says the same thing in words,
-                // for the views that have no button — the documents.
+                // **What a rail can carry, and the tick says whether it does.**
+                // A view taken off has no button at all — that is what taking
+                // it off means — so this menu is the only way back, and it has
+                // to list everything that can be off. What it leaves out is the
+                // situational views, whose button comes and goes with their
+                // content: offering to take one off is offering to remove what
+                // is not there.
                 //
                 // One list now, and not one per screen: there is one window.
-                .submenu(tr!("menu-views"), window, cx, move |menu, _window, _cx| {
-                    let menu = crate::ui::rails::TOOLS.iter().fold(menu, |menu, tool| {
-                        menu.item(view_toggle(for_views.clone(), tool.panel, tool.title))
-                    });
+                .submenu(tr!("menu-views"), window, cx, move |menu, _window, cx| {
+                    let off = for_views.read(cx).rail_states().1;
+                    let menu = crate::ui::rails::TOOLS
+                        .iter()
+                        .filter(|tool| crate::ui::rails::in_view_menu(tool, &off))
+                        .fold(menu, |menu, tool| {
+                            menu.item(view_toggle(for_views.clone(), tool.panel, tool.title))
+                        });
                     // The plugins after the built-in views. Each **panel**, not
                     // each plugin: a master/detail plugin has two tabs, and
                     // hiding one is a gesture one has to be able to undo.

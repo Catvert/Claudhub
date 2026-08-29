@@ -508,9 +508,8 @@ impl crate::ui::app::ClaudhubApp {
     /// the pointer can be thrown at.
     pub(super) fn render_workspace(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let seats = self.seats(cx);
-        let hidden: std::collections::BTreeSet<String> =
-            self.hidden_panels.iter().cloned().collect();
-        let rails = rails::rails(&seats, &hidden);
+        let (folded, off) = self.rail_states();
+        let rails = rails::rails(&seats, &folded, &off);
         // **A bare flex row and not `h_flex`**: that helper centres its
         // children (`items_center`), so the middle column would take the height
         // of its content — and its content is a `flex_1` resolving against an
@@ -548,9 +547,8 @@ impl crate::ui::app::ClaudhubApp {
     /// No background of its own: the bar has one.
     pub(super) fn render_bottom_tools(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let seats = self.seats(cx);
-        let hidden: std::collections::BTreeSet<String> =
-            self.hidden_panels.iter().cloned().collect();
-        let rail = rails::rails(&seats, &hidden)
+        let (folded, off) = self.rail_states();
+        let rail = rails::rails(&seats, &folded, &off)
             .into_iter()
             .nth(Side::Bottom.index())
             .expect("three rails");
@@ -572,6 +570,22 @@ impl crate::ui::app::ClaudhubApp {
     /// there for a window with no terminal and no run would be thirty pixels
     /// spent saying nothing.
     /// The buttons of one rail, shared by the two edges and the status bar.
+    /// The two sets the rails read: what is folded away, and what is off.
+    ///
+    /// `BTreeSet` because that is what `ui::rails` takes — it is pure, and a
+    /// sorted set is what makes its answers reproducible in a test.
+    pub(super) fn rail_states(
+        &self,
+    ) -> (
+        std::collections::BTreeSet<String>,
+        std::collections::BTreeSet<String>,
+    ) {
+        (
+            self.folded_panels.iter().cloned().collect(),
+            self.off_panels.iter().cloned().collect(),
+        )
+    }
+
     fn rail_buttons(
         &mut self,
         buttons: &[rails::Button],
@@ -634,7 +648,7 @@ impl crate::ui::app::ClaudhubApp {
                             };
                             let menu = shift(menu, "tool-move-earlier", -1, "arrow-up");
                             let menu = shift(menu, "tool-move-later", 1, "arrow-down");
-                            targets.iter().fold(menu.separator(), |menu, anchor| {
+                            let menu = targets.iter().fold(menu.separator(), |menu, anchor| {
                                 let (app, anchor) = (app.clone(), *anchor);
                                 menu.item(PopupMenuItem::new(crate::tr!(anchor.label())).on_click(
                                     move |_, window, cx| {
@@ -643,7 +657,23 @@ impl crate::ui::app::ClaudhubApp {
                                         });
                                     },
                                 ))
-                            })
+                            });
+                            // **Taking the view off, from its own button.**
+                            // The gesture was in the title bar's menu alone,
+                            // which is a long way from the icon one is looking
+                            // at when one decides one has no use for it. The
+                            // button goes with the view; the same menu is
+                            // where it comes back from.
+                            let app = app.clone();
+                            menu.separator().item(
+                                PopupMenuItem::new(crate::tr!("action-hide-view"))
+                                    .icon(crate::ui::icons::icon("eye-off"))
+                                    .on_click(move |_, _window, cx| {
+                                        app.update(cx, |app, cx| {
+                                            app.set_panel_off(panel, true, cx)
+                                        });
+                                    }),
+                            )
                         }
                     })
                     .into_any_element()

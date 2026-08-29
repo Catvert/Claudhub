@@ -981,7 +981,12 @@ pub struct ClaudhubApp {
     /// Here and not in the settings alone: the panels observe it, and
     /// `Settings::update_global` notifies nobody. The settings keep the copy that
     /// survives closing.
-    pub(super) hidden_panels: std::collections::HashSet<String>,
+    /// The views taken off their rail: no button, no tab. A decision made once
+    /// — I do not use Sentry — and the "Views" menu is where it is undone.
+    pub(super) off_panels: std::collections::HashSet<String>,
+    /// The views folded away: not on screen, but one press of their button from
+    /// coming back. What a press on a lit button does.
+    pub(super) folded_panels: std::collections::HashSet<String>,
 
     /// What each worktree has in progress, including those not opened: it is the
     /// question one asks while scanning the list.
@@ -1352,7 +1357,8 @@ impl ClaudhubApp {
             terminals_everywhere: false,
             zen_folded: Vec::new(),
             settings_form,
-            hidden_panels: Settings::global(cx).hidden_panels.iter().cloned().collect(),
+            off_panels: Settings::global(cx).hidden_panels.iter().cloned().collect(),
+            folded_panels: Settings::global(cx).folded_panels.iter().cloned().collect(),
             summaries: HashMap::new(),
             agents: crate::agent::Tracker::default(),
             diff_dragging: false,
@@ -3864,6 +3870,16 @@ impl ClaudhubApp {
         self.search.preview.is_some()
     }
 
+    /// The cross on the preview's tab: done reading this hit.
+    ///
+    /// The preview comes back with the next hit one moves on to, which is what
+    /// makes closing it cheap — it is "give me the room", not "forget where I
+    /// was".
+    pub(super) fn close_search_preview(&mut self, cx: &mut Context<Self>) {
+        self.search.preview = None;
+        cx.notify();
+    }
+
     pub(super) fn active_review(&self) -> Option<&ReviewState> {
         self.active.as_ref().and_then(|p| self.review.get(p))
     }
@@ -4421,7 +4437,7 @@ impl ClaudhubApp {
 
     /// The same, leaving the focus where it is — see `flush_reveal`.
     fn reveal_quietly(&mut self, name: &'static str, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_panel_visible(name, true, cx);
+        self.show_panel(name, cx);
         // **The editor is reached by the file being read, and not by its
         // placeholder.** `EditorPanel` hides itself as soon as a file is open,
         // and selecting a hidden tab shows nothing at all: the group falls back
@@ -4525,7 +4541,7 @@ impl ClaudhubApp {
             // place, which is not what a press on a lit button asks for.
             Press::Hide { anchor } => {
                 for name in crate::ui::rails::showing_in(anchor, &seats) {
-                    self.set_panel_visible(name, false, cx);
+                    self.set_panel_folded(name, true, cx);
                 }
             }
             Press::Reveal { panel, .. } | Press::Restore { panel, .. } => {
@@ -4547,7 +4563,7 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_panel_visible(panel, true, cx);
+        self.show_panel(panel, cx);
         crate::ui::dock_layout::move_to(&self.dock.clone(), panel, anchor, window, cx);
         // A tool sent to a folded edge is a gesture that did nothing.
         self.unfold(anchor.side, window, cx);
@@ -4700,26 +4716,71 @@ impl ClaudhubApp {
     }
 
     pub(super) fn show_terminal_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_panel_visible(super::panels::TerminalPanel::NAME, true, cx);
+        self.show_panel(super::panels::TerminalPanel::NAME, cx);
         if let Some(worktree) = self.active.clone() {
             self.ensure_terminal(&worktree, window, cx);
         }
     }
 
-    /// A view is visible until it has been hidden.
+    /// A set of panel names as the settings file takes them.
     ///
-    /// The question is asked in the negative: a panel just added shows up without
-    /// anything having to declare it, and a name unknown to the settings file — a
-    /// renamed panel — no longer hides anything.
-    pub(super) fn panel_visible(&self, name: &str) -> bool {
-        !self.hidden_panels.contains(name)
+    /// Sorted: a `HashSet` serialised in a different order every time would
+    /// make a file that changes with nothing having changed.
+    fn sorted_names(set: &std::collections::HashSet<String>) -> Vec<String> {
+        let mut names: Vec<String> = set.iter().cloned().collect();
+        names.sort();
+        names
     }
 
-    pub(super) fn set_panel_visible(&mut self, name: &str, visible: bool, cx: &mut Context<Self>) {
-        let changed = if visible {
-            self.hidden_panels.remove(name)
+    /// A view is drawn unless it is folded away or taken off its rail.
+    ///
+    /// **Two states and not one.** They were the same set, and it made one
+    /// gesture undo the other: pressing a lit button to put a view away marked
+    /// it exactly as "I do not use Sentry" did, so the button one had just
+    /// pressed was the button that should have gone. Folding is a moment —
+    /// give me the room back — and taking a view off is a decision one makes
+    /// once.
+    ///
+    /// The question is asked in the negative: a panel just added shows up
+    /// without anything having to declare it, and a name unknown to the
+    /// settings file — a renamed panel — no longer hides anything.
+    pub(super) fn panel_visible(&self, name: &str) -> bool {
+        !self.folded_panels.contains(name) && !self.off_panels.contains(name)
+    }
+
+    /// Whether a view has been taken off its rail: no button, no tab.
+    ///
+    /// What the "Views" menu ticks, and the one thing its tick can mean — a
+    /// folded view is still there, one press away.
+    pub(super) fn panel_off(&self, name: &str) -> bool {
+        self.off_panels.contains(name)
+    }
+
+    /// Folds a view away, or gives it back. Its button stays either way.
+    pub(super) fn set_panel_folded(&mut self, name: &str, folded: bool, cx: &mut Context<Self>) {
+        let changed = if folded {
+            self.folded_panels.insert(name.to_string())
         } else {
-            self.hidden_panels.insert(name.to_string())
+            self.folded_panels.remove(name)
+        };
+        if !changed {
+            return;
+        }
+        let folded = Self::sorted_names(&self.folded_panels);
+        Settings::update_global(cx, |s| s.folded_panels = folded);
+        cx.notify();
+    }
+
+    /// Takes a view off its rail, or puts it back.
+    ///
+    /// Off is off: no button, no tab, and the "Views" menu of the title bar is
+    /// where it comes back from. A view taken off is also unfolded, so that
+    /// putting it back is one gesture and not two.
+    pub(super) fn set_panel_off(&mut self, name: &str, off: bool, cx: &mut Context<Self>) {
+        let changed = if off {
+            self.off_panels.insert(name.to_string())
+        } else {
+            self.off_panels.remove(name) | self.folded_panels.remove(name)
         };
         if !changed {
             return;
@@ -4727,15 +4788,29 @@ impl ClaudhubApp {
         // Sorted before being written, like the store's collapses: a set
         // serialised in a different order every time would make a settings file
         // that changes with nothing having changed.
-        let mut hidden: Vec<String> = self.hidden_panels.iter().cloned().collect();
-        hidden.sort();
-        Settings::update_global(cx, |s| s.hidden_panels = hidden);
+        let (off, folded) = (
+            Self::sorted_names(&self.off_panels),
+            Self::sorted_names(&self.folded_panels),
+        );
+        Settings::update_global(cx, |s| {
+            s.hidden_panels = off;
+            s.folded_panels = folded;
+        });
         cx.notify();
     }
 
-    pub(super) fn toggle_panel(&mut self, name: &str, cx: &mut Context<Self>) {
-        let visible = self.panel_visible(name);
-        self.set_panel_visible(name, !visible, cx);
+    pub(super) fn toggle_panel_off(&mut self, name: &str, cx: &mut Context<Self>) {
+        let off = self.panel_off(name);
+        self.set_panel_off(name, !off, cx);
+    }
+
+    /// Unfolds a view, and puts it back on its rail if it had been taken off.
+    ///
+    /// "Show me this" answers both states at once: a gesture that reached a
+    /// view taken off and only unfolded it would do nothing at all.
+    pub(super) fn show_panel(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.set_panel_off(name, false, cx);
+        self.set_panel_folded(name, false, cx);
     }
 
     /// The area keyboard zoom aims at.
@@ -4777,10 +4852,15 @@ impl ClaudhubApp {
         let empty = worktree
             .as_deref()
             .is_some_and(|worktree| self.terminals_of(worktree).next().is_none());
+        let terminals = super::panels::TerminalPanel::NAME;
         if empty {
-            self.set_panel_visible(super::panels::TerminalPanel::NAME, true, cx);
+            self.show_panel(terminals, cx);
         } else {
-            self.toggle_panel(super::panels::TerminalPanel::NAME, cx);
+            let folded = !self.panel_visible(terminals);
+            self.show_panel(terminals, cx);
+            if !folded {
+                self.set_panel_folded(terminals, true, cx);
+            }
         }
         // The first one is opened on demand, never when a worktree is: a shell
         // nobody asked for is a process nobody asked for.

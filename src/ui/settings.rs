@@ -511,6 +511,13 @@ pub struct Settings {
     /// A list of names rather than a boolean per panel: an added panel is
     /// visible without this file having to know about it.
     pub hidden_panels: Vec<String>,
+    /// The views **folded away**, which is not the same list.
+    ///
+    /// Pressing a lit rail button puts a view away for now; the list above is
+    /// the decision one makes once. They were one set, and it made the two
+    /// gestures undo each other — the button one pressed to get the room back
+    /// was the button that then had to disappear.
+    pub folded_panels: Vec<String>,
     /// The "Databases" panel's databases.
     ///
     /// Declared here like the agent profiles, and for the same reason: it is the
@@ -634,6 +641,7 @@ impl Default for Settings {
             notes_dir: String::new(),
             wsl_distro: String::new(),
             hidden_panels: Vec::new(),
+            folded_panels: Vec::new(),
             databases: Vec::new(),
             lsp: shipped_servers(),
             plugins: Default::default(),

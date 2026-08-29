@@ -510,10 +510,17 @@ pub fn moves(panel: &str, seats: &[Seat]) -> Vec<Anchor> {
         .collect()
 }
 
-/// The three rails, from what the dock holds and what has been hidden.
+/// The three rails, from what the dock holds, what is folded and what is off.
+///
+/// **Folded and off are two different things**, and the rail is where the
+/// difference shows: a folded view keeps its button — that press is how one
+/// gets it back — and one taken off has none at all, which is the whole of what
+/// taking it off means. The title bar's "Views" menu is where it comes back
+/// from, and it is the only place, so that menu lists exactly what a rail can
+/// carry.
 ///
 /// A tool window with no seat still gets a button — that is how one calls back
-/// a view hidden from the menu — **unless** its tab comes and goes with its
+/// a view the dock no longer holds — **unless** its tab comes and goes with its
 /// content: nothing would make a conditional panel appear, so its button would
 /// do nothing.
 ///
@@ -524,7 +531,11 @@ pub fn moves(panel: &str, seats: &[Seat]) -> Vec<Anchor> {
 /// the tree is what lets one put the files before the changes without editing
 /// the source. What has no seat goes last: a view called back has to land
 /// somewhere, and the end is the one place that displaces nothing.
-pub fn rails(seats: &[Seat], hidden: &std::collections::BTreeSet<String>) -> [Rail; 3] {
+pub fn rails(
+    seats: &[Seat],
+    folded: &std::collections::BTreeSet<String>,
+    off: &std::collections::BTreeSet<String>,
+) -> [Rail; 3] {
     // Ranked while collecting, sorted once at the end: a button's place is its
     // panel's place among its group's tabs.
     struct Ranked {
@@ -538,6 +549,10 @@ pub fn rails(seats: &[Seat], hidden: &std::collections::BTreeSet<String>) -> [Ra
         bottom: Vec::new(),
     });
     for tool in tools() {
+        // Taken off its rail: no button, and that is the point.
+        if off.contains(tool.panel) {
+            continue;
+        }
         let seat = seat(tool.panel, seats);
         // At the centre it is a document: reached by its tab, among the ones
         // it shares its group with.
@@ -550,9 +565,9 @@ pub fn rails(seats: &[Seat], hidden: &std::collections::BTreeSet<String>) -> [Ra
         // ignore. The tests and the run being followed are the same — no
         // runner, no run, no button.
         //
-        // Put away **by hand** is the exception, and it has to be: that is the
+        // Folded **by hand** is the exception, and it has to be: that is the
         // one invisibility one calls the view back from, so its button stays.
-        let away = hidden.contains(tool.panel);
+        let away = folded.contains(tool.panel);
         if tool.conditional && !away && !seat.is_some_and(|seat| seat.visible) {
             continue;
         }
@@ -600,6 +615,17 @@ pub fn rails(seats: &[Seat], hidden: &std::collections::BTreeSet<String>) -> [Ra
         }
     }
     rails
+}
+
+/// Whether a view belongs in the menu that takes views off their rails.
+///
+/// **What one takes off is a view whose button is a fixture.** A situational
+/// one — the conflicts, a run being followed — has a button only while it has
+/// something to show, so offering to take it off is offering to remove what is
+/// not there. The one exception is a view already off: that is the state one
+/// has to be able to come back from, and this menu is the only way back.
+pub fn in_view_menu(tool: &Tool, off: &std::collections::BTreeSet<String>) -> bool {
+    !tool.conditional || off.contains(tool.panel)
 }
 
 /// What pressing a button does.
@@ -724,7 +750,7 @@ mod tests {
     #[test]
     fn a_panel_of_the_centre_has_no_button() {
         let seats = vec![seat("ClaudhubNotes", None, true, true)];
-        let rails = rails(&seats, &none());
+        let rails = rails(&seats, &none(), &none());
         assert!(Side::ALL
             .iter()
             .all(|side| !all_names(rail(&rails, *side)).contains(&"ClaudhubNotes")));
@@ -741,7 +767,7 @@ mod tests {
             false,
             true,
         )];
-        let rails = rails(&seats, &none());
+        let rails = rails(&seats, &none(), &none());
         assert!(names(&rail(&rails, Side::Left).top).contains(&"ClaudhubNotes"));
         assert!(!all_names(rail(&rails, Side::Right)).contains(&"ClaudhubNotes"));
     }
@@ -762,8 +788,13 @@ mod tests {
             false,
             true,
         )];
-        assert!(names(&rail(&rails(&up, &none()), Side::Right).top).contains(&"ClaudhubNotes"));
-        assert!(names(&rail(&rails(&down, &none()), Side::Right).bottom).contains(&"ClaudhubNotes"));
+        assert!(
+            names(&rail(&rails(&up, &none(), &none()), Side::Right).top).contains(&"ClaudhubNotes")
+        );
+        assert!(
+            names(&rail(&rails(&down, &none(), &none()), Side::Right).bottom)
+                .contains(&"ClaudhubNotes")
+        );
     }
 
     /// Active is "unfolded **and** in front". The displayed tab of a folded
@@ -777,7 +808,7 @@ mod tests {
                 shown,
                 open,
             )];
-            rails(&seats, &none())[Side::Right.index()].top[0].active
+            rails(&seats, &none(), &none())[Side::Right.index()].top[0].active
         };
         assert!(lit(true, true));
         assert!(!lit(true, false));
@@ -845,7 +876,7 @@ mod tests {
         let hidden = BTreeSet::from(["ClaudhubNotes".to_string()]);
         // Put away, so the panel draws nothing — which is what the seat says.
         let seats = vec![away("ClaudhubNotes", at(Side::Right, Half::Top))];
-        let button = rails(&seats, &hidden)[Side::Right.index()]
+        let button = rails(&seats, &hidden, &none())[Side::Right.index()]
             .buttons()
             .find(|button| button.panel == "ClaudhubNotes")
             .cloned()
@@ -895,24 +926,70 @@ mod tests {
                 true,
             )
         }];
-        assert!(!all_names(rail(&rails(&idle, &none()), Side::Left)).contains(&"ClaudhubConflicts"));
+        assert!(
+            !all_names(rail(&rails(&idle, &none(), &none()), Side::Left))
+                .contains(&"ClaudhubConflicts")
+        );
         let conflicting = vec![seat(
             "ClaudhubConflicts",
             at(Side::Left, Half::Bottom),
             true,
             true,
         )];
-        assert!(all_names(rail(&rails(&conflicting, &none()), Side::Left))
-            .contains(&"ClaudhubConflicts"));
+        assert!(
+            all_names(rail(&rails(&conflicting, &none(), &none()), Side::Left))
+                .contains(&"ClaudhubConflicts")
+        );
     }
 
-    /// Put away **by hand** is the exception: that is the one invisibility one
+    /// Folded **by hand** is the exception: that is the one invisibility one
     /// calls the view back from, so its button stays.
     #[test]
-    fn a_situational_view_put_away_by_hand_keeps_its_button() {
-        let hidden = BTreeSet::from(["ClaudhubTests".to_string()]);
+    fn a_situational_view_folded_by_hand_keeps_its_button() {
+        let folded = BTreeSet::from(["ClaudhubTests".to_string()]);
         let seats = vec![away("ClaudhubTests", at(Side::Left, Half::Bottom))];
-        assert!(all_names(rail(&rails(&seats, &hidden), Side::Left)).contains(&"ClaudhubTests"));
+        assert!(
+            all_names(rail(&rails(&seats, &folded, &none()), Side::Left))
+                .contains(&"ClaudhubTests")
+        );
+    }
+
+    /// **Off is off.** A view taken off its rail has no button at all — that is
+    /// the whole of what taking it off means, and the difference with folding,
+    /// which the two used to share one set for: the press that put a view away
+    /// marked it exactly as "I do not use this" did, so the button one had just
+    /// pressed was the button that then had to go.
+    #[test]
+    fn a_view_taken_off_its_rail_has_no_button() {
+        let seats = vec![seat(
+            "ClaudhubNotes",
+            at(Side::Left, Half::Bottom),
+            true,
+            true,
+        )];
+        let off = BTreeSet::from(["ClaudhubNotes".to_string()]);
+        assert!(
+            !all_names(rail(&rails(&seats, &none(), &off), Side::Left)).contains(&"ClaudhubNotes")
+        );
+        // Folded, it keeps it: that press is how one gets it back.
+        let folded = BTreeSet::from(["ClaudhubNotes".to_string()]);
+        assert!(
+            all_names(rail(&rails(&seats, &folded, &none()), Side::Left))
+                .contains(&"ClaudhubNotes")
+        );
+    }
+
+    /// The menu that takes views off lists what a rail can carry — and a view
+    /// already off, which is the one state it is the only way back from.
+    #[test]
+    fn the_views_menu_leaves_out_what_has_no_button_to_lose() {
+        let none = BTreeSet::new();
+        let tool = |panel: &str| TOOLS.iter().find(|tool| tool.panel == panel).unwrap();
+        assert!(in_view_menu(tool("ClaudhubNotes"), &none));
+        // Situational: its button comes and goes with its content.
+        assert!(!in_view_menu(tool("ClaudhubTestRun"), &none));
+        let off = BTreeSet::from(["ClaudhubTestRun".to_string()]);
+        assert!(in_view_menu(tool("ClaudhubTestRun"), &off));
     }
 
     /// A panel whose tab comes and goes with its content gets no button while
@@ -920,7 +997,7 @@ mod tests {
     /// nothing at all.
     #[test]
     fn a_conditional_panel_with_no_seat_has_no_button() {
-        let idle = rails(&[], &none());
+        let idle = rails(&[], &none(), &none());
         assert!(!all_names(rail(&idle, Side::Bottom)).contains(&"ClaudhubTestRun"));
         let running = vec![seat(
             "ClaudhubTestRun",
@@ -928,7 +1005,7 @@ mod tests {
             true,
             true,
         )];
-        let running = rails(&running, &none());
+        let running = rails(&running, &none(), &none());
         assert!(all_names(rail(&running, Side::Bottom)).contains(&"ClaudhubTestRun"));
     }
 
@@ -943,7 +1020,7 @@ mod tests {
             ..seat(panel, here, false, true)
         };
         let seats = vec![ranked("ClaudhubChanges", 1), ranked("ClaudhubFiles", 0)];
-        let rails = rails(&seats, &none());
+        let rails = rails(&seats, &none(), &none());
         let shown = names(&rail(&rails, Side::Left).top);
         assert_eq!(&shown[..2], ["ClaudhubFiles", "ClaudhubChanges"]);
     }
@@ -958,7 +1035,7 @@ mod tests {
             order: 7,
             ..seat("ClaudhubSearch", here, true, true)
         }];
-        let rails = rails(&seats, &none());
+        let rails = rails(&seats, &none(), &none());
         let shown = names(&rail(&rails, Side::Left).top);
         assert_eq!(shown.first(), Some(&"ClaudhubSearch"));
     }
@@ -987,7 +1064,7 @@ mod tests {
     /// this holds is the table one can decide about at compile time.
     #[test]
     fn no_rail_carries_more_than_it_can_show() {
-        let rails = rails(&[], &none());
+        let rails = rails(&[], &none(), &none());
         for side in Side::ALL {
             let held = rail(&rails, side).buttons().count();
             assert!(held <= MAX_PER_RAIL, "{side:?} carries {held} buttons");

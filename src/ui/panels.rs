@@ -35,6 +35,37 @@ use crate::ui::settings::Settings;
 /// wheel button both close the file.
 type Closing = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
 
+/// A view's tab, with the cross that empties it.
+///
+/// The same shape a file's tab has — the name, then a ghost cross the size of
+/// the text — so that "this closes" reads the same everywhere in the bar. The
+/// wheel button does it too, which is the gesture of every browser and the only
+/// one that closes a tab without aiming at a cross the size of a full stop.
+fn closable_title(label: gpui::SharedString, closing: Closing) -> gpui::AnyElement {
+    let on_cross = closing.clone();
+    let tab = gpui_component::h_flex()
+        // Stateful, which is what the wheel listener asks for: the id is the
+        // label, and one view's tab is drawn once.
+        .id(label.clone())
+        .gap_1()
+        .items_center()
+        .child(label)
+        .child(
+            Button::new("close-view")
+                .ghost()
+                .xsmall()
+                .icon(crate::ui::icons::icon("x"))
+                .on_click(move |_, window, cx| {
+                    // The tab under it selects on click: without this, the
+                    // cross would first bring forward what it is about to
+                    // close.
+                    cx.stop_propagation();
+                    on_cross(window, cx);
+                }),
+        );
+    close_on_middle_click(tab, move |window, cx| closing(window, cx)).into_any_element()
+}
+
 /// A panel's background, and the bottom corners of the card carrying it.
 ///
 /// No card here any more: it is the **group's frame** that is one now — the
@@ -306,12 +337,20 @@ pub fn register(app: &Entity<ClaudhubApp>, cx: &mut App) {
 /// You come back through the main menu (`VIEWS`): a hidden view has no tab left,
 /// so nothing left to click.
 fn hide_view(app: &WeakEntity<ClaudhubApp>, name: &'static str, menu: PopupMenu) -> PopupMenu {
+    // **Only a tool window.** The way back is the title bar's "Views" menu, and
+    // that menu lists the rails' table: a document taken off it — the diff, the
+    // preview — would be a view with no button, no tab and no entry anywhere,
+    // which is a window one cannot put back together. What one does with a
+    // document is close it, and its tab now carries the cross for it.
+    if crate::ui::rails::tool(name).is_none() {
+        return menu;
+    }
     let app = app.clone();
     menu.item(
         PopupMenuItem::new(tr!("action-hide-view"))
             .icon(crate::ui::icons::icon("eye-off"))
             .on_click(move |_, _window, cx| {
-                let _ = app.update(cx, |this, cx| this.set_panel_visible(name, false, cx));
+                let _ = app.update(cx, |this, cx| this.set_panel_off(name, true, cx));
             }),
     )
 }
@@ -323,7 +362,9 @@ fn hide_view(app: &WeakEntity<ClaudhubApp>, name: &'static str, menu: PopupMenu)
 /// updating is what gpui refuses with a panic. Both say the same thing — the
 /// application holds its list from the settings.
 fn visible_at_startup(name: &str, cx: &App) -> bool {
-    !Settings::global(cx).hidden_panels.iter().any(|n| n == name)
+    let settings = Settings::global(cx);
+    let listed = |list: &[String]| list.iter().any(|n| n == name);
+    !listed(&settings.hidden_panels) && !listed(&settings.folded_panels)
 }
 
 /// Zoom is a **button**, not a menu entry.
@@ -527,6 +568,34 @@ macro_rules! panels {
     (@closable) => { false };
     (@closable, $closes:ident) => { true };
 
+    // The tab's own cross, for a view that closes.
+    //
+    // **The dock paints none.** `BasePanel::closable` gates `close_panel` and
+    // the group's context; the glyph is the panel's business, which is how a
+    // file's tab and a terminal's come to carry one and the diff's did not.
+    // Saying `closes:` was therefore declaring a gesture with nothing to make
+    // it with.
+    (@title $self:expr, $title:literal) => {
+        tr!($title).into_any_element()
+    };
+    (@title $self:expr, $title:literal, $closes:ident) => {{
+        let app = $self.app.clone();
+        // One closure for the cross and the wheel button: they are two ways of
+        // making one gesture.
+        let closing: Closing = std::rc::Rc::new(move |window: &mut Window, cx: &mut App| {
+            let Some(app) = app.upgrade() else {
+                return;
+            };
+            // **Deferred**, like a file's: closing empties what the tab shows,
+            // the tab then goes with its content, and the dock is in the middle
+            // of drawing the bar this cross is in.
+            window.defer(cx, move |_window, cx| {
+                app.update(cx, |app, cx| app.$closes(cx));
+            });
+        });
+        closable_title(tr!($title), closing)
+    }};
+
     // The cached value the panel is born with, the application not being
     // readable then. See `visible_at_startup`.
     (@at_startup $name:expr, $cx:expr) => { visible_at_startup($name, $cx) };
@@ -629,7 +698,7 @@ macro_rules! panels {
 
         impl Panel for $name {
             fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                tr!($title)
+                panels!(@title self, $title $(, $closes)?)
             }
 
             fn zoom_control(&self, _: &App) -> Option<PanelControl> {
@@ -695,7 +764,7 @@ panels! {
     DbPanel => ("ClaudhubDb", "panel-databases", render_db, Db),
     SqlHistoryPanel => ("ClaudhubSqlHistory", "panel-sql-history", render_sql_history, SqlHistory),
     SearchPanel => ("ClaudhubSearch", "panel-search", render_search, Search),
-    SearchPreviewPanel => ("ClaudhubSearchPreview", "panel-search-preview", render_search_preview, SearchPreview, needed: search_preview_open),
+    SearchPreviewPanel => ("ClaudhubSearchPreview", "panel-search-preview", render_search_preview, SearchPreview, needed: search_preview_open, closes: close_search_preview),
     // The centre of each screen. **Three panels and not one whose title
     // changes**: they belonged to the same one because they were fighting over
     // the central slot, and a tab announcing "Diff", "Editor" or "SQL"

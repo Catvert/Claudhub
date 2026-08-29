@@ -429,6 +429,18 @@ pas dans la nature du panneau mais dans sa place. `ui::rails` est pur et décide
 tout : l'ordre des boutons, lequel est allumé, ce qu'une pression veut dire, ce
 que le zen replie et rend.
 
+**Replier et retirer sont deux choses**, et le bandeau est là où ça se voit :
+une vue repliée garde son bouton — cette pression est ce qui la ramène —, une
+vue retirée n'en a aucun, et c'est tout ce que retirer veut dire. Le menu
+« Vues » de la barre de titre est le seul chemin du retour, donc il liste
+exactement ce qu'un bandeau peut porter (`rails::in_view_menu` : pas les vues
+situationnelles, dont le bouton va et vient avec le contenu — sauf déjà
+retirées). Les deux états ont partagé un seul ensemble, et ça faisait que
+chaque geste défaisait l'autre : la pression qui rangeait une vue la marquait
+comme « je ne m'en sers pas », donc le bouton qu'on venait de presser devait
+disparaître. Un **document** ne se retire pas, il se **ferme** : sa croix est
+peinte par le panneau (`panels::closable_title`), le dock n'en dessine aucune.
+
 **Il n'y a pas de seconde liste.** Un bandeau se calcule à chaque frame depuis
 l'arbre du dock (`dock_layout::seats`) et rien n'en est gardé : un panneau
 traîné d'un bord à l'autre change de bandeau sans qu'on tienne rien à jour.

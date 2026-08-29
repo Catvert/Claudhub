@@ -1727,13 +1727,13 @@ impl ClaudhubApp {
         // process nobody can answer: the `+` of the status bar looked broken,
         // the project task ran out of sight, the prompt handed to an agent
         // landed nowhere. Only for the worktree being looked at, since it is
-        // the only one whose terminals this flag shows; and `set_panel_visible`
+        // the only one whose terminals this flag shows; and `show_panel`
         // rather than `show_terminal_panel`, which opens one when there is none
         // — from here that is the recursion of opening the terminal we are
         // opening. It comes **before** `install_terminal`, which hands the
         // fresh panel the visibility it reads now.
         if self.active.as_deref() == Some(worktree) {
-            self.set_panel_visible(crate::ui::panels::TerminalPanel::NAME, true, cx);
+            self.show_panel(crate::ui::panels::TerminalPanel::NAME, cx);
         }
         self.install_terminal(worktree.to_path_buf(), view, window, cx);
     }
@@ -2259,7 +2259,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         self.select_worktree(worktree.to_path_buf(), window, cx);
-        self.set_panel_visible(crate::ui::panels::TerminalPanel::NAME, true, cx);
+        self.show_panel(crate::ui::panels::TerminalPanel::NAME, cx);
         // And the grid goes away: one came to it to find out which of the
         // agents had finished, and this is the answer being acted on. Leaving
         // it up would show the eleven other checkouts' shells beside the one
