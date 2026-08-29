@@ -55,6 +55,12 @@ pub struct SentryState {
     pub error: Option<SharedString>,
     /// Why the trace is missing, which is not why the list is.
     pub event_error: Option<SharedString>,
+    /// The sections one has folded, by the key `Section::key` gives.
+    ///
+    /// **What is folded and not what is open**, so a section added later shows
+    /// rather than hides — and the distribution, folded to start with, says so
+    /// by being in here from the first frame. In memory like the notes' folds.
+    pub folded: std::collections::BTreeSet<&'static str>,
     /// The sends in flight. A late answer is dropped rather than shown: one
     /// changes error before the previous trace has come back, and painting it
     /// would replace what is being read with what is not.
@@ -64,10 +70,59 @@ pub struct SentryState {
     pub scroll: gpui::UniformListScrollHandle,
 }
 
+/// A foldable block of the error's page.
+///
+/// Named rather than numbered: the set of folds outlives the error one is
+/// reading — one folds the distribution once and means it for the next error
+/// too — and a rank would move the moment a section has nothing to show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    Context,
+    Trace,
+    Spread,
+    Crumbs,
+}
+
+impl Section {
+    /// What the fold set files it under, and the i18n key its heading is named
+    /// by — one name, so a heading and its fold cannot drift apart.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Context => "sentry-context",
+            Self::Trace => "sentry-trace",
+            Self::Spread => "sentry-spread",
+            Self::Crumbs => "sentry-crumbs",
+        }
+    }
+
+    /// **The distribution starts folded, and it is the reason folds exist
+    /// here.** It is proportions one looks at once — is this bug everywhere or
+    /// at one customer — and seven tags unfolded push the trace, which is what
+    /// one came to read, off the bottom of the screen.
+    fn folded_at_birth(self) -> bool {
+        matches!(self, Self::Spread)
+    }
+
+    const ALL: [Section; 4] = [Self::Context, Self::Trace, Self::Spread, Self::Crumbs];
+}
+
 impl SentryState {
     /// The issue being read, if the list still holds it.
     pub fn issue(&self) -> Option<&Issue> {
         self.issues.get(self.chosen?)
+    }
+
+    /// The folds a fresh reading opens with.
+    pub fn fresh_folds() -> std::collections::BTreeSet<&'static str> {
+        Section::ALL
+            .into_iter()
+            .filter(|section| section.folded_at_birth())
+            .map(Section::key)
+            .collect()
+    }
+
+    pub fn is_folded(&self, section: Section) -> bool {
+        self.folded.contains(section.key())
     }
 }
 
@@ -137,6 +192,7 @@ impl ClaudhubApp {
         let main = self.active_main();
         self.sentry = SentryState {
             main: main.clone(),
+            folded: SentryState::fresh_folds(),
             ..Default::default()
         };
         let Some((org, host, token)) = self.sentry_account(cx) else {
@@ -223,6 +279,7 @@ impl ClaudhubApp {
         };
         let id = issue.id.clone();
         self.sentry.chosen = Some(rank);
+        self.sentry.folded = SentryState::fresh_folds();
         self.sentry.event = None;
         self.sentry.event_error = None;
         self.sentry.spreads = Vec::new();
@@ -235,6 +292,14 @@ impl ClaudhubApp {
         // The centre's tab appears with the error and comes forward: it is the
         // console's rule, and what makes "choose a row" one gesture.
         self.reveal_panel(crate::ui::panels::SentryIssuePanel::NAME, window, cx);
+        cx.notify();
+    }
+
+    /// Folds a section away, or gives it back.
+    pub(super) fn fold_sentry_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        if !self.sentry.folded.remove(section.key()) {
+            self.sentry.folded.insert(section.key());
+        }
         cx.notify();
     }
 
@@ -664,6 +729,17 @@ impl ClaudhubApp {
                         .child(issue.culprit.clone()),
                 )
             })
+            // What one reads before reading anything: how bad, and whether
+            // somebody has already dealt with it.
+            .child(
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child(sentry_badge(&issue.level, level_tone(&issue.level, cx)))
+                    .when(!issue.status.is_empty(), |el| {
+                        el.child(sentry_badge(&issue.status, status_tone(&issue.status, cx)))
+                    }),
+            )
             .child(
                 h_flex()
                     .gap_2()
@@ -756,26 +832,21 @@ impl ClaudhubApp {
             ),
             (Some(event), None) => {
                 let mut body = v_flex().gap_3().p_3();
+                // **The context, then the trace.** The trace is what one came
+                // for, so nothing that can run to seven blocks goes above it —
+                // the distribution used to, and it pushed the trace off the
+                // bottom of the screen.
                 if !event.tags.is_empty() {
-                    body = body.child(sentry_section(
+                    let tags = h_flex().gap_2().flex_wrap().children(
+                        event
+                            .tags
+                            .iter()
+                            .map(|tag| sentry_pair(tag.key.clone().into(), tag.value.clone(), cx)),
+                    );
+                    body = body.child(self.sentry_section(
+                        Section::Context,
                         tr!("sentry-context"),
-                        h_flex().gap_2().flex_wrap().children(
-                            event.tags.iter().map(|tag| {
-                                sentry_pair(tag.key.clone().into(), tag.value.clone(), cx)
-                            }),
-                        ),
-                        cx,
-                    ));
-                }
-                for spread in &spreads {
-                    body = body.child(sentry_section(
-                        SharedString::from(spread.name.clone()),
-                        v_flex().gap_1().children(
-                            spread
-                                .values
-                                .iter()
-                                .map(|(value, share)| sentry_bar(value, *share, cx)),
-                        ),
+                        tags,
                         cx,
                     ));
                 }
@@ -788,30 +859,59 @@ impl ClaudhubApp {
                             .children(event.frames.iter().rev().enumerate().map(|(n, frame)| {
                                 sentry_frame(frame, n, &worktree, mono.clone(), &entity, cx)
                             }));
-                    body = body.child(sentry_section(
+                    body = body.child(self.sentry_section(
+                        Section::Trace,
                         tr!("sentry-trace", { n: event.frames.len() }),
                         frames,
                         cx,
                     ));
                 }
+                if !spreads.is_empty() {
+                    // One block, folded: what is inside is one bar chart per
+                    // tag, and they are read together or not at all.
+                    let bars = v_flex().gap_3().children(spreads.iter().map(|spread| {
+                        v_flex()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(SharedString::from(spread.name.clone())),
+                            )
+                            .children(
+                                spread
+                                    .values
+                                    .iter()
+                                    .map(|(value, share)| sentry_bar(value, *share, cx)),
+                            )
+                    }));
+                    body = body.child(self.sentry_section(
+                        Section::Spread,
+                        tr!("sentry-spread"),
+                        bars,
+                        cx,
+                    ));
+                }
                 if !event.crumbs.is_empty() {
-                    body = body.child(sentry_section(
+                    let crumbs = v_flex().gap_1().children(event.crumbs.iter().map(|crumb| {
+                        h_flex()
+                            .gap_2()
+                            .text_xs()
+                            .child(
+                                div()
+                                    .text_color(muted)
+                                    .child(SharedString::from(crumb.category.clone())),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .child(SharedString::from(crumb.message.clone())),
+                            )
+                    }));
+                    body = body.child(self.sentry_section(
+                        Section::Crumbs,
                         tr!("sentry-crumbs", { n: event.crumbs.len() }),
-                        v_flex().gap_1().children(event.crumbs.iter().map(|crumb| {
-                            h_flex()
-                                .gap_2()
-                                .text_xs()
-                                .child(
-                                    div()
-                                        .text_color(muted)
-                                        .child(SharedString::from(crumb.category.clone())),
-                                )
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .child(SharedString::from(crumb.message.clone())),
-                                )
-                        })),
+                        crumbs,
                         cx,
                     ));
                 }
@@ -830,6 +930,79 @@ impl ClaudhubApp {
     }
 }
 
+impl ClaudhubApp {
+    /// A titled block that folds.
+    ///
+    /// **The whole heading is the target**, not a chevron the size of a full
+    /// stop: it is the gesture the review's tree and the explorer's already
+    /// have, and a title one cannot click is a title one clicks anyway.
+    fn sentry_section(
+        &mut self,
+        section: Section,
+        title: SharedString,
+        body: impl IntoElement,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let folded = self.sentry.is_folded(section);
+        v_flex()
+            .gap_1()
+            .child(
+                h_flex()
+                    .id(SharedString::new_static(section.key()))
+                    .gap_1()
+                    .items_center()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        icon(if folded {
+                            "chevron-right"
+                        } else {
+                            "chevron-down"
+                        })
+                        .xsmall(),
+                    )
+                    .child(title)
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.fold_sentry_section(section, cx)
+                    })),
+            )
+            .when(!folded, |el| el.child(body))
+    }
+}
+
+/// A word in a tinted pill: a level, a status, "app".
+fn sentry_badge(text: &str, tone: gpui::Hsla) -> impl IntoElement {
+    div()
+        .px_1p5()
+        .rounded_sm()
+        .text_xs()
+        .bg(tone.opacity(0.15))
+        .text_color(tone)
+        .child(SharedString::from(text.to_string()))
+}
+
+/// What a level is worth in colour. An unknown one is neutral rather than
+/// alarming: Sentry's list is open, and a word we have never seen is not
+/// necessarily bad news.
+fn level_tone(level: &str, cx: &App) -> gpui::Hsla {
+    match level {
+        "fatal" | "error" => cx.theme().danger,
+        "warning" => cx.theme().warning,
+        "info" => cx.theme().info,
+        _ => cx.theme().muted_foreground,
+    }
+}
+
+/// And what a status is worth. Resolved is the one piece of good news this
+/// page carries.
+fn status_tone(status: &str, cx: &App) -> gpui::Hsla {
+    match status {
+        "resolved" => cx.theme().success,
+        "ignored" => cx.theme().muted_foreground,
+        _ => cx.theme().warning,
+    }
+}
+
 /// A label and its value, read across.
 fn sentry_pair(label: SharedString, value: String, cx: &App) -> impl IntoElement {
     h_flex()
@@ -837,19 +1010,6 @@ fn sentry_pair(label: SharedString, value: String, cx: &App) -> impl IntoElement
         .text_xs()
         .child(div().text_color(cx.theme().muted_foreground).child(label))
         .child(div().child(SharedString::from(value)))
-}
-
-/// A titled block. Plain and not foldable: what is here is read once, in order.
-fn sentry_section(title: SharedString, body: impl IntoElement, cx: &App) -> impl IntoElement {
-    v_flex()
-        .gap_1()
-        .child(
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(title),
-        )
-        .child(body)
 }
 
 /// One value's share of a tag, as a bar.
@@ -943,6 +1103,13 @@ fn sentry_frame(
                             .text_color(muted)
                             .child(SharedString::from(frame.function.clone())),
                     )
+                })
+                // **Ours, said out loud.** A stack runs a hundred frames deep
+                // and three of them are the application's; the badge is what
+                // the eye lands on, and it is the same three whose code is
+                // quoted under them.
+                .when(frame.in_app, |el| {
+                    el.child(sentry_badge("app", cx.theme().info))
                 }),
         )
         .when(!frame.context.is_empty(), |el| {

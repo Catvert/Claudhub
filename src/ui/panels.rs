@@ -300,6 +300,7 @@ pub fn register(app: &Entity<ClaudhubApp>, cx: &mut App) {
     }
     declare! {
         ConflictsPanel => "ClaudhubConflicts",
+        SentryIssuePanel => "ClaudhubSentryIssue",
     }
     register_generated(app, cx);
     // No builder for the terminals, and it is not an oversight: they are the
@@ -775,7 +776,6 @@ panels! {
     // state**, which is the gesture of the rest of the window: choosing an
     // error must not push out of sight the list one is choosing from.
     SentryPanel => ("ClaudhubSentry", "panel-sentry", render_sentry, Sentry),
-    SentryIssuePanel => ("ClaudhubSentryIssue", "panel-sentry-issue", render_sentry_issue, SentryIssue, needed: sentry_issue_open, closes: close_sentry_issue),
     CiPanel => ("ClaudhubCi", "panel-ci", render_ci, Ci),
 }
 
@@ -1198,6 +1198,124 @@ impl Render for QueryPanel {
             app.render_db_console(id, window, cx).into_any_element()
         });
         pane_root(&app, Pane::Console, content, cx).into_any_element()
+    }
+}
+
+/// The Sentry error being read, in the centre.
+///
+/// **Written by hand and not by `panels!`**, for one reason: its tab says which
+/// error it holds. A macro's title is a catalogue key, which is the right
+/// answer for every view whose name does not move — and the wrong one here,
+/// where two of these tabs would be two tabs called "Error".
+pub struct SentryIssuePanel {
+    app: WeakEntity<ClaudhubApp>,
+    focus: FocusHandle,
+    /// Cached for the reason the conflicts panel's is: `visible` is called
+    /// while the layout is being built, so in the middle of `ClaudhubApp::new`.
+    visible: bool,
+}
+
+impl SentryIssuePanel {
+    pub const NAME: &'static str = "ClaudhubSentryIssue";
+
+    pub fn new(app: &Entity<ClaudhubApp>, cx: &mut Context<Self>) -> Self {
+        cx.observe(app, |this: &mut Self, app, cx| {
+            let app = app.read(cx);
+            let visible = app.panel_visible(Self::NAME) && app.sentry_issue_open();
+            if this.visible != visible {
+                this.visible = visible;
+                // The dock re-reads its tabs' visibility when the zone redraws:
+                // it is the area's notification, and not the panel's, that
+                // makes a tab appear or disappear.
+                cx.emit(PanelEvent::LayoutChanged);
+            }
+            cx.notify();
+        })
+        .detach();
+        Self {
+            app: app.downgrade(),
+            focus: cx.focus_handle(),
+            visible: false,
+        }
+    }
+}
+
+impl Focusable for SentryIssuePanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl EventEmitter<PanelEvent> for SentryIssuePanel {}
+
+impl BasePanel for SentryIssuePanel {
+    fn panel_name(&self) -> &'static str {
+        Self::NAME
+    }
+
+    fn closable(&self, _: &App) -> bool {
+        true
+    }
+
+    fn visible(&self, _: &App) -> bool {
+        self.visible
+    }
+
+    /// **Deferred**, like a file's: the dock is in the middle of editing its own
+    /// tree, and closing goes back through `DockArea::remove_panel`.
+    fn on_removed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        cx.defer_in(window, move |_, _window, cx| {
+            app.update(cx, |app, cx| app.close_sentry_issue(cx));
+        });
+    }
+}
+
+impl Panel for SentryIssuePanel {
+    /// `Sentry · SHOP-2F`, and a cross.
+    ///
+    /// The short id and not the title: the title is a sentence — an exception's
+    /// class and its message — and a tab bar is read across. The short id is
+    /// also the reference one carries elsewhere, so it is the name one has
+    /// already got in mind. An issue with none falls back to the service's own
+    /// name, which is still better than "Error".
+    fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let name = self
+            .app
+            .upgrade()
+            .and_then(|app| {
+                let issue = app.read(cx).sentry.issue()?.short_id.clone();
+                (!issue.is_empty()).then(|| gpui::SharedString::from(format!("Sentry · {issue}")))
+            })
+            .unwrap_or_else(|| tr!("panel-sentry-issue"));
+        let app = self.app.clone();
+        let closing: Closing = std::rc::Rc::new(move |window: &mut Window, cx: &mut App| {
+            let Some(app) = app.upgrade() else {
+                return;
+            };
+            window.defer(cx, move |_window, cx| {
+                app.update(cx, |app, cx| app.close_sentry_issue(cx));
+            });
+        });
+        closable_title(name, closing)
+    }
+
+    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
+        zoom_in_toolbar()
+    }
+}
+
+impl Render for SentryIssuePanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(app) = self.app.upgrade() else {
+            return div().into_any_element();
+        };
+        let content = app.update(cx, |app, cx| {
+            app.render_sentry_issue(window, cx).into_any_element()
+        });
+        pane_root(&app, Pane::SentryIssue, content, cx).into_any_element()
     }
 }
 
