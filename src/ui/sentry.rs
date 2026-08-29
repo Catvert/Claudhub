@@ -18,7 +18,7 @@
 
 use std::path::PathBuf;
 
-use gpui::{div, prelude::*, App, Context, SharedString, Window};
+use gpui::{div, prelude::*, px, App, Context, Pixels, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -79,6 +79,13 @@ pub struct SentryState {
     pub event_call: u64,
     pub tags_call: u64,
     pub scroll: gpui::UniformListScrollHandle,
+    /// The error's own scroll: a trace is read by scrolling, and the list one
+    /// picked it from is not what moves under the wheel.
+    pub issue_scroll: gpui::UniformListScrollHandle,
+    /// The body of the error's page, laid out. Built when its key moves and
+    /// kept otherwise: a frame spent only scrolling then costs a slice of a
+    /// `Vec` rather than a grammar pass per excerpt.
+    pub page: Option<Page>,
 }
 
 /// A foldable block of the error's page.
@@ -751,11 +758,222 @@ fn level_icon(level: &str) -> &'static str {
 
 // — The error being read, in the centre ——————————————————————————————
 
+/// One line of the error's body, as the virtual list counts it.
+///
+/// **Everything below the header is one line tall**, code included, which is
+/// what lets a `uniform_list` carry it. A stack of two hundred frames is two
+/// thousand lines of code, and painting them all — colouring them all — is what
+/// made the wheel crawl.
+#[derive(Clone)]
+pub enum Row {
+    /// A section's heading, which is also what folds it.
+    Section(Section, SharedString),
+    /// A key and its value: a tag of the event, or a breadcrumb.
+    Pair(SharedString, SharedString),
+    /// The name of one tag of the distribution.
+    SpreadName(SharedString),
+    /// One value's share of it.
+    Bar(SharedString, u8),
+    /// A frame's heading: its path, its function, its badge.
+    Frame(usize),
+    /// One line of a frame's excerpt.
+    Code(usize, usize),
+}
+
+/// A frame as the page paints it: its text ready, and its colours **worked out
+/// once**.
+///
+/// Colouring is tens of milliseconds of grammar work, and it was being done for
+/// every frame of every paint — which is the other half of why scrolling a long
+/// trace crawled. It is done here, when the event lands, and kept until the
+/// page's key moves.
+pub struct PaintedFrame {
+    pub path: String,
+    pub line: usize,
+    pub function: String,
+    pub in_app: bool,
+    /// The file exists in this worktree, so the heading opens it.
+    pub opens: bool,
+    pub context: Vec<(usize, SharedString)>,
+    /// One entry per line of `context`; empty where nothing colours it.
+    pub styles: Vec<Vec<(std::ops::Range<usize>, gpui::HighlightStyle)>>,
+}
+
+/// What the body was laid out for. It moves, the body is built again.
+#[derive(PartialEq, Eq)]
+pub struct PageKey {
+    issue: String,
+    /// The event is there. Its arrival is what fills the trace.
+    event: bool,
+    spreads: usize,
+    folded: std::collections::BTreeSet<&'static str>,
+    /// The theme, because the colours are baked into the rows.
+    theme: String,
+    worktree: Option<PathBuf>,
+}
+
+/// The body of the page, laid out.
+pub struct Page {
+    key: PageKey,
+    rows: std::rc::Rc<Vec<Row>>,
+    frames: std::rc::Rc<Vec<PaintedFrame>>,
+}
+
 impl ClaudhubApp {
+    /// Lays the body out, when what it is made of has moved.
+    ///
+    /// The same device as the SQL history's list: a key of everything the
+    /// layout reads, and nothing rebuilt while it holds. A frame of a page one
+    /// is only scrolling then costs a slice of a `Vec`.
+    fn refresh_sentry_page(&mut self, cx: &App) {
+        let settings = Settings::global(cx);
+        let key = PageKey {
+            issue: self
+                .sentry
+                .issue()
+                .map(|issue| issue.id.clone())
+                .unwrap_or_default(),
+            event: self.sentry.event.is_some(),
+            spreads: self.sentry.spreads.len(),
+            folded: self.sentry.folded.clone(),
+            theme: format!(
+                "{:?}/{}/{}",
+                settings.theme, settings.light_theme, settings.dark_theme
+            ),
+            worktree: self.active.clone(),
+        };
+        if self
+            .sentry
+            .page
+            .as_ref()
+            .is_some_and(|page| page.key == key)
+        {
+            return;
+        }
+        let worktree = self.active.clone().unwrap_or_default();
+        let highlight = cx.theme().highlight_theme.clone();
+        let mut rows = Vec::new();
+        let mut frames = Vec::new();
+
+        if let Some(event) = self.sentry.event.clone() {
+            // **The context, then the trace.** The trace is what one came for,
+            // so nothing that can run to seven blocks goes above it — the
+            // distribution used to, and it pushed the trace off the screen.
+            if !event.tags.is_empty() {
+                rows.push(Row::Section(Section::Context, tr!("sentry-context")));
+                if !self.sentry.is_folded(Section::Context) {
+                    for tag in &event.tags {
+                        rows.push(Row::Pair(
+                            SharedString::from(tag.key.clone()),
+                            SharedString::from(tag.value.clone()),
+                        ));
+                    }
+                }
+            }
+            if !event.frames.is_empty() {
+                rows.push(Row::Section(
+                    Section::Trace,
+                    tr!("sentry-trace", { n: event.frames.len() }),
+                ));
+                // **Newest first.** Sentry's order is the call's — oldest first
+                // — and what one comes for is the line that raised.
+                for frame in event.frames.iter().rev() {
+                    let path = frame.repo_path(&worktree);
+                    // The excerpt is a fragment with nothing before it — a
+                    // grammar's error recovery is what makes parsing it on its
+                    // own worth doing — and its language comes from the path
+                    // rather than being guessed from the text, which is how a
+                    // shell transcript ends up painted as Rust.
+                    let source: String = frame
+                        .context
+                        .iter()
+                        .map(|(_, text)| text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let styles = crate::ui::highlight::language_for_path(std::path::Path::new(
+                        &path,
+                    ))
+                    .map(|language| {
+                        crate::ui::highlight::DocumentHighlights::for_language(
+                            language, &source, &highlight,
+                        )
+                    });
+                    let at = frames.len();
+                    rows.push(Row::Frame(at));
+                    if !self.sentry.is_folded(Section::Trace) {
+                        for index in 0..frame.context.len() {
+                            rows.push(Row::Code(at, index));
+                        }
+                    }
+                    frames.push(PaintedFrame {
+                        opens: !path.is_empty() && worktree.join(&path).exists(),
+                        line: frame.line,
+                        function: frame.function.clone(),
+                        in_app: frame.in_app,
+                        context: frame
+                            .context
+                            .iter()
+                            .map(|(number, text)| (*number, SharedString::from(text.clone())))
+                            .collect(),
+                        styles: (0..frame.context.len())
+                            .map(|index| {
+                                styles
+                                    .as_ref()
+                                    .map(|styles| styles.line(index).to_vec())
+                                    .unwrap_or_default()
+                            })
+                            .collect(),
+                        path,
+                    });
+                }
+                // A folded trace keeps no frame rows, headings included: what
+                // one folded away is the stack, not the code inside it.
+                if self.sentry.is_folded(Section::Trace) {
+                    rows.retain(|row| !matches!(row, Row::Frame(_)));
+                }
+            }
+            if !self.sentry.spreads.is_empty() {
+                rows.push(Row::Section(Section::Spread, tr!("sentry-spread")));
+                if !self.sentry.is_folded(Section::Spread) {
+                    for spread in &self.sentry.spreads {
+                        rows.push(Row::SpreadName(SharedString::from(spread.name.clone())));
+                        for (value, share) in &spread.values {
+                            rows.push(Row::Bar(SharedString::from(value.clone()), *share));
+                        }
+                    }
+                }
+            }
+            if !event.crumbs.is_empty() {
+                rows.push(Row::Section(
+                    Section::Crumbs,
+                    tr!("sentry-crumbs", { n: event.crumbs.len() }),
+                ));
+                if !self.sentry.is_folded(Section::Crumbs) {
+                    for crumb in &event.crumbs {
+                        rows.push(Row::Pair(
+                            SharedString::from(crumb.category.clone()),
+                            SharedString::from(crumb.message.clone()),
+                        ));
+                    }
+                }
+            }
+        }
+        self.sentry.page = Some(Page {
+            key,
+            rows: std::rc::Rc::new(rows),
+            frames: std::rc::Rc::new(frames),
+        });
+    }
+
     /// Its trace, the deployed code, what is known of it, and the gesture.
     ///
     /// This is the half that needs width — an excerpt of code and a stack of
     /// paths — and it is what a single panel could not give.
+    ///
+    /// **The header stays and the body scrolls.** A trace two hundred frames
+    /// deep is read by scrolling, and what one is reading has to keep saying
+    /// which error it is; the body is a `uniform_list`, so the frame's cost is
+    /// what fits on screen rather than what the stack holds.
     pub(super) fn render_sentry_issue(
         &mut self,
         window: &mut Window,
@@ -764,13 +982,13 @@ impl ClaudhubApp {
         let Some(issue) = self.sentry.issue().cloned() else {
             return div().into_any_element();
         };
+        self.refresh_sentry_page(cx);
         let muted = cx.theme().muted_foreground;
         let mono = cx.theme().mono_font_family.clone();
-        let worktree = self.active.clone().unwrap_or_default();
-        let event = self.sentry.event.clone();
-        let spreads = self.sentry.spreads.clone();
+        let code_size = px(Settings::global(cx).diff_font_size);
+        let line = crate::ui::diff_view::line_height(code_size);
         let event_error = self.sentry.event_error.clone();
-        let entity = cx.entity();
+        let waiting = self.sentry.event.is_none() && event_error.is_none();
         let permalink = issue.permalink.clone();
         let short_id = issue.short_id.clone();
 
@@ -875,158 +1093,231 @@ impl ClaudhubApp {
                     }),
             );
 
-        let body = match (&event, &event_error) {
-            // Under the header and not in place of the panel: the reference and
-            // the counters have done nothing wrong.
-            (_, Some(why)) => v_flex().p_3().child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().danger)
-                    .child(why.clone()),
-            ),
-            (None, None) => v_flex().p_3().child(
-                div()
-                    .text_sm()
-                    .text_color(muted)
-                    .child(tr!("sentry-loading-event")),
-            ),
-            (Some(event), None) => {
-                let mut body = v_flex().gap_3().p_3();
-                // **The context, then the trace.** The trace is what one came
-                // for, so nothing that can run to seven blocks goes above it —
-                // the distribution used to, and it pushed the trace off the
-                // bottom of the screen.
-                if !event.tags.is_empty() {
-                    let tags = h_flex().gap_2().flex_wrap().children(
-                        event
-                            .tags
-                            .iter()
-                            .map(|tag| sentry_pair(tag.key.clone().into(), tag.value.clone(), cx)),
-                    );
-                    body = body.child(self.sentry_section(
-                        Section::Context,
-                        tr!("sentry-context"),
-                        tags,
-                        cx,
-                    ));
-                }
-                if !event.frames.is_empty() {
-                    // **Newest first.** Sentry's order is the call's — oldest
-                    // first — and what one comes for is the line that raised.
-                    let frames =
-                        v_flex()
-                            .gap_2()
-                            .children(event.frames.iter().rev().enumerate().map(|(n, frame)| {
-                                sentry_frame(frame, n, &worktree, mono.clone(), &entity, cx)
-                            }));
-                    body = body.child(self.sentry_section(
-                        Section::Trace,
-                        tr!("sentry-trace", { n: event.frames.len() }),
-                        frames,
-                        cx,
-                    ));
-                }
-                if !spreads.is_empty() {
-                    // One block, folded: what is inside is one bar chart per
-                    // tag, and they are read together or not at all.
-                    let bars = v_flex().gap_3().children(spreads.iter().map(|spread| {
-                        v_flex()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .child(SharedString::from(spread.name.clone())),
-                            )
-                            .children(
-                                spread
-                                    .values
-                                    .iter()
-                                    .map(|(value, share)| sentry_bar(value, *share, cx)),
-                            )
-                    }));
-                    body = body.child(self.sentry_section(
-                        Section::Spread,
-                        tr!("sentry-spread"),
-                        bars,
-                        cx,
-                    ));
-                }
-                if !event.crumbs.is_empty() {
-                    let crumbs = v_flex().gap_1().children(event.crumbs.iter().map(|crumb| {
-                        h_flex()
-                            .gap_2()
-                            .text_xs()
-                            .child(
-                                div()
-                                    .text_color(muted)
-                                    .child(SharedString::from(crumb.category.clone())),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .child(SharedString::from(crumb.message.clone())),
-                            )
-                    }));
-                    body = body.child(self.sentry_section(
-                        Section::Crumbs,
-                        tr!("sentry-crumbs", { n: event.crumbs.len() }),
-                        crumbs,
-                        cx,
-                    ));
-                }
-                body
-            }
-        };
+        // Under the header and not in place of the panel: the reference and the
+        // counters have done nothing wrong.
+        if let Some(why) = event_error {
+            return v_flex()
+                .size_full()
+                .child(head)
+                .child(
+                    div()
+                        .p_3()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(why),
+                )
+                .into_any_element();
+        }
+        if waiting {
+            return v_flex()
+                .size_full()
+                .child(head)
+                .child(
+                    div()
+                        .p_3()
+                        .text_sm()
+                        .text_color(muted)
+                        .child(tr!("sentry-loading-event")),
+                )
+                .into_any_element();
+        }
 
-        let _ = window;
+        let Some(page) = self.sentry.page.as_ref() else {
+            return v_flex().size_full().child(head).into_any_element();
+        };
+        let (rows, frames) = (page.rows.clone(), page.frames.clone());
+        let entity = cx.entity();
+        let handle = self.sentry.issue_scroll.clone();
+        let look = CodeLook {
+            line,
+            mono,
+            muted,
+            code: code_size,
+            marked: cx.theme().warning.opacity(0.15),
+            ground: cx.theme().secondary,
+            info: cx.theme().info,
+            primary: cx.theme().primary,
+            folded: cx.theme().muted,
+        };
+        let count = rows.len();
         v_flex()
-            .id("sentry-issue")
             .size_full()
-            .overflow_y_scroll()
             .child(head)
-            .child(body)
+            .child(
+                div().flex_1().min_h_0().px_3().child(
+                    // Wheel smoothing, as everywhere else: a trace runs to
+                    // hundreds of lines, and a notch jumping three at once
+                    // makes the eye lose its place.
+                    self.scrolled(
+                        "sentry-issue",
+                        &handle,
+                        crate::ui::motion::Axes::Vertical,
+                        window,
+                        gpui::uniform_list("sentry-rows", count, move |range, _window, _cx| {
+                            range
+                                .map(|index| sentry_row_of(&rows[index], &frames, &look, &entity))
+                                .collect::<Vec<_>>()
+                        })
+                        .size_full()
+                        .track_scroll(&handle),
+                        cx,
+                    ),
+                ),
+            )
             .into_any_element()
     }
 }
 
-impl ClaudhubApp {
-    /// A titled block that folds.
-    ///
-    /// **The whole heading is the target**, not a chevron the size of a full
-    /// stop: it is the gesture the review's tree and the explorer's already
-    /// have, and a title one cannot click is a title one clicks anyway.
-    fn sentry_section(
-        &mut self,
-        section: Section,
-        title: SharedString,
-        body: impl IntoElement,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let folded = self.sentry.is_folded(section);
-        v_flex()
-            .gap_1()
+/// What painting one line of the body needs, read once per frame.
+struct CodeLook {
+    line: Pixels,
+    mono: SharedString,
+    muted: gpui::Hsla,
+    code: Pixels,
+    marked: gpui::Hsla,
+    ground: gpui::Hsla,
+    info: gpui::Hsla,
+    primary: gpui::Hsla,
+    folded: gpui::Hsla,
+}
+
+/// One line of the body.
+///
+/// Every arm is **one line tall**, explicitly: a `uniform_list` reserves what
+/// it is told, and a line that overflows what it reserved is a line drawn over
+/// its neighbour.
+fn sentry_row_of(
+    row: &Row,
+    frames: &std::rc::Rc<Vec<PaintedFrame>>,
+    look: &CodeLook,
+    app: &gpui::Entity<ClaudhubApp>,
+) -> gpui::AnyElement {
+    let base = || h_flex().h(look.line).w_full().items_center().gap_2();
+    match row {
+        Row::Section(section, title) => {
+            let (section, app) = (*section, app.clone());
+            base()
+                .id(SharedString::new_static(section.key()))
+                .text_xs()
+                .text_color(look.muted)
+                .child(title.clone())
+                .on_click(move |_, _window, cx| {
+                    app.update(cx, |this, cx| this.fold_sentry_section(section, cx));
+                })
+                .into_any_element()
+        }
+        Row::Pair(key, value) => base()
+            .text_xs()
+            .child(div().text_color(look.muted).child(key.clone()))
+            .child(div().truncate().child(value.clone()))
+            .into_any_element(),
+        Row::SpreadName(name) => base()
+            .text_xs()
+            .text_color(look.muted)
+            .child(name.clone())
+            .into_any_element(),
+        Row::Bar(value, share) => base()
+            .text_xs()
+            .child(div().w(px(160.)).truncate().child(value.clone()))
             .child(
-                h_flex()
-                    .id(SharedString::new_static(section.key()))
-                    .gap_1()
-                    .items_center()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(
-                        icon(if folded {
-                            "chevron-right"
-                        } else {
-                            "chevron-down"
-                        })
-                        .xsmall(),
-                    )
-                    .child(title)
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.fold_sentry_section(section, cx)
-                    })),
+                div().flex_1().h(px(6.)).rounded_sm().bg(look.folded).child(
+                    div()
+                        .h_full()
+                        .w(gpui::relative(f32::from(*share) / 100.))
+                        .rounded_sm()
+                        .bg(look.primary),
+                ),
             )
-            .when(!folded, |el| el.child(body))
+            .child(
+                div()
+                    .w(px(40.))
+                    .text_right()
+                    .text_color(look.muted)
+                    .child(SharedString::from(format!("{share} %"))),
+            )
+            .into_any_element(),
+        Row::Frame(at) => {
+            let Some(frame) = frames.get(*at) else {
+                return div().h(look.line).into_any_element();
+            };
+            let (app, path, line) = (
+                app.clone(),
+                std::path::PathBuf::from(&frame.path),
+                frame.line,
+            );
+            base()
+                .text_xs()
+                .child(
+                    Button::new(("sentry-frame", *at))
+                        .ghost()
+                        .xsmall()
+                        .icon(icon(if frame.in_app { "file-code" } else { "file" }))
+                        .label(SharedString::from(format!("{}:{}", frame.path, frame.line)))
+                        // A frame Sentry names by a module, or one of a
+                        // dependency that is not checked out here, opens
+                        // nothing: the button says so by being dead rather than
+                        // by opening an empty editor.
+                        .disabled(!frame.opens)
+                        .on_click(move |_, _window, cx| {
+                            let path = path.clone();
+                            app.update(cx, |app, cx| {
+                                app.open_at(
+                                    path,
+                                    Some(crate::ui::explorer::Landing::Position {
+                                        line: (line.saturating_sub(1)) as u32,
+                                        character: 0,
+                                    }),
+                                    cx,
+                                );
+                            });
+                        }),
+                )
+                .when(!frame.function.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .font_family(look.mono.clone())
+                            .text_color(look.muted)
+                            .truncate()
+                            .child(SharedString::from(frame.function.clone())),
+                    )
+                })
+                // **Ours, said out loud.** A stack runs a hundred frames deep
+                // and three of them are the application's; the badge is what the
+                // eye lands on, and it is the same three whose code is quoted
+                // under them.
+                .when(frame.in_app, |el| el.child(sentry_badge("app", look.info)))
+                .into_any_element()
+        }
+        Row::Code(at, index) => {
+            let Some((frame, (number, text))) = frames
+                .get(*at)
+                .and_then(|frame| Some((frame, frame.context.get(*index)?)))
+            else {
+                return div().h(look.line).into_any_element();
+            };
+            let culprit = *number == frame.line;
+            let styles = frame.styles.get(*index).cloned().unwrap_or_default();
+            let painted = match styles.is_empty() {
+                false => gpui::StyledText::new(text.clone())
+                    .with_highlights(styles)
+                    .into_any_element(),
+                true => div().child(text.clone()).into_any_element(),
+            };
+            base()
+                .bg(if culprit { look.marked } else { look.ground })
+                .font_family(look.mono.clone())
+                .text_size(look.code)
+                .child(
+                    div()
+                        .w(px(48.))
+                        .flex_none()
+                        .text_right()
+                        .text_color(look.muted)
+                        .child(SharedString::from(number.to_string())),
+                )
+                .child(div().whitespace_nowrap().child(painted))
+                .into_any_element()
+        }
     }
 }
 
@@ -1102,166 +1393,4 @@ fn sentry_pair(label: SharedString, value: String, cx: &App) -> impl IntoElement
         .text_xs()
         .child(div().text_color(cx.theme().muted_foreground).child(label))
         .child(div().child(SharedString::from(value)))
-}
-
-/// One value's share of a tag, as a bar.
-fn sentry_bar(value: &str, share: u8, cx: &App) -> impl IntoElement {
-    h_flex()
-        .gap_2()
-        .items_center()
-        .text_xs()
-        .child(
-            div()
-                .w(gpui::px(160.))
-                .truncate()
-                .child(SharedString::from(value.to_string())),
-        )
-        .child(
-            div()
-                .flex_1()
-                .h(gpui::px(6.))
-                .rounded_sm()
-                .bg(cx.theme().muted)
-                .child(
-                    div()
-                        .h_full()
-                        .w(gpui::relative(f32::from(share) / 100.))
-                        .rounded_sm()
-                        .bg(cx.theme().primary),
-                ),
-        )
-        .child(
-            div()
-                .w(gpui::px(40.))
-                .text_right()
-                .text_color(cx.theme().muted_foreground)
-                .child(SharedString::from(format!("{share} %"))),
-        )
-}
-
-/// One frame: the path one clicks, the function, and its excerpt.
-fn sentry_frame(
-    frame: &crate::sentry::Frame,
-    rank: usize,
-    worktree: &std::path::Path,
-    mono: SharedString,
-    app: &gpui::Entity<ClaudhubApp>,
-    cx: &App,
-) -> impl IntoElement {
-    let path = frame.repo_path(worktree);
-    let line = frame.line;
-    let target = worktree.join(&path);
-    let opens = target.exists();
-    let muted = cx.theme().muted_foreground;
-    v_flex()
-        .gap_0p5()
-        .child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .text_xs()
-                .child(
-                    Button::new(("sentry-frame", rank))
-                        .ghost()
-                        .xsmall()
-                        .icon(icon(if frame.in_app { "file-code" } else { "file" }))
-                        .label(SharedString::from(format!("{path}:{line}")))
-                        // A frame Sentry names by a module, or one of a
-                        // dependency that is not checked out here, opens
-                        // nothing: the button says so by being dead rather than
-                        // by opening an empty editor.
-                        .disabled(!opens)
-                        .on_click({
-                            let (app, path) = (app.clone(), std::path::PathBuf::from(&path));
-                            move |_, _window, cx| {
-                                let path = path.clone();
-                                app.update(cx, |app, cx| {
-                                    app.open_at(
-                                        path,
-                                        Some(crate::ui::explorer::Landing::Position {
-                                            line: line.saturating_sub(1) as u32,
-                                            character: 0,
-                                        }),
-                                        cx,
-                                    );
-                                });
-                            }
-                        }),
-                )
-                .when(!frame.function.is_empty(), |el| {
-                    el.child(
-                        div()
-                            .font_family(mono.clone())
-                            .text_color(muted)
-                            .child(SharedString::from(frame.function.clone())),
-                    )
-                })
-                // **Ours, said out loud.** A stack runs a hundred frames deep
-                // and three of them are the application's; the badge is what
-                // the eye lands on, and it is the same three whose code is
-                // quoted under them.
-                .when(frame.in_app, |el| {
-                    el.child(sentry_badge("app", cx.theme().info))
-                }),
-        )
-        .when(!frame.context.is_empty(), |el| {
-            // **It is the code one reads, so it is coloured.** The excerpt is a
-            // fragment with nothing before it — a grammar's error recovery is
-            // what makes parsing it on its own worth doing — and its language
-            // comes from the path rather than being guessed from the text,
-            // which is how a shell transcript ends up painted as Rust.
-            let source: String = frame
-                .context
-                .iter()
-                .map(|(_, text)| text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            let styles = crate::ui::highlight::language_for_path(std::path::Path::new(&path)).map(
-                |language| {
-                    crate::ui::highlight::DocumentHighlights::for_language(
-                        language,
-                        &source,
-                        &cx.theme().highlight_theme.clone(),
-                    )
-                },
-            );
-            el.child(
-                v_flex()
-                    .p_2()
-                    .rounded_md()
-                    .bg(cx.theme().secondary)
-                    .font_family(mono.clone())
-                    .text_xs()
-                    .children(
-                        frame
-                            .context
-                            .iter()
-                            .enumerate()
-                            .map(|(index, (number, text))| {
-                                let culprit = *number == line;
-                                let text = SharedString::from(text.clone());
-                                let painted = match styles.as_ref().map(|styles| styles.line(index))
-                                {
-                                    Some(runs) if !runs.is_empty() => {
-                                        gpui::StyledText::new(text.clone())
-                                            .with_highlights(runs.to_vec())
-                                            .into_any_element()
-                                    }
-                                    _ => div().child(text).into_any_element(),
-                                };
-                                h_flex()
-                                    .gap_2()
-                                    .when(culprit, |el| el.bg(cx.theme().warning.opacity(0.15)))
-                                    .child(
-                                        div()
-                                            .w(gpui::px(40.))
-                                            .text_right()
-                                            .text_color(muted)
-                                            .child(SharedString::from(number.to_string())),
-                                    )
-                                    .child(div().whitespace_nowrap().child(painted))
-                            }),
-                    ),
-            )
-        })
 }

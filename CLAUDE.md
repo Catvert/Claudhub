@@ -738,6 +738,13 @@ chercherait un bus de session qu'une distribution sans écran n'a pas. Lu une fo
 et gardé — ouvrir un trousseau peut demander de le déverrouiller. Un identifiant d'envoi écarte la réponse en retard, comme la
 console SQL.
 
+Le corps d'une erreur est une **liste virtuelle** dont chaque ligne, code
+compris, fait une ligne de haut, et sa coloration est calculée **une fois** à
+l'arrivée de l'événement : une pile de deux cents cadres fait deux mille lignes,
+et les peindre — les colorer — toutes à chaque image est ce qui faisait ramer la
+molette. L'en-tête reste, le corps défile : ce qu'on lit en parcourant une trace
+doit continuer de dire de quelle erreur il s'agit.
+
 **Rien n'est lu avant que le panneau ne soit peint** (`ensure_sentry`,
 `ensure_ci`, comme `ensure_history`) : un panneau peint est un panneau à
 l'écran — onglet devant, zone dépliée, vue non rangée —, et un worktree qu'on
