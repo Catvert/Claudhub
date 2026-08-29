@@ -738,6 +738,15 @@ chercherait un bus de session qu'une distribution sans écran n'a pas. Lu une fo
 et gardé — ouvrir un trousseau peut demander de le déverrouiller. Un identifiant d'envoi écarte la réponse en retard, comme la
 console SQL.
 
+**Rien n'est lu avant que le panneau ne soit peint** (`ensure_sentry`,
+`ensure_ci`, comme `ensure_history`) : un panneau peint est un panneau à
+l'écran — onglet devant, zone dépliée, vue non rangée —, et un worktree qu'on
+traverse ne vaut ni un aller-retour chez quelqu'un d'autre ni un `gh run list`.
+Changer de worktree **oublie** au lieu de relire. Ce qui a été lu est signé par
+le compte et le projet, jamais par un drapeau : avec un drapeau, renseigner le
+jeton dans les réglages puis revenir laissait le panneau dire « renseignez le
+jeton » pour toujours.
+
 **La CI** (`ui/ci.rs`) — les exécutions de la branche, par `gh` et non par l'API
 GitHub : la CLI est déjà authentifiée, c'est un programme que l'utilisateur
 installe comme les agents du terminal, et Claudhub n'a ni jeton à tenir ni OAuth

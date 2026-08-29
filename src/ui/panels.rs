@@ -775,8 +775,13 @@ panels! {
     // The errors Sentry reports, and the one being read. **Two panels on one
     // state**, which is the gesture of the rest of the window: choosing an
     // error must not push out of sight the list one is choosing from.
-    SentryPanel => ("ClaudhubSentry", "panel-sentry", render_sentry, Sentry),
-    CiPanel => ("ClaudhubCi", "panel-ci", render_ci, Ci),
+    // Sentry is read the first time its panel is drawn, and never before: a
+    // round trip to somebody else's server on every checkout one passes
+    // through is a cost nobody asked for. See `ensure_sentry`.
+    SentryPanel => ("ClaudhubSentry", "panel-sentry", render_sentry, Sentry, prepare: ensure_sentry),
+    // And the runs the same way: `gh run list` is a process and a network
+    // round trip of its own.
+    CiPanel => ("ClaudhubCi", "panel-ci", render_ci, Ci, prepare: ensure_ci),
 }
 
 /// One open file, as the dock shows it.

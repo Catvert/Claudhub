@@ -55,6 +55,17 @@ pub struct SentryState {
     pub error: Option<SharedString>,
     /// Why the trace is missing, which is not why the list is.
     pub event_error: Option<SharedString>,
+    /// What the reading on screen was made for: the account and the project,
+    /// as one string.
+    ///
+    /// **A signature and not a flag**, and the difference is the trap it
+    /// exists for: with a flag, filling in the token in the settings and coming
+    /// back left the panel saying "set the organisation and the token" for
+    /// ever, since it had already read once. It also stands in for the flag —
+    /// `None` is "never read" — and an account not set up yet signs as the
+    /// empty string, which is a reading that happened and must not be redone
+    /// every frame.
+    pub read_for: Option<String>,
     /// The sections one has folded, by the key `Section::key` gives.
     ///
     /// **What is folded and not what is open**, so a section added later shows
@@ -183,16 +194,54 @@ impl ClaudhubApp {
         call
     }
 
+    /// Reads the project's issues **the first time the panel is drawn**.
+    ///
+    /// A panel that is drawn is a panel on screen: the tab is displayed, the
+    /// zone is unfolded, and the view is not put away. That is the whole of the
+    /// condition, and it is read off the frame rather than tracked — the rule
+    /// the history's own loading already lives by.
+    ///
+    /// It matters more here than there: reading a `git log` of a worktree
+    /// nobody is looking at wastes a fork, and reading Sentry's wastes a round
+    /// trip to somebody else's server, on every checkout one passes through.
+    ///
+    /// Asked **once per account**, or every frame the panel is up would restart
+    /// it — and never again for the same one, or a token corrected in the
+    /// settings would never take effect.
+    pub(super) fn ensure_sentry(&mut self, cx: &mut Context<Self>) {
+        if self.sentry.loading || self.sentry.read_for.as_deref() == Some(&self.sentry_key(cx)) {
+            return;
+        }
+        self.load_sentry(cx);
+    }
+
+    /// The account and the project this reading is about, as one string.
+    ///
+    /// Empty when there is nothing to read with, which is a state like any
+    /// other: it is what the panel says in words, and what changes the moment
+    /// one fills the settings in.
+    fn sentry_key(&self, cx: &App) -> String {
+        let Some((org, host, _)) = self.sentry_account(cx) else {
+            return String::new();
+        };
+        match self.sentry_project(cx) {
+            Some(project) => format!("{org}/{project}@{host}"),
+            None => String::new(),
+        }
+    }
+
     /// Reads the project's issues, replacing whatever was there.
     ///
-    /// Called on arriving in a repository and from the panel's refresh button.
-    /// It is a **replacement** and not a refresh: the errors of another project
-    /// have nothing to do with this one's.
+    /// Called from the panel's first paint and from its refresh button. It is a
+    /// **replacement** and not a refresh: the errors of another project have
+    /// nothing to do with this one's.
     pub(super) fn load_sentry(&mut self, cx: &mut Context<Self>) {
         let main = self.active_main();
+        let key = self.sentry_key(cx);
         self.sentry = SentryState {
             main: main.clone(),
             folded: SentryState::fresh_folds(),
+            read_for: Some(key),
             ..Default::default()
         };
         let Some((org, host, token)) = self.sentry_account(cx) else {
@@ -215,7 +264,12 @@ impl ClaudhubApp {
 
     /// The Sentry views follow the worktree, like every other panel.
     ///
-    /// The project's field is refilled with it: it belongs to the repository,
+    /// It **forgets** rather than reads: what is on screen belongs to the
+    /// repository one has just left, and the next paint of the panel is what
+    /// asks for this one's. A checkout one passes through on the way to another
+    /// therefore costs no request at all.
+    ///
+    /// The project's field is refilled, though: it belongs to the repository,
     /// so leaving the previous one's name under the caret would be the one
     /// thing a per-repository setting must not do.
     pub(super) fn sentry_follows_worktree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -225,7 +279,12 @@ impl ClaudhubApp {
         let project = self.sentry_project(cx).unwrap_or_default();
         let input = self.sentry_project_input.clone();
         input.update(cx, |input, cx| input.set_value(project, window, cx));
-        self.load_sentry(cx);
+        self.sentry = SentryState {
+            main: self.active_main(),
+            folded: SentryState::fresh_folds(),
+            ..Default::default()
+        };
+        cx.notify();
     }
 
     /// The project's field validates on Enter and on losing the focus.

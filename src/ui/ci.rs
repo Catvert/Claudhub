@@ -139,6 +139,11 @@ pub struct CiState {
     /// The log of the chosen run, once asked for: choosing a row calls nothing,
     /// the button is what asks.
     pub log: Option<SharedString>,
+    /// The worktree this reading was made for. `None` is "never read".
+    ///
+    /// The same device as `SentryState::read_for`, and simpler for the same
+    /// job: what a run list depends on is one checkout and nothing else.
+    pub read_for: Option<PathBuf>,
     pub loading: bool,
     pub error: Option<SharedString>,
     /// The sends in flight — a late answer is dropped rather than shown.
@@ -161,11 +166,24 @@ impl ClaudhubApp {
         call
     }
 
+    /// Reads the runs **the first time the panel is drawn**, and never before.
+    ///
+    /// A `gh run list` is a process and a network round trip of its own, and a
+    /// checkout one passes through on the way to another is not a reason for
+    /// either. See `ClaudhubApp::ensure_sentry` for the whole of the rule.
+    pub(super) fn ensure_ci(&mut self, cx: &mut Context<Self>) {
+        if self.ci.loading || self.ci.read_for == self.active {
+            return;
+        }
+        self.load_ci(cx);
+    }
+
     /// Reads the runs, replacing whatever was there.
     pub(super) fn load_ci(&mut self, cx: &mut Context<Self>) {
         let worktree = self.active.clone();
         self.ci = CiState {
             worktree: worktree.clone(),
+            read_for: worktree.clone(),
             ..Default::default()
         };
         let Some(worktree) = worktree else {
@@ -178,11 +196,18 @@ impl ClaudhubApp {
     }
 
     /// The CI view follows the worktree, like every other panel.
+    ///
+    /// It **forgets** rather than reads: the next paint of the panel is what
+    /// asks for the arriving worktree's runs.
     pub(super) fn ci_follows_worktree(&mut self, cx: &mut Context<Self>) {
         if self.ci.worktree == self.active {
             return;
         }
-        self.load_ci(cx);
+        self.ci = CiState {
+            worktree: self.active.clone(),
+            ..Default::default()
+        };
+        cx.notify();
     }
 
     /// Chooses a run. It asks for nothing: a log is a second process, and one
