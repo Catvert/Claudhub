@@ -51,6 +51,14 @@ sans quitter l'application.
 - **Branches** — liste locale et distante avec leur dernier commit et leur
   écart à l'amont, bascule, création, et création d'un worktree depuis une
   branche existante.
+- **GitHub** — les pull requests ouvertes du dépôt : pour chacune, ce qu'elle
+  vise, qui l'a ouverte, l'état de ses vérifications et la décision de revue ;
+  celle de la branche affichée est marquée. Un bouton en ouvre une quand la
+  branche n'en a pas — titre et description proposés d'après ses commits, et la
+  branche poussée au passage si elle ne l'avait jamais été. La bascule d'à côté
+  montre les exécutions de la CI de la branche, avec le journal de celle qui a
+  échoué et de quoi le confier à un agent. Tout passe par `gh`, déjà
+  authentifié : Claudhub n'a aucun jeton à tenir.
 - **Défilement** — chaque panneau porte sa barre, et la molette y est lissée :
   un cran glisse en une fraction de seconde au lieu de sauter de trois lignes,
   ce qui garde sa place à l'œil quand on relit. Un pavé tactile reste

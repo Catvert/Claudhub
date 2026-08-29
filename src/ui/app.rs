@@ -869,10 +869,10 @@ pub struct ClaudhubApp {
     /// every input is: rebuilt at render time it would lose the caret on the
     /// first keystroke.
     pub(super) sentry_project_input: Entity<InputState>,
-    /// The branch's CI runs, and the log of the one opened.
-    pub(super) ci: crate::ui::ci::CiState,
+    /// The branch's pull request, its CI runs, and the log of the one opened.
+    pub(super) github: crate::ui::github::GithubState,
     /// What names a request of `gh`. See `sentry_seq`.
-    pub(super) ci_seq: u64,
+    pub(super) github_seq: u64,
     /// What is known of each repository's tags, by main repository: tags live
     /// in the shared `.git` and are the same seen from every worktree.
     pub(super) tags: HashMap<PathBuf, crate::ui::tags::TagsState>,
@@ -1323,8 +1323,8 @@ impl ClaudhubApp {
             sentry: Default::default(),
             sentry_seq: 0,
             sentry_project_input,
-            ci: Default::default(),
-            ci_seq: 0,
+            github: Default::default(),
+            github_seq: 0,
             tags: HashMap::new(),
             tags_scroll: gpui::UniformListScrollHandle::new(),
             pest: HashMap::new(),
@@ -2235,7 +2235,9 @@ impl ClaudhubApp {
                 result,
             } => match caller {
                 crate::runtime::protocol::Caller::Sentry => self.sentry_answered(call, result, cx),
-                crate::runtime::protocol::Caller::Ci => self.ci_answered(call, result, window, cx),
+                crate::runtime::protocol::Caller::Github => {
+                    self.github_answered(call, result, window, cx)
+                }
             },
 
             // — The language server ————————————————————————————————
@@ -3300,7 +3302,7 @@ impl ClaudhubApp {
         // The two views that read a service speak about the worktree the window
         // shows, like every other panel: changing it is starting over.
         self.sentry_follows_worktree(window, cx);
-        self.ci_follows_worktree(cx);
+        self.github_follows_worktree(cx);
         // And the editing screen goes back to this worktree's file: one may
         // have gone off to edit a file outside any repository, and leaving the
         // root there would show a file the rest of the window denies.

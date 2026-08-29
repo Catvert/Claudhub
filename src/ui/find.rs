@@ -88,9 +88,10 @@ pub enum Pane {
     /// picked from. The key exists so `Ctrl+F` there does not go to the panel
     /// touched before it.
     SentryIssue,
-    /// The branch's CI runs. It filters: the order is the runs' own, newest
-    /// first, and nothing in it links one row to the next.
-    Ci,
+    /// The GitHub panel: the branch's pull request and its CI runs. It
+    /// filters the runs — the order is theirs, newest first, and nothing in it
+    /// links one row to the next.
+    Github,
 }
 
 impl Pane {

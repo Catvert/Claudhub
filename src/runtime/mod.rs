@@ -2074,7 +2074,7 @@ mod tests {
         );
         assert_eq!(
             queue_of(&Cmd::Call {
-                caller: Caller::Ci,
+                caller: Caller::Github,
                 call: 2,
                 cap: crate::outside::Cap::Shell {
                     worktree: worktree(),

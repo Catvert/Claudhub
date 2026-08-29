@@ -783,9 +783,14 @@ panels! {
     // round trip to somebody else's server on every checkout one passes
     // through is a cost nobody asked for. See `ensure_sentry`.
     SentryPanel => ("ClaudhubSentry", "panel-sentry", render_sentry, Sentry, prepare: ensure_sentry),
-    // And the runs the same way: `gh run list` is a process and a network
-    // round trip of its own.
-    CiPanel => ("ClaudhubCi", "panel-ci", render_ci, Ci, prepare: ensure_ci),
+    // And GitHub the same way: a `gh` call is a process and a network round
+    // trip of its own.
+    //
+    // **The panel keeps its identifier** (`ClaudhubCi`) although it is no
+    // longer only about CI: it is written in every `layout.json` already
+    // saved, and a panel the dock cannot resolve comes back as "panel type is
+    // not registered" at every start, with a reset of the view for only cure.
+    GithubPanel => ("ClaudhubCi", "panel-github", render_github, Github, prepare: ensure_github),
 }
 
 /// One open file, as the dock shows it.

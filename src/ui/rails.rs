@@ -319,11 +319,11 @@ pub const TOOLS: &[Tool] = &[
         home: Anchor::new(Side::Right, Half::Top),
         conditional: false,
     },
-    // And beside what happened: a run answers "what became of this branch",
-    // which is the edge one reads where one stands.
+    // And beside what happened: a pull request answers "what became of this
+    // branch", which is the edge one reads where one stands.
     Tool {
         panel: "ClaudhubCi",
-        title: Label("panel-ci"),
+        title: Label("panel-github"),
         icon: "github",
         home: Anchor::new(Side::Right, Half::Top),
         conditional: false,

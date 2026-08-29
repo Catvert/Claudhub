@@ -44,8 +44,8 @@ impl std::fmt::Debug for Secret {
 pub enum Caller {
     /// The Sentry views: the issue list, and the one opened in the centre.
     Sentry,
-    /// The CI view: the runs of the branch, read through `gh`.
-    Ci,
+    /// The GitHub view: the branch's pull request and its runs, read through `gh`.
+    Github,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

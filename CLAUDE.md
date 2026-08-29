@@ -220,7 +220,7 @@ src/
     merge_view.rs   les trois colonnes, et le clic qui tranche
     keyring.rs      où vit un jeton : la valeur, `$NOM`, ou le trousseau
     sentry.rs       les deux vues Sentry : la liste et l'erreur qu'on lit
-    ci.rs           les exécutions de la branche, lues par `gh`
+    github.rs       la PR de la branche et ses exécutions, lues par `gh`
     find.rs         la recherche d'un panneau, et son routage
     motion.rs       le lissage de la molette — pur
     vim.rs          les modes de vim de l'éditeur — pur
@@ -266,7 +266,8 @@ attend, et c'est la panne qu'on ne diagnostique pas.
   (un `up` démarre des conteneurs), pas avec le réseau.
 - **Fond** (un worker) : résumés, agents, relevé de `wt`, ses questions et les
   liens de son `[open] source` (des shells du projet), recettes d'un `justfile`,
-  `gh` des exécutions CI. Ne doit jamais passer devant un diff qu'on vient
+  `gh` de la PR et des exécutions CI. Ne doit jamais passer devant un diff
+  qu'on vient
   de demander.
 - **Bases** (deux workers) : deux, parce que déplier un schéma en demande
   plusieurs à la fois et qu'ils attendent une socket.
@@ -411,7 +412,7 @@ souvient, le bas s'étale, le centre se lit.** À gauche ce qui désigne — les
 fichiers, la recherche, les changements, la branche, les tests dans le haut ;
 les notes, les conflits, les remisages, les tags dans le bas ; à droite ce qui
 dit où l'on en est — les bases et, sous elles, les requêtes déjà jouées ; les
-erreurs de Sentry ; les exécutions de la CI ; en bas ce qui a
+erreurs de Sentry ; la PR de la branche et ses exécutions ; en bas ce qui a
 besoin de la largeur — le run suivi, les branches et leur graphe, les
 terminaux ;
 au centre ce qu'on relit — le diff, l'éditeur, l'aperçu, et chaque fichier ouvert
@@ -805,7 +806,7 @@ molette. L'en-tête reste, le corps défile : ce qu'on lit en parcourant une tra
 doit continuer de dire de quelle erreur il s'agit.
 
 **Rien n'est lu avant que le panneau ne soit peint** (`ensure_sentry`,
-`ensure_ci`, comme `ensure_history`) : un panneau peint est un panneau à
+`ensure_github`, comme `ensure_history`) : un panneau peint est un panneau à
 l'écran — onglet devant, zone dépliée, vue non rangée —, et un worktree qu'on
 traverse ne vaut ni un aller-retour chez quelqu'un d'autre ni un `gh run list`.
 Changer de worktree **oublie** au lieu de relire. Ce qui a été lu est signé par
@@ -813,14 +814,49 @@ le compte et le projet, jamais par un drapeau : avec un drapeau, renseigner le
 jeton dans les réglages puis revenir laissait le panneau dire « renseignez le
 jeton » pour toujours.
 
-**La CI** (`ui/ci.rs`) — les exécutions de la branche, par `gh` et non par l'API
-GitHub : la CLI est déjà authentifiée, c'est un programme que l'utilisateur
-installe comme les agents du terminal, et Claudhub n'a ni jeton à tenir ni OAuth
-à parcourir. Le formatage est demandé à `gh --template` : le JSON qu'on
-analyserait serait une forme de plus à suivre. Un piège y est écrit et ce n'est
-pas un raffinement — `printf "%.0f"` sur l'identifiant, un modèle Go formatant un
-nombre JSON en flottant, si bien que `{{.databaseId}}` rend `3.2494024323e+10`,
-que `gh run view` ne reconnaît pas, et rien ne le dit avant le premier clic.
+**GitHub** (`ui/github.rs`) — les pull requests ouvertes du dépôt et les
+exécutions de la branche, par `gh` et non par l'API GitHub : la CLI est déjà authentifiée, c'est un
+programme que l'utilisateur installe comme les agents du terminal, et Claudhub
+n'a ni jeton à tenir ni OAuth à parcourir.
+
+**Deux formes de lecture, et l'écart n'est pas un goût.** Les exécutions
+reviennent en lignes séparées par des tabulations, formatées par
+`gh --template` : une liste plate est un format qui ne peut pas dériver, et le
+JSON qu'on analyserait serait une forme de plus à suivre. Une pull request n'est
+pas plate — ses vérifications sont un tableau dont les entrées ont elles-mêmes
+deux formes, `CheckRun` et `StatusContext` — et un modèle Go qui replierait cela
+en une ligne serait un analyseur écrit dans une chaîne : elle est lue en JSON.
+
+Un piège est écrit dans le modèle des exécutions et ce n'est pas un raffinement
+— `printf "%.0f"` sur l'identifiant, un modèle Go formatant un nombre JSON en
+flottant, si bien que `{{.databaseId}}` rend `3.2494024323e+10`, que
+`gh run view` ne reconnaît pas, et rien ne le dit avant le premier clic.
+
+**La liste est celle du dépôt, pas celle de la branche.** Le panneau n'a
+d'abord montré que la PR de la branche courante, et il était donc vide sur
+toute branche qui n'en a pas — c'est-à-dire la plupart, et toutes celles depuis
+lesquelles on s'apprête à en ouvrir une. Ce qu'on vient chercher dans cet
+onglet, ce sont les autres. La PR de la branche est **trouvée dans la liste**
+plutôt que lue à part : un seul processus répond aux deux questions, et la
+ligne qui la porte est marquée.
+
+Trois choix s'y ajoutent, chacun pour une panne qu'on ne voit pas venir.
+`gh pr list` et non `gh pr view`, bien que ce soit celui-ci qui nomme le geste
+« la PR de cette branche » : sans PR ouverte, `pr view` sort en erreur, si bien
+que « il n'y en a pas » et « `gh` n'est pas installé » arrivent par le même fil
+comme la même chose — `pr list` répond `[]`, ce qui est une réponse. Le préfixe `origin/`
+seulement est retiré de la base, et pas tout ce qui précède la première barre :
+les branches que cette fenêtre sert portent des barres à elles (`wt/…`), et
+couper à la première viserait une branche qui n'existe pas. Et une branche
+jamais publiée est poussée par le même geste, parce que `gh pr create` demande
+où la pousser et que l'entrée standard est fermée dans un worker : la question
+reviendrait en échec que personne ne peut résoudre.
+
+Le panneau garde son identifiant de dock (`ClaudhubCi`) bien qu'il ne parle plus
+que de CI : il est écrit dans tous les `layout.json` déjà enregistrés, et un
+panneau que le dock ne sait pas résoudre revient en « panel type is not
+registered » à chaque démarrage, sans autre remède qu'une réinitialisation de la
+vue.
 
 **Il y a eu un système de plugins**, et Sentry en était le portillon
 d'acceptation : mille lignes de Rust contre deux cent soixante-dix de Rune, et
