@@ -198,6 +198,14 @@ impl ClaudhubApp {
         };
 
         let find = self.render_find(Self::find_pane(&range), cx);
+        // Built here, with the two other things that need `&mut self`, and not
+        // in a `when` down the tree: the rest of this function holds the review
+        // state borrowed.
+        let bar = if matches!(range, DiffRange::Working) {
+            self.render_changes_bar(cx).into_any_element()
+        } else {
+            self.render_base_bar(cx).into_any_element()
+        };
         // It is the panel that asks for its list: it alone knows what it shows,
         // and loading both ranges in advance would cost a command for a tab
         // nobody will open.
@@ -229,12 +237,7 @@ impl ClaudhubApp {
         // the days when the panels touched — the gutter separates them now.
         v_flex()
             .size_full()
-            .when(!matches!(range, DiffRange::Working), |el| {
-                el.child(self.render_base_bar(cx))
-            })
-            .when(matches!(range, DiffRange::Working), |el| {
-                el.child(self.render_changes_bar(cx))
-            })
+            .child(bar)
             .children(find)
             .child(
                 div()
@@ -456,7 +459,7 @@ impl ClaudhubApp {
     /// they are that panel's gestures — you look at what changed, you tick, you
     /// commit, you push — and keeping them at the other end of the screen made
     /// you cross the window to finish a sentence started at the bottom.
-    fn render_changes_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_changes_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let has_active = self.active.is_some();
         // A fetch, a pull and a push talk to a remote: seconds, sometimes tens
         // of them, during which nothing on screen moved. The button turns while
@@ -590,6 +593,7 @@ impl ClaudhubApp {
                         }
                     })),
             )
+            .child(self.find_button(crate::ui::find::Pane::Changes, cx))
     }
 
     /// The branch review's bar: the toggle, and the choice of base.
@@ -597,14 +601,28 @@ impl ClaudhubApp {
     /// The integration branch git guesses is a starting point, not a fate — one
     /// compares just as well against `dev`, against another working branch or
     /// against a remote.
-    fn render_base_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        self.bar(cx).child(self.tree_toggle(cx)).child(
-            Select::new(&self.base_select)
-                .xsmall()
-                .title_prefix(tr!("range-base-prefix"))
-                .placeholder(tr!("range-base-placeholder"))
-                .menu_width(crate::ui::base_select::MENU_WIDTH),
-        )
+    fn render_base_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        self.bar(cx)
+            .child(self.tree_toggle(cx))
+            // The select takes the room between the two buttons rather than
+            // asking for its own: it is a whole `size_full` element, and left to
+            // itself in a bar that pushes its children right it filled the bar
+            // edge to edge — a bordered field where everything around it is a
+            // ghost button, and the widest thing in the panel for the shortest
+            // text in it. `appearance(false)` finishes the job: what is read
+            // here is the name of the base, and the chevron says it can be
+            // changed.
+            .child(
+                div().flex_1().min_w_0().child(
+                    Select::new(&self.base_select)
+                        .xsmall()
+                        .appearance(false)
+                        .title_prefix(tr!("range-base-prefix"))
+                        .placeholder(tr!("range-base-placeholder"))
+                        .menu_width(crate::ui::base_select::MENU_WIDTH),
+                ),
+            )
+            .child(self.find_button(crate::ui::find::Pane::Branch, cx))
     }
 
     fn bar(&self, cx: &mut Context<Self>) -> gpui::Div {
