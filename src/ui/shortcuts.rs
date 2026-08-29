@@ -1237,7 +1237,9 @@ pub fn toggle_terminal(
     window: &mut Window,
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
-    this.toggle_terminal_panel(window, cx);
+    // The same gesture as the rail's button, and it has to be the same code:
+    // two answers to "show me the terminals" is one of them being wrong.
+    this.press_tool(crate::ui::panels::TerminalPanel::NAME, window, cx);
 }
 
 pub fn next_terminal(

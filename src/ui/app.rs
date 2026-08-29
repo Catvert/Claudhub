@@ -4461,10 +4461,21 @@ impl ClaudhubApp {
     ) {
         use crate::ui::rails::Press;
         // The terminals are the one tool window nothing can build back: their
-        // content is a process. "Show me a terminal" is therefore "open one if
-        // there is none", which is the gesture `Ctrl+T` already makes.
-        if panel == super::panels::TerminalPanel::NAME {
-            self.toggle_terminal_panel(window, cx);
+        // content is a process. With none open there is no seat to press and
+        // nothing to reveal, so "show me a terminal" is "open one" — the
+        // gesture `Ctrl+T` makes. Past that they press like any other view:
+        // the button puts the **half** away, not merely its own tabs, which is
+        // what the two side rails have always done.
+        let terminals = panel == super::panels::TerminalPanel::NAME;
+        if terminals
+            && self
+                .active
+                .as_deref()
+                .is_some_and(|worktree| self.terminals_of(worktree).next().is_none())
+        {
+            // `show_terminal_panel` opens the first one, and opening one
+            // hands it the keyboard: the gesture is "I want a terminal now".
+            self.show_terminal_panel(window, cx);
             return;
         }
         let seats = self.seats(cx);
@@ -4477,9 +4488,26 @@ impl ClaudhubApp {
                 for name in crate::ui::rails::showing_in(anchor, &seats) {
                     self.set_panel_folded(name, true, cx);
                 }
+                // The focus was in the terminal this press has just taken off
+                // the tree, and a focus handle nothing renders any more
+                // resolves no binding: `Ctrl+T` did nothing at all until a
+                // click somewhere put it back on a live node. Only for the
+                // terminals — moving the focus out of the editor because a
+                // column was folded is not what the gesture asked.
+                if terminals {
+                    window.focus(&self.focus, cx);
+                }
             }
             Press::Reveal { panel, .. } | Press::Restore { panel, .. } => {
-                self.reveal_panel(panel, window, cx)
+                self.reveal_panel(panel, window, cx);
+                // And back to it on the way in: "I want a terminal now" is a
+                // gesture left half done if it has to be clicked before it
+                // takes a keystroke.
+                if terminals {
+                    if let Some(worktree) = self.active.clone() {
+                        self.focus_terminal(&worktree, window, cx);
+                    }
+                }
             }
         }
     }
@@ -4749,45 +4777,6 @@ impl ClaudhubApp {
             s.reset_zoom(zone);
         });
         cx.notify();
-    }
-
-    pub(super) fn toggle_terminal_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let worktree = self.active.clone();
-        // Nothing open yet: the button **shows**, whatever the flag said. The
-        // flag is on by default and there is no terminal at startup, so a plain
-        // toggle would spend the first click hiding an emptiness — a button
-        // that does nothing, which is how one concludes it is broken.
-        let empty = worktree
-            .as_deref()
-            .is_some_and(|worktree| self.terminals_of(worktree).next().is_none());
-        let terminals = super::panels::TerminalPanel::NAME;
-        if empty {
-            self.show_panel(terminals, cx);
-        } else {
-            let folded = !self.panel_visible(terminals);
-            self.show_panel(terminals, cx);
-            if !folded {
-                self.set_panel_folded(terminals, true, cx);
-            }
-        }
-        // The first one is opened on demand, never when a worktree is: a shell
-        // nobody asked for is a process nobody asked for.
-        if self.terminal_visible(cx) {
-            if let Some(worktree) = worktree {
-                self.ensure_terminal(&worktree, window, cx);
-                // And the focus goes with it: the gesture is "I want a terminal
-                // now", and one that has to be clicked before it takes a
-                // keystroke is a gesture left half done.
-                self.focus_terminal(&worktree, window, cx);
-            }
-        } else {
-            // Hiding takes the focus back to the root, and it is not a courtesy.
-            // What was focused was the terminal this gesture just removed from
-            // the tree; a focus handle nobody renders any more resolves no
-            // binding, so `Ctrl+T` did nothing at all until a click somewhere
-            // put the focus back on a live node.
-            window.focus(&self.focus, cx);
-        }
     }
 
     /// Folds one edge away, or brings it back.
