@@ -199,16 +199,23 @@ pub fn rollback_all(dir: &Path) -> Result<()> {
 ///
 /// `None` covers the two cases the editor's gutter treats alike — a file git
 /// does not track, and one added since the last commit — and it is a normal
-/// answer, not a failure, hence `git_opt`. The path is given relative to the
+/// answer, not a failure, hence the `Option`. The path is given relative to the
 /// worktree because that is how the revision syntax names it: `HEAD:` walks the
 /// tree, and an absolute path is not in it.
 ///
 /// `--textconv` is deliberately absent: a smudge filter would hand back
 /// something that is not what the file's bytes were, and the gutter compares
 /// bytes.
+///
+/// And `git_blob` and not `git_opt`, for the same reason the conflict stages
+/// use it: this is a *file*, not the answer of a command. `git` strips the
+/// trailing newlines, so the base of a file ending — as nearly every file does
+/// — with one came back a line shorter than the buffer, and the gutter marked
+/// that last empty line as added the moment the file was opened. A file ending
+/// with two blank lines got two.
 pub fn head_blob(dir: &Path, path: &Path) -> Option<String> {
     let path = path.to_str()?;
-    git_opt(dir, &["show", &format!("HEAD:./{path}")])
+    git_blob(dir, &["show", &format!("HEAD:./{path}")]).ok()
 }
 
 /// Applies (`reverse = false`) or undoes (`reverse = true`) a patch on the
