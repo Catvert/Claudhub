@@ -384,6 +384,13 @@ pub struct Button {
     pub panel: &'static str,
     pub title: Label,
     pub icon: &'static str,
+    /// The place this button speaks for.
+    ///
+    /// A tool window is normally one panel in one place, and then this is only
+    /// which rail it is on. The terminals are many panels under one name, and
+    /// nothing stops two of them sitting on two edges: there is then a button
+    /// on each, and a press has to say **which** it came from.
+    pub anchor: Anchor,
     /// On screen: its zone unfolded, its tab in front, and not put away.
     ///
     /// The only state a button carries. A view put away and a view behind
@@ -510,15 +517,23 @@ pub fn rails(
         top: Vec::new(),
         bottom: Vec::new(),
     });
+    let mut place = |anchor: Anchor, rank: Option<usize>, tool: &Tool, active: bool| {
+        let button = Button {
+            panel: tool.panel,
+            title: tool.title,
+            icon: tool.icon,
+            anchor,
+            active,
+        };
+        let rail = &mut rails[anchor.side.index()];
+        match anchor.half {
+            Half::Top => rail.top.push((rank, button)),
+            Half::Bottom => rail.bottom.push((rank, button)),
+        }
+    };
     for tool in tools() {
         // Taken off its rail: no button, and that is the point.
         if off.contains(tool.panel) {
-            continue;
-        }
-        let seat = seat(tool.panel, seats);
-        // At the centre it is a document: reached by its tab, among the ones
-        // it shares its group with.
-        if seat.is_some_and(|seat| seat.anchor.is_none()) {
             continue;
         }
         // **A situational view has no button while it has nothing to show.**
@@ -530,25 +545,48 @@ pub fn rails(
         // Folded **by hand** is the exception, and it has to be: that is the
         // one invisibility one calls the view back from, so its button stays.
         let away = folded.contains(tool.panel);
-        if tool.conditional && !away && !seat.is_some_and(|seat| seat.visible) {
+        let seated: Vec<&Seat> = seats
+            .iter()
+            .filter(|seat| seat.panel == tool.panel)
+            .collect();
+        if seated.is_empty() {
+            if tool.conditional && !away {
+                continue;
+            }
+            // Loose, so it goes last, and where the table says it belongs.
+            place(tool.home, None, &tool, false);
             continue;
         }
-        let anchor = match seat {
-            Some(seat) => seat.anchor.expect("just tested"),
-            None => tool.home,
-        };
-        let button = Button {
-            panel: tool.panel,
-            title: tool.title,
-            icon: tool.icon,
-            active: seat.is_some_and(|seat| seat.open && seat.shown && seat.visible),
-        };
-        // Seated, so the tree says where it goes; loose, so it goes last.
-        let rank = seat.map(|seat| seat.order);
-        let rail = &mut rails[anchor.side.index()];
-        match anchor.half {
-            Half::Top => rail.top.push((rank, button)),
-            Half::Bottom => rail.bottom.push((rank, button)),
+        // **Every place it sits, and one button for each.** It used to be the
+        // first seat found, which is right for a panel that has one — and one
+        // is what every tool window but the terminals has. Two terminals on two
+        // edges gave a single button, on whichever edge the walk of the tree
+        // reached first, and the other rail said nothing was there.
+        //
+        // At the centre it is a document: reached by its tab, among the ones it
+        // shares its group with. A panel seated only there gets no button at
+        // all, which is what an empty list of anchors comes to.
+        let mut anchors: Vec<Anchor> = Vec::new();
+        for anchor in seated.iter().filter_map(|seat| seat.anchor) {
+            if !anchors.contains(&anchor) {
+                anchors.push(anchor);
+            }
+        }
+        for anchor in anchors {
+            let here: Vec<&&Seat> = seated
+                .iter()
+                .filter(|seat| seat.anchor == Some(anchor))
+                .collect();
+            if tool.conditional && !away && !here.iter().any(|seat| seat.visible) {
+                continue;
+            }
+            // The tree's order, and the first of them: two terminals in one
+            // group are one button, which sits where the earlier tab does.
+            let rank = here.iter().map(|seat| seat.order).min();
+            let active = here
+                .iter()
+                .any(|seat| seat.open && seat.shown && seat.visible);
+            place(anchor, rank, &tool, active);
         }
     }
     for rail in &mut rails {
@@ -591,7 +629,7 @@ pub fn in_view_menu(tool: &Tool, off: &std::collections::BTreeSet<String>) -> bo
 }
 
 /// What pressing a button does.
-pub fn press(panel: &str, seats: &[Seat]) -> Press {
+pub fn press(panel: &str, from: Option<Anchor>, seats: &[Seat]) -> Press {
     let Some(tool) = tool(panel) else {
         // Not one of ours: nothing sensible to do, and the caller has no
         // button to have pressed.
@@ -600,24 +638,37 @@ pub fn press(panel: &str, seats: &[Seat]) -> Press {
             anchor: Anchor::new(Side::Left, Half::Top),
         };
     };
-    match seat(panel, seats) {
-        Some(seat) => match seat.anchor {
-            // On screen: the press puts its half away — see `Hide`.
-            Some(anchor) if seat.open && seat.shown && seat.visible => Press::Hide { anchor },
-            Some(anchor) => Press::Reveal {
-                panel: tool.panel,
-                side: anchor.side,
-            },
-            // A document has no button; pressing one anyway brings it forward.
-            None => Press::Reveal {
-                panel: tool.panel,
-                side: tool.home.side,
-            },
-        },
-        None => Press::Restore {
+    // **The place the button spoke for.** A key names a view and not a place,
+    // so `None` means "wherever it is" — which is the same answer for every
+    // panel that sits in one place, and every one but the terminals does.
+    let here: Vec<&Seat> = seats
+        .iter()
+        .filter(|seat| seat.panel == panel && from.is_none_or(|anchor| seat.anchor == Some(anchor)))
+        .collect();
+    if here.is_empty() {
+        return Press::Restore {
             panel: tool.panel,
-            anchor: tool.home,
-        },
+            anchor: from.unwrap_or(tool.home),
+        };
+    }
+    // On screen: the press puts its half away — see `Hide`. Any of them being
+    // on screen is enough, and it is the half of the one that is: two terminals
+    // in a group are one button, and the tab behind is not what it is about.
+    if let Some(anchor) = here
+        .iter()
+        .find(|seat| seat.open && seat.shown && seat.visible)
+        .and_then(|seat| seat.anchor)
+    {
+        return Press::Hide { anchor };
+    }
+    Press::Reveal {
+        panel: tool.panel,
+        // A document has no button; pressing one anyway brings it forward.
+        side: here
+            .iter()
+            .find_map(|seat| seat.anchor)
+            .unwrap_or(tool.home)
+            .side,
     }
 }
 
@@ -684,6 +735,44 @@ mod tests {
         Seat {
             visible: false,
             ..seat(panel, anchor, true, true)
+        }
+    }
+
+    /// One name, two places. The terminals are the case: a panel per terminal,
+    /// all called `ClaudhubTerminal`, and nothing stops two of them being on
+    /// two edges — one below the code and one beside it.
+    #[test]
+    fn a_panel_seated_on_two_edges_has_a_button_on_both() {
+        let seats = vec![
+            seat("ClaudhubTerminal", at(Side::Bottom, Half::Top), true, true),
+            seat("ClaudhubTerminal", at(Side::Right, Half::Top), true, true),
+        ];
+        let rails = rails(&seats, &none(), &none());
+        for side in [Side::Bottom, Side::Right] {
+            assert!(
+                rails[side.index()]
+                    .buttons()
+                    .any(|button| button.panel == "ClaudhubTerminal"),
+                "no terminal button on {side:?}"
+            );
+        }
+    }
+
+    /// And a press says which of the two it came from: without the anchor, the
+    /// button below would put away the half beside the code.
+    #[test]
+    fn a_press_puts_away_the_half_its_button_is_on() {
+        let seats = vec![
+            seat("ClaudhubTerminal", at(Side::Bottom, Half::Top), true, true),
+            seat("ClaudhubTerminal", at(Side::Right, Half::Top), true, true),
+        ];
+        for side in [Side::Bottom, Side::Right] {
+            let anchor = Anchor::new(side, Half::Top);
+            assert_eq!(
+                press("ClaudhubTerminal", Some(anchor), &seats),
+                Press::Hide { anchor },
+                "{side:?}"
+            );
         }
     }
 
@@ -789,7 +878,7 @@ mod tests {
             true,
         )];
         assert_eq!(
-            press("ClaudhubNotes", &open),
+            press("ClaudhubNotes", None, &open),
             Press::Hide {
                 anchor: Anchor::new(Side::Right, Half::Top)
             }
@@ -805,7 +894,7 @@ mod tests {
         )];
         for seats in [&put_away, &folded] {
             assert_eq!(
-                press("ClaudhubNotes", seats),
+                press("ClaudhubNotes", None, seats),
                 Press::Reveal {
                     panel: "ClaudhubNotes",
                     side: Side::Right,
@@ -823,7 +912,7 @@ mod tests {
             seat("ClaudhubHistory", at(Side::Right, Half::Top), false, true),
         ];
         assert_eq!(
-            press("ClaudhubHistory", &seats),
+            press("ClaudhubHistory", None, &seats),
             Press::Reveal {
                 panel: "ClaudhubHistory",
                 side: Side::Right,
@@ -846,7 +935,7 @@ mod tests {
         assert!(!button.active, "put away is not on screen");
         // Out of the tree entirely, the press puts it back where it belongs.
         assert_eq!(
-            press("ClaudhubNotes", &[]),
+            press("ClaudhubNotes", None, &[]),
             Press::Restore {
                 panel: "ClaudhubNotes",
                 anchor: Anchor::new(Side::Left, Half::Bottom),

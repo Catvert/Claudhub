@@ -1156,6 +1156,14 @@ pub enum Evt {
         id: u64,
         frame: crate::suite::Frame,
     },
+    /// One test of a running suite, as it starts and as it ends. What the
+    /// tree follows while a run goes: an account only speaks at the end, and
+    /// Pest's own output is printed per file.
+    TestsStep {
+        worktree: WorktreeId,
+        id: u64,
+        step: crate::suite::Step,
+    },
     /// A run's account — or why there was none. A failing test is a run, not
     /// an error: the error side is the suite that never started.
     TestsRan {

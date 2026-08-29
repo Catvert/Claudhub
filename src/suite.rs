@@ -271,6 +271,23 @@ pub struct Frame {
     pub height: u32,
 }
 
+/// What one test just did, while the suite still runs.
+///
+/// A run's account only speaks at the end, and Pest's own output is printed
+/// **per file** — a single file of browser tests says nothing for a minute,
+/// then everything at once. This is the third channel: the events Pest
+/// streams as it goes, one line per test, into a log of its own.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Step {
+    /// The class as the listing knows it, `P\` already stripped — which is
+    /// what makes it the same key.
+    pub class: String,
+    /// The mangled method name, the listing's own key.
+    pub method: String,
+    /// `None` while the test runs, its fate once it ends.
+    pub status: Option<Status>,
+}
+
 /// The relay that watches the browser a Pest run drives, and the run's claim
 /// on a CDP port.
 ///
@@ -401,6 +418,102 @@ impl Drop for Screencast {
         }
         let _ = std::fs::remove_file(&self.flag);
     }
+}
+
+/// Follows the TeamCity log Pest streams while it runs, and says what each
+/// test does as it does it.
+///
+/// TeamCity rather than the two other loggers because it is the one whose
+/// lines carry the pair the tree is keyed on — `testSuiteStarted` names the
+/// class, `testStarted` the mangled method — and because it is written event
+/// by event, where the JUnit account is written once, at the end.
+///
+/// Polled rather than watched: the file is written **in the container**, on a
+/// mount whose events do not cross to the host. `going` is the run itself —
+/// the last read happens after it falls, so the tail is never lost.
+fn pump_steps(path: &Path, going: &std::sync::atomic::AtomicBool, steps: &(dyn Fn(Step) + Sync)) {
+    const POLL: Duration = Duration::from_millis(150);
+    let mut read = 0u64;
+    let mut carry = String::new();
+    let mut class = String::new();
+    // TeamCity says `testFailed` **before** `testFinished`; the fate is held
+    // until the line that ends the test.
+    let mut fate: Option<Status> = None;
+    loop {
+        let still = going.load(std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut file) = std::fs::File::open(path) {
+            use std::io::{Read, Seek};
+            if file.seek(std::io::SeekFrom::Start(read)).is_ok() {
+                let mut fresh = Vec::new();
+                if let Ok(got) = file.read_to_end(&mut fresh) {
+                    read += got as u64;
+                    carry.push_str(&String::from_utf8_lossy(&fresh));
+                }
+            }
+        }
+        while let Some(at) = carry.find('\n') {
+            let line = carry[..at].to_string();
+            carry.drain(..=at);
+            let Some((kind, rest)) = teamcity(&line) else {
+                continue;
+            };
+            let Some(name) = teamcity_name(rest) else {
+                continue;
+            };
+            match kind {
+                "testSuiteStarted" => class = name.strip_prefix("P\\").unwrap_or(&name).to_string(),
+                "testStarted" => steps(Step {
+                    class: class.clone(),
+                    method: method_key(&name).to_string(),
+                    status: None,
+                }),
+                "testFailed" => fate = Some(Status::Failed),
+                "testIgnored" => fate = Some(Status::Skipped),
+                "testFinished" => steps(Step {
+                    class: class.clone(),
+                    method: method_key(&name).to_string(),
+                    status: Some(fate.take().unwrap_or(Status::Passed)),
+                }),
+                _ => {}
+            }
+        }
+        if !still {
+            break;
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+/// Splits `##teamcity[testStarted name='…' …]` into its kind and the rest.
+fn teamcity(line: &str) -> Option<(&str, &str)> {
+    let body = line.trim().strip_prefix("##teamcity[")?.strip_suffix(']')?;
+    Some(match body.split_once(' ') {
+        Some((kind, rest)) => (kind, rest),
+        None => (body, ""),
+    })
+}
+
+/// The `name='…'` of a TeamCity line, its escapes undone.
+///
+/// `|` is the escape character there, and `|'` is how a name carrying a quote
+/// is written — Pest's dataset cases do carry them. Reading to the first bare
+/// quote is what tells the value's end apart from a quote inside it.
+fn teamcity_name(rest: &str) -> Option<String> {
+    let mut chars = rest.strip_prefix("name='")?.chars();
+    let mut name = String::new();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => return Some(name),
+            '|' => match chars.next() {
+                Some('n') => name.push('\n'),
+                Some('r') => name.push('\r'),
+                Some(escaped) => name.push(escaped),
+                None => return Some(name),
+            },
+            _ => name.push(c),
+        }
+    }
+    None
 }
 
 /// Turns the relay's lines into frames until it closes — which is when the
@@ -584,6 +697,15 @@ fn complaint(stdout: &str, stderr: &str, status: &str) -> String {
 /// first of the two. Pest ends the whole listing with a period glued to the
 /// last entry; method names cannot contain `.`, so it is stripped without
 /// risk.
+/// The row's key inside a Pest method name: the mangled name itself, stripped
+/// of the suffix a dataset case carries — `"(1)"` in a listing, and
+/// ` with data set "(1)"` in the stream of a running suite. Neither a mangled
+/// nor a PHPUnit method name holds a space or a quote, so the suffix starts at
+/// the first of the two, whichever wrote it.
+fn method_key(method: &str) -> &str {
+    &method[..method.find(['"', ' ']).unwrap_or(method.len())]
+}
+
 fn pest_parse(output: &str) -> Vec<Test> {
     let entries: Vec<&str> = output
         .lines()
@@ -604,8 +726,8 @@ fn pest_parse(output: &str) -> Vec<Test> {
             continue;
         };
         let class = class.strip_prefix("P\\").unwrap_or(class).to_string();
-        let cut = method.find(['"', ' ']).unwrap_or(method.len());
-        let (method, dataset) = (&method[..cut], cut < method.len());
+        let base = method_key(method);
+        let (method, dataset) = (base, base.len() < method.len());
         let key = (class.clone(), method.to_string());
         if let Some(&row) = seen.get(&key) {
             if dataset {
@@ -795,6 +917,7 @@ pub fn run(
     id: u64,
     progress: &(dyn Fn(String) + Sync),
     frames: &(dyn Fn(Frame) + Sync),
+    steps: &(dyn Fn(Step) + Sync),
 ) -> std::result::Result<Run, String> {
     // A campaign stopped while this command still queued: refuse on arrival
     // rather than boot a suite nobody is waiting for.
@@ -805,10 +928,11 @@ pub fn run(
     if !bin.is_file() {
         return Err(format!("{} is missing", target.runner.binary()));
     }
+    let seq = RUN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let account_name = format!(
         ".claudhub-tests-{}-{}.{}",
         std::process::id(),
-        RUN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        seq,
         match target.runner {
             Runner::Jest => "json",
             _ => "xml",
@@ -830,6 +954,16 @@ pub fn run(
         let arg = file.display().to_string();
         (file, arg)
     };
+    // The same two-sided naming as the account, for the log Pest writes as it
+    // goes. Pest only: the other runners narrate on their own stream.
+    let steps_name = format!(".claudhub-steps-{}-{seq}.txt", std::process::id());
+    let (steps_file, steps_arg) = if sail {
+        (worktree.join(&steps_name), steps_name)
+    } else {
+        let file = std::env::temp_dir().join(&steps_name);
+        let arg = file.display().to_string();
+        (file, arg)
+    };
     let mut cmd = match target.runner {
         Runner::Pest => pest_command(worktree, &bin),
         _ => Command::new(&bin),
@@ -840,6 +974,13 @@ pub fn run(
             cmd.arg("--colors=never")
                 .arg("--log-junit")
                 .arg(&account_arg);
+            // Written event by event while the suite runs, where the JUnit is
+            // written once at the end: this is what the tree follows. Never
+            // under `--parallel` — a worker per process, one file, and the
+            // lines would arrive shuffled into each other.
+            if !target.parallel {
+                cmd.arg("--log-teamcity").arg(&steps_arg);
+            }
             if target.headed {
                 cmd.arg("--headed");
             }
@@ -883,12 +1024,20 @@ pub fn run(
         _ => None,
     };
     let watching = cast.as_mut().and_then(|cast| cast.child.stdout.take());
+    let going = std::sync::atomic::AtomicBool::new(true);
 
     let result = std::thread::scope(|scope| {
         if let Some(watching) = watching {
             scope.spawn(move || pump_frames(watching, frames));
         }
+        if target.runner == Runner::Pest && !target.parallel {
+            let (path, going) = (steps_file.as_path(), &going);
+            scope.spawn(move || pump_steps(path, going, steps));
+        }
         let result = follow(cmd, target.runner.label(), id, progress);
+        // Lowered before the scope joins, so the reader takes its last look at
+        // the log and stops there.
+        going.store(false, std::sync::atomic::Ordering::Relaxed);
         // Ends the relay, which closes the pipe the reader is blocked on:
         // dropped after the scope instead, the scope would wait for a thread
         // waiting for the drop.
@@ -897,6 +1046,7 @@ pub fn run(
     });
     let account = std::fs::read_to_string(&account_file).unwrap_or_default();
     let _ = std::fs::remove_file(&account_file);
+    let _ = std::fs::remove_file(&steps_file);
     let (status, kept, stderr, duration_ms) = result?;
     let mut outcomes = match target.runner {
         Runner::Pest | Runner::Vitest => parse_junit(&account),
@@ -1585,6 +1735,112 @@ mod tests {
     /// `pest --list-tests --colors=never` on a suite carrying every shape met
     /// in the wild: a plain test, UTF-8, a `describe` block, datasets, a
     /// PHPUnit class, and the period Pest glues to the last entry.
+    /// A run says each test as it ends, and the pair it says is the pair the
+    /// tree is keyed on — the class without its `P\` prefix, the mangled
+    /// method without the suffix a dataset case carries.
+    #[test]
+    fn a_streaming_log_names_the_rows_the_listing_named() {
+        let log = "\
+##teamcity[testCount count='2' flowId='7206']
+##teamcity[testSuiteStarted name='/var/www/html/phpunit.xml' flowId='7206']
+##teamcity[testSuiteStarted name='P\\Tests\\Unit\\MathTest' flowId='7206']
+##teamcity[testStarted name='__pest_evaluable_it_sums_2___2' flowId='7206']
+##teamcity[testFinished name='__pest_evaluable_it_sums_2___2' duration='12' flowId='7206']
+##teamcity[testStarted name='__pest_evaluable_it_fails' flowId='7206']
+##teamcity[testFailed name='__pest_evaluable_it_fails' message='nope' flowId='7206']
+##teamcity[testFinished name='__pest_evaluable_it_fails' duration='9' flowId='7206']
+";
+        let seen = read_steps(log);
+        assert_eq!(
+            seen,
+            vec![
+                (
+                    "Tests\\Unit\\MathTest",
+                    "__pest_evaluable_it_sums_2___2",
+                    None
+                ),
+                (
+                    "Tests\\Unit\\MathTest",
+                    "__pest_evaluable_it_sums_2___2",
+                    Some(Status::Passed)
+                ),
+                ("Tests\\Unit\\MathTest", "__pest_evaluable_it_fails", None),
+                (
+                    "Tests\\Unit\\MathTest",
+                    "__pest_evaluable_it_fails",
+                    Some(Status::Failed)
+                ),
+            ]
+        );
+    }
+
+    /// A dataset case is one line per case in the stream, and its name is
+    /// written differently there than in the listing — ` with data set "(…)"`
+    /// against `"(…)"` — but both fold onto the row's own key. Captured from
+    /// a real run: the quotes inside really do arrive escaped as `|'`.
+    #[test]
+    fn dataset_cases_fold_onto_the_row_they_belong_to() {
+        let log = "\
+##teamcity[testSuiteStarted name='P\\Tests\\Unit\\ExceptionsTest' flowId='7438']
+##teamcity[testStarted name='__pest_evaluable_it_builds with data set \"(|'App\\Exceptions\\Other|')\"' flowId='7438']
+##teamcity[testFinished name='__pest_evaluable_it_builds with data set \"(|'App\\Exceptions\\Other|')\"' duration='3' flowId='7438']
+";
+        let seen = read_steps(log);
+        assert_eq!(
+            seen,
+            vec![
+                (
+                    "Tests\\Unit\\ExceptionsTest",
+                    "__pest_evaluable_it_builds",
+                    None
+                ),
+                (
+                    "Tests\\Unit\\ExceptionsTest",
+                    "__pest_evaluable_it_builds",
+                    Some(Status::Passed)
+                ),
+            ]
+        );
+        // The very key `pest --list-tests` yields for that same case.
+        assert_eq!(
+            method_key("__pest_evaluable_it_builds\"('App\\Exceptions\\Other')\""),
+            "__pest_evaluable_it_builds"
+        );
+    }
+
+    /// Reads a whole log as the reader would, the run already over: one last
+    /// look is what it takes, and everything written is read.
+    fn read_steps(log: &str) -> Vec<(&'static str, &'static str, Option<Status>)> {
+        let path = std::env::temp_dir().join(format!(
+            "claudhub-steps-test-{}-{:p}.txt",
+            std::process::id(),
+            log
+        ));
+        std::fs::write(&path, log).expect("the log is written");
+        let seen = std::sync::Mutex::new(Vec::new());
+        pump_steps(
+            &path,
+            &std::sync::atomic::AtomicBool::new(false),
+            &|step: Step| {
+                seen.lock()
+                    .expect("nothing panics while holding it")
+                    .push(step);
+            },
+        );
+        let _ = std::fs::remove_file(&path);
+        seen.into_inner()
+            .expect("nothing panics while holding it")
+            .into_iter()
+            .map(|step| {
+                (
+                    Box::leak(step.class.into_boxed_str()) as &str,
+                    Box::leak(step.method.into_boxed_str()) as &str,
+                    step.status,
+                )
+            })
+            .collect()
+    }
+
     const LISTING: &str = "\n   INFO  Available tests:\n\n - LegacyTest::testOldSchool\n - P\\Tests\\Unit\\MathTest::__pest_evaluable_it_sums_2___2\n - P\\Tests\\Unit\\MathTest::__pest_evaluable_la_casse_UTF_8___éléphant\n - P\\Tests\\Unit\\MathTest::__pest_evaluable__inside_a_describe__→_it_nests_fine\n - P\\Tests\\Unit\\MathTest::__pest_evaluable_it_runs_on_datasets\"(1)\"\n - P\\Tests\\Unit\\MathTest::__pest_evaluable_it_runs_on_datasets\"(2)\"\n - P\\Tests\\Feature\\HttpTest::__pest_evaluable_it_answers.\n";
 
     #[test]

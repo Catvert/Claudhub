@@ -587,82 +587,88 @@ impl crate::ui::app::ClaudhubApp {
             .iter()
             .map(|button| {
                 let panel = button.panel;
-                Button::new(gpui::SharedString::from(panel))
-                    .icon(crate::ui::icons::icon(button.icon))
-                    .tooltip(button.title.text())
-                    .small()
-                    // **Solid against ghost**, the polarity of both ends of the
-                    // status bar: the "selected" state of a ghost button is a
-                    // background a few percent from the ground, invisible on
-                    // half the themes — and "what is on screen" is exactly the
-                    // question a rail has to answer without being looked for.
-                    .map(|this| {
-                        if button.active {
-                            this.primary()
-                        } else {
-                            this.ghost()
-                        }
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.press_tool(panel, window, cx);
-                    }))
-                    // **Right click moves it.** Dragging works and is what one
-                    // reaches for with a panel already on screen; a tool window
-                    // one has folded away has no title to take hold of, and
-                    // sending it to the other edge would mean opening it,
-                    // dragging it, and folding it again.
-                    .context_menu({
-                        let app = app.clone();
-                        let targets = rails::moves(panel, &seats);
-                        move |menu, _window, _cx| {
-                            use gpui_component::menu::{PopupMenu, PopupMenuItem};
-                            // **Along the rail first.** Where a view sits on
-                            // its own edge is what one adjusts often — the
-                            // files before the changes — and sending it to
-                            // another edge is the rarer decision.
-                            let shift = |menu: PopupMenu, key, delta, name| {
-                                let app = app.clone();
-                                menu.item(
-                                    PopupMenuItem::new(crate::tr!(key))
-                                        .icon(crate::ui::icons::icon(name))
-                                        .on_click(move |_, window, cx| {
-                                            app.update(cx, |app, cx| {
-                                                app.shift_tool(panel, delta, window, cx)
-                                            });
-                                        }),
-                                )
-                            };
-                            let menu = shift(menu, "tool-move-earlier", -1, "arrow-up");
-                            let menu = shift(menu, "tool-move-later", 1, "arrow-down");
-                            let menu = targets.iter().fold(menu.separator(), |menu, anchor| {
-                                let (app, anchor) = (app.clone(), *anchor);
-                                menu.item(PopupMenuItem::new(crate::tr!(anchor.label())).on_click(
-                                    move |_, window, cx| {
-                                        app.update(cx, |app, cx| {
-                                            app.move_tool(panel, anchor, window, cx)
-                                        });
-                                    },
-                                ))
-                            });
-                            // **Taking the view off, from its own button.**
-                            // The gesture was in the title bar's menu alone,
-                            // which is a long way from the icon one is looking
-                            // at when one decides one has no use for it. The
-                            // button goes with the view; the same menu is
-                            // where it comes back from.
+                let anchor = button.anchor;
+                // The panel **and its place**: with terminals on two edges
+                // there are two buttons of one name, and two elements sharing
+                // an id is one of them not being drawn.
+                Button::new(gpui::SharedString::from(format!(
+                    "rail-{panel}-{}-{}",
+                    anchor.side.index(),
+                    matches!(anchor.half, rails::Half::Bottom) as u8
+                )))
+                .icon(crate::ui::icons::icon(button.icon))
+                .tooltip(button.title.text())
+                .small()
+                // **Solid against ghost**, the polarity of both ends of the
+                // status bar: the "selected" state of a ghost button is a
+                // background a few percent from the ground, invisible on
+                // half the themes — and "what is on screen" is exactly the
+                // question a rail has to answer without being looked for.
+                .map(|this| {
+                    if button.active {
+                        this.primary()
+                    } else {
+                        this.ghost()
+                    }
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.press_tool(panel, Some(anchor), window, cx);
+                }))
+                // **Right click moves it.** Dragging works and is what one
+                // reaches for with a panel already on screen; a tool window
+                // one has folded away has no title to take hold of, and
+                // sending it to the other edge would mean opening it,
+                // dragging it, and folding it again.
+                .context_menu({
+                    let app = app.clone();
+                    let targets = rails::moves(panel, &seats);
+                    move |menu, _window, _cx| {
+                        use gpui_component::menu::{PopupMenu, PopupMenuItem};
+                        // **Along the rail first.** Where a view sits on
+                        // its own edge is what one adjusts often — the
+                        // files before the changes — and sending it to
+                        // another edge is the rarer decision.
+                        let shift = |menu: PopupMenu, key, delta, name| {
                             let app = app.clone();
-                            menu.separator().item(
-                                PopupMenuItem::new(crate::tr!("action-hide-view"))
-                                    .icon(crate::ui::icons::icon("eye-off"))
-                                    .on_click(move |_, _window, cx| {
+                            menu.item(
+                                PopupMenuItem::new(crate::tr!(key))
+                                    .icon(crate::ui::icons::icon(name))
+                                    .on_click(move |_, window, cx| {
                                         app.update(cx, |app, cx| {
-                                            app.set_panel_off(panel, true, cx)
+                                            app.shift_tool(panel, delta, window, cx)
                                         });
                                     }),
                             )
-                        }
-                    })
-                    .into_any_element()
+                        };
+                        let menu = shift(menu, "tool-move-earlier", -1, "arrow-up");
+                        let menu = shift(menu, "tool-move-later", 1, "arrow-down");
+                        let menu = targets.iter().fold(menu.separator(), |menu, anchor| {
+                            let (app, anchor) = (app.clone(), *anchor);
+                            menu.item(PopupMenuItem::new(crate::tr!(anchor.label())).on_click(
+                                move |_, window, cx| {
+                                    app.update(cx, |app, cx| {
+                                        app.move_tool(panel, anchor, window, cx)
+                                    });
+                                },
+                            ))
+                        });
+                        // **Taking the view off, from its own button.**
+                        // The gesture was in the title bar's menu alone,
+                        // which is a long way from the icon one is looking
+                        // at when one decides one has no use for it. The
+                        // button goes with the view; the same menu is
+                        // where it comes back from.
+                        let app = app.clone();
+                        menu.separator().item(
+                            PopupMenuItem::new(crate::tr!("action-hide-view"))
+                                .icon(crate::ui::icons::icon("eye-off"))
+                                .on_click(move |_, _window, cx| {
+                                    app.update(cx, |app, cx| app.set_panel_off(panel, true, cx));
+                                }),
+                        )
+                    }
+                })
+                .into_any_element()
             })
             .collect()
     }

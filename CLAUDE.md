@@ -424,6 +424,14 @@ une bande qui ne dit rien et qu'on ne remplit qu'en y traînant quelque chose
 fabrique — et `seats` lit un groupe seul comme la moitié haute, si bien que le
 bandeau de droite garde une seule série.
 
+**Un panneau assis à deux endroits a deux boutons**, un par bandeau : les
+terminaux sont plusieurs panneaux d'un seul nom, et rien n'empêche deux d'entre
+eux d'être sur deux bords. Le bouton porte donc son ancre, et une pression dit
+d'où elle vient — sans quoi celui d'en bas range la moitié d'à côté. Ce qui
+reste au **nom** est le repli lui-même (`folded_panels`), donc ranger les
+terminaux d'un bord range ceux de l'autre ; c'est réversible et la pression
+suivante les ramène.
+
 **Une tool window a un bouton, un document n'en a pas** — la différence n'est
 pas dans la nature du panneau mais dans sa place. `ui::rails` est pur et décide
 tout : l'ordre des boutons, lequel est allumé, ce qu'une pression veut dire, ce

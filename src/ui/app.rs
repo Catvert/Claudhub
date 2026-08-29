@@ -2114,6 +2114,7 @@ impl ClaudhubApp {
                 id,
                 frame,
             } => self.pest_frame(worktree, id, frame, window, cx),
+            Evt::TestsStep { worktree, id, step } => self.pest_step(worktree, id, step, cx),
             Evt::TestsRan { worktree, id, run } => self.pest_ran(worktree, id, run, cx),
             Evt::WtQuestions {
                 main,
@@ -4456,6 +4457,9 @@ impl ClaudhubApp {
     pub(super) fn press_tool(
         &mut self,
         panel: &'static str,
+        // Which rail the press came from. `None` for a key, which names a view
+        // and not a place — see `rails::press`.
+        from: Option<crate::ui::rails::Anchor>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -4479,7 +4483,7 @@ impl ClaudhubApp {
             return;
         }
         let seats = self.seats(cx);
-        match crate::ui::rails::press(panel, &seats) {
+        match crate::ui::rails::press(panel, from, &seats) {
             // The half and not its zone: one left with nothing visible stops
             // being drawn on its own, and the other takes the room. Putting
             // away the view alone left the next tab of the half showing in its

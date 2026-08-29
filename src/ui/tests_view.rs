@@ -162,6 +162,10 @@ pub struct RunState {
     /// to watch it. **One image, replaced in place**: a screencast is watched,
     /// not replayed, and each frame kept would be a decoded texture kept.
     pub cast: Option<Cast>,
+    /// The rows this campaign has already settled, by `(class, method)`.
+    /// A covered row spins until it lands here — which is what makes the tree
+    /// resolve test by test rather than all at once at the end.
+    pub settled: HashSet<(String, String)>,
     /// Why a suite never started, when one did not.
     pub error: Option<SharedString>,
     /// The finished accounts so far, merged.
@@ -603,6 +607,7 @@ impl ClaudhubApp {
                 started_at: now(),
                 lines: VecDeque::new(),
                 cast: None,
+                settled: HashSet::new(),
                 error: None,
                 run: None,
             },
@@ -675,6 +680,53 @@ impl ClaudhubApp {
             height: frame.height,
         });
         drop_cast(previous, window, cx);
+        cx.notify();
+    }
+
+    /// One test of the running suite, as it ends: its dot the moment it is
+    /// known, rather than at the end of the run.
+    ///
+    /// The name is left empty on purpose — a live event only carries the
+    /// mangled method, and [`PestState::refresh_cache`] falls back to the
+    /// listing's reading of it. The run's account, at the end, is what brings
+    /// the real description.
+    pub(super) fn pest_step(
+        &mut self,
+        worktree: PathBuf,
+        id: u64,
+        step: crate::suite::Step,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(status) = step.status else {
+            return;
+        };
+        let key = (step.class, step.method);
+        let first = match self.pest_runs.get_mut(&worktree) {
+            Some(state) if id >= state.since && id <= state.id => state.settled.insert(key.clone()),
+            _ => return,
+        };
+        let Some(state) = self.pest.get_mut(&worktree) else {
+            return;
+        };
+        let previous = state.marks.get(&key);
+        // A row that collapses dataset cases lands here once per case: within
+        // one run, red stays red. The account, at the end, says the same —
+        // one red case makes the row red — and says it for good.
+        if !first && previous.is_some_and(|mark| mark.status == Status::Failed) {
+            return;
+        }
+        // Kept from the run before: a live event only carries the mangled
+        // method, and a description already learned beats reading it back.
+        let name = previous.map_or(String::new(), |mark| mark.name.clone());
+        state.marks.insert(
+            key,
+            Mark {
+                status,
+                at: now(),
+                name,
+            },
+        );
+        state.refresh_cache();
         cx.notify();
     }
 
@@ -943,6 +995,9 @@ impl ClaudhubApp {
                     run.targets
                         .iter()
                         .any(|target| crate::suite::covers(target, test))
+                        && !run
+                            .settled
+                            .contains(&(test.class.clone(), test.method.clone()))
                 })
                 .collect(),
             _ => vec![false; tests.len()],
