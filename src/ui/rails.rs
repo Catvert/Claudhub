@@ -343,7 +343,13 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         panel: "ClaudhubTerminalRight",
         title: Label("panel-terminal-right"),
-        icon: "panel-right",
+        // **A terminal's glyph, not a place's.** It carried `panel-right`,
+        // which said where it opens and not what it is — the one thing an icon
+        // is for. The bare prompt rather than the framed one below it, because
+        // `no_two_tools_share_an_icon` is right and stays: nothing keeps this
+        // panel on the right, and two views under one glyph in one rail is a
+        // target that answers half the time.
+        icon: "terminal",
         home: Anchor::new(Side::Right, Half::Top),
         conditional: false,
     },
