@@ -1531,9 +1531,28 @@ pub(super) fn new_terminal_button(
                 PopupMenuItem::new(tr!("terminal-new"))
                     .icon(crate::ui::icons::icon("plus"))
                     .on_click(move |_, window, cx| {
-                        open_terminal(&shell, here.clone(), None, window, cx);
+                        open_terminal(&shell, here.clone(), None, None, window, cx);
                     }),
             );
+            // And the same thing against the **other** edge. One entry and not
+            // two, always the one the setting does not do: a shell beside the
+            // code rather than under it is a gesture one makes now and then,
+            // and naming both would say the setting decides nothing.
+            let elsewhere = Settings::global(cx).terminal.placement.other();
+            let menu = {
+                let app = app.clone();
+                let here = worktree.clone();
+                menu.item(
+                    PopupMenuItem::new(tr!(elsewhere.new_terminal_key()))
+                        .icon(crate::ui::icons::icon(match elsewhere {
+                            crate::ui::settings::TerminalPlacement::Right => "panel-right",
+                            crate::ui::settings::TerminalPlacement::Bottom => "panel-bottom",
+                        }))
+                        .on_click(move |_, window, cx| {
+                            open_terminal(&app, here.clone(), None, Some(elsewhere), window, cx);
+                        }),
+                )
+            };
             if profiles.is_empty() {
                 return menu;
             }
@@ -1551,6 +1570,7 @@ pub(super) fn new_terminal_button(
                                     &app,
                                     here.clone(),
                                     Some(profile.clone()),
+                                    None,
                                     window,
                                     cx,
                                 );
@@ -1567,6 +1587,8 @@ fn open_terminal(
     // the multiplexer's is about.
     worktree: Option<std::path::PathBuf>,
     profile: Option<crate::ui::settings::AgentProfile>,
+    // `None` means the setting's edge, which is what every entry but one means.
+    placement: Option<crate::ui::settings::TerminalPlacement>,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -1580,6 +1602,10 @@ fn open_terminal(
         let launch = match &profile {
             Some(profile) => crate::ui::terminal_view::Launch::agent(profile),
             None => crate::ui::terminal_view::Launch::shell(),
+        };
+        let launch = match placement {
+            Some(placement) => launch.at(placement),
+            None => launch,
         };
         app.open_terminal(&worktree, launch, window, cx);
     });
@@ -1675,21 +1701,6 @@ impl Panel for TerminalPanel {
             .map(|app| app.read(cx).terminal_label(id, cx))
             .unwrap_or_default();
         let rename = app.clone();
-        // With the grid on, the dock holds every terminal of the window, so the
-        // tab is the only thing that can say which project this one is: the
-        // repository greyed, then the worktree, the way the picker writes it.
-        let in_grid = app
-            .upgrade()
-            .is_some_and(|app| app.read(cx).terminals_everywhere);
-        let project = in_grid
-            .then(|| {
-                app.upgrade()
-                    .map(|app| app.read(cx).project_label(&self.worktree))
-            })
-            .flatten();
-        let muted = cx.theme().muted_foreground;
-        let mine = self.worktree.clone();
-        let go = app.clone();
         // The wheel button closes, like the cross — the confirmation included:
         // what dies with a terminal is a build half done, and the question does
         // not depend on which gesture asked.
@@ -1720,8 +1731,6 @@ impl Panel for TerminalPanel {
             // the tab under this element consumes the plain click to select.
             .context_menu(move |menu, _window, _cx| {
                 let app = rename.clone();
-                let go = go.clone();
-                let mine = mine.clone();
                 let menu = menu.item(
                     gpui_component::menu::PopupMenuItem::new(tr!("terminal-rename"))
                         .icon(crate::ui::icons::icon("pencil"))
@@ -1732,35 +1741,7 @@ impl Panel for TerminalPanel {
                             app.update(cx, |app, cx| app.ask_terminal_name(id, window, cx));
                         }),
                 );
-                // Only in the grid: everywhere else the tab already belongs to
-                // the worktree one is looking at, and the entry would be a way
-                // of going where one is.
-                if !in_grid {
-                    return menu;
-                }
-                menu.item(
-                    gpui_component::menu::PopupMenuItem::new(tr!("multiplexer-open-worktree"))
-                        .icon(crate::ui::icons::icon("arrow-right"))
-                        .on_click(move |_, window, cx| {
-                            let Some(app) = go.upgrade() else {
-                                return;
-                            };
-                            app.update(cx, |app, cx| app.work_in_worktree(&mine, window, cx));
-                        }),
-                )
-            })
-            .when_some(project, |el, (repo, worktree)| {
-                el.child(
-                    gpui_component::h_flex()
-                        .gap_1()
-                        .items_center()
-                        .text_color(muted)
-                        .when_some(repo, |el, repo| {
-                            el.child(repo)
-                                .child(div().text_color(muted.opacity(0.5)).child("/"))
-                        })
-                        .child(worktree),
-                )
+                menu
             })
             .child(label)
             .child(
@@ -1791,10 +1772,7 @@ impl Panel for TerminalPanel {
             // In the grid it opens on **this tab's** worktree and not on the
             // one being looked at: the bar mixes the projects, so "the current
             // worktree" is not a thing one can read off it.
-            .child(new_terminal_button(
-                &self.app,
-                in_grid.then(|| self.worktree.clone()),
-            ))
+            .child(new_terminal_button(&self.app, None))
     }
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {

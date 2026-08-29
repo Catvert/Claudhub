@@ -295,6 +295,9 @@ pub struct Frame {
 /// project — and answers one line of JSON per frame.
 struct Screencast {
     child: std::process::Child,
+    /// Held open for the whole run: closing it is what stops the relay. See
+    /// [`Screencast::drop`].
+    stdin: Option<std::process::ChildStdin>,
     flag: PathBuf,
 }
 
@@ -331,13 +334,23 @@ impl Screencast {
             .arg("-e")
             .arg(script)
             .current_dir(worktree)
-            .stdin(Stdio::null())
+            // Piped, not null: the run's only hold on the relay. See
+            // [`Screencast::drop`].
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         crate::wsl::no_console(&mut cmd);
+        // Its own group, for the same reason a run gets one: `sail` is a
+        // shell that does not `exec`, so the `docker` client is its child.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
 
         match cmd.spawn() {
-            Ok(child) => Some(Self { child, flag }),
+            Ok(mut child) => Some(Self {
+                stdin: child.stdin.take(),
+                child,
+                flag,
+            }),
             Err(_) => {
                 let _ = std::fs::remove_file(&flag);
                 None
@@ -354,9 +367,38 @@ impl Screencast {
 }
 
 impl Drop for Screencast {
+    /// Two exits to close, and `Child::kill` alone closes neither.
+    ///
+    /// The relay runs **in the container**, out of reach of any signal from
+    /// here — `docker exec` leaves what it started running, the way
+    /// [`kill_run`] cannot stop a suite. Closing its stdin is the one thing
+    /// that crosses, and the script goes on that.
+    ///
+    /// And `sail` is a shell that does not `exec`: the `docker` client is its
+    /// child, and that client holds the frames pipe. Killing the shell alone
+    /// leaves the pipe open, [`pump_frames`] waits for an EOF that never
+    /// comes, and the run — which the reader's thread is joined to — never
+    /// ends. Hence the group, and the wait for the polite exit before it.
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        drop(self.stdin.take());
+        let mut alive = true;
+        for _ in 0..30 {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                alive = false;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if alive {
+            #[cfg(unix)]
+            // SAFETY: the child has not been reaped — `try_wait` never said
+            // it had — so the pid is still its own and not yet reusable.
+            unsafe {
+                libc::kill(-(self.child.id() as i32), libc::SIGKILL)
+            };
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
         let _ = std::fs::remove_file(&self.flag);
     }
 }

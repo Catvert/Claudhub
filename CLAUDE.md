@@ -485,8 +485,12 @@ une autre pour **échanger** leurs places, ce qui réordonne `terminals` lui-mê
 — l'ordre des terminaux est un seul, celui que `Ctrl+PageUp` parcourt aussi.
 Le clavier est
 remis des deux côtés de la bascule, ce qui avait le focus n'étant plus peint
-après. À ne pas confondre avec `terminals_everywhere`, qui reste ce qu'il est :
-les terminaux de tous les worktrees dans le dock, la fenêtre entière autour.
+après. Chaque tuile a la
+flèche qui y emmène (`work_in_worktree`) : on vient là pour savoir lequel des
+agents a fini, et agir sur la réponse c'est aller dans ce worktree en quittant
+la grille. Il a remplacé `terminals_everywhere`, l'état qui montrait les
+terminaux de tous les worktrees dans le dock — ce que le multiplexeur fait
+mieux, et un état sans commande pour l'atteindre est du code mort.
 
 La disposition est enregistrée dans `<config>/layout.json`, une seule.
 `LAYOUT_VERSION` la fait écarter quand les panneaux changent de nom, et c'est le
@@ -518,6 +522,15 @@ Sept pièges du dock, tous rencontrés :
   lecteurs : les champs sont privés, mais démonter et remonter suffit. Sans lui
   un terminal de la zone basse revient en « panel type is not registered » à
   chaque démarrage — son contenu est un processus, rien ne le rebâtit.
+
+**Un terminal s'ouvre du côté que le réglage dit**, et le `+` offre en plus
+l'**autre** côté — une seule entrée, toujours celle que le réglage ne fait pas
+(`TerminalPlacement::other`). C'est ce qui met un shell à droite du code sans
+déménager ceux d'en bas ; le bandeau de droite gagne alors son bouton Terminal
+tout seul, les bandeaux se calculant depuis l'arbre du dock. Le groupe que
+rejoint un nouveau terminal est celui d'un frère **dans la zone visée**, et non
+le dernier ouvert : avec des terminaux sur deux bords, le plus récent est
+souvent sur l'autre.
 
 **Les terminaux sont des panneaux** : un par terminal, rendant sa propre
 `Entity<TerminalView>`. La place se garde par l'invisibilité, pas par un

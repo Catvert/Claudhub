@@ -64,7 +64,8 @@ pub struct PestState {
     /// own, and they would all be handed the same debugging port.
     ///
     /// Only the checkouts whose `BrowserTestCase` opens that port answer; the
-    /// others simply show no picture, and their run is unaffected.
+    /// others simply show no picture, and their run is unaffected — which is
+    /// why it is on by default.
     pub cast: bool,
     /// Run Pest with `--headed`: its browser tests then show the browser
     /// instead of running headless. A session choice, not persisted — one
@@ -446,6 +447,10 @@ impl ClaudhubApp {
         }
         let mut state = PestState {
             pending: true,
+            // On unless one turns it off: a checkout that does not open the
+            // port runs exactly as before, and a browser suite one cannot see
+            // is what this panel is for.
+            cast: true,
             ..Default::default()
         };
         if let Some(saved) = Store::global(cx).worktree(worktree) {
@@ -857,6 +862,7 @@ impl ClaudhubApp {
                 env: HashMap::new(),
                 label,
                 agent: false,
+                placement: None,
             },
             window,
             cx,

@@ -13,6 +13,13 @@ const cdp = `127.0.0.1:${__PORT__}`
 const out = o => process.stdout.write(JSON.stringify(o) + '\n')
 let attached = null
 
+// Rien, depuis l'hôte, ne tue un processus lancé par `docker exec` : la fin de son stdin
+// est le seul signal qui traverse. Claudhub tient ce tuyau ouvert le temps du run, et le
+// referme à la fin — sans quoi le relais attendrait un navigateur jusqu'à la mort du
+// conteneur, une fois par run.
+process.stdin.on('end', () => process.exit(0))
+process.stdin.resume()
+
 ;(async function connect() {
     let endpoint
 

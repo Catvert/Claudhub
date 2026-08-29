@@ -1560,6 +1560,13 @@ pub struct Launch {
     /// True when this tab runs an agent: it is the one review notes will be
     /// delivered to.
     pub agent: bool,
+    /// Which edge to dock it against, when the gesture said one.
+    ///
+    /// `None` is the setting's own answer, and it is what almost every caller
+    /// means: a task, a recipe, an agent all open "a terminal", wherever those
+    /// live. Naming an edge is for the one gesture that asks for the other
+    /// side — a shell beside the code rather than under it.
+    pub placement: Option<crate::ui::settings::TerminalPlacement>,
 }
 
 impl Launch {
@@ -1569,6 +1576,7 @@ impl Launch {
             env: HashMap::new(),
             label: tr!("terminal-shell"),
             agent: false,
+            placement: None,
         }
     }
 
@@ -1582,7 +1590,14 @@ impl Launch {
                 .collect(),
             label: SharedString::from(profile.label().to_string()),
             agent: true,
+            placement: None,
         }
+    }
+
+    /// The same launch, docked against a named edge.
+    pub fn at(mut self, placement: crate::ui::settings::TerminalPlacement) -> Self {
+        self.placement = Some(placement);
+        self
     }
 }
 
@@ -1735,7 +1750,7 @@ impl ClaudhubApp {
         if self.active.as_deref() == Some(worktree) {
             self.show_panel(crate::ui::panels::TerminalPanel::NAME, cx);
         }
-        self.install_terminal(worktree.to_path_buf(), view, window, cx);
+        self.install_terminal(worktree.to_path_buf(), view, launch.placement, window, cx);
     }
 
     /// Puts a terminal's panel into the dock, and shows it.
@@ -1752,6 +1767,7 @@ impl ClaudhubApp {
         &mut self,
         worktree: PathBuf,
         view: Entity<TerminalView>,
+        placement: Option<crate::ui::settings::TerminalPlacement>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1783,7 +1799,7 @@ impl ClaudhubApp {
             name: None,
             panel: panel.clone(),
         });
-        self.dock_terminal(&worktree, panel, window, cx);
+        self.dock_terminal(&worktree, panel, placement, window, cx);
         let handle = view.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
         cx.notify();
@@ -1805,25 +1821,34 @@ impl ClaudhubApp {
         &mut self,
         worktree: &Path,
         panel: Entity<crate::ui::panels::TerminalPanel>,
+        // `None` means the setting's own answer — see `Launch::placement`.
+        asked: Option<crate::ui::settings::TerminalPlacement>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let dock = self.dock.clone();
-        let (placement, size) = match crate::ui::settings::Settings::global(cx).terminal.placement {
+        let wanted =
+            asked.unwrap_or_else(|| crate::ui::settings::Settings::global(cx).terminal.placement);
+        let (placement, size) = match wanted {
             crate::ui::settings::TerminalPlacement::Right => (DockPlacement::Right, TERMINAL_WIDTH),
             crate::ui::settings::TerminalPlacement::Bottom => {
                 (DockPlacement::Bottom, TERMINAL_HEIGHT)
             }
         };
-        // The node of a terminal already open on this worktree: that is the tab
-        // group the new one joins, which is what makes the dock's bar read as
-        // *the* terminal bar.
-        let sibling = self
+        // The terminals already open on this worktree, newest first: the new
+        // one joins the tab group of whichever of them is **in the zone being
+        // aimed at**, which is what makes the dock's bar read as *the* terminal
+        // bar. A list and no longer the last one alone: with terminals on two
+        // edges at once, the most recent may well be on the other one, and
+        // asking its node of this zone's tree answers nothing.
+        let siblings: Vec<_> = self
             .terminals
             .iter()
             .filter(|terminal| terminal.worktree == worktree)
             .map(|terminal| terminal.panel.clone())
-            .rfind(|other| other.entity_id() != panel.entity_id());
+            .filter(|other| other.entity_id() != panel.entity_id())
+            .rev()
+            .collect();
         dock.update(cx, |dock, cx| {
             // **`panel_handle` and `dock_panel_at`, never `add_panel`.** An
             // `Entity<P>` converts itself into base's `PanelView` and the dock
@@ -1840,9 +1865,10 @@ impl ClaudhubApp {
                 // which is nobody's choice.
                 Some(size),
                 |dock| {
-                    let sibling = sibling?;
                     let tree = dock.layout(placement)?;
-                    let node = tree.find_panel_node(PanelId::from(sibling.entity_id()))?;
+                    let node = siblings.iter().find_map(|sibling| {
+                        tree.find_panel_node(PanelId::from(sibling.entity_id()))
+                    })?;
                     // **Right beside the one being looked at**, not at the far
                     // end of the bar. A terminal is opened from another one —
                     // the same task, one command further — and a tab landing
@@ -2273,7 +2299,7 @@ impl ClaudhubApp {
         // agents had finished, and this is the answer being acted on. Leaving
         // it up would show the eleven other checkouts' shells beside the one
         // just chosen.
-        self.terminals_everywhere = false;
+        self.multiplex = false;
         cx.notify();
     }
 

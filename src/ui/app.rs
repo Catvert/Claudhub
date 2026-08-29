@@ -14,7 +14,6 @@ use gpui::{
     div, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, Render, SharedString, Window,
 };
 use gpui_component::{
-    button::{Button, ButtonVariants},
     dock::{DockArea, DockSkin},
     h_flex,
     input::{InputState, TextareaState},
@@ -956,14 +955,6 @@ pub struct ClaudhubApp {
     /// Empty when one is not in zen. It is not persisted: a window reopening in
     /// zen with no memory of what it hid would be a window one has to rebuild.
     pub(super) zen_folded: Vec<crate::ui::rails::Side>,
-    /// The terminals show every worktree's, not only the one being looked at.
-    ///
-    /// What the multiplexer used to be a screen for. It is not a preference but
-    /// where one stands — "which of the agents I left running has finished" —
-    /// so it lives in the store beside the rest of it. The panels are not
-    /// rebuilt when it turns over: their visibility is observed, and the tab
-    /// says which project it belongs to for as long as it holds.
-    pub(super) terminals_everywhere: bool,
     /// The terminal grid, in place of the whole workspace — see `ui::multiplex`.
     ///
     /// A state of the window and not a panel: what it replaces is the rails,
@@ -1355,7 +1346,6 @@ impl ClaudhubApp {
             dock,
             dock_skin,
             layout_save_scheduled: false,
-            terminals_everywhere: false,
             multiplex: false,
             zen_folded: Vec::new(),
             settings_form,
@@ -4086,71 +4076,15 @@ impl ClaudhubApp {
             // the bottom edge is where one is not. What is left here is the
             // space that pushes the terminals to the other end.
             .child(div().flex_1().min_w_0())
-            // The terminals close the bar, at the bottom right — the corner of
-            // the window they open on. They were at the top, at the other end of
-            // the screen from the panel they show and beside a menu that speaks
-            // of the application rather than of the work.
-            //
-            // The toggle carries the **same `+`** as the last terminal tab's,
-            // and after it as the `+` comes after the tabs: with the terminals
-            // hidden there is no tab bar left to open one from, and showing them
-            // first only to ask is a gesture too many.
+            // The `+` closes the bar, at the bottom right — the corner of the
+            // window a terminal opens on. It is what is left of a row of three:
+            // the toggle repeated the rail's own Terminal button, and the grid
+            // beside it was the multiplexer before there was one — that screen
+            // is back, and its button is in the title bar with the gear.
             .child(
                 h_flex()
                     .flex_shrink_0()
                     .gap_1()
-                    .child(
-                        Button::new("terminal")
-                            .xsmall()
-                            .compact()
-                            .icon(icon("square-terminal"))
-                            // The name is written and not hovered, as at both ends of
-                            // this bar: an icon alone is a rebus, and a tooltip is a
-                            // name one has to ask for.
-                            .label(tr!("panel-terminal"))
-                            // Solid when they are showing, outline when they are not —
-                            // the screen picker's polarity, at the other end of the same
-                            // line: `ghost` plus `selected` is a background a few
-                            // percent away from the bar's own, invisible on half the
-                            // themes.
-                            .map(|button| {
-                                if self.terminals_on_screen(cx) {
-                                    button.primary()
-                                } else {
-                                    button.outline()
-                                }
-                            })
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_terminal_panel(window, cx);
-                            })),
-                    )
-                    // "Which of the agents I left running has finished" is the
-                    // one question that crosses the worktrees, and it used to
-                    // be a screen. It is a state of the terminals now, and its
-                    // switch belongs beside them.
-                    //
-                    // Here and not in the dock's tab bar: a control there would
-                    // follow the panel and repeat itself in every tab, which is
-                    // what the `+` had to do. This corner is the terminals'
-                    // whatever zone holds them.
-                    .child(
-                        Button::new("terminals-everywhere")
-                            .xsmall()
-                            .compact()
-                            .icon(icon("grid-3x3"))
-                            .tooltip(tr!("terminal-every-worktree"))
-                            .map(|button| {
-                                if self.terminals_everywhere {
-                                    button.primary()
-                                } else {
-                                    button.outline()
-                                }
-                            })
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.terminals_everywhere = !this.terminals_everywhere;
-                                cx.notify();
-                            })),
-                    )
                     .child(crate::ui::panels::new_terminal_button(
                         &cx.entity().downgrade(),
                         None,
@@ -4677,31 +4611,6 @@ impl ClaudhubApp {
         self.panel_visible(super::panels::TerminalPanel::NAME)
     }
 
-    /// Whether there is a terminal on screen right now — what the status bar's
-    /// button lights up for.
-    ///
-    /// Not the same reading as `terminal_visible`, which is the **flag**: it
-    /// says the terminals are not hidden, and it stays true when the last tab
-    /// has been closed by hand. A lit button over an empty corner says the one
-    /// thing a toggle must never say, that what it names is on screen when it is
-    /// not. Nothing is written here: the flag describes an intent, and the next
-    /// press reads it — pressed while empty, it opens one, which is what
-    /// `toggle_terminal_panel` already does.
-    pub(super) fn terminals_on_screen(&self, cx: &App) -> bool {
-        if !self.terminal_visible(cx) {
-            return false;
-        }
-        // Showing every worktree's is what the multiplexer used to be a screen
-        // for: counting only the one being looked at would call the corner
-        // empty in front of a dozen live shells.
-        if self.terminals_everywhere {
-            return !self.terminals.is_empty();
-        }
-        self.active
-            .as_deref()
-            .is_some_and(|worktree| self.terminals_of(worktree).next().is_some())
-    }
-
     /// Whether *this* worktree's terminals are on screen.
     ///
     /// Two conditions, and the second is what makes a terminal keep its place:
@@ -4711,8 +4620,7 @@ impl ClaudhubApp {
     /// nothing moved — which is why a terminal dragged into a split is still
     /// there after a round trip through another worktree.
     pub(super) fn terminal_shown(&self, worktree: &Path, cx: &App) -> bool {
-        self.terminal_visible(cx)
-            && (self.terminals_everywhere || self.active.as_deref() == Some(worktree))
+        self.terminal_visible(cx) && self.active.as_deref() == Some(worktree)
     }
 
     pub(super) fn show_terminal_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -18,9 +18,10 @@ use std::path::PathBuf;
 
 use gpui::{prelude::*, px, Context, Entity, Focusable as _, SharedString, Window};
 use gpui_component::{
+    button::{Button, ButtonVariants as _},
     h_flex,
     resizable::{h_resizable, resizable_panel, v_resizable},
-    v_flex, ActiveTheme,
+    v_flex, ActiveTheme, Sizable as _,
 };
 
 use super::app::ClaudhubApp;
@@ -186,6 +187,7 @@ impl Tile {
         let (repo, checkout) = self.project;
         let muted = cx.theme().muted_foreground;
         let worktree = self.worktree.clone();
+        let go = self.worktree.clone();
         let label = self.label.clone();
         let dropped = id.as_u64();
         v_flex()
@@ -254,6 +256,22 @@ impl Tile {
                             .min_w_0()
                             .truncate()
                             .child(self.label.clone()),
+                    )
+                    // The way out, tile by tile. One comes to the grid to find
+                    // out which of the agents has finished; acting on that
+                    // answer means going to that checkout and leaving the grid,
+                    // and without this the screen could only be left the way
+                    // one came in — by the title bar, landing wherever the
+                    // window happened to be.
+                    .child(
+                        Button::new(("multiplex-go", id))
+                            .ghost()
+                            .xsmall()
+                            .icon(super::icons::icon("arrow-right"))
+                            .tooltip(tr!("multiplexer-open-worktree"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.work_in_worktree(&go, window, cx);
+                            })),
                     ),
             )
             // **`v_flex` and not `div`**, for the other half of the same
