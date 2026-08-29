@@ -500,7 +500,7 @@ impl ClaudhubApp {
                         // hidden tab is a message nobody sees arrive. It is
                         // what the notes' `deliver` does, and for the same
                         // reason.
-                        this.show_terminal_panel(window, cx);
+                        this.show_agent_terminals(&worktree, window, cx);
                         this.send_to_agent(&worktree, text, window, cx);
                     });
                     true

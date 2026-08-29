@@ -58,6 +58,9 @@ pub enum Pane {
     /// The run being followed. Its content is a process's account; the key
     /// exists so `Ctrl+F` there does not go to the panel touched before it.
     TestRun,
+    /// The browser a run drives. A picture searches for nothing; the key
+    /// exists for the reason the one above it does.
+    Cast,
     Notes,
     Conflicts,
     Diff,

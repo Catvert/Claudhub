@@ -1690,7 +1690,7 @@ impl ClaudhubApp {
                 // time, each on its own connection. What the previous session
                 // had open comes back from the store, beside the files.
                 let doomed = |name: &str| {
-                    name == super::panels::TerminalPanel::NAME
+                    super::panels::TerminalPanel::is_terminal(name)
                         || name == super::panels::FilePanel::NAME
                         || name == super::panels::QueryPanel::NAME
                 };
@@ -3355,7 +3355,8 @@ impl ClaudhubApp {
             return;
         };
         self.terminal_started = true;
-        self.ensure_terminal(&worktree, window, cx);
+        let view = super::panels::TerminalPanel::name_of(Settings::global(cx).terminal.placement);
+        self.ensure_terminal(&worktree, view, window, cx);
     }
 
     /// Opens a file in the diff view.
@@ -4470,16 +4471,18 @@ impl ClaudhubApp {
         // gesture `Ctrl+T` makes. Past that they press like any other view:
         // the button puts the **half** away, not merely its own tabs, which is
         // what the two side rails have always done.
-        let terminals = panel == super::panels::TerminalPanel::NAME;
+        let terminals = super::panels::TerminalPanel::is_terminal(panel);
         if terminals
             && self
                 .active
                 .as_deref()
-                .is_some_and(|worktree| self.terminals_of(worktree).next().is_none())
+                .is_some_and(|worktree| self.terminals_in(worktree, panel).next().is_none())
         {
             // `show_terminal_panel` opens the first one, and opening one
             // hands it the keyboard: the gesture is "I want a terminal now".
-            self.show_terminal_panel(window, cx);
+            // Of **this** view: the button below and the one beside the code
+            // are two buttons, and each opens its own.
+            self.show_terminal_panel(panel, window, cx);
             return;
         }
         let seats = self.seats(cx);
@@ -4507,10 +4510,8 @@ impl ClaudhubApp {
                 // And back to it on the way in: "I want a terminal now" is a
                 // gesture left half done if it has to be clicked before it
                 // takes a keystroke.
-                if terminals {
-                    if let Some(worktree) = self.active.clone() {
-                        self.focus_terminal(&worktree, window, cx);
-                    }
+                if let (true, Some(worktree)) = (terminals, self.active.clone()) {
+                    self.focus_terminal(&worktree, Some(panel), window, cx);
                 }
             }
         }
@@ -4639,10 +4640,6 @@ impl ClaudhubApp {
         window.focus(&self.focus, cx);
     }
 
-    pub(super) fn terminal_visible(&self, _cx: &App) -> bool {
-        self.panel_visible(super::panels::TerminalPanel::NAME)
-    }
-
     /// Whether *this* worktree's terminals are on screen.
     ///
     /// Two conditions, and the second is what makes a terminal keep its place:
@@ -4651,14 +4648,20 @@ impl ClaudhubApp {
     /// closes itself when none is left, so a zone empties and fills again with
     /// nothing moved — which is why a terminal dragged into a split is still
     /// there after a round trip through another worktree.
-    pub(super) fn terminal_shown(&self, worktree: &Path, cx: &App) -> bool {
-        self.terminal_visible(cx) && self.active.as_deref() == Some(worktree)
+    pub(super) fn terminal_shown(&self, worktree: &Path, view: &str) -> bool {
+        self.panel_visible(view) && self.active.as_deref() == Some(worktree)
     }
 
-    pub(super) fn show_terminal_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_panel(super::panels::TerminalPanel::NAME, cx);
+    /// Shows one of the two terminal views, and opens its first shell.
+    pub(super) fn show_terminal_panel(
+        &mut self,
+        view: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_panel(view, cx);
         if let Some(worktree) = self.active.clone() {
-            self.ensure_terminal(&worktree, window, cx);
+            self.ensure_terminal(&worktree, view, window, cx);
         }
     }
 

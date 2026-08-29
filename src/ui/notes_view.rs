@@ -697,7 +697,7 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.show_terminal_panel(window, cx);
+        self.show_agent_terminals(&worktree, window, cx);
         self.send_to_agent(&worktree, text, window, cx);
     }
 

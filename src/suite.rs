@@ -119,6 +119,14 @@ pub struct Target {
     /// would all be handed the same debugging port and only the first would
     /// bind it. See [`Screencast`].
     pub cast: bool,
+    /// Pest only: milliseconds Playwright waits before each action it
+    /// performs — its own `slowMo`, which is what makes a browser test
+    /// followable by eye. Zero is off.
+    ///
+    /// Passed the way the debugging port is, through [`BrowserHints`]: the
+    /// plugin has no seam for launch options, and the checkout's harness is
+    /// what puts them into the connection.
+    pub slow_mo: u32,
 }
 
 impl Target {
@@ -131,6 +139,7 @@ impl Target {
             headed: false,
             parallel: false,
             cast: false,
+            slow_mo: 0,
         }
     }
 }
@@ -315,12 +324,50 @@ struct Screencast {
     /// Held open for the whole run: closing it is what stops the relay. See
     /// [`Screencast::drop`].
     stdin: Option<std::process::ChildStdin>,
-    flag: PathBuf,
 }
 
-/// Where the checkout reads the port to open. At its root, like the run's
-/// account, because that is the one directory both sides of Sail share.
-const FLAG: &str = ".pest-cdp-port";
+/// Where the checkout reads what the run asks of its browser. At its root,
+/// like the run's account, because that is the one directory both sides of
+/// Sail share.
+const HINTS: &str = ".pest-browser.json";
+
+/// What the run tells the checkout's harness to launch its browser with — the
+/// port to open onto it, the delay to put between its actions.
+///
+/// A file and not an environment variable: `sail pest` forwards none. It
+/// builds `exec -u <user> <service> php vendor/bin/pest` and passes APP_URL
+/// and DUSK_DRIVER_URL, nothing else. Written before the suite starts, read
+/// at its first browser test, removed when this drops.
+///
+/// A checkout whose `BrowserTestCase` does not read it simply runs as it
+/// always did: the file is inert, and nothing here asks whether it was read.
+struct BrowserHints {
+    path: PathBuf,
+}
+
+impl BrowserHints {
+    fn write(worktree: &Path, port: Option<u16>, slow_mo: u32) -> Option<Self> {
+        let mut fields = Vec::new();
+        if let Some(port) = port {
+            fields.push(format!("\"cdpPort\": {port}"));
+        }
+        if slow_mo > 0 {
+            fields.push(format!("\"slowMo\": {slow_mo}"));
+        }
+        if fields.is_empty() {
+            return None;
+        }
+        let path = worktree.join(HINTS);
+        std::fs::write(&path, format!("{{{}}}\n", fields.join(", "))).ok()?;
+        Some(Self { path })
+    }
+}
+
+impl Drop for BrowserHints {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
 
 /// Quality against bandwidth: every frame crosses a pipe, and in remote mode
 /// the wire too. 1280 wide at quality 55 is ~35 kB a frame, and one frame in
@@ -336,9 +383,6 @@ impl Screencast {
     /// watch still runs, and saying so is the panel's empty frame, not an
     /// error that would fail the suite.
     fn start(worktree: &Path, sail: &Path, port: u16) -> Option<Self> {
-        let flag = worktree.join(FLAG);
-        std::fs::write(&flag, port.to_string()).ok()?;
-
         let script = include_str!("../assets/cdp-relay.mjs")
             .replace("__PORT__", &port.to_string())
             .replace("__QUALITY__", &FRAME_QUALITY.to_string())
@@ -366,12 +410,8 @@ impl Screencast {
             Ok(mut child) => Some(Self {
                 stdin: child.stdin.take(),
                 child,
-                flag,
             }),
-            Err(_) => {
-                let _ = std::fs::remove_file(&flag);
-                None
-            }
+            Err(_) => None,
         }
     }
 
@@ -416,7 +456,6 @@ impl Drop for Screencast {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
-        let _ = std::fs::remove_file(&self.flag);
     }
 }
 
@@ -1019,8 +1058,13 @@ pub fn run(
     // The relay is started before the suite, so the browser's first page is
     // already watched when it opens: the port it will bind is written now,
     // and the harness reads it at the run's first browser test.
-    let mut cast = match (target.cast, &sail_bin) {
-        (true, Some(bin)) => Screencast::start(worktree, bin, Screencast::port_for(id)),
+    // Written before the suite so its first browser test reads it, and kept
+    // to the end of this function — a run reading it halfway through would
+    // find nothing.
+    let port = (target.cast && sail_bin.is_some()).then(|| Screencast::port_for(id));
+    let _hints = BrowserHints::write(worktree, port, target.slow_mo);
+    let mut cast = match (port, &sail_bin) {
+        (Some(port), Some(bin)) => Screencast::start(worktree, bin, port),
         _ => None,
     };
     let watching = cast.as_mut().and_then(|cast| cast.child.stdout.take());
@@ -1613,6 +1657,7 @@ pub fn test_target(test: &Test) -> Target {
             headed: false,
             parallel: false,
             cast: false,
+            slow_mo: 0,
         },
         // The file narrows the collection, the anchored title picks the test.
         Runner::Vitest => Target {
@@ -1623,6 +1668,7 @@ pub fn test_target(test: &Test) -> Target {
             headed: false,
             parallel: false,
             cast: false,
+            slow_mo: 0,
         },
         // A Jest row is a file: the path is the whole narrowing.
         Runner::Jest => Target {
@@ -1633,6 +1679,7 @@ pub fn test_target(test: &Test) -> Target {
             headed: false,
             parallel: false,
             cast: false,
+            slow_mo: 0,
         },
     }
 }
@@ -1649,6 +1696,7 @@ pub fn scope_target(test: &Test, depth: usize) -> Target {
             headed: false,
             parallel: false,
             cast: false,
+            slow_mo: 0,
         },
         Runner::Vitest => {
             let prefix = group_prefix(&test.class, depth).to_string();
@@ -1662,6 +1710,7 @@ pub fn scope_target(test: &Test, depth: usize) -> Target {
                 headed: false,
                 parallel: false,
                 cast: false,
+                slow_mo: 0,
             }
         }
         Runner::Jest => Target {
@@ -1672,6 +1721,7 @@ pub fn scope_target(test: &Test, depth: usize) -> Target {
             headed: false,
             parallel: false,
             cast: false,
+            slow_mo: 0,
         },
     }
 }
@@ -2130,6 +2180,7 @@ at tests/Feature/HttpTest.php:3</failure>
                 headed: false,
                 parallel: false,
                 cast: false,
+                slow_mo: 0,
             }
         );
     }
@@ -2154,6 +2205,7 @@ at tests/Feature/HttpTest.php:3</failure>
                 headed: false,
                 parallel: false,
                 cast: false,
+                slow_mo: 0,
             }
         );
     }
@@ -2225,6 +2277,7 @@ at tests/Feature/HttpTest.php:3</failure>
                 headed: false,
                 parallel: false,
                 cast: false,
+                slow_mo: 0,
             }
         );
         assert!(scope_target(test, 2).exact);
@@ -2241,6 +2294,7 @@ at tests/Feature/HttpTest.php:3</failure>
             headed: false,
             parallel: false,
             cast: false,
+            slow_mo: 0,
         };
         // No quoting needed: `^`, `:` and a trailing `$` are all literal to a
         // POSIX shell, and `join_command` only quotes what would not be.
@@ -2261,6 +2315,7 @@ at tests/Feature/HttpTest.php:3</failure>
         let parallel = Target {
             parallel: true,
             cast: false,
+            slow_mo: 0,
             ..pest.clone()
         };
         assert_eq!(
@@ -2281,6 +2336,7 @@ at tests/Feature/HttpTest.php:3</failure>
             headed: false,
             parallel: false,
             cast: false,
+            slow_mo: 0,
         };
         assert_eq!(
             command_line(false, &vitest),
@@ -2294,6 +2350,7 @@ at tests/Feature/HttpTest.php:3</failure>
             headed: false,
             parallel: false,
             cast: false,
+            slow_mo: 0,
         };
         // Sail leaves a JS runner untouched: node lives on the host.
         assert_eq!(

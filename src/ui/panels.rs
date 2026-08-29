@@ -744,6 +744,10 @@ panels! {
     // The run being followed. On the home screen its tab only shows once a
     // run exists, the console's rule.
     TestRunPanel => ("ClaudhubTestRun", "panel-test-run", render_test_run, TestRun, needed: test_run_open),
+    // The browser a run drives, in the centre and not under the account it
+    // scrolls: what one watches and what one reads afterwards are two things,
+    // and a band of 360 pixels at the top of a bottom panel was neither.
+    CastPanel => ("ClaudhubCast", "panel-cast", render_cast, Cast, needed: cast_open, closes: close_cast),
     FilesPanel => ("ClaudhubFiles", "panel-files", render_files, Files),
     DbPanel => ("ClaudhubDb", "panel-databases", render_db, Db),
     SearchPanel => ("ClaudhubSearch", "panel-search", render_search, Search),
@@ -1432,6 +1436,15 @@ impl Render for ConflictsPanel {
 /// where it was put — including across a round trip through another worktree.
 pub struct TerminalPanel {
     app: WeakEntity<ClaudhubApp>,
+    /// Which of the two terminal views this panel belongs to.
+    ///
+    /// **Two names, and that is the whole of it**: a tool window is a name, a
+    /// rail button is a tool window, and folding is a name being put away. One
+    /// name for the terminals of both edges meant one button and one fold for
+    /// the two — pressing the one below took the shells beside the code off the
+    /// screen with it. `panel_name` is a method and not a constant, so a panel
+    /// can answer with the one it was built for.
+    name: &'static str,
     worktree: std::path::PathBuf,
     view: Entity<crate::ui::terminal_view::TerminalView>,
     /// The tab group showing it, as the dock hands it over.
@@ -1449,7 +1462,32 @@ pub struct TerminalPanel {
 }
 
 impl TerminalPanel {
+    /// The terminals under the code.
     pub const NAME: &'static str = "ClaudhubTerminal";
+    /// And those beside it. A second view rather than a second seat of the
+    /// first: the two fold apart, so they are two names.
+    pub const RIGHT: &'static str = "ClaudhubTerminalRight";
+
+    /// The view a placement belongs to.
+    pub fn name_of(placement: crate::ui::settings::TerminalPlacement) -> &'static str {
+        match placement {
+            crate::ui::settings::TerminalPlacement::Bottom => Self::NAME,
+            crate::ui::settings::TerminalPlacement::Right => Self::RIGHT,
+        }
+    }
+
+    /// And back: the edge a view opens against.
+    pub fn placement_of(name: &str) -> crate::ui::settings::TerminalPlacement {
+        match name {
+            Self::RIGHT => crate::ui::settings::TerminalPlacement::Right,
+            _ => crate::ui::settings::TerminalPlacement::Bottom,
+        }
+    }
+
+    /// Is this name one of the two terminal views.
+    pub fn is_terminal(name: &str) -> bool {
+        name == Self::NAME || name == Self::RIGHT
+    }
 
     /// `visible` is **given** and not read off the application.
     ///
@@ -1460,6 +1498,7 @@ impl TerminalPanel {
     /// takes over from the next change.
     pub fn new(
         app: &Entity<ClaudhubApp>,
+        name: &'static str,
         worktree: std::path::PathBuf,
         view: Entity<crate::ui::terminal_view::TerminalView>,
         visible: bool,
@@ -1472,7 +1511,7 @@ impl TerminalPanel {
             // It used to be a second kind of panel — the multiplexer's face —
             // built once and never told otherwise; it is a state now, read like
             // any other.
-            let visible = app.read(cx).terminal_shown(&mine, cx);
+            let visible = app.read(cx).terminal_shown(&mine, this.name);
             if this.visible != visible {
                 this.visible = visible;
                 cx.emit(PanelEvent::LayoutChanged);
@@ -1485,6 +1524,7 @@ impl TerminalPanel {
         cx.observe(&view, |_, _, cx| cx.notify()).detach();
         Self {
             app: app.downgrade(),
+            name,
             visible,
             worktree,
             view,
@@ -1515,7 +1555,11 @@ impl TerminalPanel {
 /// terminals hidden there is no tab bar left to ask from.
 pub(super) fn new_terminal_button(
     app: &WeakEntity<ClaudhubApp>,
-    worktree: Option<std::path::PathBuf>,
+    // Which view to open into. `Some` from a terminal's own tab bar — its `+`
+    // opens a tab of **that** bar, and the two views are two bars — `None` from
+    // the status bar, which is about no view in particular and takes the
+    // setting's answer.
+    view: Option<crate::ui::settings::TerminalPlacement>,
 ) -> impl IntoElement {
     let app = app.clone();
     Button::new("new-terminal")
@@ -1525,23 +1569,23 @@ pub(super) fn new_terminal_button(
         .tooltip(tr!("terminal-new"))
         .dropdown_menu(move |menu, _window, cx| {
             let shell = app.clone();
-            let here = worktree.clone();
             let profiles = Settings::global(cx).terminal.agents.clone();
             let menu = menu.item(
                 PopupMenuItem::new(tr!("terminal-new"))
                     .icon(crate::ui::icons::icon("plus"))
                     .on_click(move |_, window, cx| {
-                        open_terminal(&shell, here.clone(), None, None, window, cx);
+                        open_terminal(&shell, None, view, window, cx);
                     }),
             );
             // And the same thing against the **other** edge. One entry and not
             // two, always the one the setting does not do: a shell beside the
             // code rather than under it is a gesture one makes now and then,
             // and naming both would say the setting decides nothing.
-            let elsewhere = Settings::global(cx).terminal.placement.other();
+            let elsewhere = view
+                .unwrap_or_else(|| Settings::global(cx).terminal.placement)
+                .other();
             let menu = {
                 let app = app.clone();
-                let here = worktree.clone();
                 menu.item(
                     PopupMenuItem::new(tr!(elsewhere.new_terminal_key()))
                         .icon(crate::ui::icons::icon(match elsewhere {
@@ -1549,7 +1593,7 @@ pub(super) fn new_terminal_button(
                             crate::ui::settings::TerminalPlacement::Bottom => "panel-bottom",
                         }))
                         .on_click(move |_, window, cx| {
-                            open_terminal(&app, here.clone(), None, Some(elsewhere), window, cx);
+                            open_terminal(&app, None, Some(elsewhere), window, cx);
                         }),
                 )
             };
@@ -1560,20 +1604,12 @@ pub(super) fn new_terminal_button(
                 .into_iter()
                 .fold(menu.separator(), |menu, profile| {
                     let app = app.clone();
-                    let here = worktree.clone();
                     let label = gpui::SharedString::from(profile.label().to_string());
                     menu.item(
                         PopupMenuItem::new(label)
                             .icon(crate::ui::icons::icon("bot"))
                             .on_click(move |_, window, cx| {
-                                open_terminal(
-                                    &app,
-                                    here.clone(),
-                                    Some(profile.clone()),
-                                    None,
-                                    window,
-                                    cx,
-                                );
+                                open_terminal(&app, Some(profile.clone()), view, window, cx);
                             }),
                     )
                 })
@@ -1583,11 +1619,9 @@ pub(super) fn new_terminal_button(
 /// Opens a shell, or an agent profile, on the worktree being looked at.
 fn open_terminal(
     app: &WeakEntity<ClaudhubApp>,
-    // `None` means the worktree being looked at, which is what every bar but
-    // the multiplexer's is about.
-    worktree: Option<std::path::PathBuf>,
     profile: Option<crate::ui::settings::AgentProfile>,
-    // `None` means the setting's edge, which is what every entry but one means.
+    // `None` means the setting's edge, which is what the status bar's `+`
+    // means; a terminal's own bar names its side.
     placement: Option<crate::ui::settings::TerminalPlacement>,
     window: &mut Window,
     cx: &mut App,
@@ -1596,7 +1630,7 @@ fn open_terminal(
         return;
     };
     app.update(cx, |app, cx| {
-        let Some(worktree) = worktree.or_else(|| app.active_path()) else {
+        let Some(worktree) = app.active_path() else {
             return;
         };
         let launch = match &profile {
@@ -1621,7 +1655,7 @@ impl EventEmitter<PanelEvent> for TerminalPanel {}
 
 impl BasePanel for TerminalPanel {
     fn panel_name(&self) -> &'static str {
-        Self::NAME
+        self.name
     }
     /// Closable, unlike every other panel of this window: closing a terminal
     /// tab is how one ends a shell, and it is the only panel whose content is a
@@ -1668,7 +1702,7 @@ impl BasePanel for TerminalPanel {
     /// comes back, the conversation does not, and pretending otherwise would be
     /// worse than saying so.
     fn dump(&self, _: &App) -> gpui_component::dock::PanelState {
-        let mut state = gpui_component::dock::PanelState::new(Self::NAME);
+        let mut state = gpui_component::dock::PanelState::new(self.name);
         state.info = gpui_component::dock::PanelInfo::panel(
             serde_json::json!({ "worktree": self.worktree }),
         );
@@ -1772,7 +1806,10 @@ impl Panel for TerminalPanel {
             // In the grid it opens on **this tab's** worktree and not on the
             // one being looked at: the bar mixes the projects, so "the current
             // worktree" is not a thing one can read off it.
-            .child(new_terminal_button(&self.app, None))
+            .child(new_terminal_button(
+                &self.app,
+                Some(Self::placement_of(self.name)),
+            ))
     }
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {

@@ -153,6 +153,7 @@ fn documents(window: &mut Window, cx: &mut Context<DockArea>) -> DockLayout {
 /// as the terminals are.
 const DOCUMENTS: &[&str] = &[
     "ClaudhubDiff",
+    "ClaudhubCast",
     "ClaudhubEditor",
     "ClaudhubSearchPreview",
     "ClaudhubSentryIssue",

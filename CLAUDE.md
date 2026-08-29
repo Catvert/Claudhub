@@ -424,13 +424,18 @@ une bande qui ne dit rien et qu'on ne remplit qu'en y traînant quelque chose
 fabrique — et `seats` lit un groupe seul comme la moitié haute, si bien que le
 bandeau de droite garde une seule série.
 
-**Un panneau assis à deux endroits a deux boutons**, un par bandeau : les
-terminaux sont plusieurs panneaux d'un seul nom, et rien n'empêche deux d'entre
-eux d'être sur deux bords. Le bouton porte donc son ancre, et une pression dit
-d'où elle vient — sans quoi celui d'en bas range la moitié d'à côté. Ce qui
-reste au **nom** est le repli lui-même (`folded_panels`), donc ranger les
-terminaux d'un bord range ceux de l'autre ; c'est réversible et la pression
-suivante les ramène.
+**Un panneau assis à deux endroits a deux boutons**, un par bandeau, et le
+bouton porte son ancre : une pression dit d'où elle vient, sans quoi celle d'en
+bas range la moitié d'à côté.
+
+**Les terminaux sont deux vues et non une** — `ClaudhubTerminal` sous le code,
+`ClaudhubTerminalRight` à côté — parce qu'une tool window *est* un nom : le
+bouton d'un bandeau en désigne un, et le repli en range un. Un seul nom pour
+les deux bords donnait un bouton et un repli pour les deux. `panel_name` est
+une méthode et non une constante, si bien qu'un panneau répond celui pour
+lequel il a été bâti ; `TerminalPanel::name_of` fait la traduction depuis
+l'emplacement, et les deux boutons sont là en permanence, sans siège comme
+avec.
 
 **Une tool window a un bouton, un document n'en a pas** — la différence n'est
 pas dans la nature du panneau mais dans sa place. `ui::rails` est pur et décide
@@ -533,12 +538,11 @@ Sept pièges du dock, tous rencontrés :
 
 **Un terminal s'ouvre du côté que le réglage dit**, et le `+` offre en plus
 l'**autre** côté — une seule entrée, toujours celle que le réglage ne fait pas
-(`TerminalPlacement::other`). C'est ce qui met un shell à droite du code sans
-déménager ceux d'en bas ; le bandeau de droite gagne alors son bouton Terminal
-tout seul, les bandeaux se calculant depuis l'arbre du dock. Le groupe que
-rejoint un nouveau terminal est celui d'un frère **dans la zone visée**, et non
-le dernier ouvert : avec des terminaux sur deux bords, le plus récent est
-souvent sur l'autre.
+(`TerminalPlacement::other`). Le `+` d'une barre d'onglets ouvre dans **sa**
+vue, celui de la barre d'état dans celle du réglage. Le groupe que rejoint un
+nouveau terminal est celui d'un frère **de la même vue**, et non le dernier
+ouvert : avec des terminaux sur deux bords, le plus récent est souvent sur
+l'autre.
 
 **Les terminaux sont des panneaux** : un par terminal, rendant sa propre
 `Entity<TerminalView>`. La place se garde par l'invisibilité, pas par un

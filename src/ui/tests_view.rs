@@ -32,6 +32,14 @@ use crate::ui::find::Pane;
 use crate::ui::icons::icon;
 use crate::ui::store::{Store, TestMark, TestsRun};
 
+/// What the slow-motion toggle asks for, in milliseconds between actions.
+///
+/// Playwright waits this long before each action it performs, and only before
+/// what it counts as one — a click, a fill, a navigation. Half a second is
+/// what makes a form being filled readable without turning a suite of thirty
+/// tests into a quarter of an hour.
+const SLOW_MO: u32 = 500;
+
 /// Lines of a run kept for the panel. The tail: the failures and the summary
 /// are at the end, and a runaway `dump()` loop can print millions.
 const RUN_LINES_KEPT: usize = 4000;
@@ -67,6 +75,10 @@ pub struct PestState {
     /// others simply show no picture, and their run is unaffected — which is
     /// why it is on by default.
     pub cast: bool,
+    /// Put [`SLOW_MO`] milliseconds between the browser's actions, so the
+    /// cast can be followed by eye. Like `headed`, a session choice: one
+    /// watches a test, one does not run a suite like that.
+    pub slow: bool,
     /// Run Pest with `--headed`: its browser tests then show the browser
     /// instead of running headless. A session choice, not persisted — one
     /// watches a test debug, one does not live like that.
@@ -162,6 +174,9 @@ pub struct RunState {
     /// to watch it. **One image, replaced in place**: a screencast is watched,
     /// not replayed, and each frame kept would be a decoded texture kept.
     pub cast: Option<Cast>,
+    /// Put away for this run: the cast's tab was crossed out. Cleared by the
+    /// next run, never by the next frame — see [`TestsView::close_cast`].
+    pub cast_hidden: bool,
     /// The rows this campaign has already settled, by `(class, method)`.
     /// A covered row spins until it lands here — which is what makes the tree
     /// resolve test by test rather than all at once at the end.
@@ -539,22 +554,103 @@ impl ClaudhubApp {
             .is_some_and(|worktree| self.pest_runs.contains_key(worktree))
     }
 
-    /// The (cast, headed, parallel) toggles of the worktree being looked at.
-    fn pest_modes(&self) -> (bool, bool, bool) {
+    /// Is there a browser to watch — a frame arrived for the checkout being
+    /// looked at, and its panel not put away.
+    pub(super) fn cast_open(&self) -> bool {
+        self.active
+            .as_deref()
+            .and_then(|worktree| self.pest_runs.get(worktree))
+            .is_some_and(|run| run.cast.is_some() && !run.cast_hidden)
+    }
+
+    /// The cross on the cast's tab: done watching this run.
+    ///
+    /// The frame itself is kept — freeing its texture asks for the window,
+    /// which a tab's cross does not carry — and goes when the next frame
+    /// replaces it or the next run takes the slot. Both of those do hold one.
+    /// The panel comes back with the next run, never mid-run: closing it is
+    /// "not this one", and a run that reopened it two frames later would be
+    /// refusing the gesture.
+    pub(super) fn close_cast(&mut self, cx: &mut Context<Self>) {
+        if let Some(active) = self.active.clone() {
+            if let Some(run) = self.pest_runs.get_mut(&active) {
+                run.cast_hidden = true;
+            }
+        }
+        cx.notify();
+    }
+
+    /// The browser a run drives, at the size of the centre.
+    pub(super) fn render_cast(
+        &mut self,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let cast = self
+            .active
+            .as_deref()
+            .and_then(|worktree| self.pest_runs.get(worktree))
+            .and_then(|run| run.cast.as_ref())
+            .map(|cast| (cast.image.clone(), cast.width, cast.height));
+        let Some((image, width, height)) = cast else {
+            return v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .text_color(cx.theme().muted_foreground)
+                .child(icon("monitor-play"))
+                .child(div().text_sm().px_4().child(tr!("cast-none")))
+                .into_any_element();
+        };
+        div()
+            .relative()
+            .size_full()
+            .bg(cx.theme().secondary)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                // `Contain`: a frame is 1280 wide whatever the panel is, and
+                // the browser's own ratio is what a responsive test is run at.
+                img(image)
+                    .w_full()
+                    .h_full()
+                    .object_fit(gpui::ObjectFit::Contain),
+            )
+            .child(
+                // The viewport the browser reports, which is what a responsive
+                // test is really being run at.
+                div()
+                    .absolute()
+                    .bottom_1()
+                    .right_2()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SharedString::from(format!("{width}×{height}"))),
+            )
+            .into_any_element()
+    }
+
+    /// The (cast, slow, headed, parallel) toggles of the worktree being
+    /// looked at.
+    fn pest_modes(&self) -> (bool, bool, bool, bool) {
         self.active
             .as_deref()
             .and_then(|worktree| self.pest.get(worktree))
-            .map(|state| (state.cast, state.headed, state.parallel))
-            .unwrap_or((false, false, false))
+            .map(|state| (state.cast, state.slow, state.headed, state.parallel))
+            .unwrap_or((false, false, false, false))
     }
 
-    /// Applies the three toggles to a target — Pest only, the other runners
-    /// never read the fields.
+    /// Applies the toggles to a target — Pest only, the other runners never
+    /// read the fields.
     fn apply_pest_modes(&self, target: &mut Target) {
-        let (cast, headed, parallel) = self.pest_modes();
-        target.cast = cast && target.runner == Runner::Pest;
-        target.headed = headed && target.runner == Runner::Pest;
-        target.parallel = parallel && target.runner == Runner::Pest;
+        let (cast, slow, headed, parallel) = self.pest_modes();
+        let is_pest = target.runner == Runner::Pest;
+        target.cast = cast && is_pest;
+        target.slow_mo = if slow && is_pest { SLOW_MO } else { 0 };
+        target.headed = headed && is_pest;
+        target.parallel = parallel && is_pest;
     }
 
     /// Launches a followed run — one target, or a campaign of several: "run
@@ -607,6 +703,7 @@ impl ClaudhubApp {
                 started_at: now(),
                 lines: VecDeque::new(),
                 cast: None,
+                cast_hidden: false,
                 settled: HashSet::new(),
                 error: None,
                 run: None,
@@ -679,7 +776,15 @@ impl ClaudhubApp {
             width: frame.width,
             height: frame.height,
         });
+        let first = previous.is_none();
         drop_cast(previous, window, cx);
+        // The centre comes forward on the run's **first** frame and not on
+        // each: the panel is asked for by turning the toggle on, and a tab
+        // that took the centre back thirty times a second would be taking it
+        // from whatever one moved to since.
+        if first {
+            self.travel_to_panel(crate::ui::panels::CastPanel::NAME, window, cx);
+        }
         cx.notify();
     }
 
@@ -1068,7 +1173,7 @@ impl ClaudhubApp {
         count: usize,
         pending: bool,
         only_failed: bool,
-        modes: Option<(bool, bool, bool)>,
+        modes: Option<(bool, bool, bool, bool)>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let last = self
@@ -1205,7 +1310,7 @@ impl ClaudhubApp {
         v_flex()
             .w_full()
             .child(top)
-            .when_some(modes, |el, (cast, headed, parallel)| {
+            .when_some(modes, |el, (cast, slow, headed, parallel)| {
                 el.child(
                     h_flex()
                         .h(crate::ui::theme::bar_height(cx))
@@ -1230,6 +1335,23 @@ impl ClaudhubApp {
                                             if state.cast {
                                                 state.parallel = false;
                                             }
+                                        }
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("pest-slow")
+                                .ghost()
+                                .xsmall()
+                                .icon(icon("clock"))
+                                .label(tr!("tests-slow-label"))
+                                .tooltip(tr!("tests-slow"))
+                                .selected(slow)
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    if let Some(active) = this.active.clone() {
+                                        if let Some(state) = this.pest.get_mut(&active) {
+                                            state.slow = !state.slow;
                                         }
                                     }
                                     cx.notify();
@@ -1673,10 +1795,6 @@ impl ClaudhubApp {
         };
 
         let with_failures = state.run.clone().filter(|run| run.failed > 0);
-        let cast = state
-            .cast
-            .as_ref()
-            .map(|cast| (cast.image.clone(), cast.width, cast.height));
         let lines: Vec<SharedString> = state.lines.iter().cloned().collect();
         let bar = self.render_run_bar(&active, cx);
         let failures = with_failures.map(|run| self.render_run_failures(&active, run, window, cx));
@@ -1690,39 +1808,6 @@ impl ClaudhubApp {
             .size_full()
             .child(bar)
             .children(failures)
-            .children(cast.map(|(image, width, height)| {
-                div()
-                    .relative()
-                    .flex_none()
-                    .w_full()
-                    .h(gpui::px(360.))
-                    .bg(cx.theme().secondary)
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        // `Contain` and not the preview's `ScaleDown`: a frame
-                        // is 1280 wide whatever the panel is, and a browser
-                        // shown at a third of the pane is not worth watching.
-                        img(image)
-                            .w_full()
-                            .h_full()
-                            .object_fit(gpui::ObjectFit::Contain),
-                    )
-                    .child(
-                        // The viewport the browser reports, which is what a
-                        // responsive test is really being run at.
-                        div()
-                            .absolute()
-                            .bottom_1()
-                            .right_2()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(SharedString::from(format!("{width}×{height}"))),
-                    )
-            }))
             .child(
                 div().flex_1().min_h_0().child(
                     self.scrolled(

@@ -335,6 +335,18 @@ pub const TOOLS: &[Tool] = &[
         home: Anchor::new(Side::Left, Half::Bottom),
         conditional: false,
     },
+    // The terminals beside the code, which are a **second view** and not a
+    // second seat of the first: a rail button is a tool window and folding is a
+    // name being put away, so one name for both edges meant one button and one
+    // fold for the two. It joins by the end, like everything else: the ranks of
+    // this table are what `Alt+1`… name.
+    Tool {
+        panel: "ClaudhubTerminalRight",
+        title: Label("panel-terminal-right"),
+        icon: "panel-right",
+        home: Anchor::new(Side::Right, Half::Top),
+        conditional: false,
+    },
 ];
 
 /// Every tool window.

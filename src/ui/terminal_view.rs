@@ -1620,6 +1620,12 @@ pub struct OpenTerminal {
     /// them apart — which is precisely what the program name cannot say.
     pub name: Option<SharedString>,
     pub panel: Entity<crate::ui::panels::TerminalPanel>,
+    /// Which of the two terminal views holds it — the name of its panel.
+    ///
+    /// Kept here rather than read off the panel: every caller that asks "is
+    /// there one below?" holds a `&self` on the application, and reading an
+    /// entity from there is one borrow too many.
+    pub view_name: &'static str,
 }
 
 impl OpenTerminal {}
@@ -1667,6 +1673,16 @@ impl ClaudhubApp {
         self.terminals
             .iter()
             .filter(move |terminal| terminal.worktree == worktree)
+    }
+
+    /// The same, in one of the two views: what a rail button is about.
+    pub(super) fn terminals_in<'a>(
+        &'a self,
+        worktree: &'a Path,
+        view: &'static str,
+    ) -> impl DoubleEndedIterator<Item = &'a OpenTerminal> + 'a {
+        self.terminals_of(worktree)
+            .filter(move |terminal| terminal.view_name == view)
     }
 
     /// Opens a terminal on a worktree and shows it.
@@ -1747,10 +1763,13 @@ impl ClaudhubApp {
         // — from here that is the recursion of opening the terminal we are
         // opening. It comes **before** `install_terminal`, which hands the
         // fresh panel the visibility it reads now.
+        let placement = launch
+            .placement
+            .unwrap_or_else(|| Settings::global(cx).terminal.placement);
         if self.active.as_deref() == Some(worktree) {
-            self.show_panel(crate::ui::panels::TerminalPanel::NAME, cx);
+            self.show_panel(crate::ui::panels::TerminalPanel::name_of(placement), cx);
         }
-        self.install_terminal(worktree.to_path_buf(), view, launch.placement, window, cx);
+        self.install_terminal(worktree.to_path_buf(), view, placement, window, cx);
     }
 
     /// Puts a terminal's panel into the dock, and shows it.
@@ -1767,18 +1786,21 @@ impl ClaudhubApp {
         &mut self,
         worktree: PathBuf,
         view: Entity<TerminalView>,
-        placement: Option<crate::ui::settings::TerminalPlacement>,
+        placement: crate::ui::settings::TerminalPlacement,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let app = cx.entity();
+        let view_name = crate::ui::panels::TerminalPanel::name_of(placement);
         // Computed here and handed over: the panel is built inside this
         // `update`, so it cannot read the application to find out for itself —
         // the entity is out of the table while this runs.
-        let visible = self.terminal_shown(&worktree, cx);
+        let visible = self.terminal_shown(&worktree, view_name);
         let panel = {
             let (app, worktree, view) = (app.clone(), worktree.clone(), view.clone());
-            cx.new(|cx| crate::ui::panels::TerminalPanel::new(&app, worktree, view, visible, cx))
+            cx.new(|cx| {
+                crate::ui::panels::TerminalPanel::new(&app, view_name, worktree, view, visible, cx)
+            })
         };
         // A shell that exits closes its tab. `subscribe_in` and not
         // `subscribe`: removing the panel and handing the focus on both need a
@@ -1798,6 +1820,7 @@ impl ClaudhubApp {
             view: view.clone(),
             name: None,
             panel: panel.clone(),
+            view_name,
         });
         self.dock_terminal(&worktree, panel, placement, window, cx);
         let handle = view.read(cx).focus_handle(cx);
@@ -1821,14 +1844,12 @@ impl ClaudhubApp {
         &mut self,
         worktree: &Path,
         panel: Entity<crate::ui::panels::TerminalPanel>,
-        // `None` means the setting's own answer — see `Launch::placement`.
-        asked: Option<crate::ui::settings::TerminalPlacement>,
+        wanted: crate::ui::settings::TerminalPlacement,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let dock = self.dock.clone();
-        let wanted =
-            asked.unwrap_or_else(|| crate::ui::settings::Settings::global(cx).terminal.placement);
+        let view_name = crate::ui::panels::TerminalPanel::name_of(wanted);
         let (placement, size) = match wanted {
             crate::ui::settings::TerminalPlacement::Right => (DockPlacement::Right, TERMINAL_WIDTH),
             crate::ui::settings::TerminalPlacement::Bottom => {
@@ -1844,7 +1865,7 @@ impl ClaudhubApp {
         let siblings: Vec<_> = self
             .terminals
             .iter()
-            .filter(|terminal| terminal.worktree == worktree)
+            .filter(|terminal| terminal.worktree == worktree && terminal.view_name == view_name)
             .map(|terminal| terminal.panel.clone())
             .filter(|other| other.entity_id() != panel.entity_id())
             .rev()
@@ -2086,7 +2107,7 @@ impl ClaudhubApp {
                 let root = self.focus.clone();
                 window.focus(&root, cx);
             } else {
-                self.focus_terminal(&worktree, window, cx);
+                self.focus_terminal(&worktree, None, window, cx);
             }
         }
         cx.notify();
@@ -2176,12 +2197,16 @@ impl ClaudhubApp {
     pub(super) fn focus_terminal(
         &mut self,
         worktree: &Path,
+        // Which of the two views to land in. `None` is "the last one opened",
+        // which is what a worktree being selected means.
+        view: Option<&'static str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some((view, panel)) = self
             .terminals_of(worktree)
-            .last()
+            .rev()
+            .find(|terminal| view.is_none_or(|name| terminal.view_name == name))
             .map(|terminal| (terminal.view.clone(), Some(terminal.panel.clone())))
         else {
             return;
@@ -2201,11 +2226,13 @@ impl ClaudhubApp {
     pub(super) fn ensure_terminal(
         &mut self,
         worktree: &Path,
+        view: &'static str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.terminals_of(worktree).next().is_none() {
-            self.open_terminal(worktree, Launch::shell(), window, cx);
+        if self.terminals_in(worktree, view).next().is_none() {
+            let launch = Launch::shell().at(crate::ui::panels::TerminalPanel::placement_of(view));
+            self.open_terminal(worktree, launch, window, cx);
         }
     }
 
@@ -2318,6 +2345,31 @@ impl ClaudhubApp {
                 view.is_agent() && !view.has_exited()
             })
             .map(|terminal| terminal.view.clone())
+    }
+
+    /// Shows the terminals a message is about to be delivered into.
+    ///
+    /// The view the agent lives in, and not simply the setting's: a message
+    /// delivered into a hidden tab is a message nobody sees arrive, and an
+    /// agent opened beside the code is not in the view under it.
+    pub(super) fn show_agent_terminals(
+        &mut self,
+        worktree: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = self
+            .terminals_of(worktree)
+            .rev()
+            .find(|terminal| {
+                let view = terminal.view.read(cx);
+                view.is_agent() && !view.has_exited()
+            })
+            .map(|terminal| terminal.view_name)
+            .unwrap_or_else(|| {
+                crate::ui::panels::TerminalPanel::name_of(Settings::global(cx).terminal.placement)
+            });
+        self.show_terminal_panel(view, window, cx);
     }
 
     /// Pastes, then confirms in a **second** send.

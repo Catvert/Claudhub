@@ -1238,8 +1238,13 @@ pub fn toggle_terminal(
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
     // The same gesture as the rail's button, and it has to be the same code:
-    // two answers to "show me the terminals" is one of them being wrong.
-    this.press_tool(crate::ui::panels::TerminalPanel::NAME, None, window, cx);
+    // two answers to "show me the terminals" is one of them being wrong. Of the
+    // two views, the one the setting opens into: a key names a view, and this
+    // one has to name a single one.
+    let view = crate::ui::panels::TerminalPanel::name_of(
+        crate::ui::settings::Settings::global(cx).terminal.placement,
+    );
+    this.press_tool(view, None, window, cx);
 }
 
 pub fn next_terminal(
