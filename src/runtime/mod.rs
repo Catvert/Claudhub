@@ -196,25 +196,16 @@ enum Queue {
 }
 
 fn queue_of(cmd: &Cmd) -> Queue {
-    // A plugin's request says itself which of the two slow queues it belongs
-    // to: an HTTP call is Sentry's profile, a shell command is the `wt` status
-    // sweep's. Reading it off the capability rather than off the variant is
-    // what keeps one table for both — and what lets a capability be added
+    // A request of the outside world says itself which of the two slow queues
+    // it belongs to: an HTTP call is Sentry's profile, a shell command is the
+    // `wt` status sweep's. Reading it off the request rather than off the
+    // variant is what keeps one table for both — and what lets one be added
     // without this function growing a special case.
-    if let Cmd::PluginCall { cap, .. } = cmd {
+    if let Cmd::Call { cap, .. } = cmd {
         return if cap.is_network() {
             Queue::Network
         } else {
             Queue::Background
-        };
-    }
-    // Same table, one floor up: a clone and a pull talk to a remote, removing a
-    // directory does not.
-    if let Cmd::PluginManage { op, .. } = cmd {
-        return if op.is_network() {
-            Queue::Network
-        } else {
-            Queue::Reads
         };
     }
     if is_network(cmd) {
@@ -913,23 +904,15 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             repo::resolve_with(dir, &path, &content).map(|_| String::new())
         }),
 
-        // — Plugins —————————————————————————————————————————————————————
-        // No `Done`/`Failed` for a capability: a plugin's request is not an
+        // — The world outside the repository ————————————————————————————
+        // No `Done`/`Failed` for a request of the outside world: it is not an
         // operation on the repository, and a failure belongs under the panel
         // that asked for it, not in a status bar the next message overwrites.
-        Cmd::PluginCall { plugin, call, cap } => vec![Evt::PluginResult {
-            plugin,
+        Cmd::Call { caller, call, cap } => vec![Evt::Called {
+            caller,
             call,
             result: cap.run(),
         }],
-        Cmd::PluginManage { dir, op } => {
-            let name = op.name().to_string();
-            vec![Evt::PluginManaged {
-                op: name,
-                result: op.run(&dir).map_err(|e| format!("{e:#}")),
-                dir,
-            }]
-        }
 
         // — Databases ———————————————————————————————————————————————————
         Cmd::DbDatabases { connection } => vec![Evt::DbDatabases {
@@ -2051,19 +2034,20 @@ mod tests {
         assert_eq!(queue_of(&Cmd::ReleaseCheck), Queue::Network);
     }
 
-    /// A plugin never gets in front of a diff, and never behind a `composer
-    /// install` either.
+    /// A slow service never gets in front of a diff, and never behind a
+    /// `composer install` either.
     ///
-    /// The routing is read off the capability, which is what keeps one table
-    /// for both: an HTTP call has Sentry's profile — seconds, a socket — and a
+    /// The routing is read off the request, which is what keeps one table for
+    /// both: an HTTP call has Sentry's profile — seconds, a socket — and a
     /// shell command has the `wt` sweep's.
     #[test]
-    fn a_plugins_request_lands_by_what_it_asks_for() {
+    fn a_request_of_the_outside_lands_by_what_it_asks_for() {
+        use crate::runtime::protocol::Caller;
         assert_eq!(
-            queue_of(&Cmd::PluginCall {
-                plugin: "ci".into(),
+            queue_of(&Cmd::Call {
+                caller: Caller::Sentry,
                 call: 1,
-                cap: crate::plugin::caps::Cap::Http {
+                cap: crate::outside::Cap::Http {
                     method: "GET".into(),
                     url: "https://example.test".into(),
                     headers: Vec::new(),
@@ -2074,40 +2058,15 @@ mod tests {
             Queue::Network
         );
         assert_eq!(
-            queue_of(&Cmd::PluginCall {
-                plugin: "ci".into(),
+            queue_of(&Cmd::Call {
+                caller: Caller::Ci,
                 call: 2,
-                cap: crate::plugin::caps::Cap::Shell {
+                cap: crate::outside::Cap::Shell {
                     worktree: worktree(),
                     command: "gh run list".into(),
                 },
             }),
             Queue::Background
-        );
-    }
-
-    /// Installing waits on a socket; removing a directory does not, and
-    /// putting it in the network's single worker would make it queue behind a
-    /// clone that has nothing to do with it.
-    #[test]
-    fn managing_a_plugin_lands_by_what_it_does() {
-        use crate::plugin::install::Manage;
-        let dir = PathBuf::from("/c/plugins/ci");
-        assert_eq!(
-            queue_of(&Cmd::PluginManage {
-                dir: dir.clone(),
-                op: Manage::Install {
-                    url: "https://example.test/x.git".into()
-                },
-            }),
-            Queue::Network
-        );
-        assert_eq!(
-            queue_of(&Cmd::PluginManage {
-                dir,
-                op: Manage::Remove,
-            }),
-            Queue::Reads
         );
     }
 

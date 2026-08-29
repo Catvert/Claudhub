@@ -10,6 +10,7 @@ mod base_select;
 mod blade;
 mod branch_picker;
 mod branches;
+mod ci;
 mod conflicts;
 mod db;
 mod db_query;
@@ -36,7 +37,6 @@ pub(crate) mod notes_view;
 mod notify;
 mod panels;
 mod picker;
-pub mod plugin_view;
 mod preview;
 mod rails;
 mod refine;
@@ -45,6 +45,7 @@ mod review;
 mod scroll;
 mod search;
 mod search_view;
+mod sentry;
 mod server;
 mod session;
 mod settings;
@@ -181,11 +182,6 @@ pub fn run(
                 async {}
             })
             .detach();
-            // Before the window: a plugin's panel has to be in the dock's
-            // registry before `layout.json` is read back, or its tab comes back
-            // as an empty frame. That is why adding or removing a plugin takes
-            // a restart, while its script reloads hot.
-            plugin_view::install();
             theme::install(cx);
             theme::apply(&settings, None, cx);
 

@@ -206,17 +206,17 @@ pub struct Session {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RepoState {
-    /// **Legacy**: read once so `migrate_sentry` can pour it into the Sentry
-    /// plugin's per-repository state, then cleared.
-    pub sentry_project: Option<String>,
-    /// What each plugin has remembered about this repository: plugin id → its
-    /// own keys.
+    /// The Sentry project this repository's errors are read from.
     ///
     /// **Per repository and not per worktree**, because that is what a
-    /// project's configuration means — a board's identifier, an API's base
-    /// address are the same across five checkouts of the same code. A plugin
-    /// wanting finer grain puts the worktree in its own key; the namespace is
-    /// its own.
+    /// project's configuration means: five checkouts of the same code have the
+    /// same errors. It is the one setting of the Sentry views that does not
+    /// live in `settings.json` — the organisation and the token belong to the
+    /// machine, the project belongs to the code.
+    pub sentry_project: Option<String>,
+    /// **Legacy**: what a plugin had remembered about this repository, read
+    /// once so `migrate_sentry` can pour Sentry's back into the field above,
+    /// then cleared. Nothing writes it any more.
     #[serde(default)]
     pub plugin_state:
         std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
@@ -275,25 +275,26 @@ impl Store {
         }
     }
 
-    /// The Sentry project of each repository becomes the Sentry **plugin**'s.
+    /// The Sentry project a plugin had remembered becomes the field's again.
     ///
-    /// The same path as a fresh write, like the notes' recovery and
-    /// `migrate_agents`: the field is poured into `plugin_state` and cleared,
-    /// so it happens once, and a repository already configured through the
-    /// plugin keeps what it has.
+    /// The way back from the trip through the plugin system, taken the same way
+    /// out and in: the value is poured into the field and `plugin_state` is
+    /// emptied, so it happens once. A repository configured since keeps what it
+    /// has — the field wins, and nothing that has one is overwritten.
     fn migrate_sentry(&mut self) {
         for repo in self.repos.values_mut() {
-            let Some(project) = repo.sentry_project.take() else {
-                continue;
-            };
-            if project.trim().is_empty() {
+            let legacy = std::mem::take(&mut repo.plugin_state);
+            if repo.sentry_project.is_some() {
                 continue;
             }
-            repo.plugin_state
-                .entry("sentry".to_string())
-                .or_default()
-                .entry("project".to_string())
-                .or_insert(project);
+            let project = legacy
+                .get("sentry")
+                .and_then(|state| state.get("project"))
+                .map(|project| project.trim())
+                .filter(|project| !project.is_empty());
+            if let Some(project) = project {
+                repo.sentry_project = Some(project.to_string());
+            }
         }
     }
 

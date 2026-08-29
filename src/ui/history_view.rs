@@ -169,8 +169,8 @@ impl ClaudhubApp {
         // **The editor names its files relative to the checkout** — it is what
         // `repo::head_blob` reads as `HEAD:./<path>`, and it is what `-L` wants,
         // taking no pathspec. An absolute path is accepted anyway, and one that
-        // is not under the worktree belongs to no history here: a plugin's
-        // script is edited in the same panel and lives outside every checkout.
+        // is not under the worktree belongs to no history here: a file outside
+        // every checkout is edited in the same panel.
         let relative = match path.strip_prefix(&worktree) {
             Ok(relative) => relative.to_path_buf(),
             Err(_) if path.is_absolute() => return,

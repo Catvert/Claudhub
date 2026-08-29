@@ -35,6 +35,19 @@ impl std::fmt::Debug for Secret {
     }
 }
 
+/// Which view a request of the outside world belongs to.
+///
+/// A closed list, like the requests themselves: postcard is positional, so what
+/// crosses the wire is named here once. Two entries, and adding a third is a
+/// change to Claudhub rather than to anything the wire has to guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Caller {
+    /// The Sentry views: the issue list, and the one opened in the centre.
+    Sentry,
+    /// The CI view: the runs of the branch, read through `gh`.
+    Ci,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Cmd {
     /// Opens a repository (or a repository's worktree) and enumerates its worktrees.
@@ -807,38 +820,23 @@ pub enum Cmd {
         applied: bool,
     },
 
-    // — Plugins ———————————————————————————————————————————————————
-    /// One capability a plugin asked for.
+    // — The world outside the repository —————————————————————————
+    /// One request a view makes of a service — see `crate::outside`.
     ///
-    /// **One variant and not one per plugin**, which is the whole point:
-    /// postcard is positional and `PROTOCOL_VERSION` is announced at the
-    /// handshake, so a plugin able to add a message would break the wire for
-    /// every other one. Adding a *capability* is a change to Claudhub,
-    /// versioned once; adding a plugin is no change to the wire at all.
+    /// **One variant and not one per view**: postcard is positional and
+    /// `PROTOCOL_VERSION` is announced at the handshake, so what crosses is
+    /// versioned once here rather than growing a message per feature.
     ///
-    /// The queue is read off the capability, not off this variant: an HTTP
-    /// request is the network's business, a shell command the background
-    /// sweep's. See `runtime::queue_of`.
-    PluginCall {
-        /// Which plugin is asking — the directory's name. It is what carries
-        /// the answer home.
-        plugin: String,
-        /// The host's counter, which never goes back: the same device as the
-        /// SQL console's send id and the language client's request id.
+    /// The queue is read off the request, not off this variant: an HTTP call is
+    /// the network's business, a shell command the background sweep's. See
+    /// `runtime::queue_of`.
+    Call {
+        /// Which view is asking. It is what carries the answer home.
+        caller: Caller,
+        /// A counter that never goes back: the same device as the SQL console's
+        /// send id and the language client's request id.
         call: u64,
-        cap: crate::plugin::caps::Cap,
-    },
-
-    /// Install, update or remove a plugin.
-    ///
-    /// **Claudhub's own operation, not a plugin's**: a plugin never asks for
-    /// this, so it does not go through a capability. One variant for the three,
-    /// as ever — the wire does not grow by one message per gesture.
-    PluginManage {
-        /// The plugin's directory, target included: for an install it does not
-        /// exist yet.
-        dir: PathBuf,
-        op: crate::plugin::install::Manage,
+        cap: crate::outside::Cap,
     },
 
     AddWorktree {
@@ -962,8 +960,7 @@ impl Cmd {
             Self::TestsStop { .. } => "TestsStop",
             Self::WtScan { .. } => "WtScan",
             Self::WtLinks { .. } => "WtLinks",
-            Self::PluginCall { .. } => "PluginCall",
-            Self::PluginManage { .. } => "PluginManage",
+            Self::Call { .. } => "Call",
             Self::AddWorktree { .. } => "AddWorktree",
             Self::RemoveWorktree { .. } => "RemoveWorktree",
         }
@@ -1169,10 +1166,10 @@ pub enum Evt {
         line: String,
         warning: bool,
     },
-    /// What a plugin's capability answered — the body, or one sentence of why
-    /// not. It goes back to the request that is awaiting it, by `call`.
-    PluginResult {
-        plugin: String,
+    /// What a service answered — the body, or one sentence of why not. It goes
+    /// back to the request that is awaiting it, by `call`.
+    Called {
+        caller: Caller,
         call: u64,
         result: Result<String, String>,
     },
@@ -1190,17 +1187,6 @@ pub enum Evt {
         worktree: WorktreeId,
         path: PathBuf,
         content: DbResult<crate::files::Content>,
-    },
-    /// What installing, updating or removing a plugin came to — the revision
-    /// it now sits on, or one sentence of why not.
-    ///
-    /// It carries the **directory** and not an id: an install names a directory
-    /// that had no plugin in it a moment ago, and the page has to be able to
-    /// say what became of exactly the row one clicked.
-    PluginManaged {
-        dir: PathBuf,
-        op: String,
-        result: Result<String, String>,
     },
 
     ProjectFiles {
@@ -1512,15 +1498,13 @@ pub enum Action {
     Write,
     FileOp,
     OpenExternal,
-    /// Installing, updating or removing a plugin.
-    Plugin,
     Notes,
 }
 
 impl Action {
     /// The i18n key of the message shown on success.
     /// Every action, for the tests that check each has its messages.
-    pub const ALL: [Action; 33] = [
+    pub const ALL: [Action; 32] = [
         Action::Refresh,
         Action::Stage,
         Action::Unstage,
@@ -1552,7 +1536,6 @@ impl Action {
         Action::Write,
         Action::FileOp,
         Action::OpenExternal,
-        Action::Plugin,
         Action::Notes,
     ];
 
@@ -1619,7 +1602,6 @@ impl Action {
             Self::Write => "action-write-ok",
             Self::FileOp => "action-file-op-ok",
             Self::OpenExternal => "action-open-external-ok",
-            Self::Plugin => "action-plugin-ok",
             Self::Resolve => "action-resolve-ok",
             Self::Notes => "action-notes-ok",
         }

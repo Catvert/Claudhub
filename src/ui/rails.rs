@@ -76,29 +76,6 @@ impl Anchor {
         all
     }
 
-    /// Where a plugin's manifest asks for its panel to start.
-    ///
-    /// A manifest names an **edge** and not a half: which of the two a panel
-    /// belongs in is an arrangement, and arrangements are the user's. It lands
-    /// in the bottom half, beside what one keeps an eye on rather than among
-    /// what one picks the file from.
-    pub fn of_place(place: crate::plugin::manifest::Place) -> Option<Anchor> {
-        use crate::plugin::manifest::Place;
-        match place {
-            // Beside the trees and the lists: a plugin that asks for the left
-            // is asking to sit among what one picks from, which is that edge's
-            // top half.
-            Place::Left => Some(Anchor::new(Side::Left, Half::Top)),
-            // And beside what happened: the queries already run, the branch's
-            // builds. The right is read in one group and not two halves, so
-            // that is where it joins them — a plugin that opened a second half
-            // would split an edge the arrangement keeps whole.
-            Place::Right => Some(Anchor::new(Side::Right, Half::Top)),
-            Place::Bottom => Some(Anchor::new(Side::Bottom, Half::Top)),
-            Place::Centre => None,
-        }
-    }
-
     /// The i18n key naming this place in the menu.
     pub fn label(self) -> &'static str {
         match (self.side, self.half) {
@@ -162,18 +139,12 @@ impl Side {
     }
 }
 
-/// What a button is called.
+/// What a button is called: a key of `assets/i18n`.
 ///
-/// A plugin's strings are its own: no catalogue of ours holds them, and asking
-/// one for a key it has never seen gives back the key. The two are therefore
-/// told apart here rather than guessed at the point of painting.
+/// It carried a second arm — words a plugin wrote in its own language, which no
+/// catalogue of ours held. Every view is ours again, so every name is a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Label {
-    /// A key of `assets/i18n`.
-    Key(&'static str),
-    /// A plugin's own words, already in the language it wrote them in.
-    Text(&'static str),
-}
+pub struct Label(pub &'static str);
 
 impl Label {
     /// The words to paint.
@@ -181,10 +152,7 @@ impl Label {
     /// A `SharedString` and not a `String`: a rail is rebuilt every frame, and
     /// a compiled catalogue hands back a borrow.
     pub fn text(self) -> gpui::SharedString {
-        match self {
-            Label::Key(key) => crate::tr!(key),
-            Label::Text(text) => gpui::SharedString::from(text),
-        }
+        crate::tr!(self.0)
     }
 }
 
@@ -232,21 +200,21 @@ pub const TOOLS: &[Tool] = &[
     // files first, because a project is opened on a file.
     Tool {
         panel: "ClaudhubFiles",
-        title: Label::Key("panel-files"),
+        title: Label("panel-files"),
         icon: "pencil",
         home: Anchor::new(Side::Left, Half::Top),
         conditional: false,
     },
     Tool {
         panel: "ClaudhubSearch",
-        title: Label::Key("panel-search"),
+        title: Label("panel-search"),
         icon: "search",
         home: Anchor::new(Side::Left, Half::Top),
         conditional: false,
     },
     Tool {
         panel: "ClaudhubChanges",
-        title: Label::Key("range-working"),
+        title: Label("range-working"),
         icon: "git-commit-horizontal",
         home: Anchor::new(Side::Left, Half::Top),
         conditional: false,
@@ -256,7 +224,7 @@ pub const TOOLS: &[Tool] = &[
     // the history's, where it opens the column of branches.
     Tool {
         panel: "ClaudhubBranch",
-        title: Label::Key("range-branch"),
+        title: Label("range-branch"),
         icon: "git-pull-request",
         home: Anchor::new(Side::Left, Half::Top),
         conditional: false,
@@ -266,7 +234,7 @@ pub const TOOLS: &[Tool] = &[
     // The half below is for what one keeps an eye on while doing that.
     Tool {
         panel: "ClaudhubTests",
-        title: Label::Key("panel-tests"),
+        title: Label("panel-tests"),
         icon: "circle-check",
         home: Anchor::new(Side::Left, Half::Top),
         // Only where a runner exists: on everything else the honest panel is
@@ -278,7 +246,7 @@ pub const TOOLS: &[Tool] = &[
     // tab of the five above.
     Tool {
         panel: "ClaudhubNotes",
-        title: Label::Key("panel-notes"),
+        title: Label("panel-notes"),
         icon: "sticky-note",
         home: Anchor::new(Side::Left, Half::Bottom),
         conditional: false,
@@ -288,7 +256,7 @@ pub const TOOLS: &[Tool] = &[
     // queries already run is two lists competing for the same column.
     Tool {
         panel: "ClaudhubDb",
-        title: Label::Key("panel-databases"),
+        title: Label("panel-databases"),
         icon: "database",
         home: Anchor::new(Side::Right, Half::Top),
         conditional: false,
@@ -297,14 +265,14 @@ pub const TOOLS: &[Tool] = &[
     // and a graph of commits is read left to right. Neither fits a column.
     Tool {
         panel: "ClaudhubTestRun",
-        title: Label::Key("panel-test-run"),
+        title: Label("panel-test-run"),
         icon: "play",
         home: Anchor::new(Side::Bottom, Half::Top),
         conditional: true,
     },
     Tool {
         panel: "ClaudhubHistory",
-        title: Label::Key("panel-history"),
+        title: Label("panel-history"),
         icon: "history",
         home: Anchor::new(Side::Bottom, Half::Top),
         conditional: false,
@@ -314,14 +282,14 @@ pub const TOOLS: &[Tool] = &[
     // `Ctrl+T` already calls them up by name, which no other tool window has.
     Tool {
         panel: "ClaudhubTerminal",
-        title: Label::Key("panel-terminal"),
+        title: Label("panel-terminal"),
         icon: "square-terminal",
         home: Anchor::new(Side::Bottom, Half::Top),
         conditional: false,
     },
     Tool {
         panel: "ClaudhubSqlHistory",
-        title: Label::Key("panel-sql-history"),
+        title: Label("panel-sql-history"),
         icon: "list",
         home: Anchor::new(Side::Right, Half::Top),
         conditional: false,
@@ -329,60 +297,53 @@ pub const TOOLS: &[Tool] = &[
     // Nothing to resolve, no button: one time in a hundred.
     Tool {
         panel: "ClaudhubConflicts",
-        title: Label::Key("panel-conflicts"),
+        title: Label("panel-conflicts"),
         icon: "git-merge",
         home: Anchor::new(Side::Left, Half::Bottom),
         conditional: true,
     },
     Tool {
         panel: "ClaudhubStashes",
-        title: Label::Key("panel-stashes"),
+        title: Label("panel-stashes"),
         icon: "archive",
         home: Anchor::new(Side::Left, Half::Bottom),
         conditional: false,
     },
+    // Beside what one picks from: an error one has read is a file one goes and
+    // opens, which is the left edge's whole business.
+    Tool {
+        panel: "ClaudhubSentry",
+        title: Label("panel-sentry"),
+        icon: "triangle-alert",
+        home: Anchor::new(Side::Left, Half::Bottom),
+        conditional: false,
+    },
+    // And beside what happened: a run answers "what became of this branch",
+    // which is the edge one reads where one stands.
+    Tool {
+        panel: "ClaudhubCi",
+        title: Label("panel-ci"),
+        icon: "github",
+        home: Anchor::new(Side::Right, Half::Top),
+        conditional: false,
+    },
     Tool {
         panel: "ClaudhubTags",
-        title: Label::Key("panel-tags"),
+        title: Label("panel-tags"),
         icon: "tags",
         home: Anchor::new(Side::Left, Half::Bottom),
         conditional: false,
     },
 ];
 
-/// Every tool window, ours and the plugins'.
+/// Every tool window.
 ///
-/// **The plugins' panels are tool windows of full standing**, button included:
-/// a side zone shows a title and not a strip of tabs, so a panel with no button
-/// is a panel with no way in. They come after ours and take no key — `Alt+1` to
-/// `Alt+9` are ranks of `TOOLS`, and a plugin installed between two sessions
-/// would otherwise move every key after it.
-///
-/// Built on each call rather than cached: what a plugin declares changes when
-/// one is installed, and a list held beside the manifests is the second list
-/// this module exists without.
+/// A function and no longer the table read directly: it took the plugins'
+/// panels after ours, which is what made a rail's contents a run-time question.
+/// There are none, so it is the table — kept as a function because two dozen
+/// call sites read it and a rail is not where one saves a `Vec`.
 pub fn tools() -> Vec<Tool> {
-    let mut tools = TOOLS.to_vec();
-    for manifest in crate::ui::plugin_view::manifests() {
-        for spec in &manifest.panels {
-            // A plugin's panel in the centre is a document, reached by its tab
-            // among the ones it shares its group with.
-            let Some(home) = Anchor::of_place(spec.place) else {
-                continue;
-            };
-            tools.push(Tool {
-                panel: spec.name,
-                title: Label::Text(spec.title.as_str()),
-                icon: spec.icon.as_str(),
-                home,
-                // A plugin switched off, or still missing the setting it cannot
-                // work without, draws nothing: a button for it would be a
-                // target that never answers.
-                conditional: true,
-            });
-        }
-    }
-    tools
+    TOOLS.to_vec()
 }
 
 /// What one edge may carry before the rail stops being readable.
@@ -1116,14 +1077,9 @@ mod tests {
             include_str!("../../assets/i18n/en.json"),
             include_str!("../../assets/i18n/fr.json"),
         );
-        // Ours only: a plugin's strings are its own, and no catalogue of ours
-        // holds them — which is the whole reason `Label` tells the two apart.
         let named = TOOLS
             .iter()
-            .filter_map(|tool| match tool.title {
-                Label::Key(key) => Some(key),
-                Label::Text(_) => None,
-            })
+            .map(|tool| tool.title.0)
             .chain(Anchor::all().into_iter().map(Anchor::label));
         for title in named {
             let key = format!("\"{title}\":");

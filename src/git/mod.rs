@@ -133,7 +133,7 @@ fn run<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<std::process::Output> 
 /// need a git command that hangs reproducibly, and there is none.
 ///
 /// `pub(crate)` and taking its ceiling as an argument because it is not only
-/// git's any more: a plugin's shell capability waits for a process in exactly
+/// git's any more: the CI view's shell request waits for a process in exactly
 /// the same way, and for the same reason — a full pipe blocks the writer, and
 /// reading after the wait is the classic deadlock. What differs is only how
 /// long one is willing to wait, which is why the constant became a parameter.
@@ -510,7 +510,7 @@ mod tests {
 
         let started = Instant::now();
         // Three hundred milliseconds and not the real thirty seconds: the
-        // ceiling is an argument since a plugin's shell capability wants
+        // ceiling is an argument since the CI view's shell request wants
         // another one, and that is what removed the test-only override that
         // used to stand here.
         let result = wait_with_timeout(cmd, Duration::from_millis(300), || "sleep 30".into());

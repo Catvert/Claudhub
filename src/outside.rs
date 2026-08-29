@@ -1,17 +1,21 @@
-//! What a plugin is allowed to do to the outside world.
+//! What Claudhub asks of the world outside the repository.
 //!
-//! **These are data, and they carry no Rune.** A capability is described here,
-//! travels in a `Cmd` and is executed by a worker — possibly a worker in
-//! another process, since that is what the WSL server is. That is the whole
-//! reason this module sits in the core and the script host does not: the
-//! headless server must be able to run a plugin's requests without carrying a
-//! scripting engine, and `just check-server` is what proves it still can.
+//! Two views read a service rather than the checkout — Sentry over HTTP, the
+//! CI runs through `gh` — and this is the whole of what they are allowed to do
+//! with it. **These are data**: a request is described here, travels in a
+//! `Cmd` and is executed by a worker, possibly a worker in another process,
+//! since that is what the WSL server is. `just check-server` is what proves the
+//! headless one still carries it.
 //!
-//! **The list is closed, and closing it is the point.** postcard is
-//! positional and `PROTOCOL_VERSION` is announced at the handshake: a plugin
-//! that could add a message would break the wire for every plugin. Adding a
-//! capability is therefore a change to Claudhub, versioned once; adding a
-//! plugin is not a change to the wire at all.
+//! It outlived the scripting layer it was written for. That layer put a Rune
+//! script in front of these two requests and a vocabulary to paint a panel
+//! behind them; the two views it ever carried are Rust now, and what stayed is
+//! the half that was never about scripting — one closed list of things one may
+//! do outside, each with the queue it belongs in.
+//!
+//! **The list is closed, and closing it is the point.** postcard is positional
+//! and `PROTOCOL_VERSION` is announced at the handshake: what crosses the wire
+//! is versioned once, here, rather than growing a message per feature.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -22,8 +26,8 @@ use crate::runtime::Secret;
 /// remote API sometimes takes seconds, and never minutes.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// A command's ceiling. Longer than HTTP's: what a plugin shells out to is
-/// often a CLI that itself talks to a network (`gh`, `docker`).
+/// A command's ceiling. Longer than HTTP's: what is shelled out to is a CLI
+/// that itself talks to a network — `gh`, which is what the CI view runs.
 const SHELL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The placeholder a header may carry in place of the secret.
@@ -34,7 +38,7 @@ const SHELL_TIMEOUT: Duration = Duration::from_secs(60);
 /// `Debug` prints.
 const SECRET: &str = "{secret}";
 
-/// One thing a plugin asks of the outside world.
+/// One thing Claudhub asks of the outside world.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Cap {
     /// An HTTP request. **Network queue**: this is Sentry's profile, seconds
@@ -49,7 +53,8 @@ pub enum Cap {
     },
     /// A shell command, run in a worktree. **Background queue**: it is the
     /// same profile as the `wt` status sweep — useful, periodic, and never
-    /// worth putting in front of a diff that has just been asked for.
+    /// worth putting in front of a diff that has just been asked for. It is
+    /// what the CI view runs `gh` with.
     Shell { worktree: PathBuf, command: String },
 }
 
@@ -65,8 +70,8 @@ impl Cap {
 
     /// Does it belong to the network queue rather than the background one.
     ///
-    /// A function of the capability alone, so the routing stays one readable
-    /// table — the rule the five queues already live by.
+    /// A function of the request alone, so the routing stays one readable
+    /// table — the rule the seven queues already live by.
     pub fn is_network(&self) -> bool {
         matches!(self, Self::Http { .. })
     }
@@ -74,8 +79,8 @@ impl Cap {
     /// Runs it. **In a worker**, never in the interface thread.
     ///
     /// The error is already a `String` and not an `anyhow::Error`: it goes into
-    /// an `Evt`, which is `Clone`, and the script only ever shows one sentence
-    /// of it.
+    /// an `Evt`, which is `Clone`, and a panel only ever shows one sentence of
+    /// it.
     pub fn run(self) -> Result<String, String> {
         match self {
             Self::Http {
@@ -98,7 +103,7 @@ fn http(
     secret: Option<&Secret>,
 ) -> Result<String, String> {
     // One agent for the whole process: it holds the connection pool and the
-    // TLS setup, and building one per call threw away the session a plugin
+    // TLS setup, and building one per call threw away the session a view
     // polling the same host every ten seconds would have reused.
     static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     let agent = AGENT.get_or_init(|| {
@@ -188,11 +193,11 @@ fn shell(worktree: &std::path::Path, command: &str) -> Result<String, String> {
 /// A secret written `$NAME` is read from the environment, **here**.
 ///
 /// Here, that is, in the worker: the server's environment is what counts, which
-/// is the rule the Sentry token already lived by when it was one of ours. It is
-/// also what lets a token stay out of a settings file that gets copied around,
-/// and it costs a plugin nothing — the value it names is opaque to it either
-/// way. A variable that is not set leaves the text as it stands, so a secret
-/// that genuinely begins with a dollar still works.
+/// is the rule the Sentry token has always lived by. It is also what lets a
+/// token stay out of a settings file that gets copied around, and it costs the
+/// caller nothing — the value it names is opaque to it either way. A variable
+/// that is not set leaves the text as it stands, so a secret that genuinely
+/// begins with a dollar still works.
 fn from_env(value: &str) -> String {
     let Some(name) = value.strip_prefix('$') else {
         return value.to_string();
@@ -214,8 +219,9 @@ mod tests {
 
     #[test]
     fn http_goes_to_the_network_and_a_shell_does_not() {
-        // The routing is what keeps a plugin from ever holding up a diff. It is
-        // read off the capability alone, like `queue_of` off a command.
+        // The routing is what keeps a slow service from ever holding up a
+        // diff. It is read off the request alone, like `queue_of` off a
+        // command.
         assert!(Cap::Http {
             method: "GET".into(),
             url: "https://example.test".into(),

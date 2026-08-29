@@ -77,6 +77,17 @@ pub enum Pane {
     /// The file shown beside the results. Same thing: what one searches from
     /// this screen is the project, not the preview.
     SearchPreview,
+    /// The errors Sentry reports. It filters, like every list whose order is
+    /// ours — Sentry's, by last seen — and nothing in it links one row to the
+    /// next.
+    Sentry,
+    /// The error opened in the centre: a trace and an excerpt, read rather than
+    /// picked from. The key exists so `Ctrl+F` there does not go to the panel
+    /// touched before it.
+    SentryIssue,
+    /// The branch's CI runs. It filters: the order is the runs' own, newest
+    /// first, and nothing in it links one row to the next.
+    Ci,
 }
 
 impl Pane {

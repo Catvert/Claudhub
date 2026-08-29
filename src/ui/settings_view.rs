@@ -217,10 +217,10 @@ impl ClaudhubApp {
             keyboard_page(),
             files_page(),
             lsp_page(),
+            sentry_page(),
         ];
         let databases_ix = pages.len();
         pages.push(databases_page());
-        pages.push(plugins_page());
         pages.push(logs_page(logs));
         let selected = match self.settings_page {
             Page::First => None,
@@ -1412,6 +1412,76 @@ fn files_page() -> SettingPage {
 /// Connections are declared here and nowhere else: it is the second level of the
 /// extension system — a declaration, not code — the same as the agent profiles',
 /// and the "Databases" panel is only the view of that list.
+/// The Sentry views' settings: the account, and what is asked of it.
+///
+/// The **project** is not here, and that is the whole distinction: the
+/// organisation and the token belong to the machine, the project belongs to the
+/// repository — five checkouts of one code have the same errors. Its field is
+/// on the panel, which is also where one is when one decides to change it.
+fn sentry_page() -> SettingPage {
+    let field = |value: fn(&App) -> SharedString, set: fn(SharedString, &mut App)| {
+        SettingField::input(value, set).default_value(SharedString::default())
+    };
+    SettingPage::new(tr!("settings-page-sentry")).group(
+        SettingGroup::new()
+            .item(SettingItem::new(
+                tr!("settings-sentry-org"),
+                field(
+                    |cx| Settings::global(cx).sentry_org.clone().into(),
+                    |value, cx| Settings::update_global(cx, |s| s.sentry_org = value.to_string()),
+                ),
+            ))
+            .item(
+                SettingItem::new(
+                    tr!("settings-sentry-token"),
+                    field(
+                        |cx| Settings::global(cx).sentry_token.clone().into(),
+                        |value, cx| {
+                            Settings::update_global(cx, |s| s.sentry_token = value.to_string())
+                        },
+                    ),
+                )
+                .description(tr!("settings-sentry-token-help")),
+            )
+            .item(
+                SettingItem::new(
+                    tr!("settings-sentry-host"),
+                    field(
+                        |cx| Settings::global(cx).sentry_host.clone().into(),
+                        |value, cx| {
+                            Settings::update_global(cx, |s| s.sentry_host = value.to_string())
+                        },
+                    ),
+                )
+                .description(tr!("settings-sentry-host-help")),
+            )
+            .item(
+                SettingItem::new(
+                    tr!("settings-sentry-query"),
+                    field(
+                        |cx| Settings::global(cx).sentry_query.clone().into(),
+                        |value, cx| {
+                            Settings::update_global(cx, |s| s.sentry_query = value.to_string())
+                        },
+                    ),
+                )
+                .description(tr!("settings-sentry-query-help")),
+            )
+            .item(
+                SettingItem::new(
+                    tr!("settings-sentry-intro"),
+                    field(
+                        |cx| Settings::global(cx).sentry_intro.clone().into(),
+                        |value, cx| {
+                            Settings::update_global(cx, |s| s.sentry_intro = value.to_string())
+                        },
+                    ),
+                )
+                .description(tr!("settings-sentry-intro-help")),
+            ),
+    )
+}
+
 fn databases_page() -> SettingPage {
     SettingPage::new(tr!("settings-page-databases")).group(
         SettingGroup::new().item(databases_item()).item(
@@ -2261,554 +2331,6 @@ fn size_range() -> NumberFieldOptions {
 
 fn clamp_size(value: f64) -> f32 {
     settings::clamp_font_size(value as f32)
-}
-
-// — Les plugins ————————————————————————————————————————————————————————
-
-/// Acts on the application from a form closure.
-///
-/// The form's closures only receive an `App` — the very reason the settings
-/// live in a global — so a gesture that has to reach `ClaudhubApp` needs a way
-/// back. A **weak** handle, like the dock's panels hold: strong, it would keep
-/// the application alive past the window.
-///
-/// Only from a **click**, never from a render. This closure's ancestors run
-/// inside `ClaudhubApp`'s own render — the settings panel delegates to it — and
-/// updating the entity there is the panic `open_dialog`'s closure already
-/// taught this repository. A click handler runs once that borrow is given back.
-fn with_app(
-    window: &mut Window,
-    cx: &mut App,
-    f: impl FnOnce(&mut ClaudhubApp, &mut Window, &mut Context<ClaudhubApp>),
-) {
-    let Some(app) = cx
-        .try_global::<crate::ui::app::AppHandle>()
-        .and_then(|handle| handle.0.upgrade())
-    else {
-        return;
-    };
-    app.update(cx, |app, cx| f(app, window, cx));
-}
-
-/// The plugins page: what is installed, what it is told, and git.
-///
-/// **What it does not carry is as decided as what it does.** The compilation
-/// status and its error stay in the plugin's own panel, where the reload button
-/// already is and where the error is read beside the tree it replaces. The
-/// reason is mechanical as much as editorial: this closure runs **inside**
-/// `ClaudhubApp`'s own render — the settings panel delegates to it — so reading
-/// the root entity here is the panic that `open_dialog`'s closure already
-/// taught this repository. A click handler, on the other hand, runs later, once
-/// that borrow is given back: that is why the buttons can act and the page
-/// cannot report.
-fn plugins_page() -> SettingPage {
-    SettingPage::new(tr!("settings-page-plugins")).group(SettingGroup::new().item(plugins_item()))
-}
-
-/// The state the install row keeps between two frames.
-struct PluginInstallField {
-    url: Entity<InputState>,
-    name: Entity<InputState>,
-    _subscriptions: Vec<Subscription>,
-}
-
-/// One plugin's settings and secrets, kept from one render to the next.
-struct PluginFields {
-    values: Vec<(String, Entity<InputState>)>,
-    secrets: Vec<(String, Entity<InputState>)>,
-    _subscriptions: Vec<Subscription>,
-}
-
-fn plugins_item() -> SettingItem {
-    SettingItem::render(move |_, window, cx| {
-        let manifests = crate::ui::plugin_view::manifests();
-        let count = manifests.len();
-        let rows: Vec<_> = manifests
-            .iter()
-            .map(|manifest| plugin_row(count, manifest, window, cx))
-            .collect();
-        v_flex()
-            .w_full()
-            .gap_2()
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().text_sm().child(tr!("settings-plugins")))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(tr!("settings-plugins-help")),
-                    ),
-            )
-            .when(count == 0, |el| {
-                el.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr!("settings-plugins-none")),
-                )
-            })
-            .children(rows)
-            .child(plugin_install_row(count, window, cx))
-    })
-}
-
-/// Cloning a plugin from a repository.
-///
-/// The name is **suggested** from the address and stays editable: two plugins
-/// may well be published from repositories called `claudhub-plugin` by two
-/// different people, and the directory's name is what everything else keys on.
-fn plugin_install_row(count: usize, window: &mut Window, cx: &mut App) -> impl IntoElement {
-    let key = format!("claudhub-plugin-install-{count}");
-    let state = window.use_keyed_state(SharedString::from(key), cx, move |window, cx| {
-        let url = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("settings-plugin-url")));
-        let name =
-            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("settings-plugin-name")));
-        // Typing an address fills the name in, and only while nobody has
-        // touched it: correcting a suggestion that keeps coming back is worse
-        // than having none.
-        // `subscribe_in` and not `subscribe`: writing into an input needs a
-        // window, and an ordinary subscription has none — it is the only place
-        // in this form that writes a field rather than reading it.
-        let suggest = cx.subscribe_in(&url, window, {
-            let name = name.clone();
-            move |_: &mut PluginInstallField, url, event: &InputEvent, window: &mut Window, cx| {
-                if !matches!(event, InputEvent::Change) {
-                    return;
-                }
-                if !name.read(cx).value().trim().is_empty() {
-                    return;
-                }
-                let Some(id) = crate::plugin::install::id_from_url(&url.read(cx).value()) else {
-                    return;
-                };
-                name.update(cx, |state, cx| state.set_value(id, window, cx));
-            }
-        });
-        PluginInstallField {
-            url,
-            name,
-            _subscriptions: vec![suggest],
-        }
-    });
-    let field = state.read(cx);
-    let (url, name) = (field.url.clone(), field.name.clone());
-    h_flex()
-        .w_full()
-        .min_w_0()
-        .gap_1()
-        .items_center()
-        .child(div().flex_1().min_w_0().child(Input::new(&url).small()))
-        .child(div().w(px(150.)).min_w_0().child(Input::new(&name).small()))
-        .child(
-            Button::new("install-plugin")
-                .outline()
-                .small()
-                .icon(icon("download"))
-                .label(tr!("settings-plugin-install"))
-                .on_click({
-                    let (url, name) = (url.clone(), name.clone());
-                    move |_, window, cx| {
-                        let address = url.read(cx).value().trim().to_string();
-                        let id = name.read(cx).value().trim().to_string();
-                        let id = if id.is_empty() {
-                            crate::plugin::install::id_from_url(&address).unwrap_or_default()
-                        } else {
-                            id
-                        };
-                        with_app(window, cx, move |app, window, cx| {
-                            app.manage_plugin(
-                                &id,
-                                crate::plugin::install::Manage::Install { url: address },
-                                window,
-                                cx,
-                            );
-                        });
-                    }
-                }),
-        )
-}
-
-/// The revision of each plugin's directory, read once.
-///
-/// `install::revision` is a `git log -1`, and this row is painted on every
-/// frame the plugins page is up: one process per plugin per frame. Nothing
-/// invalidates it but a plugin moving — an install, an update, a removal, or a
-/// file changing under a plugin's folder — and `forget_plugin_revisions` is
-/// what those call.
-fn plugin_revision(manifest: &crate::plugin::manifest::Manifest) -> Option<SharedString> {
-    REVISIONS.with(|revisions| {
-        revisions
-            .borrow_mut()
-            .entry(manifest.id.clone())
-            .or_insert_with(|| {
-                crate::plugin::install::revision(&manifest.dir).map(SharedString::from)
-            })
-            .clone()
-    })
-}
-
-thread_local! {
-    static REVISIONS: std::cell::RefCell<
-        std::collections::HashMap<String, Option<SharedString>>,
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
-}
-
-/// A plugin has moved: read its revision again.
-pub(super) fn forget_plugin_revisions() {
-    REVISIONS.with(|revisions| revisions.borrow_mut().clear());
-}
-
-fn plugin_row(
-    count: usize,
-    manifest: &'static crate::plugin::manifest::Manifest,
-    window: &mut Window,
-    cx: &mut App,
-) -> impl IntoElement {
-    let id = manifest.id.clone();
-    let key = format!("claudhub-plugin-{count}-{id}");
-    let declared = manifest.declaration.clone();
-    let configured = Settings::global(cx).plugins.get(&id).cloned();
-    // Where each secret lives, read **now**: the keyed state below is built
-    // once and would hold the picture from the frame a plugin was first shown,
-    // so a token just put into the keyring would still read "in clear".
-    let places: std::collections::BTreeMap<String, crate::plugin::host::SecretPlace> = declared
-        .secrets
-        .iter()
-        .map(|name| {
-            let value = configured
-                .as_ref()
-                .and_then(|p| p.secrets.get(name))
-                .map(String::as_str)
-                .unwrap_or_default();
-            (name.clone(), crate::plugin::host::SecretPlace::of(value))
-        })
-        .collect();
-    let enabled = configured.as_ref().map(|p| p.enabled).unwrap_or(true);
-    // What is still unsaid. A plugin missing one of these does not run and has
-    // no panel: the page has to say which, or it is a switch that refuses to
-    // move for a reason nobody can see.
-    let missing = crate::ui::plugin_view::missing(manifest, cx);
-    let state = window.use_keyed_state(SharedString::from(key), cx, {
-        let id = id.clone();
-        move |window, cx| {
-            let mut subscriptions = Vec::new();
-            let mut values = Vec::new();
-            for (name, default) in &declared.settings {
-                let current = configured
-                    .as_ref()
-                    .and_then(|p| p.settings.get(name).cloned())
-                    .unwrap_or_else(|| default.clone());
-                let input = cx.new(|cx| {
-                    InputState::new(window, cx)
-                        .placeholder(SharedString::from(default.clone()))
-                        .default_value(current)
-                });
-                subscriptions.push(watch_plugin_field(&input, id.clone(), name.clone(), cx));
-                values.push((name.clone(), input));
-            }
-            let mut secrets = Vec::new();
-            for name in &declared.secrets {
-                let current = configured
-                    .as_ref()
-                    .and_then(|p| p.secrets.get(name).cloned())
-                    .unwrap_or_default();
-                let input = cx.new(|cx| {
-                    InputState::new(window, cx)
-                        // The placeholder says the three forms: a secret is the
-                        // one field here whose *shape* carries a decision about
-                        // where it lives, and nothing else on this page would
-                        // say so.
-                        .placeholder(SharedString::from(format!(
-                            "{name} — {}",
-                            tr!("settings-plugin-secret-help")
-                        )))
-                        .default_value(current)
-                        .masked(true)
-                });
-                subscriptions.push(keep_on_blur(&input, id.clone(), name.clone(), window, cx));
-                secrets.push((name.clone(), input));
-            }
-            PluginFields {
-                values,
-                secrets,
-                _subscriptions: subscriptions,
-            }
-        }
-    });
-    let fields = state.read(cx);
-    let values = fields.values.clone();
-    let secrets = fields.secrets.clone();
-    let revision = plugin_revision(manifest);
-    let muted = cx.theme().muted_foreground;
-    let title = SharedString::from(manifest.title().to_string());
-    let dir = manifest.dir.clone();
-
-    v_flex()
-        .w_full()
-        .min_w_0()
-        .gap_1p5()
-        .p_2()
-        .rounded(cx.theme().radius)
-        .border_1()
-        .border_color(cx.theme().border)
-        .child(
-            h_flex()
-                .w_full()
-                .min_w_0()
-                .gap_2()
-                .items_center()
-                .child(icon(manifest.icon()).small())
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .child(div().truncate().text_sm().child(title))
-                        .child(
-                            div()
-                                .truncate()
-                                .text_xs()
-                                .text_color(muted)
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .child(SharedString::from(match &revision {
-                                    Some(revision) => format!("{id} — {revision}"),
-                                    // A directory dropped in by hand is
-                                    // perfectly legitimate: it simply has
-                                    // nothing to pull from.
-                                    None => format!("{id} — {}", tr!("settings-plugin-handmade")),
-                                })),
-                        ),
-                )
-                .child(
-                    Button::new(SharedString::from(format!("plugin-enabled-{id}")))
-                        .small()
-                        .map(|button| {
-                            if enabled {
-                                button.primary()
-                            } else {
-                                button.outline()
-                            }
-                        })
-                        .selected(enabled && missing.is_empty())
-                        .disabled(!missing.is_empty())
-                        .label(tr!("settings-plugin-enabled"))
-                        .on_click({
-                            let id = id.clone();
-                            move |_, _window, cx| {
-                                let switched = id.clone();
-                                Settings::update_global(cx, move |s| {
-                                    let entry = s.plugins.entry(switched).or_default();
-                                    entry.enabled = !entry.enabled;
-                                });
-                            }
-                        }),
-                )
-                .child(
-                    Button::new(SharedString::from(format!("plugin-edit-{id}")))
-                        .ghost()
-                        .small()
-                        .icon(icon("pencil"))
-                        .tooltip(tr!("settings-plugin-edit"))
-                        .on_click({
-                            let id = id.clone();
-                            move |_, window, cx| {
-                                let id = id.clone();
-                                with_app(window, cx, move |app, window, cx| {
-                                    let Some(manifest) = crate::ui::plugin_view::manifests()
-                                        .iter()
-                                        .find(|m| m.id == id)
-                                    else {
-                                        return;
-                                    };
-                                    app.edit_plugin(manifest, window, cx);
-                                });
-                            }
-                        }),
-                )
-                .child(
-                    Button::new(SharedString::from(format!("plugin-update-{id}")))
-                        .ghost()
-                        .small()
-                        .icon(icon("refresh-cw"))
-                        .tooltip(tr!("settings-plugin-update"))
-                        .disabled(revision.is_none())
-                        .on_click({
-                            let id = id.clone();
-                            move |_, window, cx| {
-                                let id = id.clone();
-                                with_app(window, cx, move |app, window, cx| {
-                                    app.manage_plugin(
-                                        &id,
-                                        crate::plugin::install::Manage::Update,
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }
-                        }),
-                )
-                .child(
-                    Button::new(SharedString::from(format!("plugin-remove-{id}")))
-                        .ghost()
-                        .small()
-                        .icon(icon("trash-2"))
-                        .tooltip(tr!("settings-plugin-remove"))
-                        .on_click({
-                            let id = id.clone();
-                            move |_, window, cx| {
-                                let id = id.clone();
-                                with_app(window, cx, move |app, window, cx| {
-                                    app.confirm_plugin_removal(id.clone(), window, cx);
-                                });
-                            }
-                        }),
-                ),
-        )
-        .when(!values.is_empty() || !secrets.is_empty(), |el| {
-            el.child(
-                v_flex()
-                    .w_full()
-                    .min_w_0()
-                    .gap_1()
-                    .children(
-                        values
-                            .into_iter()
-                            .map(|(name, input)| plugin_field_row(name, input, cx)),
-                    )
-                    .children(secrets.into_iter().map(|(name, input)| {
-                        let place = places
-                            .get(&name)
-                            .copied()
-                            .unwrap_or(crate::plugin::host::SecretPlace::Plain);
-                        plugin_secret_row(name, input, place, cx)
-                    })),
-            )
-        })
-        .when(!missing.is_empty(), |el| {
-            el.child(
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .text_xs()
-                    .text_color(cx.theme().warning)
-                    .child(icon("triangle-alert").xsmall())
-                    .child(tr!(
-                        "settings-plugin-missing",
-                        { names: missing.join(", ") }
-                    )),
-            )
-        })
-        .child(
-            div()
-                .text_xs()
-                .text_color(muted)
-                .child(SharedString::from(dir.display().to_string())),
-        )
-}
-
-/// A secret's field, and one word saying where its value actually is.
-///
-/// It is the question one comes to this page with — "is my token in a file?" —
-/// and nothing else on the row would answer it: the field is masked, and a
-/// keyring reference behind dots looks exactly like a token.
-fn plugin_secret_row(
-    name: String,
-    input: Entity<InputState>,
-    place: crate::plugin::host::SecretPlace,
-    cx: &mut App,
-) -> impl IntoElement {
-    use crate::plugin::host::SecretPlace;
-    let colour = match place {
-        // In clear in a file is not an error, but it is the one of the three
-        // worth noticing.
-        SecretPlace::Plain => cx.theme().warning,
-        _ => cx.theme().muted_foreground,
-    };
-    v_flex()
-        .w_full()
-        .min_w_0()
-        .gap_0p5()
-        .child(plugin_field_row(name, input, cx))
-        .child(
-            div()
-                .pl(px(138.))
-                .text_xs()
-                .text_color(colour)
-                .child(tr!(place.label())),
-        )
-}
-
-fn plugin_field_row(name: String, input: Entity<InputState>, cx: &mut App) -> impl IntoElement {
-    h_flex()
-        .w_full()
-        .min_w_0()
-        .gap_2()
-        .items_center()
-        .child(
-            div()
-                .w(px(130.))
-                .truncate()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(SharedString::from(name)),
-        )
-        .child(div().flex_1().min_w_0().child(Input::new(&input).small()))
-}
-
-fn watch_plugin_field(
-    input: &Entity<InputState>,
-    id: String,
-    name: String,
-    cx: &mut Context<PluginFields>,
-) -> Subscription {
-    cx.subscribe(
-        input,
-        move |_: &mut PluginFields, input, event: &InputEvent, cx| {
-            if !matches!(event, InputEvent::Change) {
-                return;
-            }
-            let value = input.read(cx).value().to_string();
-            let (id, name) = (id.clone(), name.clone());
-            Settings::update_global(cx, move |s| {
-                s.plugins
-                    .entry(id)
-                    .or_default()
-                    .settings
-                    .insert(name, value);
-            });
-        },
-    )
-}
-
-/// A secret is put away when one **leaves** the field, never on a keystroke.
-///
-/// Storing it means a round trip to the system keyring, which can ask the user
-/// to unlock it: doing that per character would be absurd, and would ask once
-/// per letter. Losing the focus validates, which is already this window's rule
-/// for the task list — `InputState` has no escape event, and abandoning what
-/// was typed because one clicked beside it is the worse of the two defaults.
-fn keep_on_blur(
-    input: &Entity<InputState>,
-    id: String,
-    name: String,
-    window: &mut Window,
-    cx: &mut Context<PluginFields>,
-) -> Subscription {
-    cx.subscribe_in(
-        input,
-        window,
-        move |_: &mut PluginFields, input, event: &InputEvent, window: &mut Window, cx| {
-            if !matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
-                return;
-            }
-            let value = input.read(cx).value().to_string();
-            let (id, name) = (id.clone(), name.clone());
-            with_app(window, cx, move |app, window, cx| {
-                app.keep_secret(id, name, value, window, cx);
-            });
-        },
-    )
 }
 
 #[cfg(test)]

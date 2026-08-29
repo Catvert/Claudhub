@@ -1,0 +1,1003 @@
+//! The two Sentry views: the errors of a project, and the one being read.
+//!
+//! **Two panels on one state**, which is the gesture of the rest of the window
+//! — the project tree and the editor, the hits and the preview: choosing an
+//! error must not push out of sight the list one is choosing from. The list is
+//! a tool window against the left edge, the error is a document of the centre,
+//! and it is the arrangement Sentry's own page has.
+//!
+//! What is decided lives in `crate::sentry`, pure and tested: the URLs, the
+//! shapes the API returns, the filter, the prompt. This module holds what it
+//! takes to paint them and the three round trips that fill them.
+//!
+//! **The project belongs to the repository** and the organisation to the
+//! machine: five checkouts of one code have the same errors, and two
+//! repositories of one organisation do not. That is why the project is in the
+//! store and everything else in the settings — and why the field for it is on
+//! the panel rather than in a settings page one would have to go and find.
+
+use std::path::PathBuf;
+
+use gpui::{div, prelude::*, App, Context, SharedString, Window};
+use gpui_component::{
+    button::{Button, ButtonVariants as _},
+    h_flex,
+    input::Input,
+    v_flex, ActiveTheme, Disableable as _, Sizable as _, WindowExt as _,
+};
+
+use crate::runtime::protocol::Caller;
+use crate::runtime::Cmd;
+use crate::sentry::{Event, Issue, Spread};
+use crate::tr;
+use crate::ui::app::ClaudhubApp;
+use crate::ui::find::Pane;
+use crate::ui::icons::icon;
+use crate::ui::settings::Settings;
+
+/// What the two views show and what they are waiting for.
+///
+/// One state for the window and not one per repository: what it holds is a
+/// reading of one project, and arriving somewhere else is starting over rather
+/// than refreshing — the rule every panel of this window lives by.
+#[derive(Default)]
+pub struct SentryState {
+    /// The repository this reading is about, which is what says it is stale.
+    pub main: Option<PathBuf>,
+    pub issues: Vec<Issue>,
+    /// The rank in `issues` — **not** in the filtered rows: a filter changes
+    /// which row is which, and what one is reading must survive a keystroke.
+    pub chosen: Option<usize>,
+    pub event: Option<Event>,
+    pub spreads: Vec<Spread>,
+    pub loading: bool,
+    /// Why the list is empty, when it is not simply empty.
+    pub error: Option<SharedString>,
+    /// Why the trace is missing, which is not why the list is.
+    pub event_error: Option<SharedString>,
+    /// The sends in flight. A late answer is dropped rather than shown: one
+    /// changes error before the previous trace has come back, and painting it
+    /// would replace what is being read with what is not.
+    pub list_call: u64,
+    pub event_call: u64,
+    pub tags_call: u64,
+    pub scroll: gpui::UniformListScrollHandle,
+}
+
+impl SentryState {
+    /// The issue being read, if the list still holds it.
+    pub fn issue(&self) -> Option<&Issue> {
+        self.issues.get(self.chosen?)
+    }
+}
+
+impl ClaudhubApp {
+    /// The organisation, the host and the token, as the settings hold them.
+    ///
+    /// `None` when the two that matter are not both there: a request with no
+    /// organisation is a 404, and one with no token is a 401 — neither says
+    /// anything the panel could not say first.
+    fn sentry_account(&self, cx: &App) -> Option<(String, String, crate::runtime::Secret)> {
+        let settings = Settings::global(cx);
+        let org = settings.sentry_org.trim().to_string();
+        let token = settings.sentry_token.trim().to_string();
+        if org.is_empty() || token.is_empty() {
+            return None;
+        }
+        let host = match settings.sentry_host.trim() {
+            "" => crate::sentry::DEFAULT_HOST.to_string(),
+            host => host.to_string(),
+        };
+        Some((org, host, crate::runtime::Secret(token)))
+    }
+
+    /// The project this repository's errors are read from.
+    pub(super) fn sentry_project(&self, cx: &App) -> Option<String> {
+        let main = self.active_main()?;
+        crate::ui::store::Store::global(cx)
+            .repos
+            .get(&main)
+            .and_then(|repo| repo.sentry_project.clone())
+            .map(|project| project.trim().to_string())
+            .filter(|project| !project.is_empty())
+    }
+
+    /// One request of Sentry, and the number that will carry its answer home.
+    fn ask_sentry(&mut self, url: String, token: crate::runtime::Secret) -> u64 {
+        self.sentry_seq += 1;
+        let call = self.sentry_seq;
+        self.git.send(Cmd::Call {
+            caller: Caller::Sentry,
+            call,
+            cap: crate::outside::Cap::Http {
+                method: "GET".into(),
+                url,
+                // The token is **not** written into the header here: `{secret}`
+                // is replaced in the worker, so it never reaches something a
+                // `Debug` prints. See `outside::Cap`.
+                headers: vec![("Authorization".into(), "Bearer {secret}".into())],
+                body: None,
+                secret: Some(token),
+            },
+        });
+        call
+    }
+
+    /// Reads the project's issues, replacing whatever was there.
+    ///
+    /// Called on arriving in a repository and from the panel's refresh button.
+    /// It is a **replacement** and not a refresh: the errors of another project
+    /// have nothing to do with this one's.
+    pub(super) fn load_sentry(&mut self, cx: &mut Context<Self>) {
+        let main = self.active_main();
+        self.sentry = SentryState {
+            main: main.clone(),
+            ..Default::default()
+        };
+        let Some((org, host, token)) = self.sentry_account(cx) else {
+            cx.notify();
+            return;
+        };
+        let Some(project) = self.sentry_project(cx) else {
+            cx.notify();
+            return;
+        };
+        let query = match Settings::global(cx).sentry_query.trim() {
+            "" => crate::sentry::DEFAULT_QUERY.to_string(),
+            query => query.to_string(),
+        };
+        let url = crate::sentry::issues_url(&host, &org, &project, &query);
+        self.sentry.loading = true;
+        self.sentry.list_call = self.ask_sentry(url, token);
+        cx.notify();
+    }
+
+    /// The Sentry views follow the worktree, like every other panel.
+    ///
+    /// The project's field is refilled with it: it belongs to the repository,
+    /// so leaving the previous one's name under the caret would be the one
+    /// thing a per-repository setting must not do.
+    pub(super) fn sentry_follows_worktree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sentry.main == self.active_main() {
+            return;
+        }
+        let project = self.sentry_project(cx).unwrap_or_default();
+        let input = self.sentry_project_input.clone();
+        input.update(cx, |input, cx| input.set_value(project, window, cx));
+        self.load_sentry(cx);
+    }
+
+    /// The project's field validates on Enter and on losing the focus.
+    ///
+    /// Losing the focus validates, which is already this window's rule for the
+    /// task list: `InputState` has no escape event, and throwing away what was
+    /// typed because one clicked beside it is the worse of the two defaults.
+    /// Nothing is asked of Sentry per keystroke — a request per letter of a
+    /// project's name.
+    pub(super) fn watch_sentry_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.sentry_project_input.clone();
+        cx.subscribe_in(&input, window, |this, input, event, _window, cx| {
+            use gpui_component::input::InputEvent;
+            if !matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                return;
+            }
+            let typed = input.read(cx).value().to_string();
+            if this.sentry_project(cx).unwrap_or_default() == typed.trim() {
+                return;
+            }
+            this.set_sentry_project(typed, cx);
+        })
+        .detach();
+    }
+
+    /// Files the project this repository's errors come from.
+    pub(super) fn set_sentry_project(&mut self, project: String, cx: &mut Context<Self>) {
+        let Some(main) = self.active_main() else {
+            return;
+        };
+        let project = project.trim().to_string();
+        crate::ui::store::Store::update_global(cx, |store| {
+            store.repos.entry(main).or_default().sentry_project =
+                (!project.is_empty()).then_some(project.clone());
+        });
+        self.load_sentry(cx);
+    }
+
+    /// Opens one error: its trace, and what its tags are worth.
+    ///
+    /// Two round trips, and the second's failure says nothing more than "no
+    /// bars": the trace, which is what one came for, has arrived.
+    pub(super) fn open_sentry_issue(
+        &mut self,
+        rank: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(issue) = self.sentry.issues.get(rank) else {
+            return;
+        };
+        let id = issue.id.clone();
+        self.sentry.chosen = Some(rank);
+        self.sentry.event = None;
+        self.sentry.event_error = None;
+        self.sentry.spreads = Vec::new();
+        if let Some((org, host, token)) = self.sentry_account(cx) {
+            let event = crate::sentry::event_url(&host, &org, &id);
+            let tags = crate::sentry::tags_url(&host, &org, &id);
+            self.sentry.event_call = self.ask_sentry(event, token.clone());
+            self.sentry.tags_call = self.ask_sentry(tags, token);
+        }
+        // The centre's tab appears with the error and comes forward: it is the
+        // console's rule, and what makes "choose a row" one gesture.
+        self.reveal_panel(crate::ui::panels::SentryIssuePanel::NAME, window, cx);
+        cx.notify();
+    }
+
+    /// Whether the centre has an error to show — what its tab hangs on.
+    pub(super) fn sentry_issue_open(&self) -> bool {
+        self.sentry.chosen.is_some()
+    }
+
+    /// The cross on the error's tab: done with this one.
+    pub(super) fn close_sentry_issue(&mut self, cx: &mut Context<Self>) {
+        self.sentry.chosen = None;
+        self.sentry.event = None;
+        self.sentry.event_error = None;
+        self.sentry.spreads = Vec::new();
+        cx.notify();
+    }
+
+    /// One of the three answers, back from the worker.
+    pub(super) fn sentry_answered(
+        &mut self,
+        call: u64,
+        result: Result<String, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if call == self.sentry.list_call {
+            self.sentry.loading = false;
+            match result.and_then(|body| {
+                crate::sentry::parse_issues(&body).map_err(|why| format!("{why:#}"))
+            }) {
+                Ok(issues) => {
+                    self.sentry.issues = issues;
+                    self.sentry.error = None;
+                }
+                Err(why) => {
+                    self.sentry.issues = Vec::new();
+                    self.sentry.error = Some(SharedString::from(why));
+                }
+            }
+        } else if call == self.sentry.event_call {
+            match result.and_then(|body| {
+                crate::sentry::parse_event(&body).map_err(|why| format!("{why:#}"))
+            }) {
+                Ok(Some(event)) => self.sentry.event = Some(event),
+                Ok(None) => self.sentry.event_error = Some(tr!("sentry-event-expired")),
+                Err(why) => self.sentry.event_error = Some(SharedString::from(why)),
+            }
+        } else if call == self.sentry.tags_call {
+            // Its failure is not worth a line on screen: the bars are the one
+            // reading of this page one can do without.
+            match result
+                .and_then(|body| crate::sentry::parse_tags(&body).map_err(|why| format!("{why:#}")))
+            {
+                Ok(spreads) => self.sentry.spreads = spreads,
+                Err(why) => log::warn!("sentry tags: {why}"),
+            }
+        }
+        cx.notify();
+    }
+
+    /// Hands the error to an agent, with the code around our own frames.
+    pub(super) fn hand_sentry_issue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let Some(issue) = self.sentry.issue().cloned() else {
+            return;
+        };
+        let intro = match Settings::global(cx).sentry_intro.trim() {
+            "" => tr!("sentry-intro").to_string(),
+            intro => intro.to_string(),
+        };
+        let org = Settings::global(cx).sentry_org.trim().to_string();
+        let text =
+            crate::sentry::prompt(&intro, &org, &issue, self.sentry.event.as_ref(), &worktree);
+        // Through the terminal, in a bracketed paste, like the notes: the agent
+        // is what has the repository in its hands, and Claudhub never talks to
+        // an API for this.
+        self.confirm_agent_prompt(worktree, text, window, cx);
+    }
+
+    /// Shows what is about to be handed to an agent, and lets it be edited.
+    ///
+    /// **The notes' own dialog, on the same field** (`prompt_input`): what goes
+    /// into a terminal cannot be taken back — an agent has read the paste
+    /// before one has seen what one just sent — and the two gestures are the
+    /// same gesture.
+    ///
+    /// Here it earns a second reason. What this writes is a **report**, not a
+    /// request: a Sentry issue arrives with its trace, its context and its
+    /// code, and what one wants to add is the one sentence that narrows it —
+    /// start with the controller, leave the migrations alone, this only happens
+    /// in production. That sentence has nowhere else to be written.
+    ///
+    /// An empty field sends nothing: emptying it is how one changes one's mind
+    /// once the dialog is open.
+    pub(super) fn confirm_agent_prompt(
+        &mut self,
+        worktree: PathBuf,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = self.prompt_input.clone();
+        let entity = cx.entity();
+        input.update(cx, |input, cx| input.set_value(text, window, cx));
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            // Cloned into the closure and never read from it: `open_dialog`
+            // keeps a `Fn` called back from the root's own render, where
+            // reading the application is a panic. See "Conventions gpui".
+            let input = input.clone();
+            let entity = entity.clone();
+            let worktree = worktree.clone();
+            dialog
+                .title(tr!("agent-prompt-title"))
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .w(gpui::px(640.))
+                        .child(div().text_xs().child(tr!("agent-prompt-hint")))
+                        .child(gpui_component::input::Textarea::new(&input)),
+                )
+                .overlay_closable(false)
+                .close_button(false)
+                .footer(crate::ui::dialogs::confirm())
+                .on_ok(move |_, window, cx| {
+                    let text = input.read(cx).value().to_string();
+                    if text.trim().is_empty() {
+                        return true;
+                    }
+                    entity.update(cx, |this, cx| {
+                        // Shown before it is sent: a message delivered into a
+                        // hidden tab is a message nobody sees arrive. It is
+                        // what the notes' `deliver` does, and for the same
+                        // reason.
+                        this.show_terminal_panel(window, cx);
+                        this.send_to_agent(&worktree, text, window, cx);
+                    });
+                    true
+                })
+        });
+        // The text is already there and it is meant to be added to: the caret
+        // goes in the field.
+        crate::ui::dialogs::focus_field(&self.prompt_input, window, cx);
+    }
+}
+
+// — The list, against the left edge ——————————————————————————————————
+
+impl ClaudhubApp {
+    pub(super) fn render_sentry(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let bar = self.render_sentry_bar(window, cx);
+        let find = self.render_find(Pane::Sentry, cx);
+        let query = self.query(Pane::Sentry, cx);
+        let muted = cx.theme().muted_foreground;
+
+        // The rows are **indices** into the list, as the stashes' are: a frame
+        // costs no copy of an issue.
+        let rows: std::rc::Rc<Vec<usize>> = std::rc::Rc::new(
+            self.sentry
+                .issues
+                .iter()
+                .enumerate()
+                .filter(|(_, issue)| issue.matches(&query))
+                .map(|(rank, _)| rank)
+                .collect(),
+        );
+        let note = self.sentry_note(cx);
+        if let Some(note) = note {
+            return v_flex()
+                .size_full()
+                .child(bar)
+                .children(find)
+                .child(
+                    v_flex()
+                        .size_full()
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .p_4()
+                        .text_color(muted)
+                        .child(icon("triangle-alert"))
+                        .child(div().text_sm().text_center().child(note)),
+                )
+                .into_any_element();
+        }
+
+        let issues = std::rc::Rc::new(self.sentry.issues.clone());
+        let chosen = self.sentry.chosen;
+        let scroll = self.sentry.scroll.clone();
+        let count = rows.len();
+        let total = issues.len();
+        let entity = cx.entity();
+        let look = Look::of(cx);
+        v_flex()
+            .size_full()
+            .child(bar)
+            .children(find)
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(if count == total {
+                        tr!("sentry-count", { n: total })
+                    } else {
+                        tr!("sentry-count-filtered", { n: count, total: total })
+                    }),
+            )
+            .child(
+                gpui::uniform_list("sentry-issues", count, {
+                    let rows = rows.clone();
+                    move |range, _window, cx| {
+                        range
+                            .map(|row| {
+                                let rank = rows[row];
+                                let _ = cx;
+                                sentry_row(
+                                    &issues[rank],
+                                    rank,
+                                    chosen == Some(rank),
+                                    &look,
+                                    &entity,
+                                )
+                            })
+                            .collect()
+                    }
+                })
+                .track_scroll(&scroll)
+                .flex_1()
+                .min_h_0(),
+            )
+            .into_any_element()
+    }
+
+    /// Why the list shows nothing, when that is not simply "no errors".
+    ///
+    /// **The sentence says what to do**, and the field to do it with is the one
+    /// above: a panel that reports a missing setting without offering it is a
+    /// panel one leaves to go looking through a settings page.
+    fn sentry_note(&self, cx: &App) -> Option<SharedString> {
+        if self.active_main().is_none() {
+            return Some(tr!("no-worktree"));
+        }
+        if self.sentry_account(cx).is_none() {
+            return Some(tr!("sentry-no-account"));
+        }
+        if self.sentry_project(cx).is_none() {
+            return Some(tr!("sentry-no-project"));
+        }
+        if let Some(why) = self.sentry.error.clone() {
+            return Some(why);
+        }
+        if self.sentry.loading && self.sentry.issues.is_empty() {
+            return Some(tr!("sentry-loading"));
+        }
+        self.sentry.issues.is_empty().then(|| tr!("sentry-empty"))
+    }
+
+    /// The organisation, the project, and a way to read again.
+    fn render_sentry_bar(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let org = Settings::global(cx).sentry_org.trim().to_string();
+        let input = self.sentry_project_input.clone();
+        let loading = self.sentry.loading;
+        h_flex()
+            .h(crate::ui::theme::bar_height(cx))
+            .w_full()
+            .px_2()
+            .gap_1()
+            .items_center()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(icon("triangle-alert").xsmall())
+            .when(!org.is_empty(), |el| {
+                el.child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(SharedString::from(org)),
+                )
+            })
+            // **The project's field is always there**, and not only when
+            // nothing works: it is the one setting of these views that belongs
+            // to the repository, one corrects it as often as one sets it, and a
+            // field one has to break something to find is not a field.
+            .child(div().flex_1().child(Input::new(&input).xsmall()))
+            .child(
+                Button::new("sentry-refresh")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("refresh-cw"))
+                    .tooltip(tr!("action-refresh"))
+                    .disabled(loading)
+                    .on_click(cx.listener(|this, _, _window, cx| this.load_sentry(cx))),
+            )
+    }
+}
+
+/// What a row's paint needs, read once per frame rather than per row.
+struct Look {
+    row: gpui::Pixels,
+    muted: gpui::Hsla,
+    selected: gpui::Hsla,
+    hovered: gpui::Hsla,
+}
+
+impl Look {
+    fn of(cx: &App) -> Self {
+        Self {
+            // Two storeys: what the error says, then where and when.
+            row: crate::ui::theme::row_height(cx) * 2.,
+            muted: cx.theme().muted_foreground,
+            selected: cx.theme().accent,
+            hovered: cx.theme().secondary,
+        }
+    }
+}
+
+/// One row of the list: what it is, where, and how often.
+fn sentry_row(
+    issue: &Issue,
+    rank: usize,
+    selected: bool,
+    look: &Look,
+    app: &gpui::Entity<ClaudhubApp>,
+) -> gpui::AnyElement {
+    let app = app.clone();
+    let subtitle = [issue.culprit.as_str(), issue.last_seen.as_str()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    // A band and not a pill: what a selected row names is the **row**. See
+    // "Le grain de l'interface".
+    h_flex()
+        .id(("sentry-row", rank))
+        .w_full()
+        .px_2()
+        .py_1()
+        .gap_2()
+        .items_center()
+        .h(look.row)
+        .when(selected, |el| el.bg(look.selected))
+        .hover(|el| el.bg(look.hovered))
+        .child(icon(level_icon(&issue.level)).xsmall())
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(div().truncate().text_sm().child(issue.title.clone()))
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(look.muted)
+                        .child(SharedString::from(subtitle)),
+                ),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(look.muted)
+                .child(SharedString::from(issue.count.to_string())),
+        )
+        .on_click(move |_, window, cx| {
+            app.update(cx, |this, cx| this.open_sentry_issue(rank, window, cx));
+        })
+        .into_any_element()
+}
+
+/// The glyph a level draws. Unknown levels get the neutral one rather than
+/// none: Sentry's list is open, and a row with no icon reads as a broken row.
+fn level_icon(level: &str) -> &'static str {
+    match level {
+        "fatal" | "error" => "circle-x",
+        "warning" => "triangle-alert",
+        _ => "info",
+    }
+}
+
+// — The error being read, in the centre ——————————————————————————————
+
+impl ClaudhubApp {
+    /// Its trace, the deployed code, what is known of it, and the gesture.
+    ///
+    /// This is the half that needs width — an excerpt of code and a stack of
+    /// paths — and it is what a single panel could not give.
+    pub(super) fn render_sentry_issue(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let Some(issue) = self.sentry.issue().cloned() else {
+            return div().into_any_element();
+        };
+        let muted = cx.theme().muted_foreground;
+        let mono = cx.theme().mono_font_family.clone();
+        let worktree = self.active.clone().unwrap_or_default();
+        let event = self.sentry.event.clone();
+        let spreads = self.sentry.spreads.clone();
+        let event_error = self.sentry.event_error.clone();
+        let entity = cx.entity();
+        let permalink = issue.permalink.clone();
+        let short_id = issue.short_id.clone();
+
+        let head = v_flex()
+            .gap_1()
+            .p_3()
+            .child(div().text_lg().child(issue.kind.clone()))
+            .when(!issue.value.is_empty(), |el| {
+                el.child(div().text_sm().child(issue.value.clone()))
+            })
+            .when(!issue.culprit.is_empty(), |el| {
+                el.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(issue.culprit.clone()),
+                )
+            })
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .pt_1()
+                    .child(sentry_pair(
+                        tr!("sentry-events"),
+                        issue.count.to_string(),
+                        cx,
+                    ))
+                    .when(issue.users > 0, |el| {
+                        el.child(sentry_pair(
+                            tr!("sentry-users"),
+                            issue.users.to_string(),
+                            cx,
+                        ))
+                    })
+                    .when(!issue.first_seen.is_empty(), |el| {
+                        el.child(sentry_pair(
+                            tr!("sentry-first"),
+                            issue.first_seen.clone(),
+                            cx,
+                        ))
+                    })
+                    .when(!issue.last_seen.is_empty(), |el| {
+                        el.child(sentry_pair(tr!("sentry-last"), issue.last_seen.clone(), cx))
+                    }),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .pt_1()
+                    .child(
+                        Button::new("sentry-hand")
+                            .primary()
+                            .small()
+                            .icon(icon("bot"))
+                            .label(tr!("sentry-hand"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.hand_sentry_issue(window, cx)
+                            })),
+                    )
+                    // **A button and not a text**: the short id is the
+                    // reference one carries elsewhere — a branch name, a commit
+                    // message, a message to somebody — and a panel has no text
+                    // selection to take it from by hand.
+                    .when(!short_id.is_empty(), |el| {
+                        let id = short_id.clone();
+                        el.child(
+                            Button::new("sentry-copy-id")
+                                .ghost()
+                                .small()
+                                .icon(icon("copy"))
+                                .label(SharedString::from(short_id.clone()))
+                                .on_click(cx.listener(move |this, _, _window, cx| {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                        id.clone(),
+                                    ));
+                                    this.announce(tr!("sentry-id-copied", { id: id.clone() }), cx);
+                                })),
+                        )
+                    })
+                    .when(!permalink.is_empty(), |el| {
+                        let url = permalink.clone();
+                        el.child(
+                            Button::new("sentry-open")
+                                .ghost()
+                                .small()
+                                .icon(icon("external-link"))
+                                .label(tr!("sentry-open-in-sentry"))
+                                .on_click(move |_, _window, cx| cx.open_url(&url)),
+                        )
+                    }),
+            );
+
+        let body = match (&event, &event_error) {
+            // Under the header and not in place of the panel: the reference and
+            // the counters have done nothing wrong.
+            (_, Some(why)) => v_flex().p_3().child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(why.clone()),
+            ),
+            (None, None) => v_flex().p_3().child(
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child(tr!("sentry-loading-event")),
+            ),
+            (Some(event), None) => {
+                let mut body = v_flex().gap_3().p_3();
+                if !event.tags.is_empty() {
+                    body = body.child(sentry_section(
+                        tr!("sentry-context"),
+                        h_flex().gap_2().flex_wrap().children(
+                            event.tags.iter().map(|tag| {
+                                sentry_pair(tag.key.clone().into(), tag.value.clone(), cx)
+                            }),
+                        ),
+                        cx,
+                    ));
+                }
+                for spread in &spreads {
+                    body = body.child(sentry_section(
+                        SharedString::from(spread.name.clone()),
+                        v_flex().gap_1().children(
+                            spread
+                                .values
+                                .iter()
+                                .map(|(value, share)| sentry_bar(value, *share, cx)),
+                        ),
+                        cx,
+                    ));
+                }
+                if !event.frames.is_empty() {
+                    // **Newest first.** Sentry's order is the call's — oldest
+                    // first — and what one comes for is the line that raised.
+                    let frames =
+                        v_flex()
+                            .gap_2()
+                            .children(event.frames.iter().rev().enumerate().map(|(n, frame)| {
+                                sentry_frame(frame, n, &worktree, mono.clone(), &entity, cx)
+                            }));
+                    body = body.child(sentry_section(
+                        tr!("sentry-trace", { n: event.frames.len() }),
+                        frames,
+                        cx,
+                    ));
+                }
+                if !event.crumbs.is_empty() {
+                    body = body.child(sentry_section(
+                        tr!("sentry-crumbs", { n: event.crumbs.len() }),
+                        v_flex().gap_1().children(event.crumbs.iter().map(|crumb| {
+                            h_flex()
+                                .gap_2()
+                                .text_xs()
+                                .child(
+                                    div()
+                                        .text_color(muted)
+                                        .child(SharedString::from(crumb.category.clone())),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .child(SharedString::from(crumb.message.clone())),
+                                )
+                        })),
+                        cx,
+                    ));
+                }
+                body
+            }
+        };
+
+        let _ = window;
+        v_flex()
+            .id("sentry-issue")
+            .size_full()
+            .overflow_y_scroll()
+            .child(head)
+            .child(body)
+            .into_any_element()
+    }
+}
+
+/// A label and its value, read across.
+fn sentry_pair(label: SharedString, value: String, cx: &App) -> impl IntoElement {
+    h_flex()
+        .gap_1()
+        .text_xs()
+        .child(div().text_color(cx.theme().muted_foreground).child(label))
+        .child(div().child(SharedString::from(value)))
+}
+
+/// A titled block. Plain and not foldable: what is here is read once, in order.
+fn sentry_section(title: SharedString, body: impl IntoElement, cx: &App) -> impl IntoElement {
+    v_flex()
+        .gap_1()
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(title),
+        )
+        .child(body)
+}
+
+/// One value's share of a tag, as a bar.
+fn sentry_bar(value: &str, share: u8, cx: &App) -> impl IntoElement {
+    h_flex()
+        .gap_2()
+        .items_center()
+        .text_xs()
+        .child(
+            div()
+                .w(gpui::px(160.))
+                .truncate()
+                .child(SharedString::from(value.to_string())),
+        )
+        .child(
+            div()
+                .flex_1()
+                .h(gpui::px(6.))
+                .rounded_sm()
+                .bg(cx.theme().muted)
+                .child(
+                    div()
+                        .h_full()
+                        .w(gpui::relative(f32::from(share) / 100.))
+                        .rounded_sm()
+                        .bg(cx.theme().primary),
+                ),
+        )
+        .child(
+            div()
+                .w(gpui::px(40.))
+                .text_right()
+                .text_color(cx.theme().muted_foreground)
+                .child(SharedString::from(format!("{share} %"))),
+        )
+}
+
+/// One frame: the path one clicks, the function, and its excerpt.
+fn sentry_frame(
+    frame: &crate::sentry::Frame,
+    rank: usize,
+    worktree: &std::path::Path,
+    mono: SharedString,
+    app: &gpui::Entity<ClaudhubApp>,
+    cx: &App,
+) -> impl IntoElement {
+    let path = frame.repo_path(worktree);
+    let line = frame.line;
+    let target = worktree.join(&path);
+    let opens = target.exists();
+    let muted = cx.theme().muted_foreground;
+    v_flex()
+        .gap_0p5()
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .text_xs()
+                .child(
+                    Button::new(("sentry-frame", rank))
+                        .ghost()
+                        .xsmall()
+                        .icon(icon(if frame.in_app { "file-code" } else { "file" }))
+                        .label(SharedString::from(format!("{path}:{line}")))
+                        // A frame Sentry names by a module, or one of a
+                        // dependency that is not checked out here, opens
+                        // nothing: the button says so by being dead rather than
+                        // by opening an empty editor.
+                        .disabled(!opens)
+                        .on_click({
+                            let (app, path) = (app.clone(), std::path::PathBuf::from(&path));
+                            move |_, _window, cx| {
+                                let path = path.clone();
+                                app.update(cx, |app, cx| {
+                                    app.open_at(
+                                        path,
+                                        Some(crate::ui::explorer::Landing::Position {
+                                            line: line.saturating_sub(1) as u32,
+                                            character: 0,
+                                        }),
+                                        cx,
+                                    );
+                                });
+                            }
+                        }),
+                )
+                .when(!frame.function.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .font_family(mono.clone())
+                            .text_color(muted)
+                            .child(SharedString::from(frame.function.clone())),
+                    )
+                }),
+        )
+        .when(!frame.context.is_empty(), |el| {
+            // **It is the code one reads, so it is coloured.** The excerpt is a
+            // fragment with nothing before it — a grammar's error recovery is
+            // what makes parsing it on its own worth doing — and its language
+            // comes from the path rather than being guessed from the text,
+            // which is how a shell transcript ends up painted as Rust.
+            let source: String = frame
+                .context
+                .iter()
+                .map(|(_, text)| text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let styles = crate::ui::highlight::language_for_path(std::path::Path::new(&path)).map(
+                |language| {
+                    crate::ui::highlight::DocumentHighlights::for_language(
+                        language,
+                        &source,
+                        &cx.theme().highlight_theme.clone(),
+                    )
+                },
+            );
+            el.child(
+                v_flex()
+                    .p_2()
+                    .rounded_md()
+                    .bg(cx.theme().secondary)
+                    .font_family(mono.clone())
+                    .text_xs()
+                    .children(
+                        frame
+                            .context
+                            .iter()
+                            .enumerate()
+                            .map(|(index, (number, text))| {
+                                let culprit = *number == line;
+                                let text = SharedString::from(text.clone());
+                                let painted = match styles.as_ref().map(|styles| styles.line(index))
+                                {
+                                    Some(runs) if !runs.is_empty() => {
+                                        gpui::StyledText::new(text.clone())
+                                            .with_highlights(runs.to_vec())
+                                            .into_any_element()
+                                    }
+                                    _ => div().child(text).into_any_element(),
+                                };
+                                h_flex()
+                                    .gap_2()
+                                    .when(culprit, |el| el.bg(cx.theme().warning.opacity(0.15)))
+                                    .child(
+                                        div()
+                                            .w(gpui::px(40.))
+                                            .text_right()
+                                            .text_color(muted)
+                                            .child(SharedString::from(number.to_string())),
+                                    )
+                                    .child(div().whitespace_nowrap().child(painted))
+                            }),
+                    ),
+            )
+        })
+}

@@ -123,14 +123,9 @@ src/
     frame.rs    le cadrage `Content-Length` et JSON-RPC
     sync.rs     versions de document, et l'édition à une plage (UTF-16)
     uri.rs      chemins ⇄ `file://`
-  plugin/       les plugins : des panneaux dont le contenu est un script
-    mod.rs      les modules, et `in_worktree` (un chemin qu'un script nomme)
-    view.rs     l'arbre de vue en données — le vocabulaire borné
-    manifest.rs le `plugin.toml`, ses panneaux, et la découverte
-    install.rs  installer, mettre à jour, retirer — `git clone`, `git pull`
-    caps.rs     ce qu'un plugin peut faire dehors : les données, et le worker
-    host.rs     la machine Rune (feature `plugins`) — le seul module qui la voit
-    loaded.rs   un plugin tel que la fenêtre le tient : script, état, arbres
+  outside.rs    ce qu'on demande au monde hors du dépôt : HTTP, une commande
+  sentry.rs     les erreurs d'un projet Sentry : les URL, ce que l'API rend,
+                le filtre, et ce qui part à l'agent — pur, testé
   wt.rs         le `wt.toml` d'un projet : questions, tâches, statut, URLs
   just.rs       les recettes du `justfile`, lues par `just --dump` (JSON)
   suite.rs      les suites de tests d'un worktree — Pest, Vitest, Jest,
@@ -222,7 +217,8 @@ src/
     hunks.rs        la gouttière de l'éditeur, et la comparaison de lignes — pur
     merge.rs        la fusion à trois voies : ce que chaque côté a fait — pur
     merge_view.rs   les trois colonnes, et le clic qui tranche
-    plugin_view.rs  peint l'arbre d'un plugin, et tient son script en vie
+    sentry.rs       les deux vues Sentry : la liste et l'erreur qu'on lit
+    ci.rs           les exécutions de la branche, lues par `gh`
     find.rs         la recherche d'un panneau, et son routage
     motion.rs       le lissage de la molette — pur
     vim.rs          les modes de vim de l'éditeur — pur
@@ -261,14 +257,14 @@ attend, et c'est la panne qu'on ne diagnostique pas.
 
 - **Lectures** (trois workers) : statut, diff, branches, écritures locales.
   C'est ce qu'une frame attend.
-- **Réseau** (un worker) : `fetch`, `pull`, `push`, HTTP d'un plugin, message de
+- **Réseau** (un worker) : `fetch`, `pull`, `push`, l'API de Sentry, message de
   commit rédigé par un agent. Un seul, parce que deux `fetch` sur le même dépôt
   se disputeraient le verrou des références.
 - **Hooks du projet** (un worker) : `wt new/rm/up/down`. Pas avec les lectures
   (un `up` démarre des conteneurs), pas avec le réseau.
 - **Fond** (un worker) : résumés, agents, relevé de `wt`, ses questions et les
   liens de son `[open] source` (des shells du projet), recettes d'un `justfile`,
-  commandes shell d'un plugin. Ne doit jamais passer devant un diff qu'on vient
+  `gh` des exécutions CI. Ne doit jamais passer devant un diff qu'on vient
   de demander.
 - **Bases** (deux workers) : deux, parce que déplier un schéma en demande
   plusieurs à la fois et qu'ils attendent une socket.
@@ -461,12 +457,6 @@ centre est maintenant toujours celui-là, donc elle vaut partout. La question se
 pose à l'**application** et non au panneau — un panneau ignore quelle région le
 tient, le registre en rebâtit un d'après un nom seul.
 
-Un panneau de plugin y passe aussi, sa réponse se lisant sur ce qu'il a peint
-(`view::Node::is_empty_state`). Mais **au centre seulement** : un plugin démarre
-la première fois qu'un de ses panneaux est *peint* (`plugin_boot`), si bien
-qu'un panneau caché faute de contenu ne démarrerait jamais le script, et
-n'aurait jamais de contenu. C'est la liste à gauche qui l'amorce ; l'onglet de
-détail apparaît quand on choisit une ligne, et **se met devant**.
 
 **Le panneau d'accueil du centre** (`EditorPanel`) n'est plus une contrainte du
 moteur — `add_panel_view` sait fendre la racine d'une région vide, et fabrique
@@ -712,21 +702,37 @@ pas triable. Un identifiant d'envoi, et non la requête, écarte le résultat en
 retard. Le motif de portée (`db::scope`) sépare les bases d'un worktree ; rien
 n'est masqué en silence.
 
-**Les plugins** (`plugin/`) — un script Rune rend un **arbre de vue en données**,
-et la vue le peint. Trois étages : `view.rs`/`manifest.rs` sont des données,
-`caps.rs` est ce qu'un plugin fait au monde extérieur — **sans Rune**, pour que
-le serveur headless l'exécute —, `host.rs` est la machine, derrière la feature
-`plugins`. Le contrat tient en trois fonctions, dont `view` **synchrone et
-pure**. Pièges : un `Ref<str>` et jamais un `String` dans une fonction hôte (Rune
-**prend** l'argument) ; trois variantes de protocole et trois seulement, la file
-se lisant sur la **capacité** ; ajouter un nom au vocabulaire peut casser un
-plugin installé (`use claudhub::*`) ; les secrets ne passent pas par le script,
-c'est le **worker** qui substitue. Le trousseau est l'endroit par défaut,
-résolu **côté interface** — un trousseau appartient à une session de bureau. Un
-panneau nomme son bord par `place` — quatre valeurs, une tool window de plein
-droit — et le `screen` d'un manifeste posé avant que les écrans partent est
-**lu et ignoré** : `Declaration` refuse les clés inconnues, donc le retirer
-écarterait au chargement tous les plugins déjà installés.
+**Sentry** (`sentry.rs`, `ui/sentry.rs`) — deux panneaux sur un état : la liste
+à gauche, l'erreur au centre — c'est le geste du reste de la fenêtre, et un seul
+panneau empilait les deux, si bien que choisir une erreur poussait hors de vue
+la liste où l'on choisissait. Le **projet appartient au dépôt** et se choisit
+dans la barre du panneau ; l'organisation et le jeton appartiennent à la machine
+et sont dans les réglages — cinq worktrees d'un même code ont les mêmes erreurs,
+deux dépôts d'une même organisation non. Ce qui décide vit dans `sentry.rs`, pur
+et testé sur des fixtures : les URL, les formes que l'API rend, le filtre, le
+prompt. Le jeton ne traverse jamais le script d'un `Debug` : `{secret}` est
+substitué **dans le worker** (`outside::Cap`), et `$SENTRY_TOKEN` est lu dans son
+environnement. Un identifiant d'envoi écarte la réponse en retard, comme la
+console SQL.
+
+**La CI** (`ui/ci.rs`) — les exécutions de la branche, par `gh` et non par l'API
+GitHub : la CLI est déjà authentifiée, c'est un programme que l'utilisateur
+installe comme les agents du terminal, et Claudhub n'a ni jeton à tenir ni OAuth
+à parcourir. Le formatage est demandé à `gh --template` : le JSON qu'on
+analyserait serait une forme de plus à suivre. Un piège y est écrit et ce n'est
+pas un raffinement — `printf "%.0f"` sur l'identifiant, un modèle Go formatant un
+nombre JSON en flottant, si bien que `{{.databaseId}}` rend `3.2494024323e+10`,
+que `gh run view` ne reconnaît pas, et rien ne le dit avant le premier clic.
+
+**Il y a eu un système de plugins**, et Sentry en était le portillon
+d'acceptation : mille lignes de Rust contre deux cent soixante-dix de Rune, et
+l'API tenait. Ce qu'il a coûté est ce qui l'a fait retirer — Rune, un hôte de
+script, un vocabulaire de vue, un installeur par `git clone`, une page de
+réglages, et un second format de paquet — pour deux panneaux qu'on écrivait
+soi-même. Ce qui en reste est `outside.rs`, la moitié qui n'a jamais parlé de
+script : une liste fermée de ce qu'on fait dehors, chacun avec sa file. Le
+troisième niveau du système d'extension redevient le `justfile`, le `wt.toml` et
+les commandes déclarées dans les réglages.
 
 **L'instance unique** (`instance.rs`) — « Ouvrir avec Claudhub » est sur
 *chaque* dossier, et un deuxième clic donnait un deuxième processus : deux
@@ -879,9 +885,11 @@ octet pour octet (`git_blob`), `git` rognant les sauts de ligne finaux.
 `justfile` du dépôt, s'il en a un — ses recettes sont le bouton « Lancer » de
 la barre de titre, lues par `just --dump --dump-format json` et jamais par un
 parseur à nous ; le `wt.toml` du projet ; des commandes déclarées dans les
-réglages ; un panneau écrit en Rune. Des extensions wasm à la Zed ont été
-**écartées** : un script rechargé à chaud fait ce que le troisième niveau
-demandait, sans WIT ni deuxième format de paquet.
+réglages. Il y a eu un quatrième niveau — un panneau écrit en Rune — et il est
+parti avec ce qu'il coûtait ; voir « Il y a eu un système de plugins ». Des
+extensions wasm à la Zed avaient été écartées avant lui, pour la raison qui l'a
+emporté à son tour : deux panneaux livrés ne paient ni un WIT ni un deuxième
+format de paquet.
 
 ## Conventions gpui
 
@@ -952,7 +960,7 @@ bulle qui le rapporte.
 
 ## Tests
 
-Les couches `git`, `terminal`, `runtime` et `plugin` sont testables sans contexte
+Les couches `git`, `terminal`, `runtime` et `sentry` sont testables sans contexte
 gpui, et c'est là que sont les tests. Ils portent sur les formats que nous
 parsons — sortie porcelain, diff unifié, séquences de touches — parce que c'est
 là que se trouvent les régressions silencieuses : un chemin renommé mal découpé

@@ -491,14 +491,6 @@ const SUMMARY_EVERY: u32 = 5;
 
 /// A weak handle to the application, for the closures that only get an `App`.
 ///
-/// The settings form declares its fields by closures receiving nothing else —
-/// which is already why the settings themselves are a global — and a plugin's
-/// row has buttons that act on the window. **Weak**, like the dock's panels':
-/// strong, it would keep the application alive past its window.
-pub struct AppHandle(pub gpui::WeakEntity<ClaudhubApp>);
-
-impl gpui::Global for AppHandle {}
-
 pub struct ClaudhubApp {
     pub(super) git: runtime::Handle,
     pub(super) repos: crate::ui::repos::Repos,
@@ -814,34 +806,6 @@ pub struct ClaudhubApp {
     /// answer of a row one has already left is worse than painting nothing —
     /// the same shape as the editor's `landing`, and for the same reason.
     pub(super) pending_preview: Option<(PathBuf, PathBuf, u32)>,
-    /// The plugins, in manifest order. Each holds its script, its state and the
-    /// tree it last produced; the panels only paint what is in here.
-    pub(super) plugins: Vec<crate::plugin::Plugin>,
-    /// The capability calls still out, and the moment each stops being waited
-    /// for. **A request never stays pending**: the background sweep is what
-    /// fails the ones nobody answered, rather than a timer per request.
-    pub(super) plugin_deadlines: Vec<(String, u64, std::time::Instant)>,
-    /// The folded sections of the plugins' panels. In memory, like the notes
-    /// panel's: a reading posture, not a preference.
-    pub(super) plugin_folded: crate::ui::plugin_view::Folds,
-    /// The scroll handles of the plugins' lists, one per panel and list id.
-    ///
-    /// The window's and not the tree's, for the reason a field's `InputState`
-    /// is: a tree is rebuilt on every gesture, and a handle created there would
-    /// put the list back at the top each time.
-    pub(super) plugin_lists: std::collections::HashMap<String, gpui::UniformListScrollHandle>,
-    /// The colouring of the excerpts a plugin draws, kept by content.
-    ///
-    /// An excerpt is a fragment with no file around it — a stack frame's ten
-    /// lines — so it is parsed on its own, which is what `HitHighlights`
-    /// already does for a search's result list. Parsing costs milliseconds, and
-    /// a panel repaints on every frame, hence the cache; it is keyed by the
-    /// text itself, so a tree rebuilt identically finds it again.
-    pub(super) plugin_code: crate::ui::plugin_view::CodeStyles,
-    /// The lane a plugin's capabilities leave by. Kept so the list of plugins
-    /// can be rebuilt — after an installation — without spawning a second
-    /// drain task for every one of them.
-    pub(super) plugin_outbox: Option<async_channel::Sender<crate::plugin::host::Request>>,
     /// What the editing screen shows when it is not a worktree's file.
     ///
     /// The editor keys what it holds by a **root**, which is a worktree in the
@@ -876,6 +840,21 @@ pub struct ClaudhubApp {
     /// a console: two consoles counting from one would each take the other's
     /// rows, and the number is the only thing the answer carries back.
     pub(super) db_request_seq: u64,
+    /// The errors Sentry reports for the repository being looked at, and the
+    /// one being read. One state for the window: arriving somewhere else is
+    /// starting over, not refreshing.
+    pub(super) sentry: crate::ui::sentry::SentryState,
+    /// What names a request of Sentry's API. Never goes back: a late answer is
+    /// dropped by comparing it, as the SQL console's is.
+    pub(super) sentry_seq: u64,
+    /// The field naming this repository's Sentry project. Created **once**, as
+    /// every input is: rebuilt at render time it would lose the caret on the
+    /// first keystroke.
+    pub(super) sentry_project_input: Entity<InputState>,
+    /// The branch's CI runs, and the log of the one opened.
+    pub(super) ci: crate::ui::ci::CiState,
+    /// What names a request of `gh`. See `sentry_seq`.
+    pub(super) ci_seq: u64,
     /// What is known of each repository's tags, by main repository: tags live
     /// in the shared `.git` and are the same seen from every worktree.
     pub(super) tags: HashMap<PathBuf, crate::ui::tags::TagsState>,
@@ -900,11 +879,6 @@ pub struct ClaudhubApp {
     /// kept, their rows and their heights. Rebuilt when what it depends on
     /// moves, `History::version` included; see `refresh_sql_history_list`.
     pub(super) sql_history_list: Option<crate::ui::sql_history_view::HistoryList>,
-    /// A worktree being waited for, and the prompt to deliver in it once created.
-    ///
-    /// `wt`'s creation runs hooks that take minutes; nothing but the arrival of
-    /// the worktree list says it has finished.
-    pub(super) awaiting_agent: Option<(PathBuf, String)>,
     /// What is waiting for a frame to become a balloon.
     ///
     /// **A queue and not a call**: `push_notification` wants a `&mut Window`,
@@ -1199,6 +1173,8 @@ impl ClaudhubApp {
                 .placeholder(tr!("journal-placeholder"))
         });
 
+        let sentry_project_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("sentry-project-placeholder")));
         let base_select = cx.new(|cx| {
             SelectState::new(
                 SearchableVec::new(Vec::<BaseChoice>::new()),
@@ -1316,12 +1292,6 @@ impl ClaudhubApp {
             search_preview_scroll: gpui::UniformListScrollHandle::new(),
             search_focus: search_inputs.focus,
             pending_preview: None,
-            plugins: Vec::new(),
-            plugin_deadlines: Vec::new(),
-            plugin_folded: Default::default(),
-            plugin_lists: Default::default(),
-            plugin_code: Default::default(),
-            plugin_outbox: None,
             editing_root: None,
             db: Default::default(),
             db_scroll: gpui::UniformListScrollHandle::new(),
@@ -1332,6 +1302,11 @@ impl ClaudhubApp {
             db_request_seq: 0,
             // Read once, at startup, like the state store: it is a file of our
             // own, a few hundred kilobytes at most, and nothing else writes it.
+            sentry: Default::default(),
+            sentry_seq: 0,
+            sentry_project_input,
+            ci: Default::default(),
+            ci_seq: 0,
             tags: HashMap::new(),
             tags_scroll: gpui::UniformListScrollHandle::new(),
             pest: HashMap::new(),
@@ -1345,7 +1320,6 @@ impl ClaudhubApp {
             sql_history_reach: Default::default(),
             sql_history_scroll: gpui_component::VirtualListScrollHandle::new(),
             sql_history_list: None,
-            awaiting_agent: None,
             pending_notes: Vec::new(),
             pending_reveal: None,
             pending_status: std::collections::HashSet::new(),
@@ -1402,14 +1376,11 @@ impl ClaudhubApp {
         if app_needs_layout_save {
             app.schedule_layout_save(cx);
         }
-        cx.set_global(AppHandle(cx.entity().downgrade()));
         app.pump_events(events, window, cx);
         app.pump_handoffs(handoffs, window, cx);
-        // Before the sweep: the sweep is also what expires a plugin's requests,
-        // and it has to find a list to look at rather than build one.
-        app.start_plugins(cx);
         app.start_scanning(cx);
         app.watch_vault_inputs(window, cx);
+        app.watch_sentry_project(window, cx);
 
         app.open_remembered_repositories(remote, cx);
         // Starting the server waits for the window to be mounted: a dialog needs
@@ -1592,13 +1563,6 @@ impl ClaudhubApp {
                     .update(cx, |this, cx| {
                         this.scan_now(tick.is_multiple_of(SUMMARY_EVERY), cx);
                         this.auto_fetch_now(cx);
-                        // The plugins ride the same clock. Expiring a request
-                        // wants no finer grain than two seconds against a
-                        // ninety-second ceiling, and re-reading the settings
-                        // here is what lets a token corrected in the form take
-                        // effect without recompiling the script that uses it.
-                        this.expire_plugin_calls();
-                        this.configure_plugins(cx);
                     })
                     .is_ok();
                 if !alive {
@@ -1965,34 +1929,17 @@ impl ClaudhubApp {
             .update(cx, |input, cx| input.set_value(text, window, cx));
     }
 
-    /// The two directories `file_changed` weighs a path against.
+    /// The directory `file_changed` weighs a path against.
     ///
-    /// Resolved once for a batch of paths: both are joins and lookups, and a
+    /// Resolved once for a batch of paths: it is a join and a lookup, and a
     /// single write in a busy worktree brings dozens of paths at a time.
-    fn watched_dirs(&self, cx: &App) -> (Option<PathBuf>, Option<PathBuf>) {
-        let plugins = crate::ui::plugin_view::plugins_dir();
-        let vault = self
-            .active
+    fn watched_dirs(&self, cx: &App) -> Option<PathBuf> {
+        self.active
             .clone()
-            .and_then(|active| self.notes_dir(&active, cx));
-        (plugins, vault)
+            .and_then(|active| self.notes_dir(&active, cx))
     }
 
-    fn file_changed(
-        &mut self,
-        path: &Path,
-        dirs: &(Option<PathBuf>, Option<PathBuf>),
-        cx: &mut Context<Self>,
-    ) {
-        let (plugins, vault) = dirs;
-        // Before the worktree guard: a plugin's directory is not in a worktree,
-        // and its script has to be picked up whether or not one is open.
-        if let Some(dir) = plugins {
-            if path.starts_with(dir) {
-                self.reload_plugins(cx);
-                return;
-            }
-        }
+    fn file_changed(&mut self, path: &Path, vault: &Option<PathBuf>, cx: &mut Context<Self>) {
         let Some(active) = self.active.clone() else {
             return;
         };
@@ -2260,15 +2207,15 @@ impl ClaudhubApp {
             }
             Evt::NotesRead { worktree, files } => self.notes_read(worktree, files, window, cx),
 
-            // — Plugins ————————————————————————————————————————————
-            Evt::PluginResult {
-                plugin,
+            // — The world outside the repository ———————————————————
+            Evt::Called {
+                caller,
                 call,
                 result,
-            } => self.plugin_result(plugin, call, result),
-            Evt::PluginManaged { dir, op, result } => {
-                self.plugin_managed(dir, op, result, window, cx)
-            }
+            } => match caller {
+                crate::runtime::protocol::Caller::Sentry => self.sentry_answered(call, result, cx),
+                crate::runtime::protocol::Caller::Ci => self.ci_answered(call, result, window, cx),
+            },
 
             // — The language server ————————————————————————————————
             Evt::LspReady {
@@ -2419,9 +2366,6 @@ impl ClaudhubApp {
         // git has just enumerated: it is the only moment the list is certain, so
         // the only one where forgetting an entry is safe.
         self.forget_missing_worktrees(&main, cx);
-        // A worktree created for an issue is waiting for its prompt: it is the
-        // only signal that says `wt` has finished its hooks.
-        self.deliver_awaited_agent(window, cx);
         // The active worktree may have been removed under our feet.
         if let Some(active) = self.active.clone() {
             if !self.worktree_exists(&active) {
@@ -3318,12 +3262,13 @@ impl ClaudhubApp {
         // And its Pest suite, for the tests panel — here and not at a first
         // paint, because the tab only exists once the answer says there is one.
         self.ensure_pest(&path, cx);
-        // A plugin's panel speaks about the worktree the window shows, like
-        // every other panel: changing it is starting over, not refreshing.
-        self.plugins_follow_worktree(cx);
-        // And the editing screen goes back to this worktree's file: one had
-        // gone off to edit a plugin's script, which belongs to no worktree, and
-        // leaving it there would show a file the rest of the window denies.
+        // The two views that read a service speak about the worktree the window
+        // shows, like every other panel: changing it is starting over.
+        self.sentry_follows_worktree(window, cx);
+        self.ci_follows_worktree(cx);
+        // And the editing screen goes back to this worktree's file: one may
+        // have gone off to edit a file outside any repository, and leaving the
+        // root there would show a file the rest of the window denies.
         self.editing_root = None;
         // The free note follows the displayed worktree: the input is unique, and
         // keeping the previous one's text would write it here.

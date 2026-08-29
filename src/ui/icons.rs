@@ -10,9 +10,9 @@ use gpui_component::Icon;
 ///
 /// Two hundred call sites, every one of them in a render closure: building the
 /// path meant a `String` and then an `Arc<str>` per icon per frame. The names
-/// come from a bounded vocabulary — the literals in this crate plus what a
-/// plugin's manifest carries — so the map settles after a few frames and never
-/// grows again. Nothing invalidates it: a name maps to one path, for good.
+/// come from a bounded vocabulary — the literals in this crate — so the map
+/// settles after a few frames and never grows again. Nothing invalidates it: a
+/// name maps to one path, for good.
 pub fn icon(name: &str) -> Icon {
     thread_local! {
         static PATHS: std::cell::RefCell<std::collections::HashMap<Box<str>, gpui::SharedString>> =

@@ -257,9 +257,9 @@ where
 /// What a layout read back is filtered through: a name nothing can build comes
 /// back as an empty frame — or, worse, as the registry's own "panel type is not
 /// registered" printed across the screen — and it comes back **at every
-/// start**, a reset of the view only deferring it. It happens for a plugin
-/// uninstalled between two sessions, and for a panel of ours that has gone;
-/// `LAYOUT_VERSION` answers the second only by throwing away every screen's
+/// start**, a reset of the view only deferring it. It happens for a panel that
+/// has gone — the console became one per tab, the plugins' panels went with the
+/// plugins; `LAYOUT_VERSION` answers only by throwing away the whole
 /// arrangement, which is a heavy price for one dead name.
 pub fn is_registered(name: &str) -> bool {
     REGISTERED
@@ -273,7 +273,7 @@ pub fn is_registered(name: &str) -> bool {
 /// What a recorded place needs: the store and the dock's tree hand back a
 /// `String`, and every gesture that shows a panel wants the static name the
 /// dock knows it by. The registry already holds one of each, leaked for the
-/// window's life — a plugin's included, `manifest` leaking it too.
+/// window's life.
 pub fn registered_name(name: &str) -> Option<&'static str> {
     REGISTERED
         .get_or_init(Default::default)
@@ -302,22 +302,6 @@ pub fn register(app: &Entity<ClaudhubApp>, cx: &mut App) {
         ConflictsPanel => "ClaudhubConflicts",
     }
     register_generated(app, cx);
-    // The plugins' panels. One type, one instance per plugin, named after its
-    // directory — see `ui::plugin_view`. They are registered here and not
-    // built on the fly for one reason that decides the rest: a panel has to be
-    // in this registry **before** `layout.json` is read back, or a plugin's tab
-    // comes back as an empty frame. That is also why adding or removing a
-    // plugin takes a restart, while its *script* reloads hot.
-    for manifest in crate::ui::plugin_view::manifests() {
-        for spec in &manifest.panels {
-            let handle = app.clone();
-            let panel = spec.name;
-            declare_panel(cx, panel, move |_state, _window, cx| {
-                let handle = handle.clone();
-                panel_handle(cx.new(|cx| PluginPanel::new(&handle, panel, cx)))
-            });
-        }
-    }
     // No builder for the terminals, and it is not an oversight: they are the
     // only panel whose content is a **process**, and a saved layout is read
     // long after that process has died. They are pruned from the layout before
@@ -394,11 +378,10 @@ fn zoom_in_toolbar() -> Option<PanelControl> {
 /// `add_panel_view` takes no target: it appends the panel to the region's
 /// **first tab group** and activates it there, and the move takes it right
 /// back out. Removing the tab a group displays leaves its active index one
-/// past the end, and the clamp lands on the **last** tab — on the Git screen
-/// the CI plugin's board, which every session then opened on despite
-/// `app::open_on`: the session's terminal passes through that group at every
-/// start. Noting the displayed tab before the add and giving it back after
-/// the move is the whole cure.
+/// past the end, and the clamp lands on the **last** tab, which every session
+/// then opened on despite `app::open_on`: the session's terminal passes through
+/// that group at every start. Noting the displayed tab before the add and
+/// giving it back after the move is the whole cure.
 ///
 /// Two exceptions, both meaning "the fresh panel is the one to look at": no
 /// target — the panel stays where the add put it — and a target joining the
@@ -789,6 +772,12 @@ panels! {
     // So it stands for the whole centre and not for the editor alone, and it
     // steps aside as soon as anything arrives there.
     EditorPanel => ("ClaudhubEditor", "panel-editor", render_editor_panel, Editor, visible: empty_centre_visible),
+    // The errors Sentry reports, and the one being read. **Two panels on one
+    // state**, which is the gesture of the rest of the window: choosing an
+    // error must not push out of sight the list one is choosing from.
+    SentryPanel => ("ClaudhubSentry", "panel-sentry", render_sentry, Sentry),
+    SentryIssuePanel => ("ClaudhubSentryIssue", "panel-sentry-issue", render_sentry_issue, SentryIssue, needed: sentry_issue_open, closes: close_sentry_issue),
+    CiPanel => ("ClaudhubCi", "panel-ci", render_ci, Ci),
 }
 
 /// One open file, as the dock shows it.
@@ -1696,158 +1685,5 @@ impl Render for TerminalPanel {
         // No `pane_root`: the terminals have no search of their own, `Ctrl+F`
         // there belonging to the program that runs.
         pane_frame(self.view.clone(), cx).into_any_element()
-    }
-}
-
-/// A plugin's panel.
-///
-/// One Rust type for every plugin: what differs between two of them is a
-/// `&'static str`, not a shape. It carries no state — like every other panel it
-/// delegates to `ClaudhubApp`, which holds the script, its state and the tree
-/// it last produced.
-pub struct PluginPanel {
-    app: WeakEntity<ClaudhubApp>,
-    focus: FocusHandle,
-    /// The plugin's id in the dock's registry, leaked once at discovery.
-    /// `BasePanel::panel_name` wants a `&'static str` and a plugin's name is
-    /// only known at run time; see `plugin::manifest::Manifest::panel`.
-    name: &'static str,
-    /// Cached for the same reason as the others': `visible` is called while
-    /// the layout is being built, so inside `ClaudhubApp::new`, where reading
-    /// the root entity is a panic.
-    visible: bool,
-    /// Whether this panel is one of the wide half's, read once from the
-    /// manifest.
-    ///
-    /// It is what decides whether the home screen's rule applies to it — and
-    /// the rule is for the **centre** and no other place, for a reason that is
-    /// not taste: a plugin is started the first time one of its panels is
-    /// *drawn* (`plugin_boot`), so a panel hidden for having nothing to show
-    /// would never draw, never start the script, and never have anything to
-    /// show. A plugin's list panel stays, boots the script, and its detail
-    /// panel gets a tree — empty until one picks a line, which is exactly when
-    /// its tab is worth a name.
-    centre: bool,
-}
-
-impl PluginPanel {
-    pub fn new(app: &Entity<ClaudhubApp>, name: &'static str, cx: &mut Context<Self>) -> Self {
-        let centre = is_centre_panel(name);
-        cx.observe(app, move |this: &mut Self, app, cx| {
-            // Three reasons a plugin's tab is not there: hidden from the
-            // "Views" menu like any other panel, the plugin switched off —
-            // which is not the same gesture and does not live in the same file
-            // — and, in the centre, nothing to show. The third is the `needed:`
-            // rule of the macro, asked of a panel a script draws: it answers on
-            // what it has painted, a script having no way to answer the
-            // question itself.
-            let visible = {
-                let read = app.read(cx);
-                read.panel_visible(this.name)
-                    && crate::ui::plugin_view::panel_enabled(this.name, cx)
-                    && !(this.centre && read.plugin_panel_empty(this.name))
-            };
-            if this.visible != visible {
-                // A tab that has just come back is a tab one has just made
-                // appear — picking an error in the list beside it. Bringing it
-                // forward is what makes that gesture change the centre; the
-                // group would otherwise go on showing the diff. Filed rather
-                // than done: this runs between two frames, and selecting a tab
-                // wants a window. `update` and not the entity we are observing
-                // — it notifies nothing, so there is no loop.
-                if visible && this.centre {
-                    let name = this.name;
-                    app.update(cx, |app, _| app.reveal_panel_later(name));
-                }
-                this.visible = visible;
-                cx.emit(PanelEvent::LayoutChanged);
-            }
-            cx.notify();
-        })
-        .detach();
-        Self {
-            app: app.downgrade(),
-            focus: cx.focus_handle(),
-            name,
-            // Nothing has run when the window is built, so a centre panel opens
-            // hidden — the `@at_startup` arm of the macro says the same thing
-            // for the panels of ours.
-            visible: visible_at_startup(name, cx)
-                && crate::ui::plugin_view::panel_enabled(name, cx)
-                && !centre,
-            centre,
-        }
-    }
-}
-
-/// Does this plugin panel belong to the wide half. Unknown names — a plugin
-/// removed between two sessions — are not, which keeps the tab there to be
-/// pruned rather than hidden by a rule that cannot apply to it.
-fn is_centre_panel(name: &str) -> bool {
-    crate::ui::plugin_view::by_panel(name)
-        .is_some_and(|(_, spec)| spec.place == crate::plugin::manifest::Place::Centre)
-}
-
-impl Focusable for PluginPanel {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
-    }
-}
-
-impl EventEmitter<PanelEvent> for PluginPanel {}
-
-impl BasePanel for PluginPanel {
-    fn panel_name(&self) -> &'static str {
-        self.name
-    }
-
-    fn closable(&self, _: &App) -> bool {
-        false
-    }
-
-    fn visible(&self, _: &App) -> bool {
-        self.visible
-    }
-}
-
-impl Panel for PluginPanel {
-    /// The title comes from the manifest and not from a catalogue: a plugin's
-    /// strings are its own — `tr!` reads catalogues compiled into the binary,
-    /// and a test compares their keys.
-    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        gpui::SharedString::from(
-            crate::ui::plugin_view::by_panel(self.name)
-                .map(|(_, panel)| panel.title.clone())
-                .unwrap_or_else(|| self.name.to_string()),
-        )
-    }
-
-    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
-        zoom_in_toolbar()
-    }
-
-    fn dropdown_menu(
-        &mut self,
-        menu: PopupMenu,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> PopupMenu {
-        hide_view(&self.app, self.name, menu)
-    }
-}
-
-impl Render for PluginPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(app) = self.app.upgrade() else {
-            return div().into_any_element();
-        };
-        let name = self.name;
-        let content = app.update(cx, |app, cx| {
-            app.render_plugin(name, window, cx).into_any_element()
-        });
-        // `pane_frame` and not `pane_root`: a plugin's panel is not searchable
-        // — `Ctrl+F` searches a list whose order we own, and here the script
-        // owns it. The terminals are in the same case, for the same reason.
-        pane_frame(content, cx).into_any_element()
     }
 }

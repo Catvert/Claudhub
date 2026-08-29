@@ -65,19 +65,6 @@ fn view_toggle(
     toggle_row(app, name, move || title.text())
 }
 
-/// The same, for a plugin: its title comes from its manifest and not from a
-/// catalogue — `tr!` reads catalogues compiled into the binary, and a plugin's
-/// strings are its own.
-fn plugin_toggle(app: Entity<ClaudhubApp>, name: &'static str) -> PopupMenuItem {
-    toggle_row(app, name, move || {
-        gpui::SharedString::from(
-            crate::ui::plugin_view::by_panel(name)
-                .map(|(_, panel)| panel.title.clone())
-                .unwrap_or_else(|| name.to_string()),
-        )
-    })
-}
-
 fn toggle_row(
     app: Entity<ClaudhubApp>,
     name: &'static str,
@@ -508,33 +495,11 @@ impl ClaudhubApp {
                 // One list now, and not one per screen: there is one window.
                 .submenu(tr!("menu-views"), window, cx, move |menu, _window, cx| {
                     let off = for_views.read(cx).rail_states().1;
-                    let menu = crate::ui::rails::TOOLS
+                    crate::ui::rails::TOOLS
                         .iter()
                         .filter(|tool| crate::ui::rails::in_view_menu(tool, &off))
                         .fold(menu, |menu, tool| {
                             menu.item(view_toggle(for_views.clone(), tool.panel, tool.title))
-                        });
-                    // The plugins after the built-in views. Each **panel**, not
-                    // each plugin: a master/detail plugin has two tabs, and
-                    // taking one off is a gesture one has to be able to undo.
-                    //
-                    // Its panels of the **centre** are left out, for the reason
-                    // the diff is: a document has no button, so there is
-                    // nothing for this menu to put back — a detail tab taken
-                    // off would be a view with no way in at all. What one does
-                    // with a document is close it.
-                    crate::ui::plugin_view::manifests()
-                        .iter()
-                        .fold(menu, |menu, manifest| {
-                            manifest
-                                .panels
-                                .iter()
-                                .filter(|panel| {
-                                    crate::ui::rails::Anchor::of_place(panel.place).is_some()
-                                })
-                                .fold(menu, |menu, panel| {
-                                    menu.item(plugin_toggle(for_views.clone(), panel.name))
-                                })
                         })
                 })
                 .item(PopupMenuItem::new(tr!("menu-reset-layout")).on_click(

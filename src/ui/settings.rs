@@ -454,21 +454,28 @@ pub struct Settings {
     /// Empty, the button disappears.
     pub commit_message_command: String,
     /// The Sentry organisation. The *project*, for its part, belongs to the
-    /// repository and lives in the state store, not here.
-    /// **Legacy**: read once so `migrate_sentry` can pour it into the Sentry
-    /// plugin's settings, then cleared. Kept for the same reason
-    /// `agent_command` is — a file written by an earlier version has to be
-    /// understood, once.
+    /// repository and lives in the state store, not here: five checkouts of one
+    /// code have the same errors, and two repositories of one organisation do
+    /// not.
     pub sentry_org: String,
-    /// API token, failing `SENTRY_TOKEN`.
+    /// The instance. Empty is `sentry.io`; a self-hosted one says so here,
+    /// which is the only thing that changes about it.
+    pub sentry_host: String,
+    /// API token.
     ///
-    /// The environment wins: this file is 0600, which does not make it a vault,
-    /// and a token lying around in a configuration backup is a token that leaks.
-    /// **Legacy**, see `sentry_org`.
+    /// Written `$SENTRY_TOKEN`, it is read from the **worker's** environment
+    /// and never stored: this file is 0600, which does not make it a vault, and
+    /// a token lying around in a configuration backup is a token that leaks.
+    /// See `outside::from_env`.
     pub sentry_token: String,
     /// The query sent to Sentry. Empty: the unresolved issues.
-    /// **Legacy**, see `sentry_org`.
     pub sentry_query: String,
+    /// What is said above an error handed to an agent. Empty: our own sentence.
+    ///
+    /// A setting because it is the one part of that prompt that is about the
+    /// project rather than about the error — "this is a Laravel application",
+    /// "answer in French" — and everything else in it comes from Sentry.
+    pub sentry_intro: String,
     /// Browse diffs and the tree with vim's keys.
     ///
     /// Off by default, and it has to stay that way: those bindings are **bare
@@ -549,58 +556,19 @@ pub struct Settings {
     /// One page and not the whole result: a `SELECT *` on a two-million-row
     /// table would fill the window's memory before showing anything at all.
     pub db_page_size: usize,
-    /// What each plugin is told, by its directory's name.
-    ///
-    /// The **second level** of the extension system, beside the agent profiles,
-    /// the database connections and the language servers: a plugin belongs to
-    /// the machine, not to a repository, and the same one serves five checkouts
-    /// of the same project.
-    ///
-    /// A plugin's manifest carries the defaults; this lays over them. The
-    /// secrets are here and never in the manifest, which is a file one copies
-    /// around — and they leave for a worker inside a `Secret`, whose `Debug`
-    /// masks the value.
+    /// **Legacy**: what a plugin was told, read once so `migrate_sentry` can
+    /// carry Sentry's back into the fields above, then dropped. Nothing writes
+    /// it any more.
     #[serde(default)]
     pub plugins: std::collections::BTreeMap<String, PluginSettings>,
 }
 
-/// What one plugin is told.
-///
-/// `Default` is written by hand: a plugin one has never configured is **on**,
-/// and `#[derive(Default)]` would make it off — a plugin installed and invisible
-/// for a reason nobody could see.
-fn yes() -> bool {
-    true
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// **Legacy**: what one plugin was told, kept only to be read back once.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct PluginSettings {
-    /// Off, its panel disappears and its script does not run.
-    ///
-    /// It is still **compiled**, which costs a millisecond and buys something:
-    /// a plugin just installed says whether it reads before one turns it on,
-    /// and a compilation error is the first thing one wants to see there.
-    #[serde(default = "yes")]
-    pub enabled: bool,
-    /// Read by the script with `setting(name)`.
-    #[serde(default)]
     pub settings: std::collections::BTreeMap<String, String>,
-    /// Named by the script when it makes a request; never handed to it. The
-    /// value is substituted by the **worker**, into a header that carries
-    /// `{secret}` — writing it into the header on the script's side would put
-    /// it back into something a `Debug` prints.
-    #[serde(default)]
     pub secrets: std::collections::BTreeMap<String, String>,
-}
-
-impl Default for PluginSettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            settings: Default::default(),
-            secrets: Default::default(),
-        }
-    }
 }
 
 impl Default for Settings {
@@ -634,8 +602,10 @@ impl Default for Settings {
             auto_fetch_minutes: 10,
             commit_message_command: DEFAULT_COMMIT_MESSAGE_COMMAND.into(),
             sentry_org: String::new(),
+            sentry_host: String::new(),
             sentry_token: String::new(),
             sentry_query: String::new(),
+            sentry_intro: String::new(),
             vim_mode: false,
             vim_clipboard: false,
             notes_dir: String::new(),
@@ -765,31 +735,31 @@ impl Settings {
         settings
     }
 
-    /// Sentry's settings become the Sentry **plugin**'s.
+    /// The Sentry settings a plugin was holding become ours again.
     ///
-    /// Through the same path as a fresh install, like `migrate_agents`: the
-    /// three fields are poured into `plugins["sentry"]` and cleared, so it
-    /// happens once. A window that has never seen Sentry has nothing to pour
-    /// and writes nothing.
+    /// The way back from the trip through the plugin system, taken the same way
+    /// out and in: the values are poured into the fields and the entry is
+    /// dropped, so it happens once. What is already set here wins — a window
+    /// configured since keeps what it has.
     fn migrate_sentry(&mut self) {
-        let carried = [
-            ("org", std::mem::take(&mut self.sentry_org)),
-            ("query", std::mem::take(&mut self.sentry_query)),
-        ];
-        let token = std::mem::take(&mut self.sentry_token);
-        if carried.iter().all(|(_, value)| value.trim().is_empty()) && token.trim().is_empty() {
+        let Some(plugin) = self.plugins.remove("sentry") else {
             return;
-        }
-        let entry = self.plugins.entry("sentry".to_string()).or_default();
-        for (key, value) in carried {
-            if !value.trim().is_empty() {
-                entry.settings.entry(key.to_string()).or_insert(value);
-            }
-        }
-        if !token.trim().is_empty() {
-            entry.secrets.entry("token".to_string()).or_insert(token);
-        }
-        log::info!(target: "plugin", "Sentry settings carried over to the plugin");
+        };
+        let carry =
+            |field: &mut String, key: &str, from: &std::collections::BTreeMap<String, String>| {
+                if !field.trim().is_empty() {
+                    return;
+                }
+                if let Some(value) = from.get(key).filter(|value| !value.trim().is_empty()) {
+                    *field = value.clone();
+                }
+            };
+        carry(&mut self.sentry_org, "org", &plugin.settings);
+        carry(&mut self.sentry_host, "host", &plugin.settings);
+        carry(&mut self.sentry_query, "query", &plugin.settings);
+        carry(&mut self.sentry_intro, "intro", &plugin.settings);
+        carry(&mut self.sentry_token, "token", &plugin.secrets);
+        log::info!(target: "sentry", "settings carried back from the plugin");
     }
 
     fn read() -> Self {

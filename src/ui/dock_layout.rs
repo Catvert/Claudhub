@@ -7,11 +7,10 @@
 //!
 //! Three things live here, and nothing else does:
 //!
-//! - **the default layout**, built from `rails::TOOLS` and from what the
-//!   plugins' manifests ask for. One list, read once: the tools table names the
-//!   panels, the `panels!` macro registers how to build them, and this module
-//!   asks the dock's registry — so a panel added to one is not missing from the
-//!   other;
+//! - **the default layout**, built from `rails::TOOLS` and from the panel
+//!   registry. One list, read once: the tools table names the panels, the
+//!   `panels!` macro registers how to build them, and this module asks the
+//!   dock's registry — so a panel added to one is not missing from the other;
 //! - **`seats`**, which flattens the area's tree into what `ui::rails` needs.
 //!   It is read every frame and kept nowhere, which is why a panel dragged from
 //!   one edge to the other changes rail with nothing to update;
@@ -75,8 +74,7 @@ pub fn build(
     gpui_component::dock::PanelRegistry::build_panel(name, context, window, cx)
 }
 
-/// One half of one edge, in the table's order, followed by the plugin panels
-/// that asked for it.
+/// One half of one edge, in the table's order.
 ///
 /// `None` when nothing lands there. A half is a **group**, and a group with no
 /// tab is a strip of the edge that says nothing and cannot be filled except by
@@ -88,12 +86,6 @@ fn tools_of(anchor: Anchor, window: &mut Window, cx: &mut Context<DockArea>) -> 
     let mut held = 0usize;
     for tool in rails::TOOLS.iter().filter(|tool| tool.home == anchor) {
         if let Some(view) = build(tool.panel, window, cx) {
-            group = group.panel_view(view, cx);
-            held += 1;
-        }
-    }
-    for name in plugin_panels(Some(anchor)) {
-        if let Some(view) = build(name, window, cx) {
             group = group.panel_view(view, cx);
             held += 1;
         }
@@ -146,11 +138,6 @@ fn documents(window: &mut Window, cx: &mut Context<DockArea>) -> DockLayout {
             group = group.panel_view(view, cx);
         }
     }
-    for name in plugin_panels(None) {
-        if let Some(view) = build(name, window, cx) {
-            group = group.panel_view(view, cx);
-        }
-    }
     group
 }
 
@@ -164,20 +151,12 @@ fn documents(window: &mut Window, cx: &mut Context<DockArea>) -> DockLayout {
 /// content is state the registry cannot rebuild from a name — a console is one
 /// of several, each with its own query — so they are put back by the session,
 /// as the terminals are.
-const DOCUMENTS: &[&str] = &["ClaudhubDiff", "ClaudhubEditor", "ClaudhubSearchPreview"];
-
-/// The plugin panels that asked for one place, in manifest order.
-fn plugin_panels(anchor: Option<Anchor>) -> Vec<&'static str> {
-    // Where a manifest's `place` lands is `rails`' answer and not a second one
-    // here: the rail and the layout have to agree about a plugin's home, and
-    // two readings of one field are two readings to keep in step.
-    crate::ui::plugin_view::manifests()
-        .iter()
-        .flat_map(|manifest| manifest.panels.iter())
-        .filter(|spec| Anchor::of_place(spec.place) == anchor)
-        .map(|spec| spec.name)
-        .collect()
-}
+const DOCUMENTS: &[&str] = &[
+    "ClaudhubDiff",
+    "ClaudhubEditor",
+    "ClaudhubSearchPreview",
+    "ClaudhubSentryIssue",
+];
 
 /// Gives the window the arrangement it opens on the first time.
 ///

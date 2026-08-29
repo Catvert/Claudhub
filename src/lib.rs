@@ -29,9 +29,10 @@ pub mod instance;
 pub mod just;
 pub mod logging;
 pub mod lsp;
-pub mod plugin;
+pub mod outside;
 pub mod release;
 pub mod runtime;
+pub mod sentry;
 pub mod suite;
 #[cfg(feature = "ui")]
 pub mod terminal;
