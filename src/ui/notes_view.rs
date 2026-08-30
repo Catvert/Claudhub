@@ -23,7 +23,7 @@ use gpui_component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     h_flex,
-    input::{Input, Textarea},
+    input::Input,
     v_flex, ActiveTheme, Disableable, Selectable, Sizable, WindowExt,
 };
 
@@ -126,9 +126,13 @@ impl ClaudhubApp {
         let entity = cx.entity();
         input.update(cx, |input, cx| input.set_value(body, window, cx));
         let mono = cx.theme().mono_font_family.clone();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
+        window.open_dialog(cx, move |dialog, _window, cx| {
             let (input, excerpt, mono) = (input.clone(), excerpt.clone(), mono.clone());
-            let (on_ok, on_cancel) = (entity.clone(), entity.clone());
+            // Cloned into the closure and never **read** from it: `open_dialog`
+            // keeps a `Fn` called back from the root's own render, where reading
+            // the application is a panic. The harness only needs the handle —
+            // its listeners run outside the render, where reading is free.
+            let (on_ok, on_cancel, app) = (entity.clone(), entity.clone(), entity.clone());
             dialog
                 .title(tr!("note-title"))
                 .child(
@@ -159,7 +163,18 @@ impl ClaudhubApp {
                                         .map(|line| div().whitespace_nowrap().child(line)),
                                 ),
                         )
-                        .child(Textarea::new(&input)),
+                        // A field with the file editor's keys: see
+                        // `ui::surface::text_field`. Escape leaves insert mode
+                        // here rather than dismissing the dialog — the harness
+                        // takes it on the way down, and lets it through once
+                        // there is nothing left in the field to leave.
+                        .child(crate::ui::surface::text_field(
+                            crate::ui::surface::TextField::Note,
+                            &input,
+                            crate::ui::surface::grown_height(&input, 2, 8, cx),
+                            &app,
+                            cx,
+                        )),
                 )
                 .overlay_closable(false)
                 .close_button(false)
@@ -174,9 +189,10 @@ impl ClaudhubApp {
                     true
                 })
         });
-        // One opens this dialog to write: the caret goes in it. Enter stays a
-        // newline here — the field is a `Textarea`, and a remark about code runs
+        // One opens this dialog to write: the caret goes in it, and vim starts
+        // in insert mode. Enter stays a newline here — a remark about code runs
         // to several lines — so the note is filed by the button.
+        self.start_text_insert(crate::ui::surface::TextField::Note);
         super::dialogs::focus_field(&self.note_input, window, cx);
     }
 
@@ -585,7 +601,7 @@ impl ClaudhubApp {
         let input = self.prompt_input.clone();
         let entity = cx.entity();
         input.update(cx, |input, cx| input.set_value(text, window, cx));
-        window.open_dialog(cx, move |dialog, _window, _cx| {
+        window.open_dialog(cx, move |dialog, _window, cx| {
             let input = input.clone();
             let entity = entity.clone();
             let (worktree, ids) = (worktree.clone(), ids.clone());
@@ -596,7 +612,13 @@ impl ClaudhubApp {
                         .gap_2()
                         .w(px(640.))
                         .child(div().text_xs().child(tr!("agent-prompt-hint")))
-                        .child(Textarea::new(&input)),
+                        .child(crate::ui::surface::text_field(
+                            crate::ui::surface::TextField::Prompt,
+                            &input,
+                            crate::ui::surface::grown_height(&input, 8, 20, cx),
+                            &entity,
+                            cx,
+                        )),
                 )
                 .overlay_closable(false)
                 .close_button(false)
@@ -610,7 +632,8 @@ impl ClaudhubApp {
                 })
         });
         // The text is already there, and it is meant to be added to: the caret
-        // goes in the field.
+        // goes in the field, in insert mode.
+        self.start_text_insert(crate::ui::surface::TextField::Prompt);
         super::dialogs::focus_field(&self.prompt_input, window, cx);
     }
 
@@ -1017,7 +1040,16 @@ impl ClaudhubApp {
         v_flex()
             .w_full()
             .child(header)
-            .child(div().p_2().child(Textarea::new(&self.journal_input)))
+            // The free note grows with what is written in it, between three
+            // rows and fourteen — `grown_height` is the auto-grow an editor
+            // does not have, read off the last paint. See `ui::surface`.
+            .child(div().p_2().child(crate::ui::surface::text_field(
+                crate::ui::surface::TextField::Journal,
+                &self.journal_input,
+                crate::ui::surface::grown_height(&self.journal_input, 3, 14, cx),
+                &cx.entity(),
+                cx,
+            )))
     }
 
     /// The files ticked as reviewed, and what is needed to hand them back.

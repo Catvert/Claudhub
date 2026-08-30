@@ -2071,12 +2071,12 @@ impl ClaudhubApp {
                                     .map(|el| match vim {
                                         true => {
                                             let el = el.key_context(
-                                                crate::ui::shortcuts::query_editor_context(),
+                                                crate::ui::shortcuts::editor_vim_context(),
                                             );
                                             crate::ui::surface::vim_capture(
                                                 el,
                                                 Surface::Query(id),
-                                                cx,
+                                                &cx.entity(),
                                             )
                                         }
                                         false => el,
@@ -2101,7 +2101,7 @@ impl ClaudhubApp {
                                     // it: see `surface::wheel_capture`.
                                     .child(crate::ui::surface::wheel_capture(
                                         Surface::Query(id),
-                                        cx,
+                                        &cx.entity(),
                                     )),
                             ),
                     )

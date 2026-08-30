@@ -206,13 +206,6 @@ pub const TOOLS: &[Tool] = &[
         conditional: false,
     },
     Tool {
-        panel: "ClaudhubSearch",
-        title: Label("panel-search"),
-        icon: "search",
-        home: Anchor::new(Side::Left, Half::Top),
-        conditional: false,
-    },
-    Tool {
         panel: "ClaudhubChanges",
         title: Label("range-working"),
         icon: "git-commit-horizontal",
@@ -226,6 +219,18 @@ pub const TOOLS: &[Tool] = &[
         panel: "ClaudhubBranch",
         title: Label("range-branch"),
         icon: "git-pull-request",
+        home: Anchor::new(Side::Left, Half::Top),
+        conditional: false,
+    },
+    // **After the two git tabs and not before them.** The rail's order is the
+    // tabs' order, and this is where the hand had put it: one opens a project
+    // on a file, one looks at what changed and at what the branch carries, and
+    // one searches the whole tree afterwards — it is the tab one comes to with
+    // a question rather than the one one lives in.
+    Tool {
+        panel: "ClaudhubSearch",
+        title: Label("panel-search"),
+        icon: "search",
         home: Anchor::new(Side::Left, Half::Top),
         conditional: false,
     },
@@ -354,6 +359,21 @@ pub const TOOLS: &[Tool] = &[
         conditional: false,
     },
 ];
+
+/// The glyph a panel's tab wears — its own button's, on the rail.
+///
+/// **One name for one view.** The rail's button and the tab are two ways of
+/// reaching the same panel, and the eye that learned the glyph on one must find
+/// it on the other; without it, a folded view was a picture and an unfolded one
+/// a word. `None` for what has no button: a document — a file, a console, an
+/// error one is reading — is not a tool window, and it wears the icon of what it
+/// holds.
+pub fn icon_of(panel: &str) -> Option<&'static str> {
+    TOOLS
+        .iter()
+        .find(|tool| tool.panel == panel)
+        .map(|tool| tool.icon)
+}
 
 /// Every tool window.
 ///

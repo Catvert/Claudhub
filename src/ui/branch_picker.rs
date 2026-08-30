@@ -48,7 +48,7 @@ use gpui_component::{
     h_flex,
     input::{Input, InputState},
     popover::{Popover, PopoverState},
-    v_flex, v_virtual_list, ActiveTheme, Sizable as _, StyledExt as _,
+    v_flex, v_virtual_list, ActiveTheme, Disableable as _, Sizable as _, StyledExt as _,
 };
 
 use crate::git::{BranchKind, LogRange};
@@ -105,6 +105,13 @@ struct Look {
     accent: Hsla,
     muted: Hsla,
     border: Hsla,
+    /// Where one stands. The strongest of the three, since it is the one row a
+    /// list of forty is read to find.
+    primary: Hsla,
+    /// What is to be integrated before anything can be pushed — the lag.
+    warning: Hsla,
+    /// What is there and nowhere else yet — the lead.
+    success: Hsla,
     /// A branch's row: two lines of text and next to nothing around them.
     row: gpui::Pixels,
     /// A group's heading: one line, and shorter than a row — it is a rule with
@@ -122,6 +129,9 @@ impl Look {
             accent: cx.theme().accent,
             muted: cx.theme().muted_foreground,
             border: cx.theme().border,
+            primary: cx.theme().primary,
+            warning: cx.theme().warning,
+            success: cx.theme().success,
             // Two lines and a hair, not two rows: a list where every entry is
             // twice as tall as it needs to be shows four of them where it could
             // show seven, and what one comes here to do is compare.
@@ -154,6 +164,14 @@ pub(super) struct BranchPicker {
     /// `origin` carries a hundred branches nobody has checked out. It does not
     /// outlive the window: a fold here is a reading posture, not a preference.
     folded: [bool; 2],
+    /// The wheel's smoothing, this view's own.
+    ///
+    /// The panels keep theirs on the application, keyed by the bar's id,
+    /// because a panel is not an entity of its own; this is one, and one list
+    /// is one motion — there is nothing to key. Without it the popover was the
+    /// one list in the window whose wheel jumped, which reads as a different
+    /// application under the same title bar.
+    motion: crate::ui::motion::ScrollMotion,
     /// The popover carrying us, so that a gesture can close it. Handed over by
     /// the content closure — a popover's state lives in element state, and that
     /// is the only place it is reachable from.
@@ -195,6 +213,7 @@ impl BranchPicker {
                 rows: Rc::new(Vec::new()),
                 stale: true,
                 folded: [false; 2],
+                motion: crate::ui::motion::ScrollMotion::new(crate::ui::motion::Axes::Vertical),
                 popover: None,
             }
         })
@@ -379,7 +398,7 @@ impl BranchPicker {
         let Some(next) = crate::ui::picker::step_cursor(
             rows.len(),
             // A heading is not somewhere one can land; a scope is.
-            |ix| !matches!(rows[ix], Row::Group(_)),
+            |ix| !matches!(rows[ix], Row::Group { .. }),
             self.cursor,
             delta,
         ) else {
@@ -422,8 +441,12 @@ impl BranchPicker {
         }
     }
 
-    fn render_list(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_list(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let look = Look::of(cx);
+        // The transition, one step per frame. It asks for the next frame itself
+        // for as long as it is moving.
+        let base = crate::ui::scroll::Scrollable::base(&self.scroll);
+        self.motion.advance(&base, window);
         // A popover is as tall as what it holds, up to a ceiling; a zone is as
         // tall as it was dragged, and the list is what takes what is left over
         // once the field and the footer have had theirs.
@@ -438,7 +461,7 @@ impl BranchPicker {
         let sizes = Rc::new(
             rows.iter()
                 .map(|row| match row {
-                    Row::Group(_) => gpui::size(px(0.), look.head),
+                    Row::Group { .. } => gpui::size(px(0.), look.head),
                     Row::Scope(_) => gpui::size(px(0.), look.scope),
                     Row::Branch(_) => gpui::size(px(0.), look.row),
                 })
@@ -452,8 +475,8 @@ impl BranchPicker {
         let build = {
             let rows = rows.clone();
             move |ix: usize, cx: &mut App| match &rows[ix] {
-                Row::Group(kind) => {
-                    group_heading(&entity, ix, *kind, folded[group_ix(*kind)], look)
+                Row::Group { kind, count } => {
+                    group_heading(&entity, ix, *kind, *count, folded[group_ix(*kind)], look)
                 }
                 Row::Scope(scope) => {
                     let shown = log.as_ref() == Some(&range_of(*scope));
@@ -470,11 +493,14 @@ impl BranchPicker {
             .min_h_0()
             .when(docked, |el| el.flex_1())
             .child(
-                div()
-                    .w_full()
-                    .px_1()
-                    .py_1()
-                    .child(Input::new(&self.query).xsmall()),
+                div().w_full().px_1().py_1().child(
+                    Input::new(&self.query)
+                        .xsmall()
+                        // What the field does is filter, and a bare box above a
+                        // list reads as somewhere to type a name. The glyph is
+                        // the one the panels' own `Ctrl+F` wears.
+                        .prefix(icon("search").xsmall().text_color(look.muted)),
+                ),
             )
             .child(if count == 0 {
                 div()
@@ -486,19 +512,24 @@ impl BranchPicker {
                     .child(tr!("branch-none"))
                     .into_any_element()
             } else {
-                crate::ui::scroll::vertical(
-                    "branch-list",
-                    &self.scroll,
-                    v_virtual_list(
-                        cx.entity(),
-                        "branch-rows",
-                        sizes,
-                        move |_, range, _window, cx| {
-                            range.map(|ix| build(ix, cx)).collect::<Vec<_>>()
-                        },
-                    )
-                    .size_full()
-                    .track_scroll(&self.scroll),
+                crate::ui::scroll::smooth_wheel(
+                    crate::ui::scroll::vertical(
+                        "branch-list",
+                        &self.scroll,
+                        v_virtual_list(
+                            cx.entity(),
+                            "branch-rows",
+                            sizes,
+                            move |_, range, _window, cx| {
+                                range.map(|ix| build(ix, cx)).collect::<Vec<_>>()
+                            },
+                        )
+                        .size_full()
+                        .track_scroll(&self.scroll),
+                    ),
+                    base,
+                    |this| &mut this.motion,
+                    cx,
                 )
                 .when(docked, |el| el.flex_1().min_h_0())
                 .when(!docked, |el| el.h(LIST_HEIGHT))
@@ -770,17 +801,21 @@ impl BranchPicker {
                 look,
                 cx,
             ));
+            // **One entry for both halves.** The dialog carries the box that
+            // takes `origin` with it — unticked, since that half is the one
+            // nobody undoes for you. Two entries meant doing the gesture twice
+            // to finish with a branch, which is what one does every time.
             list = list.child(self.action(
                 "delete",
                 "trash-2",
                 tr!("branch-delete"),
                 checkable,
                 {
-                    let branch = name.clone();
+                    let (branch, has_remote) = (name.clone(), has_remote);
                     move |this, window, cx| {
                         let branch = branch.clone();
                         this.act(window, cx, move |app, window, cx| {
-                            app.confirm_delete_branch(branch, window, cx)
+                            app.confirm_delete_branch(branch, has_remote, window, cx)
                         })
                     }
                 },
@@ -788,12 +823,10 @@ impl BranchPicker {
                 cx,
             ));
         }
-        // On the remote, and said as such: it is a different regret from the
-        // local one, and nobody undoes it for you.
-        if has_remote {
-            if remote {
-                list = list.child(separator(look));
-            }
+        // A remote-tracking name has no local half to delete: there the gesture
+        // is the remote one alone, and it says so.
+        if remote {
+            list = list.child(separator(look));
             list = list.child(self.action(
                 "delete-remote",
                 "trash-2",
@@ -845,19 +878,23 @@ impl BranchPicker {
                     })),
             )
             .child(icon("git-branch").xsmall().text_color(look.muted))
+            // The same shoulder as in the list: the name takes what it needs,
+            // its chips follow it, and the leftover room goes after them.
             .child(
                 div()
-                    .flex_1()
                     .min_w_0()
                     .truncate()
                     .text_sm()
                     .font_semibold()
                     .child(SharedString::from(row.name.clone())),
             )
-            .when(row.kind == BranchKind::Remote, |el| {
-                el.child(tag(tr!("branch-remote"), look))
+            .when(row.is_head, |el| {
+                el.child(crate::ui::theme::chip(tr!("branch-here"), look.primary))
             })
-            .when(row.is_head, |el| el.child(tag(tr!("branch-here"), look)))
+            .when(row.kind == BranchKind::Remote, |el| {
+                el.child(crate::ui::theme::chip(tr!("branch-remote"), look.muted))
+            })
+            .child(div().flex_1())
     }
 
     /// One action: an icon, its name, and nothing else.
@@ -896,9 +933,9 @@ impl BranchPicker {
 }
 
 impl Render for BranchPicker {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match &self.step {
-            Step::List => self.render_list(cx),
+            Step::List => self.render_list(window, cx),
             Step::Actions(row) => {
                 let row = row.clone();
                 self.render_actions(&row, cx)
@@ -991,7 +1028,7 @@ fn fold(rows: Vec<Row>, folded: [bool; 2]) -> Vec<Row> {
     let mut shut = false;
     rows.into_iter()
         .filter(|row| match row {
-            Row::Group(kind) => {
+            Row::Group { kind, .. } => {
                 shut = folded[group_ix(*kind)];
                 true
             }
@@ -1012,6 +1049,7 @@ fn group_heading(
     picker: &Entity<BranchPicker>,
     index: usize,
     kind: BranchKind,
+    count: usize,
     folded: bool,
     look: Look,
 ) -> gpui::AnyElement {
@@ -1044,7 +1082,6 @@ fn group_heading(
         )
         .child(
             div()
-                .flex_1()
                 .min_w_0()
                 .truncate()
                 .text_xs()
@@ -1055,6 +1092,19 @@ fn group_heading(
                     BranchKind::Remote => tr!("branches-remote"),
                 }),
         )
+        // **How many are under it**, and it is what a closed group has left to
+        // say: a heading over nothing tells one the group is shut, not that
+        // eighty-seven remotes are behind it. Beside the title rather than at
+        // the far right, for the reason "here" sits beside its name: it
+        // qualifies the word, so it belongs against it.
+        .child(
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(look.muted)
+                .child(count.to_string()),
+        )
+        .child(div().flex_1())
         .into_any_element()
 }
 
@@ -1062,6 +1112,12 @@ fn group_heading(
 ///
 /// A band and not a pill — the window's rule for every list: what a selected row
 /// designates is the *row*, which is what the click and the `…` act on.
+///
+/// The line reads left to right in the order one asks the questions: which
+/// branch, where it stands, what it is worth. The name comes first and the
+/// chips that qualify it sit **at its shoulder**; the two counts are pushed to
+/// the right edge, where they line up down the list and can be compared
+/// without reading a word.
 #[allow(clippy::too_many_arguments)]
 fn branch_row(
     picker: &Entity<BranchPicker>,
@@ -1074,16 +1130,19 @@ fn branch_row(
     look: Look,
     _cx: &mut App,
 ) -> gpui::AnyElement {
-    // Where it is checked out matters more than what it carries: that is what
-    // explains a greyed row.
-    let detail = match row.taken_by.as_ref().filter(|_| !row.is_head) {
-        Some(path) => format!(
-            "{} {}",
-            tr!("branch-checked-out"),
-            path.file_name().unwrap_or_default().to_string_lossy()
-        ),
-        None => row.detail.clone(),
-    };
+    // The worktree holding it, as a chip beside the name and no longer in
+    // place of what the branch carries: those are two questions, and answering
+    // the first used to throw the second away — the subject that tells
+    // `wt/fix-a` from `wt/fix-b` is exactly what one reads when choosing
+    // between two branches, checked out elsewhere or not.
+    let taken = row.taken_by.as_ref().filter(|_| !row.is_head).map(|path| {
+        SharedString::from(
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+        )
+    });
     let checkable = !row.is_head && !row.taken();
     // **Every row answers in the docked list.** What a click does there is show
     // the branch's commits, and there is no branch one cannot read — not the
@@ -1091,11 +1150,37 @@ fn branch_row(
     let clickable = checkable || matches!(mode, Mode::Docked);
     let (for_click, for_menu) = (picker.clone(), picker.clone());
     let (clicked, opened) = (row.clone(), row.clone());
+    // The `…` comes out on the row under the pointer and on the row the list is
+    // standing on, and stays out of the way everywhere else: forty rows each
+    // carrying a permanent `…` is a column of dots one reads before the branch
+    // names. One is always on screen — the row one is on — which is what keeps
+    // the gesture discoverable, the rule the panels' magnifier already follows.
+    //
+    // Hidden by opacity and not by absence: the row must not change shape under
+    // the pointer, and nothing can be clicked blind — the hover that reveals it
+    // is the same one that has to happen before it can be aimed at.
+    let group = SharedString::from(format!("branch-row-{index}"));
+    let armed = at_cursor || shown;
 
     h_flex()
         .id(("branch-row", index))
+        .group(group.clone())
         .h(look.row)
         .w_full()
+        // The rule down the left edge of the branch one is on: the mark every
+        // editor puts on the file it has open, and what makes that row findable
+        // in a list of forty without reading a word of it. The chip says which
+        // one, the rule says where — one is read, the other is seen.
+        //
+        // **Every row carries the border, and all but one carry it in nothing.**
+        // Adding it to a single row would move that row's text two pixels right
+        // of its neighbours', which reads as a misalignment rather than as a
+        // mark.
+        .border_l_2()
+        .border_color(match row.is_head {
+            true => look.primary,
+            false => gpui::transparent_black(),
+        })
         // Set in from the heading: a flat column under a title reads as a list
         // that happens to have a title above it, not as the group's branches.
         // It is the chevron's own width.
@@ -1125,9 +1210,16 @@ fn branch_row(
                         .min_w_0()
                         .gap_1()
                         .items_center()
+                        // **The name takes what it needs and no more.** It was
+                        // `flex_1`, which took the whole line and left "here"
+                        // against the right edge — a chip so far from the name
+                        // it qualifies that it read as a column of its own,
+                        // and on a short name half the row was empty between
+                        // the two. Shrinkable and `min_w_0` instead: it
+                        // truncates only once there is nothing left to give,
+                        // and what is left over goes to the spacer below.
                         .child(
                             div()
-                                .flex_1()
                                 .min_w_0()
                                 .truncate()
                                 .text_sm()
@@ -1135,9 +1227,39 @@ fn branch_row(
                                 .when(!clickable && !row.is_head, |el| el.text_color(look.muted))
                                 .child(SharedString::from(row.name.clone())),
                         )
-                        .when(row.is_head, |el| el.child(tag(tr!("branch-here"), look))),
+                        .when(row.is_head, |el| {
+                            el.child(crate::ui::theme::chip(tr!("branch-here"), look.primary))
+                        })
+                        .children(taken.map(|name| worktree_chip(name, look.muted)))
+                        // **The counts belong to the name's line.** Behind
+                        // before ahead: that is what has to be integrated
+                        // before anything can be pushed. Warning against
+                        // success, the pair the rest of the window uses for
+                        // owed and gained.
+                        //
+                        // They were centred against both lines, at the right
+                        // edge of the row — a column one could read down, but
+                        // one that answered about a branch while sitting level
+                        // with its commit subject. What "↓2" says is something
+                        // about the *name*, so it goes where the name is, at
+                        // its shoulder with the rest of what qualifies it.
+                        .when(row.behind > 0, |el| {
+                            el.child(crate::ui::theme::chip(
+                                SharedString::from(format!("↓{}", row.behind)),
+                                look.warning,
+                            ))
+                        })
+                        .when(row.ahead > 0, |el| {
+                            el.child(crate::ui::theme::chip(
+                                SharedString::from(format!("↑{}", row.ahead)),
+                                look.success,
+                            ))
+                        })
+                        // The room nobody claimed. It is what holds the chips
+                        // at the name's shoulder instead of at the edge.
+                        .child(div().flex_1()),
                 )
-                .when(!detail.is_empty(), |el| {
+                .when(!row.detail.is_empty(), |el| {
                     el.child(
                         div()
                             .w_full()
@@ -1145,45 +1267,33 @@ fn branch_row(
                             .truncate()
                             .text_xs()
                             .text_color(look.muted)
-                            .child(detail),
+                            .child(row.detail.clone()),
                     )
                 }),
         )
-        // Behind before ahead: that is what has to be integrated before one can
-        // push.
-        .when(row.behind > 0, |el| {
-            el.child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .text_color(look.muted)
-                    .child(format!("↓{}", row.behind)),
-            )
-        })
-        .when(row.ahead > 0, |el| {
-            el.child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .text_color(look.muted)
-                    .child(format!("↑{}", row.ahead)),
-            )
-        })
         .child(
-            Button::new(("branch-actions", index))
-                .ghost()
-                .xsmall()
-                .icon(icon("ellipsis"))
-                .tooltip(tr!("branch-actions"))
-                .on_click(move |_, _window, cx| {
-                    // The row is clickable too, and its click checks out: without
-                    // this the `…` would switch branch on its way to the menu.
-                    cx.stop_propagation();
-                    for_menu.update(cx, |this, cx| {
-                        this.step = Step::Actions(opened.clone());
-                        cx.notify();
-                    });
-                }),
+            div()
+                .flex_none()
+                .when(!armed, |el| {
+                    el.opacity(0.).group_hover(group, |s| s.opacity(1.))
+                })
+                .child(
+                    Button::new(("branch-actions", index))
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("ellipsis"))
+                        .tooltip(tr!("branch-actions"))
+                        .on_click(move |_, _window, cx| {
+                            // The row is clickable too, and its click checks
+                            // out: without this the `…` would switch branch on
+                            // its way to the menu.
+                            cx.stop_propagation();
+                            for_menu.update(cx, |this, cx| {
+                                this.step = Step::Actions(opened.clone());
+                                cx.notify();
+                            });
+                        }),
+                ),
         )
         .into_any_element()
 }
@@ -1192,18 +1302,94 @@ fn separator(look: Look) -> impl IntoElement {
     div().w_full().my_0p5().h(px(1.)).bg(look.border)
 }
 
-fn tag(label: SharedString, look: Look) -> impl IntoElement {
-    div()
-        .flex_none()
-        .px_1()
-        .rounded_sm()
-        .bg(look.accent)
-        .text_xs()
-        .text_color(look.muted)
-        .child(label)
+/// The worktree a branch is already checked out in.
+///
+/// The glyph is what makes it legible without a word: a name alone in a chip
+/// says nothing about *what* is named, and "checked out in" spelled out is
+/// three words on a line that has two already.
+fn worktree_chip(name: SharedString, colour: Hsla) -> impl IntoElement {
+    crate::ui::theme::chip_base(colour)
+        .child(icon("folder").xsmall())
+        .child(name)
 }
 
 impl ClaudhubApp {
+    /// Pull and push, beside the branch they are about — **and only when there
+    /// is something to pull or to push**.
+    ///
+    /// The same two gestures live in the changes panel's bar, where they are
+    /// always painted because that bar is about the working tree and one goes to
+    /// it in order to act. The title bar is not that: it is on screen at every
+    /// moment, the hours where the branch is level with its remote included, and
+    /// a button that does nothing for hours is a button one stops seeing. Here
+    /// they appear because there is work to do, which is what makes them worth a
+    /// glance.
+    ///
+    /// **The glyph alone, no count.** The picker's trigger sits one pixel to the
+    /// left and already says how far behind and how far ahead; the same two
+    /// numbers again would read as four things. The colours are that trigger's —
+    /// warning for what is owed, success for what is gained — so the eye joins a
+    /// count to its button without a word, and the gloss says the number for the
+    /// hand that wants it.
+    pub(super) fn render_sync_buttons(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let Some((ahead, behind)) = self
+            .active_review()
+            .map(|review| (review.status.ahead, review.status.behind))
+        else {
+            return Vec::new();
+        };
+        let (pulling, pushing) = (
+            self.active_running(Action::Pull),
+            self.active_running(Action::Push),
+        );
+        let (warning, success) = (cx.theme().warning, cx.theme().success);
+        let mut out: Vec<gpui::AnyElement> = Vec::new();
+        // Behind before ahead, the list's order: what has to be integrated comes
+        // before what can be sent.
+        if behind > 0 {
+            out.push(
+                Button::new("topbar-pull")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("arrow-down-to-line").text_color(warning))
+                    .tooltip(tr!("action-pull-behind", { count: behind }))
+                    .loading(pulling)
+                    .disabled(pulling)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(worktree) = this.active.clone() {
+                            let cmd = Cmd::Pull {
+                                worktree: worktree.clone(),
+                            };
+                            this.start(Some(worktree), Action::Pull, cmd, cx);
+                        }
+                    }))
+                    .into_any_element(),
+            );
+        }
+        if ahead > 0 {
+            out.push(
+                Button::new("topbar-push")
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("arrow-up-from-line").text_color(success))
+                    .tooltip(tr!("action-push-ahead", { count: ahead }))
+                    .loading(pushing)
+                    .disabled(pushing)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(worktree) = this.active.clone() {
+                            let cmd = Cmd::Push {
+                                worktree: worktree.clone(),
+                                force_with_lease: false,
+                            };
+                            this.start(Some(worktree), Action::Push, cmd, cx);
+                        }
+                    }))
+                    .into_any_element(),
+            );
+        }
+        out
+    }
+
     /// The branch picker's button, and the surface it opens.
     ///
     /// `None` without a worktree: an empty picker offers a gesture that cannot
@@ -1222,6 +1408,10 @@ impl ClaudhubApp {
             .unwrap_or((0, 0));
         let _ = worktree;
         let muted = cx.theme().muted_foreground;
+        // The same two chips as in the list below it: the lead and the lag are
+        // read in the same glance whether one is looking at the bar or at the
+        // branch it names, and two spellings of one thing are two things.
+        let (warning, success) = (cx.theme().warning, cx.theme().success);
         let picker = self.branch_picker.clone();
         let focus = picker.read(cx).query.read(cx).focus_handle(cx);
         let for_open = picker.clone();
@@ -1236,8 +1426,18 @@ impl ClaudhubApp {
                             .text_color(muted)
                             .child(icon("git-branch").xsmall())
                             .child(div().max_w(px(220.)).truncate().text_sm().child(label))
-                            .when(behind > 0, |el| el.child(format!("↓{behind}")))
-                            .when(ahead > 0, |el| el.child(format!("↑{ahead}")))
+                            .when(behind > 0, |el| {
+                                el.child(crate::ui::theme::chip(
+                                    SharedString::from(format!("↓{behind}")),
+                                    warning,
+                                ))
+                            })
+                            .when(ahead > 0, |el| {
+                                el.child(crate::ui::theme::chip(
+                                    SharedString::from(format!("↑{ahead}")),
+                                    success,
+                                ))
+                            })
                             .child(icon("chevron-down").xsmall()),
                     ),
                 )
@@ -1285,8 +1485,14 @@ mod tests {
     fn names(rows: &[Row]) -> Vec<String> {
         rows.iter()
             .map(|row| match row {
-                Row::Group(BranchKind::Local) => "== locales".into(),
-                Row::Group(BranchKind::Remote) => "== distantes".into(),
+                Row::Group {
+                    kind: BranchKind::Local,
+                    ..
+                } => "== locales".into(),
+                Row::Group {
+                    kind: BranchKind::Remote,
+                    ..
+                } => "== distantes".into(),
                 Row::Scope(scope) => format!("{scope:?}"),
                 Row::Branch(row) => row.name.clone(),
             })
@@ -1298,9 +1504,15 @@ mod tests {
     #[test]
     fn a_folded_group_keeps_its_heading_and_loses_its_branches() {
         let rows = vec![
-            Row::Group(BranchKind::Local),
+            Row::Group {
+                kind: BranchKind::Local,
+                count: 1,
+            },
             branch("main", BranchKind::Local),
-            Row::Group(BranchKind::Remote),
+            Row::Group {
+                kind: BranchKind::Remote,
+                count: 1,
+            },
             branch("origin/feat", BranchKind::Remote),
         ];
         assert_eq!(

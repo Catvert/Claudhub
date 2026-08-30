@@ -11,9 +11,9 @@ use std::path::PathBuf;
 
 /// What the picker shows of one checkout.
 ///
-/// A snapshot taken when the list is built: the summary and the agent are read
-/// out of two tables of the application, and reading them from the virtualised
-/// closure would be two borrows per row and per frame.
+/// A snapshot taken when the list is built: the summary is read out of a table
+/// of the application, and reading it from the virtualised closure would be a
+/// borrow per row and per frame.
 #[derive(Clone)]
 pub(super) struct Item {
     pub main: PathBuf,
@@ -22,7 +22,6 @@ pub(super) struct Item {
     pub branch: Option<String>,
     pub is_main: bool,
     pub summary: Option<crate::git::Summary>,
-    pub agent: Option<crate::agent::State>,
     /// What `wt` says: started, stopped, or nothing to start at all.
     pub up: Option<bool>,
     /// The rest of what `wt` says — options, ports, `[status.info]` — condensed
@@ -148,6 +147,11 @@ pub(super) enum Row {
         main: PathBuf,
         name: String,
         folded: bool,
+        /// How many checkouts stand under it — what a folded repository has
+        /// left to say: its name over nothing tells one the group is shut, not
+        /// that eleven worktrees are behind it. The **filtered** count: the
+        /// heading answers the list on screen, not the disk.
+        count: usize,
     },
     Worktree(Item),
     /// A remembered repository that no longer opens. It stays on the list
@@ -162,9 +166,9 @@ pub(super) enum Row {
 /// One checkout, as the filter judges it: the cheap half of a row.
 ///
 /// The filter is answered on this, and only what it keeps is turned into an
-/// `Item` — the expensive half, which asks the application three questions per
-/// checkout. A project with forty worktrees answered all hundred and twenty of
-/// them to show two rows.
+/// `Item` — the expensive half, which asks the application a question or two per
+/// checkout. A project with forty worktrees answered all of them to show two
+/// rows.
 pub(super) struct Checkout {
     pub path: PathBuf,
     pub label: String,
@@ -221,6 +225,7 @@ pub(super) fn rows_for(
             main: repo.main.clone(),
             name: repo.name.clone(),
             folded,
+            count: kept.len(),
         });
         if !folded {
             rows.extend(kept.into_iter().map(|checkout| {
@@ -285,7 +290,6 @@ mod tests {
             branch: checkout.branch.clone(),
             is_main: checkout.is_main,
             summary: None,
-            agent: None,
             up: None,
             detail: None,
             pinned: false,
@@ -397,6 +401,28 @@ mod tests {
             names(&rows),
             ["== acetics", "main", "fix", "== claudhub", "wip"]
         );
+    }
+
+    /// A heading says how many checkouts stand under it, and it counts what the
+    /// filter left: the number answers the list on screen, which is the only
+    /// list one can see. Read on a folded repository, where it is all that is
+    /// left of them.
+    #[test]
+    fn a_repository_counts_the_checkouts_the_filter_left() {
+        let counts = |filter: &str| -> Vec<(String, usize)> {
+            rows_for(&project(), &[], filter, &HashSet::new(), item)
+                .into_iter()
+                .filter_map(|row| match row {
+                    Row::Repo { name, count, .. } => Some((name, count)),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            counts(""),
+            vec![("acetics".to_string(), 2), ("claudhub".to_string(), 1)]
+        );
+        assert_eq!(counts("login"), vec![("acetics".to_string(), 1)]);
     }
 
     /// A folded repository keeps its heading: that heading **is** the fold, and

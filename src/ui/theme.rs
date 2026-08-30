@@ -313,6 +313,35 @@ pub fn chevron_space() -> gpui::Div {
     gpui::div().w(px(14.)).flex_none()
 }
 
+/// The shell every chip shares: a word on a tint of its own colour.
+///
+/// **One shape for everything a row says beside its name** — "here", the
+/// worktree holding a branch, a lead, a lag — because they are read in a single
+/// glance, and four shapes would be four things to learn. Shared by the two
+/// pickers, which are the same surface twice over: a chip drawn twice drifts at
+/// the first correction.
+///
+/// The tint is the colour at low opacity and the ink is the colour itself,
+/// rather than a filled badge: a filled one needs an ink chosen against it,
+/// which is the light-theme trap `surface::ink_on` exists for. This one holds
+/// on both themes without asking.
+pub fn chip_base(colour: Hsla) -> gpui::Div {
+    gpui_component::h_flex()
+        .flex_none()
+        .items_center()
+        .gap_0p5()
+        .px_1()
+        .rounded_full()
+        .bg(colour.opacity(0.15))
+        .text_xs()
+        .text_color(colour)
+}
+
+/// A chip with nothing in it but its word.
+pub fn chip(label: gpui::SharedString, colour: Hsla) -> impl IntoElement {
+    chip_base(colour).child(label)
+}
+
 /// The `+n` and `−m` of a volume of work, in the diff's colours.
 ///
 /// Two independent children rather than one wrapped element: the callers drop

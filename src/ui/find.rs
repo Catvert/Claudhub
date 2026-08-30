@@ -68,6 +68,9 @@ pub enum Pane {
     /// needs its key like the others, if only so `Ctrl+F` does not go to the
     /// panel touched before it.
     Editor,
+    /// The home page. There is nothing in it to look for; the key exists for
+    /// the reason the two above it do.
+    Home,
     /// The SQL console. Same thing: the query editor is what searches.
     Console,
     /// The queries already run. It filters, like every list whose order is

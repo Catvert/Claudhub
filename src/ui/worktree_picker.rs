@@ -53,7 +53,9 @@ enum Step {
 #[derive(Clone, Copy)]
 struct Look {
     accent: Hsla,
-    accent_foreground: Hsla,
+    /// Where one stands: the rule down the current checkout's left edge, its
+    /// "here", and the pin one has ticked.
+    primary: Hsla,
     muted: Hsla,
     border: Hsla,
     warning: Hsla,
@@ -74,7 +76,7 @@ impl Look {
         let unit = crate::ui::theme::row_height(cx);
         Self {
             accent: cx.theme().accent,
-            accent_foreground: cx.theme().primary,
+            primary: cx.theme().primary,
             muted: cx.theme().muted_foreground,
             border: cx.theme().border,
             warning: cx.theme().warning,
@@ -107,6 +109,11 @@ pub(super) struct WorktreePicker {
     /// to remember is the one that has been shut. It does not outlive the
     /// window — a fold here is a reading posture, not a preference.
     folded: HashSet<PathBuf>,
+    /// The wheel's smoothing, this view's own — the branch picker's field, for
+    /// the same reason: a view of its own keeps its motion, where a panel's
+    /// lives on the application. The two pickers move alike or the title bar
+    /// has two behaviours in one row of buttons.
+    motion: crate::ui::motion::ScrollMotion,
     popover: Option<Entity<PopoverState>>,
 }
 
@@ -139,6 +146,7 @@ impl WorktreePicker {
                 rows: Rc::new(Vec::new()),
                 stale: true,
                 folded: HashSet::new(),
+                motion: crate::ui::motion::ScrollMotion::new(crate::ui::motion::Axes::Vertical),
                 popover: None,
             }
         })
@@ -235,7 +243,6 @@ impl WorktreePicker {
             branch: checkout.branch.clone(),
             is_main: checkout.is_main,
             summary: app.summaries.get(&checkout.path).copied(),
-            agent: app.agents.get(&checkout.path).cloned(),
             up: app.wt_state(&checkout.path).and_then(|state| state.up),
             detail: app.wt_state(&checkout.path).and_then(worktrees::detail),
             pinned: pinned.contains(&checkout.path),
@@ -289,8 +296,12 @@ impl WorktreePicker {
         }
     }
 
-    fn render_list(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_list(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let look = Look::of(cx);
+        // The transition, one step per frame; it asks for the next itself while
+        // it is moving.
+        let base = crate::ui::scroll::Scrollable::base(&self.scroll);
+        self.motion.advance(&base, window);
         let rows = self.rows(cx);
         let count = rows.len();
         let cursor = self.cursor;
@@ -314,9 +325,12 @@ impl WorktreePicker {
         let build = {
             let rows = rows.clone();
             move |ix: usize, cx: &mut App| match &rows[ix] {
-                Row::Repo { main, name, folded } => {
-                    repo_heading(&entity, ix, main, name, *folded, look)
-                }
+                Row::Repo {
+                    main,
+                    name,
+                    folded,
+                    count,
+                } => repo_heading(&entity, ix, main, name, *count, *folded, look),
                 Row::Worktree(item) => worktree_row(
                     &entity,
                     ix,
@@ -337,11 +351,13 @@ impl WorktreePicker {
             .w_full()
             .min_h_0()
             .child(
-                div()
-                    .w_full()
-                    .px_1()
-                    .py_1()
-                    .child(Input::new(&self.query).xsmall()),
+                div().w_full().px_1().py_1().child(
+                    Input::new(&self.query)
+                        .xsmall()
+                        // What the field does is filter, and a bare box above a
+                        // list reads as somewhere to type a name.
+                        .prefix(icon("search").xsmall().text_color(look.muted)),
+                ),
             )
             .child(if count == 0 {
                 div()
@@ -352,19 +368,24 @@ impl WorktreePicker {
                     .child(tr!("worktree-none"))
                     .into_any_element()
             } else {
-                crate::ui::scroll::vertical(
-                    "worktree-list",
-                    &self.scroll,
-                    v_virtual_list(
-                        cx.entity(),
-                        "worktree-rows",
-                        sizes,
-                        move |_, range, _window, cx| {
-                            range.map(|ix| build(ix, cx)).collect::<Vec<_>>()
-                        },
-                    )
-                    .size_full()
-                    .track_scroll(&self.scroll),
+                crate::ui::scroll::smooth_wheel(
+                    crate::ui::scroll::vertical(
+                        "worktree-list",
+                        &self.scroll,
+                        v_virtual_list(
+                            cx.entity(),
+                            "worktree-rows",
+                            sizes,
+                            move |_, range, _window, cx| {
+                                range.map(|ix| build(ix, cx)).collect::<Vec<_>>()
+                            },
+                        )
+                        .size_full()
+                        .track_scroll(&self.scroll),
+                    ),
+                    base,
+                    |this| &mut this.motion,
+                    cx,
                 )
                 .h(LIST_HEIGHT)
                 .into_any_element()
@@ -480,9 +501,9 @@ impl WorktreePicker {
 }
 
 impl Render for WorktreePicker {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match &self.step {
-            Step::List => self.render_list(cx),
+            Step::List => self.render_list(window, cx),
             Step::Actions {
                 main,
                 worktree,
@@ -513,6 +534,7 @@ fn repo_heading(
     index: usize,
     main: &Path,
     name: &str,
+    count: usize,
     folded: bool,
     look: Look,
 ) -> gpui::AnyElement {
@@ -549,7 +571,6 @@ fn repo_heading(
         )
         .child(
             div()
-                .flex_1()
                 .min_w_0()
                 .truncate()
                 .text_xs()
@@ -557,11 +578,28 @@ fn repo_heading(
                 .text_color(look.muted)
                 .child(SharedString::from(name.to_string())),
         )
+        // How many checkouts are under it, beside the name and not at the far
+        // right: it qualifies the word, so it belongs against it. On a folded
+        // repository it is all that is left of them.
+        .child(
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(look.muted)
+                .child(count.to_string()),
+        )
+        .child(div().flex_1())
         .child(
             Button::new(("new-worktree", index))
                 .ghost()
                 .xsmall()
                 .icon(icon("plus"))
+                // **The word, and not the glyph alone.** A `+` on a repository's
+                // line is read as "add a repository" as readily as "add a
+                // worktree", and the one gesture this window exists for should
+                // not need a hover to say which it is. The gloss stays: it is
+                // what says *which* repository is being added to.
+                .label(tr!("worktree-new"))
                 .tooltip(tr!("worktree-new"))
                 .on_click(move |_, window, cx| {
                     // The heading folds on click: without this the `+` would
@@ -599,10 +637,29 @@ fn worktree_row(
     } else {
         look.row
     };
+    // The `…` comes out on the row under the pointer and on the row one is
+    // standing in, and stays out of the way everywhere else — the branch
+    // picker's rule, and the two are one surface twice over. The pin is not in
+    // it: it is a state one reads down the list, not an action one aims at.
+    let group = SharedString::from(format!("worktree-row-{index}"));
+    let armed = at_cursor || selected;
+
     h_flex()
         .id(("worktree-row", index))
+        .group(group.clone())
         .h(height)
         .w_full()
+        // The rule down the left edge of the checkout one is in: the mark every
+        // editor puts on the file it has open, and what makes that row findable
+        // without reading a word of it. **Every row carries the border, and all
+        // but one carry it in nothing** — on a single row it would move that
+        // row's text two pixels right of its neighbours', which reads as a
+        // misalignment rather than as a mark.
+        .border_l_2()
+        .border_color(match selected {
+            true => look.primary,
+            false => gpui::transparent_black(),
+        })
         // Set in from the heading: a flat column under a title reads as a list
         // that happens to have a title above it, not as the repository's
         // checkouts. It is the chevron's own width, so the folder icon lands
@@ -629,12 +686,29 @@ fn worktree_row(
                 .min_w_0()
                 .justify_center()
                 .child(
-                    div()
+                    h_flex()
                         .w_full()
-                        .truncate()
-                        .text_sm()
-                        .when(selected, |el| el.font_semibold())
-                        .child(SharedString::from(item.label.clone())),
+                        .min_w_0()
+                        .gap_1()
+                        .items_center()
+                        // The name takes what it needs and no more, so what
+                        // qualifies it sits at its shoulder rather than at the
+                        // far edge — the branch picker's line, written again.
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .when(selected, |el| el.font_semibold())
+                                .child(SharedString::from(item.label.clone())),
+                        )
+                        // The same word as the branch picker's, and it is the
+                        // same question: bold alone says "this one" only to
+                        // somebody comparing two rows.
+                        .when(selected, |el| {
+                            el.child(crate::ui::theme::chip(tr!("branch-here"), look.primary))
+                        })
+                        .child(div().flex_1()),
                 )
                 .when_some(item.branch.clone(), |el, branch| {
                     el.child(
@@ -685,9 +759,6 @@ fn worktree_row(
                     }),
             )
         })
-        .when_some(item.agent.as_ref(), |el, agent| {
-            el.child(crate::ui::topbar::agent_badge(agent, cx))
-        })
         .when_some(
             item.summary.filter(|summary| !summary.is_empty()),
             |el, summary| el.child(crate::ui::topbar::volume(summary, cx)),
@@ -704,7 +775,7 @@ fn worktree_row(
                 .xsmall()
                 .icon(
                     icon(if item.pinned { "pin-off" } else { "pin" }).text_color(if item.pinned {
-                        look.accent_foreground
+                        look.primary
                     } else {
                         look.muted.opacity(0.6)
                     }),
@@ -731,25 +802,32 @@ fn worktree_row(
                 }),
         )
         .child(
-            Button::new(("worktree-actions", index))
-                .ghost()
-                .xsmall()
-                .icon(icon("ellipsis"))
-                .tooltip(tr!("worktree-actions"))
-                .on_click(move |_, _window, cx| {
-                    // The row selects; without this the `…` would change worktree
-                    // on its way to the actions.
-                    cx.stop_propagation();
-                    let opened = opened.clone();
-                    for_menu.update(cx, |this, cx| {
-                        this.step = Step::Actions {
-                            main: opened.main.clone(),
-                            worktree: opened.path.clone(),
-                            label: opened.label.clone(),
-                        };
-                        cx.notify();
-                    });
-                }),
+            div()
+                .flex_none()
+                .when(!armed, |el| {
+                    el.opacity(0.).group_hover(group, |s| s.opacity(1.))
+                })
+                .child(
+                    Button::new(("worktree-actions", index))
+                        .ghost()
+                        .xsmall()
+                        .icon(icon("ellipsis"))
+                        .tooltip(tr!("worktree-actions"))
+                        .on_click(move |_, _window, cx| {
+                            // The row selects; without this the `…` would change worktree
+                            // on its way to the actions.
+                            cx.stop_propagation();
+                            let opened = opened.clone();
+                            for_menu.update(cx, |this, cx| {
+                                this.step = Step::Actions {
+                                    main: opened.main.clone(),
+                                    worktree: opened.path.clone(),
+                                    label: opened.label.clone(),
+                                };
+                                cx.notify();
+                            });
+                        }),
+                ),
         )
         .into_any_element()
 }

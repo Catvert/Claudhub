@@ -471,7 +471,7 @@ impl ClaudhubApp {
         let input = self.prompt_input.clone();
         let entity = cx.entity();
         input.update(cx, |input, cx| input.set_value(text, window, cx));
-        window.open_dialog(cx, move |dialog, _window, _cx| {
+        window.open_dialog(cx, move |dialog, _window, cx| {
             // Cloned into the closure and never read from it: `open_dialog`
             // keeps a `Fn` called back from the root's own render, where
             // reading the application is a panic. See "Conventions gpui".
@@ -485,7 +485,15 @@ impl ClaudhubApp {
                         .gap_2()
                         .w(gpui::px(640.))
                         .child(div().text_xs().child(tr!("agent-prompt-hint")))
-                        .child(gpui_component::input::Textarea::new(&input)),
+                        // The notes' dialog and this one paint the same field
+                        // with the same harness: see `ui::surface::text_field`.
+                        .child(crate::ui::surface::text_field(
+                            crate::ui::surface::TextField::Prompt,
+                            &input,
+                            crate::ui::surface::grown_height(&input, 8, 20, cx),
+                            &entity,
+                            cx,
+                        )),
                 )
                 .overlay_closable(false)
                 .close_button(false)
@@ -507,7 +515,8 @@ impl ClaudhubApp {
                 })
         });
         // The text is already there and it is meant to be added to: the caret
-        // goes in the field.
+        // goes in the field, in insert mode.
+        self.start_text_insert(crate::ui::surface::TextField::Prompt);
         crate::ui::dialogs::focus_field(&self.prompt_input, window, cx);
     }
 }

@@ -24,6 +24,7 @@ mod follow;
 mod github;
 mod highlight;
 mod history_view;
+mod home;
 mod hunks;
 mod icons;
 mod inflight;

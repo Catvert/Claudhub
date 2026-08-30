@@ -14,7 +14,6 @@ use gpui_component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     h_flex,
-    input::Textarea,
     select::Select,
     v_flex, ActiveTheme, Disableable, Sizable, WindowExt,
 };
@@ -56,6 +55,18 @@ struct GroupRow {
 enum Group {
     /// Files git already tracks.
     Tracked,
+    /// The half of a partly staged file that is **not** going into the next
+    /// commit — the same file, listed a second time.
+    ///
+    /// `MM` is one row above with its box ticked, since part of it is staged,
+    /// and that tick is all the list said of the part that is not: two
+    /// characters of status, on the row that already reads as done. This heading
+    /// is where the rest of the work is, and ticking it there is what finishes
+    /// the file.
+    ///
+    /// It sits **between** the two: what is left to stage belongs with what is
+    /// already staged rather than with what git has never heard of.
+    Unstaged,
     /// Files never added. Ticking them is what starts tracking them.
     Untracked,
 }
@@ -657,24 +668,62 @@ impl ClaudhubApp {
         staged: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let vim = crate::ui::settings::Settings::global(cx).vim_mode;
+        let host = self
+            .surface_host(&crate::ui::surface::Surface::Text(
+                crate::ui::surface::TextField::Commit,
+            ))
+            .map(|host| &host.vim);
+        let mode = host.map(|vim| vim.mode()).unwrap_or_default();
+        let hint = host
+            .map(|vim| vim.prompt().unwrap_or_else(|| vim.pending().to_string()))
+            .unwrap_or_default();
         v_flex()
             .w_full()
             .p_2()
             .gap_1()
             .border_t_1()
             .border_color(cx.theme().border)
-            .child(Textarea::new(&self.commit_input).h(px(64.)))
+            // A field with the file editor's keys, and not a textarea: a commit
+            // message is prose one rewrites — a summary line one shortens, a
+            // paragraph one moves — and the hand arrives here straight out of
+            // the editor. See `ui::surface::text_field`.
+            // It grows with the message, from three rows to twelve: a summary
+            // line and a paragraph under it is what a commit message is, and a
+            // box frozen at three rows made one scroll what one was writing.
+            // **What is going out, above what is being written about it.** It
+            // is the reading order of the box — how many files, then the
+            // message, then the button — and it is what gives the row below its
+            // width back: the count sat there under `flex_1`, so on a narrow
+            // panel it took the room "Commit" and "Commit and push" needed and
+            // pushed them off their own line.
+            .child(
+                div()
+                    .w_full()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tr!("commit-staged-count", { count: staged })),
+            )
+            .child(crate::ui::surface::text_field(
+                crate::ui::surface::TextField::Commit,
+                &self.commit_input,
+                crate::ui::surface::grown_height(&self.commit_input, 3, 12, cx),
+                &cx.entity(),
+                cx,
+            ))
             .child(
                 h_flex()
+                    .w_full()
                     .gap_2()
                     .items_center()
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(tr!("commit-staged-count", { count: staged })),
-                    )
+                    // Everything on this row is a gesture, and they sit where
+                    // the eye leaves the message: at the end of it.
+                    .justify_end()
+                    // The mode, on the field's own row: it is the only thing
+                    // that says why a `d` typed here deleted a line instead of
+                    // being written. The block cursor's colour says it too,
+                    // where the eye actually is.
+                    .when(vim, |el| el.child(self.render_vim_mode(mode, &hint, cx)))
                     .children(self.suggest_button(can_commit, cx))
                     .child({
                         // A commit runs the repository's hooks — a linter, a
@@ -731,7 +780,14 @@ impl ClaudhubApp {
             Button::new("commit-suggest")
                 .ghost()
                 .xsmall()
-                .icon(icon(if waiting { "loader-circle" } else { "sparkles" }))
+                .icon(icon("sparkles"))
+                // **`loading` and not a swapped glyph.** Standing `loader-circle`
+                // in for the sparkle drew a circle that does not turn: the
+                // spinner is the button's own, the same one the pull and the push
+                // beside it use, and a still wheel says "broken" where a turning
+                // one says "wait". It makes the button inert too, which the swap
+                // had to ask for separately.
+                .loading(waiting)
                 .tooltip(tr!("commit-suggest"))
                 .disabled(!can_commit || waiting)
                 .on_click(cx.listener(|this, _, _, cx| this.suggest_commit_message(cx))),
@@ -786,6 +842,17 @@ impl ClaudhubApp {
     /// Ticks or unticks files, that is, stages them or takes them out of the
     /// index. It is the only staging gesture the interface offers: the box
     /// replaces the two lists git distinguishes.
+    /// Stages or unstages a list of paths — one file, a folder's subtree, a
+    /// whole heading.
+    ///
+    /// **What has nothing to do is left out of the command, and that is not an
+    /// optimisation.** `git add` is atomic: one pathspec matching nothing makes
+    /// the whole call fatal, and nothing at all is staged. A file whose deletion
+    /// is already in the index — git's `D ` — is exactly that: it is neither on
+    /// disk nor in the index any more, so `git add -- <it>` answers "did not
+    /// match any files" and takes the other two hundred paths of the heading
+    /// down with it. The mirror case is an untracked file under `restore
+    /// --staged`, which git has never heard of.
     pub(super) fn set_staged(
         &mut self,
         worktree: PathBuf,
@@ -793,6 +860,12 @@ impl ClaudhubApp {
         staged: bool,
         cx: &mut Context<Self>,
     ) {
+        let paths = match self.review.get(&worktree) {
+            Some(review) => worth_sending(&review.status, paths, staged),
+            // No status read yet: nothing is known of these paths, and a guess
+            // that drops them would be a click that did nothing.
+            None => paths,
+        };
         if paths.is_empty() {
             return;
         }
@@ -1250,6 +1323,7 @@ fn render_group(
     let count = paths.len();
     let label = match row.group {
         Group::Tracked => tr!("group-tracked"),
+        Group::Unstaged => tr!("group-unstaged"),
         Group::Untracked => tr!("group-untracked"),
     };
     let (entity, worktree) = (entity.clone(), worktree.clone());
@@ -1538,6 +1612,33 @@ fn step_index(current: Option<usize>, delta: isize, len: usize) -> Option<usize>
     (next >= 0 && next < len as isize).then_some(next as usize)
 }
 
+/// The paths a stage or an unstage has anything to do with.
+///
+/// Asked of the status the panel is painted from, which is the same one the
+/// boxes were drawn from: a path git no longer knows under that name is a path
+/// the command must not carry. See [`ClaudhubApp::set_staged`] for what it costs
+/// to carry one.
+///
+/// A path the status does not mention at all is **kept**: it has no pending
+/// change, so the command is a no-op on it, and dropping it on a status that has
+/// gone stale — a file written a moment ago — would be a click that did nothing.
+fn worth_sending(status: &Status, paths: Vec<PathBuf>, staged: bool) -> Vec<PathBuf> {
+    paths
+        .into_iter()
+        .filter(|path| {
+            match status.files.iter().find(|file| file.path == *path) {
+                // Staging wants something outside the index; unstaging wants
+                // something in it.
+                Some(file) => match staged {
+                    true => file.is_unstaged(),
+                    false => file.is_staged(),
+                },
+                None => true,
+            }
+        })
+        .collect()
+}
+
 /// A free function because it is this view's only real decision — which file
 /// appears, in which group, ticked or not — and because it can be tested without
 /// a window.
@@ -1608,8 +1709,31 @@ fn rows_for(
                 }
             }
 
+            // A partly staged file, shown again for the half that is not going
+            // out. The row is the same one with git's two codes read apart: no
+            // index code, so `codes()` says what the working tree says, and
+            // `staged` false, so the box is empty and ticking it stages the
+            // rest — which is the one gesture this heading exists for.
+            //
+            // The volume is the file's, and it is the file's on both rows: git
+            // counts a file's lines, not a half's, and a zero here would say
+            // "nothing left" of the very rows one is being shown.
+            let unstaged: Vec<FileRow> = tracked
+                .iter()
+                .filter(|row| row.partial())
+                .map(|row| FileRow {
+                    index: StatusCode::Unmodified,
+                    staged: false,
+                    ..row.clone()
+                })
+                .collect();
+
             let mut rows = Vec::new();
-            for (group, files) in [(Group::Tracked, tracked), (Group::Untracked, untracked)] {
+            for (group, files) in [
+                (Group::Tracked, tracked),
+                (Group::Unstaged, unstaged),
+                (Group::Untracked, untracked),
+            ] {
                 if files.is_empty() {
                     continue;
                 }
@@ -1977,6 +2101,80 @@ mod tests {
         assert!(file.staged);
         assert!(file.partial(), "partial staging must be reported");
         assert_eq!(file.codes(), "MM");
+    }
+
+    /// A partly staged file is listed twice: ticked at the top for the half
+    /// that is going out, and again under its own heading for the half that is
+    /// not — where the empty box is the gesture that finishes it.
+    #[test]
+    fn a_partly_staged_file_comes_back_under_its_own_heading() {
+        let status = status(vec![
+            file("indexe.rs", StatusCode::Modified, StatusCode::Unmodified),
+            file("moitie.rs", StatusCode::Modified, StatusCode::Modified),
+            file("nouveau.rs", StatusCode::Untracked, StatusCode::Untracked),
+        ]);
+        let rows = rows_for(&DiffRange::Working, &status, &[], &[], "");
+
+        // Between the tracked files and the ones git has never heard of.
+        assert_eq!(
+            groups_of(&rows),
+            vec![Group::Tracked, Group::Unstaged, Group::Untracked]
+        );
+
+        // Only the partly staged one comes back, and only once.
+        let again: Vec<&FileRow> = files_of(&rows)
+            .into_iter()
+            .filter(|f| !f.staged && !f.untracked)
+            .collect();
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].name, "moitie.rs");
+        // Git's two codes read apart: the working tree's alone, and an empty
+        // box that stages what is left.
+        assert_eq!(again[0].codes(), "M");
+        assert!(!again[0].partial());
+    }
+
+    /// The bug this exists for: ticking "Tracked files" on a project where one
+    /// file's deletion was already staged made `git add` fatal — "did not match
+    /// any files" — and staged **nothing at all**, the other two hundred paths
+    /// included. `git add` is atomic, and a `D ` file is neither on disk nor in
+    /// the index.
+    #[test]
+    fn a_command_carries_only_the_paths_it_can_act_on() {
+        let status = status(vec![
+            file("modifie.rs", StatusCode::Unmodified, StatusCode::Modified),
+            file("indexe.rs", StatusCode::Modified, StatusCode::Unmodified),
+            // The deletion is in the index and the file is gone: `git add`
+            // cannot name it any more.
+            file("efface.rs", StatusCode::Deleted, StatusCode::Unmodified),
+            file("neuf.rs", StatusCode::Untracked, StatusCode::Untracked),
+        ]);
+        let all = || {
+            vec![
+                PathBuf::from("modifie.rs"),
+                PathBuf::from("indexe.rs"),
+                PathBuf::from("efface.rs"),
+                PathBuf::from("neuf.rs"),
+            ]
+        };
+
+        // Staging: what has something outside the index, and it alone.
+        assert_eq!(
+            worth_sending(&status, all(), true),
+            vec![PathBuf::from("modifie.rs"), PathBuf::from("neuf.rs")]
+        );
+        // Unstaging: what is in the index — the mirror trap being an untracked
+        // file, which `restore --staged` has never heard of.
+        assert_eq!(
+            worth_sending(&status, all(), false),
+            vec![PathBuf::from("indexe.rs"), PathBuf::from("efface.rs")]
+        );
+        // A path the status does not mention is kept: the status may simply be
+        // a moment behind, and dropping it would be a click that did nothing.
+        assert_eq!(
+            worth_sending(&status, vec![PathBuf::from("inconnu.rs")], true),
+            vec![PathBuf::from("inconnu.rs")]
+        );
     }
 
     #[test]

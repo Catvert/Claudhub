@@ -274,6 +274,26 @@ impl Vim {
         self.mode
     }
 
+    /// Starts in insert mode, without a keystroke having asked for it.
+    ///
+    /// For a **dialog one opens in order to write**: a note, a prompt read back
+    /// before it goes. Landing there in normal mode means the first letters of
+    /// the remark run as commands, and the field is empty, so there is nothing
+    /// for them to run on either. A file is the other way round — one arrives in
+    /// it to read — which is why normal stays the mode everything else opens in.
+    ///
+    /// The half-typed command and the pending prompt go with it; nothing is left
+    /// for `.` to replay, the insertion having begun at no keystroke.
+    pub fn start_insert(&mut self) {
+        self.mode = Mode::Insert;
+        self.pending.clear();
+        self.prompt = None;
+        self.column = None;
+        self.block_insert = None;
+        self.insert_at = None;
+        self.recording.clear();
+    }
+
     /// The end of the selection that is being moved — where the block cursor
     /// goes in a visual mode, which the editor's own caret says nothing about.
     pub fn head(&self) -> usize {

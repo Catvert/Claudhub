@@ -47,6 +47,10 @@ use crate::ui::motion::{Axes, ScrollMotion};
 /// For what is not a panel: the help window is built inside a dialog closure,
 /// which only receives an `App` and therefore cannot subscribe to the wheel
 /// through `cx.listener`.
+///
+/// A view that *can* — either picker — wraps this in [`smooth_wheel`] and gets
+/// the same motion as a panel: the bar and the listener are two halves, and
+/// only the second one needs a context.
 pub fn vertical<H: ScrollbarHandle + Clone>(
     id: impl Into<SharedString>,
     handle: &H,
@@ -71,6 +75,35 @@ pub fn both<H: ScrollbarHandle + Clone>(
     content: impl IntoElement,
 ) -> Stateful<gpui::Div> {
     wrap(id, handle, ScrollbarAxis::Both, content.into_any_element())
+}
+
+/// The wheel listener a **view of its own** installs on its own bar.
+///
+/// The panels keep their smoothing on the application, keyed by the bar's id,
+/// because a panel is not an entity: `ClaudhubApp::scrolled` is that path. A
+/// view that *is* one — either picker — holds a `ScrollMotion` in a field
+/// instead, and there is nothing to key: one list, one motion. This is the same
+/// harness written against it, and the placement is the same for the same
+/// reason — the bar's container does not scroll itself, so this runs **after**
+/// the list's own handler, in the bubble phase, which is what
+/// `ScrollMotion::on_wheel` expects: it takes over a jump already applied.
+///
+/// The caller advances the motion itself, from its `render`: it has the `&mut
+/// self` this cannot reach — reading the entity back out of its own render is a
+/// reentrant borrow.
+pub fn smooth_wheel<V: gpui::Render>(
+    element: Stateful<gpui::Div>,
+    base: gpui::ScrollHandle,
+    motion: impl Fn(&mut V) -> &mut ScrollMotion + 'static,
+    cx: &mut Context<V>,
+) -> Stateful<gpui::Div> {
+    element.on_scroll_wheel(
+        cx.listener(move |view, event: &gpui::ScrollWheelEvent, window, cx| {
+            if motion(view).on_wheel(&base, event, window) {
+                cx.notify();
+            }
+        }),
+    )
 }
 
 fn wrap<H: ScrollbarHandle + Clone>(
@@ -204,15 +237,22 @@ impl ClaudhubApp {
             .min_h_0()
             .min_w_0()
             .child(
+                // A hitbox and not the bare bounds: a window listener sees no
+                // hierarchy, so a rectangle alone cannot tell that something is
+                // painted over this panel. A popover's `occlude()` cuts the hit
+                // test short before a hitbox inserted here, which is what stops
+                // a panel from taking the wheel of a list hanging above it.
                 gpui::canvas(
-                    |_, _, _| (),
-                    move |bounds: gpui::Bounds<gpui::Pixels>, _, window, _cx| {
+                    |bounds, window, _cx| {
+                        window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal)
+                    },
+                    move |_, hitbox: gpui::Hitbox, window, _cx| {
                         window.on_mouse_event({
                             let id = id.clone();
                             let base = base.clone();
                             move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
                                 if phase != gpui::DispatchPhase::Capture
-                                    || !bounds.contains(&event.position)
+                                    || !hitbox.should_handle_scroll(window)
                                     || !takes_over(&base, event, window)
                                 {
                                     return;

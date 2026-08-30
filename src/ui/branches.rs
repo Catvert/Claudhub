@@ -17,7 +17,7 @@ use crate::git::{Branch, BranchKind};
 use crate::runtime::Cmd;
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
-use gpui_component::WindowExt as _;
+use gpui_component::{ActiveTheme as _, WindowExt as _};
 
 /// One row of the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +29,16 @@ pub(super) enum Row {
     /// out: the two rows would be two entries that do nothing there.
     Scope(Scope),
     /// A group heading: the locals first, the remotes after.
-    Group(BranchKind),
+    ///
+    /// It carries **how many branches stand under it**, which is what a folded
+    /// group has left to say: "Remotes" over nothing tells one the group is
+    /// closed, not that there are eighty-seven behind it. The count is the
+    /// filtered one — the heading answers the list on screen, not the
+    /// repository.
+    Group {
+        kind: BranchKind,
+        count: usize,
+    },
     Branch(BranchRow),
 }
 
@@ -116,7 +125,10 @@ pub(super) fn rows_for(
         // An empty group has no heading: on a search that finds only remotes, a
         // "Local" title followed by nothing reads like a display glitch.
         if !matching.is_empty() {
-            rows.push(Row::Group(kind));
+            rows.push(Row::Group {
+                kind,
+                count: matching.len(),
+            });
             rows.extend(matching);
         }
     }
@@ -134,6 +146,50 @@ fn detail(branch: &Branch) -> String {
         .filter(|part| !part.trim().is_empty())
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+/// The deletion being confirmed, while the dialog is open.
+///
+/// An entity of its own and not a field of `ClaudhubApp`, like `StashDraft`: the
+/// closure `open_dialog` keeps is called back from the root view's render, in
+/// the middle of a borrow of the application, where reading it is a panic.
+pub struct BranchDeletion {
+    branch: String,
+    /// There is something on `origin` to delete — otherwise no box at all.
+    remote: bool,
+    /// Delete it there too. **Unticked**: it is the half nobody undoes for you.
+    also_remote: bool,
+}
+
+impl gpui::Render for BranchDeletion {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (remote, also) = (self.remote, self.also_remote);
+        gpui_component::v_flex()
+            .w(gpui::px(420.))
+            .gap_2()
+            .child(gpui::div().text_sm().child(tr!("branch-delete-help")))
+            .when(remote, |el| {
+                el.child(
+                    gpui_component::checkbox::Checkbox::new("branch-delete-remote")
+                        .label(tr!("branch-delete-also-remote"))
+                        .checked(also)
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            this.also_remote = !this.also_remote;
+                            cx.notify();
+                        })),
+                )
+            })
+            // Said only once it has been asked for: a warning about a gesture
+            // one has not chosen is a line one learns to read past.
+            .when(remote && also, |el| {
+                el.child(
+                    gpui::div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(tr!("branch-delete-remote-help")),
+                )
+            })
+    }
 }
 
 impl ClaudhubApp {
@@ -242,27 +298,86 @@ impl ClaudhubApp {
         );
     }
 
-    /// Removes a local branch, once confirmed.
+    /// Removes a local branch, once confirmed — and its counterpart on `origin`
+    /// when the box in the dialog is ticked.
     ///
     /// `-d` and never `-D`: git refuses a branch whose commits are nowhere else,
     /// and that refusal is the only net there is — nothing brings the commits
     /// back afterwards. The dialog says so, so that the error, when it comes,
     /// is one the user was warned of rather than one they have to interpret.
+    ///
+    /// **One entry and a box, where there were two entries.** Deleting a branch
+    /// one is done with means deleting it in both places, and two menu items
+    /// meant doing the gesture twice — and reading two dialogs to find out that
+    /// the second was the other half of the first. The box is **unticked**: the
+    /// remote half is the one nobody undoes for you, so it is asked for and
+    /// never assumed.
     pub(super) fn confirm_delete_branch(
         &mut self,
         branch: String,
+        // The branch has a counterpart on `origin` — no box without one, since
+        // it would offer a deletion that can only come back as an error.
+        remote: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.confirm_branch(
-            tr!("branch-delete-title", { name: branch.clone() }),
-            tr!("branch-delete-help"),
-            move |main| Cmd::DeleteBranch {
+        let draft = cx.new(|_| BranchDeletion {
+            branch: branch.clone(),
+            remote,
+            also_remote: false,
+        });
+        let entity = cx.entity();
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let (entity, draft) = (entity.clone(), draft.clone());
+            dialog
+                .title(tr!("branch-delete-title", { name: branch.clone() }))
+                .child(draft.clone())
+                .overlay_closable(false)
+                .close_button(false)
+                .footer(crate::ui::dialogs::confirm())
+                .on_ok(move |_, _window, cx| {
+                    // Read on click, where the borrow has been given back: the
+                    // closure above runs inside the application's own render.
+                    let draft = draft.read(cx);
+                    let (name, also) = (draft.branch.clone(), draft.also_remote);
+                    entity.update(cx, |this, cx| this.delete_branch(name, also, cx));
+                    true
+                })
+        });
+    }
+
+    /// The two commands a confirmed deletion sends, in the order that costs
+    /// least when the first one fails.
+    ///
+    /// **The remote goes first**, which is the stash's order and the tags': `git
+    /// branch -d` is the one that can be refused — a branch carrying commits
+    /// that are nowhere else — and it is refused *because* those commits would
+    /// be lost. Sending it first would leave the remote standing behind a local
+    /// branch one has just been told one cannot delete; sending it last means
+    /// the refusal arrives after the half one asked for went through.
+    fn delete_branch(&mut self, name: String, also_remote: bool, cx: &mut Context<Self>) {
+        let Some(main) = self.active.clone().and_then(|w| self.main_of(&w)) else {
+            return;
+        };
+        if also_remote {
+            self.start(
+                None,
+                crate::runtime::Action::Branch,
+                Cmd::DeleteRemoteBranch {
+                    main: main.clone(),
+                    name: name.clone(),
+                },
+                cx,
+            );
+        }
+        self.start(
+            None,
+            crate::runtime::Action::Branch,
+            Cmd::DeleteBranch {
                 main,
-                name: branch.clone(),
+                name,
                 force: false,
             },
-            window,
             cx,
         );
     }
@@ -286,8 +401,12 @@ impl ClaudhubApp {
         );
     }
 
-    /// The shape both deletions share: a title, a sentence saying what it costs,
-    /// and the command built once the repository is known.
+    /// The shape a deletion's confirmation takes: a title, a sentence saying
+    /// what it costs, and the command built once the repository is known.
+    ///
+    /// What is left of it since the local deletion grew a box of its own: the
+    /// remote-tracking name's own gesture, where there is nothing to tick — the
+    /// remote half is the only half there is.
     fn confirm_branch(
         &mut self,
         title: gpui::SharedString,
@@ -406,8 +525,14 @@ mod tests {
         let names: Vec<String> = rows_for(&branches, "", None, false)
             .into_iter()
             .map(|row| match row {
-                Row::Group(BranchKind::Local) => "== locales".into(),
-                Row::Group(BranchKind::Remote) => "== distantes".into(),
+                Row::Group {
+                    kind: BranchKind::Local,
+                    ..
+                } => "== locales".into(),
+                Row::Group {
+                    kind: BranchKind::Remote,
+                    ..
+                } => "== distantes".into(),
                 Row::Scope(scope) => format!("{scope:?}"),
                 Row::Branch(row) => row.name,
             })
@@ -424,6 +549,33 @@ mod tests {
         );
     }
 
+    /// A heading says how many branches stand under it, and it counts what the
+    /// filter left: the number answers the list on screen, which is the only
+    /// list one can see. Read on a folded group, where it is all that is left
+    /// of the branches.
+    #[test]
+    fn a_group_counts_the_branches_the_filter_left() {
+        let branches = vec![
+            branch("main", BranchKind::Local),
+            branch("wt/essai", BranchKind::Local),
+            branch("origin/feature", BranchKind::Remote),
+        ];
+        let counts = |filter: &str| -> Vec<(BranchKind, usize)> {
+            rows_for(&branches, filter, None, false)
+                .into_iter()
+                .filter_map(|row| match row {
+                    Row::Group { kind, count } => Some((kind, count)),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            counts(""),
+            vec![(BranchKind::Local, 2), (BranchKind::Remote, 1)]
+        );
+        assert_eq!(counts("essai"), vec![(BranchKind::Local, 1)]);
+    }
+
     #[test]
     fn the_filter_ignores_case_and_drops_empty_headings() {
         let branches = vec![
@@ -436,7 +588,10 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                Row::Group(BranchKind::Remote),
+                Row::Group {
+                    kind: BranchKind::Remote,
+                    count: 1,
+                },
                 match rows_for(&branches, "", None, false)
                     .into_iter()
                     .find(|r| matches!(r, Row::Branch(b) if b.name == "origin/Feature-X"))
@@ -476,7 +631,7 @@ mod tests {
             .into_iter()
             .filter_map(|row| match row {
                 Row::Branch(row) => Some((row.name, row.is_head)),
-                Row::Group(_) | Row::Scope(_) => None,
+                Row::Group { .. } | Row::Scope(_) => None,
             })
             .collect();
         assert_eq!(
@@ -490,7 +645,7 @@ mod tests {
             .iter()
             .filter_map(|row| match row {
                 Row::Branch(row) => Some(row.taken()),
-                Row::Group(_) | Row::Scope(_) => None,
+                Row::Group { .. } | Row::Scope(_) => None,
             })
             .collect();
         assert_eq!(taken, vec![true, false]);
@@ -520,7 +675,7 @@ mod tests {
         let rows = rows_for(&branches, "", None, true);
         assert_eq!(rows.first(), Some(&Row::Scope(Scope::Head)));
         assert_eq!(rows.get(1), Some(&Row::Scope(Scope::All)));
-        assert!(matches!(rows.get(2), Some(Row::Group(_))));
+        assert!(matches!(rows.get(2), Some(Row::Group { .. })));
         // And the popover, which checks out, has neither: a scope is not
         // something one checks out.
         assert!(!rows_for(&branches, "", None, false)

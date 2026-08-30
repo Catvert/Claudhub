@@ -352,13 +352,15 @@ pub fn query_context() -> KeyContext {
     context
 }
 
-/// The console's editor, when vim keys are on.
+/// A code surface that is not a file, when vim keys are on: the SQL console,
+/// and the four writing fields.
 ///
 /// `ClaudhubEditorVim` alone and **not** `ClaudhubEditor`: the three keys that
 /// first name carries — following a definition, walking the trail — all name a
-/// file, and a query has none. What is wanted here is the one thing the second
-/// name buys, which is `Ctrl+R` staying redo rather than becoming refresh.
-pub fn query_editor_context() -> KeyContext {
+/// file, and neither a query nor a commit message has one. What is wanted here
+/// is the one thing the second name buys, which is `Ctrl+R` staying redo rather
+/// than becoming refresh.
+pub fn editor_vim_context() -> KeyContext {
     let mut context = KeyContext::default();
     context.add(EDITOR_VIM);
     context

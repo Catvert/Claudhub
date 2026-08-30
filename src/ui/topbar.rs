@@ -299,6 +299,19 @@ impl ClaudhubApp {
                             // one goes through them: the worktree, then its branch.
                             .child(self.render_worktree_picker(cx))
                             .children(self.render_branch_picker(cx))
+                            // Pull and push, and only when the branch has
+                            // something to pull or to push — see
+                            // `render_sync_buttons`.
+                            .children(self.render_sync_buttons(cx))
+                            // The worktree's own menu, at the end of the run it
+                            // belongs to. It sat in the right corner, a full
+                            // window's width from the two pickers that say which
+                            // worktree it would act on: a `…` that far from its
+                            // subject is a menu one opens to find out what it is
+                            // about. Here it reads as the end of one sentence —
+                            // this worktree, this branch, what is owed and gained,
+                            // and everything else one can ask of it.
+                            .children(self.render_worktree_actions(cx))
                             // What the project says of this worktree — started or not,
                             // and the address it exposes — then everything one can ask
                             // of it. They followed the row they were on.
@@ -318,14 +331,15 @@ impl ClaudhubApp {
                     .child(div().flex_1())
                     .child(
                         actions()
-                            // Opening the worktree in the browser, then its actions,
-                            // then the run button: the right corner is the "act on
-                            // what I am looking at" corner, and the address a project
-                            // exposes is the gesture one makes most once it runs.
+                            // Opening the worktree in the browser, then the run
+                            // button: the right corner is the "act on what I am
+                            // looking at" corner, and the address a project exposes
+                            // is the gesture one makes most once it runs. The
+                            // worktree's own menu is **not** here any more — see
+                            // where it went, beside the pickers it is about.
                             .children(
                                 active.and_then(|worktree| self.render_wt_links(&worktree, cx)),
                             )
-                            .children(self.render_worktree_actions(cx))
                             // The run button, at the far right and just before the two
                             // screens one does not work in. A `justfile` is the
                             // project's commands, and running one is a gesture of its

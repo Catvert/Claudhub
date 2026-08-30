@@ -178,6 +178,29 @@ pub struct Explorer {
     /// exception — a set seeded with every directory would be the size of the
     /// tree, rebuilt on every fold. See `tree::Folds`.
     pub expanded: std::collections::HashSet<PathBuf>,
+    /// The folders the user shut **while searching**.
+    ///
+    /// **A second set and not the first**, because the two views have opposite
+    /// defaults: the whole worktree opens shut and remembers what one opened,
+    /// a search opens on its hits — a match inside a folder one had never
+    /// opened has to be visible, or the search reads as having found nothing —
+    /// and so remembers what one shut. One set cannot carry both: the same
+    /// absent entry would mean "shut" on one side and "open" on the other.
+    ///
+    /// Emptied whenever the search changes (`set_query`): the folders are
+    /// those of a result list, and the next keystroke makes another one.
+    collapsed: std::collections::HashSet<PathBuf>,
+    /// What a wholesale collapse put away, to be given back on the next press.
+    ///
+    /// It is what makes the bar's button a **toggle**, and what its second half
+    /// is: not "unfold everything" — a real checkout unfolded is forty thousand
+    /// rows that say nothing, which is the reason the tree opens shut — but
+    /// "give me back what I had open". `None`: nothing was put away, and the
+    /// button has only its first half to offer.
+    ///
+    /// Emptied with the search's folds, and for their reason: it names the
+    /// folders of the view it was taken in.
+    stash: Option<std::collections::HashSet<PathBuf>>,
     /// Where the reading of the list stands.
     ///
     /// Four states and not a `pending` flag, for the reason the database tree
@@ -258,6 +281,8 @@ impl Default for Explorer {
             tree: tree::Tree::default(),
             rows: Rc::new(Vec::new()),
             expanded: std::collections::HashSet::new(),
+            collapsed: std::collections::HashSet::new(),
+            stash: None,
             state: Listing::Idle,
             ignored: false,
             excluded: Vec::new(),
@@ -349,29 +374,103 @@ impl Explorer {
     /// is what made a `target/` of a hundred thousand files take a fifth of a
     /// second to open.
     fn rebuild(&mut self) {
-        let rows = if self.query.trim().is_empty() {
+        let rows = if !self.searching() {
             self.tree.rows(tree::Folds::ShutBut(&self.expanded))
         } else {
-            // During a search, collapses are ignored and the tree is reduced to
-            // what matches: a file found in a closed folder would not be
-            // visible, and the search would look as if it had found nothing.
-            let keep: Vec<usize> = self
-                .files
-                .iter()
-                .enumerate()
-                .filter(|(_, path)| crate::ui::find::matches(&self.query, &path.to_string_lossy()))
-                .map(|(index, _)| index)
-                .collect();
+            // During a search the tree is reduced to what matches and comes out
+            // **open**: a file found in a folder one had never opened would not
+            // be visible, and the search would look as if it had found nothing.
+            // Which is why the folds read the other way round here — what is
+            // remembered is the folders one shut, not the ones one opened.
+            let keep: Vec<usize> = self.hits().collect();
             // `dirs` and not `unexplored`, as `set_files` builds the whole
             // tree: a directory whose contents have arrived leaves the
             // unexplored list, and telling the subset that it is a file draws
             // it twice — once as the folder its children make, once as a leaf
             // of its own.
             tree::Tree::subset(&self.files, &keep, &self.dirs)
-                .rows(tree::Folds::OpenBut(&std::collections::HashSet::new()))
+                .rows(tree::Folds::OpenBut(&self.collapsed))
         };
         self.dimmed = Rc::new(rows.iter().map(|entry| self.is_ignored(entry)).collect());
         self.rows = Rc::new(rows);
+    }
+
+    /// Takes the search the panel is showing, and rebuilds on it.
+    ///
+    /// The folds of the previous one go with it: they name the folders of a
+    /// result list, and the next keystroke makes another list.
+    fn set_query(&mut self, query: String) {
+        self.query = query;
+        self.collapsed.clear();
+        self.stash = None;
+        self.rebuild();
+    }
+
+    /// Is a search narrowing the tree?
+    fn searching(&self) -> bool {
+        !self.query.trim().is_empty()
+    }
+
+    /// The indices of the files the search keeps.
+    fn hits(&self) -> impl Iterator<Item = usize> + '_ {
+        self.files
+            .iter()
+            .enumerate()
+            .filter(|(_, path)| crate::ui::find::matches(&self.query, &path.to_string_lossy()))
+            .map(|(index, _)| index)
+    }
+
+    /// Whether a folder shows what it holds.
+    ///
+    /// Asked rather than read off a set, because which set answers depends on
+    /// the view: see `collapsed`.
+    fn is_open(&self, path: &Path) -> bool {
+        if self.searching() {
+            !self.collapsed.contains(path)
+        } else {
+            self.expanded.contains(path)
+        }
+    }
+
+    /// Opens or shuts one folder, and says whether anything moved.
+    fn set_open(&mut self, path: &Path, open: bool) -> bool {
+        match (self.searching(), open) {
+            (true, true) => self.collapsed.remove(path),
+            (true, false) => self.collapsed.insert(path.to_path_buf()),
+            (false, true) => self.expanded.insert(path.to_path_buf()),
+            (false, false) => self.expanded.remove(path),
+        }
+    }
+
+    /// Every folder a wholesale fold reaches under `root` — all of them when
+    /// there is no root.
+    ///
+    /// Read off the **paths** and not off the rows: a row is only there while
+    /// its parent is open, and "collapse everything" has to reach what is
+    /// already hidden too. Narrowed to the hits while searching, which is what
+    /// keeps the walk to the size of what is on screen.
+    fn folders_under(&self, root: Option<&Path>) -> Vec<PathBuf> {
+        let under = |path: &Path| root.is_none_or(|root| path.starts_with(root));
+        let mut out: Vec<PathBuf> = Vec::new();
+        let mut add = |path: &Path| {
+            for ancestor in path.ancestors().skip(1) {
+                if !ancestor.as_os_str().is_empty() && under(ancestor) {
+                    out.push(ancestor.to_path_buf());
+                }
+            }
+        };
+        if self.searching() {
+            for index in self.hits() {
+                if let Some(path) = self.files.get(index).filter(|path| under(path)) {
+                    add(path);
+                }
+            }
+        } else {
+            for path in self.files.iter().filter(|path| under(path)) {
+                add(path);
+            }
+        }
+        out
     }
 
     /// Is this row one that `.gitignore` leaves out?
@@ -418,11 +517,16 @@ impl Explorer {
     /// `app/Http/Livewire/Forms` fits on one line but is still an ancestor of
     /// the file it contains. The ancestors that are not rows of their own cost
     /// an entry in the set and nothing else.
+    ///
+    /// **Both sets**, whichever view is on screen: a file one has just opened
+    /// or dropped has to be where the eye can find it, and the search it was
+    /// found through is closed a moment later.
     fn reveal(&mut self, path: &Path) {
         let mut changed = false;
-        for ancestor in path.ancestors().skip(1) {
+        for ancestor in path.ancestors().skip(1).collect::<Vec<_>>() {
             if !ancestor.as_os_str().is_empty() {
                 changed |= self.expanded.insert(ancestor.to_path_buf());
+                changed |= self.collapsed.remove(ancestor);
             }
         }
         if changed {
@@ -431,34 +535,75 @@ impl Explorer {
     }
 
     /// Collapses everything, which is the state the tree opens in.
+    ///
+    /// Emptying the set is only that state while the whole worktree is on
+    /// screen: under a search the set names what is **shut**, so the same
+    /// gesture has to fill it instead.
     fn collapse_all(&mut self) {
-        self.expanded.clear();
+        if self.searching() {
+            self.stash = Some(self.collapsed.clone());
+            self.collapsed.extend(self.folders_under(None));
+        } else {
+            self.stash = Some(std::mem::take(&mut self.expanded));
+        }
         self.rebuild();
+    }
+
+    /// Gives back the folds the last wholesale collapse put away.
+    fn restore_folds(&mut self) {
+        let Some(stash) = self.stash.take() else {
+            return;
+        };
+        if self.searching() {
+            self.collapsed = stash;
+        } else {
+            self.expanded = stash;
+        }
+        self.rebuild();
+    }
+
+    /// Is anything on screen showing what it holds?
+    ///
+    /// Read off the **rows** and not off the fold sets: what the button offers
+    /// has to be what the eye sees, and a set holds folders that are hidden
+    /// inside a closed one — and, while searching, folders no hit sits under.
+    pub fn any_open(&self) -> bool {
+        self.rows.iter().any(|entry| {
+            matches!(
+                entry,
+                tree::Entry::Dir {
+                    collapsed: false,
+                    ..
+                }
+            )
+        })
+    }
+
+    /// Whether a press would have anything to give back.
+    pub fn can_restore(&self) -> bool {
+        self.stash.is_some()
     }
 
     /// Unfolds a whole subtree, its root included.
     fn expand_under(&mut self, root: &Path) {
         // Every folder under the root, and not only the visible ones: what a
         // closed folder hides has to be open too once it is reopened.
-        let files = self.files.clone();
-        for path in files.iter() {
-            if !path.starts_with(root) {
-                continue;
-            }
-            for ancestor in path.ancestors().skip(1) {
-                if ancestor.starts_with(root) {
-                    self.expanded.insert(ancestor.to_path_buf());
-                }
-            }
+        for folder in self.folders_under(Some(root)) {
+            self.set_open(&folder, true);
         }
-        self.expanded.insert(root.to_path_buf());
+        self.set_open(root, true);
         self.rebuild();
     }
 
     /// Collapses a whole subtree, its root included.
     fn collapse_under(&mut self, root: &Path) {
-        self.expanded
-            .retain(|path| !path.starts_with(root) && path != root);
+        if self.searching() {
+            self.collapsed.extend(self.folders_under(Some(root)));
+            self.collapsed.insert(root.to_path_buf());
+        } else {
+            self.expanded
+                .retain(|path| !path.starts_with(root) && path != root);
+        }
         self.rebuild();
     }
 }
@@ -691,23 +836,6 @@ impl ClaudhubApp {
         self.editings.get(root)
     }
 
-    /// Whether the "pick a file" panel has anything to say.
-    ///
-    /// It stands for the centre only while the centre has nothing else: as soon
-    /// as a file, a diff, a query or a hit arrives it is a tab beside them, and
-    /// a tab saying "open a file" among four documents is one of the empty
-    /// rooms the `needed:` rule exists to remove.
-    pub(super) fn empty_centre_visible(&self) -> bool {
-        self.panel_visible(crate::ui::panels::EditorPanel::NAME)
-            && !self.diff_on_screen()
-            && !self.db_console_open()
-            && !self.search_preview_open()
-            && self
-                .editing_root()
-                .and_then(|root| self.editings.get(&root))
-                .is_none_or(|tabs| tabs.open.is_empty())
-    }
-
     /// Whose file the editing screen shows.
     ///
     /// The displayed worktree, unless one went off to edit a plugin's script —
@@ -877,9 +1005,8 @@ impl ClaudhubApp {
         let Some(explorer) = self.explorer() else {
             return;
         };
-        if !explorer.expanded.remove(&path) {
-            explorer.expanded.insert(path);
-        }
+        let open = explorer.is_open(&path);
+        explorer.set_open(&path, !open);
         explorer.rebuild();
         cx.notify();
     }
@@ -962,13 +1089,9 @@ impl ClaudhubApp {
             return;
         };
         if explorer.is_dir(index) {
-            let is_collapsed = !explorer.expanded.contains(&path);
+            let is_collapsed = !explorer.is_open(&path);
             if open == is_collapsed {
-                if open {
-                    explorer.expanded.insert(path);
-                } else {
-                    explorer.expanded.remove(&path);
-                }
+                explorer.set_open(&path, open);
                 explorer.rebuild();
                 cx.notify();
                 return;
@@ -1087,9 +1210,19 @@ impl ClaudhubApp {
         self.announce(tr!("copy-path-done"), cx);
     }
 
-    pub(super) fn collapse_project_tree(&mut self, cx: &mut Context<Self>) {
+    /// The bar's fold button: shut everything, or give back what it shut.
+    ///
+    /// **A toggle**, because a button that has already done its one thing is a
+    /// button that does nothing on the second press — and the tree, once shut,
+    /// says nothing about what one had open in it. Its other half is a restore
+    /// and not an "unfold everything": see `Explorer::stash`.
+    pub(super) fn toggle_project_folds(&mut self, cx: &mut Context<Self>) {
         if let Some(explorer) = self.explorer() {
-            explorer.collapse_all();
+            if explorer.any_open() {
+                explorer.collapse_all();
+            } else {
+                explorer.restore_folds();
+            }
         }
         cx.notify();
     }
@@ -2367,7 +2500,7 @@ impl ClaudhubApp {
         self.file_op(op, cx);
         if let Some(explorer) = self.explorer() {
             explorer.reveal(&landing);
-            explorer.expanded.insert(dir.to_path_buf());
+            explorer.set_open(dir, true);
             explorer.cursor = Some(landing);
             explorer.drag_hover = None;
             explorer.rebuild();
@@ -2388,7 +2521,7 @@ impl ClaudhubApp {
             return; // the same folder, one mouse move later
         }
         explorer.drag_hover = Some(path.clone());
-        if explorer.expanded.contains(&path) {
+        if explorer.is_open(&path) {
             return;
         }
         cx.spawn(async move |this, cx| {
@@ -2400,7 +2533,7 @@ impl ClaudhubApp {
                 if explorer.drag_hover.as_deref() != Some(path.as_path()) {
                     return; // the hand moved on
                 }
-                if explorer.expanded.insert(path) {
+                if explorer.set_open(&path, true) {
                     explorer.rebuild();
                     cx.notify();
                 }
@@ -2437,8 +2570,7 @@ impl ClaudhubApp {
             return div().into_any_element();
         };
         if explorer.query != query {
-            explorer.query = query;
-            explorer.rebuild();
+            explorer.set_query(query);
         }
         let explorer = &*explorer;
         let state = explorer.state;
@@ -2566,12 +2698,14 @@ impl ClaudhubApp {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| worktree.display().to_string());
-        let count = self
-            .explorers
-            .get(worktree)
-            .map(|explorer| explorer.files.len())
-            .unwrap_or(0);
+        let explorer = self.explorers.get(worktree);
+        let count = explorer.map(|explorer| explorer.files.len()).unwrap_or(0);
+        // What the fold button's two halves have to offer, decided here: the
+        // tree cannot be read from inside the closure that presses it.
+        let open = explorer.is_some_and(|explorer| explorer.any_open());
+        let stashed = explorer.is_some_and(|explorer| explorer.can_restore());
         let muted = cx.theme().muted_foreground;
+        let find = self.find_button(crate::ui::find::Pane::Files, cx);
         let entity = cx.entity();
 
         h_flex()
@@ -2596,20 +2730,10 @@ impl ClaudhubApp {
                     .text_color(muted)
                     .child(SharedString::from(count.to_string())),
             )
-            .child(
-                Button::new("files-search")
-                    .ghost()
-                    .xsmall()
-                    .icon(icon("search"))
-                    .tooltip(tr!("files-search"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        // The panel becomes the search's target: the button is in
-                        // its header, and clicking in it does not necessarily go
-                        // through the content.
-                        this.touch_pane(crate::ui::find::Pane::Files, cx);
-                        this.open_find(window, cx);
-                    })),
-            )
+            // The same magnifier every panel's bar carries, and a toggle like
+            // theirs: it used to be one of our own, opening a bar the second
+            // press could not close. See `find::find_button`.
+            .child(find)
             .child(
                 Button::new("files-reveal")
                     .ghost()
@@ -2622,9 +2746,24 @@ impl ClaudhubApp {
                 Button::new("files-collapse")
                     .ghost()
                     .xsmall()
-                    .icon(icon("chevrons-down-up"))
-                    .tooltip(tr!("files-collapse-all"))
-                    .on_click(cx.listener(|this, _, _window, cx| this.collapse_project_tree(cx))),
+                    // The glyph and the tooltip say what the **next** press
+                    // does, which is the only way a toggle announces the half
+                    // it is on — the find button's rule.
+                    .icon(icon(if open {
+                        "chevrons-down-up"
+                    } else {
+                        "chevrons-up-down"
+                    }))
+                    .tooltip(if open {
+                        tr!("files-collapse-all")
+                    } else {
+                        tr!("files-restore-folds")
+                    })
+                    // Nothing open and nothing put away: neither half has
+                    // anything to do, and a live button that does nothing reads
+                    // as a broken one.
+                    .disabled(!open && !stashed)
+                    .on_click(cx.listener(|this, _, _window, cx| this.toggle_project_folds(cx))),
             )
             .child(
                 Button::new("files-more")
@@ -3113,7 +3252,9 @@ impl ClaudhubApp {
                         // them, installed only when the mode is on: see
                         // `surface::vim_capture`.
                         .map(|el| match vim {
-                            true => crate::ui::surface::vim_capture(el, surface.clone(), cx),
+                            true => {
+                                crate::ui::surface::vim_capture(el, surface.clone(), &cx.entity())
+                            }
                             false => el,
                         })
                         .child(
@@ -3160,7 +3301,7 @@ impl ClaudhubApp {
                         )
                         // The wheel, taken before the editor sees it: see
                         // `surface::wheel_capture`.
-                        .child(crate::ui::surface::wheel_capture(surface, cx)),
+                        .child(crate::ui::surface::wheel_capture(surface, &cx.entity())),
                 )
                 // vim's status line, at the foot of the file it belongs to: the
                 // mode, and the `:` or `/` line being written. See
@@ -3649,6 +3790,90 @@ fn paint_hunk_mark(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two fold sets, and the bug they exist for: a search opens the tree
+    /// on its hits — so it reads the folds the other way round — and pressing
+    /// a chevron there used to do nothing at all, the set in force being the
+    /// one a search does not read.
+    #[test]
+    fn a_folder_shut_during_a_search_stays_shut() {
+        let mut explorer = Explorer::default();
+        explorer.set_files(
+            vec![
+                PathBuf::from("docs/home.md"),
+                PathBuf::from("src/ui/app.rs"),
+                PathBuf::from("src/ui/home.rs"),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        // The hits come out open, whatever was opened before: a match inside a
+        // folder nobody ever opened is the ordinary case.
+        explorer.set_query("home".into());
+        assert!(explorer.is_open(Path::new("src/ui")));
+        assert!(explorer.row_of(Path::new("src/ui/home.rs")).is_some());
+
+        // Shutting one hides what it holds, and says nothing about the others.
+        explorer.set_open(Path::new("src/ui"), false);
+        explorer.rebuild();
+        assert!(explorer.row_of(Path::new("src/ui/home.rs")).is_none());
+        assert!(explorer.row_of(Path::new("src/ui")).is_some());
+        assert!(explorer.row_of(Path::new("docs/home.md")).is_some());
+
+        // The next search is another list, and opens on it.
+        explorer.set_query("app".into());
+        assert!(explorer.is_open(Path::new("src/ui")));
+        assert!(explorer.row_of(Path::new("src/ui/app.rs")).is_some());
+
+        // And the tree without a search is shut, as it always was: what one
+        // shut in the results said nothing about the worktree.
+        explorer.set_query(String::new());
+        assert!(!explorer.is_open(Path::new("src/ui")));
+        assert!(explorer.row_of(Path::new("src/ui/app.rs")).is_none());
+    }
+
+    /// The bar's fold button, both halves: shutting everything is worth a
+    /// press, and a press that cannot be taken back is half a button.
+    #[test]
+    fn collapsing_everything_can_be_taken_back() {
+        let mut explorer = Explorer::default();
+        explorer.set_files(
+            vec![
+                PathBuf::from("docs/home.md"),
+                PathBuf::from("src/ui/app.rs"),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        // The tree opens shut: neither half has anything to do.
+        assert!(!explorer.any_open());
+        assert!(!explorer.can_restore());
+
+        explorer.set_open(Path::new("src/ui"), true);
+        explorer.rebuild();
+        assert!(explorer.any_open());
+
+        explorer.collapse_all();
+        assert!(!explorer.any_open());
+        assert!(explorer.can_restore());
+        explorer.restore_folds();
+        assert!(explorer.is_open(Path::new("src/ui")));
+        assert!(!explorer.can_restore());
+
+        // Under a search the same button reads the other set — and the search
+        // itself takes the put-away folds with it, they naming another list.
+        explorer.set_query("app".into());
+        assert!(explorer.any_open());
+        assert!(!explorer.can_restore());
+        explorer.collapse_all();
+        assert!(!explorer.any_open());
+        explorer.restore_folds();
+        assert!(explorer.any_open());
+    }
 
     /// The tab limit's whole rule. Each clause here was a way of losing
     /// something: the oldest read is the one one has finished with, unsaved text

@@ -55,6 +55,55 @@ pub(super) enum Surface {
     /// side by side in a split. One key for all of them was one motion pushing
     /// two editors.
     Query(crate::ui::db_query::ConsoleId),
+    /// One of the window's writing fields — the commit message, a review note,
+    /// the prompt going to an agent, the worktree's free note.
+    ///
+    /// They were `Textarea`s, which is to say the one thing this window has
+    /// that one writes in and cannot edit: no modes, no block cursor, no `/`,
+    /// no `dd`. A commit message is prose one rewrites — a summary line one
+    /// shortens, a paragraph one moves — and the hand that has just spent an
+    /// hour in the editor arrives with vim's keys in it.
+    Text(TextField),
+}
+
+/// Which writing field a gesture is about.
+///
+/// A closed list and not a name: these four are built with the window and live
+/// as long as it does, so a variant is enough to reach one — where a file or a
+/// console has to be named, both being opened and closed by the dozen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum TextField {
+    /// The commit message, at the foot of the review.
+    Commit,
+    /// A review note, in the dialog that writes one.
+    Note,
+    /// The prompt going out to an agent, in the dialog that shows it first.
+    Prompt,
+    /// The worktree's free note — `NOTES.md`, in the notes panel.
+    Journal,
+}
+
+impl TextField {
+    /// All four, for the one place that keeps their decorations up to date.
+    pub(super) const ALL: [TextField; 4] = [
+        TextField::Commit,
+        TextField::Note,
+        TextField::Prompt,
+        TextField::Journal,
+    ];
+
+    /// The key this field's wheel smoothing is filed under.
+    ///
+    /// A `&'static str` and not a `format!`: it is asked for at every frame of
+    /// a smoothed scroll, and a fixed set of fields has a fixed set of names.
+    fn scroll_key(self) -> SharedString {
+        SharedString::new_static(match self {
+            TextField::Commit => "text-scroll:commit",
+            TextField::Note => "text-scroll:note",
+            TextField::Prompt => "text-scroll:prompt",
+            TextField::Journal => "text-scroll:journal",
+        })
+    }
 }
 
 impl Surface {
@@ -126,8 +175,8 @@ pub(super) struct VimHost {
     /// Which of `matches_found` was painted as the current one, so that a caret
     /// that moves without changing the answer repaints nothing.
     pub matches_lit: Option<usize>,
-    /// The mode, selection, head and text length the cursor was last painted
-    /// for.
+    /// The mode, selection, head, text length and colours the cursor was last
+    /// painted for.
     ///
     /// The block is recomputed at a frame only when one of them has moved:
     /// `value()` copies the whole text, and this runs at every frame. The head
@@ -140,6 +189,7 @@ pub(super) struct VimHost {
         usize,
         usize,
         bool,
+        CursorInk,
     )>,
     /// Whether the next selection to arrive is to be taken as vim's own
     /// whatever it says.
@@ -166,6 +216,42 @@ pub(super) struct VimHost {
     /// closed. `None` is everything open, which is one past the deepest — the
     /// state `zR` puts the surface back into, and the one it opens in.
     pub fold_level: Option<usize>,
+}
+
+/// The three colours a block cursor is painted in: the mode's, the ink of the
+/// glyph standing under it, and the rectangle of a blockwise selection.
+///
+/// **They belong to the repaint key** (`VimHost::cursor_at`), and that is not
+/// caution. The theme registry loads asynchronously, so the window's first
+/// frames are painted in the default palette and `theme::apply` runs a second
+/// time once the chosen theme has arrived — as it does again at every change of
+/// theme or of mode. The four writing fields are built with the window and
+/// `sync_text_surfaces` paints them from the very first frame, where a file's
+/// editor is created long afterwards: their cursor was therefore computed under
+/// the palette of the moment, and a key holding only the mode and the selection
+/// answered that nothing had changed. A white block on the commit message and
+/// on a note, white until the first keystroke moved the caret.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) struct CursorInk {
+    /// The block itself, which is the mode said in a colour.
+    block: gpui::Hsla,
+    /// The glyph the block stands over, read against it.
+    glyph: gpui::Hsla,
+    /// A blockwise selection's rectangle — the theme's `selection`, which is
+    /// what `v` and `V` look like next door.
+    rectangle: gpui::Hsla,
+}
+
+impl CursorInk {
+    /// What a mode is painted in, read from the theme of this very frame.
+    fn of(mode: crate::ui::vim::Mode, cx: &gpui::App) -> Self {
+        let block = vim_mode_colour(mode, cx);
+        Self {
+            block,
+            glyph: ink_on(block, cx),
+            rectangle: cx.theme().selection,
+        }
+    }
 }
 
 impl VimHost {
@@ -250,6 +336,20 @@ impl ClaudhubApp {
         match surface {
             Surface::File(path) => self.editing_at(path).map(|editing| editing.input.clone()),
             Surface::Query(id) => self.console(*id).map(|console| console.input.clone()),
+            Surface::Text(field) => Some(self.text_input(*field)),
+        }
+    }
+
+    /// The editor behind one of the writing fields.
+    ///
+    /// Always there: the four are built with the window, where a file's exists
+    /// only while its tab is open.
+    pub(super) fn text_input(&self, field: TextField) -> Entity<EditorState> {
+        match field {
+            TextField::Commit => self.commit_input.clone(),
+            TextField::Note => self.note_input.clone(),
+            TextField::Prompt => self.prompt_input.clone(),
+            TextField::Journal => self.journal_input.clone(),
         }
     }
 
@@ -265,6 +365,7 @@ impl ClaudhubApp {
                 .map(|editing| editing.scroll_key.clone())
                 .unwrap_or_else(|| Surface::file_scroll_key(path)),
             Surface::Query(id) => SharedString::from(format!("query-scroll:{}", id.0)),
+            Surface::Text(field) => field.scroll_key(),
         }
     }
 
@@ -272,6 +373,7 @@ impl ClaudhubApp {
         match surface {
             Surface::File(path) => self.editing_at(path).map(|editing| &editing.host),
             Surface::Query(id) => self.console(*id).map(|console| &console.host),
+            Surface::Text(field) => self.text_hosts.get(field),
         }
     }
 
@@ -285,6 +387,39 @@ impl ClaudhubApp {
                 let id = *id;
                 self.console_mut(id).map(|console| &mut console.host)
             }
+            Surface::Text(field) => self.text_hosts.get_mut(field),
+        }
+    }
+
+    /// Puts a writing field in insert mode, for a dialog one opens in order to
+    /// write — see `vim::Vim::start_insert`.
+    pub(super) fn start_text_insert(&mut self, field: TextField) {
+        if let Some(host) = self.text_hosts.get_mut(&field) {
+            host.vim.start_insert();
+        }
+    }
+
+    /// Keeps the four writing fields' decorations up to date, once a frame.
+    ///
+    /// **In the root's render and not in each field's own**, and that is the
+    /// dialogs' doing: two of the four are painted from a closure `open_dialog`
+    /// calls back, in the middle of a borrow of the application, where reading
+    /// it is a panic (see "Conventions gpui"). One place for the four is also
+    /// one rule rather than two.
+    ///
+    /// A frame where nothing moved costs a comparison: both syncs remember what
+    /// they last painted for, and repaint nothing when the answer is the same.
+    ///
+    /// `centre_search_match` is **not** among them, where the file editor and
+    /// the console both call it: it puts the occurrence the search bar jumped to
+    /// in the middle of the panel, and a field five rows tall has no middle to
+    /// speak of.
+    pub(super) fn sync_text_surfaces(&mut self, cx: &mut Context<Self>) {
+        let vim = Settings::global(cx).vim_mode;
+        for field in TextField::ALL {
+            let surface = Surface::Text(field);
+            self.sync_block_cursor(&surface, vim, cx);
+            self.sync_search_matches(&surface, vim, cx);
         }
     }
 
@@ -372,6 +507,45 @@ impl ClaudhubApp {
         let key = crate::ui::vim::Key {
             ch: None,
             name: name.into(),
+            ctrl: false,
+        };
+        self.vim_press(surface, key, window, cx)
+    }
+
+    /// Escape, when the field is in a dialog and the dialog binds it.
+    ///
+    /// `true` when vim has taken it, which is what keeps the dialog open. The
+    /// test is what one would answer by hand: leaving insert mode, dropping a
+    /// half-typed command, coming out of a visual selection and putting out the
+    /// occurrences of a search are all things Escape does *inside* the field.
+    /// Normal mode with nothing pending is none of them — there, Escape means
+    /// what the dialog says it means, and the dialog is dismissed.
+    ///
+    /// It cannot go through `vim_named_key`: that one steps aside in insert
+    /// mode, which is the one mode this exists for.
+    pub(super) fn vim_escape(
+        &mut self,
+        surface: &Surface,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::ui::vim::Mode;
+
+        if !Settings::global(cx).vim_mode {
+            return false;
+        }
+        let busy = self.surface_host(surface).is_some_and(|host| {
+            host.vim.mode() != Mode::Normal
+                || !host.vim.pending().is_empty()
+                || host.vim.prompt().is_some()
+                || host.vim.highlights().is_some()
+        });
+        if !busy {
+            return false;
+        }
+        let key = crate::ui::vim::Key {
+            ch: None,
+            name: "escape".into(),
             ctrl: false,
         };
         self.vim_press(surface, key, window, cx)
@@ -633,7 +807,10 @@ impl ClaudhubApp {
             return;
         };
         let (mode, head) = (host.vim.mode(), host.vim.head());
-        let at = (mode, range, head, len, on);
+        // The colours are part of the question and not only of the answer: see
+        // `CursorInk`.
+        let ink = CursorInk::of(mode, cx);
+        let at = (mode, range, head, len, on, ink);
         if host.cursor_at.as_ref() == Some(&at) {
             return;
         }
@@ -662,7 +839,7 @@ impl ClaudhubApp {
         // next door: this is the same gesture, on a rectangle the editor has no
         // way of holding.
         let selected = gpui::HighlightStyle {
-            background_color: Some(cx.theme().selection),
+            background_color: Some(ink.rectangle),
             ..Default::default()
         };
         rectangle.set(
@@ -671,10 +848,9 @@ impl ClaudhubApp {
                 .collect(),
             cx,
         );
-        let colour = vim_mode_colour(mode, cx);
         let style = gpui::HighlightStyle {
-            color: Some(ink_on(colour, cx)),
-            background_color: Some(colour),
+            color: Some(ink.glyph),
+            background_color: Some(ink.block),
             ..Default::default()
         };
         layer.set(
@@ -691,7 +867,7 @@ impl ClaudhubApp {
             // a bar on an empty line, blinking, says insert mode on a line that
             // is not in it. `cursor` answers an empty range there and `None`
             // only in insert mode, which is exactly the distinction wanted.
-            state.set_caret_block(wide.then_some(colour), cx);
+            state.set_caret_block(wide.then_some(ink.block), cx);
         });
         if let Some(host) = self.surface_host_mut(surface) {
             host.cursor_at = Some(at);
@@ -1278,6 +1454,113 @@ impl ClaudhubApp {
     }
 }
 
+/// An editor set up as plain text: what a writing field is built on.
+///
+/// A code editor by construction — that is what carries the harness, the
+/// decoration layers living in an editor's extras and nowhere else — with
+/// everything a code editor *shows* turned off: no numbers down the left, no
+/// folding chevrons, no indent guides, no language to colour. What is left
+/// looks like the textarea it replaces and answers vim's keys.
+pub(super) fn plain_editor(window: &mut Window, cx: &mut Context<EditorState>) -> EditorState {
+    EditorState::new(window, cx)
+        .line_number(false)
+        .folding(false)
+        .indent_guides(false)
+}
+
+/// A writing field of the window, given the file editor's harness.
+///
+/// One function and not four: the commit box, the note dialog, the prompt
+/// dialog and the free note are the same thing seen four times — a field, a
+/// height, and the keys vim takes before the editor sees them. They had drifted
+/// once already as `Textarea`s, one of them auto-growing where its neighbour
+/// did not.
+///
+/// **It keeps the look of the textarea it replaces**, and that means all three
+/// of the text's measurements, not just the family. What is written here is
+/// prose — a commit message, a remark about a diff — and what was missing was
+/// the keys, not the typeface.
+///
+/// `Editor` sets the monospace family, the code size and a row height of 1.5,
+/// and its refinement wins over `Input`'s own: a field left to it came out in
+/// the right family at the wrong size, a seventh larger and looser than every
+/// other field of the window, which is precisely what one notices without being
+/// able to name it. The three values put back are `Input`'s — `text_sm` and
+/// 1.25 rem — read off `Input::render` rather than guessed at.
+///
+/// **No smoothed wheel**, deliberately, where the file editor and the console
+/// both have one: `wheel_capture` consumes the notch over the field's whole
+/// area, and every one of these sits inside something that does scroll — the
+/// review, the notes panel, a dialog. A field a few rows tall would take the
+/// gesture and have nowhere to spend it.
+pub(super) fn text_field(
+    field: TextField,
+    input: &Entity<EditorState>,
+    height: Pixels,
+    app: &Entity<ClaudhubApp>,
+    cx: &App,
+) -> gpui::Stateful<gpui::Div> {
+    let vim = Settings::global(cx).vim_mode;
+    let font = cx.theme().font_family.clone();
+    div()
+        .id(SharedString::new_static(match field {
+            TextField::Commit => "text-field-commit",
+            TextField::Note => "text-field-note",
+            TextField::Prompt => "text-field-prompt",
+            TextField::Journal => "text-field-journal",
+        }))
+        .w_full()
+        .h(height)
+        // Installed only when the mode is on, so that nothing stands between
+        // the keyboard and the field otherwise: see `vim_capture`. The context
+        // is the console's, for the one thing it buys — `Ctrl+R` staying redo.
+        .map(|el| match vim {
+            true => vim_capture(
+                el.key_context(crate::ui::shortcuts::editor_vim_context()),
+                Surface::Text(field),
+                app,
+            ),
+            false => el,
+        })
+        .child(
+            gpui_component::input::Editor::new(input)
+                .font_family(font)
+                .text_sm()
+                .line_height(gpui::rems(1.25))
+                .h_full(),
+        )
+}
+
+/// What a field's height is, growing with its content between two row counts.
+///
+/// `TextareaState::auto_grow` is the textarea's and does not exist on an
+/// editor — the layout mode is one thing or the other, and a code editor is
+/// already the other. This is that behaviour written from the outside, from the
+/// two things the editor does say: how many rows its text takes, soft wrap
+/// included (`wrapped_row_count`), and how tall a row is.
+///
+/// **Not `scroll_size`**, which looks like the answer and is not: it is floored
+/// at the height already on screen, so a field that grew once would never
+/// shrink back — a note pared down to one line would keep the eight rows the
+/// draft had.
+///
+/// A frame behind, both being measurements of the last paint, which is
+/// invisible at typing speed.
+pub(super) fn grown_height(
+    input: &Entity<EditorState>,
+    min_rows: usize,
+    max_rows: usize,
+    cx: &App,
+) -> Pixels {
+    let state = input.read(cx);
+    // Before the first paint there is no row height to reckon with: the field
+    // opens at its minimum, and the next frame has the measurement.
+    let Some(row) = state.line_height() else {
+        return px(min_rows as f32 * 20.);
+    };
+    row * state.wrapped_row_count().clamp(min_rows, max_rows) as f32
+}
+
 /// The four keys a code surface takes before its editor sees them.
 ///
 /// One place and not two: the file editor and the SQL console install exactly
@@ -1297,37 +1580,58 @@ impl ClaudhubApp {
 pub(super) fn vim_capture(
     el: gpui::Stateful<gpui::Div>,
     surface: Surface,
-    cx: &mut Context<ClaudhubApp>,
+    app: &Entity<ClaudhubApp>,
 ) -> gpui::Stateful<gpui::Div> {
-    let (keys, paste, enter, backspace) =
-        (surface.clone(), surface.clone(), surface.clone(), surface);
-    el.capture_key_down(
-        cx.listener(move |this, event, window, cx| this.vim_key(&keys, event, window, cx)),
-    )
-    .capture_action(
-        cx.listener(move |this, _: &gpui_component::input::Paste, window, cx| {
-            if this.vim_paste(&paste, window, cx) {
-                cx.stop_propagation();
-            }
-        }),
-    )
-    .capture_action(cx.listener(
-        move |this, action: &gpui_component::input::Enter, window, cx| {
-            if action.secondary || action.shift {
-                return;
-            }
-            if this.vim_named_key(&enter, "enter", window, cx) {
-                cx.stop_propagation();
-            }
-        },
-    ))
-    .capture_action(cx.listener(
-        move |this, _: &gpui_component::input::Backspace, window, cx| {
-            if this.vim_named_key(&backspace, "backspace", window, cx) {
-                cx.stop_propagation();
-            }
-        },
-    ))
+    let (keys, paste, enter, backspace, escape) = (
+        surface.clone(),
+        surface.clone(),
+        surface.clone(),
+        surface.clone(),
+        surface,
+    );
+    let (app_keys, app_paste, app_enter, app_backspace, app_escape) = (
+        app.clone(),
+        app.clone(),
+        app.clone(),
+        app.clone(),
+        app.clone(),
+    );
+    el.capture_key_down(move |event, window, cx| {
+        app_keys.update(cx, |this, cx| this.vim_key(&keys, event, window, cx));
+    })
+    .capture_action(move |_: &gpui_component::input::Paste, window, cx| {
+        if app_paste.update(cx, |this, cx| this.vim_paste(&paste, window, cx)) {
+            cx.stop_propagation();
+        }
+    })
+    .capture_action(move |action: &gpui_component::input::Enter, window, cx| {
+        if action.secondary || action.shift {
+            return;
+        }
+        if app_enter.update(cx, |this, cx| {
+            this.vim_named_key(&enter, "enter", window, cx)
+        }) {
+            cx.stop_propagation();
+        }
+    })
+    .capture_action(move |_: &gpui_component::input::Backspace, window, cx| {
+        if app_backspace.update(cx, |this, cx| {
+            this.vim_named_key(&backspace, "backspace", window, cx)
+        }) {
+            cx.stop_propagation();
+        }
+    })
+    // **Escape, when a dialog is what the field is sitting in.** A dialog binds
+    // it to `Cancel`, and a binding runs ahead of the key listener: leaving
+    // insert mode dismissed the dialog and threw away what had just been
+    // written. Taken here, on the way down, and only when vim has something to
+    // do with it — in normal mode with nothing pending it is let through, since
+    // Escape is also how one leaves a dialog one has decided against.
+    .capture_action(move |_: &gpui_component::dialog::Cancel, window, cx| {
+        if app_escape.update(cx, |this, cx| this.vim_escape(&escape, window, cx)) {
+            cx.stop_propagation();
+        }
+    })
 }
 
 /// The wheel, taken before the editor sees it.
@@ -1339,15 +1643,26 @@ pub(super) fn vim_capture(
 /// underneath. A window mouse listener in the **capture** phase runs first, and
 /// consuming the event there leaves the whole movement to us.
 ///
-/// A `canvas` because the listener needs the laid-out bounds to know whether
-/// the pointer is over this surface at all.
-pub(super) fn wheel_capture(surface: Surface, cx: &mut Context<ClaudhubApp>) -> impl IntoElement {
-    let entity = cx.entity();
+/// A `canvas` because the listener needs a **hitbox** to know whether the
+/// pointer is over this surface at all — and a window listener sees no
+/// hierarchy, so nothing else would tell it that something is painted on top.
+/// `should_handle_scroll` is the question gpui answers for a wheel event, as
+/// against `is_hovered`, which is the one for clicks and hover styles.
+///
+/// **Bounds are not enough, and that is what a popover proved.** The branch
+/// picker hangs from the title bar and comes down over the centre; scrolling
+/// its list moved the file underneath, since the pointer was inside this
+/// surface's rectangle and this listener runs in the capture phase and
+/// consumes. A hitbox inserted here is behind the popover's own — the popover
+/// paints later, in a deferred layer — and its `occlude()` cuts the hit test
+/// short before ours, which is exactly the answer wanted.
+pub(super) fn wheel_capture(surface: Surface, app: &Entity<ClaudhubApp>) -> impl IntoElement {
+    let entity = app.clone();
     gpui::canvas(
-        |_, _, _| (),
-        move |bounds: gpui::Bounds<Pixels>, _, window, _cx| {
+        |bounds, window, _cx| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+        move |_, hitbox: gpui::Hitbox, window, _cx| {
             window.on_mouse_event(move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
-                if phase != gpui::DispatchPhase::Capture || !bounds.contains(&event.position) {
+                if phase != gpui::DispatchPhase::Capture || !hitbox.should_handle_scroll(window) {
                     return;
                 }
                 cx.stop_propagation();
@@ -1424,5 +1739,43 @@ fn ink_on(colour: gpui::Hsla, cx: &gpui::App) -> gpui::Hsla {
         darker
     } else {
         lighter
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every writing field is in `TextField::ALL`, and each has a scroll key of
+    /// its own.
+    ///
+    /// Two silent failures at once, and neither raises anything. A field left
+    /// out of `ALL` is a field whose block cursor is never painted:
+    /// `sync_text_surfaces` walks that list, and nothing else knows the surface
+    /// is there. Two fields filed under one key is one motion pushing both of
+    /// them — the trap `Surface::File` carries a whole path to avoid.
+    ///
+    /// The match below is exhaustive on purpose: a fifth field will not compile
+    /// until it has been given a rank here, which is the line that sends one
+    /// back to `ALL`.
+    #[test]
+    fn every_writing_field_is_listed_under_a_key_of_its_own() {
+        fn rank(field: TextField) -> usize {
+            match field {
+                TextField::Commit => 0,
+                TextField::Note => 1,
+                TextField::Prompt => 2,
+                TextField::Journal => 3,
+            }
+        }
+        let mut ranks: Vec<usize> = TextField::ALL.iter().copied().map(rank).collect();
+        ranks.sort_unstable();
+        assert_eq!(ranks, vec![0, 1, 2, 3]);
+
+        let keys: std::collections::HashSet<SharedString> = TextField::ALL
+            .iter()
+            .map(|field| field.scroll_key())
+            .collect();
+        assert_eq!(keys.len(), TextField::ALL.len());
     }
 }

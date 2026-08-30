@@ -167,6 +167,8 @@ src/
     diff_view.rs    la vue de diff, virtualisée
     refine.rs       les mots qui changent entre deux versions d'une ligne — pur
     history_view.rs l'historique et son graphe peint
+    home.rs         la page d'accueil du centre : le projet, la branche,
+                    ce qui attend d'être validé, les autres worktrees
     tags.rs         le panneau des tags, et les quatre gestes sur un tag
     stashes.rs      le panneau des remisages, et les gestes sur un remisage
     tests_view.rs   les deux panneaux des tests : l'arbre repliable multi-
@@ -476,11 +478,19 @@ pose à l'**application** et non au panneau — un panneau ignore quelle région
 tient, le registre en rebâtit un d'après un nom seul.
 
 
-**Le panneau d'accueil du centre** (`EditorPanel`) n'est plus une contrainte du
-moteur — `add_panel_view` sait fendre la racine d'une région vide, et fabrique
-même une zone absente. Il reste parce qu'une fenêtre qui s'ouvre sur rien ne dit
-rien de ce qu'elle sait faire : au premier démarrage, diff, console et aperçu
-sont tous conditionnels, donc absents.
+**Le panneau d'accueil du centre** (`EditorPanel`, peint par `ui::home`) n'est
+plus une contrainte du moteur — `add_panel_view` sait fendre la racine d'une
+région vide, et fabrique même une zone absente. Il reste parce qu'une fenêtre
+qui s'ouvre sur rien ne dit rien de ce qu'elle sait faire : au premier
+démarrage, diff, console et aperçu sont tous conditionnels, donc absents. Ce
+qu'il montre est le dépôt, la branche et ce qui attend d'être validé, et **rien
+n'y demande quoi que ce soit à git** : un onglet peint à chaque démarrage ne
+paie aucune commande. Son onglet porte la **maison seule**, comme un onglet
+épinglé (`panels::pinned_glyph`), et **ne se ferme pas** : une croix serait une
+vue rangée sans retour — le menu « Vues » ne remet que des tool windows, et
+c'est un document. Ce qu'on en fait, c'est ouvrir autre chose, ce qui est
+précisément ce qui l'efface. Il garde l'identifiant de l'éditeur
+(`ClaudhubEditor`) pour la raison que le panneau GitHub garde `ClaudhubCi`.
 
 **Les Réglages sont une modale.** Le formulaire est une **entité enfant** et non
 une fermeture : `open_dialog` retient un `Fn` rappelé depuis le rendu de la
@@ -583,7 +593,7 @@ registre de gpui-component ne se charge **que depuis un répertoire**, qu'il
 surveille ; les thèmes sont donc écrits dans `<config>/themes/` au démarrage, et
 réécrits à chaque fois — pour en modifier un, le copier sous un autre nom.
 
-**Le fork de gpui-component** (voir `Cargo.toml`) est vingt et un commits
+**Le fork de gpui-component** (voir `Cargo.toml`) est vingt-deux commits
 au-dessus de leur `main`, chacun payé par un symptôme :
 
 1. le `TabVariant` que `DockSkin` fait passer jusqu'au `TabBar` ;
@@ -647,6 +657,14 @@ au-dessus de leur `main`, chacun payé par un symptôme :
     un dialogue, une feuille ou un piège de focus — le cas pour lequel elle
     existe — et propage ailleurs.
 
+22. **un éditeur dit combien de lignes son texte occupe**
+    (`wrapped_row_count`) : `auto_grow` appartient au textarea et le mode de
+    disposition est l'un *ou* l'autre, si bien qu'un éditeur qu'on fait suivre
+    son contenu n'avait aucun moyen de demander la hauteur de ce contenu.
+    `scroll_size` ne répond pas non plus — il est plafonné par le bas à la
+    hauteur déjà à l'écran, et un champ ayant grandi une fois ne rapetissait
+    plus jamais.
+
 Les commits ont vocation à partir en PR.
 
 ## Les sous-systèmes
@@ -691,9 +709,13 @@ jamais d'un parcours de disque. `tree` ne connaît que des chemins et rend des
 parents. **Construire l'arbre et le plier sont deux gestes**, et les confondre
 coûtait un cinquième de seconde par chevron. Le curseur est un **chemin**, pas un
 indice. L'arbre s'ouvre fermé et retient ce qu'on a **ouvert** ; la revue s'ouvre
-grande et retient ce qu'on a **fermé** (`tree::Folds`). Git s'arrête au dossier
-qu'il exclut en entier (`--directory`) et son contenu se lit au chevron
-(`files::read_dir`).
+grande et retient ce qu'on a **fermé** (`tree::Folds`). **Une recherche renverse
+la règle** dans l'explorateur — les résultats s'ouvrent, sinon une trouvaille
+dans un dossier jamais ouvert ne se verrait pas — d'où un **second** ensemble de
+replis, vidé à chaque changement de filtre : un seul ne pourrait pas porter les
+deux, l'entrée absente voulant dire « fermé » d'un côté et « ouvert » de
+l'autre. Git s'arrête au dossier qu'il exclut en entier (`--directory`) et son
+contenu se lit au chevron (`files::read_dir`).
 
 **L'éditeur** (`explorer.rs`, `surface.rs`) — un jeu d'éditeurs par worktree, un
 onglet par fichier, et c'est la **barre du dock**. Le panneau qui se peint *est*
@@ -721,10 +743,25 @@ curseur bloc et les occurrences de recherche sont peints par nous, en couches de
 décoration créées **une fois** avec la surface.
 
 **Les surfaces de code** (`surface.rs`) — une surface se **nomme**, elle ne se
-possède pas (`Surface::File(chemin)` / `Surface::Query`) : l'état reste où il
-vit. Un fichier se nomme par son **chemin**, pas par « l'onglet actif » — le dock
-en montre deux dès qu'on ouvre un split, et une clé de lissage unique poussait
-deux éditeurs à la fois.
+possède pas (`Surface::File(chemin)` / `Surface::Query` / `Surface::Text(champ)`) :
+l'état reste où il vit. Un fichier se nomme par son **chemin**, pas par
+« l'onglet actif » — le dock en montre deux dès qu'on ouvre un split, et une clé
+de lissage unique poussait deux éditeurs à la fois.
+
+**Les quatre champs de rédaction sont la troisième famille** (`TextField` : le
+message de commit, la note, le prompt de l'agent, la note libre du worktree).
+C'étaient des `Textarea`, la seule chose de cette fenêtre qu'on écrit sans
+pouvoir l'éditer ; ce sont des `EditorState` habillés en texte brut
+(`plain_editor`, peints par `text_field`), avec la police de l'interface — ce
+qui manquait était les touches, pas la fonte. Les couches de décoration
+n'existent **que** sur un éditeur, et c'est ce qui interdisait le harnais à un
+textarea ; `auto_grow` est l'inverse, d'où `grown_height`. Deux des quatre sont
+dans un **dialogue**, dont la fermeture de rendu ne peut pas lire l'application :
+leurs décorations se rafraîchissent en tête du rendu de la racine
+(`sync_text_surfaces`), et le harnais n'y reçoit que la **poignée**, ses
+écouteurs tournant hors du rendu. Et **Échap y est une action** (`Cancel`, liée
+par le dialogue) et non une frappe : sans `vim_escape`, sortir du mode insertion
+fermait le dialogue et jetait ce qu'on venait d'écrire.
 
 **Le terminal** (`terminal/`) — `alacritty_terminal` fournit le parseur, la
 grille et le pty. Le verrou de la grille est partagé avec la boucle d'E/S :

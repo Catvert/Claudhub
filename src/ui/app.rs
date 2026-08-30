@@ -16,7 +16,7 @@ use gpui::{
 use gpui_component::{
     dock::{DockArea, DockSkin},
     h_flex,
-    input::{InputState, TextareaState},
+    input::{EditorState, InputState},
     select::{SearchableVec, SelectEvent, SelectState},
     separator::Separator as Divider,
     v_flex, ActiveTheme, Root, Sizable, WindowExt,
@@ -65,7 +65,7 @@ use crate::ui::terminal_view::OpenTerminal;
 // heard of are three one would put in place by hand. The default is the one
 // this window ended up giving itself, so rebuilding costs nothing to anyone
 // who had not moved anything since.
-const LAYOUT_VERSION: usize = 26;
+const LAYOUT_VERSION: usize = 27;
 
 /// The window's saved arrangement.
 ///
@@ -623,7 +623,12 @@ pub struct ClaudhubApp {
     /// together. Each is a dock panel per screen sharing one pty — see
     /// `terminal_view::Terminal`.
     pub(super) terminals: Vec<OpenTerminal>,
-    pub(super) commit_input: Entity<TextareaState>,
+    /// The commit message being written.
+    ///
+    /// An `EditorState` and not a `TextareaState`, as the three other writing
+    /// fields are: it is what carries the modal keys, the block cursor and the
+    /// search — see `ui::surface::TextField`.
+    pub(super) commit_input: Entity<EditorState>,
     /// The comparison base's selector. It is searchable: a living repository has
     /// dozens of branches, and scrolling a list of seventy entries to find one
     /// whose name you already know is exactly what a search field saves.
@@ -644,9 +649,9 @@ pub struct ClaudhubApp {
     /// A note's input field. Created **once**: recreated in a `render` or when
     /// the dialog opens, it would lose the cursor, the selection and the text on
     /// the first keystroke.
-    pub(super) note_input: Entity<TextareaState>,
+    pub(super) note_input: Entity<EditorState>,
     /// The prompt going out to the agent, before it goes.
-    pub(super) prompt_input: Entity<TextareaState>,
+    pub(super) prompt_input: Entity<EditorState>,
     /// The input for a task to add to `TODO.md`, at the bottom of the list.
     pub(super) task_input: Entity<InputState>,
     /// The input for a task being edited, in its place in the list.
@@ -661,9 +666,15 @@ pub struct ClaudhubApp {
     /// A single one for every worktree, whose content follows the displayed one:
     /// one per open worktree would keep that many editing states alive, and there
     /// is only ever one in front of you.
-    pub(super) journal_input: Entity<TextareaState>,
+    pub(super) journal_input: Entity<EditorState>,
     /// A write of the free note is already scheduled.
     pub(super) journal_save: bool,
+    /// The modal state of each writing field — see `ui::surface`.
+    ///
+    /// Beside the fields rather than inside them: `VimHost` is the harness's,
+    /// and the harness reaches every surface the same way, by name.
+    pub(super) text_hosts:
+        std::collections::HashMap<crate::ui::surface::TextField, crate::ui::surface::VimHost>,
     /// The note being written: its anchoring, settled at the moment of the gesture.
     ///
     /// It is settled there and not on confirmation because the diff can change
@@ -1162,33 +1173,41 @@ impl ClaudhubApp {
     ) -> Self {
         let (git, events, remote) = Self::spawn_backend();
 
-        let commit_input =
-            cx.new(|cx| TextareaState::new(window, cx).placeholder(tr!("commit-placeholder")));
-
-        // `auto_grow` rather than a fixed height: a review remark is two lines
-        // or ten, and a frozen area forces scrolling what is being written.
-        let note_input = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .auto_grow(2, 8)
-                .placeholder(tr!("note-placeholder"))
+        // The four writing fields are editors, and `text_field` builds the
+        // plain-text look back over them: no line numbers, no folding, no
+        // language. What they gain is `ui::surface` — the modal keys, the block
+        // cursor, the search. Their heights are said where they are painted, by
+        // `surface::grown_height`, an editor having no `auto_grow` of its own.
+        let commit_input = cx.new(|cx| {
+            crate::ui::surface::plain_editor(window, cx).placeholder(tr!("commit-placeholder"))
         });
 
-        // Taller than a note's: what is read back here is a whole message, with
-        // the quoted code, and eight lines of context are the minimum to judge
-        // what is going out.
-        let prompt_input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(8, 20));
+        let note_input = cx.new(|cx| {
+            crate::ui::surface::plain_editor(window, cx).placeholder(tr!("note-placeholder"))
+        });
+
+        let prompt_input = cx.new(|cx| crate::ui::surface::plain_editor(window, cx));
 
         let task_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("todo-add-placeholder")));
         let task_edit_input = cx.new(|cx| InputState::new(window, cx));
 
-        // The free note: it grows with what is written in it, within the limits
-        // the section can give without pushing the rest out of sight.
         let journal_input = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .auto_grow(3, 14)
-                .placeholder(tr!("journal-placeholder"))
+            crate::ui::surface::plain_editor(window, cx).placeholder(tr!("journal-placeholder"))
         });
+
+        // The modal harness, one per field and built with it: the decoration
+        // layers follow the text through its edits, and asking for new ones per
+        // frame would stack them up for as long as the window lives.
+        let text_hosts = [
+            (crate::ui::surface::TextField::Commit, &commit_input),
+            (crate::ui::surface::TextField::Note, &note_input),
+            (crate::ui::surface::TextField::Prompt, &prompt_input),
+            (crate::ui::surface::TextField::Journal, &journal_input),
+        ]
+        .into_iter()
+        .map(|(field, input)| (field, crate::ui::surface::VimHost::new(input, cx)))
+        .collect();
 
         let sentry_project_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("sentry-project-placeholder")));
@@ -1275,6 +1294,7 @@ impl ClaudhubApp {
             task_edit_input,
             task_editing: None,
             journal_input,
+            text_hosts,
             journal_save: false,
             notes_collapsed: std::collections::HashSet::new(),
             note_draft: None,
@@ -4109,6 +4129,10 @@ impl Render for ClaudhubApp {
         // `flush_notes`.
         self.flush_notes(window, cx);
         self.flush_reveal(window, cx);
+        // The block cursor and the lit occurrences of the four writing fields,
+        // two of which are painted from inside a dialog: see
+        // `surface::sync_text_surfaces`.
+        self.sync_text_surfaces(cx);
         v_flex()
             // Vim mode is read at render time and not at construction: the
             // context is what turns its bindings on, and the setting changes

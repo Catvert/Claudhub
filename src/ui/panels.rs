@@ -35,21 +35,72 @@ use crate::ui::settings::Settings;
 /// wheel button both close the file.
 type Closing = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
 
+/// A tab: the glyph of the view's own rail button, then its name.
+///
+/// **The same picture in both places.** A rail button and a tab are two ways of
+/// reaching one view — the button when the zone is folded, the tab when it is
+/// not — and until now one was a glyph and the other a word, so nothing said
+/// they were the same thing. A panel with no button on any rail is left with its
+/// name alone: a document is not a tool window (see `rails::icon_of`).
+fn tab_row(name: &str, label: gpui::SharedString) -> gpui::Div {
+    // A pinned tab is its glyph and nothing else, and the word it does not show
+    // is a hover away — see `closable_title`.
+    if let Some(glyph) = pinned_glyph(name) {
+        return gpui_component::h_flex()
+            .items_center()
+            .child(crate::ui::icons::icon(glyph).xsmall());
+    }
+    gpui_component::h_flex()
+        .gap_1()
+        .items_center()
+        .children(
+            crate::ui::rails::icon_of(name).map(|glyph| crate::ui::icons::icon(glyph).xsmall()),
+        )
+        .child(label)
+}
+
+/// The tabs that wear their glyph alone, and the glyph each wears.
+///
+/// The home tab, and nothing else so far. It is not a document one has opened
+/// but the room one comes back to when nothing is open, so it is named the way
+/// a browser names a pinned tab: by its picture, taking the width of one glyph
+/// beside the tabs that carry words. It has no rail button either — it is no
+/// tool window — which is why the glyph is here and not in `rails::icon_of`.
+fn pinned_glyph(name: &str) -> Option<&'static str> {
+    (name == EditorPanel::NAME).then_some("house")
+}
+
+/// A tab nothing closes: the glyph, and the name.
+fn titled(name: &'static str, label: gpui::SharedString) -> gpui::AnyElement {
+    tab_row(name, label.clone())
+        // A pinned tab shows no word, so the word is what its tooltip is for:
+        // a glyph one has to guess at is a tab one does not press. Stateful for
+        // that alone — a tooltip hangs off an element with an id.
+        .id(label.clone())
+        .when(pinned_glyph(name).is_some(), |tab| {
+            tab.tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx)
+            })
+        })
+        .into_any_element()
+}
+
 /// A view's tab, with the cross that empties it.
 ///
 /// The same shape a file's tab has — the name, then a ghost cross the size of
 /// the text — so that "this closes" reads the same everywhere in the bar. The
 /// wheel button does it too, which is the gesture of every browser and the only
 /// one that closes a tab without aiming at a cross the size of a full stop.
-fn closable_title(label: gpui::SharedString, closing: Closing) -> gpui::AnyElement {
+fn closable_title(
+    name: &'static str,
+    label: gpui::SharedString,
+    closing: Closing,
+) -> gpui::AnyElement {
     let on_cross = closing.clone();
-    let tab = gpui_component::h_flex()
+    let tab = tab_row(name, label.clone())
         // Stateful, which is what the wheel listener asks for: the id is the
         // label, and one view's tab is drawn once.
-        .id(label.clone())
-        .gap_1()
-        .items_center()
-        .child(label)
+        .id(label)
         .child(
             Button::new("close-view")
                 .ghost()
@@ -559,10 +610,10 @@ macro_rules! panels {
     // file's tab and a terminal's come to carry one and the diff's did not.
     // Saying `closes:` was therefore declaring a gesture with nothing to make
     // it with.
-    (@title $self:expr, $title:literal) => {
-        tr!($title).into_any_element()
+    (@title $self:expr, $id:literal, $title:literal) => {
+        titled($id, tr!($title))
     };
-    (@title $self:expr, $title:literal, $closes:ident) => {{
+    (@title $self:expr, $id:literal, $title:literal, $closes:ident) => {{
         let app = $self.app.clone();
         // One closure for the cross and the wheel button: they are two ways of
         // making one gesture.
@@ -577,7 +628,7 @@ macro_rules! panels {
                 app.update(cx, |app, cx| app.$closes(cx));
             });
         });
-        closable_title(tr!($title), closing)
+        closable_title($id, tr!($title), closing)
     }};
 
     // The cached value the panel is born with, the application not being
@@ -682,7 +733,7 @@ macro_rules! panels {
 
         impl Panel for $name {
             fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                panels!(@title self, $title $(, $closes)?)
+                panels!(@title self, $id, $title $(, $closes)?)
             }
 
             fn zoom_control(&self, _: &App) -> Option<PanelControl> {
@@ -764,18 +815,29 @@ panels! {
     // `git log` on a tab nobody will open; `ensure_history` only asks once,
     // otherwise every frame would restart the command.
     HistoryPanel => ("ClaudhubHistory", "panel-branches", render_history, History, prepare: ensure_history),
-    // The centre when **nothing** is open.
+    // The centre when **nothing** is open: the home page — see `ui::home`.
     //
     // No longer a constraint of the engine: `add_panel_view` splits an empty
     // region's root to place the first panel, so a centre with no tab has
     // somewhere to drop a file after all. What is left is a choice — a window
     // that opens on nothing at all says nothing of what it can do, and at a
     // first start the diff, the console and the preview are every one of them
-    // conditional and therefore absent.
+    // conditional and therefore absent. What it shows is therefore the project
+    // one has just opened, and not the sentence "pick a file" it used to.
     //
     // So it stands for the whole centre and not for the editor alone, and it
     // steps aside as soon as anything arrives there.
-    EditorPanel => ("ClaudhubEditor", "panel-editor", render_editor_panel, Editor, visible: empty_centre_visible),
+    //
+    // **It keeps the editor's identifier** (`ClaudhubEditor`), as the GitHub
+    // panel keeps `ClaudhubCi`: it is written in every `layout.json` already
+    // saved, and it is the name under which the centre is folded away — the
+    // file tabs read their own visibility off it.
+    //
+    // **And it does not close.** A cross on it would be a view put away with no
+    // way back: the way back is the "Views" menu, which lists tool windows, and
+    // this is a document. What one does with it is open something else, which
+    // is exactly what makes it step aside.
+    EditorPanel => ("ClaudhubEditor", "panel-home", render_home, Home, visible: home_visible),
     // The errors Sentry reports, and the one being read. **Two panels on one
     // state**, which is the gesture of the rest of the window: choosing an
     // error must not push out of sight the list one is choosing from.
@@ -1313,7 +1375,7 @@ impl Panel for SentryIssuePanel {
                 app.update(cx, |app, cx| app.close_sentry_issue(cx));
             });
         });
-        closable_title(name, closing)
+        closable_title(Self::NAME, name, closing)
     }
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {
@@ -1403,7 +1465,7 @@ impl BasePanel for ConflictsPanel {
 
 impl Panel for ConflictsPanel {
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        tr!("panel-conflicts")
+        titled("ClaudhubConflicts", tr!("panel-conflicts"))
     }
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {
@@ -1782,6 +1844,15 @@ impl Panel for TerminalPanel {
                 );
                 menu
             })
+            // The glyph of its own rail button, as every other tab wears —
+            // and it is the *seat's*, not the panel struct's: the bottom
+            // terminals and the ones beside the code are two views with two
+            // buttons, so `panel_name` is what says which of the two this tab
+            // is. See `rails::icon_of`.
+            .children(
+                crate::ui::rails::icon_of(BasePanel::panel_name(self))
+                    .map(|glyph| crate::ui::icons::icon(glyph).xsmall()),
+            )
             .child(label)
             .child(
                 Button::new("close-terminal")

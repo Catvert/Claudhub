@@ -1323,7 +1323,7 @@ impl ClaudhubApp {
                 // Not asked for: this list picks a branch to build a worktree
                 // from, and there is no log beside it to point anywhere.
                 crate::ui::branches::Row::Scope(_) => {}
-                crate::ui::branches::Row::Group(kind) => rows.push(
+                crate::ui::branches::Row::Group { kind, .. } => rows.push(
                     div()
                         .px_2()
                         .pt_1()
