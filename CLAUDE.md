@@ -176,7 +176,9 @@ src/
                     par défaut) et le run suivi — « tout lancer » est une
                     campagne, une commande par lanceur fusionnée en un compte ;
                     l'onglet n'existe que si un lanceur existe, les verdicts
-                    persistent par worktree dans le magasin
+                    persistent par worktree dans le magasin ; un clic droit
+                    ouvre le test dans l'éditeur, le fichier venant du listing
+                    et la ligne du texte qu'on y cherche
     highlight.rs    coloration tree-sitter d'un diff
     blade.rs        les vues Blade : surcouche du diff, coloriseur de l'éditeur
     panels.rs       les panneaux du dock, leur macro et leur registre
@@ -203,7 +205,7 @@ src/
     sql_history.rs  les requêtes déjà jouées : dédup, portée, jours — pur
     sql_history_view.rs  les requêtes déjà jouées, moitié basse du panneau des bases
     search.rs       les lignes de la recherche projet — pur
-    search_view.rs  la loupe : le champ, la liste, l'aperçu
+    search_view.rs  la loupe : le champ, la liste, et le volet du modal
     quick.rs        ce qu'une poignée de lettres nomme dans une liste de
                     chemins, et le double appui sur Maj — pur, testé
     quick_view.rs   le sélecteur rapide : un modal, deux questions
@@ -472,6 +474,16 @@ une zone de se replier à rien pendant que ses boutons restent. L'affordance du
 dock est un chevron dans une barre d'onglets : il nomme la zone d'à côté et s'en
 va avec elle, si bien que ce qu'il cachait ne revenait que par la barre d'un
 autre groupe. D'où `set_toggle_button_visible(false)`.
+
+**Un bandeau porte en son milieu la zone entière** (`rails::zone_glyph`,
+`dock_layout::zone_button`) : presser une vue allumée range sa **moitié**, et
+l'autre moitié prend alors la place — replier « Changements » faisait remplir la
+colonne par les notes. « Pas cette colonne du tout » demandait deux pressions,
+une par moitié, et aucune des deux ne le disait. Le milieu est le seul endroit
+qui n'appartient à aucune des deux moitiés, ce dont le bouton parle. En bas, la
+barre d'état se lit en trois parts — ce qui est dit, le bouton, ce qui ouvre —
+et les deux runs de part et d'autre l'y tiennent au centre sans placement
+absolu, lequel serait passé par-dessus le `+`.
 
 **Un onglet du centre ne s'affiche que s'il a quelque chose à montrer**
 (`needed:` dans la macro `panels!`). La règle ne valait que sur l'accueil, les
@@ -797,6 +809,22 @@ ripgrep : la question a été mesurée, l'écart est sous le seuil de perception
 de compilation de git). Trois plafonds, et chacun est dit. La recherche est
 amortie par un **compteur de frappes** relu à l'échéance, pas par un drapeau.
 
+**Une occurrence s'ouvre dans l'éditeur**, et le centre n'a plus de volet
+d'aperçu : c'était une seconde surface de code, en lecture seule, répondant à
+ce que l'onglet d'aperçu répond déjà — un clic est un coup d'œil et prend
+l'onglet que le suivant reprend (`editor_preview_tab`, `open_hit`), `Entrée` et
+le double clic le gardent — et un coup d'œil **laisse le clavier dans la
+liste**, où sont les flèches avec lesquelles on la parcourt. La **flèche ne
+déplace que le curseur** : la ligne montre déjà son texte allumé, et ouvrir à
+chaque pas coûterait un `EditorState`, un blob `HEAD` et un `didOpen` par
+touche. Les mots cherchés
+s'allument sur la couche des occurrences de `Ctrl+F` et de vim
+(`surface::hit_pattern`), jamais sur une troisième — deux couches d'une même
+couleur sur les mêmes mots font un troisième genre de correspondance. Le motif
+se lit dans `search.sent` en peignant et n'est pas recopié sur l'onglet : un
+fichier resté ouvert se rallume sur la question suivante, et vider le champ
+éteint tout.
+
 **Le sélecteur rapide** (`quick.rs`, `quick_view.rs`) — un modal, deux
 questions : *où est ce texte* (`Ctrl+Maj+F`) et *quel est ce fichier*
 (`Maj Maj`, et `Ctrl+P`). C'est PhpStorm, et c'est ce qu'une aire de dock ne
@@ -820,14 +848,16 @@ aucun état, il écrit dans `search_input`, envoie par `run_search` et peint
 `search.rows` avec le rendu de ligne du panneau. Une seule question et une
 seule réponse dans cette fenêtre — c'est ce qui rend l'échappatoire gratuite.
 
-**Le fichier est à côté de la liste, dans le modal aussi**, et en colonnes et
-non l'une sous l'autre : on parcourt la liste pour savoir *laquelle* des
-réponses c'est, et à cette question c'est le code qui répond, pas le chemin.
+**Le fichier est à côté de la liste**, et en colonnes et non l'une sous
+l'autre : on parcourt la liste pour savoir *laquelle* des réponses c'est, et à
+cette question c'est le code qui répond, pas le chemin. C'est **le seul volet
+d'aperçu qui reste**, et ce qui le garde est qu'un modal ne peut pas emprunter
+un onglet au dock — le panneau, lui, ouvre ses occurrences dans l'éditeur.
 **Un seul pipeline, deux volets** (`PreviewPane`) : `Cmd::ReadPreview` est le
 même, `PendingPreview` dit où la réponse atterrit et ce qu'on y allume — la
-requête du moment de l'envoi côté recherche, **rien** côté fichiers, les mots
-de la dernière recherche n'ayant rien à faire dans un fichier demandé par son
-nom. Deux emplacements pourtant, et non un : ce que le panneau prévisualise est
+requête du moment de l'envoi côté texte, **rien** côté fichiers, les mots de la
+dernière recherche n'ayant rien à faire dans un fichier demandé par son nom.
+Deux emplacements pourtant, et non un : ce que le côté texte prévisualise est
 l'occurrence où l'on est, ce que le côté fichiers prévisualise est un fichier —
 partager la case aurait fait effacer l'un par l'autre à chaque flèche. Et le
 côté fichiers **diffère sa lecture**, seul de tous : deux occurrences voisines

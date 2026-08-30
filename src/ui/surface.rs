@@ -901,6 +901,16 @@ impl ClaudhubApp {
         };
         let layer = host.matches.clone();
         let mut pattern = on.then(|| host.vim.highlights()).flatten().unwrap_or("");
+        // **The search results are the other source of the same question**,
+        // and they share the layer rather than adding one: two layers of the
+        // same colour over the same words make a denser colour, which reads as
+        // a third kind of match — the very reason the search bar puts this one
+        // out below. A file opened from a hit lights the words looked for; vim
+        // wins where both have something to say, its pattern being the one a
+        // key has just typed.
+        if pattern.is_empty() {
+            pattern = self.hit_pattern(surface);
+        }
         let (caret, len, bar) = {
             let state = input.read(cx);
             (
@@ -965,6 +975,39 @@ impl ClaudhubApp {
         layer.set(decorations, cx);
         if let Some(host) = self.surface_host_mut(surface) {
             host.matches_lit = current;
+        }
+    }
+
+    /// The words the project search is looking for, when this surface is a
+    /// file opened from its results.
+    ///
+    /// Read from `search.sent` at paint time rather than kept on the tab, so a
+    /// file still open relights on the next query instead of keeping the one
+    /// it was opened with — which is what the preview pane did, being rebuilt
+    /// from the same place. Emptying the field is therefore what puts the
+    /// light out.
+    ///
+    /// Nothing for a regular expression: the lighting is a literal walk of the
+    /// text (`find::find_all`), the same ruling `search_view::line_marks`
+    /// makes, and a pattern lit as if it were a word would light the wrong
+    /// bytes.
+    fn hit_pattern(&self, surface: &Surface) -> &str {
+        let Surface::File(path) = surface else {
+            return "";
+        };
+        if self.search.sent.regex {
+            return "";
+        }
+        let Some(worktree) = self.search.worktree.as_deref() else {
+            return "";
+        };
+        match self
+            .editings
+            .get(worktree)
+            .and_then(|tabs| tabs.by_path(path))
+        {
+            Some(editing) if editing.lit => &self.search.sent.text,
+            _ => "",
         }
     }
 

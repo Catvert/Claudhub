@@ -161,6 +161,9 @@ impl ClaudhubApp {
             hunk_open: None,
             preview: Some(preview),
             ephemeral,
+            // A picture has no words to light: `git grep` does not look inside
+            // one, so nothing here ever comes from a hit.
+            lit: false,
             used: self.touch_tab(),
         };
         self.place_tab(&worktree, reopened, editing);

@@ -42,7 +42,7 @@ use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
 use crate::ui::quick;
-use crate::ui::search_view::{PreviewOpen, PreviewPane};
+use crate::ui::search_view::PreviewPane;
 
 /// The wheel-smoothing and scrollbar key of the list.
 ///
@@ -390,6 +390,12 @@ impl ClaudhubApp {
                 self.search_input
                     .update(cx, |state, cx| state.set_value(text, window, cx));
                 self.search_typed(cx);
+                // The pane beside the list, for the results **already** there:
+                // asking the same question again sends nothing, so without
+                // this the palette opened on a file-shaped hole until the
+                // first arrow. It is read nowhere else now — the panel behind
+                // opens its hits in the editor — see `sync_search_preview`.
+                self.sync_search_preview(window, cx);
             }
         }
         cx.notify();
@@ -637,10 +643,9 @@ impl ClaudhubApp {
         }
         self.close_quick(window, cx);
         self.leave_multiplex(cx);
-        // The preview writes the step — it is the document one lands on — and
-        // the list is brought out beside it, exactly as `open_search` did when
-        // this shortcut was the panel's own.
-        self.travel_to_panel(crate::ui::panels::SearchPreviewPanel::NAME, window, cx);
+        // The list, beside whatever the centre holds — which the modal was
+        // covering and which stays: nothing is written on the trail, exactly
+        // as in `open_search`.
         self.reveal_panel(crate::ui::panels::SearchPanel::NAME, window, cx);
         // The list and not the field: the results are already there, and they
         // are what the gesture asked for.
@@ -698,11 +703,11 @@ impl ClaudhubApp {
                 .render_search_rows(SCROLL, &self.quick.scroll.clone(), window, cx)
                 .into_any_element(),
         };
-        let (pane, opens) = match mode {
-            Mode::Files => (PreviewPane::Quick, PreviewOpen::File),
-            Mode::Text => (PreviewPane::Search, PreviewOpen::Hit),
+        let pane = match mode {
+            Mode::Files => PreviewPane::Quick,
+            Mode::Text => PreviewPane::Search,
         };
-        let preview = self.render_preview(pane, PREVIEW_SCROLL, opens, window, cx);
+        let preview = self.render_preview(pane, PREVIEW_SCROLL, window, cx);
         let border = cx.theme().border;
         // **The file beside the list and not under it.** Both are read
         // together — one walks the list to find out *which* of the answers it

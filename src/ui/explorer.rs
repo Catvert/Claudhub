@@ -617,7 +617,15 @@ impl Explorer {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Landing {
     Offset(usize),
-    Position { line: u32, character: u32 },
+    Position {
+        line: u32,
+        character: u32,
+    },
+    /// The first of these the file carries, in order — where a place is known
+    /// by what is written there rather than by a number. It is how a test is
+    /// opened: a listing names the test, never the line it sits on, and the
+    /// line moves with every edit anyway.
+    Text(Vec<String>),
 }
 
 /// The index of a buffer's last line, as `hunks::Hunk::covers` counts them.
@@ -636,6 +644,15 @@ fn last_line(text: &str) -> usize {
 fn offset_of(text: &gpui_component::input::Rope, landing: &Landing) -> usize {
     match landing {
         Landing::Offset(offset) => (*offset).min(text.len()),
+        // Nothing found is the top of the file, which is what opening it
+        // without a place does: the file is right, the line was a guess.
+        Landing::Text(needles) => {
+            let text = text.to_string();
+            needles
+                .iter()
+                .find_map(|needle| text.find(needle.as_str()))
+                .unwrap_or(0)
+        }
         Landing::Position { line, character } => {
             use gpui_component::input::RopeExt;
             text.position_to_offset(&lsp_types::Position::new(*line, *character))
@@ -676,6 +693,10 @@ pub struct Pending {
     /// it belongs to the **gesture**, and by the time the content lands the
     /// gesture is over.
     pub ephemeral: bool,
+    /// The opening came from the search results, so the words looked for are
+    /// lit in the file. Carried for the same reason `ephemeral` is: it belongs
+    /// to the gesture, which is over by the time the text lands.
+    pub lit: bool,
 }
 
 /// The files one worktree has open, and which of them is on screen.
@@ -788,6 +809,15 @@ pub struct Editing {
     /// another file is looked at. Typing in it keeps it, and so does opening it
     /// deliberately — see `ClaudhubApp::browse_in_editor`.
     pub ephemeral: bool,
+    /// This file was opened from the search results, so the words looked for
+    /// are lit in it — the layer `sync_search_matches` paints.
+    ///
+    /// **A flag and not the words themselves**: the pattern is read from
+    /// `search.sent` at paint time, so a file already open relights on the
+    /// next query rather than keeping the one it was opened with — which is
+    /// what the preview pane did, and for the same reason. Emptying the field
+    /// is therefore what puts the light out.
+    pub lit: bool,
     /// When this tab was last read, on `ClaudhubApp::tab_clock`'s counter.
     ///
     /// A stamp and not a position in a list: the tab order is the bar's, which
@@ -1260,7 +1290,7 @@ impl ClaudhubApp {
     /// reason its preview tab exists at all.
     pub(super) fn browse_in_editor(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let ephemeral = crate::ui::settings::Settings::global(cx).editor_preview_tab;
-        self.open_where(path, None, ephemeral, cx);
+        self.open_where(path, None, ephemeral, false, cx);
     }
 
     /// The same, with a place in the file to come to rest at.
@@ -1276,7 +1306,63 @@ impl ClaudhubApp {
         landing: Option<Landing>,
         cx: &mut Context<Self>,
     ) {
-        self.open_where(path, landing, false, cx);
+        self.open_where(path, landing, false, false, cx);
+    }
+
+    /// Opens a hit from the search results: the caret on the line, the words
+    /// looked for lit, and the tab only borrowed unless one asked to keep it.
+    ///
+    /// **The preview tab is what makes the result list walkable**: a click is
+    /// a look, and the next look takes the same tab — the answer the explorer's
+    /// single click already gives, and the reason the search has no preview
+    /// pane of its own any more. `Entrée` and a double click keep the tab, as
+    /// they do in the tree.
+    pub(super) fn open_hit(
+        &mut self,
+        path: PathBuf,
+        line: u32,
+        keep: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let landing = Landing::Position { line, character: 0 };
+        // Already the file on screen: there is nothing to read, so the two
+        // flags are set here — the reread that would have carried them is not
+        // going to happen.
+        if self.editing().is_some_and(|editing| editing.path == path) {
+            if let Some(editing) = self.editing_mut() {
+                editing.lit = true;
+                if keep {
+                    editing.ephemeral = false;
+                }
+            }
+            self.jump_to(path, landing, window, cx);
+            // Nothing was read, so `finish_tab` — where the tab is brought
+            // forward — does not run: the centre may well be showing the diff,
+            // and the caret would have moved where nobody can see it.
+            let name = crate::ui::panels::EditorPanel::NAME;
+            match keep {
+                true => self.reveal_panel(name, window, cx),
+                false => self.reveal_quietly(name, window, cx),
+            }
+            return;
+        }
+        // The read for this very file is already out — the first half of a
+        // double click, whose second half is this. Keeping it is a flag on the
+        // gesture in flight, not a second read of the same bytes.
+        if keep
+            && self
+                .landing
+                .as_ref()
+                .is_some_and(|pending| pending.path == path)
+        {
+            if let Some(pending) = self.landing.as_mut() {
+                pending.ephemeral = false;
+            }
+            return;
+        }
+        let ephemeral = !keep && crate::ui::settings::Settings::global(cx).editor_preview_tab;
+        self.open_where(path, Some(landing), ephemeral, true, cx);
     }
 
     /// The same, saying whether the tab it opens is only for a look.
@@ -1285,6 +1371,7 @@ impl ClaudhubApp {
         path: PathBuf,
         landing: Option<Landing>,
         ephemeral: bool,
+        lit: bool,
         cx: &mut Context<Self>,
     ) {
         let Some(worktree) = self.active.clone() else {
@@ -1299,6 +1386,7 @@ impl ClaudhubApp {
             landing,
             from,
             ephemeral,
+            lit,
         });
         self.git.send(self.read_file_cmd(worktree, path));
         cx.notify();
@@ -1451,6 +1539,9 @@ impl ClaudhubApp {
                         // Stepping through the trail is not browsing: the file
                         // one comes back to is one already worked in.
                         ephemeral: false,
+                        // And it is not a hit either: the trail names a place,
+                        // not a question.
+                        lit: false,
                     });
                     self.git.send(self.read_file_cmd(worktree, spot.path));
                 }
@@ -1530,6 +1621,14 @@ impl ClaudhubApp {
             .as_ref()
             .filter(|pending| pending.worktree == worktree && pending.path == path)
             .map(|pending| pending.ephemeral)
+    }
+
+    /// Was this opening asked for by a search hit — see `Pending::lit`.
+    fn asked_lit(&self, worktree: &Path, path: &Path) -> bool {
+        self.landing
+            .as_ref()
+            .filter(|pending| pending.worktree == worktree && pending.path == path)
+            .is_some_and(|pending| pending.lit)
     }
 
     /// Makes room for a tab about to open: the preview tab it replaces, then
@@ -1684,6 +1783,15 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A look asked for from the result list, as against a file one has
+        // decided to go and read: the tab comes forward either way, but a look
+        // **leaves the keyboard in the list** — the arrows are what one walks
+        // the results with, and a click that took them away would make the
+        // next one move a caret in the file instead.
+        let glance = self
+            .landing
+            .as_ref()
+            .is_some_and(|pending| pending.lit && pending.ephemeral);
         if let Some(pending) = self.landing.take() {
             if (pending.worktree.as_path(), pending.path.as_path()) == (worktree, path) {
                 let offset = pending
@@ -1711,7 +1819,11 @@ impl ClaudhubApp {
         // one this worktree was left in: there is no gesture then, and the
         // screen that comes back is the place's own, set a step earlier.
         if !restored {
-            self.reveal_panel(crate::ui::panels::EditorPanel::NAME, window, cx);
+            let name = crate::ui::panels::EditorPanel::NAME;
+            match glance {
+                true => self.reveal_quietly(name, window, cx),
+                false => self.reveal_panel(name, window, cx),
+            }
         } else {
             // The next remembered tab, one at a time: see `read_next_file`.
             self.continue_restore(window, cx);
@@ -1742,6 +1854,7 @@ impl ClaudhubApp {
         // A tab put back by the session is one that was kept, however it was
         // opened: the preview tab is a gesture's, and there is no gesture here.
         let ephemeral = !restored && self.asked_for(&worktree, &path).unwrap_or(false);
+        let lit = !restored && self.asked_lit(&worktree, &path);
         if !restored {
             self.make_tab_room(&worktree, &path, ephemeral, window, cx);
         }
@@ -1830,6 +1943,12 @@ impl ClaudhubApp {
                 .map(|ix| self.editings[&worktree].open[ix].ephemeral && !asked)
                 .unwrap_or(false)
                 || ephemeral,
+            // A reread keeps the light on for the same reason: saving a file
+            // one came to from the results does not answer another question.
+            lit: lit
+                || reopened
+                    .map(|ix| self.editings[&worktree].open[ix].lit)
+                    .unwrap_or(false),
             used: self.touch_tab(),
         };
         self.place_tab(&worktree, reopened, editing);

@@ -938,6 +938,15 @@ pub struct ClaudhubApp {
     /// One and not a queue: two of them in the same frame would be two tabs
     /// asked for at once, and only the last can be on screen.
     pub(super) pending_reveal: Option<&'static str>,
+    /// The base selector has to be told the base changed under it.
+    ///
+    /// It shows the base in the branch review's bar, and it is a
+    /// `SelectState`, so putting a value into it wants a `&mut Window` —
+    /// which `set_base` has not, being reachable from a subscription. Filed
+    /// here and drained at the top of the root's render, the `pending_reveal`
+    /// lane. Without it the label kept the base one had left, until the next
+    /// branch list happened to arrive and refresh the whole selector.
+    pub(super) base_changed: bool,
     /// Worktrees whose status read has already gone out.
     ///
     /// The file watcher can produce several waves before an answer comes back;
@@ -1392,6 +1401,7 @@ impl ClaudhubApp {
             sql_history_list: None,
             pending_notes: Vec::new(),
             pending_reveal: None,
+            base_changed: false,
             pending_status: std::collections::HashSet::new(),
             last_auto_fetch: None,
             suggesting_message: None,
@@ -3606,6 +3616,10 @@ impl ClaudhubApp {
         // The branch history depends on the same base.
         state.history = None;
         self.persist_review(&worktree, cx);
+        // The selector shows the base, and the choice may well come from
+        // somewhere else than the selector — a branch row's "compare with", a
+        // commit in the history. See `base_changed`.
+        self.base_changed = true;
         cx.notify();
     }
 
@@ -3916,21 +3930,6 @@ impl ClaudhubApp {
         self.merging.is_some() || self.active_review().is_some_and(|s| s.selected.is_some())
     }
 
-    /// Is there a file under the search's cursor to show beside the hits.
-    pub(super) fn search_preview_open(&self) -> bool {
-        self.search.preview.is_some()
-    }
-
-    /// The cross on the preview's tab: done reading this hit.
-    ///
-    /// The preview comes back with the next hit one moves on to, which is what
-    /// makes closing it cheap — it is "give me the room", not "forget where I
-    /// was".
-    pub(super) fn close_search_preview(&mut self, cx: &mut Context<Self>) {
-        self.search.preview = None;
-        cx.notify();
-    }
-
     pub(super) fn active_review(&self) -> Option<&ReviewState> {
         self.active.as_ref().and_then(|p| self.review.get(p))
     }
@@ -3980,6 +3979,18 @@ impl ClaudhubApp {
         // grown content is not a reason to take the caret out of whatever is
         // being typed in.
         self.reveal_quietly(name, window, cx);
+    }
+
+    /// Points the base selector at the base that has just been chosen.
+    ///
+    /// Beside `flush_reveal` and for its reason: putting a value into a
+    /// `SelectState` wants a window, and `set_base` is called from places that
+    /// have none.
+    fn flush_base_choice(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.base_changed) {
+            return;
+        }
+        self.refresh_base_choices(window, cx);
     }
 
     /// Turns what was said between two frames into balloons.
@@ -4072,20 +4083,18 @@ impl ClaudhubApp {
         });
         let muted = cx.theme().muted_foreground;
 
-        h_flex()
-            // A toolbar and not a list row: it now carries buttons, and
-            // twenty-two pixels would make them spill over the bottom of the
-            // window.
-            .h(super::theme::toolbar_height(cx))
-            .w_full()
-            .px_2()
+        // **Three parts, and the middle one is why.** The bottom edge's fold
+        // button sits at the centre of the window, as the side rails' sit at
+        // the centre of theirs: two runs of equal share, one on each side, is
+        // what puts it there. A bar carrying every indicator at once pushes it
+        // off centre by what the left run overflows, which is the honest
+        // trade for a centre that costs no absolute positioning — and an
+        // absolutely placed band across the bar would sit over the `+`.
+        let said = h_flex()
+            .flex_1()
+            .min_w_0()
             .items_center()
             .gap_2()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().title_bar)
-            .text_xs()
-            .text_color(muted)
             // The bottom edge's tool windows open the bar, where the screen
             // picker used to be — see `render_bottom_tools` for why they are
             // here rather than in a strip of their own.
@@ -4136,26 +4145,43 @@ impl ClaudhubApp {
                         }),
                 )
                 .child(Divider::vertical().h(px(12.)))
-            })
-            // What the bar used to say has gone to the balloons, top right:
-            // the last message of a window is read where one is looking, and
-            // the bottom edge is where one is not. What is left here is the
-            // space that pushes the terminals to the other end.
-            .child(div().flex_1().min_w_0())
-            // The `+` closes the bar, at the bottom right — the corner of the
-            // window a terminal opens on. It is what is left of a row of three:
-            // the toggle repeated the rail's own Terminal button, and the grid
-            // beside it was the multiplexer before there was one — that screen
-            // is back, and its button is in the title bar with the gear.
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .gap_1()
-                    .child(crate::ui::panels::new_terminal_button(
-                        &cx.entity().downgrade(),
-                        None,
-                    )),
-            )
+            });
+        // What the bar used to say has gone to the balloons, top right: the
+        // last message of a window is read where one is looking, and the bottom
+        // edge is where one is not.
+        //
+        // The `+` closes the bar, at the bottom right — the corner of the
+        // window a terminal opens on. It is what is left of a row of three: the
+        // toggle repeated the rail's own Terminal button, and the grid beside
+        // it was the multiplexer before there was one — that screen is back,
+        // and its button is in the title bar with the gear.
+        let opens = h_flex()
+            .flex_1()
+            .min_w_0()
+            .items_center()
+            .justify_end()
+            .gap_1()
+            .child(crate::ui::panels::new_terminal_button(
+                &cx.entity().downgrade(),
+                None,
+            ));
+        h_flex()
+            // A toolbar and not a list row: it now carries buttons, and
+            // twenty-two pixels would make them spill over the bottom of the
+            // window.
+            .h(super::theme::toolbar_height(cx))
+            .w_full()
+            .px_2()
+            .items_center()
+            .gap_2()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().title_bar)
+            .text_xs()
+            .text_color(muted)
+            .child(said)
+            .child(self.render_bottom_zone(cx))
+            .child(opens)
     }
 }
 
@@ -4171,6 +4197,7 @@ impl Render for ClaudhubApp {
         // `flush_notes`.
         self.flush_notes(window, cx);
         self.flush_reveal(window, cx);
+        self.flush_base_choice(window, cx);
         // The block cursor and the lit occurrences of the four writing fields,
         // two of which are painted from inside a dialog: see
         // `surface::sync_text_surfaces`.
@@ -4494,7 +4521,12 @@ impl ClaudhubApp {
     }
 
     /// The same, leaving the focus where it is — see `flush_reveal`.
-    fn reveal_quietly(&mut self, name: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn reveal_quietly(
+        &mut self,
+        name: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.show_panel(name, cx);
         // **The editor is reached by the file being read, and not by its
         // placeholder.** `EditorPanel` hides itself as soon as a file is open,
@@ -4563,7 +4595,12 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let a_document = crate::ui::rails::side_of(name, &self.seats(cx)).is_none();
+        // Asked of the **table** and not of the tree: a tool window put away
+        // holds no seat, and reading the seats would have taken it for a
+        // document — a step written on the trail for a fold, which is exactly
+        // what `jumps::Place::Panel` says it is not. It is the case of the
+        // branch review reached by a row's "compare with".
+        let a_document = crate::ui::rails::tool(name).is_none();
         if a_document {
             let from = self.here(cx);
             self.record_step(from, crate::ui::jumps::Place::Panel(name), cx);

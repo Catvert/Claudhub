@@ -63,7 +63,7 @@ pub enum Place {
     /// A **document** and not any panel: unfolding a tool window is not a
     /// movement. Showing the history beside what one is reading does not change
     /// where one is, and a back arrow that folded a zone would be one nobody
-    /// could predict. See `ClaudhubApp::travel_to_panel`, which asks the tree
+    /// could predict. See `ClaudhubApp::travel_to_panel`, which asks `rails`
     /// which of the two a name is.
     Panel(&'static str),
     /// A query in the SQL console, on the connection that answered it.

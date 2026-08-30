@@ -80,9 +80,6 @@ pub enum Pane {
     /// focuses it rather than opening a second bar over it — see
     /// `ClaudhubApp::open_find`.
     Search,
-    /// The file shown beside the results. Same thing: what one searches from
-    /// this screen is the project, not the preview.
-    SearchPreview,
     /// The errors Sentry reports. It filters, like every list whose order is
     /// ours — Sentry's, by last seen — and nothing in it links one row to the
     /// next.
@@ -251,7 +248,7 @@ impl ClaudhubApp {
         let pane = self.pane;
         // The search screen has one field, and it is the search: a second bar
         // over it would be two places to type the same thing.
-        if matches!(pane, Pane::Search | Pane::SearchPreview) {
+        if matches!(pane, Pane::Search) {
             self.open_search(window, cx);
             return;
         }

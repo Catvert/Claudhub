@@ -550,6 +550,28 @@ impl crate::ui::app::ClaudhubApp {
             .into_any_element()
     }
 
+    /// The bottom edge's fold button, which the status bar carries in its
+    /// **centre** — the place the two side rails give theirs, and the one that
+    /// belongs to neither run of buttons. It is a child of the bar and not of
+    /// the run for that reason alone: a run has a start, and the start is
+    /// where its own views begin.
+    ///
+    /// Nothing when that edge holds no view: an empty rail paints nothing, and
+    /// a fold button for a zone with nothing in it would be the one thing left
+    /// of it.
+    pub(super) fn render_bottom_zone(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let seats = self.seats(cx);
+        let (folded, off) = self.rail_states();
+        let empty = rails::rails(&seats, &folded, &off)
+            .into_iter()
+            .nth(Side::Bottom.index())
+            .is_none_or(|rail| rail.is_empty());
+        if empty {
+            return gpui::Empty.into_any_element();
+        }
+        self.zone_button(Side::Bottom, cx)
+    }
+
     /// One rail: a button per tool window that edge holds.
     ///
     /// An empty rail paints **nothing at all**, not an empty band: the bottom
@@ -571,6 +593,40 @@ impl crate::ui::app::ClaudhubApp {
             self.folded_panels.iter().cloned().collect(),
             self.off_panels.iter().cloned().collect(),
         )
+    }
+
+    /// The button that folds a whole edge away, and gives it back.
+    ///
+    /// It sits **between the two runs** of a side rail — the one place that
+    /// belongs to neither half, which is what it speaks for. A view's own
+    /// button puts its half away and leaves the other half filling the column;
+    /// this is the gesture for "not this column at all", which until now took
+    /// one press per half and was said by neither.
+    fn zone_button(&mut self, side: Side, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use gpui_component::button::{Button, ButtonVariants as _};
+        use gpui_component::Sizable as _;
+
+        let open = self.dock.read(cx).is_dock_open(placement_of(side));
+        let label = match open {
+            true => crate::tr!("rail-fold-zone"),
+            false => crate::tr!("rail-unfold-zone"),
+        };
+        Button::new(gpui::SharedString::from(format!(
+            "rail-zone-{}",
+            side.index()
+        )))
+        .icon(crate::ui::icons::icon(rails::zone_glyph(side, open)))
+        .ghost()
+        .xsmall()
+        .tooltip(label)
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.toggle_zone(side, window, cx);
+            // The glyph turns with the zone, and it is painted from here:
+            // `toggle_zone` notifies the area, which is what saves the layout,
+            // not the view that drew the button.
+            cx.notify();
+        }))
+        .into_any_element()
     }
 
     fn rail_buttons(
@@ -688,6 +744,7 @@ impl crate::ui::app::ClaudhubApp {
         }
         let top = self.rail_buttons(&rail.top, cx);
         let bottom = self.rail_buttons(&rail.bottom, cx);
+        let zone = self.zone_button(rail.side, cx);
         let run =
             |buttons: Vec<gpui::AnyElement>| v_flex().flex_none().gap(px(2.)).children(buttons);
         // The flex is returned directly rather than wrapped: a `div()` is a
@@ -708,6 +765,10 @@ impl crate::ui::app::ClaudhubApp {
             // inside what an edge can show.
             .overflow_hidden()
             .child(run(top))
+            // In the middle, where `justify_between` puts a third child: it
+            // belongs to neither run, and neither run is where one looks for
+            // it.
+            .child(zone)
             .child(run(bottom))
             .into_any_element()
     }

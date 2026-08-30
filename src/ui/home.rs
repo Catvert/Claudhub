@@ -68,7 +68,6 @@ impl ClaudhubApp {
         self.panel_visible(crate::ui::panels::EditorPanel::NAME)
             && !self.diff_on_screen()
             && !self.db_console_open()
-            && !self.search_preview_open()
             && self
                 .editing_root()
                 .and_then(|root| self.editings.get(&root))

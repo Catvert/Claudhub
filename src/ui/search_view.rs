@@ -39,9 +39,8 @@ use crate::ui::highlight::{DocumentHighlights, HitHighlights};
 use crate::ui::icons::icon;
 use crate::ui::search::{self, Row};
 
-/// The scrollbar and wheel-smoothing key of each of the two panels.
+/// The result list's scrollbar and wheel-smoothing key.
 const RESULTS_SCROLL: &str = "search-results";
-const PREVIEW_SCROLL: &str = "search-preview";
 
 /// Where the search stands.
 ///
@@ -130,17 +129,6 @@ pub struct SearchState {
     pub definition: Option<u64>,
 }
 
-/// What the preview's pencil opens.
-///
-/// The pane knows what it is showing; the button has to be told, because the
-/// two answers differ: a result list opens the **hit** one is on, and the
-/// palette's file side opens the **file**, which has no hit in it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PreviewOpen {
-    Hit,
-    File,
-}
-
 /// Which of the two panes a preview read is for.
 ///
 /// **Two panes and one pipeline.** A file is read the same way whoever asked —
@@ -217,19 +205,15 @@ impl ClaudhubApp {
     /// its text selected: the gesture asked for the results, not for the list to
     /// take the keyboard, and the next letter typed replaces the whole word.
     ///
-    /// **And the step is written down**, though it is a key that makes it: the
-    /// exception the rule of `travel_to` earns, the screen keys staying out
-    /// because the key one came from undoes them. This one has no such key —
-    /// nothing puts back the file one was reading — and the gesture is the one
-    /// that leaves a file in the middle of a line to go and look elsewhere,
-    /// which is precisely what the back arrow is for.
+    /// **And nothing is written on the trail**, where this used to write a
+    /// step: the gesture no longer leaves anywhere. It unfolds a tool window
+    /// beside the file one is reading, which stays exactly where it was — and
+    /// unfolding a tool window is not a movement (`jumps::Place::Panel`). The
+    /// step is written by the hit one then opens, which is a document.
     pub(super) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Read **before** the views come forward: `travel_to_panel` moves the
+        // Read **before** the views come forward: revealing a panel moves the
         // focus, and the focus is what says which surface the selection is in.
         let selection = self.search_seed(window, cx);
-        // The preview writes the step — it is the document one lands on — and
-        // the list is brought out beside it.
-        self.travel_to_panel(crate::ui::panels::SearchPreviewPanel::NAME, window, cx);
         self.reveal_panel(crate::ui::panels::SearchPanel::NAME, window, cx);
         let handle = gpui::Focusable::focus_handle(&self.search_input, cx);
         handle.focus(window, cx);
@@ -575,7 +559,8 @@ impl ClaudhubApp {
         self.search.rows = Rc::new(search::rows(&self.search.results, &self.search.folded));
     }
 
-    /// Selects a row and shows what it points at.
+    /// Puts the cursor on a row. Showing what it points at is the caller's
+    /// next gesture — see `open_search_hit`.
     pub(super) fn select_search_row(
         &mut self,
         index: usize,
@@ -605,6 +590,13 @@ impl ClaudhubApp {
         self.search.selected = Some(next);
         self.search_scroll
             .scroll_to_item(next, gpui::ScrollStrategy::Top);
+        // **The arrow moves the cursor and opens nothing.** Each row shows its
+        // own line with the words lit, so walking the list already reads; and
+        // an opening per step would cost an `EditorState`, a read of the
+        // `HEAD` blob and a `didOpen` at the language server for every press
+        // of a key. `Entrée` is what says "this one". In the palette the arrow
+        // does show the file, and that is what `sync_search_preview` is: a
+        // modal has no tab to borrow.
         self.sync_search_preview(window, cx);
         cx.notify();
     }
@@ -644,23 +636,39 @@ impl ClaudhubApp {
     /// records where one came from — so `Ctrl+O` comes straight back to the
     /// result list's file.
     pub(super) fn open_search_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_search_hit(true, window, cx);
+    }
+
+    /// The hit the cursor is on, in the editor.
+    ///
+    /// `keep` is the difference between a look and a decision, and it is the
+    /// tree's: a single click borrows the preview tab, which the next look
+    /// takes back; `Entrée` and a double click keep the tab for good. It is
+    /// what replaced the preview pane — one surface for reading code in this
+    /// window, and it is the one that can also be typed in.
+    pub(super) fn open_search_hit(
+        &mut self,
+        keep: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(row) = self.selected_search_row() else {
             return;
         };
         if let Row::File { file } = row {
-            self.toggle_search_fold(file, window, cx);
+            // A file row names no line. Only the deliberate gesture folds it:
+            // a single click on it is the fold already, painted by the row
+            // itself.
+            if keep {
+                self.toggle_search_fold(file, window, cx);
+            }
             return;
         }
         let Some(path) = search::path_of(&self.search.results, row).map(PathBuf::from) else {
             return;
         };
         let line = search::line_of(&self.search.results, row).saturating_sub(1);
-        self.jump_to(
-            path,
-            crate::ui::explorer::Landing::Position { line, character: 0 },
-            window,
-            cx,
-        );
+        self.open_hit(path, line, keep, window, cx);
     }
 
     /// Looks a symbol up in the project because no server could say where it
@@ -741,15 +749,11 @@ impl ClaudhubApp {
             }
             1 => self.open_search_row(window, cx),
             _ => {
-                // `travel_reveal` and not `reveal`: the screen was not
-                // asked for, it was taken — one pressed a key on a name in a
-                // file, and the list of hits is where the code decided to
-                // answer. Without the step, one step back walks a trail whose
-                // last entry is whatever file was opened last, and lands in a
-                // tab one never left. The place written down is the caret one
-                // jumped from, `here` reading the editor while it is still the
-                // screen on show.
-                self.travel_to_panel(crate::ui::panels::SearchPreviewPanel::NAME, window, cx);
+                // The list is unfolded beside the file the key was pressed in,
+                // which does not move: there is nothing to write on the trail,
+                // and the hit one opens from here writes its own step. It used
+                // to land a preview in the centre, which *was* leaving the
+                // file — hence the step it wrote.
                 self.reveal_panel(crate::ui::panels::SearchPanel::NAME, window, cx);
                 // The list and not the field: the results are already there,
                 // and they are what the gesture asked for.
@@ -777,7 +781,16 @@ impl ClaudhubApp {
     ///
     /// Walking the hits of one file must not re-read it at every arrow: only
     /// the line to reveal changes.
-    fn sync_search_preview(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn sync_search_preview(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // **The palette and nowhere else.** The panel had a pane of its own,
+        // and it was a second surface for reading code — read-only, with no
+        // gutter, no language server and nothing to type in — answering a
+        // question the editor's preview tab already answers. A modal cannot
+        // borrow a tab from the dock, which is why this one stays: see
+        // `render_preview`.
+        if !self.quick.open {
+            return;
+        }
         let (Some(row), Some(worktree)) =
             (self.selected_search_row(), self.search.worktree.clone())
         else {
@@ -915,19 +928,6 @@ impl ClaudhubApp {
             error,
         });
         self.reveal_preview_line(pane, cx);
-        // And on the home screen the preview is a tab that was not there a
-        // moment ago — it only exists while there is a file to show. Bringing
-        // it forward is what makes clicking a hit change the centre; without
-        // it the tab appears and the group goes on showing the diff.
-        //
-        // **Not while the palette is up**, though it is the palette that asked:
-        // the modal covers the centre, so the tab would be brought forward
-        // where nobody can see it, and what one would find on closing is a
-        // preview in place of the file one was reading. `Ctrl+Entrée` is the
-        // gesture that asks for that panel, and it does it itself.
-        if pane == PreviewPane::Search && !self.quick.open {
-            self.reveal_panel_later(crate::ui::panels::SearchPreviewPanel::NAME);
-        }
         cx.notify();
     }
 
@@ -1142,33 +1142,23 @@ impl ClaudhubApp {
     }
 
     /// The file beside the list, for the panel that owns it.
-    pub(super) fn render_search_preview(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        self.render_preview(
-            PreviewPane::Search,
-            PREVIEW_SCROLL,
-            PreviewOpen::Hit,
-            window,
-            cx,
-        )
-    }
-
     /// The file beside a list, wherever that list is.
     ///
+    /// **The palette's two sides, and nothing else.** It was the search
+    /// panel's centre as well, until the hits started opening in the editor's
+    /// preview tab — one surface for reading code in this window, and it is
+    /// the one that can be typed in. What keeps this one is that a modal
+    /// cannot borrow a tab from the dock.
+    ///
     /// **The pane and the scroll key are arguments**, for the reason
-    /// `render_search_rows` takes them: the palette paints a preview of its
-    /// own in a modal that can stand over the panel painting this one, and one
-    /// `UniformListScrollHandle` driving two lists in a frame is measured by
-    /// whichever painted last — which is neither of them for the rest of the
-    /// session.
+    /// `render_search_rows` takes them: the palette's two tabs paint the same
+    /// element, and one `UniformListScrollHandle` driving two lists in a frame
+    /// is measured by whichever painted last — which is neither of them for
+    /// the rest of the session.
     pub(super) fn render_preview(
         &mut self,
         pane: PreviewPane,
         scroll: &'static str,
-        opens: PreviewOpen,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -1191,6 +1181,26 @@ impl ClaudhubApp {
             .items_center()
             .border_b_1()
             .border_color(cx.theme().border)
+            // **Left, where the rest of the window puts its buttons right.**
+            // The hand arrives from the list this file answers — one row to
+            // its left — and a pencil at the far end of a centre-wide bar is a
+            // trip across the window for the gesture the reading most often
+            // ends in.
+            .child(
+                Button::new(scroll)
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("pencil"))
+                    .tooltip(tr!("search-open"))
+                    // `open_quick_row` and not the opening itself: the pencil
+                    // says "I am going there", and going there is leaving the
+                    // modal. It answers for both tabs — a hit for the text
+                    // side, the file itself for the other — which is what the
+                    // `Entrée` of each already means.
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.open_quick_row(window, cx)),
+                    ),
+            )
             .child(crate::ui::file_icons::file_icon(&preview.path, cx))
             .child(
                 div()
@@ -1199,17 +1209,6 @@ impl ClaudhubApp {
                     .truncate()
                     .text_xs()
                     .child(SharedString::from(preview.path.display().to_string())),
-            )
-            .child(
-                Button::new(scroll)
-                    .ghost()
-                    .xsmall()
-                    .icon(icon("pencil"))
-                    .tooltip(tr!("search-open"))
-                    .on_click(cx.listener(move |this, _, window, cx| match opens {
-                        PreviewOpen::Hit => this.open_search_row(window, cx),
-                        PreviewOpen::File => this.open_quick_row(window, cx),
-                    })),
             );
         if let Some(error) = preview.error.clone() {
             return v_flex()
@@ -1483,18 +1482,17 @@ fn render_row(
                 })
                 .on_click(move |event, window, cx| {
                     // `Ctrl` on a word is the follow gesture, and the text
-                    // under the pointer has just answered it: selecting the row
-                    // as well would change the preview under the file one is
-                    // being sent to.
+                    // under the pointer has just answered it: opening the row
+                    // as well would send one to two places at once.
                     if window.modifiers().secondary() {
                         return;
                     }
-                    let open = event.click_count() > 1;
+                    // A single click is a look, a double click keeps the tab —
+                    // the tree's gesture, see `open_search_hit`.
+                    let keep = event.click_count() > 1;
                     clicking.update(cx, |this, cx| {
                         this.select_search_row(index, window, cx);
-                        if open {
-                            this.open_search_row(window, cx);
-                        }
+                        this.open_search_hit(keep, window, cx);
                     });
                 })
                 .child(

@@ -76,7 +76,6 @@ fn tab_row(name: &str, label: gpui::SharedString) -> gpui::Div {
 fn document_glyph(name: &str) -> Option<&'static str> {
     Some(match name {
         DiffPanel::NAME => "file-diff",
-        SearchPreviewPanel::NAME => "file-text",
         CastPanel::NAME => "monitor-play",
         // The panel's own glyph, and deliberately so: the list and the error
         // being read are two panels on one state, and what says they belong
@@ -829,7 +828,6 @@ panels! {
     FilesPanel => ("ClaudhubFiles", "panel-files", render_files, Files),
     DbPanel => ("ClaudhubDb", "panel-databases", render_db, Db),
     SearchPanel => ("ClaudhubSearch", "panel-search", render_search, Search),
-    SearchPreviewPanel => ("ClaudhubSearchPreview", "panel-search-preview", render_search_preview, SearchPreview, needed: search_preview_open, closes: close_search_preview),
     // The centre of each screen. **Three panels and not one whose title
     // changes**: they belonged to the same one because they were fighting over
     // the central slot, and a tab announcing "Diff", "Editor" or "SQL"

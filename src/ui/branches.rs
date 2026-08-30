@@ -439,10 +439,17 @@ impl ClaudhubApp {
 
     /// Compares the current worktree against another branch.
     ///
-    /// It sets the review's base and goes to the Git screen — which is all
-    /// "compare with" is here: the branch review *is* that comparison, and it
-    /// keeps the base one chose, per worktree. The step is written on the trail
-    /// like every other change of screen made with the mouse.
+    /// It sets the review's base and brings out the **branch review**, which is
+    /// all "compare with" is here: that panel *is* the comparison, and it keeps
+    /// the base one chose, per worktree.
+    ///
+    /// It used to reveal the diff instead, and the gesture therefore did
+    /// nothing at all: the diff is a document that answers `needed:`
+    /// (`diff_on_screen`), so it stays hidden until a file is selected — and
+    /// arriving from a branch list, none is. The base changed silently behind a
+    /// panel that was not on screen, and the popover shut on what read as a
+    /// dead menu entry. The panel to show is the one that lists what
+    /// `base...HEAD` touched; the diff comes when a row there is clicked.
     pub(super) fn compare_against(
         &mut self,
         base: String,
@@ -450,7 +457,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         self.set_base(base, cx);
-        self.travel_to_panel(crate::ui::panels::DiffPanel::NAME, window, cx);
+        self.travel_to_panel(crate::ui::panels::BranchPanel::NAME, window, cx);
     }
 
     /// Checks an existing branch out into a fresh worktree.

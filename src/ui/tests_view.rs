@@ -187,10 +187,57 @@ pub struct RunState {
     /// A covered row spins until it lands here — which is what makes the tree
     /// resolve test by test rather than all at once at the end.
     pub settled: HashSet<(String, String)>,
+    /// The tests the live channel has named, in the order it named them.
+    ///
+    /// **The run's only account of itself while it goes.** Pest prints per
+    /// **file**: a file of browser tests says nothing for a minute, then
+    /// everything at once — measured, thirty seconds of silence for three
+    /// tests. These come from the TeamCity log `pump_steps` polls, the same
+    /// channel that lights the tree's dots, and they are shown under whatever
+    /// the runner has printed so far.
+    ///
+    /// Dropped when the run lands with an account, kept when it does not: the
+    /// runner's own lines say the same tests over again, with their durations
+    /// and their totals, so leaving both would show each test twice. A run
+    /// stopped or refused has no such lines, and then this is all there is.
+    pub live: Vec<LiveStep>,
     /// Why a suite never started, when one did not.
     pub error: Option<SharedString>,
     /// The finished accounts so far, merged.
     pub run: Option<Rc<Run>>,
+}
+
+/// One test the live channel has named, and what became of it.
+///
+/// `status` is `None` between `testStarted` and `testFinished` — the test
+/// under way, and the only thing on screen that says which one takes the
+/// minute one is waiting through.
+pub struct LiveStep {
+    pub key: (String, String),
+    pub label: SharedString,
+    pub status: Option<Status>,
+}
+
+/// Files what the live channel just said, in place if the test is already
+/// there — `testStarted` writes the row, `testFinished` gives it its fate.
+///
+/// Pure, and the whole rule: a test is named twice per run, and the second
+/// word must land on the first row rather than under it.
+pub fn note_step(
+    live: &mut Vec<LiveStep>,
+    key: (String, String),
+    label: SharedString,
+    status: Option<Status>,
+) {
+    if let Some(step) = live.iter_mut().find(|step| step.key == key) {
+        // A row collapsing dataset cases lands here once per case: within one
+        // run, red stays red — the tree's own rule, for the same reason.
+        if step.status != Some(Status::Failed) {
+            step.status = status;
+        }
+        return;
+    }
+    live.push(LiveStep { key, label, status });
 }
 
 /// Does a change to this file call for re-reading the suites?
@@ -398,6 +445,28 @@ pub enum LineKind {
     Fail,
     Skip,
     Plain,
+}
+
+/// One row of the run panel: a line the runner printed, or a test the live
+/// channel named while it still runs.
+enum RunRow {
+    Said(SharedString),
+    Live {
+        status: Option<Status>,
+        label: SharedString,
+    },
+}
+
+/// The symbol a live row wears — the runner's own, so that one list reads as
+/// one list: `line_kind` then colours it without knowing where it came from.
+/// The test under way wears the ellipsis, having no fate yet.
+fn live_glyph(status: Option<Status>) -> &'static str {
+    match status {
+        Some(Status::Passed) => "✓",
+        Some(Status::Failed) => "⨯",
+        Some(Status::Skipped) => "↓",
+        None => "…",
+    }
 }
 
 pub fn line_kind(line: &str) -> LineKind {
@@ -728,6 +797,7 @@ impl ClaudhubApp {
                 cast_hidden: false,
                 hidden: false,
                 settled: HashSet::new(),
+                live: Vec::new(),
                 error: None,
                 run: None,
             },
@@ -811,8 +881,33 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// One test of the running suite, as it ends: its dot the moment it is
-    /// known, rather than at the end of the run.
+    /// The readable description of a test the live channel names by its
+    /// mangled method: what a run's account taught, else what the listing
+    /// read, else the method itself — the same fallback the tree's rows make.
+    fn live_label(&self, worktree: &Path, key: &(String, String)) -> SharedString {
+        let Some(state) = self.pest.get(worktree) else {
+            return SharedString::from(key.1.clone());
+        };
+        if let Some(mark) = state.marks.get(key) {
+            if !mark.name.is_empty() {
+                return SharedString::from(mark.name.clone());
+            }
+        }
+        if let Some(Report::Tests(tests)) = state.report.as_deref() {
+            if let Some(test) = tests
+                .iter()
+                .find(|test| test.class == key.0 && test.method == key.1)
+            {
+                return SharedString::from(test.name.clone());
+            }
+        }
+        SharedString::from(key.1.clone())
+    }
+
+    /// One test of the running suite, as it starts and as it ends: its dot
+    /// the moment it is known, rather than at the end of the run, and its
+    /// name in the run panel — which has nothing else to show until the
+    /// runner finishes a whole file. See [`RunState::live`].
     ///
     /// The name is left empty on purpose — a live event only carries the
     /// mangled method, and [`PestState::refresh_cache`] falls back to the
@@ -825,10 +920,30 @@ impl ClaudhubApp {
         step: crate::suite::Step,
         cx: &mut Context<Self>,
     ) {
-        let Some(status) = step.status else {
+        let key = (step.class, step.method);
+        let status = step.status;
+        // Read before the borrow that writes it: the readable description
+        // lives in the other map, learned from a run's account or from the
+        // listing, and a live event carries neither.
+        let label = self.live_label(&worktree, &key);
+        let follows = match self.pest_runs.get_mut(&worktree) {
+            Some(state) if id >= state.since && id <= state.id => {
+                let rows = state.lines.len();
+                note_step(&mut state.live, key.clone(), label, status);
+                Some(rows + state.live.len())
+            }
+            _ => return,
+        };
+        // The tail, as `pest_line` keeps it: what the run just said is what
+        // one is watching for.
+        if let Some(rows) = follows {
+            self.pest_run_scroll
+                .scroll_to_item(rows.saturating_sub(1), gpui::ScrollStrategy::Center);
+        }
+        let Some(status) = status else {
+            cx.notify();
             return;
         };
-        let key = (step.class, step.method);
         let first = match self.pest_runs.get_mut(&worktree) {
             Some(state) if id >= state.since && id <= state.id => state.settled.insert(key.clone()),
             _ => return,
@@ -875,6 +990,10 @@ impl ClaudhubApp {
                 }
                 match &run {
                     Ok(run) => {
+                        // The runner has printed its own reading of these
+                        // tests, durations and totals included: keeping both
+                        // would say every test twice. See `RunState::live`.
+                        state.live.clear();
                         let merged = match state.run.take() {
                             Some(earlier) => Rc::new(merge_runs(&earlier, run)),
                             None => Rc::new(run.clone()),
@@ -1680,6 +1799,40 @@ fn row_menu(
                 });
             })
     });
+    // Only when the file is known — a Pest class outside the autoloader has
+    // none, and an entry that opens nothing is worse than no entry.
+    let popup = match test.file.is_empty() {
+        true => popup,
+        false => popup.item({
+            let entity = entity.clone();
+            let file = test.file.clone();
+            // The line is looked for in the text rather than carried: a
+            // listing names a test, never the line it sits on. See
+            // `Landing::Text`.
+            //
+            // The row's label and not `test.name`: a run's account teaches the
+            // real description, where the listing only had the mangled name
+            // read back — `it sums 2 2` for a test the file writes as
+            // `it('sums 2 + 2')`, which no search would find.
+            let needles = crate::suite::test_needles(label);
+            PopupMenuItem::new(tr!("tests-open-file"))
+                .icon(icon("file-pen"))
+                .on_click(move |_, _window, cx| {
+                    let (file, needles) = (file.clone(), needles.clone());
+                    entity.update(cx, |this, cx| {
+                        let Some(worktree) = this.active.clone() else {
+                            return;
+                        };
+                        let landing = (!needles.is_empty())
+                            .then_some(crate::ui::explorer::Landing::Text(needles));
+                        // `wslpath::join` and not `Path::join`: the worktree
+                        // is a path on the server, and under Windows the
+                        // separator this machine writes is the wrong one.
+                        this.open_at(crate::wslpath::join(&worktree, file), landing, cx);
+                    });
+                })
+        }),
+    };
     let popup = popup.item({
         let entity = entity.clone();
         let target = crate::suite::test_target(test);
@@ -1818,13 +1971,20 @@ impl ClaudhubApp {
         };
 
         let with_failures = state.run.clone().filter(|run| run.failed > 0);
-        let lines: Vec<SharedString> = state.lines.iter().cloned().collect();
+        // The runner's own lines, then what the live channel has said since:
+        // the tail is the newest, and while a file runs the newest is the
+        // test under way.
+        let mut rows: Vec<RunRow> = state.lines.iter().cloned().map(RunRow::Said).collect();
+        rows.extend(state.live.iter().map(|step| RunRow::Live {
+            status: step.status,
+            label: step.label.clone(),
+        }));
         let bar = self.render_run_bar(&active, cx);
         let failures = with_failures.map(|run| self.render_run_failures(&active, run, window, cx));
         let mono = cx.theme().mono_font_family.clone();
         let scroll = self.pest_run_scroll.clone();
-        let count = lines.len();
-        let lines = Rc::new(lines);
+        let count = rows.len();
+        let rows = Rc::new(rows);
         let row = crate::ui::theme::row_height(cx);
         let look = Look::of(cx);
         v_flex()
@@ -1841,7 +2001,18 @@ impl ClaudhubApp {
                         uniform_list("pest-run-lines", count, move |visible, _window, _cx| {
                             visible
                                 .map(|index| {
-                                    let line = lines.get(index).cloned().unwrap_or_default();
+                                    let line = match rows.get(index) {
+                                        Some(RunRow::Said(line)) => line.clone(),
+                                        // The live channel carries a fate, not
+                                        // a symbol: the one the runner would
+                                        // have written is put in front, so
+                                        // `line_kind` colours both the same
+                                        // way and a copied panel reads alike.
+                                        Some(RunRow::Live { status, label }) => SharedString::from(
+                                            format!("{} {label}", live_glyph(*status)),
+                                        ),
+                                        None => SharedString::default(),
+                                    };
                                     // The colours the runner painted were
                                     // stripped with the rest of its ANSI;
                                     // what its symbols say is put back.
@@ -1905,7 +2076,7 @@ impl ClaudhubApp {
                 };
                 let open = entity.clone();
                 let target = (!outcome.file.is_empty())
-                    .then(|| (worktree.join(&outcome.file), outcome.line));
+                    .then(|| (crate::wslpath::join(&worktree, &outcome.file), outcome.line));
                 let name = SharedString::from(outcome.name.clone());
                 let place =
                     SharedString::from(crate::suite::short_class(&outcome.class).to_string());
@@ -2115,6 +2286,68 @@ impl ClaudhubApp {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_test_named_twice_takes_one_row() {
+        let key = ("Tests\\Unit\\MathTest".to_string(), "it_sums".to_string());
+        let mut live = Vec::new();
+        note_step(&mut live, key.clone(), "it sums".into(), None);
+        note_step(
+            &mut live,
+            key.clone(),
+            "it sums".into(),
+            Some(Status::Passed),
+        );
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].status, Some(Status::Passed));
+        assert_eq!(live[0].label, "it sums");
+    }
+
+    #[test]
+    fn within_one_run_a_red_row_stays_red() {
+        // A row collapsing dataset cases is named once per case, and the
+        // panel must not lose the case that failed to the ones that passed.
+        let key = (
+            "Tests\\Unit\\MathTest".to_string(),
+            "it_divides".to_string(),
+        );
+        let mut live = Vec::new();
+        note_step(
+            &mut live,
+            key.clone(),
+            "it divides".into(),
+            Some(Status::Failed),
+        );
+        note_step(
+            &mut live,
+            key.clone(),
+            "it divides".into(),
+            Some(Status::Passed),
+        );
+        assert_eq!(live[0].status, Some(Status::Failed));
+    }
+
+    #[test]
+    fn the_glyph_is_the_one_the_runner_would_have_written() {
+        // Which is what lets one list read as one list: `line_kind` colours a
+        // live row without knowing it is one.
+        assert_eq!(
+            line_kind(&format!("{} it sums", live_glyph(Some(Status::Passed)))),
+            LineKind::Pass
+        );
+        assert_eq!(
+            line_kind(&format!("{} it sums", live_glyph(Some(Status::Failed)))),
+            LineKind::Fail
+        );
+        assert_eq!(
+            line_kind(&format!("{} it sums", live_glyph(Some(Status::Skipped)))),
+            LineKind::Skip
+        );
+        assert_eq!(
+            line_kind(&format!("{} it sums", live_glyph(None))),
+            LineKind::Plain
+        );
+    }
+
     fn test(class: &str, name: &str) -> Test {
         Test {
             runner: Runner::Pest,
@@ -2126,6 +2359,7 @@ mod tests {
             name: name.to_string(),
             pattern: String::new(),
             datasets: 0,
+            file: String::new(),
         }
     }
 
@@ -2472,6 +2706,7 @@ mod tests {
                 name: "it sums 2 2".into(),
                 pattern: String::new(),
                 datasets: 0,
+                file: String::new(),
             },
             Test {
                 runner: Runner::Pest,
@@ -2480,6 +2715,7 @@ mod tests {
                 name: "testOldSchool".into(),
                 pattern: String::new(),
                 datasets: 0,
+                file: String::new(),
             },
         ];
         let outcome = |class: &str, name: &str| Outcome {

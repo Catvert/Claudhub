@@ -464,6 +464,27 @@ impl Rail {
     }
 }
 
+/// The glyph of the button that folds a whole zone away, and gives it back.
+///
+/// **A zone and not a half**, which is the whole of why it exists: pressing a
+/// lit view puts its half away, and the other half then takes the room it
+/// leaves — folding "Changes" made "Notes" fill the column. Saying "not this
+/// column at all" took two presses, one per half, and neither of them said it.
+///
+/// The arrow points where the zone goes, and back where it comes from: a
+/// button whose glyph does not turn is one whose two states cannot be told
+/// apart at the edge of the eye.
+pub fn zone_glyph(side: Side, open: bool) -> &'static str {
+    match (side, open) {
+        (Side::Left, true) => "chevron-left",
+        (Side::Left, false) => "chevron-right",
+        (Side::Right, true) => "chevron-right",
+        (Side::Right, false) => "chevron-left",
+        (Side::Bottom, true) => "chevron-down",
+        (Side::Bottom, false) => "chevron-up",
+    }
+}
+
 /// What pressing a button means. Decided here, carried out by the caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Press {
@@ -825,6 +846,21 @@ mod tests {
 
     fn none() -> BTreeSet<String> {
         BTreeSet::new()
+    }
+
+    #[test]
+    fn the_zone_button_turns_with_the_zone() {
+        // Where the zone goes, and where it comes back from.
+        assert_eq!(zone_glyph(Side::Left, true), "chevron-left");
+        assert_eq!(zone_glyph(Side::Left, false), "chevron-right");
+        assert_eq!(zone_glyph(Side::Right, true), "chevron-right");
+        assert_eq!(zone_glyph(Side::Right, false), "chevron-left");
+        assert_eq!(zone_glyph(Side::Bottom, true), "chevron-down");
+        assert_eq!(zone_glyph(Side::Bottom, false), "chevron-up");
+        // And no side reads the same in both states.
+        for side in Side::ALL {
+            assert_ne!(zone_glyph(side, true), zone_glyph(side, false));
+        }
     }
 
     fn rail(rails: &[Rail; 3], side: Side) -> &Rail {

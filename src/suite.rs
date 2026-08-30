@@ -171,6 +171,14 @@ pub struct Test {
     /// How many dataset entries were collapsed into this row. Zero for a test
     /// without datasets.
     pub datasets: u32,
+    /// The file it is written in, relative to the worktree — what "open this
+    /// test" opens. Empty when it cannot be told: a Pest class outside the
+    /// project's autoloading, which is the one case the rule below misses.
+    ///
+    /// Read at listing time and not from a run's account, though the JUnit
+    /// carries it too: a test one has never run is exactly the one worth
+    /// opening.
+    pub file: String,
 }
 
 /// What asking a worktree for its tests answered.
@@ -204,7 +212,16 @@ pub fn report(worktree: &Path) -> Report {
         }
         found = true;
         let listed = match runner {
-            Runner::Pest => pest_list(worktree, &bin).map(|out| pest_parse(&out)),
+            Runner::Pest => {
+                // Read once per listing, not per test: it is what turns a
+                // class into the file it lives in.
+                let composer =
+                    std::fs::read_to_string(worktree.join("composer.json")).unwrap_or_default();
+                let psr4 = psr4_of(&composer);
+                pest_list(worktree, &bin)
+                    .map(|out| pest_parse(&out, &psr4))
+                    .map(|listed| kept_files(worktree, listed))
+            }
             Runner::Vitest => vitest_list(worktree, &bin),
             Runner::Jest => jest_list(worktree, &bin),
         };
@@ -309,8 +326,18 @@ pub struct Step {
 /// - **The port only exists if the checkout opens it.** Playwright reads no
 ///   environment variable for browser arguments, so the project's own
 ///   `BrowserTestCase` has to pass `--remote-debugging-port`, and it learns
-///   which port from [`FLAG`] — written here, removed on drop. A checkout
-///   without that hook never answers, and the panel simply stays empty.
+///   which port from [`BrowserHints`] — written here, removed on drop. A
+///   checkout without that hook never answers, and the panel simply stays
+///   empty.
+/// - **And a Playwright server that accepts it.** Since playwright 1.62,
+///   `run-server` drops a client's `args` — `--remote-debugging-port` among
+///   them — unless it was started with `--unsafe` (`filterLaunchOptions`,
+///   `allowUnsafe`): the browser then launches with the plugin's own options
+///   and no port, in silence. The one the Pest plugin starts takes no such
+///   flag and its command line is written in the plugin, so the relay starts
+///   one beside it and the checkout connects to that one first —
+///   `Client::connectTo()` is a no-op once the connection is open. Its
+///   address travels in the same file, and it dies with the relay.
 /// - **`sail pest` forwards no environment.** It builds
 ///   `exec -u <user> <service> php vendor/bin/pest` and passes APP_URL and
 ///   DUSK_DRIVER_URL, nothing else — hence a file rather than a variable.
@@ -346,10 +373,22 @@ struct BrowserHints {
 }
 
 impl BrowserHints {
-    fn write(worktree: &Path, port: Option<u16>, slow_mo: u32) -> Option<Self> {
+    fn write(
+        worktree: &Path,
+        port: Option<u16>,
+        server: Option<u16>,
+        slow_mo: u32,
+    ) -> Option<Self> {
         let mut fields = Vec::new();
         if let Some(port) = port {
             fields.push(format!("\"cdpPort\": {port}"));
+        }
+        // The Playwright server to connect to rather than the plugin's own —
+        // see [`Screencast`]. A host and a port, the way the plugin's
+        // `PlaywrightServer::url` says it, the checkout building the websocket
+        // URL from it.
+        if let Some(server) = server {
+            fields.push(format!("\"playwrightUrl\": \"127.0.0.1:{server}\""));
         }
         if slow_mo > 0 {
             fields.push(format!("\"slowMo\": {slow_mo}"));
@@ -382,9 +421,10 @@ impl Screencast {
     /// will not start — Sail down, no node in the container: a run one cannot
     /// watch still runs, and saying so is the panel's empty frame, not an
     /// error that would fail the suite.
-    fn start(worktree: &Path, sail: &Path, port: u16) -> Option<Self> {
+    fn start(worktree: &Path, sail: &Path, port: u16, server: u16) -> Option<Self> {
         let script = include_str!("../assets/cdp-relay.mjs")
             .replace("__PORT__", &port.to_string())
+            .replace("__SERVER_PORT__", &server.to_string())
             .replace("__QUALITY__", &FRAME_QUALITY.to_string())
             .replace("__WIDTH__", &FRAME_WIDTH.to_string())
             .replace("__HEIGHT__", &FRAME_HEIGHT.to_string())
@@ -420,6 +460,12 @@ impl Screencast {
     /// this process sees nothing, and the tests queue runs one at a time.
     fn port_for(id: u64) -> u16 {
         9500 + (id % 400) as u16
+    }
+
+    /// The port the run's own Playwright server listens on. Derived the same
+    /// way and out of the CDP range, so a run never asks for one twice.
+    fn server_port_for(id: u64) -> u16 {
+        9900 + (id % 400) as u16
     }
 }
 
@@ -566,7 +612,19 @@ fn pump_frames(stdout: std::process::ChildStdout, frames: &(dyn Fn(Frame) + Sync
         let Ok(message) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
-        if message.get("type").and_then(serde_json::Value::as_str) != Some("frame") {
+        let kind = message
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if kind != "frame" {
+            // The relay's other lines — its Playwright server coming up, the
+            // browser attaching and letting go. They paint nothing, and they
+            // are the only account there is of a cast that never starts: the
+            // panel's own answer to that is a tab that never opens.
+            match kind {
+                "server-failed" => log::warn!("screencast relay: {line}"),
+                _ => log::debug!("screencast relay: {line}"),
+            }
             continue;
         }
         let Some(data) = message.get("data").and_then(serde_json::Value::as_str) else {
@@ -640,11 +698,12 @@ fn vitest_rows(json: &str, worktree: &Path) -> Vec<Test> {
                 .to_string();
             Some(Test {
                 runner: Runner::Vitest,
-                class: file,
+                class: file.clone(),
                 method: name.clone(),
                 pattern: title_pattern(&name),
                 name,
                 datasets: 0,
+                file,
             })
         })
         .collect()
@@ -678,10 +737,11 @@ fn jest_rows(output: &str, worktree: &Path) -> Vec<Test> {
             Test {
                 runner: Runner::Jest,
                 class: dir,
-                method: rel,
                 name: file,
                 pattern: String::new(),
                 datasets: 0,
+                file: rel.clone(),
+                method: rel,
             }
         })
         .collect();
@@ -745,7 +805,110 @@ fn method_key(method: &str) -> &str {
     &method[..method.find(['"', ' ']).unwrap_or(method.len())]
 }
 
-fn pest_parse(output: &str) -> Vec<Test> {
+/// Drops the file of a class the guess got wrong, keeping the rest of the row.
+///
+/// `class_file` falls back to a convention when no prefix matches, and a
+/// convention is right most of the time and not always. One `stat` per class —
+/// a listing is one directory read either way — is what makes "open this test"
+/// a promise: an entry that opens nothing is worse than no entry.
+fn kept_files(worktree: &Path, mut listed: Vec<Test>) -> Vec<Test> {
+    let mut asked: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    for test in &mut listed {
+        if test.file.is_empty() {
+            continue;
+        }
+        let there = *asked
+            .entry(test.file.clone())
+            .or_insert_with(|| worktree.join(&test.file).is_file());
+        if !there {
+            test.file.clear();
+        }
+    }
+    listed
+}
+
+/// The PSR-4 prefixes a project declares, longest first.
+///
+/// Both sections: a suite is autoloaded from `autoload-dev` in every Laravel
+/// checkout, and from `autoload` in some. An array of directories keeps its
+/// first — the one composer looks in first.
+pub fn psr4_of(composer: &str) -> Vec<(String, String)> {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(composer) else {
+        return Vec::new();
+    };
+    let mut prefixes = Vec::new();
+    for section in ["autoload", "autoload-dev"] {
+        let Some(map) = json
+            .get(section)
+            .and_then(|section| section.get("psr-4"))
+            .and_then(serde_json::Value::as_object)
+        else {
+            continue;
+        };
+        for (prefix, dir) in map {
+            let dir = match dir {
+                serde_json::Value::String(dir) => dir.clone(),
+                serde_json::Value::Array(dirs) => dirs
+                    .first()
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                _ => continue,
+            };
+            if !dir.is_empty() {
+                prefixes.push((prefix.clone(), dir));
+            }
+        }
+    }
+    // The longest prefix wins, as composer's own resolution does: `Tests\Unit\`
+    // declared beside `Tests\` must not lose to it.
+    prefixes.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
+    prefixes
+}
+
+/// The file a PHP class lives in, by the project's own autoloading rules.
+///
+/// Without a prefix that matches — no `composer.json`, or a suite outside the
+/// autoloader — the convention every Laravel checkout follows: the root
+/// namespace is the directory, lowercased. It is a guess, and a wrong one only
+/// costs an "open" that opens nothing.
+pub fn class_file(class: &str, psr4: &[(String, String)]) -> Option<String> {
+    for (prefix, dir) in psr4 {
+        if let Some(rest) = class.strip_prefix(prefix.as_str()) {
+            let dir = dir.trim_end_matches('/');
+            return Some(format!("{dir}/{}.php", rest.replace('\\', "/")));
+        }
+    }
+    let (head, rest) = class.split_once('\\')?;
+    Some(format!(
+        "{}/{}.php",
+        head.to_lowercase(),
+        rest.replace('\\', "/")
+    ))
+}
+
+/// What to look for in a test's file to land on the test itself, in order.
+///
+/// Pest writes `it('lists the tenants')` and the row reads "it lists the
+/// tenants" — the mangled name read back, `it` included — so the description
+/// **without its first word** is the one the source carries. The whole name is
+/// tried first all the same: a Vitest or Jest title is written as it is
+/// listed, and a Pest `test('…')` too.
+pub fn test_needles(name: &str) -> Vec<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Vec::new();
+    }
+    let mut needles = vec![name.to_string()];
+    if let Some((_, rest)) = name.split_once(' ') {
+        if !rest.is_empty() {
+            needles.push(rest.to_string());
+        }
+    }
+    needles
+}
+
+fn pest_parse(output: &str, psr4: &[(String, String)]) -> Vec<Test> {
     let entries: Vec<&str> = output
         .lines()
         .filter_map(|line| line.strip_prefix(" - "))
@@ -777,6 +940,7 @@ fn pest_parse(output: &str) -> Vec<Test> {
         seen.insert(key, tests.len());
         tests.push(Test {
             runner: Runner::Pest,
+            file: class_file(&class, psr4).unwrap_or_default(),
             class,
             method: method.to_string(),
             name: display(method),
@@ -1062,9 +1226,10 @@ pub fn run(
     // to the end of this function — a run reading it halfway through would
     // find nothing.
     let port = (target.cast && sail_bin.is_some()).then(|| Screencast::port_for(id));
-    let _hints = BrowserHints::write(worktree, port, target.slow_mo);
-    let mut cast = match (port, &sail_bin) {
-        (Some(port), Some(bin)) => Screencast::start(worktree, bin, port),
+    let server = port.map(|_| Screencast::server_port_for(id));
+    let _hints = BrowserHints::write(worktree, port, server, target.slow_mo);
+    let mut cast = match (port, server, &sail_bin) {
+        (Some(port), Some(server), Some(bin)) => Screencast::start(worktree, bin, port, server),
         _ => None,
     };
     let watching = cast.as_mut().and_then(|cast| cast.child.stdout.take());
@@ -1895,7 +2060,7 @@ mod tests {
 
     #[test]
     fn the_listing_gives_one_row_per_test() {
-        let tests = pest_parse(LISTING);
+        let tests = pest_parse(LISTING, &[]);
         let names: Vec<&str> = tests.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             names,
@@ -1921,7 +2086,7 @@ mod tests {
     /// Each filter was run against Pest 4 itself; these pin the exact strings.
     #[test]
     fn a_test_is_run_by_an_anchored_description_regex() {
-        let tests = pest_parse(LISTING);
+        let tests = pest_parse(LISTING, &[]);
         // ` + ` was mangled to three underscores: two to three bytes.
         assert_eq!(
             test_filter(&tests[1]),
@@ -1961,10 +2126,79 @@ mod tests {
     fn a_dataset_name_is_free_text() {
         let tests = pest_parse(
             " - P\\Tests\\Unit\\ExceptionsTest::__pest_evaluable_it_builds\"('App\\Exceptions\\FlowinApiNotAc…eption - x::y')\"\n - P\\Tests\\Unit\\ExceptionsTest::__pest_evaluable_it_builds\"('App\\Exceptions\\Other')\"\n",
+            &[],
         );
         assert_eq!(tests.len(), 1);
         assert_eq!(tests[0].name, "it builds");
         assert_eq!(tests[0].datasets, 2);
+    }
+
+    #[test]
+    fn a_class_lands_in_the_file_the_project_autoloads_it_from() {
+        let psr4 = psr4_of(
+            r#"{"autoload":{"psr-4":{"App\\":"app/"}},
+                "autoload-dev":{"psr-4":{"Tests\\":"tests/"}}}"#,
+        );
+        assert_eq!(
+            class_file("Tests\\Browser\\FileExplorerTest", &psr4).as_deref(),
+            Some("tests/Browser/FileExplorerTest.php")
+        );
+        // The longest prefix wins, as composer resolves.
+        let nested = psr4_of(
+            r#"{"autoload-dev":{"psr-4":{"Tests\\":"tests/","Tests\\Unit\\":"suite/unit/"}}}"#,
+        );
+        assert_eq!(
+            class_file("Tests\\Unit\\MathTest", &nested).as_deref(),
+            Some("suite/unit/MathTest.php")
+        );
+        // No composer.json at all: the convention, which is right far more
+        // often than it is wrong.
+        assert_eq!(
+            class_file("Tests\\Unit\\MathTest", &[]).as_deref(),
+            Some("tests/Unit/MathTest.php")
+        );
+        // A class with no namespace names no directory, so nothing is guessed.
+        assert_eq!(class_file("LegacyTest", &[]), None);
+    }
+
+    #[test]
+    fn a_listing_says_where_each_test_is_written() {
+        let tests = pest_parse(
+            LISTING,
+            &psr4_of(r#"{"autoload-dev":{"psr-4":{"Tests\\":"tests/"}}}"#),
+        );
+        let file = |class: &str| {
+            tests
+                .iter()
+                .find(|test| test.class == class)
+                .map(|test| test.file.as_str())
+        };
+        assert_eq!(
+            file("Tests\\Unit\\MathTest"),
+            Some("tests/Unit/MathTest.php")
+        );
+        assert_eq!(
+            file("Tests\\Feature\\HttpTest"),
+            Some("tests/Feature/HttpTest.php")
+        );
+        // A class in no namespace names no directory: the row simply has no
+        // "open", which is the honest answer.
+        assert_eq!(file("LegacyTest"), Some(""));
+    }
+
+    /// Pest writes `it('sums')` where the row reads "it sums": the source
+    /// carries the description without the word the mangling put in front.
+    #[test]
+    fn the_second_needle_is_the_one_a_pest_file_carries() {
+        assert_eq!(
+            test_needles("it sums two numbers"),
+            vec![
+                "it sums two numbers".to_string(),
+                "sums two numbers".to_string()
+            ]
+        );
+        assert_eq!(test_needles("testCases"), vec!["testCases".to_string()]);
+        assert!(test_needles("  ").is_empty());
     }
 
     /// PHPUnit's own providers suffix ` with data set #0`, unquoted: a space
@@ -1973,6 +2207,7 @@ mod tests {
     fn a_phpunit_provider_is_folded_too() {
         let tests = pest_parse(
             " - LegacyTest::testCases with data set #0\n - LegacyTest::testCases with data set #1.\n",
+            &[],
         );
         assert_eq!(tests.len(), 1);
         assert_eq!(tests[0].name, "testCases");
@@ -1981,8 +2216,8 @@ mod tests {
 
     #[test]
     fn what_is_not_a_test_line_is_ignored() {
-        assert!(pest_parse("   INFO  No tests found.\n").is_empty());
-        assert!(pest_parse("").is_empty());
+        assert!(pest_parse("   INFO  No tests found.\n", &[]).is_empty());
+        assert!(pest_parse("", &[]).is_empty());
     }
 
     /// The failure the panel quotes must be the explanation, not the noise:
@@ -2074,7 +2309,7 @@ at tests/Feature/HttpTest.php:3</failure>
     /// same test — that pairing is what puts a dot on a row.
     #[test]
     fn the_listing_and_the_account_name_the_same_tests() {
-        let tests = pest_parse(LISTING);
+        let tests = pest_parse(LISTING, &[]);
         let outcomes = parse_junit(ACCOUNT);
         for test in &tests {
             let paired = outcomes
@@ -2116,7 +2351,7 @@ at tests/Feature/HttpTest.php:3</failure>
     /// test, the class, a folder, or everything — never another runner's rows.
     #[test]
     fn a_target_covers_what_it_runs() {
-        let tests = pest_parse(LISTING);
+        let tests = pest_parse(LISTING, &[]);
         let (math, sibling, feature) = (&tests[1], &tests[2], &tests[5]);
         assert!(covers(&Target::everything(Runner::Pest), math));
         assert!(!covers(&Target::everything(Runner::Vitest), math));
