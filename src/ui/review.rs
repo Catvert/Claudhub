@@ -1551,6 +1551,11 @@ fn render_file(
             h_flex()
                 .flex_1()
                 .min_w_0()
+                // Clipped to its own box, which is the belt to the braces
+                // below: whatever the layout decides, nothing of the name and
+                // the folder is ever painted over the counts and the tick that
+                // follow them.
+                .overflow_hidden()
                 .gap_1()
                 .items_baseline()
                 // A reviewed file dims: that is what makes the list say at a
@@ -1567,8 +1572,18 @@ fn render_file(
                 // nothing left to give. Not zero: a name wider than the row
                 // must still truncate rather than run over the counts and the
                 // buttons to its right.
+                //
+                // **And `min_w_0` on both, which is what makes that safe.** A
+                // flex item's floor is the width of its content, so an item
+                // that has reached it freezes and hands the rest of the
+                // shortfall to its neighbours — with a fiftieth of a factor,
+                // the name took a fiftieth of what the folder could no longer
+                // absorb and overflowed the row with the remainder, painting
+                // itself over the line counts and the review tick. Truncation
+                // needs a floor of zero to happen at all.
                 .child({
                     let mut name = div()
+                        .min_w_0()
                         .truncate()
                         .text_sm()
                         .when(row.reviewed, |el| {
@@ -1580,6 +1595,7 @@ fn render_file(
                 })
                 .child(
                     div()
+                        .min_w_0()
                         .truncate()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)

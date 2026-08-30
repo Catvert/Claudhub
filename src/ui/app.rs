@@ -3742,14 +3742,18 @@ impl ClaudhubApp {
         self.git.send(Cmd::WatchDir { dir: vault });
     }
 
-    /// Is the two-column view wrapped?
+    /// Is the diff wrapped?
     ///
     /// The question decides **which list is displayed**, and therefore which
     /// handle carries the scrolling: the two are never painted at the same time,
-    /// and aiming at the wrong one would scroll a list that is not there.
+    /// and aiming at the wrong one would scroll a list that is not there. That
+    /// is what it did — the setting used to be read as "two columns *and*
+    /// wrapped", so a file with a single version, which two columns decline to
+    /// pair and which is therefore shown unified, was painted on one handle
+    /// while the smoothing, the hunk steps and every reveal aimed at the other.
+    /// Nothing moved smoothly and nothing was brought into view.
     pub(super) fn diff_wrapped(&self, cx: &App) -> bool {
-        let settings = Settings::global(cx);
-        settings.diff_split && settings.diff_wrap
+        Settings::global(cx).diff_wrap
     }
 
     /// The handle gpui really animates for the displayed diff.

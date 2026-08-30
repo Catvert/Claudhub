@@ -54,9 +54,36 @@ fn tab_row(name: &str, label: gpui::SharedString) -> gpui::Div {
         .gap_1()
         .items_center()
         .children(
-            crate::ui::rails::icon_of(name).map(|glyph| crate::ui::icons::icon(glyph).xsmall()),
+            crate::ui::rails::icon_of(name)
+                .or_else(|| document_glyph(name))
+                .map(|glyph| crate::ui::icons::icon(glyph).xsmall()),
         )
         .child(label)
+}
+
+/// What a **document** wears, a tool window's glyph being its rail button's.
+///
+/// A second table and not an entry in `TOOLS`, which would be a claim these
+/// panels do not make: what puts a glyph on a tool window's tab is that the
+/// same picture is on a rail button, and a document has no button — being in
+/// the centre is what a document is. So the picture is only about the tab, and
+/// it lives where the tab is built.
+///
+/// Every one of them is a view one arrives in rather than one one opens, and a
+/// bar of words with three pictures in it reads worse than a bar of pictures
+/// with none: what was left out was not a decoration. The home tab is not here
+/// — it wears its glyph *instead* of its name, see `pinned_glyph`.
+fn document_glyph(name: &str) -> Option<&'static str> {
+    Some(match name {
+        DiffPanel::NAME => "file-diff",
+        SearchPreviewPanel::NAME => "file-text",
+        CastPanel::NAME => "monitor-play",
+        // The panel's own glyph, and deliberately so: the list and the error
+        // being read are two panels on one state, and what says they belong
+        // together is that they wear the same picture.
+        SentryIssuePanel::NAME => "triangle-alert",
+        _ => return None,
+    })
 }
 
 /// The tabs that wear their glyph alone, and the glyph each wears.
@@ -794,7 +821,7 @@ panels! {
     TestsPanel => ("ClaudhubTests", "panel-tests", render_pest, Tests, visible: tests_visible),
     // The run being followed. On the home screen its tab only shows once a
     // run exists, the console's rule.
-    TestRunPanel => ("ClaudhubTestRun", "panel-test-run", render_test_run, TestRun, needed: test_run_open),
+    TestRunPanel => ("ClaudhubTestRun", "panel-test-run", render_test_run, TestRun, needed: test_run_open, closes: close_test_run),
     // The browser a run drives, in the centre and not under the account it
     // scrolls: what one watches and what one reads afterwards are two things,
     // and a band of 360 pixels at the top of a bottom panel was neither.
@@ -1236,7 +1263,7 @@ impl Panel for QueryPanel {
             .id(("query-tab", id.0 as usize))
             .gap_1()
             .items_center()
-            .child(crate::ui::icons::icon("database"))
+            .child(crate::ui::icons::icon("database").xsmall())
             .child(self.title.clone())
             .child(
                 Button::new("close-query")

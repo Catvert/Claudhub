@@ -402,19 +402,20 @@ pub struct Settings {
     /// Diff in two columns — old version on the left, new on the right — rather
     /// than as a single list.
     ///
-    /// True by default: this is the reading a review asks for, and it is the only
-    /// view where `diff_wrap` applies.
+    /// True by default: this is the reading a review asks for.
     pub diff_split: bool,
     /// Show the whole file around the changes, and not only their few lines of
     /// context.
     pub diff_whole_file: bool,
-    /// Wrap long lines, in two-column view.
+    /// Wrap long lines.
     ///
-    /// True by default, and this is where it counts: a column is half the view,
-    /// and the slightest long line forced horizontal scrolling of the whole file
-    /// — the width being that of the longest line, one was enough to give it to
-    /// all. In a single column the line has the whole width and wrapping is
-    /// debatable; so it does not happen.
+    /// True by default, and it counts most in two columns: a column is half the
+    /// view, and the slightest long line forced horizontal scrolling of the
+    /// whole file — the width being that of the longest line, one was enough to
+    /// give it to all. It applies to the single column too, where the width is
+    /// the view's and not the file's: the setting used to stop there, and a
+    /// file *added* landed in that column without having asked for it, two
+    /// columns declining to pair a version against nothing.
     pub diff_wrap: bool,
     /// "Update from base" replays the branch instead of merging.
     ///

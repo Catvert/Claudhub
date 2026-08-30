@@ -167,7 +167,6 @@
   "dialog-cancel": "Annuler",
   "dialog-close": "Fermer",
   "dialog-ok": "OK",
-  "diff-edit": "Éditer",
   "diff-edit-line": "Éditer cette ligne",
   "diff-edit-tooltip": "Ouvrir le fichier dans l'éditeur",
   "diff-file-position": "Fichier %{rank}/%{total}",

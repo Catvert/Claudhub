@@ -177,6 +177,12 @@ pub struct RunState {
     /// Put away for this run: the cast's tab was crossed out. Cleared by the
     /// next run, never by the next frame — see [`TestsView::close_cast`].
     pub cast_hidden: bool,
+    /// The same, for the run's own tab. A run outlives what one wanted of it:
+    /// once it is read there is nothing to go back to, and the tab stayed
+    /// until the next launch because the state it shows is still there. This
+    /// is what crossing it out says, and the next run clears it — a launch
+    /// wants its own output in front.
+    pub hidden: bool,
     /// The rows this campaign has already settled, by `(class, method)`.
     /// A covered row spins until it lands here — which is what makes the tree
     /// resolve test by test rather than all at once at the end.
@@ -551,7 +557,23 @@ impl ClaudhubApp {
     pub(super) fn test_run_open(&self) -> bool {
         self.active
             .as_deref()
-            .is_some_and(|worktree| self.pest_runs.contains_key(worktree))
+            .and_then(|worktree| self.pest_runs.get(worktree))
+            .is_some_and(|run| !run.hidden)
+    }
+
+    /// Puts the followed run away, its tab crossed out.
+    ///
+    /// The state itself is kept, not dropped: the tree reads the same run for
+    /// its dots, and a cross on one tab must not take the verdicts down with
+    /// it. What goes is the tab, and it comes back on the next launch, which
+    /// is the moment there is something to watch again.
+    pub(super) fn close_test_run(&mut self, cx: &mut Context<Self>) {
+        if let Some(active) = self.active.clone() {
+            if let Some(run) = self.pest_runs.get_mut(&active) {
+                run.hidden = true;
+            }
+        }
+        cx.notify();
     }
 
     /// Is there a browser to watch — a frame arrived for the checkout being
@@ -704,6 +726,7 @@ impl ClaudhubApp {
                 lines: VecDeque::new(),
                 cast: None,
                 cast_hidden: false,
+                hidden: false,
                 settled: HashSet::new(),
                 error: None,
                 run: None,

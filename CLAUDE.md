@@ -680,9 +680,12 @@ pas. Le détail est en commentaire dans le module nommé.
 explicite, `.whitespace_nowrap()`, `ListHorizontalSizingBehavior::Unconstrained`
 avec `with_width_from_item`, et **pas de `w_full` sur une entrée**. Tout ce qui
 se déduit d'un diff est calculé une fois dans `Rendered`, jamais dans la
-fermeture de rendu. Le repli des lignes longues n'existe qu'en deux colonnes, se
+fermeture de rendu. Le repli des lignes longues vaut dans les deux modes, se
 fait **à la colonne** et non aux mots — c'est ce qui rend la hauteur calculable —
-et bascule sur `v_virtual_list`. La largeur mesurée n'existe pas à la première
+et bascule sur `v_virtual_list` ; il ne dépendait que du mode deux colonnes, si
+bien qu'un fichier ajouté, que ce mode refuse d'apparier et qui retombe donc en
+une colonne, le perdait sans l'avoir demandé — et se peignait sur une poignée de
+défilement pendant que le lissage et les révélations visaient l'autre. La largeur mesurée n'existe pas à la première
 frame et est **toujours celle de la frame d'avant**, d'où le `canvas` de
 `diff_laid_out`. **`Ctrl` rend les symboles cliquables** : les plages de mots ne
 sont posées que tant que la touche est tenue — c'est ce qui met la main sur un

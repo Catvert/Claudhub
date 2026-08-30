@@ -115,9 +115,14 @@ impl Side {
     /// more than it wants columns.
     pub fn default_size(self) -> Pixels {
         match self {
-            Side::Left => px(350.),
+            Side::Left => px(380.),
             Side::Right => px(320.),
-            Side::Bottom => px(240.),
+            // **A band and not a strip.** What is down there is a run being
+            // followed and a graph of branches, and both are read rather than
+            // glanced at: 240 pixels showed a dozen lines of a run and a graph
+            // one commit tall, so the first thing done on opening the zone was
+            // to drag it up. This is where it was dragged to.
+            Side::Bottom => px(590.),
         }
     }
 
@@ -131,7 +136,7 @@ impl Side {
     /// paragraphs, where the left's half is a list one glances at.
     pub fn half_size(self) -> Pixels {
         match self {
-            Side::Left => px(240.),
+            Side::Left => px(270.),
             Side::Right => px(460.),
             // One slot: nothing to size against.
             Side::Bottom => px(0.),

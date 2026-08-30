@@ -94,8 +94,8 @@ pub struct Rendered {
     wrap_sizes: std::cell::RefCell<Option<WrapSizes>>,
 }
 
-/// The wrapped list's sizes, and the two things they depend on.
-type WrapSizes = (usize, Pixels, Rc<Vec<gpui::Size<Pixels>>>);
+/// The wrapped list's sizes, and the three things they depend on.
+type WrapSizes = (bool, usize, Pixels, Rc<Vec<gpui::Size<Pixels>>>);
 
 impl Rendered {
     pub fn new(path: &Path, file: FileDiff, theme: &HighlightTheme) -> Self {
@@ -137,25 +137,40 @@ impl Rendered {
         }
     }
 
-    /// The sizes of the wrapped two-column list, from the cache.
+    /// The sizes of the wrapped list, from the cache.
     ///
     /// `v_virtual_list` wants a vector as long as the list, and building it on
     /// every frame walked every entry of the file — the very sweep
     /// virtualisation exists to avoid.
-    fn wrap_sizes(&self, cols: usize, line_height: Pixels) -> Rc<Vec<gpui::Size<Pixels>>> {
+    ///
+    /// **The mode is part of the key**, not only the width: the two lists do
+    /// not have the same entries, so a vector kept from one would be read
+    /// against the other's indices — heights taken from the wrong rows, and one
+    /// vector too short or too long for the list walking it.
+    fn wrap_sizes(
+        &self,
+        split: bool,
+        cols: usize,
+        line_height: Pixels,
+    ) -> Rc<Vec<gpui::Size<Pixels>>> {
         let mut slot = self.wrap_sizes.borrow_mut();
-        if let Some((had_cols, had_height, sizes)) = slot.as_ref() {
-            if *had_cols == cols && *had_height == line_height {
+        if let Some((had_split, had_cols, had_height, sizes)) = slot.as_ref() {
+            if *had_split == split && *had_cols == cols && *had_height == line_height {
                 return sizes.clone();
             }
         }
-        let sizes = Rc::new(
+        let heights = if split {
             split_heights(self, cols)
+        } else {
+            unified_heights(self, cols)
+        };
+        let sizes = Rc::new(
+            heights
                 .into_iter()
                 .map(|lines| gpui::size(px(0.), line_height * lines as f32))
                 .collect::<Vec<_>>(),
         );
-        *slot = Some((cols, line_height, sizes.clone()));
+        *slot = Some((split, cols, line_height, sizes.clone()));
         sizes
     }
 
@@ -473,6 +488,24 @@ pub fn split_heights(diff: &Rendered, cols: usize) -> Vec<usize> {
                 .map(|index| wrapped_lines(diff.row_chars.get(*index).copied().unwrap_or(0), cols))
                 .max()
                 .unwrap_or(1),
+        })
+        .collect()
+}
+
+/// The same, of the unified list: one entry per line, a header being one row.
+///
+/// Simpler than `split_heights` for the reason the list itself is: an entry is
+/// one version of one line, so its height is that line's and nothing else —
+/// there is no half opposite to be as tall as.
+pub fn unified_heights(diff: &Rendered, cols: usize) -> Vec<usize> {
+    diff.rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| match row {
+            Row::Header { .. } => 1,
+            Row::Line { .. } => {
+                wrapped_lines(diff.row_chars.get(index).copied().unwrap_or(0), cols)
+            }
         })
         .collect()
 }
@@ -1465,7 +1498,7 @@ impl ClaudhubApp {
         let diff = state.diff.clone();
         let settings = crate::ui::settings::Settings::global(cx);
         let (split, whole_file) = (settings.diff_split, settings.diff_whole_file);
-        let wrap = split && settings.diff_wrap;
+        let wrap = settings.diff_wrap;
         let mono = cx.theme().mono_font_family.clone();
         let font_size = px(crate::ui::settings::Settings::global(cx).diff_font_size);
         let line_height = line_height(font_size);
@@ -1506,7 +1539,6 @@ impl ClaudhubApp {
         // elsewhere still names the same rows; the toggle keeps its state and
         // applies again on the next two-sided file.
         let split = split && !diff.one_sided;
-        let wrap = wrap && split;
 
         let cell = cell_width(&mono, font_size, window);
         let layout = self.diff_layout(&diff, split, wrap, cell, window, cx);
@@ -1585,6 +1617,7 @@ impl ClaudhubApp {
                     ix,
                     &colors,
                     content_width,
+                    cols,
                     &style,
                     &search,
                     &entity,
@@ -1601,7 +1634,7 @@ impl ClaudhubApp {
         // nothing left to scroll horizontally, which this list would not know
         // how to do.
         let list = if wrap {
-            let sizes = diff.wrap_sizes(cols, line_height);
+            let sizes = diff.wrap_sizes(split, cols, line_height);
             crate::ui::scroll::vertical(
                 DIFF_SCROLL,
                 &self.diff_wrap_scroll,
@@ -1745,11 +1778,24 @@ impl ClaudhubApp {
                     .child(self.step_button("prev-file", "arrow-left", -1, true, cx))
                     // Between the two arrows it counts for: where one stands
                     // in the walk the arrows make, and how far the end is.
+                    //
+                    // **A width it keeps**, reserved for the widest rank this
+                    // walk can show — which is the total itself. Sized by its
+                    // own text, going from file 9 to file 10 made the label a
+                    // digit wider and moved the "next file" arrow out from
+                    // under the finger, in the middle of the one gesture
+                    // nobody makes slowly. The measure is in monospace
+                    // characters, so it holds in both catalogues and at any
+                    // font size, and the text is centred in what it is given.
                     .when_some(position, |el, (rank, total)| {
+                        let widest = tr!("diff-file-position", { rank: total, total: total });
                         el.child(
                             div()
                                 .flex_none()
+                                .min_w(gpui::rems(0.5 * widest.chars().count() as f32))
+                                .text_center()
                                 .text_xs()
+                                .font_family(cx.theme().mono_font_family.clone())
                                 .text_color(cx.theme().muted_foreground)
                                 .child(tr!("diff-file-position", { rank: rank, total: total })),
                         )
@@ -1767,6 +1813,24 @@ impl ClaudhubApp {
                     .min_w_0()
                     .gap_2()
                     .items_center()
+                    // The writing gesture leads the group rather than trailing
+                    // it: the path is what gives way when the bar narrows, and
+                    // a button behind it was the first thing a long name
+                    // pushed out of reach. Icon alone — a pencil beside a name
+                    // is not a word anybody has to read.
+                    .child(
+                        Button::new("diff-edit")
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("pencil"))
+                            .tooltip(tr!("diff-edit-tooltip"))
+                            .on_click(cx.listener(|this, _, _window, cx| this.edit_diff_file(cx))),
+                    )
+                    // The same icon the tree and the changes list give this
+                    // file: the shape says the family and the tint says the
+                    // language, and a file recognised in one place should be
+                    // recognised in the next.
+                    .child(crate::ui::file_icons::file_icon(path, cx))
                     .child(
                         div()
                             .id("diff-path")
@@ -1781,18 +1845,6 @@ impl ClaudhubApp {
                             })
                             .on_click(cx.listener(|this, _, _window, cx| this.copy_diff_path(cx)))
                             .child(path.display().to_string()),
-                    )
-                    // The one gesture of the bar that carries its word: among
-                    // icons that all speak of reading, the writing one is
-                    // worth being read rather than guessed.
-                    .child(
-                        Button::new("diff-edit")
-                            .ghost()
-                            .xsmall()
-                            .icon(icon("pencil"))
-                            .label(tr!("diff-edit"))
-                            .tooltip(tr!("diff-edit-tooltip"))
-                            .on_click(cx.listener(|this, _, _window, cx| this.edit_diff_file(cx))),
                     ),
             )
             .child(
@@ -1830,50 +1882,25 @@ impl ClaudhubApp {
                                 cx.listener(|this, _, _window, cx| this.toggle_diff_split(cx)),
                             ),
                     )
-                    // Wrapping only makes sense in two columns: in a single one the line
-                    // has the whole width. A button that would change nothing is better
-                    // hidden than inert.
-                    .when(split, |el| {
-                        el.child(
-                            Button::new("diff-wrap")
-                                .ghost()
-                                .xsmall()
-                                .selected(wrap)
-                                .icon(icon("wrap-text"))
-                                .tooltip(if wrap {
-                                    tr!("diff-nowrap")
-                                } else {
-                                    tr!("diff-wrap")
-                                })
-                                .on_click(
-                                    cx.listener(|this, _, _window, cx| this.toggle_diff_wrap(cx)),
-                                ),
-                        )
-                    })
+                    // Offered in both modes: a single column is the view's
+                    // width, not the file's, so a line longer than it scrolls
+                    // just the same — and it is a file *added* that ends up
+                    // here without having asked, two columns declining to pair
+                    // a version against nothing.
                     .child(
-                        Button::new("copy-file")
+                        Button::new("diff-wrap")
                             .ghost()
                             .xsmall()
-                            .icon(icon("copy"))
-                            .tooltip(tr!("action-copy-file"))
+                            .selected(wrap)
+                            .icon(icon("wrap-text"))
+                            .tooltip(if wrap {
+                                tr!("diff-nowrap")
+                            } else {
+                                tr!("diff-wrap")
+                            })
                             .on_click(
-                                cx.listener(|this, _, _window, cx| this.copy_diff(false, cx)),
+                                cx.listener(|this, _, _window, cx| this.toggle_diff_wrap(cx)),
                             ),
-                    )
-                    // Handing a selection to the agent, beside copying it: what
-                    // one does with lines just picked out. Annotating is not
-                    // here — it is a gesture of the right click, where the
-                    // selection is, and of the notes panel that holds the
-                    // result.
-                    .child(
-                        Button::new("ask-agent")
-                            .ghost()
-                            .xsmall()
-                            .icon(icon("bot"))
-                            .tooltip(tr!("note-ask-title"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.ask_about_selection(window, cx)
-                            })),
                     ),
             )
     }
@@ -2011,14 +2038,19 @@ impl ClaudhubApp {
         // wrap it, whereas all of it stays reachable through horizontal
         // scrolling, which carries both columns together and therefore keeps the
         // versions opposite each other.
-        // Wrapped, the columns are half the view and nothing else: that is the
-        // whole point of wrapping, no longer having to scroll to read a long
-        // line.
+        // Wrapped, the columns are the view and nothing else: that is the whole
+        // point of wrapping, no longer having to scroll to read a long line.
+        // Halved in two-column mode, whole in one.
         let column = if wrap {
             // The note margin (3 px) belongs to the entry, not to the columns:
             // forgetting it would make the row overflow by three pixels, which
             // no bar would reveal since wrapping removes one.
-            ((viewport - px(3.)) / 2.).max(px(80.))
+            let usable = (viewport - px(3.)).max(px(80.));
+            if split {
+                (usable / 2.).max(px(80.))
+            } else {
+                usable
+            }
         } else {
             ((text_width + gutter).max(viewport / 2.)).max(px(80.))
         };
@@ -2027,11 +2059,16 @@ impl ClaudhubApp {
         } else {
             (text_width + gutter * 2.).max(viewport)
         };
-        // A half's text columns: what is left once the gutter, the sign and the
-        // note margin are taken. Zero when nothing wraps, which `half` reads as
-        // "let the line run".
+        // The text columns an entry holds: what is left once the gutters, the
+        // sign and the note margin are taken. **Two gutters in one column** —
+        // the unified list shows both numbers, where a half shows its own — and
+        // counting one would wrap a gutter's worth of characters too late, past
+        // the right edge. Zero when nothing wraps, which the rows read as "let
+        // the line run".
         let cols = if wrap {
-            ((f32::from((column - gutter - px(20.)).max(px(0.))) / f32::from(cell)) as usize).max(8)
+            let gutters = if split { gutter } else { gutter * 2. };
+            ((f32::from((column - gutters - px(20.)).max(px(0.))) / f32::from(cell)) as usize)
+                .max(8)
         } else {
             0
         };
@@ -2229,6 +2266,10 @@ fn render_row(
     index: usize,
     colors: &DiffColors,
     content_width: Pixels,
+    // `cols`: text columns before wrapping, zero when the line runs and
+    // horizontal scrolling takes care of it — `half`'s rule, on the one column
+    // this list has.
+    cols: usize,
     style: &RowStyle,
     search: &SearchPaint,
     entity: &Entity<ClaudhubApp>,
@@ -2247,27 +2288,48 @@ fn render_row(
                 return div().into_any_element();
             };
             let (bg, fg) = line_colors(source.kind, colors);
-            let content = line_content(
-                diff,
-                hunk,
-                line,
-                fg,
-                word_color(source.kind, colors),
-                &search.marks(hunk, line),
-                None,
+            let word_bg = word_color(source.kind, colors);
+            let marks = search.marks(hunk, line);
+            let line_height = style.line_height;
+            // Wrapped, the entry becomes a stack of fixed-height lines, as a
+            // half does in two columns: the numbers and the sign stay on the
+            // first, aligned to the top, and what follows is the continuation
+            // of the text. Its height is then exactly the one announced to the
+            // list — `unified_heights`, from this very count.
+            let wrapped = cols > 0;
+            let lines = if wrapped {
+                wrapped_lines(diff.row_chars.get(index).copied().unwrap_or(0), cols)
+            } else {
+                1
+            };
+            let follow = |segment: usize| {
                 style.armed.then(|| Armed {
                     id: ("diff-word", index).into(),
-                    spot: Spot::diff_row(index),
-                    hovered: style.hovered_word(index, 0, 0),
+                    spot: Spot::Diff {
+                        row: index,
+                        side: 0,
+                        segment,
+                    },
+                    hovered: style.hovered_word(index, 0, segment),
                     entity,
-                }),
-            );
+                })
+            };
 
             let row = h_flex()
                 .id(("line", index))
-                .h(style.line_height)
-                .min_w(content_width)
-                .items_center()
+                .h(line_height * lines as f32)
+                // No floor on the width once it wraps: the width is the view's,
+                // there is nothing left to scroll to, and a minimum taken from
+                // the longest line of the file would put a bar under a list
+                // that has nowhere to go.
+                .when(!wrapped, |el| el.min_w(content_width))
+                .map(|el| {
+                    if wrapped {
+                        el.items_start()
+                    } else {
+                        el.items_center()
+                    }
+                })
                 .whitespace_nowrap()
                 // The selection replaces the row's background rather than adding
                 // to it: gpui does not stack two backgrounds on one node, and a
@@ -2280,17 +2342,62 @@ fn render_row(
                 // gutter is the only place horizontal scrolling does not take
                 // out of view.
                 .child(note_mark(style))
-                .child(number(source.old_no, style.gutter, colors))
-                .child(number(source.new_no, style.gutter, colors))
+                .child(
+                    number(source.old_no, style.gutter, colors)
+                        .when(wrapped, |el| el.h(line_height)),
+                )
+                .child(
+                    number(source.new_no, style.gutter, colors)
+                        .when(wrapped, |el| el.h(line_height)),
+                )
                 .child(
                     div()
                         .w(px(14.))
                         .flex_none()
                         .text_center()
+                        .when(wrapped, |el| el.h(line_height))
                         .when_some(fg, |el, fg| el.text_color(fg))
                         .child(sign(source.kind)),
                 )
-                .child(content);
+                .map(|el| {
+                    if !wrapped {
+                        return el.child(line_content(
+                            diff,
+                            hunk,
+                            line,
+                            fg,
+                            word_bg,
+                            &marks,
+                            None,
+                            follow(0),
+                        ));
+                    }
+                    let bounds = wrap_offsets(&source.text, cols, lines);
+                    el.child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .children((0..lines).map(|segment| {
+                                // An id per segment, as in `half`: an element is
+                                // named by the path of the ids above it, and the
+                                // words of two segments would otherwise share one
+                                // name.
+                                div()
+                                    .id(("segment", segment))
+                                    .h(line_height)
+                                    .child(line_content(
+                                        diff,
+                                        hunk,
+                                        line,
+                                        fg,
+                                        word_bg,
+                                        &marks,
+                                        Some(bounds[segment]..bounds[segment + 1]),
+                                        follow(segment),
+                                    ))
+                            })),
+                    )
+                });
             style
                 .hunk_rule(with_row_gestures(row, index, entity))
                 .into_any_element()
@@ -3278,6 +3385,31 @@ mod tests {
         assert_eq!(
             split_heights(&rendered, 0),
             vec![1, 1],
+            "sans repli, une ligne"
+        );
+    }
+
+    /// The unified list has one entry per version, so an entry is as tall as
+    /// its own line and nothing else — where the two-column pair had to be as
+    /// tall as its taller half. A file added is read here, and it is the list
+    /// the setting used to leave unwrapped.
+    #[test]
+    fn a_unified_entry_is_as_tall_as_its_own_line() {
+        let mut hunk = hunk("@@ a @@", &[DiffLineKind::Removed, DiffLineKind::Added]);
+        hunk.lines[0].text = "x".repeat(10);
+        hunk.lines[1].text = "x".repeat(45);
+        let diff = FileDiff {
+            hunks: vec![hunk],
+            binary: false,
+            empty: false,
+        };
+        let rendered = Rendered::new(Path::new("x.txt"), diff, &Theme::default_dark());
+        // The header, the short line, then the long one on three lines — where
+        // the pair made a single three-line entry of the two.
+        assert_eq!(unified_heights(&rendered, 20), vec![1, 1, 3]);
+        assert_eq!(
+            unified_heights(&rendered, 0),
+            vec![1, 1, 1],
             "sans repli, une ligne"
         );
     }
