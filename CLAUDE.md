@@ -204,6 +204,9 @@ src/
     sql_history_view.rs  les requêtes déjà jouées, moitié basse du panneau des bases
     search.rs       les lignes de la recherche projet — pur
     search_view.rs  la loupe : le champ, la liste, l'aperçu
+    quick.rs        ce qu'une poignée de lettres nomme dans une liste de
+                    chemins, et le double appui sur Maj — pur, testé
+    quick_view.rs   le sélecteur rapide : un modal, deux questions
     conflicts.rs    les conflits et le garde-fou d'une opération à mi-chemin
     worktree_ops.rs création guidée, tâches du projet, intégration
     store.rs        ce qu'on retient par worktree : base, replis, notes
@@ -791,6 +794,55 @@ ripgrep : la question a été mesurée, l'écart est sous le seuil de perception
 de compilation de git). Trois plafonds, et chacun est dit. La recherche est
 amortie par un **compteur de frappes** relu à l'échéance, pas par un drapeau.
 
+**Le sélecteur rapide** (`quick.rs`, `quick_view.rs`) — un modal, deux
+questions : *où est ce texte* (`Ctrl+Maj+F`) et *quel est ce fichier*
+(`Maj Maj`, et `Ctrl+P`). C'est PhpStorm, et c'est ce qu'une aire de dock ne
+sait pas faire : on vient là pour repartir, et un panneau qu'il faut ranger
+après coup fait payer le geste deux fois.
+
+**Un champ pour les deux onglets**, et les deux raccourcis qui l'ouvrent sont
+liés une **seconde** fois contre son propre contexte : tout prédicat qui
+l'ouvre exclut `Dialog`, qui est ce qu'elle est, donc celui de l'autre question
+n'atteignait rien une fois la boîte ouverte — il y change d'onglet, sur les
+lettres déjà tapées. La question est retenue **par worktree**, et rien tapé en
+est une aussi : la réponse est alors l'**historique des fichiers lus** ici, que
+le magasin tient (`quick::promote`, `quick::recent`) parce qu'une liste en
+mémoire est vide le matin, qui est le seul moment où on la lit.
+
+**Il se tient devant les panneaux de recherche, il ne les remplace pas.** Ce
+qu'un modal ne sait pas faire, c'est être lu longtemps — un panneau se
+redimensionne, se replie et survit à Échap — donc `Ctrl+Entrée` passe la main à
+`ui::search_view`. **Et ce sont les mêmes résultats** : le côté texte ne garde
+aucun état, il écrit dans `search_input`, envoie par `run_search` et peint
+`search.rows` avec le rendu de ligne du panneau. Une seule question et une
+seule réponse dans cette fenêtre — c'est ce qui rend l'échappatoire gratuite.
+
+**Le fichier est à côté de la liste, dans le modal aussi**, et en colonnes et
+non l'une sous l'autre : on parcourt la liste pour savoir *laquelle* des
+réponses c'est, et à cette question c'est le code qui répond, pas le chemin.
+**Un seul pipeline, deux volets** (`PreviewPane`) : `Cmd::ReadPreview` est le
+même, `PendingPreview` dit où la réponse atterrit et ce qu'on y allume — la
+requête du moment de l'envoi côté recherche, **rien** côté fichiers, les mots
+de la dernière recherche n'ayant rien à faire dans un fichier demandé par son
+nom. Deux emplacements pourtant, et non un : ce que le panneau prévisualise est
+l'occurrence où l'on est, ce que le côté fichiers prévisualise est un fichier —
+partager la case aurait fait effacer l'un par l'autre à chaque flèche. Et le
+côté fichiers **diffère sa lecture**, seul de tous : deux occurrences voisines
+sont dans le même fichier, deux lignes voisines d'un classement jamais.
+
+Le côté fichier est un **classement** et non le filtre de `ui::find` : `uisrch`
+trouve `src/ui/search_view.rs`, parce que le fragment dont on se souvient est
+rarement contigu. Ce qui décide est pur et testé (`quick.rs`), devant la vue.
+
+**`Maj Maj` n'est pas une liaison, et ne peut pas l'être** : un modificateur nu
+ne devient jamais une touche — X11 comme Windows le traduisent en changement de
+modificateurs et rien d'autre. Il se lit donc sur `on_modifiers_changed` de la
+**racine**, et **toute autre frappe rompt la série** (`quick::DoubleTap`, en
+phase de **capture**, un terminal consommant ce qu'on lui donne) : sans quoi
+`AB` serait le geste exactement. Corollaire : il ne se personnalise pas et ne
+s'éteint pas, donc la fenêtre d'aide l'écrit à la main, sur la ligne de
+`Ctrl+P` puisque c'est le même geste.
+
 **Les bases** (`db/`, `db.rs`, `db_query.rs`) — un seul pilote, `sqlx`.
 **Une console est un document**, un panneau chacune, comme un fichier ouvert :
 il y en avait une parce que le centre était un emplacement unique, l'aire de
@@ -1108,6 +1160,14 @@ Elles viennent d'Aviary, et les enfreindre produit des bugs silencieux.
   (`ui::notify`, `ClaudhubApp::announce`) : la barre d'état n'en porte plus
   rien. Un point d'appel sans fenêtre passe par la file `pending_notes`, vidée
   en tête du rendu de la racine — `push_notification` réclame un `&mut Window`.
+- **Un handle de focus survit à l'élément qui le portait**, et une fenêtre dont
+  le focus pend sur un nœud qui n'est plus peint devient sourde : gpui remonte
+  l'événement depuis ce nœud, ne le trouve pas, et repart de la racine de son
+  arbre de dispatch — qui n'est pas celle de `ClaudhubApp`. Plus une seule
+  liaison déclarée ici ne répond, et un clic sur n'importe quoi de focalisable
+  remet tout en marche, ce qui rend le symptôme illisible. Ça arrive au champ
+  d'un modal, qui est une entité de l'application peinte dans un dialogue et
+  lui survit ; `app::reclaim_stranded_focus`, en tête de rendu, est le filet.
 - Les raccourcis passent par `secondary-` : le reste du clavier appartient au
   programme du terminal.
 - gpui rend via Vulkan sur Linux : `vulkan-loader` doit être dans

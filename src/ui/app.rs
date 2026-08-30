@@ -16,7 +16,7 @@ use gpui::{
 use gpui_component::{
     dock::{DockArea, DockSkin},
     h_flex,
-    input::{EditorState, InputState},
+    input::{EditorState, InputEvent, InputState},
     select::{SearchableVec, SelectEvent, SelectState},
     separator::Separator as Divider,
     v_flex, ActiveTheme, Root, Sizable, WindowExt,
@@ -815,6 +815,21 @@ pub struct ClaudhubApp {
     pub(super) search_glob_input: Entity<InputState>,
     pub(super) search_regex: bool,
     pub(super) search_whole_word: bool,
+    /// The quick palette: `Ctrl+Shift+F`, `Ctrl+P`, and `Shift Shift`.
+    ///
+    /// A modal in front of the search panels rather than in place of them —
+    /// see `ui::quick_view`. It holds no results of its own on the text side:
+    /// it types into `search_input` and paints `search.rows`, so the panels it
+    /// hands over to are already showing what it showed.
+    pub(super) quick: crate::ui::quick_view::QuickState,
+    /// The palette's field. Created **once**, like every other input.
+    pub(super) quick_input: Entity<InputState>,
+    /// The palette's content, built once and outliving its dialog.
+    ///
+    /// **An entity and not a closure**: `open_dialog` keeps a `Fn` called back
+    /// from the root's render, where reading the root entity is a panic. The
+    /// settings form's arrangement, for its reason.
+    pub(super) quick_palette: Entity<crate::ui::quick_view::QuickPalette>,
     pub(super) search_scroll: gpui::UniformListScrollHandle,
     pub(super) search_preview_scroll: gpui::UniformListScrollHandle,
     /// The result list's focus, which gives it its arrows.
@@ -823,13 +838,9 @@ pub struct ClaudhubApp {
     /// it is what tells "the arrows walk the results" from "the arrows walk the
     /// diff", and two sets of bindings on one key would not be settled.
     pub(super) search_focus: FocusHandle,
-    /// The preview read that has gone out, and the line to reveal when it comes
-    /// back.
-    ///
-    /// One walks the results while a file is being read, and painting the
-    /// answer of a row one has already left is worse than painting nothing —
-    /// the same shape as the editor's `landing`, and for the same reason.
-    pub(super) pending_preview: Option<(PathBuf, PathBuf, u32)>,
+    /// The preview read that has gone out: which file, for which pane, and
+    /// what to light in it. See `search_view::PendingPreview`.
+    pub(super) pending_preview: Option<crate::ui::search_view::PendingPreview>,
     /// What the editing screen shows when it is not a worktree's file.
     ///
     /// The editor keys what it holds by a **root**, which is a worktree in the
@@ -1257,6 +1268,24 @@ impl ClaudhubApp {
             let app = cx.entity();
             cx.new(|cx| crate::ui::settings_view::SettingsForm::new(&app, cx))
         };
+        let quick_input = cx.new(|cx| InputState::new(window, cx));
+        // A keystroke ranks the paths again, or types into the search screen's
+        // field: see `ClaudhubApp::quick_query`. Enter is **not** subscribed
+        // to — a single-line field propagates the key after emitting
+        // `PressEnter`, so the palette's own `enter` binding fires anyway, and
+        // subscribing too would open the row twice.
+        // `subscribe_in` and not `subscribe`: typing into the search screen's
+        // field needs a window, which the event alone does not carry.
+        cx.subscribe_in(&quick_input, window, |this, _, event, window, cx| {
+            if let InputEvent::Change = event {
+                this.quick_query(window, cx);
+            }
+        })
+        .detach();
+        let quick_palette = {
+            let app = cx.entity();
+            cx.new(|cx| crate::ui::quick_view::QuickPalette::new(&app, cx))
+        };
 
         let mut app = Self {
             git,
@@ -1321,6 +1350,9 @@ impl ClaudhubApp {
             search: Default::default(),
             searches: HashMap::new(),
             search_next_id: 0,
+            quick: Default::default(),
+            quick_input,
+            quick_palette,
             search_input: search_inputs.text,
             search_glob_input: search_inputs.glob,
             search_regex: false,
@@ -1850,7 +1882,6 @@ impl ClaudhubApp {
     /// scratchpad, and having to confirm it would be the best way to lose three
     /// sentences in it.
     fn watch_vault_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        use gpui_component::input::InputEvent;
         cx.subscribe(&self.journal_input.clone(), |this, _, event, cx| {
             if matches!(event, InputEvent::Change) {
                 this.schedule_journal_save(cx);
@@ -2187,7 +2218,7 @@ impl ClaudhubApp {
                 files,
                 ignored,
                 dirs,
-            } => self.project_files_arrived(worktree, files, ignored, dirs),
+            } => self.project_files_arrived(worktree, files, ignored, dirs, cx),
             Evt::DirListed {
                 worktree,
                 dir,
@@ -3785,12 +3816,19 @@ impl ClaudhubApp {
     ///
     /// **In the middle of the view**, which is where the eye already is and
     /// which shows what comes before the change as well as what follows it —
-    /// reading a hunk is reading it in its context. The exception is a hunk
-    /// **taller than the view**: centring it would push its first lines off the
-    /// top, where they cannot be recovered by reading downwards. Such a hunk
-    /// goes to the top, and is read like a page.
+    /// reading a hunk is reading it in its context.
+    ///
+    /// **But it is the header that gets centred, not the hunk**, so only half
+    /// the view is left under it: a hunk taller than that half runs off the
+    /// bottom of the screen while there is room to show it whole. It is the
+    /// last hunk of a file that makes it plain — nothing follows it to be read
+    /// into, so what one is left looking at is a change cut in two. Such a
+    /// hunk is pinned to the top, where all of it fits; and so is one taller
+    /// than the view itself, which cannot be shown whole and is read like a
+    /// page — centring that one would push its first lines off the top, where
+    /// reading downwards never recovers them.
     pub(super) fn reveal_diff_hunk(&self, row: usize, cx: &App) {
-        let strategy = if self.hunk_fits_the_view(row, cx) {
+        let strategy = if self.hunk_fits_below_the_middle(row, cx) {
             gpui::ScrollStrategy::Center
         } else {
             gpui::ScrollStrategy::Top
@@ -4133,6 +4171,7 @@ impl Render for ClaudhubApp {
         // two of which are painted from inside a dialog: see
         // `surface::sync_text_surfaces`.
         self.sync_text_surfaces(cx);
+        self.reclaim_stranded_focus(window, cx);
         v_flex()
             // Vim mode is read at render time and not at construction: the
             // context is what turns its bindings on, and the setting changes
@@ -4147,7 +4186,12 @@ impl Render for ClaudhubApp {
             // repainted unless the flag turns over: `Shift` on every capital
             // letter would otherwise cost a frame each.
             .on_modifiers_changed(cx.listener(
-                |this, event: &gpui::ModifiersChangedEvent, _, cx| {
+                |this, event: &gpui::ModifiersChangedEvent, window, cx| {
+                    // `Shift Shift`, which lives here for the very reason the
+                    // line below does: a bare modifier is not a key gpui can
+                    // bind, and a modifier change is the only trace it leaves.
+                    // See `quick::DoubleTap`.
+                    this.quick_tapped(event, window, cx);
                     let armed = event.modifiers.secondary();
                     if this.follow_armed != armed {
                         this.follow_armed = armed;
@@ -4162,6 +4206,19 @@ impl Render for ClaudhubApp {
                     }
                 },
             ))
+            // **In the capture phase, and it must be.** What these two do is
+            // break a `Shift Shift` in progress — the letter between the two
+            // capitals of `AB`, the click between two idle presses — and the
+            // keystroke they are watching for is usually consumed long before
+            // it could bubble back up here: a terminal takes every key it is
+            // given. Capture walks from the root down, so nothing can hide a
+            // keystroke from this. Neither consumes.
+            .capture_key_down(cx.listener(|this, _: &gpui::KeyDownEvent, _, _| {
+                this.quick.tap.interrupt();
+            }))
+            .capture_any_mouse_down(cx.listener(|this, _, _, _| {
+                this.quick.tap.interrupt();
+            }))
             .on_action(cx.listener(super::shortcuts::refresh))
             .on_action(cx.listener(super::shortcuts::show_line_history))
             .on_action(cx.listener(super::shortcuts::new_terminal))
@@ -4199,6 +4256,10 @@ impl Render for ClaudhubApp {
             .on_action(cx.listener(super::shortcuts::search_up))
             .on_action(cx.listener(super::shortcuts::search_down))
             .on_action(cx.listener(super::shortcuts::search_open))
+            .on_action(cx.listener(super::shortcuts::quick_up))
+            .on_action(cx.listener(super::shortcuts::quick_down))
+            .on_action(cx.listener(super::shortcuts::quick_open))
+            .on_action(cx.listener(super::shortcuts::quick_expand))
             .on_action(cx.listener(super::shortcuts::explorer_up))
             .on_action(cx.listener(super::shortcuts::explorer_down))
             .on_action(cx.listener(super::shortcuts::explorer_left))
@@ -4364,6 +4425,37 @@ impl ClaudhubApp {
         });
         self.schedule_layout_save(cx);
         cx.notify();
+    }
+
+    /// Takes the keyboard back when it is left with nowhere to be.
+    ///
+    /// **A focus handle outlives the element that carried it.** gpui walks a
+    /// key event from the node holding the focus up to the root of the window;
+    /// when that node is no longer painted it finds nothing, falls back to the
+    /// dispatch tree's own root — which is not this view's node — and every
+    /// binding declared here goes quiet: `Ctrl+P`, `Ctrl+Maj+F`, and the
+    /// modifier changes `Maj Maj` is read from. The window looks alive and
+    /// answers no key until a click lands somewhere focusable.
+    ///
+    /// The quick palette is where it happens, its field being an entity of the
+    /// application painted inside a dialog: the field survives the dialog, so
+    /// a caret left on it survives too. Closing hands it on where it can
+    /// (`quick_closed`), and this is the frame-by-frame proof of it — asked
+    /// once painting starts, when the dialog has really gone and nothing is
+    /// left mid-gesture. A dialog on screen owns the keyboard and is left
+    /// alone.
+    fn reclaim_stranded_focus(&mut self, window: &mut Window, cx: &mut App) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let stranded = window.focused(cx).is_none()
+            || gpui::Focusable::focus_handle(&self.quick_input, cx).is_focused(window);
+        if !stranded {
+            return;
+        }
+        log::debug!("focus was left on nothing painted, handing it to the window");
+        let root = self.focus.clone();
+        root.focus(window, cx);
     }
 
     /// Where each panel sits, as the dock's tree says it — see

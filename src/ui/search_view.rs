@@ -130,6 +130,55 @@ pub struct SearchState {
     pub definition: Option<u64>,
 }
 
+/// What the preview's pencil opens.
+///
+/// The pane knows what it is showing; the button has to be told, because the
+/// two answers differ: a result list opens the **hit** one is on, and the
+/// palette's file side opens the **file**, which has no hit in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PreviewOpen {
+    Hit,
+    File,
+}
+
+/// Which of the two panes a preview read is for.
+///
+/// **Two panes and one pipeline.** A file is read the same way whoever asked —
+/// `Cmd::ReadPreview`, one worker, one answer — and what differs is only where
+/// the answer lands and what is lit in it. A second pipeline would have been a
+/// second `pending`, a second `Evt` and a second place to drop a stale answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PreviewPane {
+    /// The search screen's, beside the result list — and the palette's text
+    /// side, which shows that very same state.
+    Search,
+    /// The palette's file side. A file asked for **by name**, which is not a
+    /// hit: nothing in it is lit, and the line to come to rest on is the
+    /// first.
+    Quick,
+}
+
+/// A preview read that has gone out.
+///
+/// One walks the list while a file is being read, and painting the answer of a
+/// row one has already left is worse than painting nothing — the same shape as
+/// the editor's `landing`, and for the same reason.
+pub(super) struct PendingPreview {
+    pub worktree: PathBuf,
+    pub path: PathBuf,
+    /// The line to come to rest on, as it stood when the read went out.
+    pub line: u32,
+    /// What to pick out in the file once it is here.
+    ///
+    /// **Captured at the send and not read at the arrival**: the query can be
+    /// replaced while a file is in flight, and a file lit with a word that is
+    /// no longer being looked for is a file lit wrongly. Empty for the
+    /// palette's file side — the words of the last text search have no
+    /// business showing up in a file one asked for by name.
+    pub marks: Query,
+    pub pane: PreviewPane,
+}
+
 /// The file beside the list.
 pub struct Preview {
     pub worktree: PathBuf,
@@ -709,6 +758,17 @@ impl ClaudhubApp {
         }
     }
 
+    /// Does the field hold a question the list has not answered?
+    ///
+    /// What `Entrée` looks at in the palette: under `MIN_AUTO` characters
+    /// nothing goes out by itself, so there is nothing to open and the key
+    /// means "search". The error is part of it — a query that failed has not
+    /// been answered either, and the same key is what tries it again.
+    pub(super) fn search_pending(&self, cx: &App) -> bool {
+        let query = self.search_query(cx);
+        !query.is_empty() && (query != self.search.sent || self.search.error.is_some())
+    }
+
     fn selected_search_row(&self) -> Option<Row> {
         self.search.rows.get(self.search.selected?).copied()
     }
@@ -733,11 +793,17 @@ impl ClaudhubApp {
             }
             _ => {
                 self.search.preview = None;
-                self.pending_preview = Some((worktree.clone(), path.clone(), line));
+                self.pending_preview = Some(PendingPreview {
+                    worktree: worktree.clone(),
+                    path: path.clone(),
+                    line,
+                    marks: self.search.sent.clone(),
+                    pane: PreviewPane::Search,
+                });
                 self.git.send(Cmd::ReadPreview { worktree, path });
             }
         }
-        self.reveal_preview_line(cx);
+        self.reveal_preview_line(PreviewPane::Search, cx);
     }
 
     /// Brings the previewed line into view, a third of the way down.
@@ -747,8 +813,8 @@ impl ClaudhubApp {
     /// for. The strategy is strict, so it moves even when the line is already
     /// on screen — the point is to put it *there*, not merely to make it
     /// visible.
-    fn reveal_preview_line(&mut self, _cx: &mut Context<Self>) {
-        let Some(preview) = self.search.preview.as_ref() else {
+    fn reveal_preview_line(&mut self, pane: PreviewPane, _cx: &mut Context<Self>) {
+        let Some(preview) = self.preview_of(pane) else {
             return;
         };
         let line = preview.line.saturating_sub(1) as usize;
@@ -758,8 +824,30 @@ impl ClaudhubApp {
         // arrow stepping one row and wrong here — walking to the next hit of a
         // file already shown would leave the preview exactly where it was, and
         // a key that moves nothing visible reads as a dead key.
-        self.search_preview_scroll
+        self.preview_scroll(pane)
             .scroll_to_item_strict(line - above, gpui::ScrollStrategy::Top);
+    }
+
+    /// Where a pane's preview lives, and what scrolls it.
+    pub(super) fn preview_of(&self, pane: PreviewPane) -> Option<&Preview> {
+        match pane {
+            PreviewPane::Search => self.search.preview.as_ref(),
+            PreviewPane::Quick => self.quick.preview.as_ref(),
+        }
+    }
+
+    pub(super) fn preview_slot(&mut self, pane: PreviewPane) -> &mut Option<Preview> {
+        match pane {
+            PreviewPane::Search => &mut self.search.preview,
+            PreviewPane::Quick => &mut self.quick.preview,
+        }
+    }
+
+    fn preview_scroll(&self, pane: PreviewPane) -> &gpui::UniformListScrollHandle {
+        match pane {
+            PreviewPane::Search => &self.search_preview_scroll,
+            PreviewPane::Quick => &self.quick.preview_scroll,
+        }
     }
 
     /// A previewed file has arrived.
@@ -772,23 +860,32 @@ impl ClaudhubApp {
     ) {
         // The answer to a preview one has already left. Dropped rather than
         // shown: the cursor has moved, and the file under it is another.
-        let Some((wanted_worktree, wanted_path, line)) = self.pending_preview.clone() else {
+        let Some(wanted) = self.pending_preview.take() else {
             return;
         };
-        if (wanted_worktree.as_path(), wanted_path.as_path())
+        if (wanted.worktree.as_path(), wanted.path.as_path())
             != (worktree.as_path(), path.as_path())
         {
+            // The answer to a read one has already left. Put back rather than
+            // dropped: what is still in flight is the *other* one, and
+            // clearing it here would leave its answer nowhere to land.
+            self.pending_preview = Some(wanted);
             return;
         }
-        self.pending_preview = None;
+        let pane = wanted.pane;
         // The line is re-read from where the cursor stands **now**: one walks
         // two hits of the same file faster than the file is read, and the line
-        // asked for a round trip ago is not the one under the cursor.
-        let line = self
-            .selected_search_row()
-            .filter(|row| search::path_of(&self.search.results, *row) == Some(path.as_path()))
-            .map(|row| search::line_of(&self.search.results, row))
-            .unwrap_or(line);
+        // asked for a round trip ago is not the one under the cursor. Only for
+        // the search's pane — the palette's file side always rests on the
+        // first line, there being no hit to come to rest on.
+        let line = match pane {
+            PreviewPane::Search => self
+                .selected_search_row()
+                .filter(|row| search::path_of(&self.search.results, *row) == Some(path.as_path()))
+                .map(|row| search::line_of(&self.search.results, row))
+                .unwrap_or(wanted.line),
+            PreviewPane::Quick => wanted.line,
+        };
         let (lines, highlights, error): (Vec<SharedString>, _, _) = match content {
             Ok(content) => {
                 let theme = cx.theme().highlight_theme.clone();
@@ -805,9 +902,9 @@ impl ClaudhubApp {
             }
             Err(message) => (Vec::new(), DocumentHighlights::default(), Some(message)),
         };
-        let marks = line_marks(&lines, &self.search.sent);
+        let marks = line_marks(&lines, &wanted.marks);
         let widest = widest_line(&lines);
-        self.search.preview = Some(Preview {
+        *self.preview_slot(pane) = Some(Preview {
             worktree,
             path,
             lines: Rc::new(lines),
@@ -817,12 +914,20 @@ impl ClaudhubApp {
             line,
             error,
         });
-        self.reveal_preview_line(cx);
+        self.reveal_preview_line(pane, cx);
         // And on the home screen the preview is a tab that was not there a
         // moment ago — it only exists while there is a file to show. Bringing
         // it forward is what makes clicking a hit change the centre; without
         // it the tab appears and the group goes on showing the diff.
-        self.reveal_panel_later(crate::ui::panels::SearchPreviewPanel::NAME);
+        //
+        // **Not while the palette is up**, though it is the palette that asked:
+        // the modal covers the centre, so the tab would be brought forward
+        // where nobody can see it, and what one would find on closing is a
+        // preview in place of the file one was reading. `Ctrl+Entrée` is the
+        // gesture that asks for that panel, and it does it itself.
+        if pane == PreviewPane::Search && !self.quick.open {
+            self.reveal_panel_later(crate::ui::panels::SearchPreviewPanel::NAME);
+        }
         cx.notify();
     }
 
@@ -838,7 +943,8 @@ impl ClaudhubApp {
         let body = if self.search.results.files.is_empty() {
             self.render_search_empty(cx).into_any_element()
         } else {
-            self.render_search_rows(window, cx).into_any_element()
+            self.render_search_rows(RESULTS_SCROLL, &self.search_scroll.clone(), window, cx)
+                .into_any_element()
         };
         v_flex()
             .size_full()
@@ -954,7 +1060,7 @@ impl ClaudhubApp {
         )
     }
 
-    fn render_search_empty(&mut self, cx: &mut App) -> impl IntoElement {
+    pub(super) fn render_search_empty(&mut self, cx: &mut App) -> impl IntoElement {
         let message = if self.search.error.is_some() {
             tr!("search-failed")
         } else if self.search.sent.is_empty() {
@@ -974,8 +1080,17 @@ impl ClaudhubApp {
             .child(div().text_sm().px_4().text_center().child(message))
     }
 
-    fn render_search_rows(
+    /// The result list, painted for whoever is showing it.
+    ///
+    /// **The scroll handle is an argument, and it has to be.** The palette
+    /// (`ui::quick_view`) paints these very rows in a modal that may stand
+    /// over a panel already showing them, and one `UniformListScrollHandle`
+    /// driving two lists in a frame is measured by whichever painted last —
+    /// which is neither of them for the rest of the session.
+    pub(super) fn render_search_rows(
         &mut self,
+        key: &'static str,
+        scroll: &gpui::UniformListScrollHandle,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -992,7 +1107,7 @@ impl ClaudhubApp {
         let hovered = self.follow_hover.clone();
         let entity = cx.entity();
         let count = rows.len();
-        let handle = self.search_scroll.clone();
+        let handle = scroll.clone();
         let build = move |index: usize, cx: &mut App| {
             let Some(row) = rows.get(index).copied() else {
                 return div().into_any_element();
@@ -1013,11 +1128,11 @@ impl ClaudhubApp {
             )
         };
         self.scrolled(
-            RESULTS_SCROLL,
+            key,
             &handle.clone(),
             crate::ui::motion::Axes::Vertical,
             window,
-            uniform_list("search-rows", count, move |range, _window, cx| {
+            uniform_list(key, count, move |range, _window, cx| {
                 range.map(|index| build(index, cx)).collect::<Vec<_>>()
             })
             .size_full()
@@ -1026,13 +1141,38 @@ impl ClaudhubApp {
         )
     }
 
-    /// The file beside the list.
+    /// The file beside the list, for the panel that owns it.
     pub(super) fn render_search_preview(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let Some(preview) = self.search.preview.as_ref() else {
+        self.render_preview(
+            PreviewPane::Search,
+            PREVIEW_SCROLL,
+            PreviewOpen::Hit,
+            window,
+            cx,
+        )
+    }
+
+    /// The file beside a list, wherever that list is.
+    ///
+    /// **The pane and the scroll key are arguments**, for the reason
+    /// `render_search_rows` takes them: the palette paints a preview of its
+    /// own in a modal that can stand over the panel painting this one, and one
+    /// `UniformListScrollHandle` driving two lists in a frame is measured by
+    /// whichever painted last — which is neither of them for the rest of the
+    /// session.
+    pub(super) fn render_preview(
+        &mut self,
+        pane: PreviewPane,
+        scroll: &'static str,
+        opens: PreviewOpen,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let Some(preview) = self.preview_of(pane) else {
             return v_flex()
                 .size_full()
                 .items_center()
@@ -1061,12 +1201,15 @@ impl ClaudhubApp {
                     .child(SharedString::from(preview.path.display().to_string())),
             )
             .child(
-                Button::new("search-preview-open")
+                Button::new(scroll)
                     .ghost()
                     .xsmall()
                     .icon(icon("pencil"))
                     .tooltip(tr!("search-open"))
-                    .on_click(cx.listener(|this, _, window, cx| this.open_search_row(window, cx))),
+                    .on_click(cx.listener(move |this, _, window, cx| match opens {
+                        PreviewOpen::Hit => this.open_search_row(window, cx),
+                        PreviewOpen::File => this.open_quick_row(window, cx),
+                    })),
             );
         if let Some(error) = preview.error.clone() {
             return v_flex()
@@ -1100,15 +1243,15 @@ impl ClaudhubApp {
         let digits = digits_of(lines.len());
         let gutter = font_size * 0.62 * digits as f32 + px(8.);
         let count = lines.len();
-        let handle = self.search_preview_scroll.clone();
+        let handle = self.preview_scroll(pane).clone();
         let body = self.scrolled(
-            PREVIEW_SCROLL,
+            scroll,
             &handle.clone(),
             // Both axes: the lines are unconstrained, so a long one is reached
             // by scrolling sideways, exactly as in the diff.
             crate::ui::motion::Axes::Both,
             window,
-            uniform_list("search-preview-lines", count, move |range, _window, cx| {
+            uniform_list(scroll, count, move |range, _window, cx| {
                 range
                     .map(|index| {
                         render_preview_line(

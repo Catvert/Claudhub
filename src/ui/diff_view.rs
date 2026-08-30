@@ -1220,25 +1220,34 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    /// Does the hunk starting at that header fit in the view?
+    /// Does the hunk starting at that header fit under a centred header?
     ///
-    /// It is what decides between centring the hunk and putting it at the top.
-    /// The count is in **entries**, like `page_rows`: a wrapped line takes more
-    /// than one row on screen, and the answer is only ever a choice between two
-    /// placements — being a line or two out changes nothing to which one is
-    /// right.
-    pub(super) fn hunk_fits_the_view(&self, header: usize, cx: &App) -> bool {
+    /// It is what decides between centring the hunk and putting it at the top —
+    /// see `reveal_diff_hunk`. The count is in **entries**, like `page_rows`: a
+    /// wrapped line takes more than one row on screen, and the answer is only
+    /// ever a choice between two placements — being a line or two out changes
+    /// nothing to which one is right.
+    pub(super) fn hunk_fits_below_the_middle(&self, header: usize, cx: &App) -> bool {
+        self.hunk_rows(header, cx) <= self.page_rows(cx) / 2
+    }
+
+    /// How many rows the hunk opening at `header` takes, header included.
+    ///
+    /// Zero when no block starts there, which reads as "it fits": the row is
+    /// then a line like any other, and moving the view for it is the ordinary
+    /// case.
+    fn hunk_rows(&self, header: usize, cx: &App) -> usize {
         let settings = crate::ui::settings::Settings::global(cx);
         let (split, whole_file) = (settings.diff_split, settings.diff_whole_file);
         let Some(diff) = self.active_review().and_then(|state| state.diff.as_ref()) else {
-            return true;
+            return 0;
         };
         let end = diff
             .blocks(split, whole_file)
             .into_iter()
             .find(|(start, _)| *start == header)
             .map_or(header, |(_, end)| end + 1);
-        end.saturating_sub(header) <= self.page_rows(cx)
+        end.saturating_sub(header)
     }
 
     fn move_diff_selection(&mut self, anchor: usize, head: usize, cx: &mut Context<Self>) {

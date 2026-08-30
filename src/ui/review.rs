@@ -669,13 +669,11 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let vim = crate::ui::settings::Settings::global(cx).vim_mode;
-        let host = self
+        let hint = self
             .surface_host(&crate::ui::surface::Surface::Text(
                 crate::ui::surface::TextField::Commit,
             ))
-            .map(|host| &host.vim);
-        let mode = host.map(|vim| vim.mode()).unwrap_or_default();
-        let hint = host
+            .map(|host| &host.vim)
             .map(|vim| vim.prompt().unwrap_or_else(|| vim.pending().to_string()))
             .unwrap_or_default();
         v_flex()
@@ -698,11 +696,36 @@ impl ClaudhubApp {
             // panel it took the room "Commit" and "Commit and push" needed and
             // pushed them off their own line.
             .child(
-                div()
+                h_flex()
                     .w_full()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(tr!("commit-staged-count", { count: staged })),
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tr!("commit-staged-count", { count: staged })),
+                    )
+                    // **Beside the count, and only while the count is wrong.**
+                    // Ticking every box is what one does *to that number*, so
+                    // it belongs on its line and not up in the bar among the
+                    // gestures that talk to the remote. It goes away rather
+                    // than greying out: with nothing left outside the index
+                    // there is no number to correct, and a disabled button on
+                    // a line that already reads "everything is in" says the
+                    // same thing twice.
+                    .when(self.stageable(), |el| {
+                        el.child(
+                            Button::new("stage-all")
+                                .ghost()
+                                .xsmall()
+                                .icon(icon("plus"))
+                                .label(tr!("action-stage-all"))
+                                .on_click(cx.listener(|this, _, _, cx| this.stage_all(cx))),
+                        )
+                    }),
             )
             .child(crate::ui::surface::text_field(
                 crate::ui::surface::TextField::Commit,
@@ -719,11 +742,26 @@ impl ClaudhubApp {
                     // Everything on this row is a gesture, and they sit where
                     // the eye leaves the message: at the end of it.
                     .justify_end()
-                    // The mode, on the field's own row: it is the only thing
-                    // that says why a `d` typed here deleted a line instead of
-                    // being written. The block cursor's colour says it too,
-                    // where the eye actually is.
-                    .when(vim, |el| el.child(self.render_vim_mode(mode, &hint, cx)))
+                    // **No mode pill here**, where a code surface has one: a
+                    // badge reading "NORMAL" beside the commit button is a
+                    // permanent word about the keyboard on a row that is about
+                    // the commit, and what it says the block caret says
+                    // already, in its colour, where the eye actually is. What
+                    // is kept is what nothing else shows and what goes away by
+                    // itself: the keys typed towards a command, and the `:`
+                    // line being written.
+                    .when(vim && !hint.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_color(cx.theme().muted_foreground)
+                                .child(gpui::SharedString::from(hint.clone())),
+                        )
+                    })
                     .children(self.suggest_button(can_commit, cx))
                     .child({
                         // A commit runs the repository's hooks — a linter, a
@@ -875,6 +913,47 @@ impl ClaudhubApp {
             Cmd::Unstage { worktree, paths }
         });
         cx.notify();
+    }
+
+    /// Something is outside the index, and `stage_all` would move it.
+    ///
+    /// The button's whole condition: what it filters out is what the gesture
+    /// leaves behind, so the two read the same list the same way — a checkout
+    /// whose only unstaged files are conflicted offers no button, because
+    /// pressing it would do nothing.
+    fn stageable(&self) -> bool {
+        self.active_review().is_some_and(|state| {
+            state
+                .status
+                .files
+                .iter()
+                .any(|file| file.is_unstaged() && !file.is_conflicted())
+        })
+    }
+
+    /// Stages everything the list offers, in one gesture.
+    ///
+    /// **A conflicted file is left out, and that is what makes the button safe
+    /// to press.** `git add` on a file git has written conflict markers into is
+    /// precisely how one tells git the conflict is resolved, so one click in
+    /// the middle of a merge would mark every unresolved file as done,
+    /// `<<<<<<<` and all, and the next commit would carry them. Ticking such a
+    /// file by hand still says it — one file, one decision.
+    pub(super) fn stage_all(&mut self, cx: &mut Context<Self>) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let Some(review) = self.review.get(&worktree) else {
+            return;
+        };
+        let paths: Vec<PathBuf> = review
+            .status
+            .files
+            .iter()
+            .filter(|file| file.is_unstaged() && !file.is_conflicted())
+            .map(|file| file.path.clone())
+            .collect();
+        self.set_staged(worktree, paths, true, cx);
     }
 
     /// Commits what is in the index. `amend` reuses the previous commit, and
@@ -1181,7 +1260,7 @@ fn render_row(
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
     match rows.get(index) {
-        Some(Row::Group(group)) => render_group(group, index, worktree, entity, cx),
+        Some(Row::Group(group)) => render_group(group, index, worktree, tree, entity, cx),
         Some(Row::Dir(dir)) => render_dir(dir, index, worktree, range, checkable, entity, cx),
         Some(Row::File(file)) => render_file(
             file, index, worktree, range, selected, colors, checkable, tree, entity, cx,
@@ -1224,7 +1303,11 @@ fn render_dir(
         .w_full()
         .pl_1()
         .pr(crate::ui::theme::scroll_gutter())
-        .gap_1()
+        // The same gap as a file's row and a heading's: the three kinds of row
+        // stack their boxes in one column, and a gap of its own here was four
+        // pixels of drift between a folder's box and the boxes of the files it
+        // holds.
+        .gap_2()
         .items_center()
         .cursor_pointer()
         .whitespace_nowrap()
@@ -1315,6 +1398,9 @@ fn render_group(
     row: &GroupRow,
     index: usize,
     worktree: &Rc<PathBuf>,
+    // Is the list in tree form? The heading then reserves the place of the
+    // chevron every row under it carries, as a file does.
+    tree: bool,
     entity: &gpui::Entity<ClaudhubApp>,
     cx: &mut gpui::App,
 ) -> gpui::AnyElement {
@@ -1331,10 +1417,17 @@ fn render_group(
     h_flex()
         .h(crate::ui::theme::row_height(cx))
         .w_full()
-        .px_2()
+        // **The heading's box stands in the column of the boxes it commands.**
+        // Its own padding put it four pixels to the right of every box under
+        // it, which is exactly the distance at which a column stops reading as
+        // one. Same left padding as a file's row, the same gutter kept on the
+        // right, and the chevron's place reserved in tree form.
+        .pl_1()
+        .pr(crate::ui::theme::scroll_gutter())
         .gap_2()
         .items_center()
         .bg(cx.theme().secondary)
+        .when(tree, |el| el.child(crate::ui::theme::chevron_space()))
         .child(
             Checkbox::new(("group", index))
                 .checked(checked)
@@ -1463,15 +1556,28 @@ fn render_file(
                 // A reviewed file dims: that is what makes the list say at a
                 // glance what is left to read, where the tick alone on the right
                 // would mean scanning a column.
-                .child(
-                    div()
+                //
+                // **The name gives way last, and it takes a shrink factor to
+                // say so.** Flexbox shares a shortfall in proportion to each
+                // item's own width, so of two items that both truncate, the
+                // longer loses the more — and the longer is the file name,
+                // which is the one thing the row is about: `TicketFilters…`
+                // next to an untouched `app/Http/Livewire`. A fiftieth makes
+                // the folder yield first and the name only once the folder has
+                // nothing left to give. Not zero: a name wider than the row
+                // must still truncate rather than run over the counts and the
+                // buttons to its right.
+                .child({
+                    let mut name = div()
                         .truncate()
                         .text_sm()
                         .when(row.reviewed, |el| {
                             el.text_color(cx.theme().muted_foreground)
                         })
-                        .child(row.name.clone()),
-                )
+                        .child(row.name.clone());
+                    name.style().flex_shrink = Some(0.02);
+                    name
+                })
                 .child(
                     div()
                         .truncate()

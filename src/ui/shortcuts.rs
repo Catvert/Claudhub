@@ -98,7 +98,11 @@ actions!(
         SearchProject,
         SearchUp,
         SearchDown,
-        SearchOpen
+        SearchOpen,
+        QuickUp,
+        QuickDown,
+        QuickOpen,
+        QuickExpand
     ]
 );
 
@@ -287,6 +291,24 @@ const VIM_SEARCH_PREDICATE: &str = "ClaudhubSearch && ClaudhubVim && !Input";
 /// The identifier the search panel puts on its node.
 pub const SEARCH_CONTEXT: &str = "ClaudhubSearch";
 
+/// The context the quick palette declares.
+///
+/// **Its own, and it has to be**: every other predicate in this file excludes
+/// `Dialog`, which is exactly what the palette is. The arrows and `Entrée` are
+/// therefore written against this name alone — nothing else in the window
+/// declares it, so nothing else can be reached by them.
+///
+/// `!Input` is **not** in it, unlike the tree's and the schema's: the palette
+/// has one field and one list, the field always holds the caret, and arrows
+/// that stopped at its edge would be arrows nobody could use.
+const QUICK_PREDICATE: &str = "ClaudhubQuick";
+
+pub fn quick_context() -> KeyContext {
+    let mut context = KeyContext::default();
+    context.add("ClaudhubQuick");
+    context
+}
+
 /// The context the built-in editor declares.
 ///
 /// It exists for three keys that are navigation and not text — following a
@@ -403,11 +425,20 @@ pub enum Group {
     /// `enter` opens a result here and steps to the next occurrence there — and
     /// a binding's id is its family and its default keys.
     Project,
+    /// The quick palette, for the same reason again: its arrows and its
+    /// `Entrée` are the third set to sit on those keys, and they answer only
+    /// inside a dialog nothing else can be reached from.
+    ///
+    /// The two keys that **open** it are not here — they are `project:` and
+    /// `search:` where they have always been. A binding's id is written into
+    /// the user's `settings.json`, and moving one there silently drops the
+    /// shortcut they had customised.
+    Quick,
     Terminal,
 }
 
 impl Group {
-    pub const ORDER: [Group; 9] = [
+    pub const ORDER: [Group; 10] = [
         Group::Window,
         Group::Worktrees,
         Group::Repository,
@@ -416,6 +447,7 @@ impl Group {
         Group::Database,
         Group::Search,
         Group::Project,
+        Group::Quick,
         Group::Terminal,
     ];
 
@@ -433,6 +465,7 @@ impl Group {
             Group::Database => "db",
             Group::Search => "search",
             Group::Project => "project",
+            Group::Quick => "quick",
             Group::Terminal => "terminal",
         }
     }
@@ -450,6 +483,7 @@ impl Group {
             Group::Database => "shortcut-group-database",
             Group::Search => "shortcut-group-search",
             Group::Project => "shortcut-group-project",
+            Group::Quick => "shortcut-group-quick",
             Group::Terminal => "shortcut-group-terminal",
         }
     }
@@ -827,6 +861,30 @@ table!(STANDARD, standard_bindings, false, [
     Project "down" => SearchDown, SEARCH_PREDICATE, "shortcut-search-down";
     Project "enter" => SearchOpen, SEARCH_PREDICATE, "shortcut-search-open";
 
+    // ── The quick palette ───────────────────────────────────────────────────
+    // Four keys inside a modal, and nothing that opens it: `Ctrl+Shift+F` and
+    // `Ctrl+P` keep the families they were customisable under, and
+    // `Shift Shift` is not a binding at all — a bare modifier never becomes a
+    // key, on any platform, so it is read from the modifier changes themselves
+    // (`quick::DoubleTap`) and shown in the help by hand.
+    //
+    // `Ctrl+Entrée` hands what the palette found to the panels made to read
+    // it. It does not collide with the commit or with a query: both of those
+    // are refused inside a `Dialog`, which is the only place this one answers.
+    // The two that open it are bound a **second** time, against the palette's
+    // own context: every predicate that opens it excludes `Dialog`, which is
+    // what the palette is, so with it up the shortcut for the other question
+    // reached nothing at all. It is the tab one wants, and one wants it on
+    // the letters already typed — `open_quick` hands an open palette to
+    // `switch_quick`, which keeps the field. Two entries for one gesture, as
+    // `Refresh` already has: what changes is which context answers.
+    Quick "secondary-p" => FindFile, QUICK_PREDICATE, "shortcut-quick-files";
+    Quick "secondary-shift-f" => SearchProject, QUICK_PREDICATE, "shortcut-quick-text";
+    Quick "up" => QuickUp, QUICK_PREDICATE, "shortcut-quick-up";
+    Quick "down" => QuickDown, QUICK_PREDICATE, "shortcut-quick-down";
+    Quick "enter" => QuickOpen, QUICK_PREDICATE, "shortcut-quick-open";
+    Quick "secondary-enter" => QuickExpand, QUICK_PREDICATE, "shortcut-quick-expand";
+
     // ── The terminals ───────────────────────────────────────────────────────
     Terminal "secondary-shift-t" => NewTerminal, PREDICATE, "shortcut-new-terminal";
     Terminal "secondary-shift-w" => CloseTerminal, PREDICATE, "shortcut-close-terminal";
@@ -1048,6 +1106,25 @@ pub fn sheet(vim: bool, overrides: &Overrides) -> Vec<Section> {
                 if !keys.trim().is_empty() {
                     push(entry, vim_pretty(keys));
                 }
+            }
+        }
+        // `Shift Shift`, the one gesture of this window that is not a binding:
+        // a bare modifier never becomes a key gpui can bind, so it is read
+        // from the modifier changes themselves (`quick::DoubleTap`) and
+        // written in here by hand. Which means it cannot be customised or
+        // switched off either, and saying nothing about it would be the worse
+        // half of that bargain — a gesture that fires and is written down
+        // nowhere.
+        //
+        // On the same line as `Ctrl+P`, because it is the same gesture: the
+        // rule this list is built on is that one looks up the gesture, not the
+        // key.
+        if group == Group::Search {
+            let keys = format!("{0} {0}", labels.shift);
+            let label = tr!("shortcut-find-file");
+            match rows.iter_mut().find(|row| row.label == label) {
+                Some(row) => row.keys = merge(&row.keys, &keys),
+                None => rows.push(Row { keys, label }),
             }
         }
         if !rows.is_empty() {
@@ -1465,7 +1542,7 @@ pub fn find_file(
     window: &mut Window,
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
-    this.open_file_find(window, cx);
+    this.open_quick(crate::ui::quick_view::Mode::Files, window, cx);
 }
 
 pub fn search_project(
@@ -1474,7 +1551,43 @@ pub fn search_project(
     window: &mut Window,
     cx: &mut gpui::Context<ClaudhubApp>,
 ) {
-    this.open_search(window, cx);
+    this.open_quick(crate::ui::quick_view::Mode::Text, window, cx);
+}
+
+pub fn quick_up(
+    this: &mut ClaudhubApp,
+    _: &QuickUp,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.step_quick(-1, window, cx);
+}
+
+pub fn quick_down(
+    this: &mut ClaudhubApp,
+    _: &QuickDown,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.step_quick(1, window, cx);
+}
+
+pub fn quick_open(
+    this: &mut ClaudhubApp,
+    _: &QuickOpen,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.open_quick_row(window, cx);
+}
+
+pub fn quick_expand(
+    this: &mut ClaudhubApp,
+    _: &QuickExpand,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.expand_quick(window, cx);
 }
 
 pub fn search_up(

@@ -76,6 +76,18 @@ pub struct WorktreeState {
     pub tests: Vec<TestMark>,
     /// The last run's totals, for the panel's bar.
     pub tests_run: Option<TestsRun>,
+    /// The files most recently read in this checkout, newest first.
+    ///
+    /// It is what the quick palette shows before a single letter is typed —
+    /// the question one asks on arriving is "the file from yesterday", and a
+    /// ranking has nothing to rank until then. **Written here and not kept in
+    /// memory** for exactly that: an in-memory list is empty every morning,
+    /// which is the one moment it would have been read.
+    ///
+    /// Capped at `quick::MAX_RECENT`: it is a list one reads from the top, and
+    /// a checkout browsed for a week would otherwise carry every file it has.
+    /// `quick::promote` is what writes it, and `quick::recent` what reads it.
+    pub recent: Vec<PathBuf>,
 }
 
 /// One test's last known fate.

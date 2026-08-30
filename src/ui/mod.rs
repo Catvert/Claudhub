@@ -41,6 +41,8 @@ mod notify;
 mod panels;
 mod picker;
 mod preview;
+mod quick;
+mod quick_view;
 mod rails;
 mod refine;
 mod repos;

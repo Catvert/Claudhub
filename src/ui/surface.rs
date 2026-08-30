@@ -1466,6 +1466,14 @@ pub(super) fn plain_editor(window: &mut Window, cx: &mut Context<EditorState>) -
         .line_number(false)
         .folding(false)
         .indent_guides(false)
+        // **No room past the last line**, and that is what takes the scrollbar
+        // away. A code editor reserves half a viewport below its text so the
+        // last line can be brought up to the middle of the screen — which is
+        // what one wants of a file eight hundred lines long, and what makes a
+        // three-row commit box scrollable while it is *empty*: the reserved
+        // space alone is taller than the box, so the thumb was there before a
+        // single letter was typed. These four fields are prose one sees whole.
+        .scroll_beyond_last_line(Some(0))
 }
 
 /// A writing field of the window, given the file editor's harness.

@@ -798,7 +798,7 @@ pub struct Editing {
 impl ClaudhubApp {
     // — The tree ————————————————————————————————————————————————
 
-    fn explorer(&mut self) -> Option<&mut Explorer> {
+    pub(super) fn explorer(&mut self) -> Option<&mut Explorer> {
         let worktree = self.active.clone()?;
         Some(self.explorers.entry(worktree).or_default())
     }
@@ -888,6 +888,7 @@ impl ClaudhubApp {
         files: Vec<PathBuf>,
         ignored: Vec<PathBuf>,
         dirs: Vec<PathBuf>,
+        cx: &mut Context<Self>,
     ) {
         let explorer = self.explorers.entry(worktree).or_default();
         explorer.state = Listing::Ready;
@@ -896,6 +897,11 @@ impl ClaudhubApp {
         // inside `vendor/` is read again on the next frame — a chevron that
         // shuts under the hand on every `git add` is worse than the reads it
         // saves. See `ensure_project_files`.
+        //
+        // The quick palette ranks *this* list, and the first `Shift Shift` of
+        // a session is what asks for it: without this the palette would sit
+        // there saying it found nothing, over an answer that had arrived.
+        self.rerank_quick(cx);
     }
 
     /// Files the status by path, for the tree to colour its rows.
@@ -1487,6 +1493,29 @@ impl ClaudhubApp {
         Some(offset)
     }
 
+    /// Puts a file at the head of what this checkout has read lately.
+    ///
+    /// **Both arriving in a file and coming back to its tab count**: what the
+    /// palette answers with is the order one read them in, and a file left
+    /// open all afternoon under three others is not the one wanted first.
+    ///
+    /// Written straight into the store, which is where the list lives — a
+    /// second copy in memory would be one more thing to keep in step, and the
+    /// write is debounced half a second like every other.
+    pub(super) fn remember_recent_file(&mut self, worktree: &Path, path: &Path, cx: &mut App) {
+        let Some(main) = self.main_of(worktree) else {
+            return;
+        };
+        let path = path.to_path_buf();
+        // `update_global_if`, and `promote` is what answers it: a file one is
+        // already on is the ordinary case — every tab switch comes through
+        // here — and rewriting the same list would be a state file changing
+        // with nothing having changed.
+        crate::ui::store::Store::update_global_if(cx, |store| {
+            crate::ui::quick::promote(&mut store.worktree_mut(worktree, &main).recent, &path)
+        });
+    }
+
     /// Stamps a tab as the one being read, and gives back the stamp.
     pub(super) fn touch_tab(&mut self) -> u64 {
         self.tab_clock += 1;
@@ -1686,6 +1715,13 @@ impl ClaudhubApp {
         } else {
             // The next remembered tab, one at a time: see `read_next_file`.
             self.continue_restore(window, cx);
+        }
+        // A tab the session is putting back is **not** an arrival: it was read
+        // before the window closed, it is already in the list at the rank it
+        // earned, and stamping it now would make every restart reorder the
+        // history by whatever order the tabs come back in.
+        if !restored {
+            self.remember_recent_file(worktree, path, cx);
         }
         self.persist_session(cx);
         cx.notify();
@@ -2242,7 +2278,21 @@ impl ClaudhubApp {
             }
         }
         self.lsp_sync_editor(window, cx);
-        self.persist_session(cx);
+        // **What reads the dock waits for the frame to end.** This runs inside
+        // the panel's own `render` — that is the whole design of `show_file` —
+        // so gpui holds that panel leased while it draws, and `persist_session`
+        // goes looking for the document in front by walking the dock's seats,
+        // which is reading every panel of it, this one included. A read of a
+        // leased entity is a panic, and gpui does not care that it is the same
+        // frame that leased it: switching file tabs brought the window down
+        // with `cannot read FilePanel while it is already being updated`.
+        // Deferred, both writes land after the frame, where everything is
+        // readable again — and neither is in a hurry, the store being written
+        // half a second later anyway.
+        cx.defer_in(window, move |this, _, cx| {
+            this.remember_recent_file(&worktree, &path, cx);
+            this.persist_session(cx);
+        });
         cx.notify();
     }
 

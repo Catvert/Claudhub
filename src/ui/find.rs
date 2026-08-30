@@ -266,9 +266,9 @@ impl ClaudhubApp {
 
     /// Opens **a named panel's** bar, whichever one the last click was in.
     ///
-    /// Split out for the file search: `Ctrl+P` says which panel it wants —
-    /// the explorer — where `Ctrl+F` asks the click. Returns the field so the
-    /// caller can seed it.
+    /// Split out for the panels that name themselves: the magnifier in a bar
+    /// knows which panel it belongs to, where `Ctrl+F` asks the click.
+    /// Returns the field so the caller can seed it.
     pub(super) fn open_find_in(
         &mut self,
         pane: Pane,
@@ -313,38 +313,6 @@ impl ClaudhubApp {
         input.focus_handle(cx).focus(window, cx);
         cx.notify();
         input
-    }
-
-    /// Searching the project's files **by name**, from anywhere.
-    ///
-    /// The explorer's own bar, reached without going through the click that
-    /// `Ctrl+F` reads: one goes to the editing screen, the tree shows itself,
-    /// and the field takes the keyboard. `self.pane` follows, otherwise `Esc`
-    /// and the arrows would still be aimed at the panel touched before.
-    ///
-    /// The seed is the project-wide search's, and deliberately so — the same
-    /// gesture with the same answer to "what was selected", `Ctrl+P` looking
-    /// for the file where `Ctrl+Shift+F` looks for the text. It is read
-    /// **before** the tree comes forward: `reveal_panel` moves the focus, and
-    /// the focus is what says which surface the selection is in.
-    pub(super) fn open_file_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let seed = self.search_seed(window, cx);
-        // The tree and not the centre: what this searches is the file list, one
-        // tab of the column one picks from.
-        self.reveal_panel(crate::ui::panels::FilesPanel::NAME, window, cx);
-        self.pane = Pane::Files;
-        let input = self.open_find_in(Pane::Files, window, cx);
-        if let Some(text) = seed {
-            input.update(cx, |state, cx| {
-                // Selected whole, like the project search's field: the seed is
-                // an offer, and the next keystroke replaces it.
-                state.set_value(text, window, cx);
-                state.select_all(window, cx);
-            });
-            // `set_value` emits no change event, so the filtered tree would
-            // keep the previous picture without this.
-            cx.notify();
-        }
     }
 
     /// Closes the target panel's bar.
