@@ -17,7 +17,7 @@ use gpui_component::{
     button::{Button, ButtonGroup, ButtonVariants},
     h_flex,
     menu::{DropdownMenu, PopupMenuItem},
-    ActiveTheme, Disableable, Selectable, Sizable, TitleBar,
+    ActiveTheme, Disableable, Sizable, TitleBar,
 };
 
 use crate::tr;
@@ -26,23 +26,37 @@ use crate::ui::icons::icon;
 
 /// A row of the title bar that is **not** the window's drag region.
 ///
-/// Under Windows the bar answers `HTCAPTION` for its whole width — that is what
-/// `TitleBar` asks for, and what makes the window draggable by it. A press
-/// there arrives as `WM_NCLBUTTONDOWN`: gpui hands it to the view first, but
-/// **only consumes it if something stops it propagating**. gpui's own click
-/// listener merely records the press, so nothing did, and `DefWindowProc` then
-/// entered the window-move loop — which swallows the release. The press was
-/// seen, the click never happened: neither "Run", nor the multiplexer, nor the
-/// settings could be pressed.
+/// **Everything with something to click consumes its own press**, and the empty
+/// middle — which has nothing — stays the drag region. It is one line for two
+/// platforms that lose a click in two different ways, and on both the symptom
+/// is the same and is the worst kind: the press is seen, the release is not,
+/// and the button one aimed at simply does not answer. Every second or third
+/// try, which reads as a window that ignores the mouse.
 ///
-/// So everything that has something to click consumes its own press, and the
-/// empty middle — which has nothing — stays the drag region. Windows only: on
-/// Linux the move is started by us, from a `mouse_move`, and the whole bar can
-/// go on being grabbed anywhere.
+/// Under **Windows** the bar answers `HTCAPTION` for its whole width — that is
+/// what `TitleBar` asks for, and what makes the window draggable by it. A press
+/// there arrives as `WM_NCLBUTTONDOWN`: gpui hands it to the view first, but
+/// only consumes it if something stops it propagating. gpui's own click
+/// listener merely records the press, so nothing did, and `DefWindowProc` then
+/// entered the window-move loop, which swallows the release.
+///
+/// Under **Linux** there is no such thing as a caption area, so the title bar
+/// moves the window itself: it arms a flag on mouse down and calls
+/// `start_window_move` on the first mouse move that follows. That listener sits
+/// on the bar's **root**, an ancestor of every button in it, and gpui's buttons
+/// do not stop a press propagating — so pressing one armed the flag, and the
+/// pixel or two a hand travels before letting go handed the pointer to the
+/// compositor, which kept the release. Its double click sat on the same root:
+/// two quick presses on a checkout maximised the window.
+///
+/// This is a bubble-phase listener on the group, so it runs **after** what is
+/// inside it — buttons, pickers, menus keep their press — and before the bar's
+/// root, which is the one that has to be left out.
 fn actions() -> gpui::Div {
-    h_flex().items_center().gap_1().when(cfg!(windows), |this| {
-        this.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-    })
+    h_flex()
+        .items_center()
+        .gap_1()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
 /// One row of the views menu: the tick, the name, and the gesture that toggles it.
@@ -220,7 +234,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("trail-back")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("arrow-left"))
                     .disabled(!back)
                     .tooltip(tr!("editor-jump-back"))
@@ -229,7 +243,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("trail-forward")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("arrow-right"))
                     .disabled(!forward)
                     .tooltip(tr!("editor-jump-forward"))
@@ -289,37 +303,33 @@ impl ClaudhubApp {
                             // the trail crosses. The editor's bar keeps its own two,
                             // on the same trail.
                             .child(self.render_trail_buttons(cx))
-                            // The pinned checkouts come **before** the picker rather
-                            // than after it: they are the shortest way to the same
-                            // gesture, and what is put in front is what one reaches
-                            // for first. The picker stays right behind them, for the
-                            // checkouts one has not pinned.
-                            .children(self.render_pins(cx))
                             // The two pickers that drive everything else, in the order
                             // one goes through them: the worktree, then its branch.
                             .child(self.render_worktree_picker(cx))
                             .children(self.render_branch_picker(cx))
-                            // Pull and push, and only when the branch has
-                            // something to pull or to push — see
-                            // `render_sync_buttons`.
-                            .children(self.render_sync_buttons(cx))
-                            // The worktree's own menu, at the end of the run it
-                            // belongs to. It sat in the right corner, a full
-                            // window's width from the two pickers that say which
-                            // worktree it would act on: a `…` that far from its
-                            // subject is a menu one opens to find out what it is
-                            // about. Here it reads as the end of one sentence —
-                            // this worktree, this branch, what is owed and gained,
-                            // and everything else one can ask of it.
-                            .children(self.render_worktree_actions(cx))
-                            // What the project says of this worktree — started or not,
-                            // and the address it exposes — then everything one can ask
-                            // of it. They followed the row they were on.
+                            // Whether the checkout is running, and the switch
+                            // that starts or stops it. Immediately after the
+                            // two pickers, because it is the third thing said
+                            // about the same subject: this worktree, its
+                            // branch, and whether it is up. It was a dot at the
+                            // far end of this run, its gesture buried in the
+                            // `…` — see `render_wt_state`.
                             .children(
                                 active
                                     .clone()
                                     .and_then(|worktree| self.render_wt_state(&worktree, cx)),
-                            ),
+                            )
+                            // And everything else one asks of that checkout,
+                            // right behind the one operation that earned a
+                            // button of its own. The two are one gesture in two
+                            // sizes — start it, or open the rest — and a `…` a
+                            // window's width from the subject it acts on is a
+                            // menu one opens to find out what it is about.
+                            .children(self.render_worktree_actions(cx))
+                            // Pull and push, and only when the branch has
+                            // something to pull or to push — see
+                            // `render_sync_buttons`.
+                            .children(self.render_sync_buttons(cx)),
                     )
                     // The middle is empty on purpose, and the space is not
                     // lost: it is the window's drag region. Neither `fetch`, nor
@@ -334,9 +344,7 @@ impl ClaudhubApp {
                             // Opening the worktree in the browser, then the run
                             // button: the right corner is the "act on what I am
                             // looking at" corner, and the address a project exposes
-                            // is the gesture one makes most once it runs. The
-                            // worktree's own menu is **not** here any more — see
-                            // where it went, beside the pickers it is about.
+                            // is the gesture one makes most once it runs.
                             .children(
                                 active.and_then(|worktree| self.render_wt_links(&worktree, cx)),
                             )
@@ -350,29 +358,17 @@ impl ClaudhubApp {
                             // painted only where there is a justfile with a recipe in
                             // it.
                             .children(self.render_just(cx))
-                            // The grid, right before the gear: it is the other
-                            // thing that takes the whole window, and the pair
-                            // reads as "leave what I am doing" — which is what
-                            // the corner is for. Lit while it is on, since
-                            // pressing it again is the only way back.
-                            .child(
-                                Button::new("multiplex")
-                                    .icon(icon("layout-grid"))
-                                    // The word beside the icon: this one leaves
-                                    // the window one is working in, and a lone
-                                    // glyph for that is a button one presses to
-                                    // find out what it does. The gloss says
-                                    // what one gets, the label what one asks
-                                    // for.
-                                    .label(tr!("multiplex-short"))
-                                    .tooltip(tr!("multiplex-toggle"))
-                                    .ghost()
-                                    .xsmall()
-                                    .selected(self.multiplex)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_multiplex(window, cx);
-                                    })),
-                            )
+                            // Where one goes next: the grid, then the checkouts
+                            // one has pinned, in one segmented group — see
+                            // `render_switches`. At the very end because their
+                            // number changes every time one pins or unpins, so
+                            // whatever stands after them moves under the hand:
+                            // here there is nothing after them but the gear,
+                            // which is the one button nobody aims at from
+                            // memory. In front of the pickers, where they
+                            // began, they moved the two things the whole bar is
+                            // read from.
+                            .child(self.render_switches(cx))
                             // The gear, at the far right of the title bar. It
                             // needs no gloss: it is where an application's
                             // settings are on every one of them, and a word
@@ -382,7 +378,7 @@ impl ClaudhubApp {
                                     .icon(icon("settings"))
                                     .tooltip(tr!("workspace-settings"))
                                     .ghost()
-                                    .xsmall()
+                                    .small()
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.open_settings(window, cx);
                                     })),
@@ -391,22 +387,26 @@ impl ClaudhubApp {
             )
     }
 
-    /// The pinned checkouts, as a group of buttons.
+    /// The grid, then the pinned checkouts: **one segmented group**.
     ///
     /// A popover is the right shape for twelve checkouts one browses; it is the
     /// wrong one for the two or three one goes back and forth between all day.
     /// A pin is what says which those are, and the row is read left to right in
     /// the order they were pinned — nothing reorders itself under the hand.
     ///
-    /// Nothing is painted when nothing is pinned: an empty group would take the
-    /// pickers' width to say that a feature exists.
-    fn render_pins(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    /// **The multiplexer is the first segment**, and it belongs there: the
+    /// group answers "which checkout am I looking at", and the grid is the
+    /// answer "all of them at once". Two buttons a gap apart said that twice,
+    /// with nothing to say they were one question; joined, the grid reads as
+    /// the group's "all" and lights up like a pin when it is on, which is the
+    /// polarity every one of them already had.
+    ///
+    /// It is therefore painted even with nothing pinned — where the pins alone
+    /// were not, an empty group being width spent to say that a feature exists.
+    fn render_switches(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // Shared, not copied twice: the click handler outlives the frame and
         // used to take a second list of its own.
         let pins: std::rc::Rc<[PathBuf]> = self.pinned_worktrees(cx).into();
-        if pins.is_empty() {
-            return None;
-        }
         let active = self.active_path();
         let muted = cx.theme().muted_foreground;
         // What a selected pin is painted with. A solid button's ground is the
@@ -417,77 +417,97 @@ impl ClaudhubApp {
         // own foreground, the one the theme picked to be read on it.
         let on_accent = cx.theme().primary_foreground;
         let for_click = pins.clone();
-        Some(
-            ButtonGroup::new("worktree-pins")
-                .compact()
-                .xsmall()
-                .children(pins.iter().enumerate().map(|(index, path)| {
-                    let (repo, label) = self.project_label(path);
-                    let selected = active.as_deref() == Some(path.as_path());
-                    let on_selected = selected.then_some(on_accent);
-                    Button::new(("pin", index))
-                        .tooltip(SharedString::from(path.display().to_string()))
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .items_center()
-                                // The repository's name in front and greyed,
-                                // exactly as the picker's trigger says it, and
-                                // dropped when it would repeat the checkout's
-                                // own name — the multiplexer's rule, and the
-                                // same helper.
-                                .children(repo.map(|name| {
-                                    div()
-                                        .text_xs()
-                                        .text_color(if selected {
-                                            on_accent.opacity(0.7)
-                                        } else {
-                                            muted.opacity(0.8)
-                                        })
-                                        .child(name)
-                                }))
-                                .child(div().max_w(px(140.)).truncate().child(label))
-                                // Who is working in it and how much is in
-                                // progress — the two things one glances at
-                                // before switching, and the two the picker's
-                                // row already carries. They come from the
-                                // background sweep, so a pin says what it says
-                                // of a checkout nobody has opened: the agent
-                                // every two seconds, the volume every fifth
-                                // reading.
-                                .children(
-                                    self.agents
-                                        .get(path)
-                                        .map(|agent| agent_dot_on(agent, on_selected, cx)),
-                                )
-                                .children(
-                                    self.summaries
-                                        .get(path)
-                                        .copied()
-                                        .filter(|summary| !summary.is_empty())
-                                        .map(|summary| volume_on(summary, on_selected, cx)),
-                                ),
-                        )
-                        // Solid against outline, the window's polarity: the
-                        // "selected" state of an outlined group is a background
-                        // a few percent off its own, invisible on half the
-                        // themes.
-                        .map(|button| {
-                            if selected {
-                                button.primary()
-                            } else {
-                                button.outline()
-                            }
-                        })
-                }))
-                .on_click(cx.listener(move |this, selected: &Vec<usize>, window, cx| {
-                    let Some(path) = selected.first().and_then(|ix| for_click.get(*ix).cloned())
-                    else {
-                        return;
-                    };
-                    this.select_worktree(path, window, cx);
-                })),
-        )
+        ButtonGroup::new("worktree-switches")
+            .compact()
+            .xsmall()
+            // **The word beside the glyph**, alone of the group: the pins
+            // carry the name of what they go to, and this one goes to a
+            // screen. A lone picture for "leave the window you are working
+            // in" is a button one presses to find out what it does.
+            .child(
+                Button::new("multiplex")
+                    .icon(icon("layout-grid"))
+                    .label(tr!("multiplex-short"))
+                    .tooltip(tr!("multiplex-toggle"))
+                    .map(|button| match self.multiplex {
+                        true => button.primary(),
+                        false => button.outline(),
+                    }),
+            )
+            .children(pins.iter().enumerate().map(|(index, path)| {
+                let (repo, label) = self.project_label(path);
+                let selected = active.as_deref() == Some(path.as_path());
+                let on_selected = selected.then_some(on_accent);
+                Button::new(("pin", index))
+                    .tooltip(SharedString::from(path.display().to_string()))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            // The repository's name in front and greyed,
+                            // exactly as the picker's trigger says it, and
+                            // dropped when it would repeat the checkout's
+                            // own name — the multiplexer's rule, and the
+                            // same helper.
+                            .children(repo.map(|name| {
+                                div()
+                                    .text_xs()
+                                    .text_color(if selected {
+                                        on_accent.opacity(0.7)
+                                    } else {
+                                        muted.opacity(0.8)
+                                    })
+                                    .child(name)
+                            }))
+                            .child(div().max_w(px(140.)).truncate().child(label))
+                            // Who is working in it and how much is in
+                            // progress — the two things one glances at
+                            // before switching, and the two the picker's
+                            // row already carries. They come from the
+                            // background sweep, so a pin says what it says
+                            // of a checkout nobody has opened: the agent
+                            // every two seconds, the volume every fifth
+                            // reading.
+                            .children(
+                                self.agents
+                                    .get(path)
+                                    .map(|agent| agent_dot_on(agent, on_selected, cx)),
+                            )
+                            .children(
+                                self.summaries
+                                    .get(path)
+                                    .copied()
+                                    .filter(|summary| !summary.is_empty())
+                                    .map(|summary| volume_on(summary, on_selected, cx)),
+                            ),
+                    )
+                    // Solid against outline, the window's polarity: the
+                    // "selected" state of an outlined group is a background
+                    // a few percent off its own, invisible on half the
+                    // themes.
+                    .map(|button| {
+                        if selected {
+                            button.primary()
+                        } else {
+                            button.outline()
+                        }
+                    })
+            }))
+            .on_click(cx.listener(move |this, selected: &Vec<usize>, window, cx| {
+                let Some(index) = selected.first().copied() else {
+                    return;
+                };
+                // The grid is the first segment, so the pins are counted
+                // from one — the one place this arrangement costs anything.
+                let Some(index) = index.checked_sub(1) else {
+                    this.toggle_multiplex(window, cx);
+                    return;
+                };
+                let Some(path) = for_click.get(index).cloned() else {
+                    return;
+                };
+                this.select_worktree(path, window, cx);
+            }))
     }
 
     /// The application's menu.

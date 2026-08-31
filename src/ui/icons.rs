@@ -29,3 +29,21 @@ pub fn icon(name: &str) -> Icon {
     });
     Icon::empty().path(path)
 }
+
+/// A glyph that **labels a word**, at the size of that word.
+///
+/// Every one of them sat at `xsmall`, which is twelve pixels beside the
+/// fourteen of a `text_sm` name — a picture a notch smaller than the word it
+/// belongs to, which reads as a picture that has not finished loading. It is
+/// the tab bar where it showed first, a tab being a glyph and a name with
+/// nothing else on the line, but the mismatch was the same in every list that
+/// puts an icon in front of a path.
+///
+/// It is **not** the size of every glyph: one inside a button is sized by the
+/// button, and one standing on its own — a warning at the end of a row, the
+/// dot of a state — answers to nothing but itself. This is for the ones that
+/// come in front of a name, and it exists so that they answer to one thing.
+pub fn glyph(name: &str) -> Icon {
+    use gpui_component::Sizable as _;
+    icon(name).small()
+}

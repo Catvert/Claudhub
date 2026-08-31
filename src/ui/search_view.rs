@@ -980,7 +980,7 @@ impl ClaudhubApp {
                     .child(
                         Button::new("search-run")
                             .primary()
-                            .xsmall()
+                            .small()
                             .icon(icon("search"))
                             .tooltip(tr!("search-run"))
                             .disabled(running)
@@ -1189,7 +1189,7 @@ impl ClaudhubApp {
             .child(
                 Button::new(scroll)
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("pencil"))
                     .tooltip(tr!("search-open"))
                     // `open_quick_row` and not the opening itself: the pencil

@@ -1821,7 +1821,7 @@ impl ClaudhubApp {
                     .child(
                         Button::new("diff-edit")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(icon("pencil"))
                             .tooltip(tr!("diff-edit-tooltip"))
                             .on_click(cx.listener(|this, _, _window, cx| this.edit_diff_file(cx))),
@@ -1855,7 +1855,7 @@ impl ClaudhubApp {
                     .child(
                         Button::new("diff-whole-file")
                             .ghost()
-                            .xsmall()
+                            .small()
                             // The icon says the current state, like the tree toggle: the
                             // whole file, or its changes alone.
                             .icon(icon(if whole_file { "file-text" } else { "file-diff" }))
@@ -1871,7 +1871,7 @@ impl ClaudhubApp {
                     .child(
                         Button::new("diff-split")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(icon(if split { "columns-2" } else { "list" }))
                             .tooltip(if split {
                                 tr!("diff-unified")
@@ -1890,7 +1890,7 @@ impl ClaudhubApp {
                     .child(
                         Button::new("diff-wrap")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .selected(wrap)
                             .icon(icon("wrap-text"))
                             .tooltip(if wrap {
@@ -1978,7 +1978,7 @@ impl ClaudhubApp {
         };
         Button::new(id)
             .ghost()
-            .xsmall()
+            .small()
             .icon(icon(glyph))
             .tooltip(tr!(key))
             .on_click(cx.listener(move |this, _, _window, cx| {
@@ -2466,7 +2466,7 @@ fn render_header(
         .child(
             Button::new(("copy-hunk", index))
                 .ghost()
-                .xsmall()
+                .small()
                 .icon(icon("copy"))
                 .tooltip(tr!("action-copy-hunk"))
                 .on_click(move |_, _window, cx| {
@@ -2480,7 +2480,7 @@ fn render_header(
             el.child(
                 Button::new(("stage-hunk", index))
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("plus"))
                     .tooltip(tr!("action-stage-hunk"))
                     .on_click(move |_, _window, cx| {

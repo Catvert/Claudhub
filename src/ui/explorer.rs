@@ -2906,7 +2906,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("files-reveal")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("crosshair"))
                     .tooltip(tr!("files-reveal"))
                     .on_click(cx.listener(|this, _, _window, cx| this.reveal_open_file(cx))),
@@ -2914,7 +2914,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("files-collapse")
                     .ghost()
-                    .xsmall()
+                    .small()
                     // The glyph and the tooltip say what the **next** press
                     // does, which is the only way a toggle announces the half
                     // it is on — the find button's rule.
@@ -2937,7 +2937,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("files-more")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("ellipsis"))
                     .tooltip(tr!("files-more"))
                     .dropdown_menu(move |menu, _window, _cx| {
@@ -3095,7 +3095,7 @@ impl ClaudhubApp {
                 .child(
                     Button::new("editor-jump-back")
                         .ghost()
-                        .xsmall()
+                        .small()
                         .icon(icon("arrow-left"))
                         .disabled(!back)
                         .tooltip(tr!("editor-jump-back"))
@@ -3104,7 +3104,7 @@ impl ClaudhubApp {
                 .child(
                     Button::new("editor-jump-forward")
                         .ghost()
-                        .xsmall()
+                        .small()
                         .icon(icon("arrow-right"))
                         .disabled(!forward)
                         .tooltip(tr!("editor-jump-forward"))
@@ -3141,7 +3141,7 @@ impl ClaudhubApp {
         Some(
             Button::new("editor-lsp")
                 .ghost()
-                .xsmall()
+                .small()
                 .label(label)
                 .text_color(colour)
                 .tooltip(tooltip)
@@ -3195,7 +3195,7 @@ impl ClaudhubApp {
                     .child(
                         Button::new("editor-hunk-rollback")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(icon("undo-2"))
                             .label(tr!("editor-hunk-rollback"))
                             .tooltip(tr!("editor-hunk-rollback-help"))
@@ -3211,7 +3211,7 @@ impl ClaudhubApp {
                     .child(
                         Button::new("editor-hunk-close")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(icon("x"))
                             .tooltip(tr!("editor-close"))
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -3284,7 +3284,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("editor-external")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("external-link"))
                     .tooltip(tr!("editor-external"))
                     .on_click(cx.listener(move |this, _, _window, cx| {
@@ -3294,7 +3294,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("editor-save")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("save"))
                     .tooltip(tr!("editor-save"))
                     .on_click(cx.listener(|this, _, _window, cx| this.save_file(cx))),
@@ -3302,7 +3302,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("editor-close")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("x"))
                     .tooltip(tr!("editor-close"))
                     .on_click(cx.listener(|this, _, window, cx| this.close_editor(window, cx))),
@@ -3582,9 +3582,12 @@ fn render_row(
                 // The folder carries its own glyph, open or closed: the chevron
                 // says the state of the collapse, the icon says one is looking at
                 // a folder — that is what tells a tree from an indented list.
+                // At the size of the name it stands in front of, like the file
+                // glyph under it — see `icons::glyph`. The two sit in one tree
+                // and one column, so a folder a notch smaller than the files
+                // beneath it reads as a tree that has not finished drawing.
                 .child(
-                    icon(if *collapsed { "folder" } else { "folder-open" })
-                        .xsmall()
+                    crate::ui::icons::glyph(if *collapsed { "folder" } else { "folder-open" })
                         .text_color(look.folder),
                 )
                 .child(

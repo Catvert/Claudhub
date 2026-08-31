@@ -65,7 +65,14 @@ use crate::ui::terminal_view::OpenTerminal;
 // heard of are three one would put in place by hand. The default is the one
 // this window ended up giving itself, so rebuilding costs nothing to anyone
 // who had not moved anything since.
-const LAYOUT_VERSION: usize = 27;
+// 27: the centre opened on a home page, which a saved arrangement has no tab
+// for.
+// 28: the bottom edge gained its second half, and the terminals moved into it.
+// It is the same bargain as the notes at 14: a saved arrangement holds the
+// bottom as one group, so it would put the terminals straight back among the
+// tabs this change exists to take them out of — and the split it would be
+// missing is not one anything adds afterwards.
+const LAYOUT_VERSION: usize = 28;
 
 /// The window's saved arrangement.
 ///
@@ -1132,9 +1139,12 @@ pub struct ClaudhubApp {
     /// action, and both go through one place: an entry can therefore not be left
     /// behind, which is the only failure mode of a spinner.
     pub(super) flight: crate::ui::inflight::InFlight,
-    /// The settings page the screen must land on, and the identity of the form
-    /// that shows it. See `settings_view::open_settings_at`.
+    /// Where the settings screen is: the page one last chose in its sidebar, or
+    /// the one a button asked for. It is read at the next opening — the form
+    /// keeps nothing once it is put away. See `settings_view::show_settings`.
     pub(super) settings_page: crate::ui::settings_view::Page,
+    /// The identity of the form, bumped at each opening so that the page above
+    /// is the one it starts on.
     pub(super) settings_epoch: usize,
     /// What the system told the settings form — installed fonts, `/etc/shells`.
     /// Read once: the form's declaration is rebuilt on every frame.
@@ -1578,6 +1588,15 @@ impl ClaudhubApp {
         // where one looks for them: a control that goes away with the zone it
         // controls is a control one cannot come back through.
         skin.set_toggle_button_visible(false, cx);
+        // **No `…` either.** What it held is three things, and this window has
+        // all three somewhere better: the zoom is the button beside it, closing
+        // is the cross the tab paints itself, and taking a view off the rails is
+        // the "Views" menu of the title bar — the one place that lists what can
+        // be put back, and the only way back there is. What was left was a
+        // button whose menu repeated the bar it sits in. The button that took
+        // its place folds the view away, which is the one thing the row could
+        // not do — see `panels::fold_button`.
+        skin.set_menu_button_visible(false, cx);
 
         let restored = saved
             .area
@@ -3031,9 +3050,19 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // What was cut is said in the balloon, in the reader's language: the
+        // decision is `notify`'s and pure, the sentence is the view's.
+        let body = match notice.hidden {
+            0 => notice.body,
+            hidden => format!(
+                "{}\n{}",
+                notice.body,
+                tr!("notify-more-lines", { count: hidden })
+            ),
+        };
         self.balloon(
             Some(tr!(notice.title)),
-            SharedString::from(notice.body),
+            SharedString::from(body),
             notice.level,
             window,
             cx,
@@ -3063,9 +3092,17 @@ impl ClaudhubApp {
                 gpui_component::notification::NotificationType::Error
             }
         };
+        // **A ceiling, and read off the window.** `ui::notify` already cuts the
+        // body to a number of lines, which is the honest half of this; a line
+        // is not a height, though — one long enough wraps to five rows — so the
+        // balloon is also told, in pixels, never to take more than a third of
+        // what it is covering. The stack of them is capped by the library; a
+        // single one was not.
+        let ceiling = window.viewport_size().height / 3.;
         window.push_notification(
             gpui_component::notification::Notification::new()
                 .with_type(kind)
+                .max_h(ceiling)
                 .when_some(title, |note, title| note.title(title))
                 .message(message)
                 // A failure stays until it is dismissed: it is the one thing
@@ -4097,8 +4134,9 @@ impl ClaudhubApp {
             .gap_2()
             // The bottom edge's tool windows open the bar, where the screen
             // picker used to be — see `render_bottom_tools` for why they are
-            // here rather than in a strip of their own.
-            .child(self.render_bottom_tools(cx))
+            // here rather than in a strip of their own. This run is the half
+            // at the start of the band; the other ends the bar.
+            .child(self.render_bottom_tools(crate::ui::rails::Half::Start, cx))
             // The active checkout's agent: the dot
             // says a Claude works (or waits) in what the window is looking at,
             // read out of the corner of the eye. The rest of the fleet stays
@@ -4161,6 +4199,10 @@ impl ClaudhubApp {
             .items_center()
             .justify_end()
             .gap_1()
+            // The band's other half, at the end of the bar as the side rails'
+            // second run is at the end of their edge: down there the two halves
+            // stand side by side, and the two runs say which is which.
+            .child(self.render_bottom_tools(crate::ui::rails::Half::End, cx))
             .child(crate::ui::panels::new_terminal_button(
                 &cx.entity().downgrade(),
                 None,
@@ -4256,6 +4298,8 @@ impl Render for ClaudhubApp {
             .on_action(cx.listener(super::shortcuts::close_terminal))
             .on_action(cx.listener(super::shortcuts::toggle_terminal))
             .on_action(cx.listener(super::shortcuts::next_terminal))
+            .on_action(cx.listener(super::shortcuts::next_tab))
+            .on_action(cx.listener(super::shortcuts::previous_tab))
             .on_action(cx.listener(super::shortcuts::commit))
             .on_action(cx.listener(super::shortcuts::open_settings))
             .on_action(cx.listener(super::shortcuts::zoom_in))
@@ -4581,6 +4625,20 @@ impl ClaudhubApp {
         let dock = self.dock.clone();
         crate::ui::panels::select_panel_named(&dock, name, window, cx);
         cx.notify();
+    }
+
+    /// Steps to the neighbouring document of the centre.
+    ///
+    /// **Nothing is written on the trail**, and that is deliberate: this is the
+    /// keyboard's way of pressing a tab, and pressing a tab with the mouse
+    /// records no step either. A trail that took one per press would be three
+    /// entries deep after one round of the group, and `Alt+←` would spend them
+    /// before reaching the file one actually came from.
+    pub(super) fn cycle_tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let dock = self.dock.clone();
+        if crate::ui::panels::cycle_center_tab(&dock, forward, window, cx) {
+            cx.notify();
+        }
     }
 
     /// The same, writing the step down — see `travel_to_panel`'s callers.

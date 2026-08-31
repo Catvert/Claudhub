@@ -1035,7 +1035,7 @@ impl ClaudhubApp {
                     h_flex().gap_1().child(
                         Button::new("github-pr-open")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(icon("external-link"))
                             .label(tr!("github-pr-open"))
                             .on_click(cx.listener(move |this, _, _window, cx| {
@@ -1220,7 +1220,7 @@ impl ClaudhubApp {
                         .child(
                             Button::new("ci-hand")
                                 .primary()
-                                .xsmall()
+                                .small()
                                 .icon(icon("bot"))
                                 .label(tr!("ci-hand"))
                                 .on_click(
@@ -1230,7 +1230,7 @@ impl ClaudhubApp {
                         .child(
                             Button::new("ci-log")
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .icon(icon("file-text"))
                                 .label(tr!("ci-log"))
                                 .on_click(
@@ -1279,7 +1279,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("github-mode-prs")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("git-pull-request"))
                     .tooltip(tr!("github-mode-prs"))
                     .selected(mode == Mode::Prs)
@@ -1290,7 +1290,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("github-mode-runs")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("play"))
                     .tooltip(tr!("github-mode-runs"))
                     .selected(mode == Mode::Runs)
@@ -1310,7 +1310,7 @@ impl ClaudhubApp {
                 el.child(
                     Button::new("github-pr-create")
                         .ghost()
-                        .xsmall()
+                        .small()
                         .icon(icon("plus"))
                         .tooltip(tr!("github-pr-create"))
                         .disabled(self.github.creating)
@@ -1323,7 +1323,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("ci-refresh")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("refresh-cw"))
                     .tooltip(tr!("action-refresh"))
                     .disabled(busy)

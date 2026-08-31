@@ -266,7 +266,7 @@ impl Tile {
                     .child(
                         Button::new(("multiplex-go", id))
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(super::icons::icon("arrow-right"))
                             .tooltip(tr!("multiplexer-open-worktree"))
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -318,7 +318,7 @@ impl ClaudhubApp {
     /// Puts two tiles in each other's place.
     ///
     /// It reorders `self.terminals`, which is *the* order of the terminals —
-    /// the one `Ctrl+PageUp` steps through as well. There is no second list to
+    /// the one `Ctrl+Tab` steps through in a terminal as well. There is no second list to
     /// keep in step, and there had better not be: two orders for the same
     /// terminals is two answers to "the next one".
     ///

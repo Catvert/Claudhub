@@ -616,7 +616,7 @@ impl ClaudhubApp {
                         el.child(
                             Button::new("merge-prev")
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .icon(icon("arrow-up"))
                                 .tooltip(tr!("merge-previous-conflict"))
                                 .on_click(
@@ -626,7 +626,7 @@ impl ClaudhubApp {
                         .child(
                             Button::new("merge-next")
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .icon(icon("arrow-down"))
                                 .tooltip(tr!("merge-next-conflict"))
                                 .on_click(
@@ -637,7 +637,7 @@ impl ClaudhubApp {
                             el.child(
                                 Button::new("merge-open")
                                     .ghost()
-                                    .xsmall()
+                                    .small()
                                     .icon(icon("crosshair"))
                                     .tooltip(tr!("merge-next-open"))
                                     .on_click(cx.listener(|this, _, _window, cx| {
@@ -650,7 +650,7 @@ impl ClaudhubApp {
                         el.child(
                             Button::new("merge-all-ours")
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .label(tr!("merge-take-all-ours"))
                                 .on_click(cx.listener(|this, _, _window, cx| {
                                     this.merge_take_all(Side::Ours, cx)
@@ -659,7 +659,7 @@ impl ClaudhubApp {
                         .child(
                             Button::new("merge-all-theirs")
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .label(tr!("merge-take-all-theirs"))
                                 .on_click(cx.listener(|this, _, _window, cx| {
                                     this.merge_take_all(Side::Theirs, cx)
@@ -671,7 +671,7 @@ impl ClaudhubApp {
                             el.child(
                                 Button::new("merge-reset")
                                     .ghost()
-                                    .xsmall()
+                                    .small()
                                     .icon(icon("eraser"))
                                     .tooltip(tr!("merge-reset-chunk"))
                                     .on_click(cx.listener(move |this, _, _window, cx| {
@@ -682,7 +682,7 @@ impl ClaudhubApp {
                         .child(match editing {
                             Some(_) => Button::new("merge-write")
                                 .primary()
-                                .xsmall()
+                                .small()
                                 .icon(icon("pencil"))
                                 .tooltip(tr!("merge-stop-editing"))
                                 .on_click(
@@ -690,7 +690,7 @@ impl ClaudhubApp {
                                 ),
                             None => Button::new("merge-write")
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .icon(icon("pencil"))
                                 .tooltip(tr!("merge-edit-chunk"))
                                 .on_click(cx.listener(move |this, _, window, cx| {
@@ -701,7 +701,7 @@ impl ClaudhubApp {
                     .child(
                         Button::new("merge-external")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(icon("external-link"))
                             .tooltip(tr!("merge-open-in-editor"))
                             .on_click(cx.listener(move |this, _, _window, cx| {
@@ -716,7 +716,7 @@ impl ClaudhubApp {
                         el.child(
                             Button::new("merge-apply")
                                 .primary()
-                                .xsmall()
+                                .small()
                                 .disabled(unresolved > 0)
                                 .label(tr!("merge-resolve"))
                                 .on_click(cx.listener(|this, _, _window, cx| this.merge_apply(cx))),
@@ -1101,7 +1101,7 @@ fn divider(
     };
     wrapper = wrapper.child(
         Button::new(("merge-take", chunk * 2 + usize::from(side == Side::Theirs)))
-            .xsmall()
+            .small()
             .when(taken, |button| button.primary())
             .when(!taken, |button| button.ghost())
             .icon(icon(name))

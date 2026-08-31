@@ -518,7 +518,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("stash-new")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("plus"))
                     .tooltip(tr!("stash-new"))
                     .disabled(!has_active)
@@ -527,7 +527,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("stash-clear")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("trash-2"))
                     .tooltip(tr!("stash-clear"))
                     .disabled(count == 0)
@@ -538,7 +538,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("stash-refresh")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("refresh-cw"))
                     .tooltip(tr!("action-refresh"))
                     .on_click(cx.listener(|this, _, _window, cx| this.refresh_stashes(cx))),

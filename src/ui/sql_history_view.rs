@@ -361,7 +361,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("sql-history-reach")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .label(reach_label(reach))
                     .tooltip(tr!("sql-history-reach"))
                     .dropdown_menu(move |menu, _window, _cx| {
@@ -391,7 +391,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("sql-history-find")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("search"))
                     .tooltip(tr!("sql-history-find"))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -402,7 +402,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("sql-history-clear")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("eraser"))
                     .tooltip(tr!("sql-history-clear"))
                     .disabled(count == 0)

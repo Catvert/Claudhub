@@ -34,21 +34,37 @@ pub enum Side {
 
 /// Which half of an edge a tool window sits in.
 ///
-/// A side rail is read in two runs — those pinned to the top, those pushed to
-/// the bottom — and each run is a tab group of its own, so the two show at the
-/// same time rather than taking turns. It is what lets the file list and the
-/// tests be on screen together without either being a tab of the other.
+/// A rail is read in two runs — those pinned to the start of the edge, those
+/// pushed to its end — and each run is a tab group of its own, so the two show
+/// at the same time rather than taking turns. It is what lets the file list
+/// and the tests be on screen together without either being a tab of the
+/// other.
 ///
-/// The bottom edge has one slot: it is already a band across the width, and
-/// splitting it would give two strips a terminal's worth of height each.
+/// **Start and end, and not top and bottom**, because the axis belongs to the
+/// edge and not to the window: a side zone is split downwards, so its halves
+/// stand one above the other, and the bottom zone is split **across**, so its
+/// halves stand side by side. Naming them after the side rails would have made
+/// `Half::Bottom` mean "on the right" down there — a second reading nothing in
+/// the code would have flagged. It is also what the rails already paint: one
+/// run at the start of the buttons, one at their end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Half {
-    Top,
-    Bottom,
+    Start,
+    End,
 }
 
 impl Half {
-    pub const BOTH: [Half; 2] = [Half::Top, Half::Bottom];
+    /// The two, in the order a rail reads them.
+    ///
+    /// **Every edge has both.** The bottom carried one, on the reasoning that
+    /// it is already a band across the width and that splitting it would give
+    /// two strips a terminal's worth of height each — true of a split that runs
+    /// *down*, which is not the one it gets: its halves stand side by side (see
+    /// `Side::axis`), each keeping the whole height of the band. What the one
+    /// slot cost is that everything down there shared a single group of tabs,
+    /// so calling up a terminal was how one put away the graph of branches one
+    /// had opened it beside.
+    pub const BOTH: [Half; 2] = [Half::Start, Half::End];
 }
 
 /// A place a tool window can sit: an edge, and which half of it.
@@ -64,26 +80,30 @@ impl Anchor {
     }
 
     /// Every place a tool window may be sent to, in the order the menu offers
-    /// them: the two halves of each side, then the bottom, which has one.
+    /// them: the two halves of each edge, the three edges in the rails' order.
     pub fn all() -> Vec<Anchor> {
-        let mut all = Vec::with_capacity(5);
-        for side in [Side::Left, Side::Right] {
+        let mut all = Vec::with_capacity(6);
+        for side in Side::ALL {
             for half in Half::BOTH {
                 all.push(Anchor::new(side, half));
             }
         }
-        all.push(Anchor::new(Side::Bottom, Half::Top));
         all
     }
 
     /// The i18n key naming this place in the menu.
+    ///
+    /// The words are the window's and not the enum's: down there the two
+    /// halves are left and right, which is what one sees and what PhpStorm
+    /// calls them.
     pub fn label(self) -> &'static str {
         match (self.side, self.half) {
-            (Side::Left, Half::Top) => "anchor-left-top",
-            (Side::Left, Half::Bottom) => "anchor-left-bottom",
-            (Side::Right, Half::Top) => "anchor-right-top",
-            (Side::Right, Half::Bottom) => "anchor-right-bottom",
-            (Side::Bottom, _) => "anchor-bottom",
+            (Side::Left, Half::Start) => "anchor-left-top",
+            (Side::Left, Half::End) => "anchor-left-bottom",
+            (Side::Right, Half::Start) => "anchor-right-top",
+            (Side::Right, Half::End) => "anchor-right-bottom",
+            (Side::Bottom, Half::Start) => "anchor-bottom-left",
+            (Side::Bottom, Half::End) => "anchor-bottom-right",
         }
     }
 }
@@ -92,11 +112,17 @@ impl Side {
     /// The three, in the order the rails are laid around the centre.
     pub const ALL: [Side; 3] = [Side::Left, Side::Right, Side::Bottom];
 
-    /// How many slots this edge is read in.
-    pub fn halves(self) -> &'static [Half] {
+    /// The direction a zone of this edge is split in.
+    ///
+    /// **Along the edge, always**: a side zone is a column, so its two halves
+    /// are stacked; the bottom zone is a band, so its two halves stand beside
+    /// each other. Splitting the band downwards is what the one slot was there
+    /// to avoid, and it would still be wrong — two strips of three hundred
+    /// pixels are two things one has to scroll.
+    pub fn axis(self) -> gpui::Axis {
         match self {
-            Side::Bottom => &[Half::Top],
-            _ => &[Half::Top, Half::Bottom],
+            Side::Bottom => gpui::Axis::Horizontal,
+            _ => gpui::Axis::Vertical,
         }
     }
 
@@ -126,20 +152,22 @@ impl Side {
         }
     }
 
-    /// The height of the **bottom half**, which is the one given a size.
+    /// What the **second half** of this edge is worth — the one given a size.
     ///
-    /// A height and not the width above: inside a side zone the split runs
-    /// down, so the two are different measurements and one of them was being
-    /// read for the other. Nothing starts in the right's bottom half — that
-    /// edge is one group — so its size is what a panel dragged there is given,
-    /// and it is the taller because what lands on that edge is read in
-    /// paragraphs, where the left's half is a list one glances at.
+    /// Measured along the split and not along the zone, which are two different
+    /// things and one of them was being read for the other: down a side zone it
+    /// is a height, across the bottom one it is a width. Nothing **starts** in
+    /// the right's second half — the terminals are at home there, and no
+    /// terminal exists until one is asked for — so its size is what the first
+    /// one opened, or a panel dragged there, is given.
     pub fn half_size(self) -> Pixels {
         match self {
             Side::Left => px(270.),
             Side::Right => px(460.),
-            // One slot: nothing to size against.
-            Side::Bottom => px(0.),
+            // A terminal, and eighty columns is what one is written for. The
+            // half beside it keeps the rest, which is where the graph of
+            // branches is read.
+            Side::Bottom => px(720.),
         }
     }
 }
@@ -207,14 +235,14 @@ pub const TOOLS: &[Tool] = &[
         panel: "ClaudhubFiles",
         title: Label("panel-files"),
         icon: "pencil",
-        home: Anchor::new(Side::Left, Half::Top),
+        home: Anchor::new(Side::Left, Half::Start),
         conditional: false,
     },
     Tool {
         panel: "ClaudhubChanges",
         title: Label("range-working"),
         icon: "git-commit-horizontal",
-        home: Anchor::new(Side::Left, Half::Top),
+        home: Anchor::new(Side::Left, Half::Start),
         conditional: false,
     },
     // **Not `git-branch`**: what this shows is not the branches but one branch
@@ -224,7 +252,7 @@ pub const TOOLS: &[Tool] = &[
         panel: "ClaudhubBranch",
         title: Label("range-branch"),
         icon: "git-pull-request",
-        home: Anchor::new(Side::Left, Half::Top),
+        home: Anchor::new(Side::Left, Half::Start),
         conditional: false,
     },
     // **After the two git tabs and not before them.** The rail's order is the
@@ -236,7 +264,7 @@ pub const TOOLS: &[Tool] = &[
         panel: "ClaudhubSearch",
         title: Label("panel-search"),
         icon: "search",
-        home: Anchor::new(Side::Left, Half::Top),
+        home: Anchor::new(Side::Left, Half::Start),
         conditional: false,
     },
     // **Beside the files and not under them**: a failing test is picked from
@@ -246,7 +274,7 @@ pub const TOOLS: &[Tool] = &[
         panel: "ClaudhubTests",
         title: Label("panel-tests"),
         icon: "circle-check",
-        home: Anchor::new(Side::Left, Half::Top),
+        home: Anchor::new(Side::Left, Half::Start),
         // Only where a runner exists: on everything else the honest panel is
         // no panel — there is nothing to run.
         conditional: true,
@@ -258,7 +286,7 @@ pub const TOOLS: &[Tool] = &[
         panel: "ClaudhubNotes",
         title: Label("panel-notes"),
         icon: "sticky-note",
-        home: Anchor::new(Side::Left, Half::Bottom),
+        home: Anchor::new(Side::Left, Half::End),
         conditional: false,
     },
     // The right edge holds one group and not two halves: what it carries is
@@ -268,7 +296,7 @@ pub const TOOLS: &[Tool] = &[
         panel: "ClaudhubDb",
         title: Label("panel-databases"),
         icon: "database",
-        home: Anchor::new(Side::Right, Half::Top),
+        home: Anchor::new(Side::Right, Half::Start),
         conditional: false,
     },
     // The band across the width, and the two that want it: a run scrolls,
@@ -277,7 +305,7 @@ pub const TOOLS: &[Tool] = &[
         panel: "ClaudhubTestRun",
         title: Label("panel-test-run"),
         icon: "play",
-        home: Anchor::new(Side::Bottom, Half::Top),
+        home: Anchor::new(Side::Bottom, Half::Start),
         conditional: true,
     },
     // **"Branches" and not "History".** What this panel shows is the graph of a
@@ -290,17 +318,24 @@ pub const TOOLS: &[Tool] = &[
         panel: "ClaudhubHistory",
         title: Label("panel-branches"),
         icon: "git-branch",
-        home: Anchor::new(Side::Bottom, Half::Top),
+        home: Anchor::new(Side::Bottom, Half::Start),
         conditional: false,
     },
     // Past the ninth, no key names it: `Alt+1`… stop here, and the rest is
     // reached by its button. The terminals are what can afford to be there:
     // `Ctrl+T` already calls them up by name, which no other tool window has.
+    //
+    // **The band's other half, beside the two above and not among them.** A
+    // terminal and the graph of branches are what one has open at the same
+    // time — one reads what a command did in the one and what it made of the
+    // history in the other — and as tabs of a single group each was the way
+    // the other was hidden. It is the arrangement the two side columns have
+    // had all along, said at last for the edge that most needed it.
     Tool {
         panel: "ClaudhubTerminal",
         title: Label("panel-terminal"),
         icon: "square-terminal",
-        home: Anchor::new(Side::Bottom, Half::Top),
+        home: Anchor::new(Side::Bottom, Half::End),
         conditional: false,
     },
     // Nothing to resolve, no button: one time in a hundred.
@@ -308,14 +343,14 @@ pub const TOOLS: &[Tool] = &[
         panel: "ClaudhubConflicts",
         title: Label("panel-conflicts"),
         icon: "git-merge",
-        home: Anchor::new(Side::Left, Half::Bottom),
+        home: Anchor::new(Side::Left, Half::End),
         conditional: true,
     },
     Tool {
         panel: "ClaudhubStashes",
         title: Label("panel-stashes"),
         icon: "archive",
-        home: Anchor::new(Side::Left, Half::Bottom),
+        home: Anchor::new(Side::Left, Half::End),
         conditional: false,
     },
     // **On the right, where one reads where things stand.** A list of errors
@@ -326,7 +361,7 @@ pub const TOOLS: &[Tool] = &[
         panel: "ClaudhubSentry",
         title: Label("panel-sentry"),
         icon: "triangle-alert",
-        home: Anchor::new(Side::Right, Half::Top),
+        home: Anchor::new(Side::Right, Half::Start),
         conditional: false,
     },
     // And beside what happened: a pull request answers "what became of this
@@ -335,14 +370,14 @@ pub const TOOLS: &[Tool] = &[
         panel: "ClaudhubCi",
         title: Label("panel-github"),
         icon: "github",
-        home: Anchor::new(Side::Right, Half::Top),
+        home: Anchor::new(Side::Right, Half::Start),
         conditional: false,
     },
     Tool {
         panel: "ClaudhubTags",
         title: Label("panel-tags"),
         icon: "tags",
-        home: Anchor::new(Side::Left, Half::Bottom),
+        home: Anchor::new(Side::Left, Half::End),
         conditional: false,
     },
     // The terminals beside the code, which are a **second view** and not a
@@ -350,6 +385,12 @@ pub const TOOLS: &[Tool] = &[
     // name being put away, so one name for both edges meant one button and one
     // fold for the two. It joins by the end, like everything else: the ranks of
     // this table are what `Alt+1`… name.
+    //
+    // In that edge's second half, for the reason the other terminals have the
+    // band's: a shell is not one more list to be picked from, and as a tab of
+    // the group above it was how the schema one had open there was put away.
+    // Nothing **starts** in that half either way — no terminal exists until one
+    // is asked for — so the right is still one group on a fresh window.
     Tool {
         panel: "ClaudhubTerminalRight",
         title: Label("panel-terminal-right"),
@@ -360,7 +401,7 @@ pub const TOOLS: &[Tool] = &[
         // panel on the right, and two views under one glyph in one rail is a
         // target that answers half the time.
         icon: "terminal",
-        home: Anchor::new(Side::Right, Half::Top),
+        home: Anchor::new(Side::Right, Half::End),
         conditional: false,
     },
 ];
@@ -450,17 +491,17 @@ pub struct Button {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rail {
     pub side: Side,
-    pub top: Vec<Button>,
-    pub bottom: Vec<Button>,
+    pub start: Vec<Button>,
+    pub end: Vec<Button>,
 }
 
 impl Rail {
     pub fn is_empty(&self) -> bool {
-        self.top.is_empty() && self.bottom.is_empty()
+        self.start.is_empty() && self.end.is_empty()
     }
 
     pub fn buttons(&self) -> impl Iterator<Item = &Button> {
-        self.top.iter().chain(self.bottom.iter())
+        self.start.iter().chain(self.end.iter())
     }
 }
 
@@ -573,13 +614,13 @@ pub fn rails(
     // panel's place among its group's tabs.
     struct Ranked {
         side: Side,
-        top: Vec<(Option<usize>, Button)>,
-        bottom: Vec<(Option<usize>, Button)>,
+        start: Vec<(Option<usize>, Button)>,
+        end: Vec<(Option<usize>, Button)>,
     }
     let mut rails = Side::ALL.map(|side| Ranked {
         side,
-        top: Vec::new(),
-        bottom: Vec::new(),
+        start: Vec::new(),
+        end: Vec::new(),
     });
     let mut place = |anchor: Anchor, rank: Option<usize>, tool: &Tool, active: bool| {
         let button = Button {
@@ -591,8 +632,8 @@ pub fn rails(
         };
         let rail = &mut rails[anchor.side.index()];
         match anchor.half {
-            Half::Top => rail.top.push((rank, button)),
-            Half::Bottom => rail.bottom.push((rank, button)),
+            Half::Start => rail.start.push((rank, button)),
+            Half::End => rail.end.push((rank, button)),
         }
     };
     for tool in tools() {
@@ -655,14 +696,14 @@ pub fn rails(
     }
     for rail in &mut rails {
         // Stable, so two panels the tree cannot rank keep the table's order.
-        rail.top.sort_by_key(|(rank, _)| rank.unwrap_or(usize::MAX));
-        rail.bottom
+        rail.start
             .sort_by_key(|(rank, _)| rank.unwrap_or(usize::MAX));
+        rail.end.sort_by_key(|(rank, _)| rank.unwrap_or(usize::MAX));
     }
     let mut rails = rails.map(|rail| Rail {
         side: rail.side,
-        top: rail.top.into_iter().map(|(_, button)| button).collect(),
-        bottom: rail.bottom.into_iter().map(|(_, button)| button).collect(),
+        start: rail.start.into_iter().map(|(_, button)| button).collect(),
+        end: rail.end.into_iter().map(|(_, button)| button).collect(),
     });
     let _ = &mut rails;
     // The rail does not scroll, so what it cannot show it hides. A **warning**
@@ -699,7 +740,7 @@ pub fn press(panel: &str, from: Option<Anchor>, seats: &[Seat]) -> Press {
         // button to have pressed.
         return Press::Restore {
             panel: "",
-            anchor: Anchor::new(Side::Left, Half::Top),
+            anchor: Anchor::new(Side::Left, Half::Start),
         };
     };
     // **The place the button spoke for.** A key names a view and not a place,
@@ -808,8 +849,13 @@ mod tests {
     #[test]
     fn a_panel_seated_on_two_edges_has_a_button_on_both() {
         let seats = vec![
-            seat("ClaudhubTerminal", at(Side::Bottom, Half::Top), true, true),
-            seat("ClaudhubTerminal", at(Side::Right, Half::Top), true, true),
+            seat(
+                "ClaudhubTerminal",
+                at(Side::Bottom, Half::Start),
+                true,
+                true,
+            ),
+            seat("ClaudhubTerminal", at(Side::Right, Half::Start), true, true),
         ];
         let rails = rails(&seats, &none(), &none());
         for side in [Side::Bottom, Side::Right] {
@@ -827,11 +873,16 @@ mod tests {
     #[test]
     fn a_press_puts_away_the_half_its_button_is_on() {
         let seats = vec![
-            seat("ClaudhubTerminal", at(Side::Bottom, Half::Top), true, true),
-            seat("ClaudhubTerminal", at(Side::Right, Half::Top), true, true),
+            seat(
+                "ClaudhubTerminal",
+                at(Side::Bottom, Half::Start),
+                true,
+                true,
+            ),
+            seat("ClaudhubTerminal", at(Side::Right, Half::Start), true, true),
         ];
         for side in [Side::Bottom, Side::Right] {
-            let anchor = Anchor::new(side, Half::Top);
+            let anchor = Anchor::new(side, Half::Start);
             assert_eq!(
                 press("ClaudhubTerminal", Some(anchor), &seats),
                 Press::Hide { anchor },
@@ -893,12 +944,12 @@ mod tests {
     fn a_panel_dragged_across_changes_rail() {
         let seats = vec![seat(
             "ClaudhubNotes",
-            at(Side::Left, Half::Top),
+            at(Side::Left, Half::Start),
             false,
             true,
         )];
         let rails = rails(&seats, &none(), &none());
-        assert!(names(&rail(&rails, Side::Left).top).contains(&"ClaudhubNotes"));
+        assert!(names(&rail(&rails, Side::Left).start).contains(&"ClaudhubNotes"));
         assert!(!all_names(rail(&rails, Side::Right)).contains(&"ClaudhubNotes"));
     }
 
@@ -908,21 +959,22 @@ mod tests {
     fn a_panel_dragged_down_changes_half() {
         let up = vec![seat(
             "ClaudhubNotes",
-            at(Side::Right, Half::Top),
+            at(Side::Right, Half::Start),
             false,
             true,
         )];
         let down = vec![seat(
             "ClaudhubNotes",
-            at(Side::Right, Half::Bottom),
+            at(Side::Right, Half::End),
             false,
             true,
         )];
         assert!(
-            names(&rail(&rails(&up, &none(), &none()), Side::Right).top).contains(&"ClaudhubNotes")
+            names(&rail(&rails(&up, &none(), &none()), Side::Right).start)
+                .contains(&"ClaudhubNotes")
         );
         assert!(
-            names(&rail(&rails(&down, &none(), &none()), Side::Right).bottom)
+            names(&rail(&rails(&down, &none(), &none()), Side::Right).end)
                 .contains(&"ClaudhubNotes")
         );
     }
@@ -934,11 +986,11 @@ mod tests {
         let lit = |shown, open| {
             let seats = vec![seat(
                 "ClaudhubNotes",
-                at(Side::Right, Half::Top),
+                at(Side::Right, Half::Start),
                 shown,
                 open,
             )];
-            rails(&seats, &none(), &none())[Side::Right.index()].top[0].active
+            rails(&seats, &none(), &none())[Side::Right.index()].start[0].active
         };
         assert!(lit(true, true));
         assert!(!lit(true, false));
@@ -952,22 +1004,22 @@ mod tests {
     fn pressing_what_is_on_screen_puts_its_half_away() {
         let open = vec![seat(
             "ClaudhubNotes",
-            at(Side::Right, Half::Top),
+            at(Side::Right, Half::Start),
             true,
             true,
         )];
         assert_eq!(
             press("ClaudhubNotes", None, &open),
             Press::Hide {
-                anchor: Anchor::new(Side::Right, Half::Top)
+                anchor: Anchor::new(Side::Right, Half::Start)
             }
         );
         // And pressing it again brings it back — from a view put away as from
         // a folded zone.
-        let put_away = vec![away("ClaudhubNotes", at(Side::Right, Half::Top))];
+        let put_away = vec![away("ClaudhubNotes", at(Side::Right, Half::Start))];
         let folded = vec![seat(
             "ClaudhubNotes",
-            at(Side::Right, Half::Top),
+            at(Side::Right, Half::Start),
             true,
             false,
         )];
@@ -987,8 +1039,8 @@ mod tests {
     #[test]
     fn pressing_a_tab_behind_selects_it() {
         let seats = vec![
-            seat("ClaudhubNotes", at(Side::Right, Half::Top), true, true),
-            seat("ClaudhubHistory", at(Side::Right, Half::Top), false, true),
+            seat("ClaudhubNotes", at(Side::Right, Half::Start), true, true),
+            seat("ClaudhubHistory", at(Side::Right, Half::Start), false, true),
         ];
         assert_eq!(
             press("ClaudhubHistory", None, &seats),
@@ -1005,7 +1057,7 @@ mod tests {
     fn a_view_put_away_keeps_an_unlit_button() {
         let hidden = BTreeSet::from(["ClaudhubNotes".to_string()]);
         // Put away, so the panel draws nothing — which is what the seat says.
-        let seats = vec![away("ClaudhubNotes", at(Side::Right, Half::Top))];
+        let seats = vec![away("ClaudhubNotes", at(Side::Right, Half::Start))];
         let button = rails(&seats, &hidden, &none())[Side::Right.index()]
             .buttons()
             .find(|button| button.panel == "ClaudhubNotes")
@@ -1017,7 +1069,7 @@ mod tests {
             press("ClaudhubNotes", None, &[]),
             Press::Restore {
                 panel: "ClaudhubNotes",
-                anchor: Anchor::new(Side::Left, Half::Bottom),
+                anchor: Anchor::new(Side::Left, Half::End),
             }
         );
     }
@@ -1026,14 +1078,14 @@ mod tests {
     /// tests must not hand the half over to the errors beside them.
     #[test]
     fn putting_a_half_away_takes_what_it_shows() {
-        let here = at(Side::Right, Half::Bottom);
+        let here = at(Side::Right, Half::End);
         let seats = vec![
             seat("ClaudhubTests", here, true, true),
             seat("ClaudhubStashes", here, false, true),
             // The other half stays: it is somebody else's work.
-            seat("ClaudhubNotes", at(Side::Right, Half::Top), true, true),
+            seat("ClaudhubNotes", at(Side::Right, Half::Start), true, true),
         ];
-        let going = showing_in(Anchor::new(Side::Right, Half::Bottom), &seats);
+        let going = showing_in(Anchor::new(Side::Right, Half::End), &seats);
         assert!(going.contains(&"ClaudhubTests"));
         assert!(going.contains(&"ClaudhubStashes"));
         assert!(!going.contains(&"ClaudhubNotes"));
@@ -1049,12 +1101,7 @@ mod tests {
     fn a_situational_view_with_nothing_to_show_has_no_button() {
         let idle = vec![Seat {
             visible: false,
-            ..seat(
-                "ClaudhubConflicts",
-                at(Side::Left, Half::Bottom),
-                false,
-                true,
-            )
+            ..seat("ClaudhubConflicts", at(Side::Left, Half::End), false, true)
         }];
         assert!(
             !all_names(rail(&rails(&idle, &none(), &none()), Side::Left))
@@ -1062,7 +1109,7 @@ mod tests {
         );
         let conflicting = vec![seat(
             "ClaudhubConflicts",
-            at(Side::Left, Half::Bottom),
+            at(Side::Left, Half::End),
             true,
             true,
         )];
@@ -1077,7 +1124,7 @@ mod tests {
     #[test]
     fn a_situational_view_folded_by_hand_keeps_its_button() {
         let folded = BTreeSet::from(["ClaudhubTests".to_string()]);
-        let seats = vec![away("ClaudhubTests", at(Side::Left, Half::Bottom))];
+        let seats = vec![away("ClaudhubTests", at(Side::Left, Half::End))];
         assert!(
             all_names(rail(&rails(&seats, &folded, &none()), Side::Left))
                 .contains(&"ClaudhubTests")
@@ -1091,12 +1138,7 @@ mod tests {
     /// pressed was the button that then had to go.
     #[test]
     fn a_view_taken_off_its_rail_has_no_button() {
-        let seats = vec![seat(
-            "ClaudhubNotes",
-            at(Side::Left, Half::Bottom),
-            true,
-            true,
-        )];
+        let seats = vec![seat("ClaudhubNotes", at(Side::Left, Half::End), true, true)];
         let off = BTreeSet::from(["ClaudhubNotes".to_string()]);
         assert!(
             !all_names(rail(&rails(&seats, &none(), &off), Side::Left)).contains(&"ClaudhubNotes")
@@ -1131,7 +1173,7 @@ mod tests {
         assert!(!all_names(rail(&idle, Side::Bottom)).contains(&"ClaudhubTestRun"));
         let running = vec![seat(
             "ClaudhubTestRun",
-            at(Side::Bottom, Half::Top),
+            at(Side::Bottom, Half::Start),
             true,
             true,
         )];
@@ -1144,14 +1186,14 @@ mod tests {
     /// on its own — it moves when one moves it.
     #[test]
     fn the_buttons_follow_the_tabs() {
-        let here = at(Side::Left, Half::Top);
+        let here = at(Side::Left, Half::Start);
         let ranked = |panel, order| Seat {
             order,
             ..seat(panel, here, false, true)
         };
         let seats = vec![ranked("ClaudhubChanges", 1), ranked("ClaudhubFiles", 0)];
         let rails = rails(&seats, &none(), &none());
-        let shown = names(&rail(&rails, Side::Left).top);
+        let shown = names(&rail(&rails, Side::Left).start);
         assert_eq!(&shown[..2], ["ClaudhubFiles", "ClaudhubChanges"]);
     }
 
@@ -1159,15 +1201,70 @@ mod tests {
     /// view called back has to land somewhere, and the end displaces nothing.
     #[test]
     fn what_has_no_seat_goes_last() {
-        let here = at(Side::Left, Half::Top);
+        let here = at(Side::Left, Half::Start);
         // Only the search is seated, and last in its group.
         let seats = vec![Seat {
             order: 7,
             ..seat("ClaudhubSearch", here, true, true)
         }];
         let rails = rails(&seats, &none(), &none());
-        let shown = names(&rail(&rails, Side::Left).top);
+        let shown = names(&rail(&rails, Side::Left).start);
         assert_eq!(shown.first(), Some(&"ClaudhubSearch"));
+    }
+
+    /// **The terminals have the band's other half.** As tabs of one group,
+    /// calling up a terminal was how one put away the graph of branches — and
+    /// the two are what one has open at the same time, one saying what a
+    /// command did and the other what it made of the history. The run being
+    /// followed stays with the branches: it is read while one waits, and a
+    /// terminal is what one waits in.
+    #[test]
+    fn the_terminals_do_not_share_a_group_with_the_branches() {
+        let home = |panel: &str| {
+            TOOLS
+                .iter()
+                .find(|tool| tool.panel == panel)
+                .expect("a tool of that name")
+                .home
+        };
+        let terminal = home("ClaudhubTerminal");
+        let branches = home("ClaudhubHistory");
+        assert_eq!(terminal.side, Side::Bottom);
+        assert_eq!(branches.side, Side::Bottom);
+        assert_ne!(terminal.half, branches.half);
+        assert_eq!(home("ClaudhubTestRun").half, branches.half);
+        // The same on the right, where a shell was a tab of the schema it is
+        // opened beside.
+        let beside = home("ClaudhubTerminalRight");
+        assert_eq!(beside.side, Side::Right);
+        assert_ne!(beside.half, home("ClaudhubDb").half);
+    }
+
+    /// And the rail down there is read in two runs, like the side ones: what
+    /// the status bar opens with names the half at the start of the band, what
+    /// ends it names the half at its end.
+    #[test]
+    fn the_bottom_rail_is_read_in_two_runs() {
+        let seats = vec![
+            seat("ClaudhubHistory", at(Side::Bottom, Half::Start), true, true),
+            seat("ClaudhubTerminal", at(Side::Bottom, Half::End), true, true),
+        ];
+        let rails = rails(&seats, &none(), &none());
+        let bottom = rail(&rails, Side::Bottom);
+        assert_eq!(names(&bottom.start), ["ClaudhubHistory"]);
+        assert_eq!(names(&bottom.end), ["ClaudhubTerminal"]);
+        // Putting the terminals away leaves the graph where it was, which is
+        // the whole of what the second half buys.
+        assert_eq!(
+            press("ClaudhubTerminal", None, &seats),
+            Press::Hide {
+                anchor: Anchor::new(Side::Bottom, Half::End)
+            }
+        );
+        assert_eq!(
+            showing_in(Anchor::new(Side::Bottom, Half::End), &seats),
+            ["ClaudhubTerminal"]
+        );
     }
 
     /// A move offers every place but the one it is already in: a menu entry
@@ -1176,14 +1273,14 @@ mod tests {
     fn a_move_leaves_out_the_place_one_is_in() {
         let seats = vec![seat(
             "ClaudhubNotes",
-            at(Side::Right, Half::Top),
+            at(Side::Right, Half::Start),
             true,
             true,
         )];
         let targets = moves("ClaudhubNotes", &seats);
         assert_eq!(targets.len(), Anchor::all().len() - 1);
-        assert!(!targets.contains(&Anchor::new(Side::Right, Half::Top)));
-        assert!(targets.contains(&Anchor::new(Side::Right, Half::Bottom)));
+        assert!(!targets.contains(&Anchor::new(Side::Right, Half::Start)));
+        assert!(targets.contains(&Anchor::new(Side::Right, Half::End)));
         // Out of the tree, there is no place to leave out.
         assert_eq!(moves("ClaudhubNotes", &[]).len(), Anchor::all().len());
     }

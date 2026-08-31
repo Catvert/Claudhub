@@ -62,10 +62,6 @@ struct Look {
     success: Hsla,
     /// A checkout's row: two lines of text and next to nothing around them.
     row: gpui::Pixels,
-    /// The same row with `wt`'s line under the branch: three lines. The list
-    /// is a `v_virtual_list` and every row says its own height, so a worktree
-    /// `wt` knows grows and the others do not.
-    tall: gpui::Pixels,
     /// A repository's heading: one line, and shorter than a row — it is a rule
     /// with a name on it, not an entry.
     head: gpui::Pixels,
@@ -85,7 +81,6 @@ impl Look {
             // twice as tall as it needs to be shows four of them where it could
             // show seven, and what one comes here to do is compare.
             row: unit * 1.45,
-            tall: unit * 2.0,
             head: unit * 0.95,
         }
     }
@@ -316,7 +311,6 @@ impl WorktreePicker {
             rows.iter()
                 .map(|row| match row {
                     Row::Repo { .. } => gpui::size(px(0.), look.head),
-                    Row::Worktree(item) if item.detail.is_some() => gpui::size(px(0.), look.tall),
                     _ => gpui::size(px(0.), look.row),
                 })
                 .collect::<Vec<_>>(),
@@ -401,7 +395,7 @@ impl WorktreePicker {
                     .child(
                         Button::new("repo-open")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(icon("folder-plus"))
                             .label(tr!("repo-open"))
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -476,7 +470,7 @@ impl WorktreePicker {
                     .child(
                         Button::new("worktree-back")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(icon("arrow-left"))
                             .tooltip(tr!("branch-back"))
                             .on_click(cx.listener(|this, _, _window, cx| {
@@ -592,7 +586,7 @@ fn repo_heading(
         .child(
             Button::new(("new-worktree", index))
                 .ghost()
-                .xsmall()
+                .small()
                 .icon(icon("plus"))
                 // **The word, and not the glyph alone.** A `+` on a repository's
                 // line is read as "add a repository" as readily as "add a
@@ -632,23 +626,34 @@ fn worktree_row(
     let target = item.path.clone();
     let pin_target = item.path.clone();
     let opened = item.clone();
-    let height = if item.detail.is_some() {
-        look.tall
-    } else {
-        look.row
-    };
     // The `…` comes out on the row under the pointer and on the row one is
     // standing in, and stays out of the way everywhere else — the branch
-    // picker's rule, and the two are one surface twice over. The pin is not in
-    // it: it is a state one reads down the list, not an action one aims at.
+    // picker's rule, and the two are one surface twice over. The pin follows
+    // it, with one exception written where it is applied: a pin that is *set*
+    // stays lit, being a state one reads down the list and not an action one
+    // aims at.
     let group = SharedString::from(format!("worktree-row-{index}"));
     let armed = at_cursor || selected;
 
     h_flex()
         .id(("worktree-row", index))
         .group(group.clone())
-        .h(height)
+        .h(look.row)
         .w_full()
+        // **What `wt` knows is a tooltip and no longer a third line.** The
+        // options chosen, the ports, the project's `[status.info]`: read when
+        // two checkouts of one branch have to be told apart, which is not what
+        // one does on every glance — and a list where every row carried it was
+        // three lines deep per checkout, so five of them filled the popover.
+        // A picker answers *which one*; the rest is one hover away.
+        .when_some(item.detail.clone(), |el, detail| {
+            el.tooltip({
+                let full = SharedString::from(detail.full);
+                move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(full.clone()).build(window, cx)
+                }
+            })
+        })
         // The rule down the left edge of the checkout one is in: the mark every
         // editor puts on the file it has open, and what makes that row findable
         // without reading a word of it. **Every row carries the border, and all
@@ -719,29 +724,6 @@ fn worktree_row(
                             .text_color(look.muted)
                             .child(branch),
                     )
-                })
-                // What `wt` knows beyond started/stopped — the options chosen,
-                // the ports, the project's `[status.info]` — dimmer than the
-                // branch: it is read when two worktrees of one branch have to
-                // be told apart, not on every glance. Cut to the width, whole
-                // in the tooltip.
-                .when_some(item.detail.clone(), |el, detail| {
-                    el.child(
-                        div()
-                            .id(("worktree-detail", index))
-                            .w_full()
-                            .truncate()
-                            .text_xs()
-                            .text_color(look.muted.opacity(0.75))
-                            .tooltip({
-                                let full = SharedString::from(detail.full);
-                                move |window, cx| {
-                                    gpui_component::tooltip::Tooltip::new(full.clone())
-                                        .build(window, cx)
-                                }
-                            })
-                            .child(SharedString::from(detail.line)),
-                    )
                 }),
         )
         // What the project says of it — started or not — then who is working in
@@ -763,43 +745,54 @@ fn worktree_row(
             item.summary.filter(|summary| !summary.is_empty()),
             |el, summary| el.child(crate::ui::topbar::volume(summary, cx)),
         )
-        // The pin, before the `…` and **painted on every row**, ticked or not:
-        // a control that appears under the pointer moves what is beside it, and
-        // what is beside it here is the volume one was reading. It is the same
-        // toggle as the entry in the actions — a table read twice — brought out
-        // where the eye already is, because pinning is decided while scanning
-        // the list, not after opening a menu about one row.
+        // The pin, before the `…`. **Its slot is on every row, its glyph only
+        // where it says something**: lit on the checkouts one has pinned, and
+        // on the row under the pointer, which is where one aims to pin. A grey
+        // pin on all forty rows was a column of them read before the names —
+        // and hiding the slot as well would move the volume beside it every
+        // time the pointer crossed a row. It is the same toggle as the entry in
+        // the actions, brought out where the eye already is: pinning is decided
+        // while scanning the list, not after opening a menu about one row.
         .child(
-            Button::new(("worktree-pin", index))
-                .ghost()
-                .xsmall()
-                .icon(
-                    icon(if item.pinned { "pin-off" } else { "pin" }).text_color(if item.pinned {
-                        look.primary
-                    } else {
-                        look.muted.opacity(0.6)
-                    }),
-                )
-                .tooltip(if item.pinned {
-                    tr!("worktree-unpin")
-                } else {
-                    tr!("worktree-pin")
+            div()
+                .flex_none()
+                .when(!item.pinned && !armed, |el| {
+                    el.opacity(0.).group_hover(group.clone(), |s| s.opacity(1.))
                 })
-                .on_click(move |_, _window, cx| {
-                    // The row selects; without this, pinning would change
-                    // worktree on its way.
-                    cx.stop_propagation();
-                    let target = pin_target.clone();
-                    // The popover **stays open**, unlike every other gesture
-                    // here: pinning is not going somewhere, and one pins two or
-                    // three in a row while looking at the same list.
-                    for_pin.update(cx, |this, cx| {
-                        if let Some(app) = this.app.upgrade() {
-                            app.update(cx, |app, cx| app.toggle_pin(&target, cx));
-                        }
-                        cx.notify();
-                    });
-                }),
+                .child(
+                    Button::new(("worktree-pin", index))
+                        .ghost()
+                        .small()
+                        .icon(
+                            icon(if item.pinned { "pin-off" } else { "pin" }).text_color(
+                                if item.pinned {
+                                    look.primary
+                                } else {
+                                    look.muted.opacity(0.6)
+                                },
+                            ),
+                        )
+                        .tooltip(if item.pinned {
+                            tr!("worktree-unpin")
+                        } else {
+                            tr!("worktree-pin")
+                        })
+                        .on_click(move |_, _window, cx| {
+                            // The row selects; without this, pinning would change
+                            // worktree on its way.
+                            cx.stop_propagation();
+                            let target = pin_target.clone();
+                            // The popover **stays open**, unlike every other gesture
+                            // here: pinning is not going somewhere, and one pins two or
+                            // three in a row while looking at the same list.
+                            for_pin.update(cx, |this, cx| {
+                                if let Some(app) = this.app.upgrade() {
+                                    app.update(cx, |app, cx| app.toggle_pin(&target, cx));
+                                }
+                                cx.notify();
+                            });
+                        }),
+                ),
         )
         .child(
             div()
@@ -810,7 +803,7 @@ fn worktree_row(
                 .child(
                     Button::new(("worktree-actions", index))
                         .ghost()
-                        .xsmall()
+                        .small()
                         .icon(icon("ellipsis"))
                         .tooltip(tr!("worktree-actions"))
                         .on_click(move |_, _window, cx| {
@@ -882,7 +875,7 @@ fn missing_row(
         .child(
             Button::new(("forget-repo", index))
                 .ghost()
-                .xsmall()
+                .small()
                 .icon(icon("x"))
                 .tooltip(tr!("repo-forget"))
                 .on_click(move |_, window, cx| {

@@ -232,7 +232,7 @@ impl ClaudhubApp {
                     .child(
                         Button::new(("keep-ours", index))
                             .outline()
-                            .xsmall()
+                            .small()
                             .label(tr!("conflict-keep-ours"))
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 this.resolve_conflict(for_ours.clone(), true, cx);
@@ -241,7 +241,7 @@ impl ClaudhubApp {
                     .child(
                         Button::new(("keep-theirs", index))
                             .outline()
-                            .xsmall()
+                            .small()
                             .label(tr!("conflict-keep-theirs"))
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 this.resolve_conflict(for_theirs.clone(), false, cx);
@@ -251,7 +251,7 @@ impl ClaudhubApp {
                     .child(
                         Button::new(("mark-resolved", index))
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(icon("check"))
                             .tooltip(tr!("conflict-resolved"))
                             .on_click(cx.listener(move |this, _, _window, cx| {
@@ -274,14 +274,14 @@ impl ClaudhubApp {
             .child(
                 Button::new(SharedString::from(format!("{scope}-continue")))
                     .outline()
-                    .xsmall()
+                    .small()
                     .label(tr!("pending-continue"))
                     .on_click(cx.listener(|this, _, _window, cx| this.resume_pending(cx))),
             )
             .child(
                 Button::new(SharedString::from(format!("{scope}-abort")))
                     .ghost()
-                    .xsmall()
+                    .small()
                     .label(tr!("pending-abort"))
                     .on_click(cx.listener(|this, _, _window, cx| this.abort_pending(cx))),
             )

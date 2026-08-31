@@ -503,7 +503,7 @@ impl ClaudhubApp {
                 // something out to the edge.
                 Button::new("fetch")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("refresh-cw"))
                     .tooltip(tr!("action-fetch"))
                     .loading(fetching)
@@ -528,7 +528,7 @@ impl ClaudhubApp {
                     .unwrap_or(true);
                 Button::new("rollback-all")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("undo-2"))
                     .tooltip(tr!("action-rollback-all"))
                     .loading(self.active_running(Action::Discard))
@@ -545,7 +545,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("stash")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("archive"))
                     .label(tr!("action-stash-short"))
                     .tooltip(tr!("stash-new"))
@@ -556,7 +556,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("pull")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("arrow-down-to-line"))
                     .tooltip(if behind > 0 {
                         tr!("action-pull-behind", { count: behind })
@@ -583,7 +583,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("push")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("arrow-up-from-line"))
                     .tooltip(if ahead > 0 {
                         tr!("action-push-ahead", { count: ahead })
@@ -652,7 +652,7 @@ impl ClaudhubApp {
         let tree = crate::ui::settings::Settings::global(cx).review_tree;
         Button::new("review-tree")
             .ghost()
-            .xsmall()
+            .small()
             .icon(icon(if tree { "list-tree" } else { "list" }))
             .tooltip(if tree {
                 tr!("review-as-list")
@@ -720,7 +720,7 @@ impl ClaudhubApp {
                         el.child(
                             Button::new("stage-all")
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .icon(icon("plus"))
                                 .label(tr!("action-stage-all"))
                                 .on_click(cx.listener(|this, _, _, cx| this.stage_all(cx))),
@@ -770,7 +770,7 @@ impl ClaudhubApp {
                         let pushing = self.active_running(Action::CommitPush);
                         Button::new("commit")
                             .primary()
-                            .xsmall()
+                            .small()
                             .icon(icon("git-commit-horizontal"))
                             .label(tr!("action-commit"))
                             .loading(committing)
@@ -790,7 +790,7 @@ impl ClaudhubApp {
                         let pushing = self.active_running(Action::CommitPush);
                         Button::new("commit-push")
                             .outline()
-                            .xsmall()
+                            .small()
                             .icon(icon("arrow-up-from-line"))
                             .label(tr!("action-commit-push"))
                             .loading(pushing)
@@ -817,7 +817,7 @@ impl ClaudhubApp {
         Some(
             Button::new("commit-suggest")
                 .ghost()
-                .xsmall()
+                .small()
                 .icon(icon("sparkles"))
                 // **`loading` and not a swapped glyph.** Standing `loader-circle`
                 // in for the sparkle drew a circle that does not turn: the
@@ -1161,7 +1161,7 @@ impl ClaudhubApp {
                         .child(
                             Button::new(("stage-remainder", ix))
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .icon(icon("plus"))
                                 .label(tr!("diff-unstaged-add"))
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -1212,7 +1212,7 @@ impl ClaudhubApp {
                         .child(
                             Button::new("stage-remainder-all")
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .label(tr!("diff-unstaged-add-all"))
                                 .on_click(cx.listener({
                                     let worktree = self.active.clone();
@@ -1627,7 +1627,7 @@ fn render_file(
             el.child(
                 Button::new(("discard", index))
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon(if untracked { "trash-2" } else { "undo-2" }))
                     .tooltip(if untracked {
                         tr!("action-delete")
@@ -1690,7 +1690,7 @@ fn render_reviewed(
     );
     Button::new(id)
         .ghost()
-        .xsmall()
+        .small()
         .icon(
             icon(if reviewed { "check-check" } else { "check" }).text_color(if reviewed {
                 cx.theme().success

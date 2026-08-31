@@ -35,6 +35,8 @@ actions!(
         ToggleTerminal,
         NextTerminal,
         PreviousTerminal,
+        NextTab,
+        PreviousTab,
         Commit,
         OpenSettings,
         ShowShortcuts,
@@ -700,6 +702,14 @@ table!(STANDARD, standard_bindings, false, [
     // Zoom aims at the area that has the focus: the terminal when it has it,
     // the diffs otherwise. `secondary-=` as much as `secondary-+` because the
     // plus sign needs Shift on an azerty keyboard as on a qwerty one.
+    // The documents of the centre, which is what `Ctrl+Tab` walks in every
+    // editor and every browser. It is the terminal's key too — it is a tabbed
+    // thing as well — so this one stops at its edge (`WINDOW_PREDICATE`) and
+    // the terminal's own pair answers there instead. Whichever tabs one is
+    // looking at is the set the key steps through, which is the only rule that
+    // needs no remembering.
+    Window "secondary-tab" => NextTab, WINDOW_PREDICATE, "shortcut-next-tab";
+    Window "secondary-shift-tab" => PreviousTab, WINDOW_PREDICATE, "shortcut-previous-tab";
     Window "secondary-=" => ZoomIn, PREDICATE, "shortcut-zoom-in";
     Window "secondary-+" => ZoomIn, PREDICATE, "shortcut-zoom-in";
     Window "secondary--" => ZoomOut, PREDICATE, "shortcut-zoom-out";
@@ -898,8 +908,12 @@ table!(STANDARD, standard_bindings, false, [
     // behind AltGr — so on half the keyboards there was no way at all. What is
     // taken from the running program is readline's `transpose-chars`.
     Terminal "secondary-t" => ToggleTerminal, PREDICATE, "shortcut-toggle-terminal";
-    Terminal "secondary-tab" => NextTerminal, PREDICATE, "shortcut-next-terminal";
-    Terminal "secondary-shift-tab" => PreviousTerminal, PREDICATE, "shortcut-previous-terminal";
+    // **In a terminal**, and not everywhere: the same keys walk the documents
+    // of the centre from the rest of the window. The predicate moved, the keys
+    // did not, so nobody's customisation of these two was dropped — a binding's
+    // id is its family and its **default keys**.
+    Terminal "secondary-tab" => NextTerminal, TERMINAL_PREDICATE, "shortcut-next-terminal";
+    Terminal "secondary-shift-tab" => PreviousTerminal, TERMINAL_PREDICATE, "shortcut-previous-terminal";
     // The terminals' conventions: the platform key *with* Shift, because a bare
     // `Ctrl+C` and `Ctrl+V` belong to the program.
     Terminal "secondary-shift-c" => CopySelection, TERMINAL_PREDICATE, "shortcut-terminal-copy";
@@ -1336,6 +1350,29 @@ pub fn next_terminal(
         return;
     };
     this.step_terminal(&worktree, 1, window, cx);
+}
+
+/// The next document of the centre.
+///
+/// Nothing is announced when there is only one: a window with a single tab open
+/// has nowhere to go, and a balloon saying so on every press would be the noise
+/// the gesture is meant to avoid.
+pub fn next_tab(
+    this: &mut ClaudhubApp,
+    _: &NextTab,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.cycle_tab(true, window, cx);
+}
+
+pub fn previous_tab(
+    this: &mut ClaudhubApp,
+    _: &PreviousTab,
+    window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    this.cycle_tab(false, window, cx);
 }
 
 pub fn open_settings(

@@ -205,6 +205,7 @@ impl ClaudhubApp {
                         crate::ui::notify::Notice {
                             title: "history-lines-untracked",
                             body: String::new(),
+                            hidden: 0,
                             level: crate::ui::notify::Level::Error,
                         },
                         window,
@@ -415,7 +416,7 @@ impl ClaudhubApp {
                         let selected = range == target;
                         Button::new(("history-range", ix))
                             .ghost()
-                            .xsmall()
+                            .small()
                             .label(label)
                             .selected(selected)
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -442,7 +443,7 @@ impl ClaudhubApp {
                     .child(
                         Button::new("history-lines-close")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(crate::ui::icons::icon("x"))
                             .tooltip(tr!("history-lines-close"))
                             // Back to where each came from: a restricted patch
@@ -466,7 +467,7 @@ impl ClaudhubApp {
                         header.child(
                             Button::new("history-lines-scope")
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .label(if lines_only {
                                     tr!("history-lines-only")
                                 } else {
@@ -502,7 +503,7 @@ impl ClaudhubApp {
                 header.child(
                     Button::new("history-branches")
                         .ghost()
-                        .xsmall()
+                        .small()
                         .icon(crate::ui::icons::icon("git-branch"))
                         .selected(want_branches)
                         .tooltip(if want_branches {
@@ -521,7 +522,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("history-graph")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(crate::ui::icons::icon("git-merge"))
                     .selected(show_graph)
                     .tooltip(if show_graph {

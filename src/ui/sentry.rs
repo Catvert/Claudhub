@@ -674,7 +674,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("sentry-refresh")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("refresh-cw"))
                     .tooltip(tr!("action-refresh"))
                     .disabled(loading)
@@ -1260,7 +1260,7 @@ fn sentry_row_of(
                 .child(
                     Button::new(("sentry-frame", *at))
                         .ghost()
-                        .xsmall()
+                        .small()
                         .icon(icon(if frame.in_app { "file-code" } else { "file" }))
                         .label(SharedString::from(format!("{}:{}", frame.path, frame.line)))
                         // A frame Sentry names by a module, or one of a

@@ -341,7 +341,7 @@ impl ClaudhubApp {
                     el.child(
                         Button::new("server-relaunch")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .label(tr!("server-relaunch"))
                             .when(!detail.is_empty(), |b| b.tooltip(detail.clone()))
                             .on_click(cx.listener(|this, _, window, cx| {

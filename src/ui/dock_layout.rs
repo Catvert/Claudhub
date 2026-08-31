@@ -78,7 +78,7 @@ pub fn build(
 ///
 /// `None` when nothing lands there. A half is a **group**, and a group with no
 /// tab is a strip of the edge that says nothing and cannot be filled except by
-/// dragging something onto it. The right's bottom half is that half: the whole
+/// dragging something onto it. The right's second half is that half: the whole
 /// edge is read in one run, and the size it would be given is what a panel
 /// dropped there gets instead.
 fn tools_of(anchor: Anchor, window: &mut Window, cx: &mut Context<DockArea>) -> Option<DockLayout> {
@@ -93,25 +93,34 @@ fn tools_of(anchor: Anchor, window: &mut Window, cx: &mut Context<DockArea>) -> 
     (held > 0).then_some(group)
 }
 
-/// A whole edge: the halves that hold something, stacked.
+/// A whole edge: the halves that hold something, side by side along it.
 ///
 /// **Two groups and not two tabs**: the halves are on screen together, which is
 /// what lets the file list and the tests be read at once without either being a
 /// tab of the other. It is the arrangement the review's column already had, now
-/// said once for every edge.
+/// said once for every edge — the bottom included, where everything used to
+/// share one group of tabs and a terminal was therefore how the graph of
+/// branches was put away.
+///
+/// **The split runs along the edge** (`Side::axis`): down a side zone, across
+/// the bottom one. Splitting the band downwards would give two strips one has
+/// to scroll, which is what its single slot was there to avoid.
 ///
 /// **An empty half is not a slot**, it is nothing at all: the edge is then the
 /// one group that holds something, which is exactly what the dock leaves behind
-/// when a half is emptied by dragging. `seats` reads a lone group as the top
+/// when a half is emptied by dragging. `seats` reads a lone group as the first
 /// half, so the survivors keep their anchor and the rail keeps its single run —
-/// and the right, where nothing starts below, is built whole rather than as a
-/// column with a gap under it.
+/// and the right, where nothing starts in the second, is built whole rather
+/// than as a column with a gap under it.
 fn edge(side: Side, window: &mut Window, cx: &mut Context<DockArea>) -> DockLayout {
-    let mut held: Vec<DockLayout> = side
-        .halves()
+    let mut held: Vec<DockLayout> = Half::BOTH
         .iter()
         .filter_map(|half| tools_of(Anchor::new(side, *half), window, cx))
         .collect();
+    let split = match side.axis() {
+        gpui::Axis::Horizontal => DockLayout::h_split(),
+        gpui::Axis::Vertical => DockLayout::v_split(),
+    };
     match held.len() {
         // An edge nothing asked for still needs a root the area can hold.
         0 => DockLayout::tabs(),
@@ -119,12 +128,12 @@ fn edge(side: Side, window: &mut Window, cx: &mut Context<DockArea>) -> DockLayo
         _ => held
             .into_iter()
             .enumerate()
-            .fold(DockLayout::v_split(), |split, (ix, group)| {
-                // The **bottom** half is the one given a size, never the top:
-                // two fixed sizes adding up to the region's height overflow it,
-                // and it is the top that should take what is left over. A
-                // **height**, which is not the zone's width — the split inside
-                // a side zone runs down.
+            .fold(split, |split, (ix, group)| {
+                // The **second** half is the one given a size, never the first:
+                // two fixed sizes adding up to the region overflow it, and it
+                // is the first that should take what is left over. Measured
+                // along the split and not along the zone — a height down a
+                // column, a width across the band.
                 split.child(group, (ix > 0).then(|| side.half_size()))
             }),
     }
@@ -248,8 +257,8 @@ pub fn seats(area: &DockArea, cx: &App) -> Vec<rails::Seat> {
                     // the layout wrote and what a drag rewrites.
                     let anchor = anchor.map(|anchor| match children.len() {
                         1 => anchor,
-                        _ if ix == 0 => Anchor::new(anchor.side, Half::Top),
-                        _ => Anchor::new(anchor.side, Half::Bottom),
+                        _ if ix == 0 => Anchor::new(anchor.side, Half::Start),
+                        _ => Anchor::new(anchor.side, Half::End),
                     });
                     walk(child, area, anchor, open, cx, out);
                 }
@@ -274,7 +283,7 @@ pub fn seats(area: &DockArea, cx: &App) -> Vec<rails::Seat> {
         let open = placement == DockPlacement::Center || area.is_dock_open(placement);
         // The top half until a split says otherwise — an edge holding one group
         // has no second half to be in.
-        let anchor = side_of(placement).map(|side| Anchor::new(side, Half::Top));
+        let anchor = side_of(placement).map(|side| Anchor::new(side, Half::Start));
         walk(tree.root(), area, anchor, open, cx, &mut out);
     }
     out
@@ -284,7 +293,10 @@ pub fn seats(area: &DockArea, cx: &App) -> Vec<rails::Seat> {
 ///
 /// `None` when the region does not exist yet: the caller then adds the panel to
 /// the region itself, which the area makes on the way.
-fn target_for(area: &DockArea, anchor: Anchor) -> Option<gpui_component::dock::InsertTarget> {
+pub(super) fn target_for(
+    area: &DockArea,
+    anchor: Anchor,
+) -> Option<gpui_component::dock::InsertTarget> {
     use gpui_component::dock::{InsertTarget, PaneRef};
 
     let tree = area.layout(placement_of(anchor.side))?;
@@ -297,23 +309,28 @@ fn target_for(area: &DockArea, anchor: Anchor) -> Option<gpui_component::dock::I
     };
     match root.kind() {
         // Already two halves — or more, the user having split one further. The
-        // first slot is the top, the last is the bottom.
+        // first slot is the first half, the last is the second.
         PaneRef::Split { children, .. } if children.len() > 1 => {
             let child = match anchor.half {
-                Half::Top => children.first(),
-                Half::Bottom => children.last(),
+                Half::Start => children.first(),
+                Half::End => children.last(),
             }?;
             Some(join(first_group(child)?))
         }
         // One group, and no way to tell which half it stands for: it is read as
-        // the top, so the bottom is a slot to be made below it.
+        // the first, so the second is a slot to be made beyond it — below it
+        // down a column, beside it across the band.
         _ => {
             let node = first_group(root).unwrap_or_else(|| root.id());
+            let beyond = match anchor.side.axis() {
+                gpui::Axis::Horizontal => gpui_base::Placement::Right,
+                gpui::Axis::Vertical => gpui_base::Placement::Bottom,
+            };
             match anchor.half {
-                Half::Top => Some(join(node)),
-                Half::Bottom => Some(InsertTarget::Split {
+                Half::Start => Some(join(node)),
+                Half::End => Some(InsertTarget::Split {
                     node,
-                    placement: gpui_base::Placement::Bottom,
+                    placement: beyond,
                     size: Some(anchor.side.half_size()),
                 }),
             }
@@ -351,7 +368,7 @@ pub fn move_to(
                 let id = handle.panel_id(cx);
                 let size = Some(anchor.side.default_size());
                 area.add_panel_view(handle, placement_of(anchor.side), size, window, cx);
-                if anchor.half == Half::Bottom {
+                if anchor.half == Half::End {
                     if let Some(target) = target_for(area, anchor) {
                         area.move_panel(id, target, window, cx);
                     }
@@ -522,7 +539,7 @@ impl crate::ui::app::ClaudhubApp {
             .child(self.render_rail(&rails[Side::Right.index()], cx))
     }
 
-    /// The bottom edge's buttons, for the status bar to carry.
+    /// One run of the bottom edge's buttons, for the status bar to carry.
     ///
     /// **Merged with the status bar rather than a strip of its own.** The two
     /// would have followed each other — thirty pixels between them to hold a
@@ -531,15 +548,29 @@ impl crate::ui::app::ClaudhubApp {
     /// is the observation that moved the screen picker down here in the first
     /// place, and it outlived the picker.
     ///
+    /// **Two runs, as on the side rails**, and the bar already had the shape
+    /// for them: what starts the bar names the half at the start of the band,
+    /// what ends it names the half at its end, and the fold button sits between
+    /// them. A single run would have said the bottom holds one group, which it
+    /// no longer does.
+    ///
     /// No background of its own: the bar has one.
-    pub(super) fn render_bottom_tools(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(super) fn render_bottom_tools(
+        &mut self,
+        half: Half,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let seats = self.seats(cx);
         let (folded, off) = self.rail_states();
         let rail = rails::rails(&seats, &folded, &off)
             .into_iter()
             .nth(Side::Bottom.index())
             .expect("three rails");
-        let buttons = self.rail_buttons(&rail.top, cx);
+        let run = match half {
+            Half::Start => &rail.start,
+            Half::End => &rail.end,
+        };
+        let buttons = self.rail_buttons(run, cx);
         if buttons.is_empty() {
             return gpui::Empty.into_any_element();
         }
@@ -617,7 +648,7 @@ impl crate::ui::app::ClaudhubApp {
         )))
         .icon(crate::ui::icons::icon(rails::zone_glyph(side, open)))
         .ghost()
-        .xsmall()
+        .small()
         .tooltip(label)
         .on_click(cx.listener(move |this, _, window, cx| {
             this.toggle_zone(side, window, cx);
@@ -651,7 +682,7 @@ impl crate::ui::app::ClaudhubApp {
                 Button::new(gpui::SharedString::from(format!(
                     "rail-{panel}-{}-{}",
                     anchor.side.index(),
-                    matches!(anchor.half, rails::Half::Bottom) as u8
+                    matches!(anchor.half, rails::Half::End) as u8
                 )))
                 .icon(crate::ui::icons::icon(button.icon))
                 .tooltip(button.title.text())
@@ -742,8 +773,8 @@ impl crate::ui::app::ClaudhubApp {
             // Nothing to show, nothing painted — not an empty band.
             return gpui::Empty.into_any_element();
         }
-        let top = self.rail_buttons(&rail.top, cx);
-        let bottom = self.rail_buttons(&rail.bottom, cx);
+        let top = self.rail_buttons(&rail.start, cx);
+        let bottom = self.rail_buttons(&rail.end, cx);
         let zone = self.zone_button(rail.side, cx);
         let run =
             |buttons: Vec<gpui::AnyElement>| v_flex().flex_none().gap(px(2.)).children(buttons);

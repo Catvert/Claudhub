@@ -413,19 +413,19 @@ pub fn look_of(path: &Path) -> FileLook {
         .unwrap_or(PLAIN)
 }
 
-/// A file's icon, tinted.
+/// A file's icon, tinted, at the size of the name it comes in front of —
+/// see `icons::glyph`.
 ///
 /// A `div` around the icon rather than a colour set on it: `Icon` inherits the
 /// text colour, and it is the container that fixes it.
 pub fn file_icon(path: &Path, cx: &App) -> gpui::AnyElement {
     use gpui::prelude::*;
-    use gpui_component::Sizable;
 
     let look = look_of(path);
     gpui::div()
         .flex_none()
         .when_some(look.color(cx), |el, color| el.text_color(color))
-        .child(crate::ui::icons::icon(look.icon).xsmall())
+        .child(crate::ui::icons::glyph(look.icon))
         .into_any_element()
 }
 

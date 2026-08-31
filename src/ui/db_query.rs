@@ -2146,7 +2146,7 @@ impl ClaudhubApp {
             .child(
                 Button::new(("db-run", rank))
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("play"))
                     .tooltip(tr!("db-run"))
                     .disabled(running)
@@ -2177,7 +2177,7 @@ impl ClaudhubApp {
             .child(
                 Button::new(("db-copy", rank))
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("copy"))
                     .tooltip(tr!("db-copy-result"))
                     .disabled(!has_result)
@@ -2186,7 +2186,7 @@ impl ClaudhubApp {
             .child(
                 Button::new(("db-export", rank))
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("download"))
                     .tooltip(tr!("db-export"))
                     .disabled(!has_result || exporting)
@@ -2250,7 +2250,7 @@ impl ClaudhubApp {
                 .child(
                     Button::new(("db-first", rank))
                         .ghost()
-                        .xsmall()
+                        .small()
                         .icon(icon("chevrons-left"))
                         .tooltip(tr!("db-first-page"))
                         .disabled(offset == 0)
@@ -2261,7 +2261,7 @@ impl ClaudhubApp {
                 .child(
                     Button::new(("db-previous", rank))
                         .ghost()
-                        .xsmall()
+                        .small()
                         .icon(icon("chevron-left"))
                         .tooltip(tr!("db-previous-page"))
                         .disabled(offset == 0)
@@ -2272,7 +2272,7 @@ impl ClaudhubApp {
                 .child(
                     Button::new(("db-next", rank))
                         .ghost()
-                        .xsmall()
+                        .small()
                         .icon(icon("chevron-right"))
                         .tooltip(tr!("db-next-page"))
                         .disabled(!more)
@@ -2289,7 +2289,7 @@ impl ClaudhubApp {
         let current = Settings::global(cx).db_page_size.max(1);
         Button::new("db-page-size")
             .ghost()
-            .xsmall()
+            .small()
             .label(SharedString::from(current.to_string()))
             .tooltip(tr!("db-page-size"))
             .dropdown_menu(move |menu, _window, _cx| {

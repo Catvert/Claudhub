@@ -1191,7 +1191,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("db-new-console")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("file-code"))
                     .tooltip(tr!("db-new-console"))
                     .on_click(
@@ -1201,7 +1201,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("db-index-all")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("zap"))
                     .tooltip(tr!("db-index-all"))
                     .disabled(indexing)
@@ -1210,7 +1210,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("db-refresh")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("refresh-cw"))
                     .tooltip(tr!("action-refresh"))
                     .on_click(cx.listener(|this, _, _window, cx| this.db_refresh(None, cx))),
@@ -1218,7 +1218,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("db-add")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("plus"))
                     .tooltip(tr!("db-add-connection"))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -1260,7 +1260,7 @@ impl ClaudhubApp {
                 .child(
                     Button::new("db-scope")
                         .ghost()
-                        .xsmall()
+                        .small()
                         .icon(icon("funnel"))
                         .tooltip(if scoped {
                             tr!("db-scope-on")

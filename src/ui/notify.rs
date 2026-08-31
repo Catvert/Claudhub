@@ -35,12 +35,25 @@ pub enum Level {
 pub struct Notice {
     /// The i18n key naming the outcome, resolved by the view.
     pub title: &'static str,
-    /// What git said, whole. Empty when it said nothing worth reading, and the
+    /// What git said. Empty when it said nothing worth reading, and the
     /// balloon is then its title alone — which is the whole message of a stage
     /// or a checkout.
     pub body: String,
+    /// The lines the body does not carry. Nought almost always; the view says
+    /// so when it is not, and that is what makes the cut below honest.
+    pub hidden: usize,
     pub level: Level,
 }
+
+/// How many lines a balloon carries.
+///
+/// A balloon is a message, not a window: a rebase that touches two hundred
+/// files answered with two hundred lines, and the balloon then covered the
+/// review it was reporting on — with no way to scroll it and nothing under it
+/// reachable. The number is chosen so that the answers one actually reads pass
+/// whole: a pull naming its files, a push naming its refs, a failure and its
+/// two lines of git.
+const MAX_LINES: usize = 14;
 
 /// The balloon an outcome deserves.
 ///
@@ -50,6 +63,19 @@ pub struct Notice {
 /// bar gone, that rule became a way of saying nothing at all, and a gesture
 /// that answers nothing reads as a gesture that did nothing.
 pub fn notice(action: Action, output: &str, level: Level) -> Notice {
+    let trimmed = output.trim();
+    let lines = trimmed.lines().count();
+    // **The first lines and not the last.** Git puts what it was doing at the
+    // top — `error: failed to push some refs` — and the tail of a long answer
+    // is a list, of which one line is as good as another.
+    let body = match lines > MAX_LINES {
+        true => trimmed
+            .lines()
+            .take(MAX_LINES)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        false => trimmed.to_string(),
+    };
     Notice {
         title: match level {
             Level::Success => action.success_key(),
@@ -58,7 +84,8 @@ pub fn notice(action: Action, output: &str, level: Level) -> Notice {
             // the operation itself — `error: failed to push some refs`.
             Level::Error => FAILED,
         },
-        body: output.trim().to_string(),
+        body,
+        hidden: lines.saturating_sub(MAX_LINES),
         level,
     }
 }
@@ -98,5 +125,35 @@ mod tests {
         assert_eq!(balloon.level, Level::Error);
         assert_eq!(balloon.title, FAILED);
         assert_eq!(balloon.body, "no upstream branch");
+        assert_eq!(balloon.hidden, 0);
+    }
+
+    /// A long answer is cut, and **says that it is**: a balloon taller than the
+    /// window covers the very thing it reports on, and one that quietly dropped
+    /// its tail would be worse than one that did not open.
+    #[test]
+    fn a_long_answer_is_cut_and_says_how_much() {
+        let long: String = (0..40)
+            .map(|n| format!(" app/File{n}.php | 2 +\n"))
+            .collect();
+        let balloon = notice(Action::Pull, &long, Level::Success);
+        assert_eq!(balloon.body.lines().count(), MAX_LINES);
+        assert_eq!(balloon.hidden, 40 - MAX_LINES);
+        // The head, which is where git says what it was doing.
+        assert!(
+            balloon.body.starts_with("app/File0.php"),
+            "{}",
+            balloon.body
+        );
+    }
+
+    /// Exactly the limit is not a cut: a balloon that said "and 0 more" would
+    /// be reporting on itself.
+    #[test]
+    fn what_fits_is_carried_whole() {
+        let fits: String = (0..MAX_LINES).map(|n| format!("line {n}\n")).collect();
+        let balloon = notice(Action::Pull, &fits, Level::Success);
+        assert_eq!(balloon.body.lines().count(), MAX_LINES);
+        assert_eq!(balloon.hidden, 0);
     }
 }

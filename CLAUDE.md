@@ -235,6 +235,7 @@ src/
     scroll.rs       la barre de défilement d'un panneau, et son lissage
     shortcuts.rs    les actions, leurs touches, et l'aide qui en sort
     shortcuts_view.rs  la fenêtre d'aide, en deux colonnes
+    vscode.rs       le clavier de VS Code, repris dans le nôtre — pur, testé
     theme.rs / icons.rs
 ```
 
@@ -420,17 +421,34 @@ fichiers, la recherche, les changements, la branche, les tests dans le haut ;
 les notes, les conflits, les remisages, les tags dans le bas ; à droite ce qui
 dit où l'on en est — les bases et, sous elles, les requêtes déjà jouées ; les
 erreurs de Sentry ; la PR de la branche et ses exécutions ; en bas ce qui a
-besoin de la largeur — le run suivi, les branches et leur graphe, les
-terminaux ;
+besoin de la largeur — le run suivi et les branches et leur graphe d'un côté,
+les terminaux de l'autre ;
 au centre ce qu'on relit — le diff, l'éditeur, l'aperçu, et chaque fichier ouvert
 et chaque console SQL.
 
-**La droite est un seul groupe**, les deux autres bords en ont deux : rien n'y
-démarre dans la moitié basse, et une moitié vide n'est pas un emplacement mais
-une bande qui ne dit rien et qu'on ne remplit qu'en y traînant quelque chose
-(`dock_layout::edge`). Elle existe toujours — un panneau qu'on y dépose la
-fabrique — et `seats` lit un groupe seul comme la moitié haute, si bien que le
-bandeau de droite garde une seule série.
+**Chaque bord a deux moitiés, et la fente suit le bord** (`Side::axis`) : un
+côté est une colonne, donc ses moitiés se superposent ; le bas est une bande,
+donc les siennes sont **côte à côte**, chacune gardant toute la hauteur. Ce
+sont les deux séries d'un bandeau — `Half::Start` et `Half::End`, jamais
+« haut » et « bas », faute de quoi `Bottom` voudrait dire « à droite » en bas.
+Le bas n'a eu qu'un emplacement, et ça faisait qu'appeler un terminal était la
+façon de ranger le graphe des branches à côté duquel on l'ouvrait.
+
+**Une moitié vide n'est pas un emplacement** mais une bande qui ne dit rien et
+qu'on ne remplit qu'en y traînant quelque chose (`dock_layout::edge`) : elle
+existe toujours — un panneau qu'on y dépose la fabrique — et `seats` lit un
+groupe seul comme la **première** moitié, si bien que les survivants gardent
+leur ancre. Rien ne démarre dans la seconde moitié d'un côté : c'est là que les
+terminaux sont chez eux, et il n'y en a aucun tant qu'on n'en demande pas.
+
+**Une tool window ne se dépose pas au centre, un document ne se dépose pas à un
+bord** (`panels::regions_of`, `BasePanel::regions` — le 26e commit du fork). Le
+survol ne dessine rien et le lâcher ne fait rien. Une tool window déposée au
+centre y devenait un document sans bouton de bandeau, donc sans retour possible
+autrement qu'en réinitialisant la vue. La réponse se lit sur le **nom** : ce que
+`rails::tool` connaît est une tool window, le reste est un document — pas de
+seconde liste. Elle ne vaut que pour le glissement : `add_panel_view` et une
+disposition relue posent le panneau où on le leur dit.
 
 **Un panneau assis à deux endroits a deux boutons**, un par bandeau, et le
 bouton porte son ancre : une pression dit d'où elle vient, sans quoi celle d'en
@@ -474,6 +492,16 @@ une zone de se replier à rien pendant que ses boutons restent. L'affordance du
 dock est un chevron dans une barre d'onglets : il nomme la zone d'à côté et s'en
 va avec elle, si bien que ce qu'il cachait ne revenait que par la barre d'un
 autre groupe. D'où `set_toggle_button_visible(false)`.
+
+**Et le `…` de la barre d'onglets non plus** (`set_menu_button_visible(false)`) :
+il portait trois choses que cette fenêtre a toutes ailleurs — le zoom est le
+bouton d'à côté, fermer est la croix que l'onglet peint, et retirer une vue est
+le menu « Vues » de la barre de titre, seul endroit qui liste ce qui peut
+revenir. À sa place, un bouton qui **replie** la vue (`panels::fold_button`) :
+la seule chose que la rangée ne savait pas faire, et la moitié manquante de la
+phrase que le zoom commence. Il presse le bouton de bandeau de la vue
+(`press_tool` sans ancre), donc c'est `rails::press` qui décide, en un seul
+endroit. Les tool windows seulement : un document du centre ne se replie pas.
 
 **Un bandeau porte en son milieu la zone entière** (`rails::zone_glyph`,
 `dock_layout::zone_button`) : presser une vue allumée range sa **moitié**, et
@@ -565,10 +593,15 @@ Sept pièges du dock, tous rencontrés :
 **Un terminal s'ouvre du côté que le réglage dit**, et le `+` offre en plus
 l'**autre** côté — une seule entrée, toujours celle que le réglage ne fait pas
 (`TerminalPlacement::other`). Le `+` d'une barre d'onglets ouvre dans **sa**
-vue, celui de la barre d'état dans celle du réglage. Le groupe que rejoint un
+vue, celui de la barre d'état dans celle du réglage. Il se pose **après le
+dernier onglet** (`tab_bar_trailing`) et non au bout de la barre : le geste est
+« un de plus », donc il se lit comme l'onglet suivant. Le groupe que rejoint un
 nouveau terminal est celui d'un frère **de la même vue**, et non le dernier
 ouvert : avec des terminaux sur deux bords, le plus récent est souvent sur
-l'autre.
+l'autre. **Sans frère, la cible se dit quand même** (`dock_layout::target_for`
+sur le `home` de la table) : sans cible, `add_panel_view` laisse le panneau dans
+le **premier** groupe de la zone, qui est justement la moitié dont les terminaux
+ont été sortis.
 
 **Les terminaux sont des panneaux** : un par terminal, rendant sa propre
 `Entity<TerminalView>`. La place se garde par l'invisibilité, pas par un
@@ -597,6 +630,16 @@ qu'il porte non (`theme::scroll_gutter`), la gouttière étant toujours réserv�
 voisines) : une hauteur figée déborde dès qu'on grossit la police, et c'est pire
 dans les listes virtualisées, qui réservent exactement ce qu'on leur annonce.
 
+**La gouttière est un cran de luminosité sous la carte** (`theme::gutter_of`),
+et le cran va **du côté où il y a de la place** : vers le bas depuis un fond
+clair, vers le haut depuis un fond déjà au ras du noir, où en retirer peint
+deux fois le même noir. Il valait cinq pour cent, une couleur qui se mesure et
+que personne ne voit.
+
+**Les boutons de la fenêtre sont `small`**, une seule taille : la moitié
+étaient `xsmall`, soit vingt pixels — une cible qu'on vise plutôt qu'on ne
+presse. Les **glyphes** dedans restent `xsmall` : c'est la boîte qui a grandi.
+
 **`Theme::tokens` est dérivé de `Theme::colors` une seule fois**, à l'application
 de la palette : toute couleur écrite dans `theme::apply` doit être suivie du
 recalcul, sans quoi elle ne se voit nulle part et rien ne le signale.
@@ -608,7 +651,7 @@ registre de gpui-component ne se charge **que depuis un répertoire**, qu'il
 surveille ; les thèmes sont donc écrits dans `<config>/themes/` au démarrage, et
 réécrits à chaque fois — pour en modifier un, le copier sous un autre nom.
 
-**Le fork de gpui-component** (voir `Cargo.toml`) est vingt-deux commits
+**Le fork de gpui-component** (voir `Cargo.toml`) est vingt-cinq commits
 au-dessus de leur `main`, chacun payé par un symptôme :
 
 1. le `TabVariant` que `DockSkin` fait passer jusqu'au `TabBar` ;
@@ -679,6 +722,48 @@ au-dessus de leur `main`, chacun payé par un symptôme :
     `scroll_size` ne répond pas non plus — il est plafonné par le bas à la
     hauteur déjà à l'écran, et un champ ayant grandi une fois ne rapetissait
     plus jamais.
+
+23. **un formulaire de réglages dit quelle page on vient de choisir**
+    (`on_select`) : sa sélection est un `use_keyed_state`, qui meurt avec le
+    dialogue, et `SettingsState` est privé — une application n'avait aucun
+    moyen de retenir la page qu'elle rouvrait. Il rend le **titre** et non
+    l'indice, lequel compte dans la liste que la recherche a filtrée.
+
+24. **un skin peut retenir le `…` d'une barre d'onglets**
+    (`set_menu_button_visible`) : il porte le `dropdown_menu` du panneau, le
+    zoom et la fermeture, et une application qui a posé les trois ailleurs se
+    retrouve avec un bouton dont le menu répète la barre où il est. C'est la
+    décision du chevron d'à côté, écrite pour lui ressembler.
+
+25. **la poignée d'une zone se prend là où le trait est peint** : trois
+    défauts pour un symptôme. Sa zone de prise faisait **un pixel** — un
+    `w(HANDLE_SIZE)` rembourré de `px(HANDLE_PADDING)` se lit neuf, mais le
+    rembourrage tombe *dedans* dans une boîte-bordure, qui est ce que taffy
+    dispose. Elle était centrée sur le **bord du panneau** et non sur la
+    couture, qui est la gouttière d'à côté, d'où une demi-gouttière de
+    décalage vers l'intérieur — cinq pixels pour la zone gauche, qui avait un
+    cas à elle et un FIXME ; `nudge` est ce par quoi l'appelant le dit. Et la
+    boîte de la zone la **rognait** : le rognage descend d'un niveau, sur les
+    panneaux qui en ont besoin.
+
+26. **un panneau dit dans quelles régions il se dépose** (`Panel::regions`,
+    `DockRegions`) : un glissement atterrit là où on le lâche, si bien qu'une
+    tool window pouvait être déposée au centre, où elle devenait un document
+    sans bouton de bandeau. Le drag lit la réponse **à son départ** et la
+    porte : le groupe survolé tient ses propres panneaux, celui qu'on traîne
+    vient d'ailleurs, et résoudre son identifiant demanderait de remonter à
+    l'aire, ce qu'un groupe ne sait pas faire. Refusé deux fois, et la seconde
+    n'est pas redondante — au-dessus du contenu, l'indicateur ne se dessine
+    pas ; sur la barre d'onglets, le créneau vient du skin sans consulter
+    d'indicateur.
+
+27. **un panneau peut poser un contrôle après le dernier onglet**
+    (`TabBar::trailing`, `Panel::tab_bar_trailing`) : le suffixe est le bout de
+    la barre, à côté du zoom et du repli, où un « nouvel onglet » se lit comme
+    une action sur le groupe et non comme l'onglet suivant. Porté dans le titre
+    de **chaque** onglet, faute d'un autre endroit, il était répété autant de
+    fois qu'il y avait d'onglets. Lu sur le panneau **affiché**, comme le
+    suffixe de titre : un groupe tient ce qu'on y a traîné.
 
 Les commits ont vocation à partir en PR.
 
@@ -787,7 +872,14 @@ grille et le pty. Le verrou de la grille est partagé avec la boucle d'E/S :
 fixe ne suffit pas à aligner les colonnes : chaque run est posé **à sa colonne**
 en absolu, et un caractère mesuré hors grille reçoit une case à lui. Les lignes
 de l'historique sont numérotées **négativement**. Le redimensionnement attend que
-la main s'arrête, l'attente repartant à chaque changement. Une ligne de terminal
+la main s'arrête — un `SIGWINCH` par image ferait redessiner le programme à
+chaque image, et ses invites s'empileraient au lieu de se remplacer. Mais
+**lâcher la poignée est un événement, pas un silence** : un écouteur de
+relâchement posé sur la **fenêtre** (le séparateur a capturé le pointeur, le
+bouton remonte sur lui) applique la géométrie sur-le-champ, et l'attente ne
+répond plus que de ce qui n'est pas un geste — un repli de zone, la police, le
+gestionnaire de fenêtres. Elle se dort **jusqu'à** l'heure du dernier
+changement plus le silence, et non par tics aveugles. Une ligne de terminal
 ne se laisse pas comprimer (`flex_shrink_0`). **Le texte nu passe par l'input
 handler, jamais par la frappe** : `key_bytes` ne rend que les touches spéciales
 et les combinaisons, `on_key` consomme ce qu'il rend, et la plateforme livre à
@@ -1048,6 +1140,22 @@ casse. Une touche que
 gpui lit n'est pas une touche qui existe (`valid_keys`) ; `KeyBinding::new`
 **panique** sur ce qu'elle ne sait pas lire, et `init` tourne au démarrage.
 
+**`Ctrl+Tab` parcourt les onglets de ce qu'on regarde** : les documents du
+centre (`panels::cycle_center_tab`, le groupe qui a le focus, sinon le
+premier), les terminaux quand c'est un terminal qu'on a sous les doigts — deux
+prédicats qui ne se rencontrent jamais. Ces touches étaient au terminal seul :
+**le prédicat a bougé, pas les touches**, sans quoi l'identifiant de la liaison
+changeait et la personnalisation de qui en avait une partait sans un mot. Rien
+n'en va sur la piste : un clic sur un onglet n'y écrit rien non plus.
+
+**Le clavier de VS Code se reprend** (`vscode.rs`) — une table des gestes que
+les deux applications ont, jamais de leurs commandes : VS Code en a trois
+mille. Deux sources, ses défauts à lui puis le `keybindings.json` de
+l'utilisateur — seul endroit où `git.pull`, qui n'a pas de touche chez lui, en
+reçoit une. Un import **n'éteint jamais** un raccourci. Le fichier est lu
+**depuis le thread d'interface**, pour la raison du trousseau : il appartient à
+la session de bureau, qui est du côté Windows quand les workers sont dans WSL.
+
 **Le lissage de la molette** (`motion.rs`) — on n'empêche pas gpui de sauter (il
 n'y a pas de capture pour la molette) : on le laisse faire, on lit où il a
 atterri, on **remet** le décalage d'avant et on y va progressivement. D'où
@@ -1098,11 +1206,18 @@ absente ne se distinguerait pas d'une entrée d'un dépôt pas encore ouvert.
 **Les réglages** (`settings.rs`) — un **global gpui** et non un champ de
 `ClaudhubApp` : le formulaire déclare chaque champ par des fermetures qui ne
 reçoivent qu'un `App`. L'écriture est différée d'une demi-seconde. Ce qui dépend
-d'un réglage se **relit à chaque rendu**, jamais à la construction. La page
-demandée passe par l'**identifiant** du formulaire, `default_selected_index`
-n'étant lu qu'à la création de l'état. Le formulaire est une **entité enfant**
-bâtie une fois : `open_dialog` retient un `Fn` rappelé depuis le rendu de la
-racine, et lire l'entité racine de là est une panique.
+d'un réglage se **relit à chaque rendu**, jamais à la construction. Le
+formulaire est une **entité enfant** bâtie une fois : `open_dialog` retient un
+`Fn` rappelé depuis le rendu de la racine, et lire l'entité racine de là est une
+panique.
+
+**La page est à nous, pas au formulaire.** Sa sélection est un
+`use_keyed_state`, qui meurt avec le dialogue : chaque ouverture repart de
+`default_selected_index`. D'où `Page`, retenue ici et redonnée sur un
+**identifiant** neuf — seul moment où ce défaut est lu —, et le vingt-troisième
+commit du fork, `on_select`, qui dit quelle page on vient de choisir. Sans
+cela, ouvrir les réglages depuis le panneau des bases y ramenait pour
+toujours.
 
 **Le journal** (`logging.rs`) — notre `log::Log` par-dessus celui d'`env_logger`,
 un anneau de deux mille lignes. Une application graphique n'a pas de console sous
@@ -1193,6 +1308,10 @@ Elles viennent d'Aviary, et les enfreindre produit des bugs silencieux.
   (`ui::notify`, `ClaudhubApp::announce`) : la barre d'état n'en porte plus
   rien. Un point d'appel sans fenêtre passe par la file `pending_notes`, vidée
   en tête du rendu de la racine — `push_notification` réclame un `&mut Window`.
+  Elle est **bornée deux fois** : `notify::notice` coupe le corps à quatorze
+  lignes et dit combien il en reste — un rebase de deux cents fichiers
+  recouvrait la relecture qu'il rapportait — et `balloon` lui pose un plafond
+  au tiers de la fenêtre, une ligne n'étant pas une hauteur.
 - **Un handle de focus survit à l'élément qui le portait**, et une fenêtre dont
   le focus pend sur un nœud qui n'est plus peint devient sourde : gpui remonte
   l'événement depuis ce nœud, ne le trouve pas, et repart de la racine de son
@@ -1201,6 +1320,13 @@ Elles viennent d'Aviary, et les enfreindre produit des bugs silencieux.
   remet tout en marche, ce qui rend le symptôme illisible. Ça arrive au champ
   d'un modal, qui est une entité de l'application peinte dans un dialogue et
   lui survit ; `app::reclaim_stranded_focus`, en tête de rendu, est le filet.
+- **Tout ce qui se clique dans la barre de titre passe par `topbar::actions()`**,
+  qui consomme la pression. La barre est la zone de glissement de la fenêtre, et
+  le déplacement démarre sur une pression que rien n'a arrêtée : sous Windows
+  par `HTCAPTION`, sous Linux par le `start_window_move` que la barre appelle au
+  premier mouvement. Les deux avalent le relâchement, donc le clic n'a jamais
+  lieu — un bouton posé hors de ce groupe ne répond qu'une fois sur deux, et
+  rien ne le dit.
 - Les raccourcis passent par `secondary-` : le reste du clavier appartient au
   programme du terminal.
 - gpui rend via Vulkan sur Linux : `vulkan-loader` doit être dans

@@ -817,7 +817,7 @@ impl ClaudhubApp {
                 el.child(
                     Button::new("vault-open")
                         .ghost()
-                        .xsmall()
+                        .small()
                         .icon(icon("external-link"))
                         .tooltip(tr!("note-open-vault"))
                         .on_click(move |_, _window, cx| {
@@ -941,7 +941,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("notes-filter")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon(if only_open { "eye-off" } else { "eye" }))
                     .selected(only_open)
                     .tooltip(tr!("note-only-open"))
@@ -950,7 +950,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("notes-send-all")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("send"))
                     .tooltip(tr!("note-send-all"))
                     .disabled(pending == 0)
@@ -1077,7 +1077,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("reviewed-clear")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("delete"))
                     .tooltip(tr!("note-reviewed-clear"))
                     .on_click(cx.listener(|this, _, _window, cx| this.clear_reviewed(cx))),
@@ -1120,7 +1120,7 @@ impl ClaudhubApp {
                     .child(
                         Button::new(("reviewed-undo", index))
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(icon("check-check"))
                             .tooltip(tr!("action-unreview"))
                             .on_click(cx.listener(move |this, _, _window, cx| {
@@ -1157,7 +1157,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("todo-add")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("plus"))
                     .tooltip(tr!("todo-add"))
                     // The button only gives focus to the input row that is
@@ -1224,7 +1224,7 @@ impl ClaudhubApp {
                     .child(
                         Button::new(("todo-remove", line))
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(icon("trash-2"))
                             .tooltip(tr!("todo-remove"))
                             .on_click(
@@ -1316,7 +1316,7 @@ impl ClaudhubApp {
                     .child(
                         Button::new(("note-send", id as usize))
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(icon("send"))
                             .tooltip(tr!("note-send"))
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -1326,7 +1326,7 @@ impl ClaudhubApp {
                     .child(
                         Button::new(("note-edit", id as usize))
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(icon("pencil"))
                             .tooltip(tr!("note-edit"))
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -1336,7 +1336,7 @@ impl ClaudhubApp {
                     .child(
                         Button::new(("note-delete", id as usize))
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(icon("trash-2"))
                             .tooltip(tr!("note-delete"))
                             .on_click(cx.listener(move |this, _, _window, cx| {

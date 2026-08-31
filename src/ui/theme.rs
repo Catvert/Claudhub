@@ -154,17 +154,13 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
     // grid of stitched rectangles. Blended into the gutter, the bar lets tabs
     // read as sitting on a card — which the library could not do by itself, its
     // `TabPanel::render` being a `size_full()` with neither radius nor margin.
-    let base = theme.background;
-    let gutter = Hsla {
-        l: (base.l - 0.05).max(0.),
-        ..base
-    };
+    let gutter = gutter_of(theme.background);
     theme.tab_bar = gutter;
     // The tab rail is **on the card**, not on the gutter: a group's bar and
     // content share the same surface, and that is what blends them into each
     // other — the old seam between the two was precisely the bar painted in the
     // gutter colour above a bordered card.
-    theme.tab_bar_segmented = base;
+    theme.tab_bar_segmented = theme.background;
     // The active pill therefore carries a **raised** tone (that of section
     // headers), not the card's — on the card it would be invisible.
     theme.tab_active = theme.secondary;
@@ -200,6 +196,35 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
     base.resizable.handle = Some(gpui::transparent_black());
 
     cx.refresh_windows();
+}
+
+/// The gutter's colour, a step of lightness away from the card's.
+///
+/// **The step goes wherever there is room.** Down from a light background; up
+/// from one already at the bottom of its range, where taking lightness away
+/// paints the same near-black twice and the window reads as one flat sheet —
+/// which is exactly what the gutter exists to prevent.
+///
+/// The step was five percent, and five percent is a colour one can measure and
+/// not one anybody sees: it holds on a calibrated screen and vanishes on a
+/// laptop panel, so the cards stopped reading as sitting *on* anything. It is
+/// still small — this is a seam between two planes, not a border — but it is
+/// now a seam.
+fn gutter_of(card: Hsla) -> Hsla {
+    /// How far apart the two planes are.
+    const STEP: f32 = 0.08;
+    /// Below this, there is no room underneath and the step goes up.
+    const FLOOR: f32 = 0.02;
+
+    let l = if card.l >= STEP + FLOOR {
+        card.l - STEP
+    } else {
+        card.l + STEP
+    };
+    Hsla {
+        l: l.clamp(0., 1.),
+        ..card
+    }
 }
 
 /// The height of a list row.
@@ -479,6 +504,47 @@ pub fn status_color(code: crate::git::StatusCode, cx: &App) -> Hsla {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn grey(l: f32) -> Hsla {
+        Hsla {
+            h: 0.,
+            s: 0.,
+            l,
+            a: 1.,
+        }
+    }
+
+    /// The seam is there in both directions, and it is the same seam: a dark
+    /// palette whose background is already all but black gets its gutter
+    /// **above** it, since there is nothing below.
+    #[test]
+    fn the_gutter_steps_away_from_the_card_whichever_way_there_is_room() {
+        let light = gutter_of(grey(0.98));
+        assert!(light.l < 0.98 - 0.05, "{}", light.l);
+        let dark = gutter_of(grey(0.01));
+        assert!(dark.l > 0.01 + 0.05, "{}", dark.l);
+        // And nothing leaves the range, whatever the palette says.
+        for l in [0., 0.02, 0.5, 0.99, 1.] {
+            let gutter = gutter_of(grey(l));
+            assert!((0. ..=1.).contains(&gutter.l), "{l} gave {}", gutter.l);
+        }
+    }
+
+    /// Only the lightness moves: a tinted palette keeps its tint in the gutter,
+    /// which is what makes the derivation safe on a theme written by somebody
+    /// else.
+    #[test]
+    fn the_gutter_keeps_the_cards_hue() {
+        let card = Hsla {
+            h: 0.6,
+            s: 0.3,
+            l: 0.2,
+            a: 1.,
+        };
+        let gutter = gutter_of(card);
+        assert_eq!((gutter.h, gutter.s, gutter.a), (card.h, card.s, card.a));
+        assert_ne!(gutter.l, card.l);
+    }
 
     /// A theme the registry fails to read is simply ignored: no error reaches
     /// the screen, it is just missing from the list. This test is the only

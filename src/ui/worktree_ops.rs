@@ -2033,20 +2033,63 @@ impl ClaudhubApp {
         let known = self.wt_slug(&main, &worktree).is_some();
         let mut actions = Vec::new();
 
+        // **The remote first**, and in a group of its own. The title bar has
+        // both already, and only while there is something to bring down or to
+        // send up: a button that does nothing for hours is a button one stops
+        // seeing, which is right for a bar one reads all day and wrong for a
+        // menu one opens to make a gesture. Here they are always offered —
+        // pulling with nothing to pull answers "already up to date", which is
+        // an answer — and `Ctrl+Maj+U` and `Ctrl+Maj+P` are the same two.
+        //
+        // They sit above the two that follow rather than beside them because
+        // they speak of somewhere else: the remote, where "update from base"
+        // and "integrate" speak of another branch in this same repository.
         {
             let target = worktree.clone();
             actions.push(WtAction::new(
-                "update",
+                "pull",
                 "arrow-down-to-line",
-                tr!("worktree-update"),
+                tr!("action-pull"),
                 move |app, window, cx| {
-                    // Updating from the base is read off the worktree being
-                    // looked at: selecting it first is what makes the entry mean
-                    // the row it was opened on and not the one on screen.
+                    // Selected first, for the reason written on `update`
+                    // below: `pull` acts on the checkout on screen, and this
+                    // menu is opened on a row that need not be it.
                     app.select_worktree(target.clone(), window, cx);
-                    app.update_from_base(cx);
+                    app.pull(cx);
                 },
             ));
+        }
+        {
+            let target = worktree.clone();
+            actions.push(WtAction::new(
+                "push",
+                "arrow-up-from-line",
+                tr!("action-push"),
+                move |app, window, cx| {
+                    app.select_worktree(target.clone(), window, cx);
+                    app.push(cx);
+                },
+            ));
+        }
+
+        {
+            let target = worktree.clone();
+            actions.push(
+                WtAction::new(
+                    "update",
+                    "arrow-down-to-line",
+                    tr!("worktree-update"),
+                    move |app, window, cx| {
+                        // Updating from the base is read off the worktree being
+                        // looked at: selecting it first is what makes the entry
+                        // mean the row it was opened on and not the one on
+                        // screen.
+                        app.select_worktree(target.clone(), window, cx);
+                        app.update_from_base(cx);
+                    },
+                )
+                .group(),
+            );
         }
         {
             let target = worktree.clone();
@@ -2280,7 +2323,7 @@ impl ClaudhubApp {
             worktree.display()
         )))
         .ghost()
-        .xsmall()
+        .small()
         .icon(icon("external-link"))
         .label(tr!("wt-links-open"));
         let main = self.repo_of(worktree).map(|repo| repo.main.clone());
@@ -2346,43 +2389,88 @@ impl ClaudhubApp {
         )
     }
 
-    /// The state badge of a worktree `wt` knows how to start.
+    /// Whether the worktree one is in is running, **and the switch for it**.
+    ///
+    /// It was a dot, and a dot is half an answer: the state was on the bar and
+    /// the gesture that changes it was three clicks away, inside the `…` menu,
+    /// which is a long way for the thing one does twice a morning. The glyph
+    /// says both — `play` where pressing starts it, `stop` where pressing stops
+    /// it — and the colour keeps the reading the dot had, green for what is up,
+    /// so a glance still answers without naming the gesture.
+    ///
+    /// **A dot again where there is no gesture**: a project declaring `up` and
+    /// no `down` has nothing to press while it runs, and a state is still worth
+    /// showing. That case is the reason this is one function and not a button
+    /// beside a badge.
+    ///
+    /// Nothing at all when `wt` does not know the checkout, or knows it and
+    /// cannot say whether it is up — `[status] up` is what answers that, and a
+    /// project without one has no state to show.
     pub(super) fn render_wt_state(
         &self,
         worktree: &Path,
-        cx: &gpui::App,
+        cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
+        use gpui_component::button::{Button, ButtonVariants as _};
+        use gpui_component::{Disableable as _, Sizable as _};
+
         let up = self.wt_state(worktree)?.up?;
-        // Starting or stopping is the only state the dot cannot show, being
-        // neither of the two it knows: it becomes a spinner, and the row is the
-        // only place that says anything for the next half-minute.
+        // Starting or stopping is the only state the glyph cannot show, being
+        // neither of the two it knows: it becomes a spinner, and the bar is the
+        // only place that says anything for the next half-minute. Still a
+        // button, and merely disabled: a badge here would be narrower than what
+        // it replaces, and everything to its right would step sideways for the
+        // half-minute the operation takes.
         if self.flight.wt_target() == Some(worktree) {
+            return Some(
+                Button::new("wt-power")
+                    .ghost()
+                    .small()
+                    .disabled(true)
+                    .icon(icon("loader-circle").text_color(cx.theme().warning))
+                    .into_any_element(),
+            );
+        }
+        let main = self.main_of(worktree);
+        let project = main.as_ref().and_then(|main| self.wt_project(main));
+        let can = project.is_some_and(|project| if up { project.has_down } else { project.has_up });
+        let colour = match up {
+            true => cx.theme().success,
+            false => cx.theme().muted_foreground,
+        };
+        let Some(main) = main.filter(|_| can) else {
             return Some(
                 h_flex()
                     .flex_none()
                     .child(
-                        icon("loader-circle")
-                            .xsmall()
-                            .text_color(cx.theme().warning),
+                        div()
+                            .size(px(7.))
+                            .rounded_full()
+                            .when(up, |el| el.bg(colour))
+                            .when(!up, |el| el.border_1().border_color(colour.opacity(0.8))),
                     )
                     .into_any_element(),
             );
-        }
-        let color = if up {
-            cx.theme().success
-        } else {
-            cx.theme().muted_foreground
         };
+        let target = worktree.to_path_buf();
         Some(
-            h_flex()
-                .flex_none()
-                .child(
-                    div()
-                        .size(px(7.))
-                        .rounded_full()
-                        .when(up, |el| el.bg(color))
-                        .when(!up, |el| el.border_1().border_color(color.opacity(0.8))),
-                )
+            Button::new("wt-power")
+                .ghost()
+                .small()
+                .icon(icon(if up { "circle-stop" } else { "play" }).text_color(colour))
+                .tooltip(if up {
+                    tr!("worktree-down")
+                } else {
+                    tr!("worktree-up")
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    let main = main.clone();
+                    if up {
+                        this.wt_down(main, &target, window, cx);
+                    } else {
+                        this.wt_up(main, &target, window, cx);
+                    }
+                }))
                 .into_any_element(),
         )
     }

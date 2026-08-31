@@ -18,9 +18,9 @@ use gpui::{
     Focusable, Hsla, IntoElement, PathBuilder, Pixels, Render, WeakEntity, Window,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::dock::{BasePanel, Panel, PanelControl, PanelEvent};
+use gpui_component::dock::{BasePanel, DockRegions, Panel, PanelControl, PanelEvent};
+use gpui_component::menu::PopupMenuItem;
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _};
-use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::ActiveTheme;
 use gpui_component::Sizable as _;
 
@@ -35,6 +35,26 @@ use crate::ui::settings::Settings;
 /// wheel button both close the file.
 type Closing = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
 
+/// Where a panel of this name may be dropped: an edge, or the centre.
+///
+/// **A tool window is picked from and a document is read**, and that is the
+/// whole of the difference — `ui::rails` says which a name is, and it is the
+/// same table the rail buttons come from, so there is nothing here to keep in
+/// step. Until the dock could be told, a drag was free to swap the two: a tool
+/// window dropped in the centre became a document with no rail button and no
+/// tab of its own to get back by, and a file dragged to an edge sat in a
+/// column of lists where the rail said nothing was.
+///
+/// It is asked of the **name** and not of the panel's own state, for the
+/// reason `needed:` is asked of the application: a panel does not know which
+/// region holds it, and the registry rebuilds one from a name alone.
+pub fn regions_of(name: &str) -> DockRegions {
+    match crate::ui::rails::tool(name) {
+        Some(_) => DockRegions::EDGES,
+        None => DockRegions::CENTER,
+    }
+}
+
 /// A tab: the glyph of the view's own rail button, then its name.
 ///
 /// **The same picture in both places.** A rail button and a tab are two ways of
@@ -48,7 +68,7 @@ fn tab_row(name: &str, label: gpui::SharedString) -> gpui::Div {
     if let Some(glyph) = pinned_glyph(name) {
         return gpui_component::h_flex()
             .items_center()
-            .child(crate::ui::icons::icon(glyph).xsmall());
+            .child(crate::ui::icons::glyph(glyph));
     }
     gpui_component::h_flex()
         .gap_1()
@@ -56,7 +76,7 @@ fn tab_row(name: &str, label: gpui::SharedString) -> gpui::Div {
         .children(
             crate::ui::rails::icon_of(name)
                 .or_else(|| document_glyph(name))
-                .map(|glyph| crate::ui::icons::icon(glyph).xsmall()),
+                .map(crate::ui::icons::glyph),
         )
         .child(label)
 }
@@ -130,7 +150,7 @@ fn closable_title(
         .child(
             Button::new("close-view")
                 .ghost()
-                .xsmall()
+                .small()
                 .icon(crate::ui::icons::icon("x"))
                 .on_click(move |_, window, cx| {
                     // The tab under it selects on click: without this, the
@@ -398,23 +418,37 @@ pub fn register(app: &Entity<ClaudhubApp>, cx: &mut App) {
 ///
 /// You come back through the main menu (`VIEWS`): a hidden view has no tab left,
 /// so nothing left to click.
-fn hide_view(app: &WeakEntity<ClaudhubApp>, name: &'static str, menu: PopupMenu) -> PopupMenu {
-    // **Only a tool window.** The way back is the title bar's "Views" menu, and
-    // that menu lists the rails' table: a document taken off it — the diff, the
-    // preview — would be a view with no button, no tab and no entry anywhere,
-    // which is a window one cannot put back together. What one does with a
-    // document is close it, and its tab now carries the cross for it.
-    if crate::ui::rails::tool(name).is_none() {
-        return menu;
-    }
+/// The control that folds a tool window away, beside the one that zooms it.
+///
+/// **The pair is the point.** A tab bar's right-hand end offers "make this fill
+/// the area"; what it never offered was the other half of that sentence, and a
+/// view was put away either from its rail button — off at the window's edge,
+/// which is a journey when the pointer is already here — or from a `…` menu
+/// that no longer exists.
+///
+/// It presses the view's **own rail button** (`press_tool` with no anchor), so
+/// what it does is what that button does and is decided in one place
+/// (`rails::press`): the half this group sits in goes away, and the button on
+/// the rail lights up as the way back. Nothing here needs to know which zone
+/// holds the panel — a panel does not know that, and `rails::press` reads it
+/// from the seats.
+///
+/// **Tool windows only.** The centre does not fold: a document has no rail
+/// button, so a control that put it away would leave a view with no tab, no
+/// button and no entry anywhere. What one does with a document is close it, and
+/// its tab carries the cross for that.
+fn fold_button(app: &WeakEntity<ClaudhubApp>, name: &'static str) -> Option<Vec<Button>> {
+    crate::ui::rails::tool(name)?;
     let app = app.clone();
-    menu.item(
-        PopupMenuItem::new(tr!("action-hide-view"))
-            .icon(crate::ui::icons::icon("eye-off"))
-            .on_click(move |_, _window, cx| {
-                let _ = app.update(cx, |this, cx| this.set_panel_off(name, true, cx));
-            }),
-    )
+    Some(vec![Button::new("fold-view")
+        // The dash of a window's minimise, and **not** the glyph the dock
+        // already uses to zoom back out: the two sit side by side, so the same
+        // picture on both would say the same thing twice and mean two.
+        .icon(crate::ui::icons::icon("minus"))
+        .tooltip(tr!("action-fold-view"))
+        .on_click(move |_, window, cx| {
+            let _ = app.update(cx, |this, cx| this.press_tool(name, None, window, cx));
+        })])
 }
 
 /// A view's visibility at the moment its panel is built.
@@ -592,6 +626,91 @@ pub(super) fn select_panel_named(
     true
 }
 
+/// Steps to the next document of the centre, or to the one before it.
+///
+/// **The centre and not the whole area**, which is what `Ctrl+Tab` means
+/// everywhere it exists: it walks what one is reading, and the tool windows are
+/// reached by their rails and by `Alt+N`. A terminal keeps the same keys for
+/// its own tabs — it is a tabbed thing too — which is why the binding stops at
+/// its edge rather than this function doing the choosing.
+///
+/// **The group holding the focus, else the first.** A split centre is two tab
+/// bars, and cycling the left one while the right one is being read would be a
+/// gesture aimed at the wrong half. A dock knows nothing of focus, so it is
+/// asked of the panels themselves.
+///
+/// The move is `select_panel_named`'s: a panel moved back into its own node at
+/// its **own** index, which reinstates it and activates it — the group's entity
+/// is private to the dock, and there is no `select_tab`.
+pub(super) fn cycle_center_tab(
+    dock: &Entity<gpui_component::dock::DockArea>,
+    forward: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    use gpui_component::dock::{DockPlacement, InsertTarget, NodeId, PaneNode, PaneRef, PanelId};
+
+    /// Every tab group of a tree, in the order they are laid out.
+    fn groups(node: &PaneNode, out: &mut Vec<(NodeId, Vec<PanelId>, usize)>) {
+        match node.kind() {
+            PaneRef::Tabs { panels, active_ix } => {
+                out.push((node.id(), panels.to_vec(), active_ix))
+            }
+            PaneRef::Split { children, .. } => {
+                for child in children {
+                    groups(child, out);
+                }
+            }
+            PaneRef::Tiles { .. } => {}
+        }
+    }
+
+    let step = {
+        let area = dock.read(cx);
+        let mut found = Vec::new();
+        if let Some(tree) = area.layout(DockPlacement::Center) {
+            groups(tree.root(), &mut found);
+        }
+        // A group of one has no next tab, and a gesture that lands on the panel
+        // it started from reads as one that did nothing.
+        found.retain(|(_, panels, _)| panels.len() > 1);
+        let focused = found.iter().position(|(_, panels, active_ix)| {
+            panels
+                .get(*active_ix)
+                .and_then(|panel| area.panel(*panel))
+                .is_some_and(|panel| panel.focus_handle(cx).contains_focused(window, cx))
+        });
+        found
+            .get(focused.unwrap_or(0))
+            .map(|(node, panels, active_ix)| {
+                let count = panels.len();
+                let next = match forward {
+                    true => (active_ix + 1) % count,
+                    // `+ count - 1` and not `- 1`: these are unsigned, and the
+                    // first tab is precisely where one presses Shift+Tab.
+                    false => (active_ix + count - 1) % count,
+                };
+                (*node, panels[next], next)
+            })
+    };
+    let Some((node, panel, ix)) = step else {
+        return false;
+    };
+    dock.update(cx, |dock, cx| {
+        dock.move_panel(
+            panel,
+            InsertTarget::Tabs {
+                node,
+                ix: Some(ix),
+                activate: true,
+            },
+            window,
+            cx,
+        );
+    });
+    true
+}
+
 /// Every panel whose whole shape is "a title, a render, a pane".
 ///
 /// Two optional pieces, each of which used to be a hand-written copy of this
@@ -729,6 +848,11 @@ macro_rules! panels {
                 $id
             }
 
+            /// Where a drag may put it: see `regions_of`.
+            fn regions(&self, _: &App) -> DockRegions {
+                regions_of(self.panel_name())
+            }
+
             /// See the `@closable` arm.
             fn closable(&self, _: &App) -> bool {
                 panels!(@closable $(, $closes)?)
@@ -766,13 +890,12 @@ macro_rules! panels {
                 zoom_in_toolbar()
             }
 
-            fn dropdown_menu(
+            fn toolbar_buttons(
                 &mut self,
-                menu: PopupMenu,
                 _: &mut Window,
                 _: &mut Context<Self>,
-            ) -> PopupMenu {
-                hide_view(&self.app, Self::NAME, menu)
+            ) -> Option<Vec<Button>> {
+                fold_button(&self.app, Self::NAME)
             }
         }
 
@@ -979,6 +1102,11 @@ impl Focusable for FilePanel {
 impl EventEmitter<PanelEvent> for FilePanel {}
 
 impl BasePanel for FilePanel {
+    /// Where a drag may put it: see `regions_of`.
+    fn regions(&self, _: &App) -> DockRegions {
+        regions_of(self.panel_name())
+    }
+
     fn panel_name(&self) -> &'static str {
         Self::NAME
     }
@@ -1069,7 +1197,7 @@ impl Panel for FilePanel {
             .child(
                 Button::new("close-file")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(crate::ui::icons::icon("x"))
                     .on_click(move |_, window, cx| {
                         // The tab under it selects on click: without this, the
@@ -1084,15 +1212,6 @@ impl Panel for FilePanel {
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {
         zoom_in_toolbar()
-    }
-
-    fn dropdown_menu(
-        &mut self,
-        menu: PopupMenu,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> PopupMenu {
-        hide_view(&self.app, EditorPanel::NAME, menu)
     }
 }
 
@@ -1202,6 +1321,11 @@ impl Focusable for QueryPanel {
 impl EventEmitter<PanelEvent> for QueryPanel {}
 
 impl BasePanel for QueryPanel {
+    /// Where a drag may put it: see `regions_of`.
+    fn regions(&self, _: &App) -> DockRegions {
+        regions_of(self.panel_name())
+    }
+
     fn panel_name(&self) -> &'static str {
         Self::NAME
     }
@@ -1261,12 +1385,12 @@ impl Panel for QueryPanel {
             .id(("query-tab", id.0 as usize))
             .gap_1()
             .items_center()
-            .child(crate::ui::icons::icon("database").xsmall())
+            .child(crate::ui::icons::glyph("database"))
             .child(self.title.clone())
             .child(
                 Button::new("close-query")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(crate::ui::icons::icon("x"))
                     .on_click(move |_, window, cx| {
                         // The tab under it selects on click: without this, the
@@ -1350,6 +1474,11 @@ impl Focusable for SentryIssuePanel {
 impl EventEmitter<PanelEvent> for SentryIssuePanel {}
 
 impl BasePanel for SentryIssuePanel {
+    /// Where a drag may put it: see `regions_of`.
+    fn regions(&self, _: &App) -> DockRegions {
+        regions_of(self.panel_name())
+    }
+
     fn panel_name(&self) -> &'static str {
         Self::NAME
     }
@@ -1477,6 +1606,11 @@ impl Focusable for ConflictsPanel {
 impl EventEmitter<PanelEvent> for ConflictsPanel {}
 
 impl BasePanel for ConflictsPanel {
+    /// Where a drag may put it: see `regions_of`.
+    fn regions(&self, _: &App) -> DockRegions {
+        regions_of(self.panel_name())
+    }
+
     fn panel_name(&self) -> &'static str {
         "ClaudhubConflicts"
     }
@@ -1495,6 +1629,10 @@ impl Panel for ConflictsPanel {
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {
         zoom_in_toolbar()
+    }
+
+    fn toolbar_buttons(&mut self, _: &mut Window, _: &mut Context<Self>) -> Option<Vec<Button>> {
+        fold_button(&self.app, "ClaudhubConflicts")
     }
 }
 
@@ -1656,7 +1794,7 @@ pub(super) fn new_terminal_button(
     let app = app.clone();
     Button::new("new-terminal")
         .ghost()
-        .xsmall()
+        .small()
         .icon(crate::ui::icons::icon("plus"))
         .tooltip(tr!("terminal-new"))
         .dropdown_menu(move |menu, _window, cx| {
@@ -1746,6 +1884,11 @@ impl Focusable for TerminalPanel {
 impl EventEmitter<PanelEvent> for TerminalPanel {}
 
 impl BasePanel for TerminalPanel {
+    /// Where a drag may put it: see `regions_of`.
+    fn regions(&self, _: &App) -> DockRegions {
+        regions_of(self.panel_name())
+    }
+
     fn panel_name(&self) -> &'static str {
         self.name
     }
@@ -1875,14 +2018,13 @@ impl Panel for TerminalPanel {
             // buttons, so `panel_name` is what says which of the two this tab
             // is. See `rails::icon_of`.
             .children(
-                crate::ui::rails::icon_of(BasePanel::panel_name(self))
-                    .map(|glyph| crate::ui::icons::icon(glyph).xsmall()),
+                crate::ui::rails::icon_of(BasePanel::panel_name(self)).map(crate::ui::icons::glyph),
             )
             .child(label)
             .child(
                 Button::new("close-terminal")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(crate::ui::icons::icon("x"))
                     .on_click(move |_, window, cx| {
                         // The tab under it selects on click: without this, the
@@ -1900,21 +2042,35 @@ impl Panel for TerminalPanel {
                         });
                     }),
             )
-            // The "+" rides in **every** tab's title rather than sticking to
-            // the right edge of the bar: the dock's bar offers no place for
-            // it, and carried by the last tab alone it went out of sight as
-            // soon as that tab did — a bar full of terminals scrolls.
-            // In the grid it opens on **this tab's** worktree and not on the
-            // one being looked at: the bar mixes the projects, so "the current
-            // worktree" is not a thing one can read off it.
-            .child(new_terminal_button(
-                &self.app,
-                Some(Self::placement_of(self.name)),
-            ))
+    }
+
+    /// The `+`, after the last tab — see `tab_bar_trailing`.
+    ///
+    /// It used to ride in **every** tab's title, for want of anywhere else to
+    /// put it: a bar of six terminals offered six of them, and the one on the
+    /// last tab went out of sight as soon as that tab did. The bar has a place
+    /// for it now (the 27th commit of the fork), and it is the place the
+    /// gesture means — "one more of these" reads as the next tab.
+    fn tab_bar_trailing(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        Some(new_terminal_button(
+            &self.app,
+            Some(Self::placement_of(self.name)),
+        ))
     }
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {
         zoom_in_toolbar()
+    }
+
+    /// **The seat's name and not the struct's**: the terminals below the code
+    /// and those beside it are two tool windows, and folding is a name being
+    /// put away — see the `name` field.
+    fn toolbar_buttons(&mut self, _: &mut Window, _: &mut Context<Self>) -> Option<Vec<Button>> {
+        fold_button(&self.app, self.name)
     }
 }
 
@@ -1923,5 +2079,41 @@ impl Render for TerminalPanel {
         // No `pane_root`: the terminals have no search of their own, `Ctrl+F`
         // there belonging to the program that runs.
         pane_frame(self.view.clone(), cx).into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **A tool window belongs to the edges and a document to the centre**, and
+    /// neither can be dragged into the other's place. The centre used to take
+    /// anything: a tool window dropped there became a document with no rail
+    /// button, and the only way back was to reset the whole arrangement.
+    #[test]
+    fn a_tool_window_is_refused_by_the_centre_and_a_document_by_the_edges() {
+        use gpui_component::dock::DockPlacement;
+
+        for tool in crate::ui::rails::TOOLS {
+            let regions = regions_of(tool.panel);
+            assert!(
+                !regions.allows(DockPlacement::Center),
+                "{} is a tool window",
+                tool.panel
+            );
+            assert!(regions.allows(DockPlacement::Bottom), "{}", tool.panel);
+        }
+        // A file, a console, the home page: what one reads.
+        for document in ["ClaudhubEditor", "ClaudhubDiff", "ClaudhubQuery"] {
+            let regions = regions_of(document);
+            assert!(regions.allows(DockPlacement::Center), "{document}");
+            for edge in [
+                DockPlacement::Left,
+                DockPlacement::Right,
+                DockPlacement::Bottom,
+            ] {
+                assert!(!regions.allows(edge), "{document} in {edge:?}");
+            }
+        }
     }
 }

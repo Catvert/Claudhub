@@ -105,11 +105,15 @@ pub struct TerminalView {
     pending_size: Option<TermSize>,
     /// True when a deferred transmission is already scheduled.
     resize_scheduled: bool,
-    /// True when the geometry has changed since the running wait last looked.
+    /// When the geometry last moved.
     ///
-    /// That is what makes the wait *trailing*: it restarts as long as the hand
-    /// is still moving, so the pty is resized once, at the end.
-    resize_moved: bool,
+    /// That is what makes the wait *trailing*: it is slept **up to**, so it
+    /// restarts as long as the hand is moving and expires exactly one quiet
+    /// time after it stops. It was a flag read on a fixed tick, which is not
+    /// the same thing — the last movement of a drag was noticed on the next
+    /// tick, and the terminal then sat frozen for up to two quiet times after
+    /// the mouse had been let go.
+    resized_at: std::time::Instant,
     label: SharedString,
     /// True when this tab runs a coding agent.
     ///
@@ -255,7 +259,7 @@ impl TerminalView {
             scroll_remainder: 0.,
             pending_size: None,
             resize_scheduled: false,
-            resize_moved: false,
+            resized_at: std::time::Instant::now(),
             label,
             agent,
             runs_command,
@@ -509,6 +513,12 @@ impl TerminalView {
     /// of the sentence above: what is worth passing on is a geometry someone
     /// has settled on.
     ///
+    /// **The wait is the last resort, not the ordinary path**: letting go of a
+    /// splitter settles the size at once (`settle_size`, called from the
+    /// window's mouse-up), and this timer is what answers for everything that
+    /// is not a drag — a zone folded, the font changed, the window itself
+    /// resized by the manager.
+    ///
     /// Bounded all the same (`MAX_DEFERRALS`): a size that changed forever —
     /// an animation, a layout that never converges — would otherwise leave the
     /// program at a geometry that has not existed for a long time, and nothing
@@ -521,32 +531,48 @@ impl TerminalView {
         self.pending_size = Some(size);
         // Noted whether or not a wait is already running: it is what tells the
         // one that is running that the hand has moved again.
-        self.resize_moved = true;
+        self.resized_at = std::time::Instant::now();
         if self.resize_scheduled {
             return;
         }
         self.resize_scheduled = true;
         cx.spawn(async move |this, cx| {
             for _ in 0..MAX_DEFERRALS {
-                cx.background_executor().timer(RESIZE_QUIET).await;
-                let moved = this
-                    .update(cx, |this, _| std::mem::take(&mut this.resize_moved))
-                    .unwrap_or(false);
-                if !moved {
+                // Slept **up to** the last movement plus a quiet time, and not
+                // one blind tick after another: a tick that lands just after a
+                // movement waits a whole one more for nothing, which is the
+                // half of the old lag one could not account for.
+                let left = this
+                    .update(cx, |this, _| {
+                        RESIZE_QUIET.saturating_sub(this.resized_at.elapsed())
+                    })
+                    .unwrap_or_default();
+                if left.is_zero() {
                     break;
                 }
+                cx.background_executor().timer(left).await;
             }
             let _ = this.update(cx, |this, cx| {
                 this.resize_scheduled = false;
-                this.resize_moved = false;
-                if let Some(size) = this.pending_size.take() {
-                    this.terminal.resize(size);
-                    this.snapshot = this.terminal.snapshot();
-                    cx.notify();
-                }
+                this.settle_size(cx);
             });
         })
         .detach();
+    }
+
+    /// Hands the geometry to the grid and to the pty, now.
+    ///
+    /// Idempotent, because it is called from two places that do not know about
+    /// each other: the trailing wait above, and the mouse-up that ends a drag.
+    /// Whichever gets there first takes the pending size, and the other finds
+    /// nothing to do.
+    fn settle_size(&mut self, cx: &mut Context<Self>) {
+        let Some(size) = self.pending_size.take() else {
+            return;
+        };
+        self.terminal.resize(size);
+        self.snapshot = self.terminal.snapshot();
+        cx.notify();
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -927,7 +953,37 @@ impl Render for TerminalView {
                 // `TerminalInputHandler`.
                 let handler = TerminalInputHandler { view: cx.entity() };
                 let focus = self.focus.clone();
-                move |_, _, window, cx| window.handle_input(&focus, handler, cx)
+                let view = cx.entity();
+                move |_, _, window: &mut Window, cx: &mut App| {
+                    window.handle_input(&focus, handler, cx);
+                    // **The end of a drag is an event and not a silence.** The
+                    // geometry a splitter is being dragged through is passed on
+                    // once it settles, and until this the only thing that said
+                    // "it has settled" was a stretch of time with nothing in
+                    // it — so letting go of the splitter left the terminal
+                    // holding its old grid, clipped, for a further quiet time
+                    // before it caught up. Nothing about that reads as the
+                    // window's own resizing, which is instant on release.
+                    //
+                    // A **window** listener and not one on this element: the
+                    // splitter has captured the pointer for the whole drag, and
+                    // the button comes up over it and not over us. It is
+                    // registered here because that is where `on_mouse_event`
+                    // may be called from, and re-registered every frame, which
+                    // is what that call means.
+                    //
+                    // It answers every click in the window, terminals being a
+                    // dozen in the multiplexer: hence the read before the
+                    // update — with no size pending there is nothing to lease.
+                    window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, cx: &mut App| {
+                        if phase != gpui::DispatchPhase::Bubble
+                            || view.read(cx).pending_size.is_none()
+                        {
+                            return;
+                        }
+                        view.update(cx, |view, cx| view.settle_size(cx));
+                    });
+                }
             },
         )
         .absolute()
@@ -1887,9 +1943,21 @@ impl ClaudhubApp {
                 Some(size),
                 |dock| {
                     let tree = dock.layout(placement)?;
-                    let node = siblings.iter().find_map(|sibling| {
+                    let Some(node) = siblings.iter().find_map(|sibling| {
                         tree.find_panel_node(PanelId::from(sibling.entity_id()))
-                    })?;
+                    }) else {
+                        // **The first terminal of a zone lands in the terminals'
+                        // own half**, and it has to be said here: without a
+                        // target the panel stays where `add_panel_view` put it,
+                        // which is the region's *first* group — the graph of
+                        // branches, down there, which is precisely the half the
+                        // terminals were taken out of. The anchor is the table's
+                        // and not the tree's for the reason `Press::Restore`
+                        // reads it too: with no terminal anywhere there is no
+                        // place of its own to read.
+                        return crate::ui::rails::tool(view_name)
+                            .and_then(|tool| crate::ui::dock_layout::target_for(dock, tool.home));
+                    };
                     // **Right beside the one being looked at**, not at the far
                     // end of the bar. A terminal is opened from another one —
                     // the same task, one command further — and a tab landing

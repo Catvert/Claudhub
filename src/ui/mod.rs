@@ -70,6 +70,7 @@ mod topbar;
 mod tree;
 mod vault;
 mod vim;
+mod vscode;
 mod worktree_ops;
 mod worktree_picker;
 mod worktrees;

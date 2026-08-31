@@ -24,85 +24,65 @@ pub(super) struct Item {
     pub summary: Option<crate::git::Summary>,
     /// What `wt` says: started, stopped, or nothing to start at all.
     pub up: Option<bool>,
-    /// The rest of what `wt` says — options, ports, `[status.info]` — condensed
-    /// into a third line, when there is anything to say. See [`detail`].
+    /// The rest of what `wt` says — options, ports, `[status.info]` — as the
+    /// row's tooltip, when there is anything to say. See [`detail`].
     pub detail: Option<Detail>,
     /// Whether it has a button of its own in the top bar.
     pub pinned: bool,
 }
 
-/// The `wt` preview of a checkout, as one dimmed line under its name.
+/// The `wt` preview of a checkout: one part per line, nothing abbreviated.
 ///
-/// The row truncates `line` to its width; `full` — one part per line, nothing
-/// abbreviated — is its tooltip, so what the truncation hides is one hover
-/// away.
+/// It was **also** a condensed version, painted as a dim third line under the
+/// branch, of which this was the tooltip. The line went — a picker answers
+/// which checkout, not everything about it — and the abbreviation that cut a
+/// list of twelve tenants down to `itcs, acme +10` went with it: there is no
+/// width to fit any more, only a tooltip that can be as tall as it needs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Detail {
-    pub line: String,
     pub full: String,
 }
 
-/// Past this many values, a list is cut and the rest counted: `itcs, acme +3`.
-/// The line shows a handful of worktrees side by side, and a tenant list of
-/// twelve would be the whole width for one of them.
-const LIST_HEAD: usize = 2;
-
-/// What the third line of a `wt` worktree says, and in what order.
+/// What `wt` knows of a worktree beyond started/stopped, and in what order.
 ///
 /// **The options first** — they are what one chose when creating it, which is
 /// what tells two worktrees of the same branch apart — then the ports, then
 /// the `[status.info]` lines, the project's own word on the worktree. `None`
-/// when `wt` has nothing beyond started/stopped: the row then keeps its two
-/// lines rather than carrying an empty third.
+/// when `wt` has nothing beyond started/stopped: the row then has no tooltip
+/// rather than one saying nothing.
 ///
 /// The values are **raw**: `wt` keeps the answers, not the labels of a
 /// `[[prompt]]`, so it is `isolated` and not "isolées". Acceptable — they are
-/// the project's own vocabulary, and the person who chose them reads them.
-/// Two readings make a raw value say something on its own:
-///
-/// - a yes/no answer shows its **name** when yes and nothing when no — a bare
-///   `no` next to `isolated` names nothing, and `devtenant` alone says it;
-/// - a list (`a,b,c`) is cut to its first [`LIST_HEAD`] entries and the rest
-///   counted, on the line only — the tooltip carries the whole list.
+/// the project's own vocabulary, and the person who chose them reads them. A
+/// yes/no answer shows its **name** when yes and nothing when no: a bare `no`
+/// next to `isolated` names nothing, and `devtenant` alone says it.
 pub(super) fn detail(state: &crate::runtime::protocol::WtWorktree) -> Option<Detail> {
-    let mut short: Vec<String> = Vec::new();
-    let mut long: Vec<String> = Vec::new();
+    let mut parts: Vec<String> = Vec::new();
     for (name, value) in &state.opts {
         match yes_no(value) {
-            Some(true) => {
-                short.push(name.clone());
-                long.push(name.clone());
-            }
+            Some(true) => parts.push(name.clone()),
             Some(false) => {}
             None => {
                 let values = list(value);
                 if values.is_empty() {
                     continue;
                 }
-                short.push(abbreviate(&values));
-                long.push(format!("{name}: {}", values.join(", ")));
+                parts.push(format!("{name}: {}", values.join(", ")));
             }
         }
     }
     for (name, port) in &state.ports {
-        short.push(format!("{name} {port}"));
-        long.push(format!("{name}: {port}"));
+        parts.push(format!("{name}: {port}"));
     }
     for (name, value) in &state.info {
         let value = value.trim();
         if value.is_empty() {
             continue;
         }
-        // The whole value, even a long one: the view truncates the line, and
-        // what `[status.info]` says is the project's most important word on
-        // the worktree — `tenant_ (shared — no migrations)` is read to the end
-        // or not at all.
-        short.push(format!("{name}: {value}"));
-        long.push(format!("{name}: {value}"));
+        parts.push(format!("{name}: {value}"));
     }
-    (!short.is_empty()).then(|| Detail {
-        line: short.join(" · "),
-        full: long.join("\n"),
+    (!parts.is_empty()).then(|| Detail {
+        full: parts.join("\n"),
     })
 }
 
@@ -126,18 +106,6 @@ fn list(value: &str) -> Vec<String> {
         .filter(|entry| !entry.is_empty())
         .map(str::to_string)
         .collect()
-}
-
-fn abbreviate(values: &[String]) -> String {
-    if values.len() <= LIST_HEAD {
-        values.join(", ")
-    } else {
-        format!(
-            "{} +{}",
-            values[..LIST_HEAD].join(", "),
-            values.len() - LIST_HEAD
-        )
-    }
 }
 
 /// One line of the list.
@@ -228,10 +196,22 @@ pub(super) fn rows_for(
             count: kept.len(),
         });
         if !folded {
-            rows.extend(kept.into_iter().map(|checkout| {
-                let built = item(repo, checkout);
-                Row::Worktree(built)
-            }));
+            let mut built: Vec<Item> = kept
+                .into_iter()
+                .map(|checkout| item(repo, checkout))
+                .collect();
+            // **What is running comes first.** A project with a dozen checkouts
+            // has two or three up at a time, and those are the ones one switches
+            // between all day; the rest are read once, when one goes back to
+            // them. It is the green dot the row already carries, sorted on.
+            //
+            // A **stable** sort, so that everything else keeps the order git
+            // gave it — the main checkout first, then the linked ones as they
+            // were created. And `up` is `None` where the project has no `wt` at
+            // all: those rank with the stopped, which leaves such a repository's
+            // list exactly as it was.
+            built.sort_by_key(|item| !matches!(item.up, Some(true)));
+            rows.extend(built.into_iter().map(Row::Worktree));
         }
     }
     // Last, and only when nothing is being filtered: a folder that no longer
@@ -317,11 +297,10 @@ mod tests {
         }
     }
 
-    /// The options first, the ports, then the project's `[status.info]`; a
-    /// list is cut to two and the rest counted; a `no` says nothing and a
-    /// `yes` says its name. The tooltip carries it all, one part per line.
+    /// The options first, the ports, then the project's `[status.info]`, one
+    /// part per line — and an empty `[status.info]` value is not a part.
     #[test]
-    fn the_detail_condenses_what_wt_knows_into_one_line() {
+    fn the_detail_says_what_wt_knows_one_part_per_line() {
         let detail = detail(&state(
             &[
                 ("db", "isolated"),
@@ -333,10 +312,6 @@ mod tests {
             &[("bases", "wt_fix_tenant_\n"), ("centrale", "")],
         ))
         .unwrap();
-        assert_eq!(
-            detail.line,
-            "isolated · queue, reverb · itcs, acme +2 · vite 5201 · bases: wt_fix_tenant_"
-        );
         assert_eq!(
             detail.full,
             "db: isolated\nservices: queue, reverb\ntenants: itcs, acme, xyz, abc\nvite: 5201\nbases: wt_fix_tenant_"
@@ -353,11 +328,11 @@ mod tests {
             &[],
         ))
         .unwrap();
-        assert_eq!(detail.line, "devtenant");
+        assert_eq!(detail.full, "devtenant");
     }
 
-    /// Nothing beyond started/stopped: the row keeps its two lines rather
-    /// than carrying an empty third.
+    /// Nothing beyond started/stopped: the row then has no tooltip rather
+    /// than one saying nothing.
     #[test]
     fn a_worktree_wt_knows_nothing_more_of_has_no_detail() {
         assert_eq!(detail(&state(&[], &[], &[("bases", "  ")])), None);
@@ -449,6 +424,39 @@ mod tests {
     fn a_repository_the_filter_empties_loses_its_heading() {
         let rows = rows_for(&project(), &[], "wip", &HashSet::new(), item);
         assert_eq!(names(&rows), ["== claudhub", "wip"]);
+    }
+
+    /// The checkouts `wt` says are up come first, and the rest keep the order
+    /// git gave them: a project runs two or three of a dozen at a time, and
+    /// those are the ones one switches between all day.
+    #[test]
+    fn the_started_checkouts_are_listed_first() {
+        let repos = vec![repo(
+            "acetics",
+            vec![
+                checkout("main", "master"),
+                checkout("fix", "fix/login"),
+                checkout("db", "feat/db"),
+                checkout("ui", "feat/ui"),
+            ],
+        )];
+        let up = |_: &Repository, checkout: &Checkout| Item {
+            up: Some(matches!(checkout.label.as_str(), "db" | "fix")),
+            ..item(&repos[0], checkout)
+        };
+        let rows = rows_for(&repos, &[], "", &HashSet::new(), up);
+        assert_eq!(names(&rows), ["== acetics", "fix", "db", "main", "ui"]);
+    }
+
+    /// A project without `wt` says nothing about anybody being up, and its list
+    /// must come out exactly as git gave it.
+    #[test]
+    fn a_project_without_wt_keeps_its_order() {
+        let rows = rows_for(&project(), &[], "", &HashSet::new(), item);
+        assert_eq!(
+            names(&rows),
+            ["== acetics", "main", "fix", "== claudhub", "wip"]
+        );
     }
 
     /// The name of the checkout, its branch, or the repository's own: one looks

@@ -18,9 +18,10 @@
 //!   click. The `…` at the row's end opens the second step.
 //! - **Step two** is that branch's actions, each with its name written out.
 //!
-//! The `…` is painted on every row and not on the hovered one alone: a control
-//! that appears under the pointer moves what is beside it, and what is beside it
-//! here is the count one was reading.
+//! The `…` keeps its place on every row and shows itself on the one under the
+//! pointer: a control that *appeared* there would move what is beside it, and
+//! what is beside it here is the count one was reading — so it is hidden by
+//! opacity and not by absence.
 //!
 //! **A disabled action stays on the list, greyed.** What one wants to know
 //! standing here is *why* a gesture is not available — the branch is checked out
@@ -60,8 +61,9 @@ use crate::ui::icons::icon;
 
 /// How wide the surface is.
 ///
-/// Two lines of text need room: below this, the commit subject that tells two
-/// similarly named branches apart is truncated to the point of saying nothing.
+/// A branch's name and everything that qualifies it need room: below this, a
+/// `wt/` name and the four chips at its shoulder — here, the checkout holding
+/// it, what it owes and what it leads by — leave nothing for the name itself.
 /// It is `base_select`'s width, and for the same reason.
 const WIDTH: gpui::Pixels = px(420.);
 
@@ -112,13 +114,16 @@ struct Look {
     warning: Hsla,
     /// What is there and nowhere else yet — the lead.
     success: Hsla,
-    /// A branch's row: two lines of text and next to nothing around them.
+    /// A branch's row in the docked column: two lines of text and next to
+    /// nothing around them.
     row: gpui::Pixels,
+    /// The same row in the popover, where it carries the name alone.
+    compact: gpui::Pixels,
     /// A group's heading: one line, and shorter than a row — it is a rule with
     /// a name on it, not an entry.
     head: gpui::Pixels,
     /// A scope row: one line, and an entry one aims at — so taller than a
-    /// heading and shorter than a branch, which carries two.
+    /// heading, and the height of a branch wherever a branch carries one line.
     scope: gpui::Pixels,
 }
 
@@ -136,8 +141,18 @@ impl Look {
             // twice as tall as it needs to be shows four of them where it could
             // show seven, and what one comes here to do is compare.
             row: unit * 1.45,
+            compact: unit * 1.15,
             head: unit * 0.95,
             scope: unit * 1.15,
+        }
+    }
+
+    /// How tall a branch's row is, which is a question of where it is being
+    /// read. See the second line's own comment in `branch_row`.
+    fn branch(&self, mode: Mode) -> gpui::Pixels {
+        match mode {
+            Mode::Docked => self.row,
+            Mode::Popover => self.compact,
         }
     }
 }
@@ -332,8 +347,16 @@ impl BranchPicker {
     /// it, and a list that switched branch under the pointer is a list one
     /// cannot browse. Checking out from there is still one gesture, on the
     /// row's `…`.
+    ///
+    /// **A branch already checked out somewhere takes one there instead**, and
+    /// that is the same answer to the same question. Git refuses two checkouts
+    /// of one branch, so the row used to be greyed and inert — which answers
+    /// "I want to work on `wt/fix`" with a refusal, when the window has the
+    /// thing being asked for open one worktree away. The row says so before
+    /// the click: see `branch_row`.
     fn activate(&mut self, branch: &BranchRow, window: &mut Window, cx: &mut Context<Self>) {
         match self.mode {
+            Mode::Popover if branch.taken() => self.go_to_worktree(branch, window, cx),
             Mode::Popover => self.checkout(branch, window, cx),
             Mode::Docked => self.scope(
                 LogRange::Ref {
@@ -342,6 +365,16 @@ impl BranchPicker {
                 cx,
             ),
         }
+    }
+
+    /// Goes to the checkout that already holds this branch.
+    fn go_to_worktree(&mut self, branch: &BranchRow, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(worktree) = branch.taken_by.clone() else {
+            return;
+        };
+        self.act(window, cx, move |app, window, cx| {
+            app.select_worktree(worktree, window, cx)
+        });
     }
 
     /// Points the log beside the list at something else.
@@ -463,7 +496,7 @@ impl BranchPicker {
                 .map(|row| match row {
                     Row::Group { .. } => gpui::size(px(0.), look.head),
                     Row::Scope(_) => gpui::size(px(0.), look.scope),
-                    Row::Branch(_) => gpui::size(px(0.), look.row),
+                    Row::Branch(_) => gpui::size(px(0.), look.branch(self.mode)),
                 })
                 .collect::<Vec<_>>(),
         );
@@ -552,7 +585,7 @@ impl BranchPicker {
             .child(
                 Button::new("branch-new")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("plus"))
                     .label(tr!("branch-new"))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -567,7 +600,7 @@ impl BranchPicker {
             .child(
                 Button::new("branch-fetch")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("refresh-cw"))
                     .tooltip(tr!("action-fetch"))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -613,6 +646,33 @@ impl BranchPicker {
             look,
             cx,
         ));
+        // **Beside the checkout it stands in for**, and only where there is a
+        // checkout to name. It is the exception to this surface's rule that a
+        // refused action stays on the list greyed, and the reason is in the
+        // label: that rule exists so one reads *why* a gesture is unavailable,
+        // and "go to the worktree" for a branch held in none is not a refusal
+        // but a sentence with a hole in it. What it does is what the row's own
+        // click does; it is here so the gesture has a name, which is how one
+        // finds out it exists.
+        if let Some(worktree) = row.taken_by.clone().filter(|_| !row.is_head) {
+            let label = worktree
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            list = list.child(self.action(
+                "go-to-worktree",
+                "arrow-right",
+                tr!("branch-open-worktree", { name: label }),
+                true,
+                {
+                    let row = row.clone();
+                    move |this, window, cx| this.go_to_worktree(&row, window, cx)
+                },
+                look,
+                cx,
+            ));
+        }
         list = list.child(self.action(
             "new-from",
             "plus",
@@ -869,7 +929,7 @@ impl BranchPicker {
             .child(
                 Button::new("branch-back")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("arrow-left"))
                     .tooltip(tr!("branch-back"))
                     .on_click(cx.listener(|this, _, _window, cx| {
@@ -1144,10 +1204,15 @@ fn branch_row(
         )
     });
     let checkable = !row.is_head && !row.taken();
+    // A click here goes to the checkout that holds it — see `activate`. Only in
+    // the popover: the docked column's click points the log at the branch, which
+    // is the one thing it does for every row, and an arrow promising a journey
+    // there would promise the wrong one.
+    let travels = matches!(mode, Mode::Popover) && row.taken();
     // **Every row answers in the docked list.** What a click does there is show
     // the branch's commits, and there is no branch one cannot read — not the
     // one checked out here, not the one checked out next door.
-    let clickable = checkable || matches!(mode, Mode::Docked);
+    let clickable = checkable || travels || matches!(mode, Mode::Docked);
     let (for_click, for_menu) = (picker.clone(), picker.clone());
     let (clicked, opened) = (row.clone(), row.clone());
     // The `…` comes out on the row under the pointer and on the row the list is
@@ -1165,8 +1230,29 @@ fn branch_row(
     h_flex()
         .id(("branch-row", index))
         .group(group.clone())
-        .h(look.row)
+        .h(look.branch(mode))
         .w_full()
+        // **What the click will do**, wherever it is not the obvious thing.
+        // A row that takes one to another checkout says so in words: the arrow
+        // in its chip is what one sees, this is what one reads, and between the
+        // two nobody clicks to find out. It wins over the subject below, which
+        // is a nicety where this is the difference between two gestures.
+        //
+        // Otherwise the subject, when the row is not showing it — see the
+        // second line further down. A popover of forty branches is read to find
+        // one, and what one finds it by is its name.
+        .when_some(
+            match (travels, taken.clone()) {
+                (true, Some(name)) => Some(tr!("branch-go-to-worktree", { name: name })),
+                _ => (!row.detail.is_empty() && !matches!(mode, Mode::Docked))
+                    .then(|| SharedString::from(row.detail.clone())),
+            },
+            |el, text| {
+                el.tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(text.clone()).build(window, cx)
+                })
+            },
+        )
         // The rule down the left edge of the branch one is on: the mark every
         // editor puts on the file it has open, and what makes that row findable
         // in a list of forty without reading a word of it. The chip says which
@@ -1224,13 +1310,16 @@ fn branch_row(
                                 .truncate()
                                 .text_sm()
                                 .when(row.is_head, |el| el.font_semibold())
-                                .when(!clickable && !row.is_head, |el| el.text_color(look.muted))
                                 .child(SharedString::from(row.name.clone())),
                         )
                         .when(row.is_head, |el| {
                             el.child(crate::ui::theme::chip(tr!("branch-here"), look.primary))
                         })
-                        .children(taken.map(|name| worktree_chip(name, look.muted)))
+                        // **The name is no longer set back** when the branch is
+                        // checked out elsewhere. Grey is what a window says of
+                        // something it refuses, and this row is not refused any
+                        // more: it goes somewhere.
+                        .children(taken.map(|name| worktree_chip(name, look.muted, travels)))
                         // **The counts belong to the name's line.** Behind
                         // before ahead: that is what has to be integrated
                         // before anything can be pushed. Warning against
@@ -1259,17 +1348,28 @@ fn branch_row(
                         // at the name's shoulder instead of at the edge.
                         .child(div().flex_1()),
                 )
-                .when(!row.detail.is_empty(), |el| {
-                    el.child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .truncate()
-                            .text_xs()
-                            .text_color(look.muted)
-                            .child(row.detail.clone()),
-                    )
-                }),
+                // **The subject and its date belong to the docked column, not
+                // to the popover.** The two seats are two gestures: one comes
+                // to the popover to *pick* a branch, and picks it by name, so
+                // forty rows two lines deep put half of them off screen for a
+                // line read on none of them; the column beside the graph is
+                // where a branch is read at length, and there the same line is
+                // what says whether it is the one. In the popover it is the
+                // row's tooltip.
+                .when(
+                    !row.detail.is_empty() && matches!(mode, Mode::Docked),
+                    |el| {
+                        el.child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(look.muted)
+                                .child(row.detail.clone()),
+                        )
+                    },
+                ),
         )
         .child(
             div()
@@ -1280,7 +1380,7 @@ fn branch_row(
                 .child(
                     Button::new(("branch-actions", index))
                         .ghost()
-                        .xsmall()
+                        .small()
                         .icon(icon("ellipsis"))
                         .tooltip(tr!("branch-actions"))
                         .on_click(move |_, _window, cx| {
@@ -1307,9 +1407,15 @@ fn separator(look: Look) -> impl IntoElement {
 /// The glyph is what makes it legible without a word: a name alone in a chip
 /// says nothing about *what* is named, and "checked out in" spelled out is
 /// three words on a line that has two already.
-fn worktree_chip(name: SharedString, colour: Hsla) -> impl IntoElement {
+///
+/// **Which glyph is which gesture**, and that is the point of `travels`: the
+/// arrow is the one the multiplexer's tiles carry for "take me to this
+/// checkout", so where the row's click does that, the chip wears it and reads
+/// as a destination. Where it does not — the docked column, whose click points
+/// the log at the branch — the folder stays, and states a fact.
+fn worktree_chip(name: SharedString, colour: Hsla, travels: bool) -> impl IntoElement {
     crate::ui::theme::chip_base(colour)
-        .child(icon("folder").xsmall())
+        .child(icon(if travels { "arrow-right" } else { "folder" }).xsmall())
         .child(name)
 }
 
@@ -1350,7 +1456,7 @@ impl ClaudhubApp {
             out.push(
                 Button::new("topbar-pull")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("arrow-down-to-line").text_color(warning))
                     .tooltip(tr!("action-pull-behind", { count: behind }))
                     .loading(pulling)
@@ -1370,7 +1476,7 @@ impl ClaudhubApp {
             out.push(
                 Button::new("topbar-push")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("arrow-up-from-line").text_color(success))
                     .tooltip(tr!("action-push-ahead", { count: ahead }))
                     .loading(pushing)

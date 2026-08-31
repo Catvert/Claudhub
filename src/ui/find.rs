@@ -396,7 +396,7 @@ impl ClaudhubApp {
         let open = self.find_open(pane);
         Button::new("find-in-pane")
             .ghost()
-            .xsmall()
+            .small()
             .selected(open)
             .icon(crate::ui::icons::icon("search"))
             // The tooltip says what the *next* press does, which is the only
@@ -461,7 +461,7 @@ impl ClaudhubApp {
                     el.child(
                         Button::new("find-prev")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(icon("arrow-up"))
                             .tooltip(tr!("find-previous"))
                             .on_click(cx.listener(|this, _, _window, cx| this.find_step(-1, cx))),
@@ -469,7 +469,7 @@ impl ClaudhubApp {
                     .child(
                         Button::new("find-next")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(icon("arrow-down"))
                             .tooltip(tr!("find-next"))
                             .on_click(cx.listener(|this, _, _window, cx| this.find_step(1, cx))),
@@ -478,7 +478,7 @@ impl ClaudhubApp {
                 .child(
                     Button::new("find-close")
                         .ghost()
-                        .xsmall()
+                        .small()
                         .icon(icon("x"))
                         .tooltip(tr!("find-close"))
                         .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))),

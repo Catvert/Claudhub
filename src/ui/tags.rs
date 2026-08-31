@@ -557,7 +557,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("tag-new")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("plus"))
                     .tooltip(tr!("tag-new"))
                     .on_click(cx.listener(|this, _, window, cx| this.prompt_new_tag(window, cx))),
@@ -565,7 +565,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("tag-push-all")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("arrow-up-from-line"))
                     .tooltip(tr!("tag-push-all"))
                     .disabled(count == 0)
@@ -574,7 +574,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("tag-remote")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("globe"))
                     .tooltip(tr!("tag-check-remote"))
                     .disabled(checking)
@@ -584,7 +584,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("tag-refresh")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("refresh-cw"))
                     .tooltip(tr!("action-refresh"))
                     .on_click(cx.listener(|this, _, _window, cx| this.refresh_tags(cx))),

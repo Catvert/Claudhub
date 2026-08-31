@@ -224,7 +224,7 @@ impl ClaudhubApp {
                         .child(
                             Button::new("preview-fit")
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .icon(icon(if fit { "maximize" } else { "minimize" }))
                                 .tooltip(if fit {
                                     tr!("preview-actual-size")
@@ -238,7 +238,7 @@ impl ClaudhubApp {
                         .child(
                             Button::new("preview-external")
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .icon(icon("external-link"))
                                 .tooltip(tr!("editor-external"))
                                 .on_click(cx.listener(move |this, _, _window, cx| {
@@ -248,7 +248,7 @@ impl ClaudhubApp {
                         .child(
                             Button::new("preview-close")
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .icon(icon("x"))
                                 .tooltip(tr!("editor-close"))
                                 .on_click(

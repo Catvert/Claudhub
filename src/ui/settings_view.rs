@@ -38,14 +38,61 @@ use crate::ui::settings::{
 
 /// Which page the settings screen shows.
 ///
-/// An enum and not an index: the page order is decided in `settings_pages`, and
-/// that is the only place that has to know it.
+/// An enum and not an index: an index into the form's list is one into the
+/// list its **search box has filtered**, which is not the list declared here.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum Page {
-    /// Wherever you were — what is wanted when the settings are simply opened.
     #[default]
-    First,
+    Appearance,
+    Terminal,
+    Review,
+    Keyboard,
+    Files,
+    Lsp,
+    Sentry,
     Databases,
+    Logs,
+}
+
+impl Page {
+    /// The sidebar's order, and the only place that knows it: the form is built
+    /// by walking this list, so a page cannot be added to one and not the other.
+    const ORDER: [Page; 9] = [
+        Page::Appearance,
+        Page::Terminal,
+        Page::Review,
+        Page::Keyboard,
+        Page::Files,
+        Page::Lsp,
+        Page::Sentry,
+        Page::Databases,
+        Page::Logs,
+    ];
+
+    /// The heading the sidebar shows.
+    ///
+    /// Written **here** and given to `SettingPage::new`, rather than each page
+    /// naming itself: it is also the name the form answers by — `on_select`
+    /// reports a title — and two spellings of it would mean a page one could
+    /// reach and never return to.
+    fn title(self) -> SharedString {
+        match self {
+            Page::Appearance => tr!("settings-page-appearance"),
+            Page::Terminal => tr!("settings-page-terminal"),
+            Page::Review => tr!("settings-page-review"),
+            Page::Keyboard => tr!("settings-page-keyboard"),
+            Page::Files => tr!("settings-page-files"),
+            Page::Lsp => tr!("settings-page-lsp"),
+            Page::Sentry => tr!("settings-page-sentry"),
+            Page::Databases => tr!("settings-page-databases"),
+            Page::Logs => tr!("settings-page-logs"),
+        }
+    }
+
+    /// The page the form says one has just chosen.
+    fn of_title(title: &SharedString) -> Option<Page> {
+        Page::ORDER.into_iter().find(|page| page.title() == *title)
+    }
 }
 
 /// What the screen asks the system for, and asks it **once**.
@@ -118,32 +165,40 @@ impl Render for SettingsForm {
 }
 
 impl ClaudhubApp {
+    /// The settings, on the page one had left them.
     pub(super) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_settings_at(Page::First, window, cx);
+        self.show_settings(None, window, cx);
     }
 
-    /// The settings screen, shown on a given page.
+    /// The settings, on the page being asked for.
     ///
     /// "Add a connection" comes from the "Databases" panel; answering it with a
-    /// form opened on appearance leaves you hunting through a seven-entry
+    /// form opened on appearance leaves you hunting through a nine-entry
     /// sidebar for what you had just asked for.
-    ///
-    /// The page cannot simply be written into the form on every frame:
-    /// `default_selected_index` is read when the form's state is **created**,
-    /// and that state lives as long as its id. The id therefore carries a
-    /// counter that this gesture bumps — a named page is a request, honoured
-    /// every time, even twice in a row having wandered off in between, where
-    /// `First` means "wherever you were" and leaves the form alone.
     pub(super) fn open_settings_at(
         &mut self,
         page: Page,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !matches!(page, Page::First) {
+        self.show_settings(Some(page), window, cx);
+    }
+
+    /// The settings screen, on a named page or on the one it was left on.
+    ///
+    /// The page cannot simply be written into the form on every frame:
+    /// `default_selected_index` is read when the form's state is **created**.
+    /// That state is a `use_keyed_state`, which lives exactly as long as the
+    /// element is drawn in consecutive frames — so it dies with the dialog and
+    /// is born again on the next opening, which is what made the page one had
+    /// asked for once come back for ever. The id carries a counter this bumps
+    /// on **every** opening, so that the page shown is the one recorded here
+    /// whatever the library does with that state.
+    fn show_settings(&mut self, page: Option<Page>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(page) = page {
             self.settings_page = page;
-            self.settings_epoch += 1;
         }
+        self.settings_epoch += 1;
         let form = self.settings_form.clone();
         window.open_dialog(cx, move |dialog, window, _cx| {
             // **The size is given, and given here.** In the dock the form
@@ -201,32 +256,40 @@ impl ClaudhubApp {
             app: cx.entity(),
         };
 
-        // The pages are assembled as a list rather than chained: that is what
-        // makes it possible to record a page's place **at the moment it is
-        // added**. A hard-coded index would have named the neighbour as soon as
-        // one page was inserted before it, and nothing would say so.
-        let mut pages = vec![
-            appearance_page(
-                environment.ui_fonts.clone(),
-                environment.mono_fonts.clone(),
-                light_themes,
-                dark_themes,
-            ),
-            terminal_page(environment.shells.clone(), environment.mono_fonts.clone()),
-            review_page(),
-            keyboard_page(),
-            files_page(),
-            lsp_page(),
-            sentry_page(),
-        ];
-        let databases_ix = pages.len();
-        pages.push(databases_page());
-        pages.push(logs_page(logs));
-        let selected = match self.settings_page {
-            Page::First => None,
-            Page::Databases => Some(databases_ix),
-        };
-
+        // The application, for the two pages that answer a click with something
+        // more than a setting: the log and the keyboard's import.
+        let app = cx.entity();
+        // The list is walked from `Page::ORDER`, so the sidebar's order and the
+        // enum that names its entries are one thing. Building it by hand meant
+        // an index recorded beside each `push`, which named the neighbour as
+        // soon as a page was inserted before it, with nothing to say so.
+        let pages: Vec<SettingPage> = Page::ORDER
+            .into_iter()
+            .map(|page| match page {
+                Page::Appearance => appearance_page(
+                    environment.ui_fonts.clone(),
+                    environment.mono_fonts.clone(),
+                    light_themes.clone(),
+                    dark_themes.clone(),
+                ),
+                Page::Terminal => {
+                    terminal_page(environment.shells.clone(), environment.mono_fonts.clone())
+                }
+                Page::Review => review_page(),
+                Page::Keyboard => keyboard_page(app.clone()),
+                Page::Files => files_page(),
+                Page::Lsp => lsp_page(),
+                Page::Sentry => sentry_page(),
+                Page::Databases => databases_page(),
+                // The ring itself is behind an `Rc`: what is cloned here is
+                // three words.
+                Page::Logs => logs_page(logs.clone()),
+            })
+            .collect();
+        let selected = Page::ORDER
+            .iter()
+            .position(|page| *page == self.settings_page)
+            .unwrap_or_default();
         div().size_full().child(
             gpui_component::setting::Settings::new(SharedString::from(format!(
                 "claudhub-settings-{}",
@@ -234,12 +297,18 @@ impl ClaudhubApp {
             )))
             .sidebar_width(px(190.))
             .pages(pages)
-            .map(|form| match selected {
-                Some(page_ix) => form.default_selected_index(SelectIndex {
-                    page_ix,
-                    group_ix: None,
-                }),
-                None => form,
+            .default_selected_index(SelectIndex {
+                page_ix: selected,
+                group_ix: None,
+            })
+            // Where the sidebar goes next. The form has no other way of saying
+            // it — its selection is element state, gone the moment the dialog
+            // closes.
+            .on_select(move |title, _, cx| {
+                let Some(page) = Page::of_title(title) else {
+                    return;
+                };
+                app.update(cx, |app, _| app.settings_page = page);
             }),
         )
     }
@@ -604,7 +673,7 @@ fn appearance_page(
         (SharedString::from("en"), SharedString::from("English")),
     ];
 
-    SettingPage::new(tr!("settings-page-appearance"))
+    SettingPage::new(Page::Appearance.title())
         .default_open(true)
         .group(
             SettingGroup::new()
@@ -754,7 +823,7 @@ fn terminal_page(
     let mut fonts = vec![(SharedString::default(), tr!("settings-font-inherit"))];
     fonts.extend(mono_fonts);
 
-    SettingPage::new(tr!("settings-page-terminal"))
+    SettingPage::new(Page::Terminal.title())
         .group(
             SettingGroup::new()
                 .title(tr!("settings-group-shell"))
@@ -845,8 +914,8 @@ fn terminal_page(
 /// A short page, and that is accepted: vim mode changes the meaning of half the
 /// keys, and it is the first place one goes looking for it. The reminder about
 /// `F1` is there because help you cannot find is not help.
-fn keyboard_page() -> SettingPage {
-    SettingPage::new(tr!("settings-page-keyboard"))
+fn keyboard_page(app: Entity<ClaudhubApp>) -> SettingPage {
+    SettingPage::new(Page::Keyboard.title())
         .group(
             SettingGroup::new()
                 .title(tr!("settings-group-vim"))
@@ -880,8 +949,53 @@ fn keyboard_page() -> SettingPage {
         .group(
             SettingGroup::new()
                 .title(tr!("settings-group-shortcuts"))
-                .item(shortcuts_item()),
+                .item(shortcuts_item(app)),
         )
+}
+
+/// Bumped when the whole table moves under the rows.
+///
+/// A row's field is an `InputState` built **once**, from the keys the binding
+/// had then; nothing tells it they have all just changed, and an import that
+/// left the fields showing the old keys would read as an import that did
+/// nothing. The key the state is filed under moves instead, so the next frame
+/// builds them again. Not a counter on the settings: this is a fact about the
+/// rows on screen, and it must reach a `&mut App` that knows nothing else.
+static SHORTCUTS_GENERATION: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// VS Code's keyboard, written over ours.
+///
+/// **The file is read from here**, which is the thread that draws — the rule it
+/// bends is about git commands, not about a form reading four kilobytes on a
+/// click. It has to be here for the same reason the keyring does: a VS Code
+/// configuration belongs to the desktop session, which is the Windows side when
+/// the workers are running in WSL, and a worker looking for it over there would
+/// find nothing and say the user has no VS Code.
+fn import_vscode(app: &Entity<ClaudhubApp>, cx: &mut App) {
+    let file = directories::BaseDirs::new()
+        .map(|dirs| dirs.config_dir().to_path_buf())
+        .into_iter()
+        .flat_map(|config| crate::ui::vscode::candidates(&config))
+        .find(|path| path.exists());
+    if let Some(path) = &file {
+        log::info!("importing the VS Code keyboard from {}", path.display());
+    }
+    // No file is not a failure: VS Code's own defaults are what somebody who
+    // never opened its keyboard settings means by importing it.
+    let text = file
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok());
+    let keymap = crate::ui::vscode::keymap(text.as_deref());
+    let mut moved = 0;
+    Settings::update_global(cx, |settings| {
+        moved = keymap.apply(&mut settings.shortcuts);
+    });
+    crate::ui::shortcuts::rebind(cx);
+    SHORTCUTS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    app.update(cx, |app, cx| {
+        app.announce(tr!("settings-shortcuts-imported", { count: moved }), cx)
+    });
 }
 
 /// Every binding, editable.
@@ -893,8 +1007,9 @@ fn keyboard_page() -> SettingPage {
 /// The list is `shortcuts::all()` — the table both the keymap and the help come
 /// out of. A second list would have diverged on the first addition, which is
 /// the whole point of that module.
-fn shortcuts_item() -> SettingItem {
+fn shortcuts_item(app: Entity<ClaudhubApp>) -> SettingItem {
     SettingItem::render(move |_, window, cx| {
+        let app = app.clone();
         let overrides = Settings::global(cx).shortcuts.clone();
         let vim = Settings::global(cx).vim_mode;
         // Which keys are claimed twice under the same predicate. Counted once
@@ -939,10 +1054,30 @@ fn shortcuts_item() -> SettingItem {
             .w_full()
             .gap_1()
             .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(tr!("settings-shortcuts-help")),
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_start()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tr!("settings-shortcuts-help")),
+                    )
+                    // The keyboard one already has, for whoever comes from the
+                    // editor next door. No confirmation asked: it writes only
+                    // the bindings it speaks for, each row keeps its own way
+                    // back, and a dialog inside a dialog is a focus one loses.
+                    .child(
+                        Button::new("import-vscode")
+                            .small()
+                            .outline()
+                            .label(tr!("settings-shortcuts-import-vscode"))
+                            .tooltip(tr!("settings-shortcuts-import-vscode-help"))
+                            .on_click(move |_, _window, cx| import_vscode(&app, cx)),
+                    ),
             )
             .children(rows)
     })
@@ -1016,9 +1151,10 @@ struct ShortcutField {
 /// One binding: what it does, the keys it answers to, and the way back.
 ///
 /// **The state's key is the binding's id**, which never moves: the list is
-/// neither added to nor reordered while the window is open, so there is no
-/// count to carry as the agent profiles do. Resetting writes into the field
-/// itself — the state would otherwise keep the text one has just abandoned.
+/// neither added to nor reordered while the window is open. What it does carry
+/// is `SHORTCUTS_GENERATION`, and only for the one gesture that changes every
+/// row at once. Resetting writes into the field itself — the state would
+/// otherwise keep the text one has just abandoned.
 fn shortcut_row(
     entry: &'static crate::ui::shortcuts::Entry,
     row: &crate::ui::shortcuts::Setting,
@@ -1037,8 +1173,9 @@ fn shortcut_row(
         idle,
     } = row.clone();
 
+    let generation = SHORTCUTS_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
     let state = window.use_keyed_state(
-        SharedString::from(format!("claudhub-shortcut-{id}")),
+        SharedString::from(format!("claudhub-shortcut-{generation}-{id}")),
         cx,
         move |window, cx| {
             let keys = cx.new(|cx| {
@@ -1152,7 +1289,7 @@ fn shortcut_row(
         .child(
             Button::new(SharedString::from(format!("reset-{id}")))
                 .ghost()
-                .xsmall()
+                .small()
                 .icon(icon("undo-2"))
                 .tooltip(tr!("settings-shortcut-reset"))
                 .disabled(!customised)
@@ -1169,7 +1306,7 @@ fn shortcut_row(
 }
 
 fn review_page() -> SettingPage {
-    SettingPage::new(tr!("settings-page-review"))
+    SettingPage::new(Page::Review.title())
         .group(
             SettingGroup::new()
                 .title(tr!("settings-group-integration"))
@@ -1296,7 +1433,7 @@ fn review_page() -> SettingPage {
 }
 
 fn files_page() -> SettingPage {
-    SettingPage::new(tr!("settings-page-files")).group(
+    SettingPage::new(Page::Files.title()).group(
         SettingGroup::new()
             .item(
                 SettingItem::new(
@@ -1422,7 +1559,7 @@ fn sentry_page() -> SettingPage {
     let field = |value: fn(&App) -> SharedString, set: fn(SharedString, &mut App)| {
         SettingField::input(value, set).default_value(SharedString::default())
     };
-    SettingPage::new(tr!("settings-page-sentry")).group(
+    SettingPage::new(Page::Sentry.title()).group(
         SettingGroup::new()
             .item(SettingItem::new(
                 tr!("settings-sentry-org"),
@@ -1483,7 +1620,7 @@ fn sentry_page() -> SettingPage {
 }
 
 fn databases_page() -> SettingPage {
-    SettingPage::new(tr!("settings-page-databases")).group(
+    SettingPage::new(Page::Databases.title()).group(
         SettingGroup::new().item(databases_item()).item(
             SettingItem::new(
                 tr!("settings-db-page-size"),
@@ -1846,7 +1983,7 @@ fn database_row(
 /// in `settings.json`: a language server takes its settings from its own file,
 /// where an agent takes its model from a variable.
 fn lsp_page() -> SettingPage {
-    SettingPage::new(tr!("settings-page-lsp")).group(SettingGroup::new().item(lsp_item()))
+    SettingPage::new(Page::Lsp.title()).group(SettingGroup::new().item(lsp_item()))
 }
 
 /// The servers table, a `SettingItem::render` for the databases' reason: four
@@ -2068,6 +2205,7 @@ fn edit_database(index: usize, cx: &mut App, edit: impl FnOnce(&mut crate::db::C
 /// What the logs page needs: the records, what is being shown of them, and a
 /// way back to the application — the level is a posture of reading, not a
 /// preference, and it lives in `ClaudhubApp` rather than in the settings file.
+#[derive(Clone)]
 struct LogView {
     records: std::rc::Rc<Vec<LogRow>>,
     level: log::LevelFilter,
@@ -2153,7 +2291,7 @@ fn log_line(entry: &crate::logging::Entry) -> String {
 /// died means relaunching from a terminal, which is asking the user to reproduce
 /// the problem before being allowed to look at it.
 fn logs_page(view: LogView) -> SettingPage {
-    SettingPage::new(tr!("settings-page-logs"))
+    SettingPage::new(Page::Logs.title())
         // Nothing here is a setting, so nothing here resets.
         .resettable(false)
         .group(

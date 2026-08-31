@@ -1369,7 +1369,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("pest-only-failed")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("circle-x"))
                     .tooltip(tr!("tests-only-failed"))
                     .selected(only_failed)
@@ -1385,7 +1385,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("tests-reset")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("eraser"))
                     .tooltip(tr!("tests-reset"))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -1395,7 +1395,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("pest-run-all")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("play"))
                     .tooltip(tr!("tests-run-all"))
                     .disabled(count == 0)
@@ -1433,7 +1433,7 @@ impl ClaudhubApp {
             .child(
                 Button::new("pest-refresh")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(icon("refresh-cw"))
                     .tooltip(tr!("action-refresh"))
                     .disabled(pending)
@@ -1465,7 +1465,7 @@ impl ClaudhubApp {
                         .child(
                             Button::new("pest-cast")
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .icon(icon("monitor-play"))
                                 .label(tr!("tests-cast-label"))
                                 .tooltip(tr!("tests-cast"))
@@ -1485,7 +1485,7 @@ impl ClaudhubApp {
                         .child(
                             Button::new("pest-slow")
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .icon(icon("clock"))
                                 .label(tr!("tests-slow-label"))
                                 .tooltip(tr!("tests-slow"))
@@ -1502,7 +1502,7 @@ impl ClaudhubApp {
                         .child(
                             Button::new("pest-headed")
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .icon(icon("eye"))
                                 .label(tr!("tests-headed-label"))
                                 .tooltip(tr!("tests-headed"))
@@ -1522,7 +1522,7 @@ impl ClaudhubApp {
                         .child(
                             Button::new("pest-parallel")
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .icon(icon("zap"))
                                 .label(tr!("tests-parallel-label"))
                                 .tooltip(tr!("tests-parallel"))
@@ -1669,7 +1669,7 @@ fn render_dir(
         .child(
             Button::new(("pest-dir-run", index))
                 .ghost()
-                .xsmall()
+                .small()
                 .icon(icon("play"))
                 .tooltip(tr!("tests-run-class"))
                 .on_click(move |_, window, cx| {
@@ -2134,7 +2134,7 @@ impl ClaudhubApp {
                         // message, not the row's truncated first line.
                         Button::new(("pest-failure-copy", index))
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(icon("copy"))
                             .label(tr!("tests-copy"))
                             .tooltip(tr!("tests-copy-result"))
@@ -2205,7 +2205,7 @@ impl ClaudhubApp {
                 .child(
                     Button::new("tests-stop")
                         .ghost()
-                        .xsmall()
+                        .small()
                         .icon(icon("circle-stop"))
                         .tooltip(tr!("tests-stop"))
                         .on_click(cx.listener(move |this, _, _window, cx| {
