@@ -19,8 +19,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::dock::{BasePanel, DockRegions, Panel, PanelControl, PanelEvent};
-use gpui_component::menu::PopupMenuItem;
-use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _};
+use gpui_component::menu::ContextMenuExt as _;
 use gpui_component::ActiveTheme;
 use gpui_component::Sizable as _;
 
@@ -1773,11 +1772,14 @@ impl TerminalPanel {
     }
 }
 
-/// The "+" of the terminals: a shell, or one of the agent profiles.
+/// The "+" of the terminals: a shell, at once.
 ///
-/// One entry per profile, as the hand-painted strip used to offer: the menu is
-/// the only place the choice arises, and a list coming from the settings saves
-/// reopening them to launch something else.
+/// **A click and not a menu.** It opened a menu — a shell, the same against
+/// the other edge, then one entry per agent profile — and the menu was a
+/// second gesture in front of the one thing the button is pressed for
+/// ninety-nine times in a hundred. An agent is launched from the title bar,
+/// and the multiplexer's `+` keeps its menu, which is there to name a
+/// worktree first and offers the profiles while it is at it.
 ///
 /// It is used in two places, and it is the same button: the last tab's title,
 /// where the row of terminals ends, and the status bar beside the toggle — the
@@ -1797,52 +1799,8 @@ pub(super) fn new_terminal_button(
         .small()
         .icon(crate::ui::icons::icon("plus"))
         .tooltip(tr!("terminal-new"))
-        .dropdown_menu(move |menu, _window, cx| {
-            let shell = app.clone();
-            let profiles = Settings::global(cx).terminal.agents.clone();
-            let menu = menu.item(
-                PopupMenuItem::new(tr!("terminal-new"))
-                    .icon(crate::ui::icons::icon("plus"))
-                    .on_click(move |_, window, cx| {
-                        open_terminal(&shell, None, view, window, cx);
-                    }),
-            );
-            // And the same thing against the **other** edge. One entry and not
-            // two, always the one the setting does not do: a shell beside the
-            // code rather than under it is a gesture one makes now and then,
-            // and naming both would say the setting decides nothing.
-            let elsewhere = view
-                .unwrap_or_else(|| Settings::global(cx).terminal.placement)
-                .other();
-            let menu = {
-                let app = app.clone();
-                menu.item(
-                    PopupMenuItem::new(tr!(elsewhere.new_terminal_key()))
-                        .icon(crate::ui::icons::icon(match elsewhere {
-                            crate::ui::settings::TerminalPlacement::Right => "panel-right",
-                            crate::ui::settings::TerminalPlacement::Bottom => "panel-bottom",
-                        }))
-                        .on_click(move |_, window, cx| {
-                            open_terminal(&app, None, Some(elsewhere), window, cx);
-                        }),
-                )
-            };
-            if profiles.is_empty() {
-                return menu;
-            }
-            profiles
-                .into_iter()
-                .fold(menu.separator(), |menu, profile| {
-                    let app = app.clone();
-                    let label = gpui::SharedString::from(profile.label().to_string());
-                    menu.item(
-                        PopupMenuItem::new(label)
-                            .icon(crate::ui::icons::icon("bot"))
-                            .on_click(move |_, window, cx| {
-                                open_terminal(&app, Some(profile.clone()), view, window, cx);
-                            }),
-                    )
-                })
+        .on_click(move |_, window, cx| {
+            open_terminal(&app, None, view, window, cx);
         })
 }
 

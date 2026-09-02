@@ -993,13 +993,20 @@ pub struct ClaudhubApp {
     /// Empty when one is not in zen. It is not persisted: a window reopening in
     /// zen with no memory of what it hid would be a window one has to rebuild.
     pub(super) zen_folded: Vec<crate::ui::rails::Side>,
-    /// The terminal grid, in place of the whole workspace — see `ui::multiplex`.
+    /// The terminal strip, in place of the whole workspace — see `ui::multiplex`.
     ///
     /// A state of the window and not a panel: what it replaces is the rails,
     /// the docks and the status bar, which is precisely what a panel cannot do.
     /// Not remembered either — a screen with no way back to the code is not
     /// where a window should come up.
     pub(super) multiplex: bool,
+    /// Where the multiplexer's strip of columns is scrolled to.
+    pub(super) multiplex_scroll: gpui::ScrollHandle,
+    /// The terminal the strip last brought into view — the one under the
+    /// hand at the previous frame. `None` when nothing was, or when the strip
+    /// has just come up: the first frame then reveals the focused column
+    /// wherever the strip had been left.
+    pub(super) multiplex_seen: Option<gpui::EntityId>,
     /// The views the user has hidden, by panel name.
     ///
     /// A set and not a flag per panel: it is `Panel::visible` that makes a view
@@ -1016,6 +1023,18 @@ pub struct ClaudhubApp {
     /// The views folded away: not on screen, but one press of their button from
     /// coming back. What a press on a lit button does.
     pub(super) folded_panels: std::collections::HashSet<String>,
+    /// The views taken off the screen by a view called up beside them, on an
+    /// edge that shows one half at a time — see `rails::displaced_by`.
+    ///
+    /// **A third state and not a fold.** A displaced view was not put away by
+    /// anyone: it is not drawn because the terminals were called up beside
+    /// it. Written into `folded_panels` it would have outlived the terminals
+    /// that displaced it — into the next start, where there are none, as a
+    /// band with nothing in it. Otherwise it behaves as a fold: it comes
+    /// back when pressed, and **only** then. It gave the band back on its own
+    /// when the half in front emptied, and that made the terminals reappear
+    /// the moment one folded the graph — the opposite of what the fold asked.
+    pub(super) displaced_panels: std::collections::HashSet<String>,
 
     /// What each worktree has in progress, including those not opened: it is the
     /// question one asks while scanning the list.
@@ -1419,10 +1438,13 @@ impl ClaudhubApp {
             dock_skin,
             layout_save_scheduled: false,
             multiplex: false,
+            multiplex_scroll: gpui::ScrollHandle::new(),
+            multiplex_seen: None,
             zen_folded: Vec::new(),
             settings_form,
             off_panels: Settings::global(cx).hidden_panels.iter().cloned().collect(),
             folded_panels: Settings::global(cx).folded_panels.iter().cloned().collect(),
+            displaced_panels: std::collections::HashSet::new(),
             summaries: HashMap::new(),
             agents: crate::agent::Tracker::default(),
             diff_dragging: false,
@@ -3095,16 +3117,31 @@ impl ClaudhubApp {
         // **A ceiling, and read off the window.** `ui::notify` already cuts the
         // body to a number of lines, which is the honest half of this; a line
         // is not a height, though — one long enough wraps to five rows — so the
-        // balloon is also told, in pixels, never to take more than a third of
+        // body is also told, in pixels, never to take more than a third of
         // what it is covering. The stack of them is capped by the library; a
         // single one was not.
+        //
+        // **On the body, and painted by us, not as a `max_h` on the balloon.**
+        // The balloon's column of text is a flex item with no `min_h_0`: its
+        // floor is its content, so a ceiling on the box outside it clipped
+        // nothing, and fourteen lines of diffstat wrapping to thirty ran out
+        // of the rounded border and over the panel below. The body scrolls
+        // instead, so that what the ceiling hides is still there to be read.
         let ceiling = window.viewport_size().height / 3.;
         window.push_notification(
             gpui_component::notification::Notification::new()
                 .with_type(kind)
-                .max_h(ceiling)
                 .when_some(title, |note, title| note.title(title))
-                .message(message)
+                .content(move |_, _, _| {
+                    div()
+                        .id("notice-body")
+                        .max_h(ceiling)
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .text_sm()
+                        .child(message.clone())
+                        .into_any_element()
+                })
                 // A failure stays until it is dismissed: it is the one thing
                 // here that is read late, and a balloon that fades on its own
                 // is a message one finds gone on coming back to it.
@@ -4298,6 +4335,8 @@ impl Render for ClaudhubApp {
             .on_action(cx.listener(super::shortcuts::close_terminal))
             .on_action(cx.listener(super::shortcuts::toggle_terminal))
             .on_action(cx.listener(super::shortcuts::next_terminal))
+            .on_action(cx.listener(super::shortcuts::multiplex_step_left))
+            .on_action(cx.listener(super::shortcuts::multiplex_step_right))
             .on_action(cx.listener(super::shortcuts::next_tab))
             .on_action(cx.listener(super::shortcuts::previous_tab))
             .on_action(cx.listener(super::shortcuts::commit))
@@ -4618,10 +4657,13 @@ impl ClaudhubApp {
             }
         }
         // Its zone, if it is in one and it is folded: a tab selected behind a
-        // folded edge is a gesture that did nothing.
+        // folded edge is a gesture that did nothing. And its half in front,
+        // where the edge draws one at a time: a tab selected behind the
+        // terminals is the same gesture.
         if let Some(side) = crate::ui::rails::side_of(name, &self.seats(cx)) {
             self.unfold(side, window, cx);
         }
+        self.bring_half_forward(name, cx);
         let dock = self.dock.clone();
         crate::ui::panels::select_panel_named(&dock, name, window, cx);
         cx.notify();
@@ -4749,8 +4791,10 @@ impl ClaudhubApp {
     ) {
         self.show_panel(panel, cx);
         crate::ui::dock_layout::move_to(&self.dock.clone(), panel, anchor, window, cx);
-        // A tool sent to a folded edge is a gesture that did nothing.
+        // A tool sent to a folded edge is a gesture that did nothing — and so
+        // is one sent behind the half in front.
         self.unfold(anchor.side, window, cx);
+        self.bring_half_forward(panel, cx);
         let dock = self.dock.clone();
         crate::ui::panels::select_panel_named(&dock, panel, window, cx);
         self.schedule_layout_save(cx);
@@ -4880,6 +4924,10 @@ impl ClaudhubApp {
         if let Some(worktree) = self.active.clone() {
             self.ensure_terminal(&worktree, view, window, cx);
         }
+        // One already open, unfolded by the line above: in front of the graph
+        // it shares the band with. Opening one goes through `dock_terminal`,
+        // which says the same, so this is for the one that was there.
+        self.bring_half_forward(view, cx);
     }
 
     /// A set of panel names as the settings file takes them.
@@ -4905,7 +4953,37 @@ impl ClaudhubApp {
     /// without anything having to declare it, and a name unknown to the
     /// settings file — a renamed panel — no longer hides anything.
     pub(super) fn panel_visible(&self, name: &str) -> bool {
-        !self.folded_panels.contains(name) && !self.off_panels.contains(name)
+        !self.folded_panels.contains(name)
+            && !self.off_panels.contains(name)
+            && !self.displaced_panels.contains(name)
+    }
+
+    /// Puts the half a view sits in **in front** of its edge, where the edge
+    /// shows one half at a time: what the other half draws is displaced.
+    ///
+    /// Every "show me that" of a bottom view ends here: the rail button, the
+    /// key, a terminal being opened, a view moved there. At the gesture and
+    /// not at the next frame, so the panels learn of it in the same round
+    /// trip as the fold that goes with it, and the two halves are never drawn
+    /// side by side in between. Wherever the name is seated — the terminals
+    /// are one name on as many seats as there are terminals, and two of them
+    /// can be on two edges.
+    pub(super) fn bring_half_forward(&mut self, name: &str, cx: &mut Context<Self>) {
+        let seats = self.seats(cx);
+        let mut changed = self.displaced_panels.remove(name);
+        for seat in seats.iter().filter(|seat| seat.panel == name) {
+            let Some(anchor) = seat.anchor else {
+                continue;
+            };
+            for other in crate::ui::rails::displaced_by(anchor, &seats) {
+                if other != name {
+                    changed |= self.displaced_panels.insert(other.to_string());
+                }
+            }
+        }
+        if changed {
+            cx.notify();
+        }
     }
 
     /// Whether a view has been taken off its rail: no button, no tab.
@@ -4971,6 +5049,10 @@ impl ClaudhubApp {
     pub(super) fn show_panel(&mut self, name: &str, cx: &mut Context<Self>) {
         self.set_panel_off(name, false, cx);
         self.set_panel_folded(name, false, cx);
+        // And displaced, which is the third way of not being drawn.
+        if self.displaced_panels.remove(name) {
+            cx.notify();
+        }
     }
 
     /// The area keyboard zoom aims at.

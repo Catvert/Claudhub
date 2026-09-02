@@ -845,8 +845,19 @@ impl TerminalView {
         // them: without this, one notch over a tile would move the tile *and*
         // the grid under it. A fraction of a line that has not added up to one
         // yet is consumed just the same, or the leftovers would leak upward.
-        cx.stop_propagation();
+        //
+        // **A sideways notch is the one exception**, and it is let through
+        // untouched: nothing below reads the x axis — a terminal has no width
+        // to scroll — and the multiplexer's strip above does, which is how a
+        // tilt of the wheel or two fingers on a trackpad slide the columns
+        // from anywhere on the screen, niri's gesture. A notch with a vertical
+        // part keeps belonging here: it is what a diagonal swipe mostly is.
         let line_height = window.line_height().max(px(1.));
+        let delta = event.delta.pixel_delta(line_height);
+        if delta.y == px(0.) && delta.x != px(0.) {
+            return;
+        }
+        cx.stop_propagation();
         // The platform key changes the wheel's meaning: we enlarge the text
         // instead of scrolling back. The terminal handles its own scrolling, so
         // it is enough not to do it.
@@ -1682,6 +1693,11 @@ pub struct OpenTerminal {
     /// there one below?" holds a `&self` on the application, and reading an
     /// entity from there is one borrow too many.
     pub view_name: &'static str,
+    /// How wide its column is in the multiplexer, as a share of the window.
+    ///
+    /// Here and not in a map keyed by the view: a terminal that closes takes
+    /// its width with it, and there is nothing to sweep.
+    pub column: crate::ui::multiplex::Width,
 }
 
 impl OpenTerminal {}
@@ -1877,6 +1893,7 @@ impl ClaudhubApp {
             name: None,
             panel: panel.clone(),
             view_name,
+            column: crate::ui::multiplex::Width::default(),
         });
         self.dock_terminal(&worktree, panel, placement, window, cx);
         let handle = view.read(cx).focus_handle(cx);
@@ -1986,6 +2003,14 @@ impl ClaudhubApp {
             _ => None,
         } {
             self.unfold(side, window, cx);
+        }
+        // And one opened behind the graph of branches is the same: down
+        // there the band draws one half at a time, and a terminal one has
+        // just asked for is the half one wants. Only when it is drawn at all
+        // — a terminal opened on a worktree one is not looking at must not
+        // take the band from the one being looked at.
+        if self.terminal_shown(worktree, view_name) {
+            self.bring_half_forward(view_name, cx);
         }
     }
 
@@ -2390,6 +2415,7 @@ impl ClaudhubApp {
     ) {
         self.select_worktree(worktree.to_path_buf(), window, cx);
         self.show_panel(crate::ui::panels::TerminalPanel::NAME, cx);
+        self.bring_half_forward(crate::ui::panels::TerminalPanel::NAME, cx);
         // And the grid goes away: one came to it to find out which of the
         // agents had finished, and this is the answer being acted on. Leaving
         // it up would show the eleven other checkouts' shells beside the one

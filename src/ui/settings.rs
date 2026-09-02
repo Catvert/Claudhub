@@ -238,23 +238,6 @@ impl TerminalPlacement {
             _ => Self::Bottom,
         }
     }
-
-    /// The other edge. What the `+` offers under the entry that follows the
-    /// setting: the useful gesture is always the one the setting does not do.
-    pub fn other(self) -> Self {
-        match self {
-            Self::Bottom => Self::Right,
-            Self::Right => Self::Bottom,
-        }
-    }
-
-    /// The i18n key of "a new terminal, over there".
-    pub fn new_terminal_key(self) -> &'static str {
-        match self {
-            Self::Bottom => "terminal-new-bottom",
-            Self::Right => "terminal-new-right",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -61,6 +61,10 @@ pub enum Axes {
     Vertical,
     /// The diff, whose lines never wrap.
     Both,
+    /// The multiplexer's strip of columns, which overflows in width alone.
+    /// The mirror of `Vertical`: a vertical wheel falls back to horizontal,
+    /// exactly as gpui does when only that axis overflows.
+    Horizontal,
 }
 
 /// The smoothing of one scroll handle.
@@ -246,6 +250,10 @@ impl ScrollMotion {
             }
             Axes::Both if delta.x.abs() > delta.y.abs() => (f32::from(delta.x), 0.),
             Axes::Both => (0., f32::from(delta.y)),
+            Axes::Horizontal => {
+                let dx = if delta.x == px(0.) { delta.y } else { delta.x };
+                (f32::from(dx), 0.)
+            }
         }
     }
 }
@@ -536,5 +544,11 @@ mod tests {
             (0., -60.),
             "only the dominant component gets through"
         );
+
+        // A strip that only overflows sideways takes a vertical notch as a
+        // horizontal one, and a sideways notch as itself.
+        let horizontal = ScrollMotion::new(Axes::Horizontal);
+        assert_eq!(horizontal.split(point(px(0.), px(-60.))), (-60., 0.));
+        assert_eq!(horizontal.split(point(px(-30.), px(-60.))), (-30., 0.));
     }
 }

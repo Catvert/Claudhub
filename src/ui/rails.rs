@@ -65,6 +65,14 @@ impl Half {
     /// so calling up a terminal was how one put away the graph of branches one
     /// had opened it beside.
     pub const BOTH: [Half; 2] = [Half::Start, Half::End];
+
+    /// The half beside this one.
+    pub fn other(self) -> Half {
+        match self {
+            Half::Start => Half::End,
+            Half::End => Half::Start,
+        }
+    }
 }
 
 /// A place a tool window can sit: an edge, and which half of it.
@@ -124,6 +132,25 @@ impl Side {
             Side::Bottom => gpui::Axis::Horizontal,
             _ => gpui::Axis::Vertical,
         }
+    }
+
+    /// Whether this edge shows **one half at a time**.
+    ///
+    /// The bottom does. Its two halves stand side by side, and side by side is
+    /// what a terminal and the graph of branches cannot afford to be: each
+    /// wants the width of the window — eighty columns for the one, the run of
+    /// commits for the other — and splitting the band gave a terminal that
+    /// wrapped every line and a graph read through a slot. So calling up one
+    /// half puts the other away — and putting it away leaves the band
+    /// empty, until one presses: nothing comes back on its own. The two side
+    /// columns do not need it, their halves being stacked and each keeping
+    /// the whole width.
+    ///
+    /// The halves are kept — a terminal still lands in its own group, and the
+    /// rail still reads two runs — and what changes is only which of the two
+    /// is drawn: see `displaced_by`.
+    pub fn exclusive(self) -> bool {
+        matches!(self, Side::Bottom)
     }
 
     /// Its rank in `ALL` — the index of its slot wherever the three are held
@@ -794,6 +821,23 @@ pub fn showing_in(anchor: Anchor, seats: &[Seat]) -> Vec<&'static str> {
         .collect()
 }
 
+/// The tool windows that calling up a view at `anchor` takes off the screen.
+///
+/// Nothing on a side column: its halves are stacked and both stay. On the
+/// bottom, the other half's views that are drawn — a view folded by hand is
+/// not drawn, and is not touched; one already displaced neither. Decided at
+/// the **gesture** and not read off the tree each frame: a displacement
+/// worked out at render time was drawn one frame late, with the two halves
+/// side by side in between, and gave the band back on its own when the half
+/// in front emptied — which is what a hand that had just folded a view did
+/// not ask for. Hidden is hidden until one presses.
+pub fn displaced_by(anchor: Anchor, seats: &[Seat]) -> Vec<&'static str> {
+    if !anchor.side.exclusive() {
+        return Vec::new();
+    }
+    showing_in(Anchor::new(anchor.side, anchor.half.other()), seats)
+}
+
 /// The zen fold, and the way back.
 ///
 /// Folding the three is easy; what makes it zen rather than destructive is
@@ -1253,8 +1297,8 @@ mod tests {
         let bottom = rail(&rails, Side::Bottom);
         assert_eq!(names(&bottom.start), ["ClaudhubHistory"]);
         assert_eq!(names(&bottom.end), ["ClaudhubTerminal"]);
-        // Putting the terminals away leaves the graph where it was, which is
-        // the whole of what the second half buys.
+        // Putting the terminals away is a press on their own half, and the
+        // band is left empty: the graph comes back when pressed for.
         assert_eq!(
             press("ClaudhubTerminal", None, &seats),
             Press::Hide {
@@ -1265,6 +1309,44 @@ mod tests {
             showing_in(Anchor::new(Side::Bottom, Half::End), &seats),
             ["ClaudhubTerminal"]
         );
+    }
+
+    /// **The band shows one half at a time.** Called up, the terminals put
+    /// the graph away; called up, the graph puts the terminals away. The side
+    /// columns keep both halves on screen: their halves are stacked, and each
+    /// keeps the whole width.
+    #[test]
+    fn the_bottom_shows_one_half_at_a_time() {
+        let seats = vec![
+            seat("ClaudhubHistory", at(Side::Bottom, Half::Start), true, true),
+            seat("ClaudhubTerminal", at(Side::Bottom, Half::End), true, true),
+        ];
+        assert_eq!(
+            displaced_by(Anchor::new(Side::Bottom, Half::End), &seats),
+            ["ClaudhubHistory"]
+        );
+        assert_eq!(
+            displaced_by(Anchor::new(Side::Bottom, Half::Start), &seats),
+            ["ClaudhubTerminal"]
+        );
+        assert!(Side::Bottom.exclusive());
+        assert!(!Side::Left.exclusive() && !Side::Right.exclusive());
+        let stacked = vec![
+            seat("ClaudhubFiles", at(Side::Left, Half::Start), true, true),
+            seat("ClaudhubNotes", at(Side::Left, Half::End), true, true),
+        ];
+        assert!(displaced_by(Anchor::new(Side::Left, Half::End), &stacked).is_empty());
+    }
+
+    /// What is not drawn is not displaced: a view folded by hand stays a
+    /// fold, and one already off the screen is not named twice.
+    #[test]
+    fn what_is_not_drawn_is_not_displaced() {
+        let seats = vec![
+            away("ClaudhubHistory", at(Side::Bottom, Half::Start)),
+            seat("ClaudhubTerminal", at(Side::Bottom, Half::End), true, true),
+        ];
+        assert!(displaced_by(Anchor::new(Side::Bottom, Half::End), &seats).is_empty());
     }
 
     /// A move offers every place but the one it is already in: a menu entry

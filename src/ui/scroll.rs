@@ -302,6 +302,7 @@ impl ClaudhubApp {
         let axis = match axes {
             Axes::Vertical => ScrollbarAxis::Vertical,
             Axes::Both => ScrollbarAxis::Both,
+            Axes::Horizontal => ScrollbarAxis::Horizontal,
         };
         wrap(id.clone(), handle, axis, content.into_any_element()).on_scroll_wheel(cx.listener(
             move |this, event: &gpui::ScrollWheelEvent, window, cx| {

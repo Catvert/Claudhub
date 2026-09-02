@@ -621,7 +621,15 @@ impl crate::ui::app::ClaudhubApp {
         std::collections::BTreeSet<String>,
     ) {
         (
-            self.folded_panels.iter().cloned().collect(),
+            // Displaced reads as folded here: the rail keeps a button for a
+            // situational view folded by hand, and a run being followed that
+            // the terminals pushed off the screen is exactly that — its button
+            // is how one calls it back.
+            self.folded_panels
+                .iter()
+                .chain(self.displaced_panels.iter())
+                .cloned()
+                .collect(),
             self.off_panels.iter().cloned().collect(),
         )
     }

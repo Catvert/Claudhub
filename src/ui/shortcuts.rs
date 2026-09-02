@@ -35,6 +35,8 @@ actions!(
         ToggleTerminal,
         NextTerminal,
         PreviousTerminal,
+        MultiplexStepLeft,
+        MultiplexStepRight,
         NextTab,
         PreviousTab,
         Commit,
@@ -919,6 +921,14 @@ table!(STANDARD, standard_bindings, false, [
     Terminal "secondary-shift-c" => CopySelection, TERMINAL_PREDICATE, "shortcut-terminal-copy";
     Terminal "secondary-shift-v" => PasteClipboard, TERMINAL_PREDICATE, "shortcut-terminal-paste";
     Terminal "secondary-shift-a" => SelectAllText, TERMINAL_PREDICATE, "shortcut-terminal-select-all";
+    // The multiplexer's two chevrons, for a hand on the keyboard: the strip
+    // slides half a column, the same step the buttons and the wheel take.
+    // `PREDICATE` and not `WINDOW_PREDICATE`, deliberately: on that screen
+    // the focus is in a terminal, which is exactly where the key is pressed.
+    // Off the screen the handler **propagates**, so the terminal one is
+    // typing in still receives the keystroke.
+    Terminal "secondary-shift-h" => MultiplexStepLeft, PREDICATE, "shortcut-multiplex-step-left";
+    Terminal "secondary-shift-j" => MultiplexStepRight, PREDICATE, "shortcut-multiplex-step-right";
     // gpui-component's `Root` binds a bare `tab` and `shift-tab` to focus
     // cycling. These two match **deeper** — on the terminal's own node — and
     // gpui tries every matching binding in turn, stopping at the first that
@@ -1350,6 +1360,41 @@ pub fn next_terminal(
         return;
     };
     this.step_terminal(&worktree, 1, window, cx);
+}
+
+pub fn multiplex_step_left(
+    this: &mut ClaudhubApp,
+    _: &MultiplexStepLeft,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    multiplex_step(this, crate::ui::multiplex::End::Start, cx);
+}
+
+pub fn multiplex_step_right(
+    this: &mut ClaudhubApp,
+    _: &MultiplexStepRight,
+    _window: &mut Window,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    multiplex_step(this, crate::ui::multiplex::End::End, cx);
+}
+
+/// Slides the multiplexer's strip half a column — see `step_strip`.
+///
+/// Off that screen the keystroke is **handed on**: the binding matches in a
+/// terminal, and a terminal is where `Ctrl+Shift+H` means something to the
+/// program running there.
+fn multiplex_step(
+    this: &mut ClaudhubApp,
+    end: crate::ui::multiplex::End,
+    cx: &mut gpui::Context<ClaudhubApp>,
+) {
+    if !this.multiplex {
+        cx.propagate();
+        return;
+    }
+    this.step_strip(end, cx);
 }
 
 /// The next document of the centre.

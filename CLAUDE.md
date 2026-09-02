@@ -190,7 +190,7 @@ src/
     worktree_picker.rs le sélecteur de worktrees : le filtre, la liste, les actions
     worktrees.rs    ce que le sélecteur de worktrees liste — pur, testé
     picker.rs       ce que les deux sélecteurs partagent : le pas du curseur — pur
-    multiplex.rs    la grille de tous les terminaux : un écran, pas un panneau
+    multiplex.rs    tous les terminaux en colonnes : un écran, pas un panneau
     review.rs / terminal_view.rs
     server.rs       la mise en route du serveur WSL
     settings.rs     les réglages et leur global
@@ -434,6 +434,22 @@ sont les deux séries d'un bandeau — `Half::Start` et `Half::End`, jamais
 Le bas n'a eu qu'un emplacement, et ça faisait qu'appeler un terminal était la
 façon de ranger le graphe des branches à côté duquel on l'ouvrait.
 
+**Le bas ne dessine qu'une moitié à la fois** (`Side::exclusive`,
+`rails::settle`) : côte à côte, un terminal et le graphe des branches se
+volaient la largeur, la seule chose qu'un terminal ait en trop — quatre-vingts
+colonnes d'un côté, la course des commits de l'autre. Appeler une moitié
+**déplace** l'autre, et la ranger laisse la bande vide : rien ne revient
+sans qu'on le presse. Déplacé est un **troisième état**, en mémoire seulement
+(`displaced_panels`) et jamais dans `folded_panels` : écrit là, le graphe
+aurait survécu aux terminaux qui l'avaient poussé — jusqu'au démarrage
+suivant, où il n'y a aucun terminal, en bande vide. Il se décide **au geste**
+(`bring_half_forward`) et non au rendu : calculé en tête de frame depuis
+l'arbre, il se dessinait une frame en retard, les deux moitiés côte à côte
+entre-temps, et il rendait la bande de lui-même dès que la moitié de devant se
+vidait — replier le graphe faisait réapparaître les terminaux. Les moitiés
+restent : un terminal atterrit dans son groupe et le bandeau se lit en deux
+séries, seul le dessin change.
+
 **Une moitié vide n'est pas un emplacement** mais une bande qui ne dit rien et
 qu'on ne remplit qu'en y traînant quelque chose (`dock_layout::edge`) : elle
 existe toujours — un panneau qu'on y dépose la fabrique — et `seats` lit un
@@ -543,19 +559,42 @@ racine, où lire l'entité racine est une panique.
 dock ne sait pas faire : surveiller cinq agents demande de voir cinq terminaux
 *en même temps*, là où un groupe d'onglets en montre un. Il remplace tout ce
 qui est sous la barre de titre — bandeaux, docks, barre d'état — par des tuiles,
-tous worktrees confondus, chacune disant à quel projet elle appartient. La
-forme **de départ** de la grille est pure et testée (`multiplex::rows`) —
-lignes et tuiles se redimensionnent ensuite à la main, par les groupes
-redimensionnables de gpui-component, dont l'état vit sur la fenêtre sous l'id
-du groupe et non chez nous. Une tuile se prend par son en-tête et se dépose sur
-une autre pour **échanger** leurs places, ce qui réordonne `terminals` lui-même
+tous worktrees confondus, chacune disant à quel projet elle appartient.
+**Des colonnes pleine hauteur dans une bande qui défile en largeur**, comme
+niri, et non une grille : une grille de neuf donnait à chaque terminal un
+tiers de la hauteur, douze lignes de transcription, là où une colonne garde
+toutes les lignes et paie en largeur, l'axe qu'un terminal a en trop. La
+largeur d'une colonne est un **préréglage** (`multiplex::Width` — un tiers,
+la moitié, deux tiers, tout ; pur, testé), une part de la fenêtre que le bouton
+de l'en-tête fait tourner, jamais une poignée : une taille qu'on tire se
+retire à chaque fois. La bande **suit le focus**, en glissant par le même lissage
+(`multiplex::reveal` calcule la destination, `motion::push` y va) et non par
+`scroll_to_item`, qui saute ; lu au rendu et non écrit à
+chaque geste — un clic sur la surface d'un terminal le focalise aussi, et ce
+clic est au programme. Un cran **latéral** de la molette traverse le terminal
+(seul cran qu'il laisse passer) et fait glisser la bande depuis n'importe où ;
+un cran vertical sur un en-tête aussi, gpui le tournant vers le seul axe qui
+déborde — lissé comme les listes du dock, par `motion::Axes::Horizontal`. Deux chevrons de l'en-tête déplacent une colonne d'un
+pas (`multiplex::shift`, sans boucler), et une tuile se prend aussi par son
+en-tête pour se déposer sur une autre et **échanger** leurs places ; les deux
+réordonnent `terminals` lui-même
 — l'ordre des terminaux est un seul, celui que `Ctrl+PageUp` parcourt aussi.
+Deux **bandeaux fixes** encadrent la bande, un par bout, et ne défilent
+jamais : un chevron qui la fait glisser d'une demi-colonne — la moitié de la
+colonne **qui entre** de ce côté (`multiplex::half_column`, pur), un tiers et
+deux tiers n'ayant pas la même moitié — et un `+` qui ouvre un terminal à ce
+bout. Un cran de molette est le même pas, pris sur la colonne avant que gpui
+n'applique ses trois hauteurs de ligne — en demandant
+d'abord **sur quel worktree** : le `+` du dock ouvre sur le worktree regardé,
+et cet écran les regarde tous. Rien d'autre que des colonnes ne se tient dans
+la bande : un `+` qui la terminait prenait le rang d'une colonne neuve, et ses
+bornes périmées avec.
 Le clavier est
 remis des deux côtés de la bascule, ce qui avait le focus n'étant plus peint
 après. Chaque tuile a la
 flèche qui y emmène (`work_in_worktree`) : on vient là pour savoir lequel des
 agents a fini, et agir sur la réponse c'est aller dans ce worktree en quittant
-la grille. Il a remplacé `terminals_everywhere`, l'état qui montrait les
+les colonnes. Il a remplacé `terminals_everywhere`, l'état qui montrait les
 terminaux de tous les worktrees dans le dock — ce que le multiplexeur fait
 mieux, et un état sans commande pour l'atteindre est du code mort.
 
@@ -590,10 +629,14 @@ Sept pièges du dock, tous rencontrés :
   un terminal de la zone basse revient en « panel type is not registered » à
   chaque démarrage — son contenu est un processus, rien ne le rebâtit.
 
-**Un terminal s'ouvre du côté que le réglage dit**, et le `+` offre en plus
-l'**autre** côté — une seule entrée, toujours celle que le réglage ne fait pas
-(`TerminalPlacement::other`). Le `+` d'une barre d'onglets ouvre dans **sa**
-vue, celui de la barre d'état dans celle du réglage. Il se pose **après le
+**Un terminal s'ouvre du côté que le réglage dit**, et le `+` du dock ouvre
+un shell **d'un clic**, sans menu : il en a porté un — le shell, l'autre côté,
+puis un profil d'agent par entrée — et c'était un second geste devant celui
+qu'on fait quatre-vingt-dix-neuf fois sur cent. L'agent se lance depuis la
+barre de titre ; seul le `+` du multiplexeur garde son menu, qui existe pour
+nommer un worktree d'abord et offre les profils tant qu'il y est. Le `+`
+d'une barre d'onglets ouvre dans **sa** vue, celui de la barre d'état dans
+celle du réglage. Il se pose **après le
 dernier onglet** (`tab_bar_trailing`) et non au bout de la barre : le geste est
 « un de plus », donc il se lit comme l'onglet suivant. Le groupe que rejoint un
 nouveau terminal est celui d'un frère **de la même vue**, et non le dernier
@@ -966,7 +1009,9 @@ modificateurs et rien d'autre. Il se lit donc sur `on_modifiers_changed` de la
 phase de **capture**, un terminal consommant ce qu'on lui donne) : sans quoi
 `AB` serait le geste exactement. Corollaire : il ne se personnalise pas et ne
 s'éteint pas, donc la fenêtre d'aide l'écrit à la main, sur la ligne de
-`Ctrl+P` puisque c'est le même geste.
+`Ctrl+P` puisque c'est le même geste. Une exception, dans le code et non dans
+une table : il se tait sur le multiplexeur, où deux Maj sont une hésitation
+au clavier d'un shell — `Ctrl+P` y reste.
 
 **Les bases** (`db/`, `db.rs`, `db_query.rs`) — un seul pilote, `sqlx`.
 **Une console est un document**, un panneau chacune, comme un fichier ouvert :
@@ -1310,8 +1355,10 @@ Elles viennent d'Aviary, et les enfreindre produit des bugs silencieux.
   en tête du rendu de la racine — `push_notification` réclame un `&mut Window`.
   Elle est **bornée deux fois** : `notify::notice` coupe le corps à quatorze
   lignes et dit combien il en reste — un rebase de deux cents fichiers
-  recouvrait la relecture qu'il rapportait — et `balloon` lui pose un plafond
-  au tiers de la fenêtre, une ligne n'étant pas une hauteur.
+  recouvrait la relecture qu'il rapportait — et `balloon` pose au corps un
+  plafond au tiers de la fenêtre, une ligne n'étant pas une hauteur — sur le
+  corps, qui défile, et non sur la bulle : sa colonne de texte n'a pas de
+  `min_h_0`, et un plafond sur la boîte ne rognait rien.
 - **Un handle de focus survit à l'élément qui le portait**, et une fenêtre dont
   le focus pend sur un nœud qui n'est plus peint devient sourde : gpui remonte
   l'événement depuis ce nœud, ne le trouve pas, et repart de la racine de son

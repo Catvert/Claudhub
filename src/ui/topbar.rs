@@ -403,11 +403,18 @@ impl ClaudhubApp {
     ///
     /// It is therefore painted even with nothing pinned — where the pins alone
     /// were not, an empty group being width spent to say that a feature exists.
+    ///
+    /// **And it is exclusive of the pins**, since it is one answer to the same
+    /// question: while the strip is up no pin is lit, though the window still
+    /// has a current checkout underneath — the strip shows every project's
+    /// terminals, and a pin lit beside it said one of them was being looked at
+    /// alone. A pin pressed from the strip goes to work in that checkout and
+    /// leaves the strip, the gesture the tiles' arrow already makes.
     fn render_switches(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // Shared, not copied twice: the click handler outlives the frame and
         // used to take a second list of its own.
         let pins: std::rc::Rc<[PathBuf]> = self.pinned_worktrees(cx).into();
-        let active = self.active_path();
+        let active = self.active_path().filter(|_| !self.multiplex);
         let muted = cx.theme().muted_foreground;
         // What a selected pin is painted with. A solid button's ground is the
         // accent, and everything the row carries beside its name — the
@@ -506,7 +513,11 @@ impl ClaudhubApp {
                 let Some(path) = for_click.get(index).cloned() else {
                     return;
                 };
-                this.select_worktree(path, window, cx);
+                if this.multiplex {
+                    this.work_in_worktree(&path, window, cx);
+                } else {
+                    this.select_worktree(path, window, cx);
+                }
             }))
     }
 

@@ -613,9 +613,10 @@ impl ClaudhubApp {
 
     /// The terminal grid goes away when the palette answers.
     ///
-    /// The palette is reachable from the multiplexer — a modal covers whatever
-    /// is under it, and this one is worth reaching from there: "which file was
-    /// that" is a question one asks while watching five agents. But the answer
+    /// The palette is reachable from the multiplexer, by `Ctrl+P` and not by
+    /// the double `Shift` (`quick_tapped`) — a modal covers whatever is under
+    /// it, and this one is worth reaching from there: "which file was that" is
+    /// a question one asks while watching five agents. But the answer
     /// is a file, and the grid replaces everything below the title bar, so an
     /// answer given without leaving it would open a tab nobody can see. The
     /// rule `work_in_worktree` already follows: acting on what one came to the
@@ -676,6 +677,14 @@ impl ClaudhubApp {
             return;
         }
         if window.has_active_dialog(cx) {
+            return;
+        }
+        // Not over the strip of terminals. A double `Shift` is a thing a hand
+        // does while typing at a shell — a capital letter hesitated over — and
+        // there is nothing else under it there: the palette then covered the
+        // five agents one was watching, uninvited. `Ctrl+P` still opens it
+        // from there, on purpose.
+        if self.multiplex {
             return;
         }
         self.open_quick(Mode::Files, window, cx);
