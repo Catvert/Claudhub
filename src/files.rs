@@ -66,7 +66,7 @@ pub const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 ///
 /// **Ours and not gpui's**: this module belongs to the core, which the headless
 /// server builds without the `ui` feature — and it is the server that reads the
-/// file. `ui::explorer` translates it into `gpui::ImageFormat`, which is one
+/// file. `ui::explorer` translates it into `gpui_kit::ImageFormat`, which is one
 /// match and the only place the two vocabularies meet.
 ///
 /// The list is gpui's, minus what it cannot decode. SVG is in it: gpui rasters

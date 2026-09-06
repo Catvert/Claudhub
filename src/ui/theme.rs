@@ -6,8 +6,8 @@
 
 use std::path::PathBuf;
 
-use gpui::{prelude::*, px, App, Hsla, Pixels, Rgba, Window};
-use gpui_component::{Theme, ThemeRegistry};
+use gpui_kit::component::{Theme, ThemeRegistry};
+use gpui_kit::{prelude::*, px, App, Hsla, Pixels, Rgba, Window};
 
 use super::settings::{Settings, ThemeMode};
 
@@ -42,7 +42,7 @@ pub fn install(cx: &mut App) {
     // Loading is asynchronous: the chosen theme does not exist in the registry
     // yet at this point. The re-application is **not** done in `watch_dir`'s
     // callback: gpui-component installs its own `observe_global::<ThemeRegistry>`
-    // in `gpui_component::init`, which calls `Theme::change` — and so wipes
+    // in `gpui_kit::component::init`, which calls `Theme::change` — and so wipes
     // every colour `apply` writes — and global observers run at the end of the
     // effects cycle, *after* that callback. The window then opened with the
     // palette's raw `tab_bar` (lighter than the card, the dock read as
@@ -74,15 +74,15 @@ fn write_bundled(dir: &std::path::Path) -> std::io::Result<()> {
 /// mode or text size.
 pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
     let mode = match settings.theme {
-        ThemeMode::Dark => gpui_component::ThemeMode::Dark,
-        ThemeMode::Light => gpui_component::ThemeMode::Light,
+        ThemeMode::Dark => gpui_kit::component::ThemeMode::Dark,
+        ThemeMode::Light => gpui_kit::component::ThemeMode::Light,
         // gpui does not expose the system preference portably; dark mode is a
         // development tool's default.
         ThemeMode::System => match cx.window_appearance() {
-            gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight => {
-                gpui_component::ThemeMode::Light
+            gpui_kit::WindowAppearance::Light | gpui_kit::WindowAppearance::VibrantLight => {
+                gpui_kit::component::ThemeMode::Light
             }
-            _ => gpui_component::ThemeMode::Dark,
+            _ => gpui_kit::component::ThemeMode::Dark,
         },
     };
 
@@ -123,7 +123,7 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
     // would have vanished each time you wonder where you are. Nor `Hover`,
     // which only shows them once the pointer is on the bar: it is invisible,
     // therefore unfindable.
-    theme.scrollbar_mode = gpui_component::scroll::ScrollbarMode::Always;
+    theme.scrollbar_mode = gpui_kit::component::scroll::ScrollbarMode::Always;
 
     // gpui-component's radii are a 2015 web form's: six and eight pixels. They
     // carry everything the window shows — buttons, fields, menus, dialogs — and
@@ -177,14 +177,14 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
     // components — the dock's tab bar among them — read `tokens` and not
     // `colors`, and a colour changed here without this call shows up nowhere.
     // That is this version's silent failure.
-    theme.tokens = gpui_component::ThemeTokens::from(&theme.colors);
+    theme.tokens = gpui_kit::component::ThemeTokens::from(&theme.colors);
 
     // The base layer keeps **its own copy** of the theme — resize handles and
     // scrollbars paint without going through gpui-component. Without this
     // projection, none of the above reaches it; and since it rebuilds the copy
     // from scratch, the handle tweak comes after.
     Theme::sync_base(cx);
-    let base = gpui_base::Theme::global_mut(cx);
+    let base = gpui_kit::base::Theme::global_mut(cx);
     // The handle at rest paints nothing: the cards are already separated by the
     // gutter, and a grey line on top would stitch back what we have just
     // unstitched. It stays grabbable — the grab zone is wider than the line —
@@ -193,7 +193,7 @@ pub fn apply(settings: &Settings, window: Option<&mut Window>, cx: &mut App) {
     // `Some` and not `None`: the field became an option upstream, and `None`
     // falls back to the border colour rather than meaning "no line" — the very
     // grey this exists to remove.
-    base.resizable.handle = Some(gpui::transparent_black());
+    base.resizable.handle = Some(gpui_kit::transparent_black());
 
     cx.refresh_windows();
 }
@@ -252,7 +252,7 @@ pub fn row_height(cx: &App) -> Pixels {
 ///
 /// The width is the component's own, not a number of ours: the bar is theirs.
 pub fn scroll_gutter() -> Pixels {
-    gpui_component::scroll::Scrollbar::width()
+    gpui_kit::component::scroll::Scrollbar::width()
 }
 
 /// The height of a header bar: tabs, panel titles.
@@ -275,11 +275,11 @@ pub fn toolbar_height(cx: &App) -> Pixels {
 /// Deriving it rather than adding it to the twelve bundled palettes is also
 /// what gives a theme written by someone else the benefit without knowing it.
 pub fn gutter(cx: &App) -> Hsla {
-    gpui_component::ActiveTheme::theme(cx).tab_bar
+    gpui_kit::component::ActiveTheme::theme(cx).tab_bar
 }
 
 fn scaled(cx: &App, factor: f32, floor: Pixels) -> Pixels {
-    let base = gpui_component::ActiveTheme::theme(cx).font_size;
+    let base = gpui_kit::component::ActiveTheme::theme(cx).font_size;
     (base * factor).round().max(floor)
 }
 
@@ -313,9 +313,9 @@ pub const INDENT: f32 = 12.;
 /// The colour is taken rather than read from the theme: the explorer's rows
 /// are rendered by the dozen in a virtualised list's closure, where `cx.theme()`
 /// borrows the context — it reads it once per frame and hands it over.
-pub fn indent_guides(depth: usize, guide: Hsla) -> impl IntoIterator<Item = gpui::Div> + use<> {
+pub fn indent_guides(depth: usize, guide: Hsla) -> impl IntoIterator<Item = gpui_kit::Div> + use<> {
     (0..depth).map(move |_| {
-        gpui::div()
+        gpui_kit::div()
             .w(px(INDENT))
             .h_full()
             .flex_none()
@@ -327,15 +327,17 @@ pub fn indent_guides(depth: usize, guide: Hsla) -> impl IntoIterator<Item = gpui
 /// The colour of those rules: pale enough to read as a texture and not as a
 /// separator, they are on screen by the dozen.
 pub fn indent_guide(cx: &App) -> Hsla {
-    gpui_component::ActiveTheme::theme(cx).border.opacity(0.7)
+    gpui_kit::component::ActiveTheme::theme(cx)
+        .border
+        .opacity(0.7)
 }
 
 /// The place of the chevron a leaf does not have.
 ///
 /// Without it, a file's name and a folder's do not line up, and the indentation
 /// says nothing.
-pub fn chevron_space() -> gpui::Div {
-    gpui::div().w(px(14.)).flex_none()
+pub fn chevron_space() -> gpui_kit::Div {
+    gpui_kit::div().w(px(14.)).flex_none()
 }
 
 /// The shell every chip shares: a word on a tint of its own colour.
@@ -350,8 +352,8 @@ pub fn chevron_space() -> gpui::Div {
 /// rather than a filled badge: a filled one needs an ink chosen against it,
 /// which is the light-theme trap `surface::ink_on` exists for. This one holds
 /// on both themes without asking.
-pub fn chip_base(colour: Hsla) -> gpui::Div {
-    gpui_component::h_flex()
+pub fn chip_base(colour: Hsla) -> gpui_kit::Div {
+    gpui_kit::component::h_flex()
         .flex_none()
         .items_center()
         .gap_0p5()
@@ -363,7 +365,7 @@ pub fn chip_base(colour: Hsla) -> gpui::Div {
 }
 
 /// A chip with nothing in it but its word.
-pub fn chip(label: gpui::SharedString, colour: Hsla) -> impl IntoElement {
+pub fn chip(label: gpui_kit::SharedString, colour: Hsla) -> impl IntoElement {
     chip_base(colour).child(label)
 }
 
@@ -373,11 +375,11 @@ pub fn chip(label: gpui::SharedString, colour: Hsla) -> impl IntoElement {
 /// them straight into their row, which already sets the gap, and a wrapper of
 /// our own would give them a second one. A zero is left out — `+0` makes the eye
 /// read a number where there is none.
-pub fn volume(added: usize, removed: usize, colors: &DiffColors) -> Vec<gpui::Div> {
+pub fn volume(added: usize, removed: usize, colors: &DiffColors) -> Vec<gpui_kit::Div> {
     let mut parts = Vec::new();
     if added > 0 {
         parts.push(
-            gpui::div()
+            gpui_kit::div()
                 .flex_none()
                 .text_xs()
                 .text_color(colors.added_fg)
@@ -386,7 +388,7 @@ pub fn volume(added: usize, removed: usize, colors: &DiffColors) -> Vec<gpui::Di
     }
     if removed > 0 {
         parts.push(
-            gpui::div()
+            gpui_kit::div()
                 .flex_none()
                 .text_xs()
                 .text_color(colors.removed_fg)
@@ -416,7 +418,7 @@ pub struct DiffColors {
 
 impl DiffColors {
     pub fn of(cx: &App) -> Self {
-        if gpui_component::ActiveTheme::theme(cx).mode.is_dark() {
+        if gpui_kit::component::ActiveTheme::theme(cx).mode.is_dark() {
             Self {
                 added_bg: Hsla {
                     a: 0.18,
@@ -489,7 +491,7 @@ impl DiffColors {
 /// The colour of a file's status letter, in the review list.
 pub fn status_color(code: crate::git::StatusCode, cx: &App) -> Hsla {
     use crate::git::StatusCode as S;
-    let theme = gpui_component::ActiveTheme::theme(cx);
+    let theme = gpui_kit::component::ActiveTheme::theme(cx);
     match code {
         S::Added | S::Copied => rgb(0x3fb950),
         S::Modified | S::TypeChanged => rgb(0xd29922),
@@ -555,7 +557,7 @@ mod tests {
         for name in BundledThemes::iter() {
             let file = BundledThemes::get(&name).expect("embedded file");
             let text = std::str::from_utf8(&file.data).expect("UTF-8");
-            let set: gpui_component::ThemeSet =
+            let set: gpui_kit::component::ThemeSet =
                 serde_json::from_str(text).unwrap_or_else(|e| panic!("{name} unreadable: {e}"));
             assert!(!set.themes.is_empty(), "{name} declares no theme");
             for theme in &set.themes {

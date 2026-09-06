@@ -115,6 +115,36 @@ fn report<S: AsRef<OsStr>>(dir: &Path, args: &[S], elapsed: Duration, out: &std:
     }
 }
 
+/// The same as `git`, with something written on the command's standard input.
+///
+/// For the one write that takes a patch rather than arguments: `git apply`,
+/// fed what `git show` said. The input never touches the disk — a temporary
+/// file would be a path to translate on the Windows target — and the wait is
+/// `wait_feeding`'s, which writes from a thread so a slow reader cannot
+/// deadlock against the pipes we drain.
+pub(crate) fn git_feeding<S: AsRef<OsStr>>(
+    dir: &Path,
+    args: &[S],
+    input: Vec<u8>,
+) -> Result<String> {
+    let started = Instant::now();
+    let mut cmd = command(dir, args);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let out = wait_feeding(cmd, Some(input), TIMEOUT, || {
+        format!("git {}", describe(args))
+    })?;
+    report(dir, args, started.elapsed(), &out);
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!("git {}: {}", describe(args), stderr.trim());
+    }
+    Ok(strip_trailing_newline(
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    ))
+}
+
 /// Launches the command and waits for it, without exceeding `TIMEOUT`.
 ///
 /// Both outputs are read by threads: a full pipe blocks the writer, and `git

@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use gpui::{App, BorrowAppContext};
+use gpui_kit::{App, BorrowAppContext};
 use serde::{Deserialize, Serialize};
 
 use crate::ui::notes::Note;
@@ -405,7 +405,7 @@ pub struct StateStore {
     saving: bool,
 }
 
-impl gpui::Global for StateStore {}
+impl gpui_kit::Global for StateStore {}
 
 impl Store {
     /// Installs the loaded state. To be called once, at startup.

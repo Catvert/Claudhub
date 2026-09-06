@@ -40,16 +40,16 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use gpui::{
-    div, prelude::*, px, App, Context, Entity, Focusable as _, Hsla, KeyDownEvent, ScrollStrategy,
-    SharedString, WeakEntity, Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputState},
     popover::{Popover, PopoverState},
     v_flex, v_virtual_list, ActiveTheme, Disableable as _, Sizable as _, StyledExt as _,
+};
+use gpui_kit::{
+    div, prelude::*, px, App, Context, Entity, Focusable as _, Hsla, KeyDownEvent, ScrollStrategy,
+    SharedString, WeakEntity, Window,
 };
 
 use crate::git::{BranchKind, LogRange};
@@ -65,10 +65,10 @@ use crate::ui::icons::icon;
 /// `wt/` name and the four chips at its shoulder — here, the checkout holding
 /// it, what it owes and what it leads by — leave nothing for the name itself.
 /// It is `base_select`'s width, and for the same reason.
-const WIDTH: gpui::Pixels = px(420.);
+const WIDTH: gpui_kit::Pixels = px(420.);
 
 /// How tall the list grows before it scrolls.
-const LIST_HEIGHT: gpui::Pixels = px(320.);
+const LIST_HEIGHT: gpui_kit::Pixels = px(320.);
 
 /// Where the picker is painted.
 ///
@@ -116,15 +116,15 @@ struct Look {
     success: Hsla,
     /// A branch's row in the docked column: two lines of text and next to
     /// nothing around them.
-    row: gpui::Pixels,
+    row: gpui_kit::Pixels,
     /// The same row in the popover, where it carries the name alone.
-    compact: gpui::Pixels,
+    compact: gpui_kit::Pixels,
     /// A group's heading: one line, and shorter than a row — it is a rule with
     /// a name on it, not an entry.
-    head: gpui::Pixels,
+    head: gpui_kit::Pixels,
     /// A scope row: one line, and an entry one aims at — so taller than a
     /// heading, and the height of a branch wherever a branch carries one line.
-    scope: gpui::Pixels,
+    scope: gpui_kit::Pixels,
 }
 
 impl Look {
@@ -149,7 +149,7 @@ impl Look {
 
     /// How tall a branch's row is, which is a question of where it is being
     /// read. See the second line's own comment in `branch_row`.
-    fn branch(&self, mode: Mode) -> gpui::Pixels {
+    fn branch(&self, mode: Mode) -> gpui_kit::Pixels {
         match mode {
             Mode::Docked => self.row,
             Mode::Popover => self.compact,
@@ -162,7 +162,7 @@ pub(super) struct BranchPicker {
     query: Entity<InputState>,
     mode: Mode,
     step: Step,
-    scroll: gpui_component::VirtualListScrollHandle,
+    scroll: gpui_kit::component::VirtualListScrollHandle,
     /// Keyboard cursor into the **displayed** list, group headings included:
     /// what the arrows move is a row on screen, and a cursor counted on anything
     /// else drifts the moment a heading leaves with its group.
@@ -207,7 +207,7 @@ impl BranchPicker {
             // asked for.
             cx.subscribe(
                 &query,
-                |this: &mut Self, _, _event: &gpui_component::input::InputEvent, cx| {
+                |this: &mut Self, _, _event: &gpui_kit::component::input::InputEvent, cx| {
                     this.stale = true;
                     cx.notify();
                 },
@@ -223,7 +223,7 @@ impl BranchPicker {
                 query,
                 mode,
                 step: Step::List,
-                scroll: gpui_component::VirtualListScrollHandle::new(),
+                scroll: gpui_kit::component::VirtualListScrollHandle::new(),
                 cursor: 0,
                 rows: Rc::new(Vec::new()),
                 stale: true,
@@ -269,7 +269,7 @@ impl BranchPicker {
     /// The filter's focus handle, which is what `Ctrl+F` aims at in the tool
     /// window: the panel has a field and it **is** the search, the rule the
     /// project search already follows.
-    pub(super) fn filter(&self, cx: &App) -> gpui::FocusHandle {
+    pub(super) fn filter(&self, cx: &App) -> gpui_kit::FocusHandle {
         self.query.focus_handle(cx)
     }
 
@@ -474,7 +474,7 @@ impl BranchPicker {
         }
     }
 
-    fn render_list(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_list(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let look = Look::of(cx);
         // The transition, one step per frame. It asks for the next frame itself
         // for as long as it is moving.
@@ -494,9 +494,9 @@ impl BranchPicker {
         let sizes = Rc::new(
             rows.iter()
                 .map(|row| match row {
-                    Row::Group { .. } => gpui::size(px(0.), look.head),
-                    Row::Scope(_) => gpui::size(px(0.), look.scope),
-                    Row::Branch(_) => gpui::size(px(0.), look.branch(self.mode)),
+                    Row::Group { .. } => gpui_kit::size(px(0.), look.head),
+                    Row::Scope(_) => gpui_kit::size(px(0.), look.scope),
+                    Row::Branch(_) => gpui_kit::size(px(0.), look.branch(self.mode)),
                 })
                 .collect::<Vec<_>>(),
         );
@@ -621,7 +621,7 @@ impl BranchPicker {
 
     // — Step two: one branch's actions ————————————————————————————
 
-    fn render_actions(&mut self, row: &BranchRow, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_actions(&mut self, row: &BranchRow, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let look = Look::of(cx);
         let remote = row.kind == BranchKind::Remote;
         // A remote-tracking name is its own upstream; a local one has to declare
@@ -1032,7 +1032,7 @@ fn scope_row(
     shown: bool,
     at_cursor: bool,
     look: Look,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let picker = picker.clone();
     h_flex()
         .id(("branch-scope", index))
@@ -1112,7 +1112,7 @@ fn group_heading(
     count: usize,
     folded: bool,
     look: Look,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let picker = picker.clone();
     h_flex()
         .id(("branch-group", index))
@@ -1189,7 +1189,7 @@ fn branch_row(
     shown: bool,
     look: Look,
     _cx: &mut App,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     // The worktree holding it, as a chip beside the name and no longer in
     // place of what the branch carries: those are two questions, and answering
     // the first used to throw the second away — the subject that tells
@@ -1249,7 +1249,7 @@ fn branch_row(
             },
             |el, text| {
                 el.tooltip(move |window, cx| {
-                    gpui_component::tooltip::Tooltip::new(text.clone()).build(window, cx)
+                    gpui_kit::component::tooltip::Tooltip::new(text.clone()).build(window, cx)
                 })
             },
         )
@@ -1265,7 +1265,7 @@ fn branch_row(
         .border_l_2()
         .border_color(match row.is_head {
             true => look.primary,
-            false => gpui::transparent_black(),
+            false => gpui_kit::transparent_black(),
         })
         // Set in from the heading: a flat column under a title reads as a list
         // that happens to have a title above it, not as the group's branches.
@@ -1437,7 +1437,7 @@ impl ClaudhubApp {
     /// warning for what is owed, success for what is gained — so the eye joins a
     /// count to its button without a word, and the gloss says the number for the
     /// hand that wants it.
-    pub(super) fn render_sync_buttons(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+    pub(super) fn render_sync_buttons(&self, cx: &mut Context<Self>) -> Vec<gpui_kit::AnyElement> {
         let Some((ahead, behind)) = self
             .active_review()
             .map(|review| (review.status.ahead, review.status.behind))
@@ -1449,7 +1449,7 @@ impl ClaudhubApp {
             self.active_running(Action::Push),
         );
         let (warning, success) = (cx.theme().warning, cx.theme().success);
-        let mut out: Vec<gpui::AnyElement> = Vec::new();
+        let mut out: Vec<gpui_kit::AnyElement> = Vec::new();
         // Behind before ahead, the list's order: what has to be integrated comes
         // before what can be sent.
         if behind > 0 {

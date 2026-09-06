@@ -19,13 +19,13 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use gpui::{div, prelude::*, Context, Entity, Focusable, SharedString, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputEvent, InputState},
     ActiveTheme, Sizable,
 };
+use gpui_kit::{div, prelude::*, Context, Entity, Focusable, SharedString, Window};
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
@@ -216,7 +216,7 @@ impl ClaudhubApp {
     ///
     /// Empty and not `None`: the callers all filter the same way, and an empty
     /// query removes nothing.
-    pub(super) fn query(&self, pane: Pane, cx: &gpui::App) -> String {
+    pub(super) fn query(&self, pane: Pane, cx: &gpui_kit::App) -> String {
         self.finders
             .get(&self.find_key(pane))
             .filter(|finder| finder.open)
@@ -391,8 +391,8 @@ impl ClaudhubApp {
     /// is right under it with a cross of its own. Pressed again it closes, and
     /// closing empties, like the cross and like `Esc`.
     pub(super) fn find_button(&mut self, pane: Pane, cx: &mut Context<Self>) -> impl IntoElement {
-        use gpui_component::button::{Button, ButtonVariants as _};
-        use gpui_component::{Selectable as _, Sizable as _};
+        use gpui_kit::component::button::{Button, ButtonVariants as _};
+        use gpui_kit::component::{Selectable as _, Sizable as _};
         let open = self.find_open(pane);
         Button::new("find-in-pane")
             .ghost()
@@ -412,7 +412,7 @@ impl ClaudhubApp {
                     return;
                 }
                 let input = this.open_find_in(pane, window, cx);
-                gpui::Focusable::focus_handle(&input, cx).focus(window, cx);
+                gpui_kit::Focusable::focus_handle(&input, cx).focus(window, cx);
             }))
     }
 
@@ -538,7 +538,7 @@ pub struct Hit {
 }
 
 /// The background of an occurrence, laid over the syntax highlighting.
-pub fn highlight_color(current: bool, cx: &gpui::App) -> gpui::Hsla {
+pub fn highlight_color(current: bool, cx: &gpui_kit::App) -> gpui_kit::Hsla {
     if current {
         cx.theme().warning
     } else {

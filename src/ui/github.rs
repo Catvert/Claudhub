@@ -20,14 +20,14 @@
 
 use std::path::PathBuf;
 
-use gpui::{div, prelude::*, AnyElement, Context, Entity, SharedString, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     h_flex,
     input::{Input, InputState, Textarea, TextareaState},
     v_flex, ActiveTheme, Disableable as _, Selectable as _, Sizable as _, WindowExt as _,
 };
+use gpui_kit::{div, prelude::*, AnyElement, Context, Entity, SharedString, Window};
 
 use crate::runtime::protocol::Caller;
 use crate::runtime::Cmd;
@@ -309,7 +309,7 @@ pub fn draft_from(subjects: &str, branch: &str) -> (String, String) {
 /// is a row one has to read before seeing there is nothing to read. It takes
 /// its colours rather than the context, because it is called from inside a
 /// virtualised list's closure, where the application cannot be read.
-fn tally_elements(checks: Checks, colors: [gpui::Hsla; 3]) -> Vec<AnyElement> {
+fn tally_elements(checks: Checks, colors: [gpui_kit::Hsla; 3]) -> Vec<AnyElement> {
     let [success, danger, warning] = colors;
     [
         ("circle-check", success, checks.passed),
@@ -459,7 +459,7 @@ pub struct GithubState {
     /// Which of the two lists the panel shows. Pull requests: that is what the
     /// panel is for, and the runs are what one goes to **from** one.
     pub mode: Mode,
-    pub pr_scroll: gpui::UniformListScrollHandle,
+    pub pr_scroll: gpui_kit::UniformListScrollHandle,
     pub runs: Vec<Run>,
     pub chosen: Option<usize>,
     /// The log of the chosen run, once asked for: choosing a row calls nothing,
@@ -491,7 +491,7 @@ pub struct GithubState {
     pub creating: bool,
     /// What the log, once it lands, is for: reading, or handing over.
     pub log_for_agent: bool,
-    pub scroll: gpui::UniformListScrollHandle,
+    pub scroll: gpui_kit::UniformListScrollHandle,
 }
 
 impl ClaudhubApp {
@@ -893,7 +893,7 @@ impl ClaudhubApp {
         v_flex()
             .size_full()
             .child(
-                gpui::uniform_list("github-prs", count, {
+                gpui_kit::uniform_list("github-prs", count, {
                     let rows = rows.clone();
                     move |range, _window, _cx| {
                         range
@@ -1090,7 +1090,7 @@ impl ClaudhubApp {
         v_flex()
             .size_full()
             .child(
-                gpui::uniform_list("ci-runs", count, {
+                gpui_kit::uniform_list("ci-runs", count, {
                     let rows = rows.clone();
                     move |range, _window, _cx| {
                         range
@@ -1242,7 +1242,7 @@ impl ClaudhubApp {
                     el.child(
                         div()
                             .id("ci-log")
-                            .max_h(gpui::px(220.))
+                            .max_h(gpui_kit::px(220.))
                             .overflow_scroll()
                             .p_2()
                             .rounded_md()
@@ -1357,7 +1357,7 @@ impl Render for PrDraft {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
         v_flex()
-            .w(gpui::px(560.))
+            .w(gpui_kit::px(560.))
             .gap_2()
             .children(self.base.clone().map(|base| {
                 div()

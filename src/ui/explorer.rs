@@ -29,13 +29,15 @@
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gpui::{div, prelude::*, px, uniform_list, App, Context, Entity, Pixels, SharedString, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     input::{Editor, EditorState},
     menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
     v_flex, ActiveTheme, Disableable, Sizable, WindowExt,
+};
+use gpui_kit::{
+    div, prelude::*, px, uniform_list, App, Context, Entity, Pixels, SharedString, Window,
 };
 
 use crate::files;
@@ -66,7 +68,7 @@ pub struct DraggedEntry {
     pub path: PathBuf,
 }
 
-impl gpui::Render for DraggedEntry {
+impl gpui_kit::Render for DraggedEntry {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let name = self
             .path
@@ -641,7 +643,7 @@ fn last_line(text: &str) -> usize {
 /// The offset is clamped: a trail entry is a byte offset in a file that may
 /// have been rewritten while one was away, and a server's position may name a
 /// line the document no longer has.
-fn offset_of(text: &gpui_component::input::Rope, landing: &Landing) -> usize {
+fn offset_of(text: &gpui_kit::component::input::Rope, landing: &Landing) -> usize {
     match landing {
         Landing::Offset(offset) => (*offset).min(text.len()),
         // Nothing found is the top of the file, which is what opening it
@@ -654,7 +656,7 @@ fn offset_of(text: &gpui_component::input::Rope, landing: &Landing) -> usize {
                 .unwrap_or(0)
         }
         Landing::Position { line, character } => {
-            use gpui_component::input::RopeExt;
+            use gpui_kit::component::input::RopeExt;
             text.position_to_offset(&lsp_types::Position::new(*line, *character))
         }
     }
@@ -1061,7 +1063,7 @@ impl ClaudhubApp {
             return;
         };
         self.files_scroll
-            .scroll_to_item(index, gpui::ScrollStrategy::Top);
+            .scroll_to_item(index, gpui_kit::ScrollStrategy::Top);
     }
 
     /// Moves up or down one row in the displayed tree.
@@ -1242,7 +1244,7 @@ impl ClaudhubApp {
             (true, Some(worktree)) => crate::wslpath::join(worktree, path).display().to_string(),
             _ => path.display().to_string(),
         };
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
         self.announce(tr!("copy-path-done"), cx);
     }
 
@@ -1580,7 +1582,7 @@ impl ClaudhubApp {
                 editing.reveal_tries = 0;
             }
         }
-        gpui::Focusable::focus_handle(&input, cx).focus(window, cx);
+        gpui_kit::Focusable::focus_handle(&input, cx).focus(window, cx);
         Some(offset)
     }
 
@@ -1888,7 +1890,7 @@ impl ClaudhubApp {
         let owner = worktree.clone();
         let edited = path.clone();
         cx.subscribe(&input, move |this, _, event, cx| {
-            if !matches!(event, gpui_component::input::InputEvent::Change) {
+            if !matches!(event, gpui_kit::component::input::InputEvent::Change) {
                 return;
             }
             if let Some(editing) = this
@@ -2177,7 +2179,7 @@ impl ClaudhubApp {
         let last = editing.last_line;
         let app = cx.entity().downgrade();
         let (worktree, path) = (worktree.to_path_buf(), path.to_path_buf());
-        let render: gpui_component::input::GutterMarkRenderer = Rc::new(move |row| {
+        let render: gpui_kit::component::input::GutterMarkRenderer = Rc::new(move |row| {
             let kind = hunks.iter().find(|hunk| hunk.covers(row, last))?.kind();
             let (worktree, path, app) = (worktree.clone(), path.clone(), app.clone());
             Some(
@@ -2190,14 +2192,14 @@ impl ClaudhubApp {
                     .relative()
                     .cursor_pointer()
                     .child(
-                        gpui::canvas(
+                        gpui_kit::canvas(
                             |_, _, _| {},
                             move |bounds, _, window, cx| paint_hunk_mark(kind, bounds, window, cx),
                         )
                         .absolute()
                         .inset_0(),
                     )
-                    .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                    .on_mouse_down(gpui_kit::MouseButton::Left, move |_, _, cx| {
                         // The strip belongs to the gutter, and the gutter is
                         // not the text: without this the click would also land
                         // in the editor and move the caret.
@@ -2328,17 +2330,17 @@ impl ClaudhubApp {
         dock.update(cx, |dock, cx| {
             crate::ui::panels::dock_panel_at(
                 dock,
-                gpui_component::dock::panel_handle(panel.clone()),
-                gpui_component::dock::DockPlacement::Center,
+                gpui_kit::component::dock::panel_handle(panel.clone()),
+                gpui_kit::component::dock::DockPlacement::Center,
                 None,
                 |dock| {
-                    dock.layout(gpui_component::dock::DockPlacement::Center)
+                    dock.layout(gpui_kit::component::dock::DockPlacement::Center)
                         .and_then(|layout| {
-                            layout.find_panel_node(gpui_component::dock::PanelId::from(
+                            layout.find_panel_node(gpui_kit::component::dock::PanelId::from(
                                 sibling?.entity_id(),
                             ))
                         })
-                        .map(|node| gpui_component::dock::InsertTarget::Tabs {
+                        .map(|node| gpui_kit::component::dock::InsertTarget::Tabs {
                             node,
                             ix: None,
                             // The file one has just opened is the file one
@@ -2798,14 +2800,14 @@ impl ClaudhubApp {
                     // aiming at nothing. The border is always reserved —
                     // one that appears would move every row one pixel.
                     .border_1()
-                    .border_color(gpui::transparent_black())
-                    .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| {
+                    .border_color(gpui_kit::transparent_black())
+                    .drag_over::<gpui_kit::ExternalPaths>(move |style, _, _, _| {
                         style.border_color(edge)
                     })
                     .drag_over::<DraggedEntry>(move |style, _, _, _| style.border_color(edge))
                     .on_drop({
                         let entity = entity.clone();
-                        move |paths: &gpui::ExternalPaths, _window, cx| {
+                        move |paths: &gpui_kit::ExternalPaths, _window, cx| {
                             let paths = paths.paths().to_vec();
                             entity.update(cx, |this, cx| {
                                 this.drop_external(PathBuf::new(), paths, cx)
@@ -3407,11 +3409,11 @@ impl ClaudhubApp {
                         // sees the click, and read after — see
                         // `on_surface_definition_click`.
                         .capture_any_mouse_down(cx.listener(
-                            |this, _: &gpui::MouseDownEvent, _, _| {
+                            |this, _: &gpui_kit::MouseDownEvent, _, _| {
                                 this.followed_definition = false;
                             },
                         ))
-                        .on_mouse_down(gpui::MouseButton::Left, {
+                        .on_mouse_down(gpui_kit::MouseButton::Left, {
                             let surface = surface.clone();
                             cx.listener(move |this, event, window, cx| {
                                 this.on_surface_definition_click(&surface, event, window, cx)
@@ -3489,17 +3491,17 @@ impl ClaudhubApp {
 /// `cx.theme()` borrows the context.
 struct Look {
     height: Pixels,
-    muted: gpui::Hsla,
-    accent: gpui::Hsla,
+    muted: gpui_kit::Hsla,
+    accent: gpui_kit::Hsla,
     /// The colour of the folder a drop is about to land in.
-    drop: gpui::Hsla,
+    drop: gpui_kit::Hsla,
     /// The vertical rule of one indentation level.
-    guide: gpui::Hsla,
-    folder: gpui::Hsla,
+    guide: gpui_kit::Hsla,
+    folder: gpui_kit::Hsla,
 }
 
 impl Look {
-    fn of(cx: &gpui::App) -> Self {
+    fn of(cx: &gpui_kit::App) -> Self {
         Self {
             height: crate::ui::theme::row_height(cx),
             muted: cx.theme().muted_foreground,
@@ -3527,8 +3529,8 @@ fn render_row(
     cursor: Option<&Path>,
     look: &Look,
     entity: &Entity<ClaudhubApp>,
-    cx: &mut gpui::App,
-) -> gpui::AnyElement {
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::AnyElement {
     let Some(entry) = rows.get(index) else {
         return div().into_any_element();
     };
@@ -3634,7 +3636,7 @@ fn render_row(
                 // by which one says "this one I am staying in". The count comes
                 // from the event — gpui counts the clicks for us — so there is
                 // no second handler and no delay waiting for one.
-                .on_click(move |event: &gpui::ClickEvent, window, cx| {
+                .on_click(move |event: &gpui_kit::ClickEvent, window, cx| {
                     let kept = event.click_count() > 1;
                     open_entity.update(cx, |this, cx| {
                         this.focus_project_tree(for_open.clone(), window, cx);
@@ -3684,21 +3686,21 @@ fn render_row(
 /// turns a platform drop into an `ExternalPaths` drag, so a file manager's drop
 /// is read with the very same listeners — and a row of this same tree.
 fn accepts_drops(
-    row: gpui::Stateful<gpui::Div>,
+    row: gpui_kit::Stateful<gpui_kit::Div>,
     entity: &Entity<ClaudhubApp>,
     path: &Path,
     is_dir: bool,
     look: &Look,
-) -> gpui::Stateful<gpui::Div> {
+) -> gpui_kit::Stateful<gpui_kit::Div> {
     let dir = drop_dir(path, is_dir);
     let colour = look.drop;
     let (dropping, moving) = (entity.clone(), entity.clone());
     let (outside, inside) = (entity.clone(), entity.clone());
     let (for_drop, for_move) = (dir.clone(), dir);
     let (from_outside, from_inside) = (path.to_path_buf(), path.to_path_buf());
-    row.drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.bg(colour))
+    row.drag_over::<gpui_kit::ExternalPaths>(move |style, _, _, _| style.bg(colour))
         .drag_over::<DraggedEntry>(move |style, _, _, _| style.bg(colour))
-        .on_drop(move |paths: &gpui::ExternalPaths, _window, cx| {
+        .on_drop(move |paths: &gpui_kit::ExternalPaths, _window, cx| {
             let paths = paths.paths().to_vec();
             dropping.update(cx, |this, cx| {
                 this.drop_external(for_drop.clone(), paths, cx)
@@ -3714,19 +3716,21 @@ fn accepts_drops(
         // claim to be the one under the hand.
         .when(is_dir, |row| {
             row.on_drag_move(
-                move |event: &gpui::DragMoveEvent<gpui::ExternalPaths>, _, cx| {
+                move |event: &gpui_kit::DragMoveEvent<gpui_kit::ExternalPaths>, _, cx| {
                     if event.bounds.contains(&event.event.position) {
                         let path = from_outside.clone();
                         outside.update(cx, |this, cx| this.hover_drop_dir(path, cx));
                     }
                 },
             )
-            .on_drag_move(move |event: &gpui::DragMoveEvent<DraggedEntry>, _, cx| {
-                if event.bounds.contains(&event.event.position) {
-                    let path = from_inside.clone();
-                    inside.update(cx, |this, cx| this.hover_drop_dir(path, cx));
-                }
-            })
+            .on_drag_move(
+                move |event: &gpui_kit::DragMoveEvent<DraggedEntry>, _, cx| {
+                    if event.bounds.contains(&event.event.position) {
+                        let path = from_inside.clone();
+                        inside.update(cx, |this, cx| this.hover_drop_dir(path, cx));
+                    }
+                },
+            )
         })
 }
 
@@ -3735,7 +3739,10 @@ fn accepts_drops(
 /// The ghost is the row's own name in a small card: the platform draws nothing
 /// for an internal drag, and a drag with nothing following the pointer reads as
 /// a click that did not take.
-fn draggable(row: gpui::Stateful<gpui::Div>, path: &Path) -> gpui::Stateful<gpui::Div> {
+fn draggable(
+    row: gpui_kit::Stateful<gpui_kit::Div>,
+    path: &Path,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
     row.on_drag(
         DraggedEntry {
             path: path.to_path_buf(),
@@ -3749,10 +3756,10 @@ fn draggable(row: gpui::Stateful<gpui::Div>, path: &Path) -> gpui::Stateful<gpui
 
 /// A folder's menu: create inside it, and unfold or collapse it wholesale.
 fn dir_menu(
-    menu: gpui_component::menu::PopupMenu,
+    menu: gpui_kit::component::menu::PopupMenu,
     entity: &Entity<ClaudhubApp>,
     path: &Path,
-) -> gpui_component::menu::PopupMenu {
+) -> gpui_kit::component::menu::PopupMenu {
     let (new_file, new_dir) = (entity.clone(), entity.clone());
     let (expand, collapse, copy) = (entity.clone(), entity.clone(), entity.clone());
     let (p1, p2, p3, p4, p5) = (
@@ -3810,18 +3817,18 @@ fn dir_menu(
 ///
 /// The items the editor itself offers, plus the one gesture that is ours: the
 /// history of the lines under the pointer. They are `NativeMenu` actions and
-/// not closures — the menu carries a `gpui::Action` and nothing else, which is
+/// not closures — the menu carries a `gpui_kit::Action` and nothing else, which is
 /// why `ShowLineHistory` names its file rather than relying on "the file being
 /// edited".
 fn editor_menu(
-    menu: gpui_component::native_menu::NativeMenu,
+    menu: gpui_kit::component::native_menu::NativeMenu,
     // Whether the editor had a selection when the frame was painted — see the
     // call site: it cannot be read from here.
     selection: bool,
     path: &Path,
-    cx: &gpui::App,
-) -> gpui_component::native_menu::NativeMenu {
-    use gpui_base::input as base;
+    cx: &gpui_kit::App,
+) -> gpui_kit::component::native_menu::NativeMenu {
+    use gpui_kit::base::input as base;
     menu.menu(
         tr!("shortcut-goto-definition"),
         Box::new(base::GoToDefinition),
@@ -3846,10 +3853,10 @@ fn editor_menu(
 }
 
 fn file_menu(
-    menu: gpui_component::menu::PopupMenu,
+    menu: gpui_kit::component::menu::PopupMenu,
     entity: &Entity<ClaudhubApp>,
     path: &Path,
-) -> gpui_component::menu::PopupMenu {
+) -> gpui_kit::component::menu::PopupMenu {
     let (external, copy, absolute) = (entity.clone(), entity.clone(), entity.clone());
     let (new_file, rename, delete) = (entity.clone(), entity.clone(), entity.clone());
     let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -3931,7 +3938,7 @@ const HUNK_MARK_GAP: Pixels = px(4.);
 /// anything having to say that it happened.
 fn paint_hunk_mark(
     kind: crate::ui::hunks::Kind,
-    bounds: gpui::Bounds<Pixels>,
+    bounds: gpui_kit::Bounds<Pixels>,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -3940,7 +3947,7 @@ fn paint_hunk_mark(
     let colour = match kind {
         Kind::Added => diff.added_fg,
         Kind::Removed => diff.removed_fg,
-        Kind::Changed => gpui_component::ActiveTheme::theme(cx).primary,
+        Kind::Changed => gpui_kit::component::ActiveTheme::theme(cx).primary,
     };
     // A deletion has no lines of its own, so it cannot have the full height:
     // it is drawn as a stub on the boundary it sits on, which is what says
@@ -3949,14 +3956,14 @@ fn paint_hunk_mark(
         Kind::Removed => (HUNK_MARK_WIDTH * 2., px(3.)),
         _ => (HUNK_MARK_WIDTH, bounds.size.height),
     };
-    let rect = gpui::Bounds::new(
-        gpui::point(
+    let rect = gpui_kit::Bounds::new(
+        gpui_kit::point(
             bounds.origin.x + bounds.size.width - width - HUNK_MARK_GAP,
             bounds.origin.y,
         ),
-        gpui::size(width, height),
+        gpui_kit::size(width, height),
     );
-    window.paint_quad(gpui::fill(rect, colour));
+    window.paint_quad(gpui_kit::fill(rect, colour));
 }
 
 #[cfg(test)]

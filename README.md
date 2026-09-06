@@ -2,9 +2,9 @@
 
 Poste de travail pour la **revue de code** et le **pilotage d'agents de codage
 en terminal**, organisé par **worktree git**. Écrit en Rust sur
-[gpui](https://www.gpui.rs/) (le framework d'interface de Zed) avec les widgets
-[gpui-component](https://github.com/longbridge/gpui-component) — la même pile
-que le projet Aviary.
+[GPUI Kit 0.6](https://gpui-kit.com/), qui réunit GPUI et les widgets
+GPUI Component. Les extensions du fork encore nécessaires sont décrites dans
+[la note de migration](docs/gpui-kit-migration.md).
 
 L'idée tient en une phrase : une fenêtre où l'on voit, pour chaque worktree,
 ce qu'un agent a écrit, avec de quoi le relire, le valider et lui reparler,

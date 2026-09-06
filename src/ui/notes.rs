@@ -399,7 +399,7 @@ mod tests {
         Rendered::new(
             std::path::Path::new("src/main.rs"),
             file,
-            &gpui_component::highlighter::HighlightTheme::default_light(),
+            &gpui_kit::component::highlighter::HighlightTheme::default_light(),
         )
     }
 

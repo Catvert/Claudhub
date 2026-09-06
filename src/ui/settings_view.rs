@@ -18,15 +18,17 @@
 //! that the render closure now runs **on every frame** instead of once at
 //! opening — hence `Environment`, and the cached log records.
 
-use gpui::{div, prelude::*, px, Anchor, App, Context, Entity, SharedString, Subscription, Window};
-use gpui_component::button::{Button, ButtonGroup, ButtonVariants};
-use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_component::setting::{
+use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::setting::{
     NumberFieldOptions, SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage,
 };
-use gpui_component::{
+use gpui_kit::component::{
     h_flex, v_flex, ActiveTheme, Disableable, Selectable, Sizable, StyledExt, WindowExt,
+};
+use gpui_kit::{
+    div, prelude::*, px, Anchor, App, Context, Entity, SharedString, Subscription, Window,
 };
 
 use crate::tr;
@@ -131,8 +133,8 @@ impl Environment {
 /// them again lands on the page one had left, which is what `Page::First`
 /// means.
 pub(super) struct SettingsForm {
-    app: gpui::WeakEntity<ClaudhubApp>,
-    focus: gpui::FocusHandle,
+    app: gpui_kit::WeakEntity<ClaudhubApp>,
+    focus: gpui_kit::FocusHandle,
 }
 
 impl SettingsForm {
@@ -147,8 +149,8 @@ impl SettingsForm {
     }
 }
 
-impl gpui::Focusable for SettingsForm {
-    fn focus_handle(&self, _: &App) -> gpui::FocusHandle {
+impl gpui_kit::Focusable for SettingsForm {
+    fn focus_handle(&self, _: &App) -> gpui_kit::FocusHandle {
         self.focus.clone()
     }
 }
@@ -291,7 +293,7 @@ impl ClaudhubApp {
             .position(|page| *page == self.settings_page)
             .unwrap_or_default();
         div().size_full().child(
-            gpui_component::setting::Settings::new(SharedString::from(format!(
+            gpui_kit::component::setting::Settings::new(SharedString::from(format!(
                 "claudhub-settings-{}",
                 self.settings_epoch
             )))
@@ -643,11 +645,11 @@ fn edit_agent(index: usize, cx: &mut App, edit: impl FnOnce(&mut settings::Agent
 fn theme_choices(cx: &App) -> (Choices, Choices) {
     let mut light: Choices = Vec::new();
     let mut dark: Choices = Vec::new();
-    for theme in gpui_component::ThemeRegistry::global(cx).sorted_themes() {
+    for theme in gpui_kit::component::ThemeRegistry::global(cx).sorted_themes() {
         let choice = (theme.name.clone(), theme.name.clone());
         match theme.mode {
-            gpui_component::ThemeMode::Light => light.push(choice),
-            gpui_component::ThemeMode::Dark => dark.push(choice),
+            gpui_kit::component::ThemeMode::Light => light.push(choice),
+            gpui_kit::component::ThemeMode::Dark => dark.push(choice),
         }
     }
     (light, dark)
@@ -1024,7 +1026,7 @@ fn shortcuts_item(app: Entity<ClaudhubApp>) -> SettingItem {
             }
         }
 
-        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        let mut rows: Vec<gpui_kit::AnyElement> = Vec::new();
         for group in crate::ui::shortcuts::Group::ORDER {
             let family: Vec<_> = crate::ui::shortcuts::all()
                 .filter(|entry| entry.group == group)
@@ -1400,7 +1402,7 @@ fn review_page() -> SettingPage {
                 .item(SettingItem::render(|_, _, cx| {
                     div()
                         .text_xs()
-                        .text_color(gpui_component::ActiveTheme::theme(cx).muted_foreground)
+                        .text_color(gpui_kit::component::ActiveTheme::theme(cx).muted_foreground)
                         .child(tr!("settings-diff-context-note"))
                 }))
                 .item(
@@ -2261,7 +2263,7 @@ const LOG_LEVELS: [log::LevelFilter; 5] = [
 
 /// The colour of a level. Warnings and errors are the two one is looking for;
 /// the rest is context, and painting it would make the page unreadable.
-fn level_color(level: log::Level, cx: &App) -> gpui::Hsla {
+fn level_color(level: log::Level, cx: &App) -> gpui_kit::Hsla {
     match level {
         log::Level::Error => cx.theme().danger,
         log::Level::Warn => cx.theme().warning,
@@ -2414,7 +2416,7 @@ fn logs_page(view: LogView) -> SettingPage {
                                                         .collect::<Vec<_>>()
                                                         .join("\n");
                                                     cx.write_to_clipboard(
-                                                        gpui::ClipboardItem::new_string(text),
+                                                        gpui_kit::ClipboardItem::new_string(text),
                                                     );
                                                 }
                                             }),

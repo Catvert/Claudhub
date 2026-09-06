@@ -54,17 +54,16 @@ rustPlatform.buildRustPackage {
 
   src = lib.cleanSource ../.;
 
-  # Le verrou contient huit dépôts git (gpui et ses satellites chez
-  # zed-industries, le fork gpui-component, wt) : `fetchCargoVendor` les
-  # rassemble sous un seul hash, là où `cargoLock.outputHashes` en demanderait
-  # un par dépôt.
+  # Le verrou contient le fork GPUI Kit et wt comme sources git ; GPUI et
+  # ses satellites viennent désormais de crates.io. `fetchCargoVendor`
+  # rassemble ces sources sous un seul hash.
   #
   # Il change à **chaque** changement de `Cargo.lock` — le vendor en emporte
   # une copie —, donc y compris quand seul le numéro de version de Claudhub
   # bouge. Un `just ci` ne le dit pas : la porte qui le voit est `nix build`,
   # et elle n'est dans aucune des quatre. C'est ce qui a laissé la 0.2.1 sortir
   # avec un hash périmé.
-  cargoHash = "sha256-KdktqrzXMtQlHDE/cVLqo9t4vxK77KHRdHD8mpEmC/M=";
+  cargoHash = "sha256-tR8YjCZQ+5qbMlpO2IFlAQIEOcKDNdwyl0elmqclX6c=";
 
   nativeBuildInputs = [
     pkg-config

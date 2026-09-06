@@ -13,17 +13,17 @@
 //! view's render happens *after* the parent's render closure has returned:
 //! layout is done outside that borrow.
 
-use gpui::{
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::dock::{BasePanel, DockRegions, Panel, PanelControl, PanelEvent};
+use gpui_kit::component::menu::ContextMenuExt as _;
+use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::Sizable as _;
+use gpui_kit::{
     canvas, div, point, prelude::*, App, AppContext, Context, Entity, EventEmitter, FocusHandle,
     Focusable, Hsla, IntoElement, PathBuilder, Pixels, Render, WeakEntity, Window,
 };
-use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::dock::{BasePanel, DockRegions, Panel, PanelControl, PanelEvent};
-use gpui_component::menu::ContextMenuExt as _;
-use gpui_component::ActiveTheme;
-use gpui_component::Sizable as _;
 
-use gpui_component::dock::{panel_handle, register_panel};
+use gpui_kit::component::dock::{panel_handle, register_panel};
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
@@ -61,15 +61,15 @@ pub fn regions_of(name: &str) -> DockRegions {
 /// not — and until now one was a glyph and the other a word, so nothing said
 /// they were the same thing. A panel with no button on any rail is left with its
 /// name alone: a document is not a tool window (see `rails::icon_of`).
-fn tab_row(name: &str, label: gpui::SharedString) -> gpui::Div {
+fn tab_row(name: &str, label: gpui_kit::SharedString) -> gpui_kit::Div {
     // A pinned tab is its glyph and nothing else, and the word it does not show
     // is a hover away — see `closable_title`.
     if let Some(glyph) = pinned_glyph(name) {
-        return gpui_component::h_flex()
+        return gpui_kit::component::h_flex()
             .items_center()
             .child(crate::ui::icons::glyph(glyph));
     }
-    gpui_component::h_flex()
+    gpui_kit::component::h_flex()
         .gap_1()
         .items_center()
         .children(
@@ -116,7 +116,7 @@ fn pinned_glyph(name: &str) -> Option<&'static str> {
 }
 
 /// A tab nothing closes: the glyph, and the name.
-fn titled(name: &'static str, label: gpui::SharedString) -> gpui::AnyElement {
+fn titled(name: &'static str, label: gpui_kit::SharedString) -> gpui_kit::AnyElement {
     tab_row(name, label.clone())
         // A pinned tab shows no word, so the word is what its tooltip is for:
         // a glyph one has to guess at is a tab one does not press. Stateful for
@@ -124,7 +124,7 @@ fn titled(name: &'static str, label: gpui::SharedString) -> gpui::AnyElement {
         .id(label.clone())
         .when(pinned_glyph(name).is_some(), |tab| {
             tab.tooltip(move |window, cx| {
-                gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx)
+                gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx)
             })
         })
         .into_any_element()
@@ -138,9 +138,9 @@ fn titled(name: &'static str, label: gpui::SharedString) -> gpui::AnyElement {
 /// one that closes a tab without aiming at a cross the size of a full stop.
 fn closable_title(
     name: &'static str,
-    label: gpui::SharedString,
+    label: gpui_kit::SharedString,
     closing: Closing,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let on_cross = closing.clone();
     let tab = tab_row(name, label.clone())
         // Stateful, which is what the wheel listener asks for: the id is the
@@ -175,7 +175,7 @@ fn closable_title(
 /// lets the frame show; at the bottom, this background has the last word. Every
 /// panel must therefore go through it: one that skips it has square corners,
 /// and nothing points that out.
-fn pane_frame(content: impl IntoElement, cx: &App) -> gpui::Div {
+fn pane_frame(content: impl IntoElement, cx: &App) -> gpui_kit::Div {
     let radius = cx.theme().radius_lg;
     let outside = crate::ui::theme::gutter(cx);
     div()
@@ -262,15 +262,15 @@ fn corner_cut(radius: Pixels, left: bool, colour: Hsla) -> impl IntoElement {
 /// the same way: the panel exists and sits in the right group, but the tab on
 /// screen is whichever was added last.
 fn select_own_tab(
-    group: Option<gpui::WeakEntity<gpui_component::dock::TabGroup>>,
-    panel: gpui::EntityId,
+    group: Option<gpui_kit::WeakEntity<gpui_kit::component::dock::TabGroup>>,
+    panel: gpui_kit::EntityId,
     window: &mut Window,
     cx: &mut App,
 ) {
     let Some(group) = group.and_then(|group| group.upgrade()) else {
         return;
     };
-    let me = gpui_component::dock::PanelId::from(panel);
+    let me = gpui_kit::component::dock::PanelId::from(panel);
     group.update(cx, |group, cx| {
         if let Some(ix) = group
             .panels()
@@ -282,15 +282,15 @@ fn select_own_tab(
     });
 }
 
-fn close_on_middle_click<E: gpui::StatefulInteractiveElement>(
+fn close_on_middle_click<E: gpui_kit::StatefulInteractiveElement>(
     tab: E,
     close: impl Fn(&mut Window, &mut App) + 'static,
 ) -> E {
     tab.on_aux_click(move |event, window, cx| {
-        let gpui::ClickEvent::Mouse(mouse) = event else {
+        let gpui_kit::ClickEvent::Mouse(mouse) = event else {
             return;
         };
-        if mouse.up.button != gpui::MouseButton::Middle {
+        if mouse.up.button != gpui_kit::MouseButton::Middle {
             return;
         }
         cx.stop_propagation();
@@ -334,10 +334,10 @@ static REGISTERED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSe
 fn declare_panel<F>(cx: &mut App, name: &'static str, build: F)
 where
     F: Fn(
-            gpui_component::dock::PanelBuildContext,
+            gpui_kit::component::dock::PanelBuildContext,
             &mut Window,
             &mut App,
-        ) -> std::sync::Arc<dyn gpui_component::dock::BasePanelView>
+        ) -> std::sync::Arc<dyn gpui_kit::component::dock::BasePanelView>
         + 'static,
 {
     REGISTERED
@@ -501,15 +501,17 @@ fn zoom_in_toolbar() -> Option<PanelControl> {
 /// The target is computed **after** the add, which both callers need: a
 /// sibling's node is looked up in the tree the add has just edited.
 pub(super) fn dock_panel_at(
-    dock: &mut gpui_component::dock::DockArea,
-    handle: std::sync::Arc<dyn gpui_component::dock::BasePanelView>,
-    placement: gpui_component::dock::DockPlacement,
-    size: Option<gpui::Pixels>,
-    target: impl FnOnce(&gpui_component::dock::DockArea) -> Option<gpui_component::dock::InsertTarget>,
+    dock: &mut gpui_kit::component::dock::DockArea,
+    handle: std::sync::Arc<dyn gpui_kit::component::dock::BasePanelView>,
+    placement: gpui_kit::component::dock::DockPlacement,
+    size: Option<gpui_kit::Pixels>,
+    target: impl FnOnce(
+        &gpui_kit::component::dock::DockArea,
+    ) -> Option<gpui_kit::component::dock::InsertTarget>,
     window: &mut Window,
-    cx: &mut Context<gpui_component::dock::DockArea>,
+    cx: &mut Context<gpui_kit::component::dock::DockArea>,
 ) {
-    use gpui_component::dock::{InsertTarget, NodeId, PaneNode, PaneRef, PanelId};
+    use gpui_kit::component::dock::{InsertTarget, NodeId, PaneNode, PaneRef, PanelId};
 
     /// The first tab group's displayed panel — the group `add_panel_view`
     /// lands in, found by the same walk it uses.
@@ -570,17 +572,19 @@ pub(super) fn dock_panel_at(
 /// Every region and not the centre alone: a panel can have been dragged into a
 /// side dock, and a gesture that then did nothing would read as broken.
 pub(super) fn select_panel_named(
-    dock: &Entity<gpui_component::dock::DockArea>,
+    dock: &Entity<gpui_kit::component::dock::DockArea>,
     name: &str,
     window: &mut Window,
     cx: &mut App,
 ) -> bool {
-    use gpui_component::dock::{DockPlacement, InsertTarget, NodeId, PaneNode, PaneRef, PanelId};
+    use gpui_kit::component::dock::{
+        DockPlacement, InsertTarget, NodeId, PaneNode, PaneRef, PanelId,
+    };
 
     /// The node holding a panel of this name, and where it sits in it.
     fn seat(
         node: &PaneNode,
-        dock: &gpui_component::dock::DockArea,
+        dock: &gpui_kit::component::dock::DockArea,
         name: &str,
         cx: &App,
     ) -> Option<(NodeId, usize, PanelId)> {
@@ -642,12 +646,14 @@ pub(super) fn select_panel_named(
 /// its **own** index, which reinstates it and activates it — the group's entity
 /// is private to the dock, and there is no `select_tab`.
 pub(super) fn cycle_center_tab(
-    dock: &Entity<gpui_component::dock::DockArea>,
+    dock: &Entity<gpui_kit::component::dock::DockArea>,
     forward: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> bool {
-    use gpui_component::dock::{DockPlacement, InsertTarget, NodeId, PaneNode, PaneRef, PanelId};
+    use gpui_kit::component::dock::{
+        DockPlacement, InsertTarget, NodeId, PaneNode, PaneRef, PanelId,
+    };
 
     /// Every tab group of a tree, in the order they are laid out.
     fn groups(node: &PaneNode, out: &mut Vec<(NodeId, Vec<PanelId>, usize)>) {
@@ -1019,12 +1025,12 @@ pub struct FilePanel {
     path: std::path::PathBuf,
     /// What the tab says, worked out once: a path's last segment never moves,
     /// and the title is asked for on every frame the bar paints.
-    name: gpui::SharedString,
+    name: gpui_kit::SharedString,
     /// The editor's state, held rather than looked up: `focus_handle` and the
     /// tab's title are asked for by the dock at moments when reading the
     /// application would read it while it is being updated.
-    input: Entity<gpui_component::input::EditorState>,
-    group: Option<gpui::WeakEntity<gpui_component::dock::TabGroup>>,
+    input: Entity<gpui_kit::component::input::EditorState>,
+    group: Option<gpui_kit::WeakEntity<gpui_kit::component::dock::TabGroup>>,
     visible: bool,
 }
 
@@ -1037,7 +1043,7 @@ impl FilePanel {
         app: &Entity<ClaudhubApp>,
         root: std::path::PathBuf,
         path: std::path::PathBuf,
-        input: Entity<gpui_component::input::EditorState>,
+        input: Entity<gpui_kit::component::input::EditorState>,
         visible: bool,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -1084,7 +1090,7 @@ impl FilePanel {
     /// focus would speak for a text nobody holds.
     pub fn rebind(
         &mut self,
-        input: Entity<gpui_component::input::EditorState>,
+        input: Entity<gpui_kit::component::input::EditorState>,
         cx: &mut Context<Self>,
     ) {
         self.input = input;
@@ -1121,7 +1127,7 @@ impl BasePanel for FilePanel {
 
     fn on_added_to(
         &mut self,
-        group: gpui::WeakEntity<gpui_component::dock::TabGroup>,
+        group: gpui_kit::WeakEntity<gpui_kit::component::dock::TabGroup>,
         _: &mut Window,
         _: &mut Context<Self>,
     ) {
@@ -1179,7 +1185,7 @@ impl Panel for FilePanel {
             })
         };
         let on_cross = closing.clone();
-        let tab = gpui_component::h_flex()
+        let tab = gpui_kit::component::h_flex()
             .id(("file-tab", self.input.entity_id()))
             .gap_1()
             .items_center()
@@ -1249,15 +1255,15 @@ pub struct QueryPanel {
     id: crate::ui::db_query::ConsoleId,
     /// The tab group showing it, as the dock hands it over — the only way to
     /// bring a tab forward from code. See `TerminalPanel::group`.
-    group: Option<gpui::WeakEntity<gpui_component::dock::TabGroup>>,
+    group: Option<gpui_kit::WeakEntity<gpui_kit::component::dock::TabGroup>>,
     /// The console's editor, held rather than looked up: `focus_handle` is
     /// asked for by the dock at moments when reading the application would read
     /// it while it is being updated.
-    input: Entity<gpui_component::input::EditorState>,
+    input: Entity<gpui_kit::component::input::EditorState>,
     /// What the tab says, worked out once: a rank never moves for as long as
     /// the console lives, and the title is asked for on every frame the bar
     /// paints.
-    title: gpui::SharedString,
+    title: gpui_kit::SharedString,
     visible: bool,
 }
 
@@ -1274,8 +1280,8 @@ impl QueryPanel {
     pub fn new(
         app: &Entity<ClaudhubApp>,
         id: crate::ui::db_query::ConsoleId,
-        input: Entity<gpui_component::input::EditorState>,
-        title: gpui::SharedString,
+        input: Entity<gpui_kit::component::input::EditorState>,
+        title: gpui_kit::SharedString,
         worktree: std::path::PathBuf,
         visible: bool,
         cx: &mut Context<Self>,
@@ -1341,7 +1347,7 @@ impl BasePanel for QueryPanel {
 
     fn on_added_to(
         &mut self,
-        group: gpui::WeakEntity<gpui_component::dock::TabGroup>,
+        group: gpui_kit::WeakEntity<gpui_kit::component::dock::TabGroup>,
         _: &mut Window,
         _: &mut Context<Self>,
     ) {
@@ -1380,7 +1386,7 @@ impl Panel for QueryPanel {
             });
         });
         let on_cross = closing.clone();
-        let tab = gpui_component::h_flex()
+        let tab = gpui_kit::component::h_flex()
             .id(("query-tab", id.0 as usize))
             .gap_1()
             .items_center()
@@ -1516,7 +1522,8 @@ impl Panel for SentryIssuePanel {
             .upgrade()
             .and_then(|app| {
                 let issue = app.read(cx).sentry.issue()?.short_id.clone();
-                (!issue.is_empty()).then(|| gpui::SharedString::from(format!("Sentry · {issue}")))
+                (!issue.is_empty())
+                    .then(|| gpui_kit::SharedString::from(format!("Sentry · {issue}")))
             })
             .unwrap_or_else(|| tr!("panel-sentry-issue"));
         let app = self.app.clone();
@@ -1683,7 +1690,7 @@ pub struct TerminalPanel {
     /// in. Without it, "show this terminal" could only be done by *moving* the
     /// panel into its own group — which activates it, and reorders the tabs on
     /// the way.
-    group: Option<gpui::WeakEntity<gpui_component::dock::TabGroup>>,
+    group: Option<gpui_kit::WeakEntity<gpui_kit::component::dock::TabGroup>>,
     /// Cached for the same reason as the conflicts panel's: `visible` is called
     /// while the layout is being built, so in the middle of
     /// `ClaudhubApp::new`.
@@ -1866,7 +1873,7 @@ impl BasePanel for TerminalPanel {
     /// and the other four would otherwise stay as tabs showing a dead shell.
     fn on_added_to(
         &mut self,
-        group: gpui::WeakEntity<gpui_component::dock::TabGroup>,
+        group: gpui_kit::WeakEntity<gpui_kit::component::dock::TabGroup>,
         _: &mut Window,
         _: &mut Context<Self>,
     ) {
@@ -1894,9 +1901,9 @@ impl BasePanel for TerminalPanel {
     /// A terminal read back is a **fresh shell in the same place** — the layout
     /// comes back, the conversation does not, and pretending otherwise would be
     /// worse than saying so.
-    fn dump(&self, _: &App) -> gpui_component::dock::PanelState {
-        let mut state = gpui_component::dock::PanelState::new(self.name);
-        state.info = gpui_component::dock::PanelInfo::panel(
+    fn dump(&self, _: &App) -> gpui_kit::component::dock::PanelState {
+        let mut state = gpui_kit::component::dock::PanelState::new(self.name);
+        state.info = gpui_kit::component::dock::PanelInfo::panel(
             serde_json::json!({ "worktree": self.worktree }),
         );
         state
@@ -1946,7 +1953,7 @@ impl Panel for TerminalPanel {
         // context menu is not an interactive element, and there is nothing to
         // hang a click on once it has.
         let tab = close_on_middle_click(
-            gpui_component::h_flex()
+            gpui_kit::component::h_flex()
                 .id(("terminal-tab", id))
                 .gap_1()
                 .items_center(),
@@ -1959,7 +1966,7 @@ impl Panel for TerminalPanel {
             .context_menu(move |menu, _window, _cx| {
                 let app = rename.clone();
                 let menu = menu.item(
-                    gpui_component::menu::PopupMenuItem::new(tr!("terminal-rename"))
+                    gpui_kit::component::menu::PopupMenuItem::new(tr!("terminal-rename"))
                         .icon(crate::ui::icons::icon("pencil"))
                         .on_click(move |_, window, cx| {
                             let Some(app) = app.upgrade() else {
@@ -2050,7 +2057,7 @@ mod tests {
     /// button, and the only way back was to reset the whole arrangement.
     #[test]
     fn a_tool_window_is_refused_by_the_centre_and_a_document_by_the_edges() {
-        use gpui_component::dock::DockPlacement;
+        use gpui_kit::component::dock::DockPlacement;
 
         for tool in crate::ui::rails::TOOLS {
             let regions = regions_of(tool.panel);

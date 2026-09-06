@@ -38,7 +38,7 @@
 //! The two axes are independent: the diff also scrolls in width, and a vertical
 //! transition must not freeze a horizontal offset.
 
-use gpui::{point, px, Pixels, Point, ScrollDelta, ScrollHandle, ScrollWheelEvent, Window};
+use gpui_kit::{point, px, Pixels, Point, ScrollDelta, ScrollHandle, ScrollWheelEvent, Window};
 use std::time::{Duration, Instant};
 
 /// Below this, two positions are the same. Used to avoid restarting a

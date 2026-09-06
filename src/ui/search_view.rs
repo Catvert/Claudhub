@@ -18,16 +18,16 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use gpui::{
-    div, prelude::*, px, uniform_list, App, Context, Entity, FocusHandle,
-    ListHorizontalSizingBehavior, Pixels, SharedString, StyledText, Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     h_flex,
     input::{Input, InputState},
     v_flex, ActiveTheme, Disableable as _, Sizable as _,
+};
+use gpui_kit::{
+    div, prelude::*, px, uniform_list, App, Context, Entity, FocusHandle,
+    ListHorizontalSizingBehavior, Pixels, SharedString, StyledText, Window,
 };
 
 use crate::git::search::{Query, Results};
@@ -215,7 +215,7 @@ impl ClaudhubApp {
         // focus, and the focus is what says which surface the selection is in.
         let selection = self.search_seed(window, cx);
         self.reveal_panel(crate::ui::panels::SearchPanel::NAME, window, cx);
-        let handle = gpui::Focusable::focus_handle(&self.search_input, cx);
+        let handle = gpui_kit::Focusable::focus_handle(&self.search_input, cx);
         handle.focus(window, cx);
         if let Some(text) = selection {
             self.search_input.update(cx, |state, cx| {
@@ -297,8 +297,9 @@ impl ClaudhubApp {
     fn focused_surface(&self, window: &Window, cx: &App) -> Option<crate::ui::surface::Surface> {
         use crate::ui::surface::Surface;
         let focused = |surface: &Surface| {
-            self.surface_input(surface)
-                .is_some_and(|input| gpui::Focusable::focus_handle(&input, cx).is_focused(window))
+            self.surface_input(surface).is_some_and(|input| {
+                gpui_kit::Focusable::focus_handle(&input, cx).is_focused(window)
+            })
         };
         // The consoles first, and each by its own id: what one is typing in is
         // one of several, and the panel that draws is not the one that answers
@@ -589,7 +590,7 @@ impl ClaudhubApp {
         };
         self.search.selected = Some(next);
         self.search_scroll
-            .scroll_to_item(next, gpui::ScrollStrategy::Top);
+            .scroll_to_item(next, gpui_kit::ScrollStrategy::Top);
         // **The arrow moves the cursor and opens nothing.** Each row shows its
         // own line with the words lit, so walking the list already reads; and
         // an opening per step would cost an `EditorState`, a read of the
@@ -838,7 +839,7 @@ impl ClaudhubApp {
         // file already shown would leave the preview exactly where it was, and
         // a key that moves nothing visible reads as a dead key.
         self.preview_scroll(pane)
-            .scroll_to_item_strict(line - above, gpui::ScrollStrategy::Top);
+            .scroll_to_item_strict(line - above, gpui_kit::ScrollStrategy::Top);
     }
 
     /// Where a pane's preview lives, and what scrolls it.
@@ -856,7 +857,7 @@ impl ClaudhubApp {
         }
     }
 
-    fn preview_scroll(&self, pane: PreviewPane) -> &gpui::UniformListScrollHandle {
+    fn preview_scroll(&self, pane: PreviewPane) -> &gpui_kit::UniformListScrollHandle {
         match pane {
             PreviewPane::Search => &self.search_preview_scroll,
             PreviewPane::Quick => &self.quick.preview_scroll,
@@ -1090,7 +1091,7 @@ impl ClaudhubApp {
     pub(super) fn render_search_rows(
         &mut self,
         key: &'static str,
-        scroll: &gpui::UniformListScrollHandle,
+        scroll: &gpui_kit::UniformListScrollHandle,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -1308,12 +1309,12 @@ const MIN_AUTO: usize = 2;
 #[derive(Clone, Copy)]
 struct Look {
     row: Pixels,
-    muted: gpui::Hsla,
-    accent: gpui::Hsla,
-    text: gpui::Hsla,
+    muted: gpui_kit::Hsla,
+    accent: gpui_kit::Hsla,
+    text: gpui_kit::Hsla,
     /// The colour occurrences are picked out in, the same as every other search
     /// in this window.
-    hit: gpui::Hsla,
+    hit: gpui_kit::Hsla,
 }
 
 impl Look {
@@ -1346,10 +1347,10 @@ fn hovered_word(hovered: &Option<(Spot, Range<usize>)>, here: Spot) -> Option<Ra
 /// the same rule, because the eye reads the same thing.
 fn code_line(
     text: SharedString,
-    styles: &[(Range<usize>, gpui::HighlightStyle)],
-    marks: &[(Range<usize>, gpui::Hsla)],
+    styles: &[(Range<usize>, gpui_kit::HighlightStyle)],
+    marks: &[(Range<usize>, gpui_kit::Hsla)],
     follow: Option<Armed>,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     // Nothing to colour and nobody holding the modifier — the common case by
     // far: the plain element it has always been, at the same cost.
     if styles.is_empty() && marks.is_empty() && follow.is_none() {
@@ -1388,7 +1389,7 @@ fn render_row(
     hovered: &Option<(Spot, Range<usize>)>,
     entity: &Entity<ClaudhubApp>,
     cx: &App,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     match row {
         Row::File { file } => {
             let Some(hits) = results.files.get(file) else {
@@ -1532,7 +1533,7 @@ fn render_preview_line(
     hovered: &Option<(Spot, Range<usize>)>,
     entity: &Entity<ClaudhubApp>,
     _cx: &App,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let Some(text) = lines.get(index).cloned() else {
         return div().into_any_element();
     };
@@ -1665,10 +1666,10 @@ impl SearchInputs {
         // finished typing, I am going to read".
         fn watch(
             this: &mut ClaudhubApp,
-            event: &gpui_component::input::InputEvent,
+            event: &gpui_kit::component::input::InputEvent,
             cx: &mut Context<ClaudhubApp>,
         ) {
-            use gpui_component::input::InputEvent;
+            use gpui_kit::component::input::InputEvent;
             match event {
                 InputEvent::Change => this.search_typed(cx),
                 InputEvent::PressEnter { .. } => this.run_search(true, cx),

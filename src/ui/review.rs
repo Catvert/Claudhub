@@ -9,14 +9,14 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gpui::{div, prelude::*, px, uniform_list, Context, Focusable, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     h_flex,
     select::Select,
     v_flex, ActiveTheme, Disableable, Sizable, WindowExt,
 };
+use gpui_kit::{div, prelude::*, px, uniform_list, Context, Focusable, Window};
 
 use crate::git::{DiffFile, DiffRange, Status, StatusCode};
 use crate::runtime::{Action, Cmd};
@@ -281,12 +281,12 @@ impl ClaudhubApp {
                         let worktree = Rc::new(worktree);
                         el.child(
                             self.scrolled(
-                                gpui::SharedString::from(format!("file-bar-{}", list_id)),
+                                gpui_kit::SharedString::from(format!("file-bar-{}", list_id)),
                                 &scroll,
                                 crate::ui::motion::Axes::Vertical,
                                 window,
                                 uniform_list(
-                                    gpui::SharedString::from(format!("file-list-{}", list_id)),
+                                    gpui_kit::SharedString::from(format!("file-list-{}", list_id)),
                                     count,
                                     move |visible, _window, cx| {
                                         visible
@@ -337,7 +337,7 @@ impl ClaudhubApp {
     /// The status is the source for the changes in progress — it alone tells the
     /// index from the working tree — and `--numstat` for the ranges that are
     /// about commits and have no notion of an index.
-    fn rows_view(&mut self, range: &DiffRange, cx: &gpui::App) -> Option<RowsView> {
+    fn rows_view(&mut self, range: &DiffRange, cx: &gpui_kit::App) -> Option<RowsView> {
         let query = self.query(Self::find_pane(range), cx);
         let tree = crate::ui::settings::Settings::global(cx).review_tree;
         let worktree = self.active.clone()?;
@@ -384,7 +384,7 @@ impl ClaudhubApp {
     /// files, and the arrows must not open a file the list does not show — the
     /// next one would then be impossible to find by eye. The search counts the
     /// same way: it is the same list.
-    fn visible_files(&mut self, range: &DiffRange, cx: &gpui::App) -> Vec<PathBuf> {
+    fn visible_files(&mut self, range: &DiffRange, cx: &gpui_kit::App) -> Vec<PathBuf> {
         let Some(view) = self.rows_view(range, cx) else {
             return Vec::new();
         };
@@ -414,7 +414,7 @@ impl ClaudhubApp {
             return;
         };
         self.file_scroll(range)
-            .scroll_to_item(index, gpui::ScrollStrategy::Center);
+            .scroll_to_item(index, gpui_kit::ScrollStrategy::Center);
     }
 
     /// Opens the previous or next file in the list.
@@ -454,7 +454,7 @@ impl ClaudhubApp {
     pub(super) fn diff_file_position(
         &mut self,
         path: &Path,
-        cx: &gpui::App,
+        cx: &gpui_kit::App,
     ) -> Option<(usize, usize)> {
         let worktree = self.active.clone()?;
         let range = self.review.get(&worktree)?.range.clone();
@@ -636,7 +636,7 @@ impl ClaudhubApp {
             .child(self.find_button(crate::ui::find::Pane::Branch, cx))
     }
 
-    fn bar(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn bar(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
         h_flex()
             .h(crate::ui::theme::bar_height(cx))
             .w_full()
@@ -759,7 +759,7 @@ impl ClaudhubApp {
                                 .text_xs()
                                 .font_family(cx.theme().mono_font_family.clone())
                                 .text_color(cx.theme().muted_foreground)
-                                .child(gpui::SharedString::from(hint.clone())),
+                                .child(gpui_kit::SharedString::from(hint.clone())),
                         )
                     })
                     .children(self.suggest_button(can_commit, cx))
@@ -1125,7 +1125,7 @@ impl ClaudhubApp {
     pub(super) fn render_unstaged_panel(
         &mut self,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
+    ) -> Option<gpui_kit::AnyElement> {
         let state = self.active_review()?;
         if !matches!(state.range, DiffRange::Working) {
             return None;
@@ -1138,7 +1138,7 @@ impl ClaudhubApp {
         let theme = cx.theme().clone();
         let colors = crate::ui::theme::DiffColors::of(cx);
         let mono = theme.mono_font_family.clone();
-        let font_size = gpui::px(crate::ui::settings::Settings::global(cx).diff_font_size);
+        let font_size = gpui_kit::px(crate::ui::settings::Settings::global(cx).diff_font_size);
         let count = diff.hunks.len();
 
         let hunks = diff.hunks.iter().enumerate().map(|(ix, hunk)| {
@@ -1228,7 +1228,7 @@ impl ClaudhubApp {
                 .child(
                     div()
                         .id("unstaged-remainder")
-                        .max_h(gpui::px(240.))
+                        .max_h(gpui_kit::px(240.))
                         .overflow_y_scroll()
                         .font_family(mono)
                         .text_size(font_size)
@@ -1256,9 +1256,9 @@ fn render_row(
     // Is the list in tree form? A file then reserves the place of the chevron
     // it does not have; flat, that place would be a column of nothing.
     tree: bool,
-    entity: &gpui::Entity<ClaudhubApp>,
-    cx: &mut gpui::App,
-) -> gpui::AnyElement {
+    entity: &gpui_kit::Entity<ClaudhubApp>,
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::AnyElement {
     match rows.get(index) {
         Some(Row::Group(group)) => render_group(group, index, worktree, tree, entity, cx),
         Some(Row::Dir(dir)) => render_dir(dir, index, worktree, range, checkable, entity, cx),
@@ -1273,10 +1273,10 @@ fn render_row(
 ///
 /// Kept out of the catalogues: "Pull 3" is the same in both languages, and a
 /// key per shape would be two entries saying nothing a `format!` does not.
-fn with_count(label: gpui::SharedString, count: usize) -> gpui::SharedString {
+fn with_count(label: gpui_kit::SharedString, count: usize) -> gpui_kit::SharedString {
     match count {
         0 => label,
-        _ => gpui::SharedString::from(format!("{label} {count}")),
+        _ => gpui_kit::SharedString::from(format!("{label} {count}")),
     }
 }
 
@@ -1289,9 +1289,9 @@ fn render_dir(
     worktree: &Rc<PathBuf>,
     range: &Rc<DiffRange>,
     checkable: bool,
-    entity: &gpui::Entity<ClaudhubApp>,
-    cx: &mut gpui::App,
-) -> gpui::AnyElement {
+    entity: &gpui_kit::Entity<ClaudhubApp>,
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::AnyElement {
     let staged = row.staged;
     let count = row.paths.len();
 
@@ -1401,9 +1401,9 @@ fn render_group(
     // Is the list in tree form? The heading then reserves the place of the
     // chevron every row under it carries, as a file does.
     tree: bool,
-    entity: &gpui::Entity<ClaudhubApp>,
-    cx: &mut gpui::App,
-) -> gpui::AnyElement {
+    entity: &gpui_kit::Entity<ClaudhubApp>,
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::AnyElement {
     let checked = row.checked;
     let paths = row.paths.clone();
     let count = paths.len();
@@ -1441,7 +1441,7 @@ fn render_group(
             div()
                 .flex_1()
                 .text_xs()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .text_color(cx.theme().muted_foreground)
                 .child(format!("{label} ({count})")),
         )
@@ -1458,9 +1458,9 @@ fn render_file(
     colors: &DiffColors,
     checkable: bool,
     tree: bool,
-    entity: &gpui::Entity<ClaudhubApp>,
-    cx: &mut gpui::App,
-) -> gpui::AnyElement {
+    entity: &gpui_kit::Entity<ClaudhubApp>,
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::AnyElement {
     let is_selected = selected == Some(row.path());
     let staged = row.staged;
 
@@ -1679,8 +1679,8 @@ fn render_reviewed(
     worktree: &Rc<PathBuf>,
     range: &Rc<DiffRange>,
     paths: &Rc<[PathBuf]>,
-    entity: &gpui::Entity<ClaudhubApp>,
-    cx: &gpui::App,
+    entity: &gpui_kit::Entity<ClaudhubApp>,
+    cx: &gpui_kit::App,
 ) -> Button {
     let (entity, worktree, range, paths) = (
         entity.clone(),

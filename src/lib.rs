@@ -47,10 +47,10 @@ pub mod wt;
 /// static `SharedString`. Across a frame that renders hundreds of them, that is
 /// the difference between free and measurable.
 #[cfg(feature = "ui")]
-pub fn i18n_shared(value: std::borrow::Cow<'static, str>) -> gpui::SharedString {
+pub fn i18n_shared(value: std::borrow::Cow<'static, str>) -> gpui_kit::SharedString {
     match value {
-        std::borrow::Cow::Borrowed(text) => gpui::SharedString::new_static(text),
-        std::borrow::Cow::Owned(text) => gpui::SharedString::from(text),
+        std::borrow::Cow::Borrowed(text) => gpui_kit::SharedString::new_static(text),
+        std::borrow::Cow::Owned(text) => gpui_kit::SharedString::from(text),
     }
 }
 

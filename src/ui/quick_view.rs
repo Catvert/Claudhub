@@ -27,15 +27,15 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use gpui::{
-    div, prelude::*, px, uniform_list, App, Context, Entity, FocusHandle, SharedString, StyledText,
-    Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::Input,
     v_flex, ActiveTheme, Selectable as _, Sizable as _, WindowExt as _,
+};
+use gpui_kit::{
+    div, prelude::*, px, uniform_list, App, Context, Entity, FocusHandle, SharedString, StyledText,
+    Window,
 };
 
 use crate::tr;
@@ -59,7 +59,7 @@ const PREVIEW_SCROLL: &str = "quick-preview";
 /// A fixed column and not a share: what the list shows is a path, whose length
 /// nobody chose, and what the file shows is code, which wants every pixel
 /// left. Wide enough for `src/ui/search_view.rs` and a folder or two after it.
-const LIST_WIDTH: gpui::Pixels = px(360.);
+const LIST_WIDTH: gpui_kit::Pixels = px(360.);
 
 /// How long the arrows have to stop before the file under them is read.
 ///
@@ -72,8 +72,8 @@ const PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_millis(120)
 /// A **definite** box either way, never one sized by its content: a list that
 /// grows as one types moves the row under the pointer between two keystrokes,
 /// and the preview beside it would jump with it.
-const MAX_WIDTH: gpui::Pixels = px(1280.);
-const MAX_HEIGHT: gpui::Pixels = px(760.);
+const MAX_WIDTH: gpui_kit::Pixels = px(1280.);
+const MAX_HEIGHT: gpui_kit::Pixels = px(760.);
 
 /// Which of the two questions the palette is asking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -108,7 +108,7 @@ pub(super) struct QuickState {
     /// keystroke is three milliseconds one can feel.
     pub hits: Rc<Vec<quick::Hit>>,
     pub paths: Rc<Vec<PathBuf>>,
-    pub scroll: gpui::UniformListScrollHandle,
+    pub scroll: gpui_kit::UniformListScrollHandle,
     /// The file shown beside the list, on the file side.
     ///
     /// **Its own and not `search.preview`**, though it is the same type and
@@ -117,7 +117,7 @@ pub(super) struct QuickState {
     /// two answers to two questions — sharing the slot would have had the
     /// palette wipe, on every arrow, the file the panel behind it was showing.
     pub preview: Option<crate::ui::search_view::Preview>,
-    pub preview_scroll: gpui::UniformListScrollHandle,
+    pub preview_scroll: gpui_kit::UniformListScrollHandle,
     /// Bumped on every move of the cursor, read again when the timer fires.
     ///
     /// **The file side previews on a trailing delay, the text side does not**,
@@ -153,7 +153,7 @@ pub(super) struct QuickState {
 /// gpui refuses. A child's `render` happens after the parent's closure has
 /// returned.
 pub(super) struct QuickPalette {
-    app: gpui::WeakEntity<ClaudhubApp>,
+    app: gpui_kit::WeakEntity<ClaudhubApp>,
     focus: FocusHandle,
 }
 
@@ -168,7 +168,7 @@ impl QuickPalette {
     }
 }
 
-impl gpui::Focusable for QuickPalette {
+impl gpui_kit::Focusable for QuickPalette {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
     }
@@ -330,7 +330,7 @@ impl ClaudhubApp {
     /// that stops drawing it.
     pub(super) fn quick_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.quick.open = false;
-        let stranded = gpui::Focusable::focus_handle(&self.quick_input, cx).is_focused(window)
+        let stranded = gpui_kit::Focusable::focus_handle(&self.quick_input, cx).is_focused(window)
             || window.focused(cx).is_none();
         if stranded {
             let root = self.focus.clone();
@@ -433,7 +433,7 @@ impl ClaudhubApp {
             self.quick.selected = 0;
             self.quick
                 .scroll
-                .scroll_to_item(0, gpui::ScrollStrategy::Top);
+                .scroll_to_item(0, gpui_kit::ScrollStrategy::Top);
             self.preview_quick_file(cx);
             cx.notify();
             return;
@@ -457,7 +457,7 @@ impl ClaudhubApp {
         self.quick.selected = 0;
         self.quick
             .scroll
-            .scroll_to_item(0, gpui::ScrollStrategy::Top);
+            .scroll_to_item(0, gpui_kit::ScrollStrategy::Top);
         self.preview_quick_file(cx);
         cx.notify();
     }
@@ -567,7 +567,7 @@ impl ClaudhubApp {
         }
         self.quick
             .scroll
-            .scroll_to_item(self.quick_cursor(), gpui::ScrollStrategy::Top);
+            .scroll_to_item(self.quick_cursor(), gpui_kit::ScrollStrategy::Top);
         cx.notify();
     }
 
@@ -662,7 +662,7 @@ impl ClaudhubApp {
     /// answering.
     pub(super) fn quick_tapped(
         &mut self,
-        event: &gpui::ModifiersChangedEvent,
+        event: &gpui_kit::ModifiersChangedEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -916,12 +916,12 @@ impl ClaudhubApp {
 /// What the theme gives a row, read once per frame and not per row.
 #[derive(Clone)]
 struct FileLook {
-    row: gpui::Pixels,
-    muted: gpui::Hsla,
-    accent: gpui::Hsla,
+    row: gpui_kit::Pixels,
+    muted: gpui_kit::Hsla,
+    accent: gpui_kit::Hsla,
     /// The background an occurrence is picked out with — the same one every
     /// other search in this window uses.
-    hit: gpui::Hsla,
+    hit: gpui_kit::Hsla,
 }
 
 impl FileLook {
@@ -949,7 +949,7 @@ fn render_file_row(
     look: &FileLook,
     entity: &Entity<ClaudhubApp>,
     cx: &App,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let Some(hit) = hits.get(index) else {
         return div().into_any_element();
     };
@@ -1013,7 +1013,11 @@ fn render_file_row(
 /// `highlight::overlay` over an empty base rather than a style built here:
 /// what a match looks like is decided in one place for the whole window, and a
 /// second opinion about it would only be noticed once the theme changed.
-fn marked(text: &str, ranges: &[std::ops::Range<usize>], colour: gpui::Hsla) -> gpui::AnyElement {
+fn marked(
+    text: &str,
+    ranges: &[std::ops::Range<usize>],
+    colour: gpui_kit::Hsla,
+) -> gpui_kit::AnyElement {
     let text = SharedString::from(text.to_string());
     if ranges.is_empty() {
         return div().child(text).into_any_element();

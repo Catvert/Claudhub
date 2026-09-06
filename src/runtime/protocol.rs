@@ -239,6 +239,17 @@ pub enum Cmd {
         worktree: WorktreeId,
         branch: String,
     },
+    /// Replays one commit on the checkout's HEAD.
+    CherryPick {
+        worktree: WorktreeId,
+        id: String,
+    },
+    /// Takes what one commit did to one file — the change, not the content.
+    TakeFile {
+        worktree: WorktreeId,
+        id: String,
+        path: PathBuf,
+    },
     CreateBranch {
         worktree: WorktreeId,
         name: String,
@@ -908,6 +919,8 @@ impl Cmd {
             Self::Push { .. } => "Push",
             Self::Reconcile { .. } => "Reconcile",
             Self::Checkout { .. } => "Checkout",
+            Self::CherryPick { .. } => "CherryPick",
+            Self::TakeFile { .. } => "TakeFile",
             Self::CreateBranch { .. } => "CreateBranch",
             Self::DeleteBranch { .. } => "DeleteBranch",
             Self::RenameBranch { .. } => "RenameBranch",
@@ -1498,6 +1511,9 @@ pub enum Action {
     Pull,
     Push,
     Checkout,
+    /// A commit replayed on HEAD, or one file's change taken from a commit:
+    /// the same words for the two, the balloon carrying git's account.
+    CherryPick,
     Branch,
     /// Creating or removing a tag, locally.
     Tag,
@@ -1530,7 +1546,7 @@ pub enum Action {
 impl Action {
     /// The i18n key of the message shown on success.
     /// Every action, for the tests that check each has its messages.
-    pub const ALL: [Action; 32] = [
+    pub const ALL: [Action; 33] = [
         Action::Refresh,
         Action::Stage,
         Action::Unstage,
@@ -1543,6 +1559,7 @@ impl Action {
         Action::Pull,
         Action::Push,
         Action::Checkout,
+        Action::CherryPick,
         Action::Branch,
         Action::Tag,
         Action::PushTag,
@@ -1584,6 +1601,7 @@ impl Action {
             Self::PushTag => "running-push-tag",
             Self::Stash => "running-stash",
             Self::Checkout => "running-checkout",
+            Self::CherryPick => "running-cherry-pick",
             Self::Merge => "running-merge",
             Self::Integrate => "running-integrate",
             Self::Rebase => "running-rebase",
@@ -1610,6 +1628,7 @@ impl Action {
             Self::Pull => "action-pull-ok",
             Self::Push => "action-push-ok",
             Self::Checkout => "action-checkout-ok",
+            Self::CherryPick => "action-cherry-pick-ok",
             Self::Branch => "action-branch-ok",
             Self::Tag => "action-tag-ok",
             Self::PushTag => "action-push-tag-ok",

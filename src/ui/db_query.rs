@@ -30,11 +30,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use gpui::{
-    div, prelude::*, px, App, Context, Entity, Focusable as _, SharedString, Task, WeakEntity,
-    Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     input::{CompletionProvider, Editor, Rope, RopeExt as _},
@@ -42,6 +38,10 @@ use gpui_component::{
     resizable::{resizable_panel, v_resizable, ResizableState},
     table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
     v_flex, ActiveTheme, Disableable, Sizable,
+};
+use gpui_kit::{
+    div, prelude::*, px, App, Context, Entity, Focusable as _, SharedString, Task, WeakEntity,
+    Window,
 };
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit,
@@ -211,7 +211,7 @@ pub struct Console {
     pub state: QueryState,
     /// The console's editor. Created **once**: recreated at render time, it
     /// would lose the cursor, the selection and the text on the first keystroke.
-    pub input: Entity<gpui_component::input::EditorState>,
+    pub input: Entity<gpui_kit::component::input::EditorState>,
     /// The modal harness — the same one the file editor holds, since SQL is
     /// code read and written the same way.
     pub host: crate::ui::surface::VimHost,
@@ -265,8 +265,8 @@ pub struct SchemaIndex {
 #[derive(Default)]
 pub struct Results {
     pub rows: db::Rows,
-    widths: Vec<gpui::Pixels>,
-    mono: Option<gpui::SharedString>,
+    widths: Vec<gpui_kit::Pixels>,
+    mono: Option<gpui_kit::SharedString>,
     /// The sort in force, which decides the headers' arrow.
     sort: Option<Sort>,
     /// The headers react to a click.
@@ -321,7 +321,7 @@ pub struct Results {
 /// window's widest column is not the one being looked at. Bounded on both sides
 /// — an `id` column must not be a thread, and a ten-thousand-character `TEXT`
 /// must not push all the others out of sight.
-fn column_width(rows: &db::Rows, index: usize) -> gpui::Pixels {
+fn column_width(rows: &db::Rows, index: usize) -> gpui_kit::Pixels {
     let mut chars = rows
         .columns
         .get(index)
@@ -641,8 +641,8 @@ impl TableDelegate for Results {
             })
             .when(selected, |el| el.bg(cx.theme().selection))
             .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(move |table, event: &gpui::MouseDownEvent, window, cx| {
+                gpui_kit::MouseButton::Left,
+                cx.listener(move |table, event: &gpui_kit::MouseDownEvent, window, cx| {
                     // A click in the grid **takes the focus**, like a click on a
                     // diff line: without that the `Ctrl+C` that follows goes to
                     // whoever had it — the terminal, the query editor — and the
@@ -674,25 +674,25 @@ impl TableDelegate for Results {
             // The button is rechecked on every movement and not only on the
             // press: a release outside the window sends no event, and the
             // selection would follow the cursor afterwards.
-            .on_mouse_move(
-                cx.listener(move |table, event: &gpui::MouseMoveEvent, _window, cx| {
+            .on_mouse_move(cx.listener(
+                move |table, event: &gpui_kit::MouseMoveEvent, _window, cx| {
                     if !table.delegate().dragging {
                         return;
                     }
-                    if event.pressed_button != Some(gpui::MouseButton::Left) {
+                    if event.pressed_button != Some(gpui_kit::MouseButton::Left) {
                         table.delegate_mut().dragging = false;
                         return;
                     }
                     if table.delegate_mut().drag_to(row, column) {
                         cx.notify();
                     }
-                }),
-            )
+                },
+            ))
             // A right click **outside** the selection replaces it; inside, it
             // keeps it — otherwise the "copy selection" menu would copy the one
             // cell just aimed at.
             .on_mouse_down(
-                gpui::MouseButton::Right,
+                gpui_kit::MouseButton::Right,
                 cx.listener(move |table, _event, _window, cx| {
                     let inside = table
                         .delegate()
@@ -718,10 +718,10 @@ impl TableDelegate for Results {
     fn context_menu(
         &mut self,
         row: usize,
-        menu: gpui_component::menu::PopupMenu,
+        menu: gpui_kit::component::menu::PopupMenu,
         _: &mut Window,
         _: &mut Context<TableState<Self>>,
-    ) -> gpui_component::menu::PopupMenu {
+    ) -> gpui_kit::component::menu::PopupMenu {
         let Some(app) = self.app.clone() else {
             return menu;
         };
@@ -916,7 +916,7 @@ impl ClaudhubApp {
         let rank = self.free_console_rank();
         let schema: Rc<RefCell<SchemaIndex>> = Default::default();
         let input = cx.new(|cx| {
-            gpui_component::input::EditorState::new(window, cx)
+            gpui_kit::component::input::EditorState::new(window, cx)
                 .language("sql")
                 .line_number(true)
                 .placeholder("SELECT * FROM …")
@@ -944,7 +944,7 @@ impl ClaudhubApp {
         // The store's write is deferred by half a second, which is what keeps a
         // keystroke from costing a file.
         cx.subscribe(&input, |this, _, event, cx| {
-            if matches!(event, gpui_component::input::InputEvent::Change) {
+            if matches!(event, gpui_kit::component::input::InputEvent::Change) {
                 this.persist_session(cx);
             }
         })
@@ -992,7 +992,7 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use gpui_component::dock::{DockPlacement, InsertTarget, PanelId};
+        use gpui_kit::component::dock::{DockPlacement, InsertTarget, PanelId};
         let dock = self.dock.clone();
         let sibling = self
             .consoles
@@ -1006,7 +1006,7 @@ impl ClaudhubApp {
             // goes with it: no tab, no title, no content.
             crate::ui::panels::dock_panel_at(
                 dock,
-                gpui_component::dock::panel_handle(panel.clone()),
+                gpui_kit::component::dock::panel_handle(panel.clone()),
                 DockPlacement::Center,
                 None,
                 |dock| {
@@ -1026,7 +1026,7 @@ impl ClaudhubApp {
             );
         });
         if asked_for {
-            let handle = gpui::Focusable::focus_handle(&panel, cx);
+            let handle = gpui_kit::Focusable::focus_handle(&panel, cx);
             window.focus(&handle, cx);
         }
         cx.notify();
@@ -1068,7 +1068,7 @@ impl ClaudhubApp {
             return;
         };
         let console = self.consoles.remove(ix);
-        let had_focus = gpui::Focusable::focus_handle(&console.panel, cx).is_focused(window);
+        let had_focus = gpui_kit::Focusable::focus_handle(&console.panel, cx).is_focused(window);
         if self.active_console == Some(id) {
             // The neighbour, which is what one is left looking at.
             self.active_console = self.consoles.last().map(|console| console.id);
@@ -1076,7 +1076,7 @@ impl ClaudhubApp {
         if had_focus {
             match self.active_console.and_then(|id| self.console(id)) {
                 Some(console) => {
-                    let handle = gpui::Focusable::focus_handle(&console.panel, cx);
+                    let handle = gpui_kit::Focusable::focus_handle(&console.panel, cx);
                     window.focus(&handle, cx);
                 }
                 None => {
@@ -1121,8 +1121,8 @@ impl ClaudhubApp {
         let Some(console) = self.console(id) else {
             return;
         };
-        let focused = gpui::Focusable::focus_handle(&console.input, cx).is_focused(window)
-            || gpui::Focusable::focus_handle(&console.table, cx).is_focused(window);
+        let focused = gpui_kit::Focusable::focus_handle(&console.input, cx).is_focused(window)
+            || gpui_kit::Focusable::focus_handle(&console.table, cx).is_focused(window);
         if focused {
             self.active_console = Some(id);
         }
@@ -1140,7 +1140,7 @@ impl ClaudhubApp {
         };
         let panel = console.panel.clone();
         crate::ui::panels::QueryPanel::activate(&panel, window, cx);
-        let handle = gpui::Focusable::focus_handle(&panel, cx);
+        let handle = gpui_kit::Focusable::focus_handle(&panel, cx);
         window.focus(&handle, cx);
         self.active_console = Some(id);
     }
@@ -1822,7 +1822,7 @@ impl ClaudhubApp {
 
     fn put_on_clipboard(&mut self, text: String, cx: &mut Context<Self>) {
         let lines = text.lines().count();
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
         self.announce(tr!("db-copied", { n: lines }), cx);
     }
 
@@ -2313,7 +2313,7 @@ impl ClaudhubApp {
         id: ConsoleId,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let centered = |message: SharedString, error: bool, cx: &Context<Self>| {
             v_flex()
                 .size_full()
@@ -2458,7 +2458,7 @@ impl CompletionProvider for SqlCompletions {
 }
 
 /// The editor/results split state, created once with the console that holds it.
-pub fn split_state(cx: &mut App) -> gpui::Entity<ResizableState> {
+pub fn split_state(cx: &mut App) -> gpui_kit::Entity<ResizableState> {
     cx.new(|_| ResizableState::default())
 }
 

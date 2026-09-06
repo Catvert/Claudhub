@@ -11,7 +11,7 @@
 //! relying on it any more.
 
 use alacritty_terminal::term::TermMode;
-use gpui::Keystroke;
+use gpui_kit::Keystroke;
 
 /// Returns the bytes to write to the pty, or `None` if the keystroke has no
 /// business there (plain text — which travels through the input handler —,
@@ -153,7 +153,7 @@ pub fn key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
 }
 
 /// xterm's modifier code: 1 + shift(1) + alt(2) + ctrl(4).
-fn modifier_code(m: &gpui::Modifiers) -> Option<u8> {
+fn modifier_code(m: &gpui_kit::Modifiers) -> Option<u8> {
     let code = 1 + u8::from(m.shift) + 2 * u8::from(m.alt) + 4 * u8::from(m.control);
     (code > 1).then_some(code)
 }

@@ -30,8 +30,8 @@
 
 use std::path::Path;
 
-use gpui::{App, Hsla};
-use gpui_component::ActiveTheme;
+use gpui_kit::component::ActiveTheme;
+use gpui_kit::{App, Hsla};
 
 /// What a row shows of a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -418,11 +418,11 @@ pub fn look_of(path: &Path) -> FileLook {
 ///
 /// A `div` around the icon rather than a colour set on it: `Icon` inherits the
 /// text colour, and it is the container that fixes it.
-pub fn file_icon(path: &Path, cx: &App) -> gpui::AnyElement {
-    use gpui::prelude::*;
+pub fn file_icon(path: &Path, cx: &App) -> gpui_kit::AnyElement {
+    use gpui_kit::prelude::*;
 
     let look = look_of(path);
-    gpui::div()
+    gpui_kit::div()
         .flex_none()
         .when_some(look.color(cx), |el, color| el.text_color(color))
         .child(crate::ui::icons::glyph(look.icon))

@@ -14,9 +14,9 @@
 //! many, and it is also what keeps the dialogs' code unchanged apart from the
 //! line that adds this footer.
 
-use gpui::{prelude::*, App, Entity, Focusable, SharedString, Window};
-use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::dialog::{Cancel, Confirm, DialogFooter};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::dialog::{Cancel, Confirm, DialogFooter};
+use gpui_kit::{prelude::*, App, Entity, Focusable, SharedString, Window};
 
 use crate::tr;
 

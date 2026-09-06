@@ -35,12 +35,12 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::{anyhow, Result};
-use gpui::Entity;
-use gpui::{App, SharedString, Task, WeakEntity, Window};
-use gpui_component::input::{
+use gpui_kit::component::input::{
     CodeActionProvider, CompletionProvider, DefinitionProvider,
     DocumentRangeSemanticTokensProvider, EditorState, HoverProvider, Rope, RopeExt,
 };
+use gpui_kit::Entity;
+use gpui_kit::{App, SharedString, Task, WeakEntity, Window};
 use lsp_types::{
     CodeAction, CodeActionOrCommand, CodeActionResponse, CompletionContext, CompletionResponse,
     Diagnostic, GotoDefinitionResponse, Hover, LocationLink, SemanticTokenType, SemanticTokens,
@@ -295,7 +295,7 @@ impl ClaudhubApp {
     /// The button. Switching on starts a server for the file in the editor;
     /// switching off ends the session and takes its diagnostics with it —
     /// leaving underlines nothing maintains any more would be worse than none.
-    pub(super) fn toggle_lsp(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+    pub(super) fn toggle_lsp(&mut self, window: &mut Window, cx: &mut gpui_kit::Context<Self>) {
         let Some(worktree) = self.active.clone() else {
             return;
         };
@@ -312,7 +312,7 @@ impl ClaudhubApp {
         cx.notify();
     }
 
-    fn lsp_stop(&mut self, worktree: &Path, cx: &mut gpui::Context<Self>) {
+    fn lsp_stop(&mut self, worktree: &Path, cx: &mut gpui_kit::Context<Self>) {
         if self.lsp.remove(worktree).is_none() {
             return;
         }
@@ -327,7 +327,11 @@ impl ClaudhubApp {
     ///
     /// Called at every opening and whenever the button is switched on, which is
     /// what makes it the single place where a session is born.
-    pub(super) fn lsp_sync_editor(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+    pub(super) fn lsp_sync_editor(
+        &mut self,
+        window: &mut Window,
+        cx: &mut gpui_kit::Context<Self>,
+    ) {
         let Some(editing) = self.editing() else {
             return;
         };
@@ -377,7 +381,7 @@ impl ClaudhubApp {
     }
 
     /// Posts on the editor what the server can answer, and nothing else.
-    fn lsp_install_providers(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) {
+    fn lsp_install_providers(&mut self, _window: &mut Window, cx: &mut gpui_kit::Context<Self>) {
         let Some(editing) = self.editing() else {
             return;
         };
@@ -474,7 +478,7 @@ impl ClaudhubApp {
     pub(super) fn lsp_editor_changed(
         &mut self,
         owner: &std::path::Path,
-        cx: &mut gpui::Context<Self>,
+        cx: &mut gpui_kit::Context<Self>,
     ) {
         let owner = owner.to_path_buf();
         let Some(editing) = self
@@ -545,7 +549,7 @@ impl ClaudhubApp {
         name: String,
         capabilities: String,
         window: &mut Window,
-        cx: &mut gpui::Context<Self>,
+        cx: &mut gpui_kit::Context<Self>,
     ) {
         let capabilities = Capabilities::read(&capabilities);
         log::info!("language server {name} ready in {}", worktree.display());
@@ -564,7 +568,7 @@ impl ClaudhubApp {
         &mut self,
         worktree: PathBuf,
         reason: Option<String>,
-        cx: &mut gpui::Context<Self>,
+        cx: &mut gpui_kit::Context<Self>,
     ) {
         // Everything that was waiting on it dies with it: a `Task` nobody
         // resolves is a popover that spins for ever.
@@ -594,7 +598,7 @@ impl ClaudhubApp {
         &mut self,
         worktree: PathBuf,
         message: Option<String>,
-        cx: &mut gpui::Context<Self>,
+        cx: &mut gpui_kit::Context<Self>,
     ) {
         if let Some(session) = self.lsp.get_mut(&worktree) {
             session.busy = message.map(SharedString::from);
@@ -610,7 +614,7 @@ impl ClaudhubApp {
         id: u64,
         payload: String,
         window: &mut Window,
-        cx: &mut gpui::Context<Self>,
+        cx: &mut gpui_kit::Context<Self>,
     ) {
         let edit: Option<WorkspaceEdit> = serde_json::from_str(&payload).ok();
         let applied = match (edit, self.editing()) {
@@ -646,7 +650,7 @@ impl ClaudhubApp {
         worktree: PathBuf,
         path: PathBuf,
         payload: String,
-        cx: &mut gpui::Context<Self>,
+        cx: &mut gpui_kit::Context<Self>,
     ) {
         // The server answers by URI, so the path arrives absolute; everything
         // it is compared against here is a path inside the worktree.
@@ -671,7 +675,7 @@ impl ClaudhubApp {
     }
 
     /// Puts the open file's diagnostics into the editor's own set.
-    fn lsp_paint_diagnostics(&mut self, cx: &mut gpui::Context<Self>) {
+    fn lsp_paint_diagnostics(&mut self, cx: &mut gpui_kit::Context<Self>) {
         let Some(editing) = self.editing() else {
             return;
         };
@@ -690,7 +694,7 @@ impl ClaudhubApp {
         });
     }
 
-    fn lsp_clear_diagnostics(&mut self, cx: &mut gpui::Context<Self>) {
+    fn lsp_clear_diagnostics(&mut self, cx: &mut gpui_kit::Context<Self>) {
         let Some(editing) = self.editing() else {
             return;
         };
@@ -722,7 +726,11 @@ impl ClaudhubApp {
     /// — it cannot tell a declaration from a use — but it is an answer, and it
     /// is what this window had before the server existed. See
     /// `search_for_definition`.
-    pub(super) fn goto_definition(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+    pub(super) fn goto_definition(
+        &mut self,
+        window: &mut Window,
+        cx: &mut gpui_kit::Context<Self>,
+    ) {
         let Some(editing) = self.editing() else {
             return;
         };
@@ -795,7 +803,7 @@ impl ClaudhubApp {
         &mut self,
         symbol: Option<String>,
         window: &mut Window,
-        cx: &mut gpui::Context<Self>,
+        cx: &mut gpui_kit::Context<Self>,
     ) {
         let Some(symbol) = symbol else {
             // Nothing to look for: said out loud, a key that answers nothing
@@ -1265,7 +1273,7 @@ pub fn tooltip(session: Option<&Session>) -> Option<SharedString> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui_component::highlighter::HighlightTheme;
+    use gpui_kit::component::highlighter::HighlightTheme;
 
     /// The protocol wants an absolute path and the window keeps a relative one,
     /// and the two must be the same file in both directions — a URI built from
@@ -1351,7 +1359,7 @@ mod tests {
     /// falls back to when the bundled ones are not on disk yet.
     #[test]
     fn every_token_type_lands_on_a_colour_in_the_default_themes() {
-        use gpui_component::input::HighlightStyleResolver as _;
+        use gpui_kit::component::input::HighlightStyleResolver as _;
         for theme in [
             HighlightTheme::default_dark(),
             HighlightTheme::default_light(),

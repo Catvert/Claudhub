@@ -17,14 +17,14 @@
 use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
 
-use gpui::{div, prelude::*, px, uniform_list, Context, Entity, SharedString, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     menu::{ContextMenuExt, PopupMenu, PopupMenuItem},
     resizable::{resizable_panel, v_resizable},
     v_flex, ActiveTheme, Disableable, Selectable, Sizable,
 };
+use gpui_kit::{div, prelude::*, px, uniform_list, Context, Entity, SharedString, Window};
 
 use crate::db;
 use crate::runtime::Cmd;
@@ -960,7 +960,7 @@ impl ClaudhubApp {
         };
         self.db.cursor = Some(next);
         self.db_scroll
-            .scroll_to_item(next, gpui::ScrollStrategy::Center);
+            .scroll_to_item(next, gpui_kit::ScrollStrategy::Center);
         cx.notify();
     }
 
@@ -982,7 +982,7 @@ impl ClaudhubApp {
                 {
                     self.db.cursor = Some(parent);
                     self.db_scroll
-                        .scroll_to_item(parent, gpui::ScrollStrategy::Center);
+                        .scroll_to_item(parent, gpui_kit::ScrollStrategy::Center);
                     cx.notify();
                 }
             }
@@ -1285,18 +1285,18 @@ fn status(depth: usize, loading: bool, message: SharedString) -> Entry {
 /// What the theme gives a row, read once per frame and not per row.
 #[derive(Clone)]
 struct Look {
-    height: gpui::Pixels,
-    muted: gpui::Hsla,
-    accent: gpui::Hsla,
-    guide: gpui::Hsla,
-    danger: gpui::Hsla,
-    warning: gpui::Hsla,
-    info: gpui::Hsla,
-    success: gpui::Hsla,
+    height: gpui_kit::Pixels,
+    muted: gpui_kit::Hsla,
+    accent: gpui_kit::Hsla,
+    guide: gpui_kit::Hsla,
+    danger: gpui_kit::Hsla,
+    warning: gpui_kit::Hsla,
+    info: gpui_kit::Hsla,
+    success: gpui_kit::Hsla,
 }
 
 impl Look {
-    fn of(cx: &gpui::App) -> Self {
+    fn of(cx: &gpui_kit::App) -> Self {
         Self {
             height: crate::ui::theme::row_height(cx),
             muted: cx.theme().muted_foreground,
@@ -1310,7 +1310,7 @@ impl Look {
     }
 }
 
-fn indent_guides(depth: usize, look: &Look) -> impl IntoIterator<Item = gpui::Div> + use<> {
+fn indent_guides(depth: usize, look: &Look) -> impl IntoIterator<Item = gpui_kit::Div> + use<> {
     let guide = look.guide;
     (0..depth).map(move |_| {
         div()
@@ -1333,8 +1333,8 @@ fn render_row(
     cursor: Option<usize>,
     look: &Look,
     entity: &Entity<ClaudhubApp>,
-    cx: &mut gpui::App,
-) -> gpui::AnyElement {
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::AnyElement {
     let Some(entry) = entries.get(index).cloned() else {
         return div().into_any_element();
     };
@@ -1436,7 +1436,7 @@ fn render_row(
             let (tip, for_tip) = (entity.clone(), entry.clone());
             el.tooltip(move |window, cx| {
                 let text = tooltip_of(tip.read(cx), &for_tip).unwrap_or_default();
-                gpui_component::tooltip::Tooltip::new(text).build(window, cx)
+                gpui_kit::component::tooltip::Tooltip::new(text).build(window, cx)
             })
         })
         .context_menu(move |popup, _window, _cx| row_menu(popup, &menu, &for_menu))
@@ -1457,7 +1457,7 @@ fn describe(
     look: &Look,
 ) -> Option<(
     &'static str,
-    gpui::Hsla,
+    gpui_kit::Hsla,
     SharedString,
     Option<SharedString>,
     bool,
@@ -1762,7 +1762,7 @@ impl ClaudhubApp {
         let Some(name) = self.db_entry_name(entry) else {
             return;
         };
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(name));
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(name));
     }
 
     fn db_entry_name(&self, entry: &Entry) -> Option<String> {

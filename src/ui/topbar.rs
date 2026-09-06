@@ -12,13 +12,13 @@
 
 use std::path::PathBuf;
 
-use gpui::{div, prelude::*, px, Context, Entity, MouseButton, SharedString, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonGroup, ButtonVariants},
     h_flex,
     menu::{DropdownMenu, PopupMenuItem},
     ActiveTheme, Disableable, Sizable, TitleBar,
 };
+use gpui_kit::{div, prelude::*, px, Context, Entity, MouseButton, SharedString, Window};
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
@@ -52,7 +52,7 @@ use crate::ui::icons::icon;
 /// This is a bubble-phase listener on the group, so it runs **after** what is
 /// inside it — buttons, pickers, menus keep their press — and before the bar's
 /// root, which is the one that has to be left out.
-fn actions() -> gpui::Div {
+fn actions() -> gpui_kit::Div {
     h_flex()
         .items_center()
         .gap_1()
@@ -82,7 +82,7 @@ fn view_toggle(
 fn toggle_row(
     app: Entity<ClaudhubApp>,
     name: &'static str,
-    label: impl Fn() -> gpui::SharedString + 'static,
+    label: impl Fn() -> gpui_kit::SharedString + 'static,
 ) -> PopupMenuItem {
     PopupMenuItem::element(move |_window, cx| {
         // **On the rail, and not on screen.** What this menu decides is whether
@@ -114,7 +114,7 @@ fn toggle_row(
 ///
 /// The file count is only there for want of better — a rename or a binary moves
 /// no line, and showing nothing would suggest there is nothing.
-pub(super) fn volume(summary: crate::git::Summary, cx: &gpui::App) -> impl IntoElement {
+pub(super) fn volume(summary: crate::git::Summary, cx: &gpui_kit::App) -> impl IntoElement {
     volume_on(summary, None, cx)
 }
 
@@ -126,8 +126,8 @@ pub(super) fn volume(summary: crate::git::Summary, cx: &gpui::App) -> impl IntoE
 /// The signs stay, so nothing of what the badge means is lost with the hue.
 pub(super) fn volume_on(
     summary: crate::git::Summary,
-    on: Option<gpui::Hsla>,
-    cx: &gpui::App,
+    on: Option<gpui_kit::Hsla>,
+    cx: &gpui_kit::App,
 ) -> impl IntoElement {
     let mut colors = crate::ui::theme::DiffColors::of(cx);
     if let Some(on) = on {
@@ -156,7 +156,7 @@ pub(super) fn volume_on(
 ///
 /// A badge and not a word: the row already carries a name and a branch, and this
 /// is information read out of the corner of the eye while scanning the list.
-pub(super) fn agent_badge(agent: &crate::agent::State, cx: &gpui::App) -> impl IntoElement {
+pub(super) fn agent_badge(agent: &crate::agent::State, cx: &gpui_kit::App) -> impl IntoElement {
     let color = agent_colour(agent, cx);
     agent_dot(agent, cx)
         // The agent's name as soon as there is more than one profile to tell
@@ -169,7 +169,7 @@ pub(super) fn agent_badge(agent: &crate::agent::State, cx: &gpui::App) -> impl I
         )
 }
 
-fn agent_colour(agent: &crate::agent::State, cx: &gpui::App) -> gpui::Hsla {
+fn agent_colour(agent: &crate::agent::State, cx: &gpui_kit::App) -> gpui_kit::Hsla {
     if agent.working {
         cx.theme().warning
     } else {
@@ -183,7 +183,7 @@ fn agent_colour(agent: &crate::agent::State, cx: &gpui::App) -> gpui::Hsla {
 /// It is what a pin's button carries — the button already says which checkout it
 /// is, and the programs' names would take from the row the width it has to
 /// spare. The picker's row has the space and says them.
-pub(super) fn agent_dot(agent: &crate::agent::State, cx: &gpui::App) -> gpui::Div {
+pub(super) fn agent_dot(agent: &crate::agent::State, cx: &gpui_kit::App) -> gpui_kit::Div {
     agent_dot_on(agent, None, cx)
 }
 
@@ -191,9 +191,9 @@ pub(super) fn agent_dot(agent: &crate::agent::State, cx: &gpui::App) -> gpui::Di
 /// grounds.
 pub(super) fn agent_dot_on(
     agent: &crate::agent::State,
-    on: Option<gpui::Hsla>,
-    cx: &gpui::App,
-) -> gpui::Div {
+    on: Option<gpui_kit::Hsla>,
+    cx: &gpui_kit::App,
+) -> gpui_kit::Div {
     let color = on.unwrap_or_else(|| agent_colour(agent, cx));
     h_flex()
         .flex_none()

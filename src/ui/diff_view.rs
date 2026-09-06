@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use gpui_component::highlighter::HighlightTheme;
+use gpui_kit::component::highlighter::HighlightTheme;
 
 use crate::git::{DiffLineKind, FileDiff};
 use crate::ui::highlight::DiffHighlights;
@@ -95,7 +95,7 @@ pub struct Rendered {
 }
 
 /// The wrapped list's sizes, and the three things they depend on.
-type WrapSizes = (bool, usize, Pixels, Rc<Vec<gpui::Size<Pixels>>>);
+type WrapSizes = (bool, usize, Pixels, Rc<Vec<gpui_kit::Size<Pixels>>>);
 
 impl Rendered {
     pub fn new(path: &Path, file: FileDiff, theme: &HighlightTheme) -> Self {
@@ -152,7 +152,7 @@ impl Rendered {
         split: bool,
         cols: usize,
         line_height: Pixels,
-    ) -> Rc<Vec<gpui::Size<Pixels>>> {
+    ) -> Rc<Vec<gpui_kit::Size<Pixels>>> {
         let mut slot = self.wrap_sizes.borrow_mut();
         if let Some((had_split, had_cols, had_height, sizes)) = slot.as_ref() {
             if *had_split == split && *had_cols == cols && *had_height == line_height {
@@ -167,7 +167,7 @@ impl Rendered {
         let sizes = Rc::new(
             heights
                 .into_iter()
-                .map(|lines| gpui::size(px(0.), line_height * lines as f32))
+                .map(|lines| gpui_kit::size(px(0.), line_height * lines as f32))
                 .collect::<Vec<_>>(),
         );
         *slot = Some((split, cols, line_height, sizes.clone()));
@@ -812,15 +812,15 @@ fn patch_sign(kind: DiffLineKind) -> &'static str {
 
 use std::rc::Rc;
 
-use gpui::{
-    div, prelude::*, px, uniform_list, App, Context, Entity, Focusable,
-    ListHorizontalSizingBehavior, Pixels, SharedString, StyledText, Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     menu::ContextMenuExt,
     v_flex, v_virtual_list, ActiveTheme, Selectable, Sizable, StyledExt,
+};
+use gpui_kit::{
+    div, prelude::*, px, uniform_list, App, Context, Entity, Focusable,
+    ListHorizontalSizingBehavior, Pixels, SharedString, StyledText, Window,
 };
 
 use crate::git::DiffRange;
@@ -1006,7 +1006,7 @@ impl ClaudhubApp {
             return;
         }
         let lines = text.lines().count();
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
         self.announce(tr!("copy-done", { count: lines }), cx);
     }
 
@@ -1018,7 +1018,7 @@ impl ClaudhubApp {
             return;
         };
         let path = path.display().to_string();
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(path));
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(path));
         self.announce(tr!("copy-path-done"), cx);
     }
 
@@ -1105,7 +1105,7 @@ impl ClaudhubApp {
         if let Some(state) = self.active_review_mut() {
             state.diff_selection = Some((row, row));
         }
-        self.reveal_diff_row(row, gpui::ScrollStrategy::Center, cx);
+        self.reveal_diff_row(row, gpui_kit::ScrollStrategy::Center, cx);
         cx.notify();
     }
 
@@ -1291,7 +1291,7 @@ impl ClaudhubApp {
         // Non-strict scrolling: an already-visible line does not make the view
         // jump, which leaves the eye where it is as long as one does not leave
         // the screen.
-        self.reveal_diff_row(head, gpui::ScrollStrategy::Top, cx);
+        self.reveal_diff_row(head, gpui_kit::ScrollStrategy::Top, cx);
         cx.notify();
     }
 
@@ -1309,7 +1309,7 @@ impl ClaudhubApp {
     /// the reading jump three lines.
     pub(super) fn on_diff_scroll(
         &mut self,
-        event: &gpui::ScrollWheelEvent,
+        event: &gpui_kit::ScrollWheelEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1331,9 +1331,9 @@ impl ClaudhubApp {
         // Only one axis moves at a time: it is gpui's default behaviour, which
         // only lets the dominant component through.
         let undo = if delta.x.abs() > delta.y.abs() {
-            gpui::point(delta.x, px(0.))
+            gpui_kit::point(delta.x, px(0.))
         } else {
-            gpui::point(px(0.), delta.y)
+            gpui_kit::point(px(0.), delta.y)
         };
         handle.set_offset(handle.offset() - undo);
 
@@ -1377,7 +1377,7 @@ impl ClaudhubApp {
     /// caption, and a caption that appears with its text is better than one
     /// that flashes empty. The detail is matched against the range's id, not
     /// just trusted: it follows a git command, and the click may have moved on.
-    fn render_commit_block(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    fn render_commit_block(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let state = self.active_review()?;
         let DiffRange::Commit { id, .. } = &state.range else {
             return None;
@@ -1591,7 +1591,7 @@ impl ClaudhubApp {
         // long. See `ClaudhubApp::follow_armed`.
         let armed = self.follow_armed;
         let hovered = self.follow_hover.clone();
-        let build = move |ix: usize, cx: &mut gpui::App| {
+        let build = move |ix: usize, cx: &mut gpui_kit::App| {
             let selected = selection.is_some_and(|(a, b)| ix >= a && ix <= b);
             let style = RowStyle {
                 line_height,
@@ -1694,10 +1694,10 @@ impl ClaudhubApp {
                     // frame *after* layout and asks for one more when the width
                     // has moved, which settles as soon as it stops moving.
                     .child(
-                        gpui::canvas(
+                        gpui_kit::canvas(
                             {
                                 let entity = cx.entity();
-                                move |bounds: gpui::Bounds<Pixels>, window, cx| {
+                                move |bounds: gpui_kit::Bounds<Pixels>, window, cx| {
                                     entity.update(cx, |this, _| {
                                         if (bounds.size.width - this.diff_laid_out).abs() > px(0.5)
                                         {
@@ -1714,7 +1714,7 @@ impl ClaudhubApp {
                     )
                     .on_scroll_wheel(cx.listener(Self::on_diff_scroll))
                     .on_mouse_up(
-                        gpui::MouseButton::Left,
+                        gpui_kit::MouseButton::Left,
                         cx.listener(|this, _, _window, _cx| this.end_diff_drag()),
                     )
                     .child(list)
@@ -1723,7 +1723,13 @@ impl ClaudhubApp {
                     // the header bar to act on them is one round trip too many.
                     .context_menu({
                         let entity = cx.entity();
-                        move |menu, _window, _cx| diff_menu(menu, &entity)
+                        // Decided here, where the state can be read: the menu
+                        // is built on the click, and reading the application
+                        // from there would be a second lease on it.
+                        let on_commit = self
+                            .active_review()
+                            .is_some_and(|state| matches!(state.range, DiffRange::Commit { .. }));
+                        move |menu, _window, _cx| diff_menu(menu, &entity, on_commit)
                     }),
             )
             // The remainder of a partially staged file, under the diff: what
@@ -1792,7 +1798,7 @@ impl ClaudhubApp {
                         el.child(
                             div()
                                 .flex_none()
-                                .min_w(gpui::rems(0.5 * widest.chars().count() as f32))
+                                .min_w(gpui_kit::rems(0.5 * widest.chars().count() as f32))
                                 .text_center()
                                 .text_xs()
                                 .font_family(cx.theme().mono_font_family.clone())
@@ -1840,7 +1846,7 @@ impl ClaudhubApp {
                             .cursor_pointer()
                             .font_family(mono)
                             .tooltip(|window, cx| {
-                                gpui_component::tooltip::Tooltip::new(tr!("action-copy-path"))
+                                gpui_kit::component::tooltip::Tooltip::new(tr!("action-copy-path"))
                                     .build(window, cx)
                             })
                             .on_click(cx.listener(|this, _, _window, cx| this.copy_diff_path(cx)))
@@ -2097,7 +2103,7 @@ struct DiffLayout {
 /// not mean a width known in advance, and a one-pixel discrepancy shifts the
 /// gutter by a whole character after a hundred columns.
 fn cell_width(mono: &SharedString, font_size: Pixels, window: &mut Window) -> Pixels {
-    let font = gpui::Font {
+    let font = gpui_kit::Font {
         family: mono.clone(),
         features: Default::default(),
         weight: Default::default(),
@@ -2114,56 +2120,73 @@ fn cell_width(mono: &SharedString, font_size: Pixels, window: &mut Window) -> Pi
 
 /// The right click on a diff line: the gestures that have no button to hand.
 fn diff_menu(
-    menu: gpui_component::menu::PopupMenu,
-    entity: &gpui::Entity<ClaudhubApp>,
-) -> gpui_component::menu::PopupMenu {
+    menu: gpui_kit::component::menu::PopupMenu,
+    entity: &gpui_kit::Entity<ClaudhubApp>,
+    // The diff is a commit's: its file can be taken as it was changed there.
+    on_commit: bool,
+) -> gpui_kit::component::menu::PopupMenu {
     let (note, ask) = (entity.clone(), entity.clone());
     let (here, edit) = (entity.clone(), entity.clone());
     let (copy, patch) = (entity.clone(), entity.clone());
-    menu.item(
-        gpui_component::menu::PopupMenuItem::new(tr!("note-add"))
-            .icon(icon("message-square-plus"))
-            .on_click(move |_, window, cx| {
-                note.update(cx, |this, cx| this.annotate_selection(window, cx));
-            }),
-    )
-    .item(
-        gpui_component::menu::PopupMenuItem::new(tr!("note-ask-title"))
-            .icon(icon("bot"))
-            .on_click(move |_, window, cx| {
-                ask.update(cx, |this, cx| this.ask_about_selection(window, cx));
-            }),
-    )
-    .item(
-        // Editing a line is read from the diff: one walks the changes, one sees
-        // what is wrong, and the file opens at that very line rather than at its
-        // top with the number to find again.
-        gpui_component::menu::PopupMenuItem::new(tr!("diff-edit-line"))
-            .icon(icon("pencil"))
+    let take = entity.clone();
+    let menu = menu
+        .item(
+            gpui_kit::component::menu::PopupMenuItem::new(tr!("note-add"))
+                .icon(icon("message-square-plus"))
+                .on_click(move |_, window, cx| {
+                    note.update(cx, |this, cx| this.annotate_selection(window, cx));
+                }),
+        )
+        .item(
+            gpui_kit::component::menu::PopupMenuItem::new(tr!("note-ask-title"))
+                .icon(icon("bot"))
+                .on_click(move |_, window, cx| {
+                    ask.update(cx, |this, cx| this.ask_about_selection(window, cx));
+                }),
+        )
+        .item(
+            // Editing a line is read from the diff: one walks the changes, one sees
+            // what is wrong, and the file opens at that very line rather than at its
+            // top with the number to find again.
+            gpui_kit::component::menu::PopupMenuItem::new(tr!("diff-edit-line"))
+                .icon(icon("pencil"))
+                .on_click(move |_, _window, cx| {
+                    here.update(cx, |this, cx| this.edit_diff_file(cx));
+                }),
+        )
+        .item(
+            gpui_kit::component::menu::PopupMenuItem::new(tr!("editor-external"))
+                .icon(icon("external-link"))
+                .on_click(move |_, _window, cx| {
+                    edit.update(cx, |this, cx| this.open_diff_externally(cx));
+                }),
+        )
+        .separator()
+        .item(
+            gpui_kit::component::menu::PopupMenuItem::new(tr!("action-copy-file"))
+                .icon(icon("copy"))
+                .on_click(move |_, _window, cx| {
+                    copy.update(cx, |this, cx| this.copy_diff(false, cx));
+                }),
+        )
+        .item(
+            gpui_kit::component::menu::PopupMenuItem::new(tr!("action-copy-patch"))
+                .icon(icon("file-diff"))
+                .on_click(move |_, _window, cx| {
+                    patch.update(cx, |this, cx| this.copy_diff(true, cx));
+                }),
+        );
+    if !on_commit {
+        return menu;
+    }
+    // PhpStorm's "cherry-pick selected changes", for the file: what this
+    // commit did to it, applied here, and nothing of the other commits that
+    // touched the same file.
+    menu.separator().item(
+        gpui_kit::component::menu::PopupMenuItem::new(tr!("diff-take-from-commit"))
+            .icon(icon("download"))
             .on_click(move |_, _window, cx| {
-                here.update(cx, |this, cx| this.edit_diff_file(cx));
-            }),
-    )
-    .item(
-        gpui_component::menu::PopupMenuItem::new(tr!("editor-external"))
-            .icon(icon("external-link"))
-            .on_click(move |_, _window, cx| {
-                edit.update(cx, |this, cx| this.open_diff_externally(cx));
-            }),
-    )
-    .separator()
-    .item(
-        gpui_component::menu::PopupMenuItem::new(tr!("action-copy-file"))
-            .icon(icon("copy"))
-            .on_click(move |_, _window, cx| {
-                copy.update(cx, |this, cx| this.copy_diff(false, cx));
-            }),
-    )
-    .item(
-        gpui_component::menu::PopupMenuItem::new(tr!("action-copy-patch"))
-            .icon(icon("file-diff"))
-            .on_click(move |_, _window, cx| {
-                patch.update(cx, |this, cx| this.copy_diff(true, cx));
+                take.update(cx, |this, cx| this.take_file_from_commit(cx));
             }),
     )
 }
@@ -2179,12 +2202,12 @@ pub struct SearchPaint {
     /// The current hit, painted more brightly than the others: in a file with
     /// forty of them, "where am I" is the question.
     pub current: Option<crate::ui::find::Hit>,
-    pub color: gpui::Hsla,
-    pub current_color: gpui::Hsla,
+    pub color: gpui_kit::Hsla,
+    pub current_color: gpui_kit::Hsla,
 }
 
 impl SearchPaint {
-    fn marks(&self, hunk: usize, line: usize) -> Vec<(std::ops::Range<usize>, gpui::Hsla)> {
+    fn marks(&self, hunk: usize, line: usize) -> Vec<(std::ops::Range<usize>, gpui_kit::Hsla)> {
         let Some(ranges) = self.by_line.get(&(hunk, line)) else {
             return Vec::new();
         };
@@ -2219,13 +2242,13 @@ pub struct RowStyle {
     pub gutter: Pixels,
     pub stageable: bool,
     pub selected: bool,
-    pub selection_bg: gpui::Hsla,
+    pub selection_bg: gpui_kit::Hsla,
     /// A note is about this entry.
     pub annotated: bool,
-    pub note_color: gpui::Hsla,
+    pub note_color: gpui_kit::Hsla,
     /// The entry belongs to the hunk the selection is in.
     pub current_hunk: bool,
-    pub hunk_color: gpui::Hsla,
+    pub hunk_color: gpui_kit::Hsla,
     /// The modifier that makes a symbol clickable is held down.
     ///
     /// Per frame and not per row, but it travels with the rest: it decides what
@@ -2255,7 +2278,7 @@ impl RowStyle {
         el.border_l_2().border_color(if self.current_hunk {
             self.hunk_color
         } else {
-            gpui::transparent_black()
+            gpui_kit::transparent_black()
         })
     }
 }
@@ -2273,8 +2296,8 @@ fn render_row(
     style: &RowStyle,
     search: &SearchPaint,
     entity: &Entity<ClaudhubApp>,
-    cx: &mut gpui::App,
-) -> gpui::AnyElement {
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::AnyElement {
     let Some(row) = diff.rows.get(index).copied() else {
         return div().into_any_element();
     };
@@ -2418,10 +2441,10 @@ fn with_row_gestures<E: InteractiveElement>(
     entity: &Entity<ClaudhubApp>,
 ) -> E {
     let (for_click, for_menu, for_drag) = (entity.clone(), entity.clone(), entity.clone());
-    el.on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+    el.on_mouse_down(gpui_kit::MouseButton::Left, move |event, window, cx| {
         select(&for_click, index, event.modifiers.shift, window, cx);
     })
-    .on_mouse_down(gpui::MouseButton::Right, move |_, window, cx| {
+    .on_mouse_down(gpui_kit::MouseButton::Right, move |_, window, cx| {
         aim(&for_menu, index, window, cx);
     })
     .on_mouse_move(move |event, _window, cx| drag(&for_drag, index, event, cx))
@@ -2438,8 +2461,8 @@ fn render_header(
     content_width: Pixels,
     style: &RowStyle,
     entity: &Entity<ClaudhubApp>,
-    cx: &mut gpui::App,
-) -> gpui::AnyElement {
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::AnyElement {
     let (selected, selection_bg, line_height, stageable) = (
         style.selected,
         style.selection_bg,
@@ -2496,7 +2519,7 @@ fn render_header(
 fn line_colors(
     kind: DiffLineKind,
     colors: &DiffColors,
-) -> (Option<gpui::Hsla>, Option<gpui::Hsla>) {
+) -> (Option<gpui_kit::Hsla>, Option<gpui_kit::Hsla>) {
     match kind {
         DiffLineKind::Added => (Some(colors.added_bg), Some(colors.added_fg)),
         DiffLineKind::Removed => (Some(colors.removed_bg), Some(colors.removed_fg)),
@@ -2505,7 +2528,7 @@ fn line_colors(
 }
 
 /// The background of a changed word, on the side that carries it.
-fn word_color(kind: DiffLineKind, colors: &DiffColors) -> Option<gpui::Hsla> {
+fn word_color(kind: DiffLineKind, colors: &DiffColors) -> Option<gpui_kit::Hsla> {
     match kind {
         DiffLineKind::Added => Some(colors.added_word_bg),
         DiffLineKind::Removed => Some(colors.removed_word_bg),
@@ -2523,12 +2546,12 @@ fn line_content(
     diff: &Rc<Rendered>,
     hunk: usize,
     line: usize,
-    fg: Option<gpui::Hsla>,
+    fg: Option<gpui_kit::Hsla>,
     // `word_bg`: the background of the words that changed inside this line,
     // on the side that carries them. `None` on a context line, which has no
     // other version to differ from.
-    word_bg: Option<gpui::Hsla>,
-    marks: &[(std::ops::Range<usize>, gpui::Hsla)],
+    word_bg: Option<gpui_kit::Hsla>,
+    marks: &[(std::ops::Range<usize>, gpui_kit::Hsla)],
     // `span`: the slice of the text to show, in **bytes**, when the line is
     // wrapped. Its ends are computed once per line by `wrap_offsets`, where
     // taking them a column count at a time walked the text once per segment.
@@ -2537,11 +2560,11 @@ fn line_content(
     // modifier, which is all the time: no ranges are computed, and the text is
     // the plain element it has always been.
     follow: Option<Armed>,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let Some(source) = diff.file.hunks.get(hunk).and_then(|h| h.lines.get(line)) else {
         return div().into_any_element();
     };
-    let words: Vec<(std::ops::Range<usize>, gpui::Hsla)> = match word_bg {
+    let words: Vec<(std::ops::Range<usize>, gpui_kit::Hsla)> = match word_bg {
         Some(bg) => diff
             .word_ranges(hunk, line)
             .iter()
@@ -2629,8 +2652,8 @@ fn render_split_row(
     style: &RowStyle,
     search: &SearchPaint,
     entity: &Entity<ClaudhubApp>,
-    cx: &mut gpui::App,
-) -> gpui::AnyElement {
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::AnyElement {
     let Some(row) = diff.split.get(index).copied() else {
         return div().into_any_element();
     };
@@ -2733,7 +2756,7 @@ fn half(
     // `index`: the entry of the list, which names its clickable words.
     index: usize,
     entity: &Entity<ClaudhubApp>,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let (gutter, selected, selection_bg) = (style.gutter, style.selected, style.selection_bg);
     let source = row
         .and_then(|index| diff.rows.get(index).copied())
@@ -2910,7 +2933,7 @@ fn select(
     index: usize,
     extend: bool,
     window: &mut Window,
-    cx: &mut gpui::App,
+    cx: &mut gpui_kit::App,
 ) {
     let handle = entity.read(cx).focus_handle(cx);
     window.focus(&handle, cx);
@@ -2923,7 +2946,7 @@ fn select(
 /// The right click's press: it puts the selection where the eye is, and no drag
 /// starts — the menu opens on the release, and a button that is not held cannot
 /// extend anything.
-fn aim(entity: &Entity<ClaudhubApp>, index: usize, window: &mut Window, cx: &mut gpui::App) {
+fn aim(entity: &Entity<ClaudhubApp>, index: usize, window: &mut Window, cx: &mut gpui_kit::App) {
     let handle = entity.read(cx).focus_handle(cx);
     window.focus(&handle, cx);
     entity.update(cx, |this, cx| this.aim_diff_row(index, cx));
@@ -2937,15 +2960,15 @@ fn aim(entity: &Entity<ClaudhubApp>, index: usize, window: &mut Window, cx: &mut
 fn drag(
     entity: &Entity<ClaudhubApp>,
     index: usize,
-    event: &gpui::MouseMoveEvent,
-    cx: &mut gpui::App,
+    event: &gpui_kit::MouseMoveEvent,
+    cx: &mut gpui_kit::App,
 ) {
     entity.update(cx, |this, cx| {
         // The pointer is on **this** entry, so a word underlined on another one
         // is no longer under it. The words of this entry have already had their
         // say: a text is a child of its row, and a child is dispatched first.
         this.leave_row(Spot::diff_row(index), cx);
-        if event.pressed_button != Some(gpui::MouseButton::Left) {
+        if event.pressed_button != Some(gpui_kit::MouseButton::Left) {
             this.end_diff_drag();
             return;
         }
@@ -2953,7 +2976,7 @@ fn drag(
     });
 }
 
-fn number(value: Option<usize>, width: Pixels, colors: &DiffColors) -> gpui::Div {
+fn number(value: Option<usize>, width: Pixels, colors: &DiffColors) -> gpui_kit::Div {
     div()
         .w(width)
         .flex_none()
@@ -2968,7 +2991,7 @@ fn number(value: Option<usize>, width: Pixels, colors: &DiffColors) -> gpui::Div
 /// An icon and a word in the centre rather than a grey sentence at the top left:
 /// an empty panel with no visual cue reads as a broken panel, above all on first
 /// launch where it is the first thing one sees.
-fn centered_message(text: SharedString, cx: &mut gpui::App) -> gpui::AnyElement {
+fn centered_message(text: SharedString, cx: &mut gpui_kit::App) -> gpui_kit::AnyElement {
     v_flex()
         .size_full()
         .items_center()
@@ -2988,7 +3011,7 @@ fn centered_message(text: SharedString, cx: &mut gpui::App) -> gpui::AnyElement 
         .into_any_element()
 }
 
-pub(super) fn hint(text: SharedString, cx: &mut gpui::App) -> impl IntoElement {
+pub(super) fn hint(text: SharedString, cx: &mut gpui_kit::App) -> impl IntoElement {
     div()
         .p_3()
         .text_sm()
@@ -3000,7 +3023,7 @@ pub(super) fn hint(text: SharedString, cx: &mut gpui::App) -> impl IntoElement {
 mod tests {
     use super::*;
     use crate::git::{DiffLine, Hunk};
-    use gpui_component::highlighter::HighlightTheme as Theme;
+    use gpui_kit::component::highlighter::HighlightTheme as Theme;
 
     fn hunk(header: &str, kinds: &[DiffLineKind]) -> Hunk {
         Hunk {

@@ -14,7 +14,7 @@
 
 use std::ops::Range;
 
-use gpui::{prelude::*, Context, Entity, SharedString, StyledText};
+use gpui_kit::{prelude::*, Context, Entity, SharedString, StyledText};
 
 use crate::ui::app::ClaudhubApp;
 
@@ -67,7 +67,7 @@ impl Spot {
 /// Built only while the modifier is held: `None` is the state of every line
 /// almost all the time, and it costs exactly what it did before.
 pub struct Armed<'a> {
-    pub id: gpui::ElementId,
+    pub id: gpui_kit::ElementId,
     pub spot: Spot,
     /// The word the pointer is over, in this text's own bytes — the one to
     /// underline. It comes from the frame before, which is what a hover always
@@ -122,12 +122,12 @@ impl ClaudhubApp {
 /// day a glyph falls back to another face, or the gutter gains a pixel. This
 /// asks the shaped line itself which character was hit, which is the same
 /// question the caret of an editor answers.
-pub fn followable(armed: Armed, text: SharedString, styled: StyledText) -> gpui::AnyElement {
+pub fn followable(armed: Armed, text: SharedString, styled: StyledText) -> gpui_kit::AnyElement {
     let ranges = crate::ui::search::word_ranges(&text);
     let (clicked, hovered) = (ranges.clone(), ranges.clone());
     let (for_click, for_hover) = (armed.entity.clone(), armed.entity.clone());
     let spot = armed.spot;
-    gpui::InteractiveText::new(armed.id, styled)
+    gpui_kit::InteractiveText::new(armed.id, styled)
         .on_click(ranges, move |index, window, cx| {
             if !window.modifiers().secondary() {
                 return;

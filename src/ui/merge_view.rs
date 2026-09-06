@@ -22,14 +22,14 @@
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gpui::{
-    div, prelude::*, px, Context, Entity, Focusable, Pixels, ScrollStrategy, SharedString, Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     input::{Editor, EditorState, InputEvent},
     v_flex, ActiveTheme, Disableable, Sizable,
+};
+use gpui_kit::{
+    div, prelude::*, px, Context, Entity, Focusable, Pixels, ScrollStrategy, SharedString, Window,
 };
 
 use crate::runtime::{Action, Cmd};
@@ -427,7 +427,7 @@ impl ClaudhubApp {
     }
 
     /// The three-pane view, when a conflicted file is open.
-    pub(super) fn render_merge(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(super) fn render_merge(&mut self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         if !self.merging_shown() {
             return None;
         }
@@ -498,7 +498,7 @@ impl ClaudhubApp {
                         Item::Row(_) => 1,
                         Item::Editing { lines, .. } => *lines,
                     };
-                    gpui::size(px(0.), line * lines as f32)
+                    gpui_kit::size(px(0.), line * lines as f32)
                 })
                 .collect::<Vec<_>>(),
         );
@@ -518,13 +518,18 @@ impl ClaudhubApp {
         let list = crate::ui::scroll::vertical(
             "merge-lines",
             &scroll,
-            gpui_component::v_virtual_list(
+            gpui_kit::component::v_virtual_list(
                 cx.entity(),
                 "merge-rows",
                 sizes,
-                move |_, range, _window, cx| {
+                // **The view is the first argument, and it is read from
+                // there.** The list renders its entries inside an `update` of
+                // the entity it was given — this one — so reading that entity
+                // from the closure is the double-lease panic: clicking a
+                // conflicted file crashed the window before it drew a row.
+                move |app, range, _window, cx| {
                     range
-                        .map(|index| render_item(&paint, index, &entity, cx))
+                        .map(|index| render_item(&paint, index, app, &entity, cx))
                         .collect::<Vec<_>>()
                 },
             )
@@ -794,7 +799,7 @@ struct Paint {
     number_width: Pixels,
     line: Pixels,
     current: usize,
-    rule: gpui::Hsla,
+    rule: gpui_kit::Hsla,
     editor: Option<Entity<EditorState>>,
     font: SharedString,
     font_size: Pixels,
@@ -812,12 +817,15 @@ enum Column {
 fn render_item(
     paint: &Paint,
     index: usize,
+    app: &ClaudhubApp,
     entity: &Entity<ClaudhubApp>,
-    cx: &mut gpui::App,
-) -> gpui::AnyElement {
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::AnyElement {
     match paint.items.get(index) {
-        Some(Item::Row(row)) => render_row(paint, *row, entity, cx),
-        Some(Item::Editing { chunk, lines }) => render_editing(paint, *chunk, *lines, entity, cx),
+        Some(Item::Row(row)) => render_row(paint, *row, app, entity, cx),
+        Some(Item::Editing { chunk, lines }) => {
+            render_editing(paint, *chunk, *lines, app, entity, cx)
+        }
         None => div().into_any_element(),
     }
 }
@@ -833,14 +841,15 @@ fn render_editing(
     paint: &Paint,
     chunk: usize,
     lines: usize,
+    app: &ClaudhubApp,
     entity: &Entity<ClaudhubApp>,
-    cx: &mut gpui::App,
-) -> gpui::AnyElement {
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::AnyElement {
     let rows = chunk_rows(paint, chunk);
     let Some(first) = rows.first().copied() else {
         return div().into_any_element();
     };
-    let (mine, yours) = picked(entity, chunk, cx);
+    let (mine, yours) = picked(app, chunk);
     let height = paint.line * lines as f32;
     let editor = paint.editor.clone();
     let ours = side(paint, &rows, Column::Ours, mine, yours, height, cx);
@@ -904,7 +913,7 @@ fn side(
     mine: bool,
     yours: bool,
     height: Pixels,
-    cx: &mut gpui::App,
+    cx: &mut gpui_kit::App,
 ) -> impl IntoElement {
     let mut stack = v_flex().flex_1().min_w_0().h(height);
     for row in rows {
@@ -917,13 +926,14 @@ fn side(
 fn render_row(
     paint: &Paint,
     index: usize,
+    app: &ClaudhubApp,
     entity: &Entity<ClaudhubApp>,
-    cx: &mut gpui::App,
-) -> gpui::AnyElement {
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::AnyElement {
     let Some(row) = paint.rows.get(index) else {
         return div().into_any_element();
     };
-    let (mine, yours) = picked(entity, row.chunk, cx);
+    let (mine, yours) = picked(app, row.chunk);
     let chunk = row.chunk;
     let for_edit = entity.clone();
     h_flex()
@@ -935,7 +945,7 @@ fn render_row(
         // A double click on the outcome opens an editor on that chunk: it is
         // the gesture one makes at a text one wants to change, and the button
         // in the bar is there for whoever would rather be told.
-        .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+        .on_mouse_down(gpui_kit::MouseButton::Left, move |event, window, cx| {
             if event.click_count < 2 {
                 return;
             }
@@ -966,9 +976,12 @@ fn render_row(
 
 /// Which sides a chunk has been given, read off the application: it changes on
 /// a click, and the closure below runs for every visible entry of every frame.
-fn picked(entity: &Entity<ClaudhubApp>, chunk: usize, cx: &gpui::App) -> (bool, bool) {
-    let chunk = entity
-        .read(cx)
+///
+/// Off the **borrow the list hands over** and never off the entity: the list
+/// runs its closure inside an `update` of that entity, and reading it there
+/// is a panic.
+fn picked(app: &ClaudhubApp, chunk: usize) -> (bool, bool) {
+    let chunk = app
         .merging
         .as_ref()
         .and_then(|state| state.merge.as_ref())
@@ -996,8 +1009,8 @@ fn cell(
     column: Column,
     mine: bool,
     yours: bool,
-    cx: &mut gpui::App,
-) -> gpui::AnyElement {
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::AnyElement {
     let content = match column {
         Column::Ours => row.ours.as_ref(),
         Column::Result => row.result.as_ref(),
@@ -1052,7 +1065,7 @@ fn tint(
     colors: &DiffColors,
     mine: bool,
     yours: bool,
-) -> Option<gpui::Hsla> {
+) -> Option<gpui_kit::Hsla> {
     match row.kind {
         Kind::Stable => None,
         Kind::Ours => match column {
@@ -1088,7 +1101,7 @@ fn divider(
     line: Pixels,
     entity: &Entity<ClaudhubApp>,
     tooltip: &'static str,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let mut wrapper = div().w(DIVIDER).flex_none().h(line);
     if !row.kind.is_conflict() || !row.first {
         return wrapper.into_any_element();

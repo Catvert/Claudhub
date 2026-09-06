@@ -10,19 +10,19 @@
 //! times as many as the worktrees — and cutting in the middle of the table would
 //! leave one column half empty.
 
-use gpui::{div, prelude::*, px, Context, SharedString, Window};
-use gpui_component::{h_flex, v_flex, ActiveTheme, StyledExt, WindowExt};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme, StyledExt, WindowExt};
+use gpui_kit::{div, prelude::*, px, Context, SharedString, Window};
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::settings::Settings;
 use crate::ui::shortcuts::{self, Section};
 
-const WIDTH: gpui::Pixels = px(860.);
-const HEIGHT: gpui::Pixels = px(560.);
+const WIDTH: gpui_kit::Pixels = px(860.);
+const HEIGHT: gpui_kit::Pixels = px(560.);
 /// Width reserved for the keys. Fixed, so the labels line up from one row to the
 /// next: it is the column one scans by eye.
-const KEYS: gpui::Pixels = px(148.);
+const KEYS: gpui_kit::Pixels = px(148.);
 
 impl ClaudhubApp {
     pub(super) fn open_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -98,7 +98,7 @@ fn split(sections: Vec<Section>) -> (Vec<Section>, Vec<Section>) {
     (left, right)
 }
 
-fn column(sections: Vec<Section>, cx: &gpui::App) -> impl IntoElement {
+fn column(sections: Vec<Section>, cx: &gpui_kit::App) -> impl IntoElement {
     let (muted, mono, border) = (
         cx.theme().muted_foreground,
         cx.theme().mono_font_family.clone(),

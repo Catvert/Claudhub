@@ -21,16 +21,16 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use gpui::{
+use gpui_kit::component::{
+    dock::{DockPlacement, InsertTarget, PaneRef, PanelId},
+    menu::{ContextMenuExt, PopupMenuItem},
+    v_flex, ActiveTheme, WindowExt as _,
+};
+use gpui_kit::{
     div, prelude::*, px, App, Bounds, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
     Focusable, Hsla, InputHandler, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, Point, Render, ScrollWheelEvent, SharedString, StyledText, TextRun,
     UTF16Selection, Window,
-};
-use gpui_component::{
-    dock::{DockPlacement, InsertTarget, PaneRef, PanelId},
-    menu::{ContextMenuExt, PopupMenuItem},
-    v_flex, ActiveTheme, WindowExt as _,
 };
 
 use crate::terminal::{
@@ -81,7 +81,7 @@ pub struct TerminalView {
     bounds: Bounds<Pixels>,
     /// A cell's geometry, measured on the effective font. It serves to translate
     /// a mouse position back into a line and a column.
-    cell: gpui::Size<Pixels>,
+    cell: gpui_kit::Size<Pixels>,
     /// Which characters the terminal font places on the grid.
     ///
     /// `advance` resolves a glyph in **that** font and fails when it has none,
@@ -252,7 +252,7 @@ impl TerminalView {
             font_size,
             font_family,
             bounds: Bounds::default(),
-            cell: gpui::size(px(8.), px(16.)),
+            cell: gpui_kit::size(px(8.), px(16.)),
             on_grid: HashMap::new(),
             selecting: false,
             mouse_cell: None,
@@ -439,7 +439,7 @@ impl TerminalView {
         if unknown.is_empty() {
             return;
         }
-        let font_id = window.text_system().resolve_font(&gpui::Font {
+        let font_id = window.text_system().resolve_font(&gpui_kit::Font {
             family: self.font_family.clone(),
             features: Default::default(),
             weight: Default::default(),
@@ -469,7 +469,7 @@ impl TerminalView {
         }
         self.bounds = bounds;
 
-        let font = gpui::Font {
+        let font = gpui_kit::Font {
             family: self.font_family.clone(),
             features: Default::default(),
             weight: Default::default(),
@@ -484,7 +484,7 @@ impl TerminalView {
             .unwrap_or(self.font_size * 0.6);
         let line_height = window.line_height().max(px(1.));
 
-        self.cell = gpui::size(cell_width.max(px(1.)), line_height);
+        self.cell = gpui_kit::size(cell_width.max(px(1.)), line_height);
         let (columns, lines) = grid_size(bounds.size, self.cell);
         self.request_size(
             TermSize::new(
@@ -623,7 +623,7 @@ impl TerminalView {
         button: Option<mouse::Button>,
         action: mouse::Action,
         position: Point<Pixels>,
-        modifiers: gpui::Modifiers,
+        modifiers: gpui_kit::Modifiers,
     ) -> bool {
         if modifiers.shift || !self.terminal.reports_mouse() {
             return false;
@@ -954,7 +954,7 @@ impl Render for TerminalView {
         // The measuring happens in a background `canvas`, which receives the
         // final geometry after layout. Computing it during the list's render
         // would need a size nobody knows yet.
-        let measure = gpui::canvas(
+        let measure = gpui_kit::canvas(
             move |bounds, window, cx| {
                 entity.update(cx, |view, cx| view.sync_size(bounds, window, cx));
             },
@@ -986,14 +986,16 @@ impl Render for TerminalView {
                     // It answers every click in the window, terminals being a
                     // dozen in the multiplexer: hence the read before the
                     // update — with no size pending there is nothing to lease.
-                    window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, cx: &mut App| {
-                        if phase != gpui::DispatchPhase::Bubble
-                            || view.read(cx).pending_size.is_none()
-                        {
-                            return;
-                        }
-                        view.update(cx, |view, cx| view.settle_size(cx));
-                    });
+                    window.on_mouse_event(
+                        move |_: &gpui_kit::MouseUpEvent, phase, _, cx: &mut App| {
+                            if phase != gpui_kit::DispatchPhase::Bubble
+                                || view.read(cx).pending_size.is_none()
+                            {
+                                return;
+                            }
+                            view.update(cx, |view, cx| view.settle_size(cx));
+                        },
+                    );
                 }
             },
         )
@@ -1221,9 +1223,9 @@ impl InputHandler for TerminalInputHandler {
 /// `render` reads as the shape of the panel rather than as a menu with a
 /// terminal around it.
 fn terminal_menu(
-    menu: gpui_component::menu::PopupMenu,
-    entity: &gpui::Entity<TerminalView>,
-) -> gpui_component::menu::PopupMenu {
+    menu: gpui_kit::component::menu::PopupMenu,
+    entity: &gpui_kit::Entity<TerminalView>,
+) -> gpui_kit::component::menu::PopupMenu {
     let (copy, paste) = (entity.clone(), entity.clone());
     let (all, clear) = (entity.clone(), entity.clone());
     menu.item(
@@ -1277,7 +1279,7 @@ const ALT_SCREEN_LINES: usize = 3;
 
 /// An arrow's bytes, as the program expects them.
 fn arrow_bytes(key: &str, mode: alacritty_terminal::term::TermMode) -> Option<Vec<u8>> {
-    crate::terminal::key_bytes(&gpui::Keystroke::parse(key).ok()?, mode)
+    crate::terminal::key_bytes(&gpui_kit::Keystroke::parse(key).ok()?, mode)
 }
 
 /// The grid's floor: below it, the panel clips rather than ask the program to
@@ -1292,7 +1294,7 @@ const MIN_LINES: usize = 3;
 /// program redraws, the scrollback overflows, and only fragments are left. Below
 /// it, the panel clips — which is also what a terminal window shrunk too far
 /// does.
-pub fn grid_size(space: gpui::Size<Pixels>, cell: gpui::Size<Pixels>) -> (usize, usize) {
+pub fn grid_size(space: gpui_kit::Size<Pixels>, cell: gpui_kit::Size<Pixels>) -> (usize, usize) {
     let columns = (space.width / cell.width.max(px(1.))) as usize;
     let lines = (space.height / cell.height.max(px(1.))) as usize;
     (columns.max(MIN_COLUMNS), lines.max(MIN_LINES))
@@ -1429,12 +1431,12 @@ fn painted_line(line: &crate::terminal::Line, on_grid: &HashMap<char, bool>) -> 
 fn line_boxes(
     line: &crate::terminal::Line,
     painted: &[Painted],
-    cell: gpui::Size<Pixels>,
+    cell: gpui_kit::Size<Pixels>,
     family: &SharedString,
     default_fg: Hsla,
     default_bg: Hsla,
     selection_bg: Hsla,
-) -> Vec<gpui::Div> {
+) -> Vec<gpui_kit::Div> {
     let mut out = Vec::new();
     for run in painted {
         let Some(seg) = line.segments.get(run.segment) else {
@@ -1460,18 +1462,18 @@ fn line_boxes(
         };
         let styled = TextRun {
             len: text.len(),
-            font: gpui::Font {
+            font: gpui_kit::Font {
                 family: family.clone(),
                 features: Default::default(),
                 weight: if seg.bold {
-                    gpui::FontWeight::BOLD
+                    gpui_kit::FontWeight::BOLD
                 } else {
-                    gpui::FontWeight::NORMAL
+                    gpui_kit::FontWeight::NORMAL
                 },
                 style: if seg.italic {
-                    gpui::FontStyle::Italic
+                    gpui_kit::FontStyle::Italic
                 } else {
-                    gpui::FontStyle::Normal
+                    gpui_kit::FontStyle::Normal
                 },
                 fallbacks: None,
             },
@@ -1484,8 +1486,10 @@ fn line_boxes(
                 Paint::Rgb(r, g, b) => rgb(r, g, b),
             },
             background_color: None,
-            underline: seg.underline.then(gpui::UnderlineStyle::default),
-            strikethrough: seg.strikethrough.then(gpui::StrikethroughStyle::default),
+            underline: seg.underline.then(gpui_kit::UnderlineStyle::default),
+            strikethrough: seg
+                .strikethrough
+                .then(gpui_kit::StrikethroughStyle::default),
         };
         out.push(
             div()
@@ -1511,7 +1515,7 @@ fn line_boxes(
 /// A free function rather than a method: it is arithmetic whose half-cell error
 /// is invisible to the eye but makes selection unpleasant, and which can be
 /// tested without a window.
-fn viewport_position(offset: Point<Pixels>, cell: gpui::Size<Pixels>) -> ViewportPosition {
+fn viewport_position(offset: Point<Pixels>, cell: gpui_kit::Size<Pixels>) -> ViewportPosition {
     let width = f32::from(cell.width).max(1.0);
     let height = f32::from(cell.height).max(1.0);
     let column_f = f32::from(offset.x.max(px(0.))) / width;
@@ -1532,7 +1536,7 @@ fn viewport_position(offset: Point<Pixels>, cell: gpui::Size<Pixels>) -> Viewpor
 }
 
 fn rgb(r: u8, g: u8, b: u8) -> Hsla {
-    gpui::Rgba {
+    gpui_kit::Rgba {
         r: r as f32 / 255.0,
         g: g as f32 / 255.0,
         b: b as f32 / 255.0,
@@ -1560,7 +1564,7 @@ impl WslShell {
     /// The login shell comes from the distribution itself, recorded at the
     /// moment the server was installed; failing that `/bin/sh`, which exists
     /// everywhere.
-    pub fn current(cx: &gpui::App) -> Option<Self> {
+    pub fn current(cx: &gpui_kit::App) -> Option<Self> {
         if !cfg!(windows) {
             return None;
         }
@@ -1952,7 +1956,7 @@ impl ClaudhubApp {
             // into nothing.
             crate::ui::panels::dock_panel_at(
                 dock,
-                gpui_component::dock::panel_handle(panel.clone()),
+                gpui_kit::component::dock::panel_handle(panel.clone()),
                 placement,
                 // The size the zone takes if the area has to make one: without
                 // it a fresh zone is born at twice the minimum panel size,
@@ -2015,7 +2019,7 @@ impl ClaudhubApp {
     }
 
     /// What a terminal's tab says: the name given by hand, or the program.
-    pub(super) fn terminal_label(&self, view: gpui::EntityId, cx: &App) -> SharedString {
+    pub(super) fn terminal_label(&self, view: gpui_kit::EntityId, cx: &App) -> SharedString {
         let Some(terminal) = self
             .terminals
             .iter()
@@ -2036,7 +2040,7 @@ impl ClaudhubApp {
     /// gesture for "actually, put it back".
     pub(super) fn rename_terminal(
         &mut self,
-        view: gpui::EntityId,
+        view: gpui_kit::EntityId,
         name: String,
         cx: &mut Context<Self>,
     ) {
@@ -2055,7 +2059,7 @@ impl ClaudhubApp {
     /// Asks for a terminal's new name.
     pub(super) fn ask_terminal_name(
         &mut self,
-        view: gpui::EntityId,
+        view: gpui_kit::EntityId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2083,7 +2087,7 @@ impl ClaudhubApp {
     /// would leave a pty alive with nothing to show it.
     pub(super) fn ask_close_terminal(
         &mut self,
-        view: gpui::EntityId,
+        view: gpui_kit::EntityId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2174,7 +2178,7 @@ impl ClaudhubApp {
     /// of them pointing at a dead shell would be four tabs that do nothing.
     pub(super) fn close_terminal(
         &mut self,
-        view: gpui::EntityId,
+        view: gpui_kit::EntityId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2213,7 +2217,7 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let doomed: Vec<gpui::EntityId> = self
+        let doomed: Vec<gpui_kit::EntityId> = self
             .terminals
             .iter()
             .filter(|terminal| terminal.worktree == worktree)
@@ -2522,20 +2526,26 @@ mod tests {
     /// but stacked fragments.
     #[test]
     fn a_squeezed_panel_still_gets_a_usable_grid() {
-        let cell = gpui::size(px(8.), px(16.));
-        assert_eq!(grid_size(gpui::size(px(800.), px(320.)), cell), (100, 20));
+        let cell = gpui_kit::size(px(8.), px(16.));
+        assert_eq!(
+            grid_size(gpui_kit::size(px(800.), px(320.)), cell),
+            (100, 20)
+        );
         // Shrunk to nothing: we clip rather than ask for two columns.
-        assert_eq!(grid_size(gpui::size(px(10.), px(4.)), cell), (20, 3));
+        assert_eq!(grid_size(gpui_kit::size(px(10.), px(4.)), cell), (20, 3));
         // A zero-width cell does not divide by zero.
         assert_eq!(
-            grid_size(gpui::size(px(800.), px(320.)), gpui::size(px(0.), px(0.))),
+            grid_size(
+                gpui_kit::size(px(800.), px(320.)),
+                gpui_kit::size(px(0.), px(0.))
+            ),
             (800, 320)
         );
     }
     use super::*;
 
-    fn cell() -> gpui::Size<Pixels> {
-        gpui::size(px(8.), px(16.))
+    fn cell() -> gpui_kit::Size<Pixels> {
+        gpui_kit::size(px(8.), px(16.))
     }
 
     fn run(text: &str, col: usize, cells: usize) -> (crate::terminal::Line, Segment) {
@@ -2600,23 +2610,23 @@ mod tests {
 
     #[test]
     fn maps_pixels_to_the_cell_under_them() {
-        let p = viewport_position(gpui::point(px(0.), px(0.)), cell());
+        let p = viewport_position(gpui_kit::point(px(0.), px(0.)), cell());
         assert_eq!((p.line, p.column), (0, 0));
 
         // Column 3, line 2: 3×8 and 2×16, plus a shade.
-        let p = viewport_position(gpui::point(px(25.), px(33.)), cell());
+        let p = viewport_position(gpui_kit::point(px(25.), px(33.)), cell());
         assert_eq!((p.line, p.column), (2, 3));
     }
 
     #[test]
     fn the_half_of_the_cell_decides_the_side() {
         // First third of cell 2: we aim at its left boundary.
-        let p = viewport_position(gpui::point(px(18.), px(0.)), cell());
+        let p = viewport_position(gpui_kit::point(px(18.), px(0.)), cell());
         assert_eq!(p.column, 2);
         assert_eq!(p.side, Side::Left);
 
         // Last third of the same cell: right boundary.
-        let p = viewport_position(gpui::point(px(22.), px(0.)), cell());
+        let p = viewport_position(gpui_kit::point(px(22.), px(0.)), cell());
         assert_eq!(p.column, 2);
         assert_eq!(p.side, Side::Right);
     }
@@ -2625,7 +2635,7 @@ mod tests {
     fn a_pointer_above_or_left_of_the_view_clamps_to_the_origin() {
         // A drag leaving the area must not produce a negative index: the
         // conversion to `usize` would overflow.
-        let p = viewport_position(gpui::point(px(-40.), px(-90.)), cell());
+        let p = viewport_position(gpui_kit::point(px(-40.), px(-90.)), cell());
         assert_eq!((p.line, p.column), (0, 0));
     }
 }

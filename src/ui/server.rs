@@ -10,11 +10,11 @@
 //! free: this is exactly what the "`src/ui/` never does I/O" rule exists to
 //! avoid. The view only keeps a progress state and paints it.
 
-use gpui::{div, prelude::*, px, Context, Render, SharedString, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex, v_flex, ActiveTheme, Selectable, Sizable, WindowExt,
 };
+use gpui_kit::{div, prelude::*, px, Context, Render, SharedString, Window};
 
 use crate::runtime::remote;
 use crate::tr;

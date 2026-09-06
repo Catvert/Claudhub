@@ -25,10 +25,7 @@ path = "src/bin/server.rs"
 [features]
 default = ["ui"]
 ui = [
-    "dep:gpui",
-    "dep:gpui_platform",
-    "dep:gpui-component",
-    "dep:gpui-base",
+    "dep:gpui-kit",
     "dep:rust-embed",
     "dep:tree-sitter-php",
     "dep:tree-sitter-nix",
@@ -42,47 +39,24 @@ ui = [
 ]
 
 [dependencies]
-# UI : gpui (le framework de Zed) et gpui-component (dock, listes virtualisées,
-# sidebar, inputs, thèmes, coloration syntaxique tree-sitter).
-# gpui-component suit son `main` : la version publiée (0.5.1) date d'avant la
-# refonte du dock — moteur de disposition séparé (`gpui-base`), `DockLayout` en
-# valeur, et une peau (`DockSkin`) qu'on peut remplacer. Le `main` de
-# gpui-component compile contre le gpui du dépôt de Zed, pas contre celui de
-# crates.io : les deux doivent donc pointer sur la même révision, faute de quoi
-# cargo compile deux crates `gpui` distinctes et rien ne s'accorde. La
-# révision n'est donc **pas** épinglée ici : gpui-component déclare son gpui
-# sans révision, et un `rev` de notre côté suffirait à en faire deux sources
-# différentes — neuf cents erreurs de types identiques mais étrangers.
-# `Cargo.lock` fige le commit ; c'est lui qui rend la construction reproductible.
-gpui = { git = "https://github.com/zed-industries/zed", optional = true }
-gpui_platform = { git = "https://github.com/zed-industries/zed", optional = true, features = [
-    "font-kit",
-    "x11",
-    "wayland",
-    "runtime_shaders",
-] }
-# `tree-sitter-languages` fournit entre autres la grammaire `diff`, qui colore
-# les hunks de la vue de revue sans que nous écrivions un lexer.
-# Notre fork, branche `claudhub` : un seul commit au-dessus de leur `main`, qui
-# laisse la peau du dock choisir le variant des onglets (`set_tab_variant`) —
-# le rayon du variant par défaut est un zéro codé en dur. Le commit a vocation
-# à partir en PR ; le fork disparaîtra avec elle.
-gpui-component = { git = "https://github.com/Catvert/gpui-component", branch = "claudhub", optional = true, features = [
+# GPUI Kit maintient ensemble GPUI, la couche de base et les composants.
+# Les patches Claudhub sont limités à gpui-base et gpui-component (voir
+# docs/gpui-kit-migration.md) ; le framework utilise les paquets gpui-pre publiés.
+# Les icônes et polices viennent de nos propres assets embarqués.
+gpui-kit = { version = "0.6.0", optional = true, default-features = false, features = [
+    "component",
     "tree-sitter-languages",
 ] }
-# La couche de base tient sa propre copie du thème (poignées, barres de
-# défilement) : éteindre la ligne d'une poignée de redimensionnement s'écrit
-# dans son global à elle, que gpui-component ne réexporte pas.
-gpui-base = { git = "https://github.com/Catvert/gpui-component", branch = "claudhub", optional = true }
+
 # Assets embarqués (icônes Lucide, polices) servis à gpui via AssetSource.
 rust-embed = { version = "8", optional = true }
 
-# PHP n'est pas dans les grammaires que gpui-component embarque, et c'est le
-# langage de la moitié des dépôts que Claudhub sert à relire. La grammaire est
-# donc enregistrée à la main dans son registre (voir ui::highlight).
+# PHP est fourni par Kit, mais nous enregistrons nos propres requêtes pour
+# les constantes et les injections HTML/SQL utilisées dans les vues Blade
+# (voir ui::highlight). La grammaire est partagée avec celle de Kit.
 tree-sitter-php = { version = "0.24", optional = true }
 
-# Nix non plus n'y est pas, et c'est le langage du `shell.nix` de ce dépôt : on
+# Nix n'y est pas, et c'est le langage du `shell.nix` de ce dépôt : on
 # relit un diff de `shell.nix` ou de `flake.nix` en même temps que le reste.
 tree-sitter-nix = { version = "0.3", optional = true }
 
@@ -234,3 +208,8 @@ winresource = { version = "0.1.31", default-features = false }
 
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] }
+
+# Patches applicatifs portés sur le tag upstream v0.6.0.
+[patch.crates-io]
+gpui-base = { git = "https://github.com/Catvert/gpui-component", rev = "475a83b50844c2a209f76e73d72b20c6fe023c9d" }
+gpui-component = { git = "https://github.com/Catvert/gpui-component", rev = "475a83b50844c2a209f76e73d72b20c6fe023c9d" }

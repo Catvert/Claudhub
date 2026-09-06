@@ -23,8 +23,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use gpui::{div, prelude::*, px, uniform_list, App, Context, Entity, SharedString, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     h_flex,
@@ -32,6 +31,7 @@ use gpui_component::{
     menu::{ContextMenuExt, PopupMenu, PopupMenuItem},
     v_flex, ActiveTheme, Disableable, Selectable, Sizable, WindowExt,
 };
+use gpui_kit::{div, prelude::*, px, uniform_list, App, Context, Entity, SharedString, Window};
 
 use crate::git::Tag;
 use crate::runtime::Cmd;
@@ -595,11 +595,11 @@ impl ClaudhubApp {
 /// What the theme gives a row, read once per frame and not per row.
 #[derive(Clone, Copy)]
 struct Look {
-    row: gpui::Pixels,
-    muted: gpui::Hsla,
-    accent: gpui::Hsla,
-    warning: gpui::Hsla,
-    info: gpui::Hsla,
+    row: gpui_kit::Pixels,
+    muted: gpui_kit::Hsla,
+    accent: gpui_kit::Hsla,
+    warning: gpui_kit::Hsla,
+    info: gpui_kit::Hsla,
 }
 
 impl Look {
@@ -629,7 +629,7 @@ fn render_tag(
     look: &Look,
     entity: &Entity<ClaudhubApp>,
     cx: &App,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let Some(tag) = tags.get(at) else {
         return div().into_any_element();
     };
@@ -755,7 +755,7 @@ fn row_menu(popup: PopupMenu, entity: &Entity<ClaudhubApp>, tag: &Tag) -> PopupM
         PopupMenuItem::new(tr!("tag-copy-name"))
             .icon(icon("copy"))
             .on_click(move |_, _window, cx| {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(name.clone()));
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(name.clone()));
             })
     });
     let popup = popup.item({
@@ -788,7 +788,7 @@ fn row_menu(popup: PopupMenu, entity: &Entity<ClaudhubApp>, tag: &Tag) -> PopupM
 /// Nothing to show: a read under way, a search that found nothing, or a
 /// repository with no tag at all — three different things, and saying the wrong
 /// one is how a panel reads as broken.
-fn empty_tags(query: &str, pending: bool, cx: &App) -> gpui::AnyElement {
+fn empty_tags(query: &str, pending: bool, cx: &App) -> gpui_kit::AnyElement {
     let message = if pending {
         tr!("tags-loading")
     } else if query.trim().is_empty() {

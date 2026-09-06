@@ -21,7 +21,7 @@
 //! and the help window come out of it. Two lists would have diverged on the
 //! first addition, and help that lies about the keys is worse than no help.
 
-use gpui::{actions, App, KeyBinding, KeyContext, SharedString, Window};
+use gpui_kit::{actions, App, KeyBinding, KeyContext, SharedString, Window};
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
@@ -116,7 +116,7 @@ actions!(
 /// `Alt+1` to `Alt+9` do the same thing up to an index. The rank is
 /// `rails::TOOLS`'s, which is why a tool window only ever joins that table by
 /// the end.
-#[derive(Clone, PartialEq, Debug, Default, gpui::Action)]
+#[derive(Clone, PartialEq, Debug, Default, gpui_kit::Action)]
 #[action(namespace = claudhub, no_json)]
 pub struct ToggleTool {
     pub index: usize,
@@ -127,7 +127,7 @@ pub struct ToggleTool {
 /// An action *with a payload* rather than nine actions: `Ctrl+1` to `Ctrl+9` do
 /// the same thing up to an index, and nine identical handlers would say nothing
 /// more.
-#[derive(Clone, PartialEq, Debug, Default, gpui::Action)]
+#[derive(Clone, PartialEq, Debug, Default, gpui_kit::Action)]
 #[action(namespace = claudhub, no_json)]
 pub struct SelectWorktree {
     pub index: usize,
@@ -138,7 +138,7 @@ pub struct SelectWorktree {
 /// A payload and not a bare action: the dock shows two editors as soon as a
 /// split is open, and it is the one the menu was opened on that is being asked
 /// about — the same reason a surface is named by its path. See `ui::surface`.
-#[derive(Clone, PartialEq, Debug, Default, gpui::Action)]
+#[derive(Clone, PartialEq, Debug, Default, gpui_kit::Action)]
 #[action(namespace = claudhub, no_json)]
 pub struct ShowLineHistory {
     pub path: std::path::PathBuf,
@@ -640,7 +640,7 @@ const NAMED_KEYS: &[&str] = &[
 /// An empty text is not invalid — it is a binding switched off.
 pub fn valid_keys(keys: &str) -> bool {
     keys.split_whitespace().all(|stroke| {
-        gpui::Keystroke::parse(stroke).is_ok_and(|stroke| {
+        gpui_kit::Keystroke::parse(stroke).is_ok_and(|stroke| {
             stroke.key.chars().count() == 1 || NAMED_KEYS.contains(&stroke.key.as_str())
         })
     })
@@ -1000,7 +1000,7 @@ pub fn init(cx: &mut App) {
     // arrows, dialogs their Escape, and nothing public reinstalls them.
     // Hence the snapshot, taken **before** ours are added and while the
     // library's are all there. Whence the order in `ui::run`:
-    // `gpui_component::init` first, since it is what we are keeping, then the
+    // `gpui_kit::component::init` first, since it is what we are keeping, then the
     // settings global, which `install` reads the customisations from, and only
     // then this.
     let base: Vec<KeyBinding> = cx.key_bindings().borrow().bindings().cloned().collect();
@@ -1011,7 +1011,7 @@ pub fn init(cx: &mut App) {
 /// The bindings that were there before ours.
 struct BaseKeymap(Vec<KeyBinding>);
 
-impl gpui::Global for BaseKeymap {}
+impl gpui_kit::Global for BaseKeymap {}
 
 /// Installs ours, the user's customisations applied.
 fn install(cx: &mut App) {
@@ -1031,7 +1031,7 @@ fn install(cx: &mut App) {
 /// The platform key comes out as `secondary`, which is what the tables say and
 /// what makes a customised binding read the same on the three platforms — gpui
 /// parses it back to Ctrl here and Cmd on macOS.
-pub fn stroke_syntax(stroke: &gpui::Keystroke) -> Option<String> {
+pub fn stroke_syntax(stroke: &gpui_kit::Keystroke) -> Option<String> {
     let key = stroke.key.as_str();
     if matches!(
         key,
@@ -1288,7 +1288,7 @@ pub fn show_line_history(
     this: &mut ClaudhubApp,
     action: &ShowLineHistory,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.show_line_history(action.path.clone(), window, cx);
 }
@@ -1297,7 +1297,7 @@ pub fn refresh(
     this: &mut ClaudhubApp,
     _: &Refresh,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.refresh_active(cx);
 }
@@ -1306,7 +1306,7 @@ pub fn new_terminal(
     this: &mut ClaudhubApp,
     _: &NewTerminal,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     let Some(worktree) = this.active_path() else {
         return;
@@ -1326,7 +1326,7 @@ pub fn close_terminal(
     this: &mut ClaudhubApp,
     _: &CloseTerminal,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     let Some(worktree) = this.active_path() else {
         return;
@@ -1338,7 +1338,7 @@ pub fn toggle_terminal(
     this: &mut ClaudhubApp,
     _: &ToggleTerminal,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     // The same gesture as the rail's button, and it has to be the same code:
     // two answers to "show me the terminals" is one of them being wrong. Of the
@@ -1354,7 +1354,7 @@ pub fn next_terminal(
     this: &mut ClaudhubApp,
     _: &NextTerminal,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     let Some(worktree) = this.active_path() else {
         return;
@@ -1366,7 +1366,7 @@ pub fn multiplex_step_left(
     this: &mut ClaudhubApp,
     _: &MultiplexStepLeft,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     multiplex_step(this, crate::ui::multiplex::End::Start, cx);
 }
@@ -1375,7 +1375,7 @@ pub fn multiplex_step_right(
     this: &mut ClaudhubApp,
     _: &MultiplexStepRight,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     multiplex_step(this, crate::ui::multiplex::End::End, cx);
 }
@@ -1388,7 +1388,7 @@ pub fn multiplex_step_right(
 fn multiplex_step(
     this: &mut ClaudhubApp,
     end: crate::ui::multiplex::End,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     if !this.multiplex {
         cx.propagate();
@@ -1406,7 +1406,7 @@ pub fn next_tab(
     this: &mut ClaudhubApp,
     _: &NextTab,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.cycle_tab(true, window, cx);
 }
@@ -1415,7 +1415,7 @@ pub fn previous_tab(
     this: &mut ClaudhubApp,
     _: &PreviousTab,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.cycle_tab(false, window, cx);
 }
@@ -1424,7 +1424,7 @@ pub fn open_settings(
     this: &mut ClaudhubApp,
     _: &OpenSettings,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.open_settings(window, cx);
 }
@@ -1433,7 +1433,7 @@ pub fn zoom_in(
     this: &mut ClaudhubApp,
     _: &ZoomIn,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.zoom(1., window, cx);
 }
@@ -1442,7 +1442,7 @@ pub fn zoom_out(
     this: &mut ClaudhubApp,
     _: &ZoomOut,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.zoom(-1., window, cx);
 }
@@ -1451,7 +1451,7 @@ pub fn zoom_reset(
     this: &mut ClaudhubApp,
     _: &ZoomReset,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.reset_zoom(window, cx);
 }
@@ -1460,7 +1460,7 @@ pub fn copy_diff(
     this: &mut ClaudhubApp,
     _: &CopyDiff,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.copy_diff(false, cx);
 }
@@ -1469,7 +1469,7 @@ pub fn copy_diff_patch(
     this: &mut ClaudhubApp,
     _: &CopyDiffPatch,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.copy_diff(true, cx);
 }
@@ -1478,7 +1478,7 @@ pub fn select_whole_diff(
     this: &mut ClaudhubApp,
     _: &SelectWholeDiff,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.select_whole_diff(cx);
 }
@@ -1487,7 +1487,7 @@ pub fn previous_line(
     this: &mut ClaudhubApp,
     _: &PreviousLine,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.step_diff_row(-1, false, cx);
 }
@@ -1496,7 +1496,7 @@ pub fn next_line(
     this: &mut ClaudhubApp,
     _: &NextLine,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.step_diff_row(1, false, cx);
 }
@@ -1505,7 +1505,7 @@ pub fn extend_up(
     this: &mut ClaudhubApp,
     _: &ExtendUp,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.step_diff_row(-1, true, cx);
 }
@@ -1514,7 +1514,7 @@ pub fn extend_down(
     this: &mut ClaudhubApp,
     _: &ExtendDown,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.step_diff_row(1, true, cx);
 }
@@ -1523,7 +1523,7 @@ pub fn previous_hunk(
     this: &mut ClaudhubApp,
     _: &PreviousHunk,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.step_diff_hunk(-1, cx);
 }
@@ -1532,7 +1532,7 @@ pub fn next_hunk(
     this: &mut ClaudhubApp,
     _: &NextHunk,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.step_diff_hunk(1, cx);
 }
@@ -1541,7 +1541,7 @@ pub fn previous_file(
     this: &mut ClaudhubApp,
     _: &PreviousFile,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.step_file(-1, cx);
 }
@@ -1550,7 +1550,7 @@ pub fn next_file(
     this: &mut ClaudhubApp,
     _: &NextFile,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.step_file(1, cx);
 }
@@ -1559,7 +1559,7 @@ pub fn toggle_diff_split(
     this: &mut ClaudhubApp,
     _: &ToggleDiffSplit,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.toggle_diff_split(cx);
 }
@@ -1568,7 +1568,7 @@ pub fn toggle_whole_file(
     this: &mut ClaudhubApp,
     _: &ToggleWholeFile,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.toggle_whole_file(cx);
 }
@@ -1577,7 +1577,7 @@ pub fn commit(
     this: &mut ClaudhubApp,
     _: &Commit,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.commit(false, false, cx);
 }
@@ -1586,7 +1586,7 @@ pub fn annotate_selection(
     this: &mut ClaudhubApp,
     _: &AnnotateSelection,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.annotate_selection(window, cx);
 }
@@ -1595,7 +1595,7 @@ pub fn ask_agent(
     this: &mut ClaudhubApp,
     _: &AskAgent,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.ask_about_selection(window, cx);
 }
@@ -1604,7 +1604,7 @@ pub fn send_notes(
     this: &mut ClaudhubApp,
     _: &SendNotes,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.send_notes(None, window, cx);
 }
@@ -1613,7 +1613,7 @@ pub fn save_file(
     this: &mut ClaudhubApp,
     _: &SaveFile,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.save_file(cx);
 }
@@ -1622,7 +1622,7 @@ pub fn find_file(
     this: &mut ClaudhubApp,
     _: &FindFile,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.open_quick(crate::ui::quick_view::Mode::Files, window, cx);
 }
@@ -1631,7 +1631,7 @@ pub fn search_project(
     this: &mut ClaudhubApp,
     _: &SearchProject,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.open_quick(crate::ui::quick_view::Mode::Text, window, cx);
 }
@@ -1640,7 +1640,7 @@ pub fn quick_up(
     this: &mut ClaudhubApp,
     _: &QuickUp,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.step_quick(-1, window, cx);
 }
@@ -1649,7 +1649,7 @@ pub fn quick_down(
     this: &mut ClaudhubApp,
     _: &QuickDown,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.step_quick(1, window, cx);
 }
@@ -1658,7 +1658,7 @@ pub fn quick_open(
     this: &mut ClaudhubApp,
     _: &QuickOpen,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.open_quick_row(window, cx);
 }
@@ -1667,7 +1667,7 @@ pub fn quick_expand(
     this: &mut ClaudhubApp,
     _: &QuickExpand,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.expand_quick(window, cx);
 }
@@ -1676,7 +1676,7 @@ pub fn search_up(
     this: &mut ClaudhubApp,
     _: &SearchUp,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.step_search(-1, window, cx);
 }
@@ -1685,7 +1685,7 @@ pub fn search_down(
     this: &mut ClaudhubApp,
     _: &SearchDown,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.step_search(1, window, cx);
 }
@@ -1694,7 +1694,7 @@ pub fn search_open(
     this: &mut ClaudhubApp,
     _: &SearchOpen,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.open_search_row(window, cx);
 }
@@ -1703,7 +1703,7 @@ pub fn explorer_up(
     this: &mut ClaudhubApp,
     _: &ExplorerUp,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.step_project_cursor(-1, cx);
 }
@@ -1712,7 +1712,7 @@ pub fn explorer_down(
     this: &mut ClaudhubApp,
     _: &ExplorerDown,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.step_project_cursor(1, cx);
 }
@@ -1721,7 +1721,7 @@ pub fn explorer_left(
     this: &mut ClaudhubApp,
     _: &ExplorerLeft,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.fold_project_cursor(false, cx);
 }
@@ -1730,7 +1730,7 @@ pub fn explorer_right(
     this: &mut ClaudhubApp,
     _: &ExplorerRight,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.fold_project_cursor(true, cx);
 }
@@ -1739,7 +1739,7 @@ pub fn explorer_open(
     this: &mut ClaudhubApp,
     _: &ExplorerOpen,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.activate_project_cursor(cx);
 }
@@ -1748,7 +1748,7 @@ pub fn goto_definition(
     this: &mut ClaudhubApp,
     _: &GoToDefinition,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.goto_definition(window, cx);
 }
@@ -1757,7 +1757,7 @@ pub fn jump_back(
     this: &mut ClaudhubApp,
     _: &JumpBack,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.jump_back(window, cx);
 }
@@ -1766,7 +1766,7 @@ pub fn jump_forward(
     this: &mut ClaudhubApp,
     _: &JumpForward,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.jump_forward(window, cx);
 }
@@ -1775,7 +1775,7 @@ pub fn db_up(
     this: &mut ClaudhubApp,
     _: &DbUp,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.db_step_cursor(-1, cx);
 }
@@ -1784,7 +1784,7 @@ pub fn db_down(
     this: &mut ClaudhubApp,
     _: &DbDown,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.db_step_cursor(1, cx);
 }
@@ -1793,7 +1793,7 @@ pub fn db_left(
     this: &mut ClaudhubApp,
     _: &DbLeft,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.db_fold_cursor(false, cx);
 }
@@ -1802,7 +1802,7 @@ pub fn db_right(
     this: &mut ClaudhubApp,
     _: &DbRight,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.db_fold_cursor(true, cx);
 }
@@ -1811,7 +1811,7 @@ pub fn db_open(
     this: &mut ClaudhubApp,
     _: &DbOpen,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.db_open_cursor(window, cx);
 }
@@ -1820,7 +1820,7 @@ pub fn run_db_query(
     this: &mut ClaudhubApp,
     _: &RunDbQuery,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.run_focused_db_query(cx);
 }
@@ -1834,7 +1834,7 @@ pub fn toggle_tool(
     this: &mut ClaudhubApp,
     action: &ToggleTool,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     if let Some(tool) = crate::ui::rails::TOOLS.get(action.index) {
         this.press_tool(tool.panel, None, window, cx);
@@ -1846,7 +1846,7 @@ pub fn new_db_console(
     this: &mut ClaudhubApp,
     _: &NewDbConsole,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.open_another_console(window, cx);
 }
@@ -1855,7 +1855,7 @@ pub fn copy_db_result(
     this: &mut ClaudhubApp,
     _: &CopyDbResult,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.copy_focused_db_result(cx);
 }
@@ -1864,7 +1864,7 @@ pub fn select_whole_result(
     this: &mut ClaudhubApp,
     _: &SelectWholeResult,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.select_whole_focused_db_result(cx);
 }
@@ -1873,7 +1873,7 @@ pub fn export_db_csv(
     this: &mut ClaudhubApp,
     _: &ExportDbCsv,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.export_focused_db_csv(cx);
 }
@@ -1882,7 +1882,7 @@ pub fn find(
     this: &mut ClaudhubApp,
     _: &Find,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.open_find(window, cx);
 }
@@ -1891,7 +1891,7 @@ pub fn close_find(
     this: &mut ClaudhubApp,
     _: &CloseFind,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.close_find(window, cx);
 }
@@ -1900,7 +1900,7 @@ pub fn find_next(
     this: &mut ClaudhubApp,
     _: &FindNext,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.find_step(1, cx);
 }
@@ -1909,7 +1909,7 @@ pub fn find_previous(
     this: &mut ClaudhubApp,
     _: &FindPrevious,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.find_step(-1, cx);
 }
@@ -1918,7 +1918,7 @@ pub fn show_shortcuts(
     this: &mut ClaudhubApp,
     _: &ShowShortcuts,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.open_shortcuts(window, cx);
 }
@@ -1927,7 +1927,7 @@ pub fn toggle_sidebar(
     this: &mut ClaudhubApp,
     _: &ToggleSidebar,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.toggle_sidebar(window, cx);
 }
@@ -1936,7 +1936,7 @@ pub fn toggle_zen(
     this: &mut ClaudhubApp,
     _: &ToggleZen,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.toggle_zen(window, cx);
 }
@@ -1945,7 +1945,7 @@ pub fn previous_terminal(
     this: &mut ClaudhubApp,
     _: &PreviousTerminal,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     let Some(worktree) = this.active_path() else {
         return;
@@ -1957,7 +1957,7 @@ pub fn select_worktree(
     this: &mut ClaudhubApp,
     action: &SelectWorktree,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.select_worktree_at(action.index, window, cx);
 }
@@ -1966,7 +1966,7 @@ pub fn fetch(
     this: &mut ClaudhubApp,
     _: &Fetch,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.fetch(cx);
 }
@@ -1975,7 +1975,7 @@ pub fn pull(
     this: &mut ClaudhubApp,
     _: &Pull,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.pull(cx);
 }
@@ -1984,7 +1984,7 @@ pub fn push(
     this: &mut ClaudhubApp,
     _: &Push,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.push(cx);
 }
@@ -1993,7 +1993,7 @@ pub fn toggle_stage(
     this: &mut ClaudhubApp,
     _: &ToggleStage,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.toggle_stage_of_open_file(cx);
 }
@@ -2002,7 +2002,7 @@ pub fn toggle_review_tree(
     this: &mut ClaudhubApp,
     _: &ToggleReviewTree,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.toggle_review_tree(cx);
 }
@@ -2011,7 +2011,7 @@ pub fn diff_start(
     this: &mut ClaudhubApp,
     _: &DiffStart,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.jump_diff(crate::ui::diff_view::Jump::Start, cx);
 }
@@ -2020,7 +2020,7 @@ pub fn diff_end(
     this: &mut ClaudhubApp,
     _: &DiffEnd,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.jump_diff(crate::ui::diff_view::Jump::End, cx);
 }
@@ -2029,7 +2029,7 @@ pub fn diff_page_up(
     this: &mut ClaudhubApp,
     _: &DiffPageUp,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.jump_diff(crate::ui::diff_view::Jump::PageUp, cx);
 }
@@ -2038,7 +2038,7 @@ pub fn diff_page_down(
     this: &mut ClaudhubApp,
     _: &DiffPageDown,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.jump_diff(crate::ui::diff_view::Jump::PageDown, cx);
 }
@@ -2047,7 +2047,7 @@ pub fn close_editor(
     this: &mut ClaudhubApp,
     _: &CloseEditor,
     window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.close_editor(window, cx);
 }
@@ -2056,7 +2056,7 @@ pub fn explorer_home(
     this: &mut ClaudhubApp,
     _: &ExplorerHome,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.jump_project_cursor(false, cx);
 }
@@ -2065,7 +2065,7 @@ pub fn explorer_end(
     this: &mut ClaudhubApp,
     _: &ExplorerEnd,
     _window: &mut Window,
-    cx: &mut gpui::Context<ClaudhubApp>,
+    cx: &mut gpui_kit::Context<ClaudhubApp>,
 ) {
     this.jump_project_cursor(true, cx);
 }
@@ -2233,7 +2233,7 @@ mod tests {
     #[test]
     fn a_pressed_key_is_written_the_way_the_table_writes_it() {
         let round_trip = |keys: &str| {
-            let stroke = gpui::Keystroke::parse(keys).expect("a readable keystroke");
+            let stroke = gpui_kit::Keystroke::parse(keys).expect("a readable keystroke");
             stroke_syntax(&stroke)
         };
         assert_eq!(

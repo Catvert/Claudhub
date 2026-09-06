@@ -13,11 +13,11 @@
 
 use std::path::PathBuf;
 
-use gpui::{div, prelude::*, px, Context, SharedString, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex, v_flex, ActiveTheme, Sizable,
 };
+use gpui_kit::{div, prelude::*, px, Context, SharedString, Window};
 
 use crate::git::Pending;
 use crate::runtime::{Action, Cmd};
@@ -298,7 +298,7 @@ impl ClaudhubApp {
                 .child(div().text_color(warning).child(icon("git-merge").xsmall()))
                 .child(div().text_color(warning).child(tr!(kind.key())))
                 .child(self.render_pending_buttons("bar", cx))
-                .child(gpui_component::separator::Separator::vertical().h(px(12.))),
+                .child(gpui_kit::component::separator::Separator::vertical().h(px(12.))),
         )
     }
 }

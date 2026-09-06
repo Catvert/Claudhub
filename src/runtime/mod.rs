@@ -777,6 +777,20 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
                 repo::checkout(dir, &branch).map(|_| String::new())
             })
         }
+        // Status re-read **even on failure**, like a stash that conflicts: a
+        // pick that stops on a conflict has written its markers into the
+        // files and `CHERRY_PICK_HEAD` beside them, and it is the status that
+        // hands the conflicts panel its work.
+        Cmd::CherryPick { worktree, id } => {
+            write_then_refresh_anyway(worktree, Action::CherryPick, |dir| {
+                repo::cherry_pick(dir, &id)
+            })
+        }
+        Cmd::TakeFile { worktree, id, path } => {
+            write_then_refresh_anyway(worktree, Action::CherryPick, |dir| {
+                repo::take_from_commit(dir, &id, &path)
+            })
+        }
         Cmd::CreateBranch {
             worktree,
             name,
@@ -1607,6 +1621,27 @@ fn write_then_refresh(
         }
         Err(e) => vec![fail(Some(worktree), action, e)],
     }
+}
+
+/// The same, with the status re-read whether the write succeeded or not.
+///
+/// For the writes whose failure has changed the working tree: a cherry-pick
+/// stopped on a conflict has left its markers in the files, and a status that
+/// waited for the next save would leave the conflicts panel empty in front of
+/// a repository that is mid-operation.
+fn write_then_refresh_anyway(
+    worktree: PathBuf,
+    action: Action,
+    op: impl FnOnce(&Path) -> Result<String>,
+) -> Vec<Evt> {
+    let mut evts = vec![match op(&worktree) {
+        Ok(output) => done(Some(worktree.clone()), action, output),
+        Err(e) => fail(Some(worktree.clone()), action, e),
+    }];
+    if let Ok(status) = status::status(&worktree) {
+        evts.push(Evt::Status { worktree, status });
+    }
+    evts
 }
 
 /// Every tag write is followed by a re-read of the tag list, for the reason

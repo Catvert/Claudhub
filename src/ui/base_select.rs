@@ -10,8 +10,8 @@
 //! by eye, and information that requires stopping on each row to reveal it does
 //! not help you compare.
 
-use gpui::{div, prelude::*, px, App, IntoElement, SharedString, Window};
-use gpui_component::{h_flex, select::SelectItem, v_flex, ActiveTheme};
+use gpui_kit::component::{h_flex, select::SelectItem, v_flex, ActiveTheme};
+use gpui_kit::{div, prelude::*, px, App, IntoElement, SharedString, Window};
 
 use crate::git::{Branch, BranchKind};
 use crate::tr;
@@ -116,7 +116,7 @@ fn tag(label: SharedString, cx: &App) -> impl IntoElement {
 
 /// Menu width. Two lines of text need room; below this width the commit
 /// subject is truncated to the point of saying nothing.
-pub const MENU_WIDTH: gpui::Pixels = px(420.);
+pub const MENU_WIDTH: gpui_kit::Pixels = px(420.);
 
 #[cfg(test)]
 mod tests {

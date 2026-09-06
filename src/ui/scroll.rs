@@ -36,8 +36,8 @@
 //! identified parent the panels would share the state — hover, drag — of one
 //! and the same bar.
 
-use gpui::{div, prelude::*, AnyElement, Context, SharedString, Stateful, Window};
-use gpui_component::scroll::{ScrollableElement, ScrollbarAxis, ScrollbarHandle};
+use gpui_kit::component::scroll::{ScrollableElement, ScrollbarAxis, ScrollbarHandle};
+use gpui_kit::{div, prelude::*, AnyElement, Context, SharedString, Stateful, Window};
 
 use crate::ui::app::ClaudhubApp;
 use crate::ui::motion::{Axes, ScrollMotion};
@@ -55,7 +55,7 @@ pub fn vertical<H: ScrollbarHandle + Clone>(
     id: impl Into<SharedString>,
     handle: &H,
     content: impl IntoElement,
-) -> Stateful<gpui::Div> {
+) -> Stateful<gpui_kit::Div> {
     wrap(
         id,
         handle,
@@ -73,7 +73,7 @@ pub fn both<H: ScrollbarHandle + Clone>(
     id: impl Into<SharedString>,
     handle: &H,
     content: impl IntoElement,
-) -> Stateful<gpui::Div> {
+) -> Stateful<gpui_kit::Div> {
     wrap(id, handle, ScrollbarAxis::Both, content.into_any_element())
 }
 
@@ -91,19 +91,19 @@ pub fn both<H: ScrollbarHandle + Clone>(
 /// The caller advances the motion itself, from its `render`: it has the `&mut
 /// self` this cannot reach — reading the entity back out of its own render is a
 /// reentrant borrow.
-pub fn smooth_wheel<V: gpui::Render>(
-    element: Stateful<gpui::Div>,
-    base: gpui::ScrollHandle,
+pub fn smooth_wheel<V: gpui_kit::Render>(
+    element: Stateful<gpui_kit::Div>,
+    base: gpui_kit::ScrollHandle,
     motion: impl Fn(&mut V) -> &mut ScrollMotion + 'static,
     cx: &mut Context<V>,
-) -> Stateful<gpui::Div> {
-    element.on_scroll_wheel(
-        cx.listener(move |view, event: &gpui::ScrollWheelEvent, window, cx| {
+) -> Stateful<gpui_kit::Div> {
+    element.on_scroll_wheel(cx.listener(
+        move |view, event: &gpui_kit::ScrollWheelEvent, window, cx| {
             if motion(view).on_wheel(&base, event, window) {
                 cx.notify();
             }
-        }),
-    )
+        },
+    ))
 }
 
 fn wrap<H: ScrollbarHandle + Clone>(
@@ -111,9 +111,9 @@ fn wrap<H: ScrollbarHandle + Clone>(
     handle: &H,
     axis: ScrollbarAxis,
     content: AnyElement,
-) -> Stateful<gpui::Div> {
+) -> Stateful<gpui_kit::Div> {
     div()
-        .id(gpui::ElementId::Name(id.into()))
+        .id(gpui_kit::ElementId::Name(id.into()))
         .relative()
         .size_full()
         .min_h_0()
@@ -128,23 +128,23 @@ fn wrap<H: ScrollbarHandle + Clone>(
 /// `UniformListScrollHandle` is not a handle: it is a list state containing
 /// one, and that inner handle is what the wheel moves.
 pub trait Scrollable: ScrollbarHandle + Clone {
-    fn base(&self) -> gpui::ScrollHandle;
+    fn base(&self) -> gpui_kit::ScrollHandle;
 }
 
-impl Scrollable for gpui::ScrollHandle {
-    fn base(&self) -> gpui::ScrollHandle {
+impl Scrollable for gpui_kit::ScrollHandle {
+    fn base(&self) -> gpui_kit::ScrollHandle {
         self.clone()
     }
 }
 
-impl Scrollable for gpui::UniformListScrollHandle {
-    fn base(&self) -> gpui::ScrollHandle {
+impl Scrollable for gpui_kit::UniformListScrollHandle {
+    fn base(&self) -> gpui_kit::ScrollHandle {
         self.0.borrow().base_handle.clone()
     }
 }
 
-impl Scrollable for gpui_component::VirtualListScrollHandle {
-    fn base(&self) -> gpui::ScrollHandle {
+impl Scrollable for gpui_kit::component::VirtualListScrollHandle {
+    fn base(&self) -> gpui_kit::ScrollHandle {
         self.base_handle().clone()
     }
 }
@@ -155,20 +155,20 @@ impl Scrollable for gpui_component::VirtualListScrollHandle {
 /// itself — only the vertical axis, and only while the view has somewhere to
 /// go: at the edge the event has to bubble, exactly as the mask lets it.
 fn takes_over(
-    handle: &gpui::ScrollHandle,
-    event: &gpui::ScrollWheelEvent,
+    handle: &gpui_kit::ScrollHandle,
+    event: &gpui_kit::ScrollWheelEvent,
     window: &Window,
 ) -> bool {
-    if !matches!(event.delta, gpui::ScrollDelta::Lines(_)) {
+    if !matches!(event.delta, gpui_kit::ScrollDelta::Lines(_)) {
         return false;
     }
     let delta = event.delta.pixel_delta(window.line_height());
-    if delta.y == gpui::px(0.) || delta.x.abs() > delta.y.abs() {
+    if delta.y == gpui_kit::px(0.) || delta.x.abs() > delta.y.abs() {
         return false;
     }
-    let max = handle.max_offset().y.max(gpui::px(0.));
-    let at = handle.offset().y.clamp(-max, gpui::px(0.));
-    (at + delta.y).clamp(-max, gpui::px(0.)) != at
+    let max = handle.max_offset().y.max(gpui_kit::px(0.));
+    let at = handle.offset().y.clamp(-max, gpui_kit::px(0.));
+    (at + delta.y).clamp(-max, gpui_kit::px(0.)) != at
 }
 
 impl ClaudhubApp {
@@ -225,13 +225,13 @@ impl ClaudhubApp {
         window: &Window,
         content: impl IntoElement,
         cx: &Context<Self>,
-    ) -> Stateful<gpui::Div> {
+    ) -> Stateful<gpui_kit::Div> {
         let id: SharedString = id.into();
         let base = handle.base();
         self.motion(id.clone(), axes).advance(&base, window);
         let entity = cx.entity();
         div()
-            .id(gpui::ElementId::Name(id.clone()))
+            .id(gpui_kit::ElementId::Name(id.clone()))
             .relative()
             .size_full()
             .min_h_0()
@@ -242,16 +242,16 @@ impl ClaudhubApp {
                 // painted over this panel. A popover's `occlude()` cuts the hit
                 // test short before a hitbox inserted here, which is what stops
                 // a panel from taking the wheel of a list hanging above it.
-                gpui::canvas(
+                gpui_kit::canvas(
                     |bounds, window, _cx| {
-                        window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal)
+                        window.insert_hitbox(bounds, gpui_kit::HitboxBehavior::Normal)
                     },
-                    move |_, hitbox: gpui::Hitbox, window, _cx| {
+                    move |_, hitbox: gpui_kit::Hitbox, window, _cx| {
                         window.on_mouse_event({
                             let id = id.clone();
                             let base = base.clone();
-                            move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
-                                if phase != gpui::DispatchPhase::Capture
+                            move |event: &gpui_kit::ScrollWheelEvent, phase, window, cx| {
+                                if phase != gpui_kit::DispatchPhase::Capture
                                     || !hitbox.should_handle_scroll(window)
                                     || !takes_over(&base, event, window)
                                 {
@@ -295,7 +295,7 @@ impl ClaudhubApp {
         // prevent that — arguments evaluate left to right.
         content: impl IntoElement,
         cx: &Context<Self>,
-    ) -> Stateful<gpui::Div> {
+    ) -> Stateful<gpui_kit::Div> {
         let id: SharedString = id.into();
         let base = handle.base();
         self.motion(id.clone(), axes).advance(&base, window);
@@ -305,7 +305,7 @@ impl ClaudhubApp {
             Axes::Horizontal => ScrollbarAxis::Horizontal,
         };
         wrap(id.clone(), handle, axis, content.into_any_element()).on_scroll_wheel(cx.listener(
-            move |this, event: &gpui::ScrollWheelEvent, window, cx| {
+            move |this, event: &gpui_kit::ScrollWheelEvent, window, cx| {
                 if this.motion(id.clone(), axes).on_wheel(&base, event, window) {
                     cx.notify();
                 }

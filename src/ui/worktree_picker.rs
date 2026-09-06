@@ -17,16 +17,16 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gpui::{
-    div, prelude::*, px, App, Context, Entity, Focusable as _, Hsla, KeyDownEvent, ScrollStrategy,
-    SharedString, WeakEntity, Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputState},
     popover::{Popover, PopoverState},
     v_flex, v_virtual_list, ActiveTheme, Sizable as _, StyledExt as _,
+};
+use gpui_kit::{
+    div, prelude::*, px, App, Context, Entity, Focusable as _, Hsla, KeyDownEvent, ScrollStrategy,
+    SharedString, WeakEntity, Window,
 };
 
 use crate::tr;
@@ -36,8 +36,8 @@ use crate::ui::worktrees::{self, Item, Row};
 
 /// How wide the surface is. Narrower than the branch picker's: what a row
 /// carries here is a folder name and a branch, not a commit subject.
-const WIDTH: gpui::Pixels = px(360.);
-const LIST_HEIGHT: gpui::Pixels = px(320.);
+const WIDTH: gpui_kit::Pixels = px(360.);
+const LIST_HEIGHT: gpui_kit::Pixels = px(320.);
 
 enum Step {
     List,
@@ -61,10 +61,10 @@ struct Look {
     warning: Hsla,
     success: Hsla,
     /// A checkout's row: two lines of text and next to nothing around them.
-    row: gpui::Pixels,
+    row: gpui_kit::Pixels,
     /// A repository's heading: one line, and shorter than a row — it is a rule
     /// with a name on it, not an entry.
-    head: gpui::Pixels,
+    head: gpui_kit::Pixels,
 }
 
 impl Look {
@@ -90,7 +90,7 @@ pub(super) struct WorktreePicker {
     app: WeakEntity<ClaudhubApp>,
     query: Entity<InputState>,
     step: Step,
-    scroll: gpui_component::VirtualListScrollHandle,
+    scroll: gpui_kit::component::VirtualListScrollHandle,
     cursor: usize,
     /// The rows on screen, kept between frames — see `rows`.
     rows: Rc<Vec<Row>>,
@@ -120,7 +120,7 @@ impl WorktreePicker {
         cx.new(|cx| {
             cx.subscribe(
                 &query,
-                |this: &mut Self, _, _event: &gpui_component::input::InputEvent, cx| {
+                |this: &mut Self, _, _event: &gpui_kit::component::input::InputEvent, cx| {
                     this.stale = true;
                     cx.notify();
                 },
@@ -136,7 +136,7 @@ impl WorktreePicker {
                 app,
                 query,
                 step: Step::List,
-                scroll: gpui_component::VirtualListScrollHandle::new(),
+                scroll: gpui_kit::component::VirtualListScrollHandle::new(),
                 cursor: 0,
                 rows: Rc::new(Vec::new()),
                 stale: true,
@@ -291,7 +291,7 @@ impl WorktreePicker {
         }
     }
 
-    fn render_list(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_list(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let look = Look::of(cx);
         // The transition, one step per frame; it asks for the next itself while
         // it is moving.
@@ -310,8 +310,8 @@ impl WorktreePicker {
         let sizes = Rc::new(
             rows.iter()
                 .map(|row| match row {
-                    Row::Repo { .. } => gpui::size(px(0.), look.head),
-                    _ => gpui::size(px(0.), look.row),
+                    Row::Repo { .. } => gpui_kit::size(px(0.), look.head),
+                    _ => gpui_kit::size(px(0.), look.row),
                 })
                 .collect::<Vec<_>>(),
         );
@@ -414,7 +414,7 @@ impl WorktreePicker {
         worktree: &Path,
         label: &str,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let look = Look::of(cx);
         let Some(app) = self.app.upgrade() else {
             return div().into_any_element();
@@ -433,7 +433,7 @@ impl WorktreePicker {
             let run = action.run.clone();
             list = list.child(
                 h_flex()
-                    .id(gpui::ElementId::Name(action.id.clone()))
+                    .id(gpui_kit::ElementId::Name(action.id.clone()))
                     .w_full()
                     .px_2()
                     .py_1()
@@ -531,7 +531,7 @@ fn repo_heading(
     count: usize,
     folded: bool,
     look: Look,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let (for_fold, for_new) = (picker.clone(), picker.clone());
     let (fold_main, new_main) = (main.to_path_buf(), main.to_path_buf());
     h_flex()
@@ -621,7 +621,7 @@ fn worktree_row(
     at_cursor: bool,
     look: Look,
     cx: &mut App,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let (for_click, for_menu, for_pin) = (picker.clone(), picker.clone(), picker.clone());
     let target = item.path.clone();
     let pin_target = item.path.clone();
@@ -650,7 +650,7 @@ fn worktree_row(
             el.tooltip({
                 let full = SharedString::from(detail.full);
                 move |window, cx| {
-                    gpui_component::tooltip::Tooltip::new(full.clone()).build(window, cx)
+                    gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(window, cx)
                 }
             })
         })
@@ -663,7 +663,7 @@ fn worktree_row(
         .border_l_2()
         .border_color(match selected {
             true => look.primary,
-            false => gpui::transparent_black(),
+            false => gpui_kit::transparent_black(),
         })
         // Set in from the heading: a flat column under a title reads as a list
         // that happens to have a title above it, not as the repository's
@@ -839,7 +839,7 @@ fn missing_row(
     name: &str,
     message: &str,
     look: Look,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let (picker, path) = (picker.clone(), path.to_path_buf());
     h_flex()
         .id(("missing-repo", index))

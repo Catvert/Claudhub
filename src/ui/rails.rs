@@ -18,7 +18,7 @@
 //! button, the dimming, the ordering and the zen fold are worked out here, and
 //! `ui::dock_layout` does no more than paint the answer and carry it out.
 
-use gpui::{px, Pixels};
+use gpui_kit::{px, Pixels};
 
 /// An edge a tool window can hold.
 ///
@@ -127,10 +127,10 @@ impl Side {
     /// each other. Splitting the band downwards is what the one slot was there
     /// to avoid, and it would still be wrong — two strips of three hundred
     /// pixels are two things one has to scroll.
-    pub fn axis(self) -> gpui::Axis {
+    pub fn axis(self) -> gpui_kit::Axis {
         match self {
-            Side::Bottom => gpui::Axis::Horizontal,
-            _ => gpui::Axis::Vertical,
+            Side::Bottom => gpui_kit::Axis::Horizontal,
+            _ => gpui_kit::Axis::Vertical,
         }
     }
 
@@ -211,7 +211,7 @@ impl Label {
     ///
     /// A `SharedString` and not a `String`: a rail is rebuilt every frame, and
     /// a compiled catalogue hands back a borrow.
-    pub fn text(self) -> gpui::SharedString {
+    pub fn text(self) -> gpui_kit::SharedString {
         crate::tr!(self.0)
     }
 }

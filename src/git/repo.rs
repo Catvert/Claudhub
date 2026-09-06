@@ -377,6 +377,47 @@ pub fn checkout(dir: &Path, branch: &str) -> Result<()> {
     git(dir, &["switch", branch]).map(|_| ())
 }
 
+/// Replays one commit on HEAD, as `git cherry-pick` does.
+///
+/// **No `-x`**: the "cherry picked from" line is a convention of public
+/// branches, and stamping it on every pick is a decision the message's author
+/// should take. A pick that conflicts leaves `CHERRY_PICK_HEAD` behind, which
+/// `pending` already knows how to read: the conflicts panel takes over, and
+/// its "abort" and "continue" are the right ones.
+pub fn cherry_pick(dir: &Path, id: &str) -> Result<String> {
+    git(dir, &["cherry-pick", id])
+}
+
+/// Takes what one commit did to one file, and nothing else: PhpStorm's
+/// "cherry-pick selected changes".
+///
+/// The **change** and not the file's content at that commit — `git checkout
+/// <id> -- <path>` would bring along every other commit that touched the
+/// file. So the commit's patch for that path, read with `git show`, is applied
+/// with `git apply --3way --index`: into the index and the working tree at
+/// once, as a pick leaves things, and with conflict markers rather than a
+/// refusal where it does not apply cleanly. `--first-parent -m` says which
+/// side a merge commit is read against; on a plain commit both are inert.
+pub fn take_from_commit(dir: &Path, id: &str, path: &Path) -> Result<String> {
+    let mut args: Vec<std::ffi::OsString> = vec![
+        "show".into(),
+        "--format=".into(),
+        "--first-parent".into(),
+        "-m".into(),
+        "--no-color".into(),
+        id.into(),
+        "--".into(),
+    ];
+    args.push(path.as_os_str().to_os_string());
+    let patch = git(dir, &args)?;
+    if patch.trim().is_empty() {
+        bail!("commit {id} does not touch {}", path.display());
+    }
+    let mut patch = patch.into_bytes();
+    patch.push(b'\n');
+    super::git_feeding(dir, &["apply", "--3way", "--index"], patch)
+}
+
 pub fn create_branch(dir: &Path, name: &str, from: Option<&str>) -> Result<()> {
     let mut args: Vec<&str> = vec!["switch", "-c", name];
     args.extend(from);
@@ -895,6 +936,74 @@ mod tests {
                 .unwrap();
         }
         root
+    }
+
+    fn sh(root: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A branch with one commit touching two files, and the checkout back on
+    /// the first branch: the shape of "take this from over there".
+    fn repo_with_a_side_commit(name: &str) -> (PathBuf, String) {
+        let root = scratch_repo(name);
+        sh(&root, &["commit", "-q", "-m", "first"]);
+        sh(&root, &["switch", "-q", "-c", "feat"]);
+        std::fs::write(root.join("src/code.rs"), "fn main() { changed(); }").unwrap();
+        std::fs::write(root.join("src/other.rs"), "pub fn other() {}").unwrap();
+        sh(&root, &["add", "src/code.rs", "src/other.rs"]);
+        sh(&root, &["commit", "-q", "-m", "two files"]);
+        let id = sh(&root, &["rev-parse", "HEAD"]);
+        sh(&root, &["switch", "-q", "-"]);
+        (root, id)
+    }
+
+    /// Taking a file from a commit brings **that file's change** and nothing
+    /// else — the other file of the same commit is left alone — and it lands
+    /// staged, as a pick leaves things.
+    #[test]
+    fn taking_a_file_from_a_commit_brings_that_change_alone() {
+        let (root, id) = repo_with_a_side_commit("take-file");
+        take_from_commit(&root, &id, Path::new("src/other.rs")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/other.rs")).unwrap(),
+            "pub fn other() {}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/code.rs")).unwrap(),
+            "fn main() {}",
+            "the commit's other file is not touched"
+        );
+        let staged = sh(&root, &["diff", "--cached", "--name-only"]);
+        assert_eq!(staged, "src/other.rs", "staged, as a pick leaves things");
+        // A file the commit did not touch is refused, not silently a no-op.
+        assert!(take_from_commit(&root, &id, Path::new(".gitignore")).is_err());
+    }
+
+    /// A pick replays the whole commit on HEAD, message included.
+    #[test]
+    fn a_cherry_pick_replays_the_commit_on_head() {
+        let (root, id) = repo_with_a_side_commit("cherry-pick");
+        cherry_pick(&root, &id).unwrap();
+        assert_eq!(sh(&root, &["log", "-1", "--format=%s"]), "two files");
+        // Not `assert_ne!` on the hash: same parent, same tree, same message
+        // and the same second give the very same commit object, which is what
+        // a pick onto the branch it was forked from comes to.
+        assert_eq!(sh(&root, &["rev-parse", "--abbrev-ref", "HEAD"]), "master");
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/code.rs")).unwrap(),
+            "fn main() { changed(); }"
+        );
     }
 
     #[test]

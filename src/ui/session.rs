@@ -37,7 +37,7 @@
 
 use std::path::{Path, PathBuf};
 
-use gpui::{App, Context, Window};
+use gpui_kit::{App, Context, Window};
 
 use crate::ui::app::ClaudhubApp;
 use crate::ui::settings::Settings;

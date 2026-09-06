@@ -21,8 +21,7 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use gpui::{div, prelude::*, px, uniform_list, App, Context, Entity, SharedString, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     h_flex,
@@ -30,6 +29,7 @@ use gpui_component::{
     menu::{ContextMenuExt, PopupMenu, PopupMenuItem},
     v_flex, ActiveTheme, Disableable, Sizable, WindowExt,
 };
+use gpui_kit::{div, prelude::*, px, uniform_list, App, Context, Entity, SharedString, Window};
 
 use crate::git::Stash;
 use crate::runtime::{Action, Cmd};
@@ -550,10 +550,10 @@ impl ClaudhubApp {
 #[derive(Clone, Copy)]
 struct Look {
     /// Two storeys: what the stash says, then where it came from.
-    row: gpui::Pixels,
-    muted: gpui::Hsla,
-    accent: gpui::Hsla,
-    info: gpui::Hsla,
+    row: gpui_kit::Pixels,
+    muted: gpui_kit::Hsla,
+    accent: gpui_kit::Hsla,
+    info: gpui_kit::Hsla,
 }
 
 impl Look {
@@ -577,7 +577,7 @@ fn render_stash(
     look: &Look,
     entity: &Entity<ClaudhubApp>,
     cx: &App,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let Some(stash) = stashes.get(at) else {
         return div().into_any_element();
     };
@@ -774,7 +774,7 @@ fn row_menu(popup: PopupMenu, entity: &Entity<ClaudhubApp>, stash: &Stash) -> Po
         PopupMenuItem::new(tr!("stash-copy-name"))
             .icon(icon("copy"))
             .on_click(move |_, _window, cx| {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(name.clone()));
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(name.clone()));
             })
     });
     popup.item({
@@ -791,7 +791,7 @@ fn row_menu(popup: PopupMenu, entity: &Entity<ClaudhubApp>, stash: &Stash) -> Po
 /// Nothing to show: a read under way, a search that found nothing, or a
 /// repository with nothing put aside — three different things, and saying the
 /// wrong one is how a panel reads as broken.
-fn empty_stashes(query: &str, pending: bool, cx: &App) -> gpui::AnyElement {
+fn empty_stashes(query: &str, pending: bool, cx: &App) -> gpui_kit::AnyElement {
     let message = if pending {
         tr!("stashes-loading")
     } else if query.trim().is_empty() {

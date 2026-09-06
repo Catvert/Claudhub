@@ -26,7 +26,7 @@
 //! an event and a mode, so it is testable — like `keys`.
 
 use alacritty_terminal::term::TermMode;
-use gpui::Modifiers;
+use gpui_kit::Modifiers;
 
 /// What moved. Wheels count: the protocol treats them as buttons, numbered
 /// separately.

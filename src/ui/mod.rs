@@ -75,8 +75,8 @@ mod worktree_ops;
 mod worktree_picker;
 mod worktrees;
 
-use gpui::{px, size, App, AppContext, Bounds, WindowBounds, WindowOptions};
-use gpui_component::Root;
+use gpui_kit::component::Root;
+use gpui_kit::{px, size, App, AppContext, Bounds, WindowBounds, WindowOptions};
 use rust_embed::RustEmbed;
 
 pub use settings::{split_command, LanguageChoice, Settings, ThemeMode};
@@ -105,12 +105,12 @@ const JETBRAINS_MONO_FONT: &[u8] = include_bytes!("../../assets/fonts/JetBrainsM
 #[include = "icons/**/*.svg"]
 pub(crate) struct Assets;
 
-impl gpui::AssetSource for Assets {
+impl gpui_kit::AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<std::borrow::Cow<'static, [u8]>>> {
         Ok(Self::get(path).map(|f| f.data))
     }
 
-    fn list(&self, path: &str) -> anyhow::Result<Vec<gpui::SharedString>> {
+    fn list(&self, path: &str) -> anyhow::Result<Vec<gpui_kit::SharedString>> {
         Ok(Self::iter()
             .filter(|p| p.starts_with(path))
             .map(|p| p.to_string().into())
@@ -124,7 +124,7 @@ impl gpui::AssetSource for Assets {
 pub(crate) fn set_language(language: LanguageChoice) {
     let locale = language.to_lang_id();
     rust_i18n::set_locale(locale);
-    gpui_component::set_locale(locale);
+    gpui_kit::component::set_locale(locale);
 }
 
 fn install_fonts(cx: &mut App) {
@@ -158,69 +158,65 @@ pub fn run(
     let settings = Settings::load();
     set_language(settings.language);
 
-    // `gpui_platform::application()` replaced `Application::new()`: gpui was
-    // split in two, the core on one side and the platform (wayland, x11,
-    // font-kit) on the other, and the latter is what builds the loop.
-    gpui_platform::application()
-        .with_assets(Assets)
-        .run(move |cx| {
-            gpui_component::init(cx);
-            highlight::register_languages();
-            install_fonts(cx);
-            // The settings become global before anything else: the form writes
-            // them from closures that only have an `App`, and installing the
-            // themes reads them back to know what to apply.
-            settings.clone().init_global(cx);
-            // The keymap comes after them — it reads the shortcuts one has
-            // customised — and after `gpui_component::init`, whose own bindings
-            // it takes a snapshot of: see `shortcuts::init`.
-            shortcuts::init(cx);
-            // Per-worktree state follows the settings: the views read it just
-            // the same, and it has to be there before the first of them.
-            store::Store::load().init_global(cx);
-            // Both files are written on a half-second timer, and quitting is
-            // the one moment that timer does not survive: without this flush,
-            // the last change — the worktree one just switched to, most
-            // painfully — was lost exactly when it was about to matter.
-            cx.on_app_quit(|cx| {
-                store::Store::flush(cx);
-                settings::Settings::flush(cx);
-                async {}
-            })
-            .detach();
-            theme::install(cx);
-            theme::apply(&settings, None, cx);
+    // Kit opens the matching native GPUI platform and initializes its layers.
+    gpui_kit::application().with_assets(Assets).run(move |cx| {
+        gpui_kit::init(cx);
+        highlight::register_languages();
+        install_fonts(cx);
+        // The settings become global before anything else: the form writes
+        // them from closures that only have an `App`, and installing the
+        // themes reads them back to know what to apply.
+        settings.clone().init_global(cx);
+        // The keymap comes after them — it reads the shortcuts one has
+        // customised — and after `gpui_kit::init`, whose own bindings
+        // it takes a snapshot of: see `shortcuts::init`.
+        shortcuts::init(cx);
+        // Per-worktree state follows the settings: the views read it just
+        // the same, and it has to be there before the first of them.
+        store::Store::load().init_global(cx);
+        // Both files are written on a half-second timer, and quitting is
+        // the one moment that timer does not survive: without this flush,
+        // the last change — the worktree one just switched to, most
+        // painfully — was lost exactly when it was about to matter.
+        cx.on_app_quit(|cx| {
+            store::Store::flush(cx);
+            settings::Settings::flush(cx);
+            async {}
+        })
+        .detach();
+        theme::install(cx);
+        theme::apply(&settings, None, cx);
 
-            let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
-            // `Maximized` carries these dimensions anyway: they become the
-            // restore size.
-            let window_bounds = if settings.start_maximized {
-                WindowBounds::Maximized(bounds)
-            } else {
-                WindowBounds::Windowed(bounds)
-            };
-            cx.activate(true);
+        let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
+        // `Maximized` carries these dimensions anyway: they become the
+        // restore size.
+        let window_bounds = if settings.start_maximized {
+            WindowBounds::Maximized(bounds)
+        } else {
+            WindowBounds::Windowed(bounds)
+        };
+        cx.activate(true);
 
-            let opened = cx.open_window(
-                // `TitleBar::window_options` rather than `Default`: it also
-                // sets `app_owns_titlebar_drag`, without which the platform
-                // and our bar fight over the double-click and the drag. It is
-                // `topbar::render_topbar` that draws the bar — without it, the
-                // window has nothing left to be moved or closed by.
-                WindowOptions {
-                    window_bounds: Some(window_bounds),
-                    app_id: Some("claudhub".into()),
-                    ..gpui_component::TitleBar::window_options()
-                },
-                |window, cx| {
-                    let main = cx.new(|cx| app::ClaudhubApp::new(folder, handoffs, window, cx));
-                    cx.new(|cx| Root::new(main, window, cx))
-                },
-            );
-            if let Err(e) = opened {
-                log::error!("opening the window: {e:#}");
-            }
-        });
+        let opened = cx.open_window(
+            // `TitleBar::window_options` rather than `Default`: it also
+            // sets `app_owns_titlebar_drag`, without which the platform
+            // and our bar fight over the double-click and the drag. It is
+            // `topbar::render_topbar` that draws the bar — without it, the
+            // window has nothing left to be moved or closed by.
+            WindowOptions {
+                window_bounds: Some(window_bounds),
+                app_id: Some("claudhub".into()),
+                ..gpui_kit::component::TitleBar::window_options()
+            },
+            |window, cx| {
+                let main = cx.new(|cx| app::ClaudhubApp::new(folder, handoffs, window, cx));
+                cx.new(|cx| Root::new(main, window, cx))
+            },
+        );
+        if let Err(e) = opened {
+            log::error!("opening the window: {e:#}");
+        }
+    });
 }
 
 #[cfg(test)]

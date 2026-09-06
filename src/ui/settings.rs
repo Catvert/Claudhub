@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use gpui::{App, BorrowAppContext};
+use gpui_kit::{App, BorrowAppContext};
 use serde::{Deserialize, Serialize};
 
 /// Embedded interface font. It is always available, which makes it the only
@@ -894,7 +894,7 @@ pub struct SettingsStore {
     saving: bool,
 }
 
-impl gpui::Global for SettingsStore {}
+impl gpui_kit::Global for SettingsStore {}
 
 impl Settings {
     /// Installs the loaded settings. To be called once, at startup.

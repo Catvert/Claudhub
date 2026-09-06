@@ -10,16 +10,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gpui::{
-    div, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, Render, SharedString, Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     dock::{DockArea, DockSkin},
     h_flex,
     input::{EditorState, InputEvent, InputState},
     select::{SearchableVec, SelectEvent, SelectState},
     separator::Separator as Divider,
     v_flex, ActiveTheme, Root, Sizable, WindowExt,
+};
+use gpui_kit::{
+    div, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, Render, SharedString, Window,
 };
 
 use crate::git::{Branch, Commit, DiffFile, DiffRange, GraphRow, LogRange, Status, Worktree};
@@ -85,7 +85,7 @@ const LAYOUT_VERSION: usize = 28;
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct Layouts {
     version: Option<usize>,
-    area: Option<gpui_component::dock::DockAreaState>,
+    area: Option<gpui_kit::component::dock::DockAreaState>,
 }
 
 fn load_layouts() -> Layouts {
@@ -132,8 +132,8 @@ fn load_layouts() -> Layouts {
 /// rule the review's own base follows (`range_chosen`).
 ///
 /// Answers whether it found the panel, which is what stops the walk.
-fn open_on(state: &mut gpui_component::dock::PanelState, name: &str) -> bool {
-    if let gpui_component::dock::PanelInfo::Tabs { active_index } = &mut state.info {
+fn open_on(state: &mut gpui_kit::component::dock::PanelState, name: &str) -> bool {
+    if let gpui_kit::component::dock::PanelInfo::Tabs { active_index } = &mut state.info {
         if let Some(ix) = state
             .children
             .iter()
@@ -146,7 +146,10 @@ fn open_on(state: &mut gpui_component::dock::PanelState, name: &str) -> bool {
     state.children.iter_mut().any(|child| open_on(child, name))
 }
 
-fn prune(state: &mut gpui_component::dock::PanelState, doomed: &impl Fn(&str) -> bool) -> bool {
+fn prune(
+    state: &mut gpui_kit::component::dock::PanelState,
+    doomed: &impl Fn(&str) -> bool,
+) -> bool {
     // **Only a leaf is judged by its name.** A container carries one of the
     // dock's own — `TabPanel`, `StackPanel` — which is not one of ours and is
     // therefore not in the registry we ask: asked about the root, the reading
@@ -168,7 +171,7 @@ fn prune(state: &mut gpui_component::dock::PanelState, doomed: &impl Fn(&str) ->
         state.children.remove(ix);
         // A stack's sizes are positional: dropping a child without its size
         // shifts every size that follows on to the wrong pane.
-        if let gpui_component::dock::PanelInfo::Stack { sizes, .. } = &mut state.info {
+        if let gpui_kit::component::dock::PanelInfo::Stack { sizes, .. } = &mut state.info {
             if ix < sizes.len() {
                 sizes.remove(ix);
             }
@@ -182,7 +185,10 @@ fn prune(state: &mut gpui_component::dock::PanelState, doomed: &impl Fn(&str) ->
     // a container that number no longer describes. Collapsing the wrapper
     // drops the stale size with it.
     if state.children.len() == 1
-        && matches!(state.info, gpui_component::dock::PanelInfo::Stack { .. })
+        && matches!(
+            state.info,
+            gpui_kit::component::dock::PanelInfo::Stack { .. }
+        )
     {
         let child = state.children.remove(0);
         *state = child;
@@ -210,7 +216,10 @@ fn prune(state: &mut gpui_component::dock::PanelState, doomed: &impl Fn(&str) ->
 /// `DockState`: an empty zone read back would reopen on nothing, and nothing
 /// is lost by letting it go — `add_panel_view` makes the region again for
 /// whoever names it.
-fn prune_dock(dock: &mut Option<gpui_component::dock::DockState>, doomed: &impl Fn(&str) -> bool) {
+fn prune_dock(
+    dock: &mut Option<gpui_kit::component::dock::DockState>,
+    doomed: &impl Fn(&str) -> bool,
+) {
     let Some(zone) = dock.as_ref() else {
         return;
     };
@@ -220,14 +229,14 @@ fn prune_dock(dock: &mut Option<gpui_component::dock::DockState>, doomed: &impl 
         *dock = None;
         return;
     }
-    *dock = Some(gpui_component::dock::DockState::new(
+    *dock = Some(gpui_kit::component::dock::DockState::new(
         tree, placement, size, open,
     ));
 }
 
 /// `open_on`, for one of the three side zones — taken apart and put back the
 /// way `prune_dock` does, and for the same reason.
-fn open_dock_on(dock: &mut Option<gpui_component::dock::DockState>, name: &str) {
+fn open_dock_on(dock: &mut Option<gpui_kit::component::dock::DockState>, name: &str) {
     let Some(zone) = dock.as_ref() else {
         return;
     };
@@ -235,7 +244,7 @@ fn open_dock_on(dock: &mut Option<gpui_component::dock::DockState>, name: &str) 
     if !open_on(&mut tree, name) {
         return;
     }
-    *dock = Some(gpui_component::dock::DockState::new(
+    *dock = Some(gpui_kit::component::dock::DockState::new(
         tree,
         zone.placement(),
         zone.size(),
@@ -434,14 +443,14 @@ pub struct CommitDetail {
     /// The commit the detail was read for — the guard against a late answer
     /// captioning another commit's diff.
     pub id: String,
-    pub short: gpui::SharedString,
-    pub author: gpui::SharedString,
-    pub date: gpui::SharedString,
+    pub short: gpui_kit::SharedString,
+    pub author: gpui_kit::SharedString,
+    pub date: gpui_kit::SharedString,
     /// The message's first line.
-    pub subject: gpui::SharedString,
+    pub subject: gpui_kit::SharedString,
     /// The rest of the message, blank separator gone. Empty for the common
     /// one-line message.
-    pub body: gpui::SharedString,
+    pub body: gpui_kit::SharedString,
 }
 
 /// The history as the view shows it.
@@ -713,11 +722,11 @@ pub struct ClaudhubApp {
     /// Each visited worktree's Pest suite. Keyed by worktree like the
     /// justfile, and for its reason: the tests are the checkout's files.
     pub(super) pest: HashMap<PathBuf, crate::ui::tests_view::PestState>,
-    pub(super) pest_scroll: gpui::UniformListScrollHandle,
+    pub(super) pest_scroll: gpui_kit::UniformListScrollHandle,
     /// The run each worktree follows — or followed: the panel keeps the last
     /// account until the next launch replaces it.
     pub(super) pest_runs: HashMap<PathBuf, crate::ui::tests_view::RunState>,
-    pub(super) pest_run_scroll: gpui::UniformListScrollHandle,
+    pub(super) pest_run_scroll: gpui_kit::UniformListScrollHandle,
     /// The send id `Evt::TestsRan` hands back — a run launched for a state
     /// since replaced must not paint the panel.
     pub(super) pest_run_seq: u64,
@@ -794,7 +803,7 @@ pub struct ClaudhubApp {
     /// by letting go of the modifier — a word left underlined under nothing
     /// would read as a word that has been chosen.
     pub(super) follow_hover: Option<(crate::ui::follow::Spot, std::ops::Range<usize>)>,
-    pub(super) files_scroll: gpui::UniformListScrollHandle,
+    pub(super) files_scroll: gpui_kit::UniformListScrollHandle,
     /// The explorer tree's focus, which gives it its arrows.
     ///
     /// A handle of its own and not the root view's: it is what tells "the arrows
@@ -837,8 +846,8 @@ pub struct ClaudhubApp {
     /// from the root's render, where reading the root entity is a panic. The
     /// settings form's arrangement, for its reason.
     pub(super) quick_palette: Entity<crate::ui::quick_view::QuickPalette>,
-    pub(super) search_scroll: gpui::UniformListScrollHandle,
-    pub(super) search_preview_scroll: gpui::UniformListScrollHandle,
+    pub(super) search_scroll: gpui_kit::UniformListScrollHandle,
+    pub(super) search_preview_scroll: gpui_kit::UniformListScrollHandle,
     /// The result list's focus, which gives it its arrows.
     ///
     /// A handle of its own, like the project explorer's and the schema tree's:
@@ -858,7 +867,7 @@ pub struct ClaudhubApp {
     pub(super) editing_root: Option<PathBuf>,
     /// The databases tree: connections, schemas, tables, columns.
     pub(super) db: crate::ui::db::DbState,
-    pub(super) db_scroll: gpui::UniformListScrollHandle,
+    pub(super) db_scroll: gpui_kit::UniformListScrollHandle,
     /// The databases tree's focus, which gives it its arrows.
     ///
     /// A handle of its own, like the project explorer's: it is what tells "the
@@ -886,7 +895,7 @@ pub struct ClaudhubApp {
     /// which share the panel. An entity created once: rebuilt at render time,
     /// the handle would go back to its place on every frame and would not let
     /// itself be dragged.
-    pub(super) db_history_split: Entity<gpui_component::resizable::ResizableState>,
+    pub(super) db_history_split: Entity<gpui_kit::component::resizable::ResizableState>,
     /// The errors Sentry reports for the repository being looked at, and the
     /// one being read. One state for the window: arriving somewhere else is
     /// starting over, not refreshing.
@@ -905,12 +914,12 @@ pub struct ClaudhubApp {
     /// What is known of each repository's tags, by main repository: tags live
     /// in the shared `.git` and are the same seen from every worktree.
     pub(super) tags: HashMap<PathBuf, crate::ui::tags::TagsState>,
-    pub(super) tags_scroll: gpui::UniformListScrollHandle,
+    pub(super) tags_scroll: gpui_kit::UniformListScrollHandle,
     /// What is known of each repository's stashes, by main repository:
     /// `refs/stash` lives in the shared `.git` and is the same seen from every
     /// worktree.
     pub(super) stashes: HashMap<PathBuf, crate::ui::stashes::StashesState>,
-    pub(super) stashes_scroll: gpui::UniformListScrollHandle,
+    pub(super) stashes_scroll: gpui_kit::UniformListScrollHandle,
     /// Every query run, per worktree, and the reach the panel is showing.
     ///
     /// In the application and not in a global: only the history panel reads it,
@@ -921,7 +930,7 @@ pub struct ClaudhubApp {
     /// rows are not all the same height — a day's heading is one line, a query
     /// two — and that is the one case where walking a vector of sizes is worth
     /// its price.
-    pub(super) sql_history_scroll: gpui_component::VirtualListScrollHandle,
+    pub(super) sql_history_scroll: gpui_kit::component::VirtualListScrollHandle,
     /// The history list as the panel last prepared it — the entries the filter
     /// kept, their rows and their heights. Rebuilt when what it depends on
     /// moves, `History::version` included; see `refresh_sql_history_list`.
@@ -1001,12 +1010,12 @@ pub struct ClaudhubApp {
     /// where a window should come up.
     pub(super) multiplex: bool,
     /// Where the multiplexer's strip of columns is scrolled to.
-    pub(super) multiplex_scroll: gpui::ScrollHandle,
+    pub(super) multiplex_scroll: gpui_kit::ScrollHandle,
     /// The terminal the strip last brought into view — the one under the
     /// hand at the previous frame. `None` when nothing was, or when the strip
     /// has just come up: the first frame then reveals the focused column
     /// wherever the strip had been left.
-    pub(super) multiplex_seen: Option<gpui::EntityId>,
+    pub(super) multiplex_seen: Option<gpui_kit::EntityId>,
     /// The views the user has hidden, by panel name.
     ///
     /// A set and not a flag per panel: it is `Panel::visible` that makes a view
@@ -1052,7 +1061,7 @@ pub struct ClaudhubApp {
     /// The diff's virtualised list scrolling. It lives on the view and is never
     /// rebuilt: recreating it per frame would put the diff back at the top on
     /// every frame.
-    pub(super) diff_scroll: gpui::UniformListScrollHandle,
+    pub(super) diff_scroll: gpui_kit::UniformListScrollHandle,
     /// The conflicted file open in the three-pane merge, if there is one. It
     /// stands **in place of** the diff at the centre of the Git screen: opening
     /// any other file is what puts the diff back.
@@ -1060,7 +1069,7 @@ pub struct ClaudhubApp {
     /// The merge view's list scrolling. Its own handle, never rebuilt, for the
     /// reason every other one is: a fresh handle per frame scrolls back to the
     /// top on every frame.
-    pub(super) merge_scroll: gpui_component::VirtualListScrollHandle,
+    pub(super) merge_scroll: gpui_kit::component::VirtualListScrollHandle,
     /// The measured width of the diff view on the previous frame.
     ///
     /// A view just opened has no bounds: they are only worth something once the
@@ -1069,7 +1078,7 @@ pub struct ClaudhubApp {
     /// display stays wrong until the next event, that is, the background sweep
     /// two seconds later. So we keep the last known width, which holds for every
     /// following diff.
-    pub(super) diff_width: gpui::Pixels,
+    pub(super) diff_width: gpui_kit::Pixels,
     /// Frames asked for while waiting for that first measurement.
     ///
     /// Bounded: a panel shrunk to zero would never be measured, and asking for a
@@ -1086,25 +1095,25 @@ pub struct ClaudhubApp {
     /// background sweep two seconds later. A canvas measures the frame after
     /// layout, and a width that has moved since the last one is what asks for
     /// the frame that repaints it right.
-    pub(super) diff_laid_out: gpui::Pixels,
+    pub(super) diff_laid_out: gpui_kit::Pixels,
     /// The history list's measured width, by the same mechanism and for a
     /// reason of its own: the panel lives in a resizable column, and the row's
     /// fixed columns — hash, author, date — are dropped one by one when the
     /// width no longer holds them beside the summary, which is what a history
     /// is read by.
-    pub(super) history_laid_out: gpui::Pixels,
+    pub(super) history_laid_out: gpui_kit::Pixels,
     /// The history panel's own shape, measured the same way and read for one
     /// question only: whether the graph sits beside the chosen commit's files
     /// or above them — see `history_view::side_by_side`. Not the width above,
     /// which is the room left *beside the graph's gutter*.
-    pub(super) history_shape: gpui::Size<gpui::Pixels>,
+    pub(super) history_shape: gpui_kit::Size<gpui_kit::Pixels>,
     /// The handle of the wrapped two-column view.
     ///
     /// A second handle and not the same one: the entries there no longer have
     /// the same height, `v_virtual_list` paints them, and it can only scroll with
     /// its own. The two are never shown at the same time.
-    pub(super) diff_wrap_scroll: gpui_component::VirtualListScrollHandle,
-    pub(super) history_scroll: gpui::UniformListScrollHandle,
+    pub(super) diff_wrap_scroll: gpui_kit::component::VirtualListScrollHandle,
+    pub(super) history_scroll: gpui_kit::UniformListScrollHandle,
     /// In a line history, whether a commit shows the patch restricted to those
     /// lines or the whole commit.
     ///
@@ -1113,7 +1122,7 @@ pub struct ClaudhubApp {
     pub(super) history_lines_only: bool,
     /// The file lists' scrolling, **one per range**: "Review" and "Changes" are
     /// shown at the same time, and a single handle would scroll them together.
-    file_scroll: HashMap<DiffRange, gpui::UniformListScrollHandle>,
+    file_scroll: HashMap<DiffRange, gpui_kit::UniformListScrollHandle>,
     /// Each panel's search, created on its first opening — **one per worktree
     /// and per panel**, as the editors and the trail are. See `find::Key`.
     pub(super) finders: HashMap<crate::ui::find::Key, crate::ui::find::Finder>,
@@ -1130,26 +1139,26 @@ pub struct ClaudhubApp {
     /// panel: they are all the same thing, and they only serve to give the
     /// scrollbar a position. Created here and not at render time, otherwise the
     /// list would go back to the top on every frame.
-    scrolls: HashMap<&'static str, gpui::ScrollHandle>,
+    scrolls: HashMap<&'static str, gpui_kit::ScrollHandle>,
     /// The wheel smoothing, per panel, created on its first use. The key is the
     /// scrollbar's — see `ui::scroll`.
-    pub(super) motions: HashMap<gpui::SharedString, crate::ui::motion::ScrollMotion>,
+    pub(super) motions: HashMap<gpui_kit::SharedString, crate::ui::motion::ScrollMotion>,
     /// The split between the graph and the chosen commit's file list, stacked.
-    pub(super) history_split: Entity<gpui_component::resizable::ResizableState>,
+    pub(super) history_split: Entity<gpui_kit::component::resizable::ResizableState>,
     /// The split between the branches and everything else, in a zone wide
     /// enough for three columns.
     ///
     /// **Nested and not a third slot** of the split below: dragging the
     /// branches wider would otherwise move the graph's divider with it, and
     /// each state stays a pair one can reason about.
-    pub(super) history_split_branches: Entity<gpui_component::resizable::ResizableState>,
+    pub(super) history_split_branches: Entity<gpui_kit::component::resizable::ResizableState>,
     /// And the same split laid across, in a zone wide enough for it.
     ///
     /// **A second state and not the same one**: what a resizable keeps is the
     /// sizes of its slots, and a height carried into a width would open the
     /// side-by-side arrangement on whatever the stacked one was last dragged
     /// to.
-    pub(super) history_split_side: Entity<gpui_component::resizable::ResizableState>,
+    pub(super) history_split_side: Entity<gpui_kit::component::resizable::ResizableState>,
     /// The write operations in flight — what the buttons carrying a spinner
     /// read, and what the status bar names.
     ///
@@ -1384,7 +1393,7 @@ impl ClaudhubApp {
             followed_definition: false,
             follow_armed: false,
             follow_hover: None,
-            files_scroll: gpui::UniformListScrollHandle::new(),
+            files_scroll: gpui_kit::UniformListScrollHandle::new(),
             search: Default::default(),
             searches: HashMap::new(),
             search_next_id: 0,
@@ -1395,13 +1404,13 @@ impl ClaudhubApp {
             search_glob_input: search_inputs.glob,
             search_regex: false,
             search_whole_word: false,
-            search_scroll: gpui::UniformListScrollHandle::new(),
-            search_preview_scroll: gpui::UniformListScrollHandle::new(),
+            search_scroll: gpui_kit::UniformListScrollHandle::new(),
+            search_preview_scroll: gpui_kit::UniformListScrollHandle::new(),
             search_focus: search_inputs.focus,
             pending_preview: None,
             editing_root: None,
             db: Default::default(),
-            db_scroll: gpui::UniformListScrollHandle::new(),
+            db_scroll: gpui_kit::UniformListScrollHandle::new(),
             db_focus: cx.focus_handle(),
             consoles: Vec::new(),
             active_console: None,
@@ -1416,17 +1425,17 @@ impl ClaudhubApp {
             github: Default::default(),
             github_seq: 0,
             tags: HashMap::new(),
-            tags_scroll: gpui::UniformListScrollHandle::new(),
+            tags_scroll: gpui_kit::UniformListScrollHandle::new(),
             pest: HashMap::new(),
-            pest_scroll: gpui::UniformListScrollHandle::new(),
+            pest_scroll: gpui_kit::UniformListScrollHandle::new(),
             pest_runs: HashMap::new(),
-            pest_run_scroll: gpui::UniformListScrollHandle::new(),
+            pest_run_scroll: gpui_kit::UniformListScrollHandle::new(),
             pest_run_seq: 0,
             stashes: HashMap::new(),
-            stashes_scroll: gpui::UniformListScrollHandle::new(),
+            stashes_scroll: gpui_kit::UniformListScrollHandle::new(),
             sql_history: crate::ui::sql_history::History::load(),
             sql_history_reach: Default::default(),
-            sql_history_scroll: gpui_component::VirtualListScrollHandle::new(),
+            sql_history_scroll: gpui_kit::component::VirtualListScrollHandle::new(),
             sql_history_list: None,
             pending_notes: Vec::new(),
             pending_reveal: None,
@@ -1438,7 +1447,7 @@ impl ClaudhubApp {
             dock_skin,
             layout_save_scheduled: false,
             multiplex: false,
-            multiplex_scroll: gpui::ScrollHandle::new(),
+            multiplex_scroll: gpui_kit::ScrollHandle::new(),
             multiplex_seen: None,
             zen_folded: Vec::new(),
             settings_form,
@@ -1448,16 +1457,16 @@ impl ClaudhubApp {
             summaries: HashMap::new(),
             agents: crate::agent::Tracker::default(),
             diff_dragging: false,
-            diff_scroll: gpui::UniformListScrollHandle::new(),
-            diff_width: gpui::px(0.),
+            diff_scroll: gpui_kit::UniformListScrollHandle::new(),
+            diff_width: gpui_kit::px(0.),
             diff_measures: 0,
             merging: None,
-            merge_scroll: gpui_component::VirtualListScrollHandle::new(),
-            diff_laid_out: gpui::px(0.),
-            history_laid_out: gpui::px(0.),
-            history_shape: gpui::size(gpui::px(0.), gpui::px(0.)),
-            diff_wrap_scroll: gpui_component::VirtualListScrollHandle::new(),
-            history_scroll: gpui::UniformListScrollHandle::new(),
+            merge_scroll: gpui_kit::component::VirtualListScrollHandle::new(),
+            diff_laid_out: gpui_kit::px(0.),
+            history_laid_out: gpui_kit::px(0.),
+            history_shape: gpui_kit::size(gpui_kit::px(0.), gpui_kit::px(0.)),
+            diff_wrap_scroll: gpui_kit::component::VirtualListScrollHandle::new(),
+            history_scroll: gpui_kit::UniformListScrollHandle::new(),
             history_lines_only: true,
             file_scroll: HashMap::new(),
             scrolls: HashMap::new(),
@@ -1468,10 +1477,11 @@ impl ClaudhubApp {
             // the only one that is always there.
             pane: crate::ui::find::Pane::Diff,
             diff_search: crate::ui::find::DiffSearch::default(),
-            history_split: cx.new(|_| gpui_component::resizable::ResizableState::default()),
-            history_split_side: cx.new(|_| gpui_component::resizable::ResizableState::default()),
+            history_split: cx.new(|_| gpui_kit::component::resizable::ResizableState::default()),
+            history_split_side: cx
+                .new(|_| gpui_kit::component::resizable::ResizableState::default()),
             history_split_branches: cx
-                .new(|_| gpui_component::resizable::ResizableState::default()),
+                .new(|_| gpui_kit::component::resizable::ResizableState::default()),
             flight: crate::ui::inflight::InFlight::default(),
             settings_page: Default::default(),
             settings_epoch: 0,
@@ -1583,12 +1593,12 @@ impl ClaudhubApp {
         // `Segmented`: the rounded pill in a rail, in place of the bordered
         // rectangle whose radius is a hard-coded zero. It is our commit on the
         // fork that exposes this setting.
-        skin.set_tab_variant(gpui_component::tab::TabVariant::Segmented, cx);
+        skin.set_tab_variant(gpui_kit::component::tab::TabVariant::Segmented, cx);
         // A tab bar everywhere, including on groups with a single panel: the
         // default (`Auto`) renders a flat title there, and "Branches" or
         // "Terminals" would not have the same band as their neighbours — two
         // chromes for one window.
-        skin.set_panel_style(gpui_component::dock::PanelStyle::TabBar, cx);
+        skin.set_panel_style(gpui_kit::component::dock::PanelStyle::TabBar, cx);
         // **The two edges carry a title, not a strip of tabs.** The rails
         // already say what each zone holds and which of it is in front, one
         // button per tool window; a tab bar beside them says it a second time,
@@ -1599,10 +1609,10 @@ impl ClaudhubApp {
         // else — and so does the bottom, where several terminals live side by
         // side and their tabs carry the name, the `+` and the cross.
         for side in [
-            gpui_component::dock::DockPlacement::Left,
-            gpui_component::dock::DockPlacement::Right,
+            gpui_kit::component::dock::DockPlacement::Left,
+            gpui_kit::component::dock::DockPlacement::Right,
         ] {
-            skin.set_panel_style_at(side, gpui_component::dock::PanelStyle::Title, cx);
+            skin.set_panel_style_at(side, gpui_kit::component::dock::PanelStyle::Title, cx);
         }
         // **No collapse affordance in the tab bars.** The dock draws, in the tab
         // bar of the group nearest each edge, a chevron that folds the
@@ -2897,7 +2907,12 @@ impl ClaudhubApp {
         // An operation that moved HEAD also changes the branches.
         if matches!(
             action,
-            Action::Commit | Action::Fetch | Action::Pull | Action::Push | Action::Checkout
+            Action::Commit
+                | Action::Fetch
+                | Action::Pull
+                | Action::Push
+                | Action::Checkout
+                | Action::CherryPick
         ) {
             if let Some(main) = worktree.as_deref().and_then(|w| self.main_of(w)) {
                 self.git.send(Cmd::LoadBranches { main });
@@ -2914,6 +2929,7 @@ impl ClaudhubApp {
                 | Action::Pull
                 | Action::Push
                 | Action::Checkout
+                | Action::CherryPick
                 | Action::Branch
                 | Action::Tag
                 | Action::PushTag
@@ -3108,10 +3124,10 @@ impl ClaudhubApp {
     ) {
         let kind = match level {
             crate::ui::notify::Level::Success => {
-                gpui_component::notification::NotificationType::Success
+                gpui_kit::component::notification::NotificationType::Success
             }
             crate::ui::notify::Level::Error => {
-                gpui_component::notification::NotificationType::Error
+                gpui_kit::component::notification::NotificationType::Error
             }
         };
         // **A ceiling, and read off the window.** `ui::notify` already cuts the
@@ -3129,7 +3145,7 @@ impl ClaudhubApp {
         // instead, so that what the ceiling hides is still there to be read.
         let ceiling = window.viewport_size().height / 3.;
         window.push_notification(
-            gpui_component::notification::Notification::new()
+            gpui_kit::component::notification::Notification::new()
                 .with_type(kind)
                 .when_some(title, |note, title| note.title(title))
                 .content(move |_, _, _| {
@@ -3574,12 +3590,12 @@ impl ClaudhubApp {
     ///
     /// Never rebuilt: a fresh handle per frame would put the list back at the
     /// top on every frame.
-    pub(super) fn file_scroll(&mut self, range: &DiffRange) -> gpui::UniformListScrollHandle {
+    pub(super) fn file_scroll(&mut self, range: &DiffRange) -> gpui_kit::UniformListScrollHandle {
         self.file_scroll.entry(range.clone()).or_default().clone()
     }
 
     /// A non-virtualised panel's scroll handle.
-    pub(super) fn scroll_of(&mut self, key: &'static str) -> gpui::ScrollHandle {
+    pub(super) fn scroll_of(&mut self, key: &'static str) -> gpui_kit::ScrollHandle {
         self.scrolls.entry(key).or_default().clone()
     }
 
@@ -3845,7 +3861,7 @@ impl ClaudhubApp {
     }
 
     /// The handle gpui really animates for the displayed diff.
-    pub(super) fn diff_base_handle(&self, cx: &App) -> gpui::ScrollHandle {
+    pub(super) fn diff_base_handle(&self, cx: &App) -> gpui_kit::ScrollHandle {
         use crate::ui::scroll::Scrollable;
         if self.diff_wrapped(cx) {
             self.diff_wrap_scroll.base()
@@ -3858,7 +3874,7 @@ impl ClaudhubApp {
     ///
     /// That is what an arrow moving one line at a time wants: a line already on
     /// screen must not make the view jump under the eye.
-    pub(super) fn reveal_diff_row(&self, row: usize, strategy: gpui::ScrollStrategy, cx: &App) {
+    pub(super) fn reveal_diff_row(&self, row: usize, strategy: gpui_kit::ScrollStrategy, cx: &App) {
         if self.diff_wrapped(cx) {
             self.diff_wrap_scroll.scroll_to_item(row, strategy);
         } else {
@@ -3887,16 +3903,16 @@ impl ClaudhubApp {
     pub(super) fn reveal_diff_row_strict(
         &self,
         row: usize,
-        strategy: gpui::ScrollStrategy,
+        strategy: gpui_kit::ScrollStrategy,
         cx: &App,
     ) {
         use crate::ui::scroll::Scrollable;
-        use gpui_component::scroll::ScrollbarHandle;
+        use gpui_kit::component::scroll::ScrollbarHandle;
         if self.diff_wrapped(cx) {
-            if !matches!(strategy, gpui::ScrollStrategy::Center) {
+            if !matches!(strategy, gpui_kit::ScrollStrategy::Center) {
                 let base = self.diff_wrap_scroll.base();
                 let offset = base.offset();
-                base.set_offset(gpui::point(offset.x, -base.content_size().height));
+                base.set_offset(gpui_kit::point(offset.x, -base.content_size().height));
             }
             self.diff_wrap_scroll.scroll_to_item(row, strategy);
         } else {
@@ -3921,9 +3937,9 @@ impl ClaudhubApp {
     /// reading downwards never recovers them.
     pub(super) fn reveal_diff_hunk(&self, row: usize, cx: &App) {
         let strategy = if self.hunk_fits_below_the_middle(row, cx) {
-            gpui::ScrollStrategy::Center
+            gpui_kit::ScrollStrategy::Center
         } else {
-            gpui::ScrollStrategy::Top
+            gpui_kit::ScrollStrategy::Top
         };
         self.reveal_diff_row_strict(row, strategy, cx);
     }
@@ -4117,23 +4133,51 @@ impl ClaudhubApp {
             .into_iter()
             .map(|key| tr!(key))
             .collect();
+        let warning = cx.theme().warning;
+        // **A wheel that turns**, and not the glyph of one: a still circle
+        // says "broken" where a turning one says "wait" — the button beside
+        // the commit message made the same point.
+        let running = h_flex()
+            .gap_1()
+            .items_center()
+            .text_color(warning)
+            .child(
+                gpui_kit::component::spinner::Spinner::new()
+                    .xsmall()
+                    .icon(icon("loader-circle"))
+                    .color(warning),
+            )
+            .child(names.join(" · "));
+        // A `wt` console put away runs behind these words, and they are how
+        // one gets it back: the "hide" button had no way back at all.
+        let running = if self.console_hidden() {
+            running
+                .id("running-console")
+                .cursor_pointer()
+                .tooltip(|window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(tr!("worktree-console-show"))
+                        .build(window, cx)
+                })
+                .on_click(cx.listener(|this, _, window, cx| this.reopen_console(window, cx)))
+                .into_any_element()
+        } else {
+            running.into_any_element()
+        };
         Some(
             h_flex()
                 .gap_1()
                 .items_center()
-                .text_color(cx.theme().warning)
-                .child(icon("loader-circle").xsmall())
-                .child(names.join(" · "))
+                .child(running)
                 .child(Divider::vertical().h(px(12.))),
         )
     }
 
     /// The active checkout's agent — the badge, then a rule, or nothing at
     /// all: a bar that says "no agent" all day long says nothing.
-    fn render_agent_indicator(&self, cx: &gpui::App) -> Option<impl IntoElement> {
+    fn render_agent_indicator(&self, cx: &gpui_kit::App) -> Option<impl IntoElement> {
         let agent = self.agents.get(self.active.as_deref()?)?;
         Some(
-            gpui_component::h_flex()
+            gpui_kit::component::h_flex()
                 .flex_none()
                 .gap_2()
                 .items_center()
@@ -4296,7 +4340,7 @@ impl Render for ClaudhubApp {
             // repainted unless the flag turns over: `Shift` on every capital
             // letter would otherwise cost a frame each.
             .on_modifiers_changed(cx.listener(
-                |this, event: &gpui::ModifiersChangedEvent, window, cx| {
+                |this, event: &gpui_kit::ModifiersChangedEvent, window, cx| {
                     // `Shift Shift`, which lives here for the very reason the
                     // line below does: a bare modifier is not a key gpui can
                     // bind, and a modifier change is the only trace it leaves.
@@ -4323,7 +4367,7 @@ impl Render for ClaudhubApp {
             // it could bubble back up here: a terminal takes every key it is
             // given. Capture walks from the root down, so nothing can hide a
             // keystroke from this. Neither consumes.
-            .capture_key_down(cx.listener(|this, _: &gpui::KeyDownEvent, _, _| {
+            .capture_key_down(cx.listener(|this, _: &gpui_kit::KeyDownEvent, _, _| {
                 this.quick.tap.interrupt();
             }))
             .capture_any_mouse_down(cx.listener(|this, _, _, _| {
@@ -4416,11 +4460,11 @@ impl Render for ClaudhubApp {
             // enough — nothing below listens for them, the terminal included,
             // where only the left button is handed to the program.
             .on_mouse_down(
-                gpui::MouseButton::Navigate(gpui::NavigationDirection::Back),
+                gpui_kit::MouseButton::Navigate(gpui_kit::NavigationDirection::Back),
                 cx.listener(|this, _, window, cx| this.jump_back(window, cx)),
             )
             .on_mouse_down(
-                gpui::MouseButton::Navigate(gpui::NavigationDirection::Forward),
+                gpui_kit::MouseButton::Navigate(gpui_kit::NavigationDirection::Forward),
                 cx.listener(|this, _, window, cx| this.jump_forward(window, cx)),
             )
             .size_full()
@@ -4504,7 +4548,7 @@ impl ClaudhubApp {
                 .overlay_closable(false)
                 .close_button(false)
                 .footer(super::dialogs::confirm())
-                .child(gpui_component::input::Input::new(&input))
+                .child(gpui_kit::component::input::Input::new(&input))
                 // The window is passed to the closure: what is launched next —
                 // opening a terminal, delivering a text into it — needs it, and
                 // taking it back afterwards would mean one frame's gap with the
@@ -4563,7 +4607,7 @@ impl ClaudhubApp {
             return;
         }
         let stranded = window.focused(cx).is_none()
-            || gpui::Focusable::focus_handle(&self.quick_input, cx).is_focused(window);
+            || gpui_kit::Focusable::focus_handle(&self.quick_input, cx).is_focused(window);
         if !stranded {
             return;
         }
@@ -4647,7 +4691,7 @@ impl ClaudhubApp {
                     crate::ui::panels::dock_panel_at(
                         area,
                         handle,
-                        gpui_component::dock::DockPlacement::Center,
+                        gpui_kit::component::dock::DockPlacement::Center,
                         None,
                         |_| None,
                         window,
@@ -4882,7 +4926,7 @@ impl ClaudhubApp {
         use crate::ui::panels::*;
         if name == EditorPanel::NAME {
             if let Some(editing) = self.editing() {
-                let handle = gpui::Focusable::focus_handle(&editing.input, cx);
+                let handle = gpui_kit::Focusable::focus_handle(&editing.input, cx);
                 handle.focus(window, cx);
                 return;
             }
@@ -4894,7 +4938,7 @@ impl ClaudhubApp {
             }
         }
         if name == SearchPanel::NAME && self.panel_visible(SearchPanel::NAME) {
-            let handle = gpui::Focusable::focus_handle(&self.search_input, cx);
+            let handle = gpui_kit::Focusable::focus_handle(&self.search_input, cx);
             handle.focus(window, cx);
             return;
         }
@@ -5192,15 +5236,15 @@ pub(super) fn partially_staged(status: &Status, path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui_component::dock::{PanelInfo, PanelState};
+    use gpui_kit::component::dock::{PanelInfo, PanelState};
 
     fn leaf(name: &str) -> PanelState {
         PanelState::new(name)
     }
 
-    fn stack(sizes: Vec<gpui::Pixels>, children: Vec<PanelState>) -> PanelState {
+    fn stack(sizes: Vec<gpui_kit::Pixels>, children: Vec<PanelState>) -> PanelState {
         let mut state = PanelState::new("StackPanel");
-        state.info = PanelInfo::stack(sizes, gpui::Axis::Vertical);
+        state.info = PanelInfo::stack(sizes, gpui_kit::Axis::Vertical);
         state.children = children;
         state
     }
@@ -5213,10 +5257,13 @@ mod tests {
     }
 
     /// A side zone as `dump` writes one: a tree, a side, a size, an open flag.
-    fn dock(tree: PanelState, size: gpui::Pixels) -> Option<gpui_component::dock::DockState> {
-        Some(gpui_component::dock::DockState::new(
+    fn dock(
+        tree: PanelState,
+        size: gpui_kit::Pixels,
+    ) -> Option<gpui_kit::component::dock::DockState> {
+        Some(gpui_kit::component::dock::DockState::new(
             tree,
-            gpui_component::dock::DockPlacement::Bottom,
+            gpui_kit::component::dock::DockPlacement::Bottom,
             size,
             true,
         ))
@@ -5391,7 +5438,7 @@ mod tests {
         assert!(zone.open());
         assert_eq!(
             zone.placement(),
-            gpui_component::dock::DockPlacement::Bottom
+            gpui_kit::component::dock::DockPlacement::Bottom
         );
     }
 

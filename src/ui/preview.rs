@@ -21,11 +21,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui::{div, img, prelude::*, px, Context, SharedString, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex, v_flex, ActiveTheme, Sizable,
 };
+use gpui_kit::{div, img, prelude::*, px, Context, SharedString, Window};
 
 use crate::files;
 use crate::runtime::Cmd;
@@ -40,10 +40,10 @@ pub struct Preview {
     /// carried alongside: it is the same number and one field fewer to keep
     /// truthful.
     pub bytes: usize,
-    /// Built **once**, when the image arrives: `gpui::Image::from_bytes`
+    /// Built **once**, when the image arrives: `gpui_kit::Image::from_bytes`
     /// digests the whole file to key the decoded texture, and a render closure
     /// runs sixty times a second.
-    pub image: Arc<gpui::Image>,
+    pub image: Arc<gpui_kit::Image>,
     /// Scaled down to the panel, or painted at its own size in a scrollable
     /// area. Never scaled **up**: an icon stretched to the width of a window is
     /// a wall of pixels, and it is the one thing a preview must not invent.
@@ -51,17 +51,17 @@ pub struct Preview {
 }
 
 /// Our vocabulary translated into gpui's — the only place the two meet.
-fn format_of(kind: files::Picture) -> gpui::ImageFormat {
+fn format_of(kind: files::Picture) -> gpui_kit::ImageFormat {
     use files::Picture;
     match kind {
-        Picture::Png => gpui::ImageFormat::Png,
-        Picture::Jpeg => gpui::ImageFormat::Jpeg,
-        Picture::Gif => gpui::ImageFormat::Gif,
-        Picture::Webp => gpui::ImageFormat::Webp,
-        Picture::Bmp => gpui::ImageFormat::Bmp,
-        Picture::Ico => gpui::ImageFormat::Ico,
-        Picture::Tiff => gpui::ImageFormat::Tiff,
-        Picture::Svg => gpui::ImageFormat::Svg,
+        Picture::Png => gpui_kit::ImageFormat::Png,
+        Picture::Jpeg => gpui_kit::ImageFormat::Jpeg,
+        Picture::Gif => gpui_kit::ImageFormat::Gif,
+        Picture::Webp => gpui_kit::ImageFormat::Webp,
+        Picture::Bmp => gpui_kit::ImageFormat::Bmp,
+        Picture::Ico => gpui_kit::ImageFormat::Ico,
+        Picture::Tiff => gpui_kit::ImageFormat::Tiff,
+        Picture::Svg => gpui_kit::ImageFormat::Svg,
     }
 }
 
@@ -118,7 +118,10 @@ impl ClaudhubApp {
         let preview = Preview {
             kind: image.kind,
             bytes: image.bytes.len(),
-            image: Arc::new(gpui::Image::from_bytes(format_of(image.kind), image.bytes)),
+            image: Arc::new(gpui_kit::Image::from_bytes(
+                format_of(image.kind),
+                image.bytes,
+            )),
             // Fitted on arrival: a screenshot is larger than the panel far more
             // often than an icon is smaller than it, and `fit` never scales up
             // anyway — so the two agree on everything but the big picture.
@@ -128,7 +131,7 @@ impl ClaudhubApp {
         // tab holds its focus handle by, and what the dock asks for when the
         // panel takes the keyboard. Building a second kind of panel to avoid
         // one unused entity would be two of everything for one field.
-        let input = cx.new(|cx| gpui_component::input::EditorState::new(window, cx));
+        let input = cx.new(|cx| gpui_kit::component::input::EditorState::new(window, cx));
         // The document the language server was holding is dropped: arriving in
         // a file closes the one that was there, and an image is an arrival like
         // any other.
@@ -189,7 +192,7 @@ impl ClaudhubApp {
     pub(super) fn render_image_preview(
         &mut self,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
+    ) -> Option<gpui_kit::AnyElement> {
         let editing = self.editing()?;
         let preview = editing.preview.as_ref()?;
         let (fit, kind, bytes) = (preview.fit, preview.kind, preview.bytes);
@@ -281,7 +284,7 @@ impl ClaudhubApp {
                             // preview of anything.
                             img(image)
                                 .when(fit, |el| el.max_w_full().max_h_full())
-                                .object_fit(gpui::ObjectFit::ScaleDown),
+                                .object_fit(gpui_kit::ObjectFit::ScaleDown),
                         ),
                 )
                 .child(

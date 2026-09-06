@@ -846,6 +846,7 @@
   "worktree-cleanup-help": "Le worktree et sa branche sont supprimés. Le travail est déjà dans la base.",
   "worktree-cleanup-title": "Retirer le worktree intégré ?",
   "worktree-console-failed": "L’opération a échoué",
+  "worktree-console-show": "Rouvrir la console de l'opération",
   "worktree-console-hide": "Masquer",
   "worktree-console-running": "En cours…",
   "worktree-down": "Arrêter",
@@ -879,5 +880,9 @@
   "worktree-up-title": "Démarrer le worktree",
   "worktree-update": "Update from base",
   "wt-links-open": "Ouvrir",
-  "wt-links-resolving": "Adresses en cours de résolution…"
+  "wt-links-resolving": "Adresses en cours de résolution…",
+  "commit-cherry-pick": "Cherry-pick de ce commit sur la branche courante",
+  "diff-take-from-commit": "Reprendre ce que ce commit a fait à ce fichier",
+  "running-cherry-pick": "Cherry-pick…",
+  "action-cherry-pick-ok": "Cherry-pick appliqué."
 }

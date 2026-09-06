@@ -20,11 +20,11 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
 
-use gpui::HighlightStyle;
-use gpui_component::highlighter::{
+use gpui_kit::component::highlighter::{
     HighlightTheme, LanguageConfig, LanguageRegistry, SyntaxHighlighter,
 };
-use gpui_component::input::Rope;
+use gpui_kit::component::input::Rope;
+use gpui_kit::HighlightStyle;
 
 use super::blade;
 use crate::git::search::Results;
@@ -702,7 +702,7 @@ pub fn language_for_path(path: &Path) -> Option<&'static str> {
 /// which is in fact the common case.
 pub fn overlay(
     base: &[(Range<usize>, HighlightStyle)],
-    marks: &[(Range<usize>, gpui::Hsla)],
+    marks: &[(Range<usize>, gpui_kit::Hsla)],
 ) -> Vec<(Range<usize>, HighlightStyle)> {
     if marks.is_empty() {
         return base.to_vec();
@@ -793,8 +793,8 @@ pub fn underline(
             continue;
         };
         if inside {
-            style.underline = Some(gpui::UnderlineStyle {
-                thickness: gpui::px(1.),
+            style.underline = Some(gpui_kit::UnderlineStyle {
+                thickness: gpui_kit::px(1.),
                 color: None,
                 wavy: false,
             });
@@ -810,14 +810,14 @@ pub fn underline(
 #[cfg(test)]
 mod tests {
     use super::underline;
-    use gpui::HighlightStyle;
+    use gpui_kit::HighlightStyle;
 
     /// The hovered word keeps the colour the grammar gave it, and the runs
     /// around it are left exactly as they were.
     #[test]
     fn an_underline_splits_a_run_without_recolouring_it() {
         let red = HighlightStyle {
-            color: Some(gpui::red()),
+            color: Some(gpui_kit::red()),
             ..Default::default()
         };
         // `fooba` is red, and `oob` is hovered.
@@ -847,20 +847,20 @@ mod tests {
     #[test]
     fn a_mark_splits_the_style_it_falls_inside() {
         let red = HighlightStyle {
-            color: Some(gpui::red()),
+            color: Some(gpui_kit::red()),
             ..Default::default()
         };
         let base = vec![(0..10, red)];
-        let yellow = gpui::yellow();
+        let yellow = gpui_kit::yellow();
         let out = overlay(&base, &[(3..6, yellow)]);
         assert_eq!(out.len(), 3);
         assert_eq!(out[0].0, 0..3);
         assert_eq!(out[1].0, 3..6);
         assert_eq!(out[2].0, 6..10);
-        assert_eq!(out[0].1.color, Some(gpui::red()));
+        assert_eq!(out[0].1.color, Some(gpui_kit::red()));
         assert_eq!(
             out[1].1.color,
-            Some(gpui::red()),
+            Some(gpui_kit::red()),
             "le texte garde sa couleur"
         );
         assert_eq!(out[1].1.background_color, Some(yellow));
@@ -870,7 +870,7 @@ mod tests {
     /// With no highlighting underneath, the hit is the line's only style.
     #[test]
     fn a_mark_on_bare_text_stands_alone() {
-        let yellow = gpui::yellow();
+        let yellow = gpui_kit::yellow();
         let out = overlay(&[], &[(2..4, yellow)]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].0, 2..4);
@@ -884,8 +884,11 @@ mod tests {
             color: Some(c),
             ..Default::default()
         };
-        let base = vec![(0..4, style(gpui::red())), (8..12, style(gpui::blue()))];
-        let out = overlay(&base, &[(2..10, gpui::yellow())]);
+        let base = vec![
+            (0..4, style(gpui_kit::red())),
+            (8..12, style(gpui_kit::blue())),
+        ];
+        let out = overlay(&base, &[(2..10, gpui_kit::yellow())]);
         let mut previous = 0;
         for (range, _) in &out {
             assert!(range.start >= previous, "out-of-order ranges: {out:?}");
@@ -904,7 +907,7 @@ mod tests {
         let base = vec![(
             0..3,
             HighlightStyle {
-                color: Some(gpui::red()),
+                color: Some(gpui_kit::red()),
                 ..Default::default()
             },
         )];

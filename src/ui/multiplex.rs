@@ -33,14 +33,14 @@
 
 use std::path::PathBuf;
 
-use gpui::{
-    prelude::*, px, relative, Context, Entity, Focusable as _, SharedString, WeakEntity, Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{DropdownMenu as _, PopupMenuItem},
     v_flex, ActiveTheme, Disableable as _, Sizable as _,
+};
+use gpui_kit::{
+    prelude::*, px, relative, Context, Entity, Focusable as _, SharedString, WeakEntity, Window,
 };
 
 use super::app::ClaudhubApp;
@@ -212,9 +212,9 @@ pub struct DraggedTile {
     label: SharedString,
 }
 
-impl gpui::Render for DraggedTile {
+impl gpui_kit::Render for DraggedTile {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        gpui::div()
+        gpui_kit::div()
             .px_2()
             .py_1()
             .rounded(cx.theme().radius)
@@ -284,7 +284,7 @@ impl ClaudhubApp {
                         .items_center()
                         .justify_center()
                         .child(
-                            gpui::div()
+                            gpui_kit::div()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(tr!("multiplex-empty")),
@@ -325,7 +325,7 @@ impl ClaudhubApp {
             .track_scroll(&scroll)
             .p(px(2.))
             .children(tiles.into_iter().map(|tile| {
-                gpui::div()
+                gpui_kit::div()
                     .flex_none()
                     .h_full()
                     .w(relative(tile.width.fraction()))
@@ -339,20 +339,22 @@ impl ClaudhubApp {
                     // What reaches this is a vertical notch over a head, or
                     // a sideways one the terminal let through; a trackpad's
                     // pixels are left to gpui and the smoothing's `cancel`.
-                    .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
-                        let gpui::ScrollDelta::Lines(lines) = event.delta else {
-                            return;
-                        };
-                        let along = if lines.x != 0. { lines.x } else { lines.y };
-                        if along == 0. {
-                            return;
-                        }
-                        cx.stop_propagation();
-                        // A positive notch is "up", which on this axis is
-                        // towards the start: gpui adds it to the offset.
-                        let end = if along > 0. { End::Start } else { End::End };
-                        this.step_strip(end, cx);
-                    }))
+                    .on_scroll_wheel(cx.listener(
+                        |this, event: &gpui_kit::ScrollWheelEvent, _, cx| {
+                            let gpui_kit::ScrollDelta::Lines(lines) = event.delta else {
+                                return;
+                            };
+                            let along = if lines.x != 0. { lines.x } else { lines.y };
+                            if along == 0. {
+                                return;
+                            }
+                            cx.stop_propagation();
+                            // A positive notch is "up", which on this axis is
+                            // towards the start: gpui adds it to the offset.
+                            let end = if along > 0. { End::Start } else { End::End };
+                            this.step_strip(end, cx);
+                        },
+                    ))
                     .child(tile.render(window, cx))
             }));
         // The same wheel smoothing as every list of the window, on the other
@@ -405,9 +407,9 @@ impl ClaudhubApp {
         let column = handle.bounds_for_item(rank).or_else(|| {
             let before = handle.bounds_for_item(rank.checked_sub(1)?)?;
             let start = before.right();
-            Some(gpui::Bounds::new(
-                gpui::point(start, before.top()),
-                gpui::size(viewport.size.width * width.fraction(), before.size.height),
+            Some(gpui_kit::Bounds::new(
+                gpui_kit::point(start, before.top()),
+                gpui_kit::size(viewport.size.width * width.fraction(), before.size.height),
             ))
         });
         let Some(column) = column.filter(|_| viewport.size.width > px(0.)) else {
@@ -437,7 +439,7 @@ impl ClaudhubApp {
                 SharedString::from("multiplex-scroll"),
                 super::motion::Axes::Horizontal,
             )
-            .push(offset, gpui::point(px(delta), px(0.)), max);
+            .push(offset, gpui_kit::point(px(delta), px(0.)), max);
         handle.set_offset(next);
     }
 
@@ -503,7 +505,7 @@ impl ClaudhubApp {
             )
             .push(
                 handle.offset(),
-                gpui::point(px(delta), px(0.)),
+                gpui_kit::point(px(delta), px(0.)),
                 handle.max_offset(),
             );
         handle.set_offset(next);
@@ -606,7 +608,7 @@ impl ClaudhubApp {
     }
 
     /// Gives a column its next preset width.
-    pub(super) fn cycle_column(&mut self, view: gpui::EntityId, cx: &mut Context<Self>) {
+    pub(super) fn cycle_column(&mut self, view: gpui_kit::EntityId, cx: &mut Context<Self>) {
         if let Some(terminal) = self
             .terminals
             .iter_mut()
@@ -640,7 +642,7 @@ fn open_on(
     launch: Launch,
     end: End,
     window: &mut Window,
-    cx: &mut gpui::App,
+    cx: &mut gpui_kit::App,
 ) {
     let Some(app) = app.upgrade() else {
         return;
@@ -675,7 +677,7 @@ struct Tile {
 }
 
 impl Tile {
-    fn render(self, window: &mut Window, cx: &mut Context<ClaudhubApp>) -> gpui::AnyElement {
+    fn render(self, window: &mut Window, cx: &mut Context<ClaudhubApp>) -> gpui_kit::AnyElement {
         let focused = self.view.focus_handle(cx).contains_focused(window, cx);
         let id = self.view.entity_id();
         let (repo, checkout) = self.project;
@@ -741,11 +743,16 @@ impl Tile {
                         this.focus_tile(id, &worktree, window, cx);
                     }))
                     .children(
-                        repo.map(|repo| gpui::div().flex_none().text_color(muted).child(repo)),
+                        repo.map(|repo| gpui_kit::div().flex_none().text_color(muted).child(repo)),
                     )
-                    .child(gpui::div().flex_none().text_color(muted).child(checkout))
                     .child(
-                        gpui::div()
+                        gpui_kit::div()
+                            .flex_none()
+                            .text_color(muted)
+                            .child(checkout),
+                    )
+                    .child(
+                        gpui_kit::div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
@@ -888,7 +895,7 @@ impl ClaudhubApp {
     /// project one was watching.
     pub(super) fn focus_tile(
         &mut self,
-        view: gpui::EntityId,
+        view: gpui_kit::EntityId,
         worktree: &std::path::Path,
         window: &mut Window,
         cx: &mut Context<Self>,

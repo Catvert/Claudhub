@@ -11,13 +11,13 @@
 
 use std::path::{Path, PathBuf};
 
-use gpui::{prelude::*, Context, Window};
+use gpui_kit::{prelude::*, Context, Window};
 
 use crate::git::{Branch, BranchKind};
 use crate::runtime::Cmd;
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
-use gpui_component::{ActiveTheme as _, WindowExt as _};
+use gpui_kit::component::{ActiveTheme as _, WindowExt as _};
 
 /// One row of the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,16 +161,16 @@ pub struct BranchDeletion {
     also_remote: bool,
 }
 
-impl gpui::Render for BranchDeletion {
+impl gpui_kit::Render for BranchDeletion {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (remote, also) = (self.remote, self.also_remote);
-        gpui_component::v_flex()
-            .w(gpui::px(420.))
+        gpui_kit::component::v_flex()
+            .w(gpui_kit::px(420.))
             .gap_2()
-            .child(gpui::div().text_sm().child(tr!("branch-delete-help")))
+            .child(gpui_kit::div().text_sm().child(tr!("branch-delete-help")))
             .when(remote, |el| {
                 el.child(
-                    gpui_component::checkbox::Checkbox::new("branch-delete-remote")
+                    gpui_kit::component::checkbox::Checkbox::new("branch-delete-remote")
                         .label(tr!("branch-delete-also-remote"))
                         .checked(also)
                         .on_click(cx.listener(|this, _, _window, cx| {
@@ -183,7 +183,7 @@ impl gpui::Render for BranchDeletion {
             // one has not chosen is a line one learns to read past.
             .when(remote && also, |el| {
                 el.child(
-                    gpui::div()
+                    gpui_kit::div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
                         .child(tr!("branch-delete-remote-help")),
@@ -409,8 +409,8 @@ impl ClaudhubApp {
     /// remote half is the only half there is.
     fn confirm_branch(
         &mut self,
-        title: gpui::SharedString,
-        help: gpui::SharedString,
+        title: gpui_kit::SharedString,
+        help: gpui_kit::SharedString,
         cmd: impl Fn(PathBuf) -> Cmd + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -421,7 +421,7 @@ impl ClaudhubApp {
             let (entity, cmd) = (entity.clone(), cmd.clone());
             dialog
                 .title(title.clone())
-                .child(gpui::div().text_sm().child(help.clone()))
+                .child(gpui_kit::div().text_sm().child(help.clone()))
                 .overlay_closable(false)
                 .close_button(false)
                 .footer(crate::ui::dialogs::confirm())

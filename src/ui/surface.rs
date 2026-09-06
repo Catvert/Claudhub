@@ -26,8 +26,8 @@
 
 use std::path::PathBuf;
 
-use gpui::{div, prelude::*, px, App, Context, Entity, Pixels, SharedString, Window};
-use gpui_component::{h_flex, input::EditorState, ActiveTheme};
+use gpui_kit::component::{h_flex, input::EditorState, ActiveTheme};
+use gpui_kit::{div, prelude::*, px, App, Context, Entity, Pixels, SharedString, Window};
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
@@ -137,11 +137,11 @@ pub(super) struct VimHost {
     /// anyway.
     pub vim: crate::ui::vim::Vim,
     /// The layer a yank lights up on.
-    pub flash: gpui_component::input::TextDecorationCollection,
+    pub flash: gpui_kit::component::input::TextDecorationCollection,
     /// What puts the light out, held so that it can be **dropped**: a second
     /// yank replaces the task, and dropping a gpui task cancels it — without
     /// that, the first timer would darken the second yank.
-    pub flash_timer: Option<gpui::Task<()>>,
+    pub flash_timer: Option<gpui_kit::Task<()>>,
     /// The layer the block cursor is painted on.
     ///
     /// It is **ours** and not the editor's selection, for two reasons that are
@@ -150,17 +150,17 @@ pub(super) struct VimHost {
     /// after a click of the mouse; and its colour is the theme's `selection`,
     /// which is a few percent of lightness away from the background — a block
     /// one has to look for is a block one does not see.
-    pub cursor: gpui_component::input::TextDecorationCollection,
+    pub cursor: gpui_kit::component::input::TextDecorationCollection,
     /// The layer a blockwise selection is painted on, created **after** the
     /// cursor's so that the block cursor keeps its colour where the two meet.
     ///
     /// It exists because the editor's own selection is a single run of text and
     /// a rectangle is one range per line: there is nothing to hand it.
-    pub selection: gpui_component::input::TextDecorationCollection,
+    pub selection: gpui_kit::component::input::TextDecorationCollection,
     /// The layer the occurrences of a search are lit on, created **last** so
     /// that the block cursor, the yank flash and a blockwise selection all keep
     /// their colours where they cross one.
-    pub matches: gpui_component::input::TextDecorationCollection,
+    pub matches: gpui_kit::component::input::TextDecorationCollection,
     /// The pattern and text length the occurrences were found for.
     ///
     /// `find_all` walks the whole file, which is a keystroke's worth of work and
@@ -234,17 +234,17 @@ pub(super) struct VimHost {
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct CursorInk {
     /// The block itself, which is the mode said in a colour.
-    block: gpui::Hsla,
+    block: gpui_kit::Hsla,
     /// The glyph the block stands over, read against it.
-    glyph: gpui::Hsla,
+    glyph: gpui_kit::Hsla,
     /// A blockwise selection's rectangle — the theme's `selection`, which is
     /// what `v` and `V` look like next door.
-    rectangle: gpui::Hsla,
+    rectangle: gpui_kit::Hsla,
 }
 
 impl CursorInk {
     /// What a mode is painted in, read from the theme of this very frame.
-    fn of(mode: crate::ui::vim::Mode, cx: &gpui::App) -> Self {
+    fn of(mode: crate::ui::vim::Mode, cx: &gpui_kit::App) -> Self {
         let block = vim_mode_colour(mode, cx);
         Self {
             block,
@@ -308,8 +308,8 @@ pub(super) enum Place {
 /// Read off the **rope**, which is what the editor holds: `value()` copies the
 /// whole text to count newlines in it, and this is asked after every motion and
 /// at every frame a reveal is waiting for a measurement.
-pub(super) fn line_at(text: &gpui_component::input::Rope, offset: usize) -> usize {
-    use gpui_component::input::RopeExt;
+pub(super) fn line_at(text: &gpui_kit::component::input::Rope, offset: usize) -> usize {
+    use gpui_kit::component::input::RopeExt;
     text.offset_to_position(offset.min(text.len())).line as usize
 }
 
@@ -437,7 +437,7 @@ impl ClaudhubApp {
     pub(super) fn vim_key(
         &mut self,
         surface: &Surface,
-        event: &gpui::KeyDownEvent,
+        event: &gpui_kit::KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -646,7 +646,7 @@ impl ClaudhubApp {
             Response::Ignored | Response::Consumed => {}
             Response::Apply(change) => {
                 if let Some(yank) = change.yank.filter(|_| clipboard) {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(yank.text));
+                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(yank.text));
                 }
                 if !change.flash.is_empty() {
                     self.flash_yank(surface, change.flash, cx);
@@ -674,11 +674,11 @@ impl ClaudhubApp {
                 // the undone transaction was made from: the next frame would
                 // find a selection vim never wrote and take it for the mouse's.
                 Command::Undo => {
-                    window.dispatch_action(Box::new(gpui_component::input::Undo), cx);
+                    window.dispatch_action(Box::new(gpui_kit::component::input::Undo), cx);
                     self.absorb_selection(surface);
                 }
                 Command::Redo => {
-                    window.dispatch_action(Box::new(gpui_component::input::Redo), cx);
+                    window.dispatch_action(Box::new(gpui_kit::component::input::Redo), cx);
                     self.absorb_selection(surface);
                 }
                 Command::Reveal(at) => self.place_caret_line(&input, at, cx),
@@ -838,17 +838,17 @@ impl ClaudhubApp {
         // The theme's `selection`, which is exactly what `v` and `V` look like
         // next door: this is the same gesture, on a rectangle the editor has no
         // way of holding.
-        let selected = gpui::HighlightStyle {
+        let selected = gpui_kit::HighlightStyle {
             background_color: Some(ink.rectangle),
             ..Default::default()
         };
         rectangle.set(
             rows.into_iter()
-                .map(|range| gpui_component::input::TextDecoration::new(range, selected))
+                .map(|range| gpui_kit::component::input::TextDecoration::new(range, selected))
                 .collect(),
             cx,
         );
-        let style = gpui::HighlightStyle {
+        let style = gpui_kit::HighlightStyle {
             color: Some(ink.glyph),
             background_color: Some(ink.block),
             ..Default::default()
@@ -856,7 +856,7 @@ impl ClaudhubApp {
         layer.set(
             block
                 .clone()
-                .map(|range| gpui_component::input::TextDecoration::new(range, style))
+                .map(|range| gpui_kit::component::input::TextDecoration::new(range, style))
                 .into_iter()
                 .collect(),
             cx,
@@ -962,14 +962,14 @@ impl ClaudhubApp {
             .iter()
             .enumerate()
             .map(|(index, range)| {
-                let style = gpui::HighlightStyle {
+                let style = gpui_kit::HighlightStyle {
                     background_color: Some(match Some(index) == current {
                         true => bright,
                         false => lit,
                     }),
                     ..Default::default()
                 };
-                gpui_component::input::TextDecoration::new(range.clone(), style)
+                gpui_kit::component::input::TextDecoration::new(range.clone(), style)
             })
             .collect();
         layer.set(decorations, cx);
@@ -1087,14 +1087,14 @@ impl ClaudhubApp {
         let flash = host.flash.clone();
         // The tone of a search occurrence: it is already the colour this
         // interface lays over code to say "here", and it follows the theme.
-        let style = gpui::HighlightStyle {
+        let style = gpui_kit::HighlightStyle {
             background_color: Some(crate::ui::find::highlight_color(false, cx)),
             ..Default::default()
         };
         flash.set(
             ranges
                 .into_iter()
-                .map(|range| gpui_component::input::TextDecoration::new(range, style))
+                .map(|range| gpui_kit::component::input::TextDecoration::new(range, style))
                 .collect(),
             cx,
         );
@@ -1146,7 +1146,7 @@ impl ClaudhubApp {
             };
             let offset = state.scroll_offset();
             let moved = offset.y - line_height * lines as f32;
-            state.set_scroll_offset(gpui::point(offset.x, moved.min(gpui::px(0.))), cx);
+            state.set_scroll_offset(gpui_kit::point(offset.x, moved.min(gpui_kit::px(0.))), cx);
         });
     }
 
@@ -1264,7 +1264,7 @@ impl ClaudhubApp {
             };
             // The input's scroll handle counts downwards as negative.
             let offset = state.scroll_offset();
-            state.set_scroll_offset(gpui::point(offset.x, -(line_height * first as f32)), cx);
+            state.set_scroll_offset(gpui_kit::point(offset.x, -(line_height * first as f32)), cx);
             true
         })
     }
@@ -1311,13 +1311,13 @@ impl ClaudhubApp {
     pub(super) fn on_surface_definition_click(
         &mut self,
         surface: &Surface,
-        event: &gpui::MouseDownEvent,
+        event: &gpui_kit::MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // The second down of a double click is the same gesture, and by then
         // the first has already answered it.
-        if event.button != gpui::MouseButton::Left
+        if event.button != gpui_kit::MouseButton::Left
             || !event.modifiers.secondary()
             || event.click_count > 1
         {
@@ -1344,7 +1344,7 @@ impl ClaudhubApp {
     pub(super) fn on_surface_scroll(
         &mut self,
         surface: &Surface,
-        event: &gpui::ScrollWheelEvent,
+        event: &gpui_kit::ScrollWheelEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1385,12 +1385,12 @@ impl ClaudhubApp {
         let next = match event.delta {
             // A trackpad is already gradual, and attached to the finger:
             // smoothing it would add lag to a direct gesture.
-            gpui::ScrollDelta::Pixels(_) => {
+            gpui_kit::ScrollDelta::Pixels(_) => {
                 self.owned_motion(key, crate::ui::motion::Axes::Vertical)
                     .cancel();
-                gpui::point(offset.x, offset.y + delta.y)
+                gpui_kit::point(offset.x, offset.y + delta.y)
             }
-            gpui::ScrollDelta::Lines(_) => self
+            gpui_kit::ScrollDelta::Lines(_) => self
                 .owned_motion(key, crate::ui::motion::Axes::Vertical)
                 .push(offset, delta, max),
         };
@@ -1550,7 +1550,7 @@ pub(super) fn text_field(
     height: Pixels,
     app: &Entity<ClaudhubApp>,
     cx: &App,
-) -> gpui::Stateful<gpui::Div> {
+) -> gpui_kit::Stateful<gpui_kit::Div> {
     let vim = Settings::global(cx).vim_mode;
     let font = cx.theme().font_family.clone();
     div()
@@ -1574,10 +1574,10 @@ pub(super) fn text_field(
             false => el,
         })
         .child(
-            gpui_component::input::Editor::new(input)
+            gpui_kit::component::input::Editor::new(input)
                 .font_family(font)
                 .text_sm()
-                .line_height(gpui::rems(1.25))
+                .line_height(gpui_kit::rems(1.25))
                 .h_full(),
         )
 }
@@ -1629,10 +1629,10 @@ pub(super) fn grown_height(
 /// The caller installs it only when the mode is on, so that nothing stands
 /// between the keyboard and the input otherwise.
 pub(super) fn vim_capture(
-    el: gpui::Stateful<gpui::Div>,
+    el: gpui_kit::Stateful<gpui_kit::Div>,
     surface: Surface,
     app: &Entity<ClaudhubApp>,
-) -> gpui::Stateful<gpui::Div> {
+) -> gpui_kit::Stateful<gpui_kit::Div> {
     let (keys, paste, enter, backspace, escape) = (
         surface.clone(),
         surface.clone(),
@@ -1650,35 +1650,39 @@ pub(super) fn vim_capture(
     el.capture_key_down(move |event, window, cx| {
         app_keys.update(cx, |this, cx| this.vim_key(&keys, event, window, cx));
     })
-    .capture_action(move |_: &gpui_component::input::Paste, window, cx| {
+    .capture_action(move |_: &gpui_kit::component::input::Paste, window, cx| {
         if app_paste.update(cx, |this, cx| this.vim_paste(&paste, window, cx)) {
             cx.stop_propagation();
         }
     })
-    .capture_action(move |action: &gpui_component::input::Enter, window, cx| {
-        if action.secondary || action.shift {
-            return;
-        }
-        if app_enter.update(cx, |this, cx| {
-            this.vim_named_key(&enter, "enter", window, cx)
-        }) {
-            cx.stop_propagation();
-        }
-    })
-    .capture_action(move |_: &gpui_component::input::Backspace, window, cx| {
-        if app_backspace.update(cx, |this, cx| {
-            this.vim_named_key(&backspace, "backspace", window, cx)
-        }) {
-            cx.stop_propagation();
-        }
-    })
+    .capture_action(
+        move |action: &gpui_kit::component::input::Enter, window, cx| {
+            if action.secondary || action.shift {
+                return;
+            }
+            if app_enter.update(cx, |this, cx| {
+                this.vim_named_key(&enter, "enter", window, cx)
+            }) {
+                cx.stop_propagation();
+            }
+        },
+    )
+    .capture_action(
+        move |_: &gpui_kit::component::input::Backspace, window, cx| {
+            if app_backspace.update(cx, |this, cx| {
+                this.vim_named_key(&backspace, "backspace", window, cx)
+            }) {
+                cx.stop_propagation();
+            }
+        },
+    )
     // **Escape, when a dialog is what the field is sitting in.** A dialog binds
     // it to `Cancel`, and a binding runs ahead of the key listener: leaving
     // insert mode dismissed the dialog and threw away what had just been
     // written. Taken here, on the way down, and only when vim has something to
     // do with it — in normal mode with nothing pending it is let through, since
     // Escape is also how one leaves a dialog one has decided against.
-    .capture_action(move |_: &gpui_component::dialog::Cancel, window, cx| {
+    .capture_action(move |_: &gpui_kit::component::dialog::Cancel, window, cx| {
         if app_escape.update(cx, |this, cx| this.vim_escape(&escape, window, cx)) {
             cx.stop_propagation();
         }
@@ -1709,18 +1713,22 @@ pub(super) fn vim_capture(
 /// short before ours, which is exactly the answer wanted.
 pub(super) fn wheel_capture(surface: Surface, app: &Entity<ClaudhubApp>) -> impl IntoElement {
     let entity = app.clone();
-    gpui::canvas(
-        |bounds, window, _cx| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
-        move |_, hitbox: gpui::Hitbox, window, _cx| {
-            window.on_mouse_event(move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
-                if phase != gpui::DispatchPhase::Capture || !hitbox.should_handle_scroll(window) {
-                    return;
-                }
-                cx.stop_propagation();
-                entity.update(cx, |this, cx| {
-                    this.on_surface_scroll(&surface, event, window, cx)
-                });
-            });
+    gpui_kit::canvas(
+        |bounds, window, _cx| window.insert_hitbox(bounds, gpui_kit::HitboxBehavior::Normal),
+        move |_, hitbox: gpui_kit::Hitbox, window, _cx| {
+            window.on_mouse_event(
+                move |event: &gpui_kit::ScrollWheelEvent, phase, window, cx| {
+                    if phase != gpui_kit::DispatchPhase::Capture
+                        || !hitbox.should_handle_scroll(window)
+                    {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    entity.update(cx, |this, cx| {
+                        this.on_surface_scroll(&surface, event, window, cx)
+                    });
+                },
+            );
         },
     )
     .absolute()
@@ -1741,7 +1749,7 @@ pub(super) fn wheel_capture(surface: Surface, app: &Entity<ClaudhubApp>) -> impl
 fn editor_extent(
     input: &Entity<EditorState>,
     cx: &App,
-) -> (gpui::Point<Pixels>, gpui::Point<Pixels>) {
+) -> (gpui_kit::Point<Pixels>, gpui_kit::Point<Pixels>) {
     let state = input.read(cx);
     let offset = state.scroll_offset();
     let content = state.scroll_size().height;
@@ -1752,7 +1760,7 @@ fn editor_extent(
         // aims where it is asked to, and the editor cuts it back.
         px(f32::MAX / 4.)
     };
-    (offset, gpui::point(px(0.), travel))
+    (offset, gpui_kit::point(px(0.), travel))
 }
 
 /// The colour a mode is said in — the pill on the surface's bar, and the block
@@ -1762,7 +1770,7 @@ fn editor_extent(
 /// mode one reads in the corner while the block says another colour would be one
 /// of them too many. It is also what makes the mode legible without looking away
 /// from the caret, which is the point of a modal editor.
-fn vim_mode_colour(mode: crate::ui::vim::Mode, cx: &gpui::App) -> gpui::Hsla {
+fn vim_mode_colour(mode: crate::ui::vim::Mode, cx: &gpui_kit::App) -> gpui_kit::Hsla {
     match mode {
         // The theme's own cursor colour, which is what the eye expects there.
         crate::ui::vim::Mode::Normal => cx.theme().caret,
@@ -1779,7 +1787,7 @@ fn vim_mode_colour(mode: crate::ui::vim::Mode, cx: &gpui::App) -> gpui::Hsla {
 /// Not `background` alone: it is the right answer on a dark theme, where the
 /// block is a light colour, and the wrong one on a light theme, where a pale
 /// glyph on a pale block is a hole.
-fn ink_on(colour: gpui::Hsla, cx: &gpui::App) -> gpui::Hsla {
+fn ink_on(colour: gpui_kit::Hsla, cx: &gpui_kit::App) -> gpui_kit::Hsla {
     let (background, foreground) = (cx.theme().background, cx.theme().foreground);
     let (darker, lighter) = if background.l < foreground.l {
         (background, foreground)

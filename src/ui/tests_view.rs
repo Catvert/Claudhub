@@ -15,14 +15,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gpui::{div, img, prelude::*, uniform_list, App, Context, Entity, SharedString, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     menu::{ContextMenuExt, PopupMenu, PopupMenuItem},
     spinner::Spinner,
     v_flex, ActiveTheme, Disableable, Selectable, Sizable,
 };
+use gpui_kit::{div, img, prelude::*, uniform_list, App, Context, Entity, SharedString, Window};
 
 use crate::runtime::Cmd;
 use crate::suite::{Outcome, Report, Run, Runner, Status, Target, Test};
@@ -132,7 +132,7 @@ impl PestState {
 /// Frees the texture a frame uploaded to the atlas. Nothing else does — see
 /// [`TestsView::pest_frame`] — and the window has to be named: it is taken out
 /// of the app's list while it updates, which is when every one of these runs.
-fn drop_cast(cast: Option<Cast>, window: &mut Window, cx: &mut gpui::App) {
+fn drop_cast(cast: Option<Cast>, window: &mut Window, cx: &mut gpui_kit::App) {
     if let Some(cast) = cast {
         cx.drop_image(cast.image, Some(window));
     }
@@ -141,7 +141,7 @@ fn drop_cast(cast: Option<Cast>, window: &mut Window, cx: &mut gpui::App) {
 /// One frame of the browser a run drives, as the panel holds it.
 pub struct Cast {
     /// Decoded, not the JPEG: see [`TestsView::pest_frame`].
-    pub image: std::sync::Arc<gpui::RenderImage>,
+    pub image: std::sync::Arc<gpui_kit::RenderImage>,
     /// The browser's own size, which sets the frame's shape: the panel is
     /// rarely that ratio, and a stretched page reads as a broken one.
     pub width: u32,
@@ -676,7 +676,7 @@ impl ClaudhubApp {
         &mut self,
         _: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let cast = self
             .active
             .as_deref()
@@ -707,7 +707,7 @@ impl ClaudhubApp {
                 img(image)
                     .w_full()
                     .h_full()
-                    .object_fit(gpui::ObjectFit::Contain),
+                    .object_fit(gpui_kit::ObjectFit::Contain),
             )
             .child(
                 // The viewport the browser reports, which is what a responsive
@@ -828,7 +828,7 @@ impl ClaudhubApp {
         // just said.
         self.pest_run_scroll.scroll_to_item(
             state.lines.len().saturating_sub(1),
-            gpui::ScrollStrategy::Center,
+            gpui_kit::ScrollStrategy::Center,
         );
         cx.notify();
     }
@@ -859,7 +859,7 @@ impl ClaudhubApp {
         if id < state.since || id > state.id {
             return;
         }
-        let Ok(image) = gpui::Image::from_bytes(gpui::ImageFormat::Jpeg, frame.jpeg)
+        let Ok(image) = gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Jpeg, frame.jpeg)
             .to_image_data(cx.svg_renderer())
         else {
             return;
@@ -938,7 +938,7 @@ impl ClaudhubApp {
         // one is watching for.
         if let Some(rows) = follows {
             self.pest_run_scroll
-                .scroll_to_item(rows.saturating_sub(1), gpui::ScrollStrategy::Center);
+                .scroll_to_item(rows.saturating_sub(1), gpui_kit::ScrollStrategy::Center);
         }
         let Some(status) = status else {
             cx.notify();
@@ -1548,11 +1548,11 @@ impl ClaudhubApp {
 /// What the theme gives a row, read once per frame and not per row.
 #[derive(Clone, Copy)]
 struct Look {
-    row: gpui::Pixels,
-    muted: gpui::Hsla,
-    accent: gpui::Hsla,
-    success: gpui::Hsla,
-    danger: gpui::Hsla,
+    row: gpui_kit::Pixels,
+    muted: gpui_kit::Hsla,
+    accent: gpui_kit::Hsla,
+    success: gpui_kit::Hsla,
+    danger: gpui_kit::Hsla,
 }
 
 impl Look {
@@ -1575,7 +1575,7 @@ fn render_dir(
     row: Row,
     look: &Look,
     entity: &Entity<ClaudhubApp>,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let Row::Dir {
         test,
         depth,
@@ -1612,7 +1612,7 @@ fn render_dir(
         .id(("pest-dir", index))
         .h(look.row)
         .w_full()
-        .pl(gpui::px(6. + 14. * depth as f32))
+        .pl(gpui_kit::px(6. + 14. * depth as f32))
         .pr(crate::ui::theme::scroll_gutter())
         .gap_1()
         .items_center()
@@ -1707,7 +1707,7 @@ fn render_test(
     row: Row,
     look: &Look,
     entity: &Entity<ClaudhubApp>,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let Row::Test { test: at, depth } = row else {
         return div().into_any_element();
     };
@@ -1735,7 +1735,7 @@ fn render_test(
         .id(("pest-row", index))
         .h(look.row)
         .w_full()
-        .pl(gpui::px(6. + 14. * depth as f32))
+        .pl(gpui_kit::px(6. + 14. * depth as f32))
         .pr(crate::ui::theme::scroll_gutter())
         .gap_1()
         .items_center()
@@ -1864,7 +1864,7 @@ fn row_menu(
                         .map(|worktree| crate::suite::terminal_command(worktree, &target));
                 });
                 if let Some(line) = line {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(line));
+                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(line));
                 }
             })
     })
@@ -1872,7 +1872,7 @@ fn row_menu(
 
 /// Pest refused to list — a parse error in a test file, most days. Its
 /// message is the content: it names the file and the line.
-fn failed_pest(message: SharedString, cx: &App) -> gpui::AnyElement {
+fn failed_pest(message: SharedString, cx: &App) -> gpui_kit::AnyElement {
     v_flex()
         .size_full()
         .p_4()
@@ -1900,7 +1900,7 @@ fn failed_pest(message: SharedString, cx: &App) -> gpui::AnyElement {
 
 /// No suite here. Painted on the tests screen, whose empty state is the
 /// screen; elsewhere the tab simply is not there.
-fn missing_pest(pending: bool, cx: &App) -> gpui::AnyElement {
+fn missing_pest(pending: bool, cx: &App) -> gpui_kit::AnyElement {
     let message = if pending {
         tr!("tests-loading")
     } else {
@@ -1920,7 +1920,7 @@ fn missing_pest(pending: bool, cx: &App) -> gpui::AnyElement {
 /// Nothing to show: a listing under way, a search or the failures filter
 /// that found nothing, or a suite with no test at all — different things,
 /// and saying the wrong one is how a panel reads as broken.
-fn empty_pest(query: &str, pending: bool, only_failed: bool, cx: &App) -> gpui::AnyElement {
+fn empty_pest(query: &str, pending: bool, only_failed: bool, cx: &App) -> gpui_kit::AnyElement {
     let message = if pending {
         tr!("tests-loading")
     } else if only_failed {
@@ -2052,7 +2052,7 @@ impl ClaudhubApp {
         run: Rc<Run>,
         _window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let failed: Vec<usize> = run
             .outcomes
             .iter()
@@ -2141,7 +2141,7 @@ impl ClaudhubApp {
                             .on_click({
                                 let text = outcome_text(outcome);
                                 move |_, _window, cx| {
-                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
                                         text.clone(),
                                     ));
                                     // The row underneath opens the file:
@@ -2171,7 +2171,7 @@ impl ClaudhubApp {
 impl ClaudhubApp {
     /// The run's headline: running with a spinner and the button that stops
     /// it, stopped, failed to start, or the totals with when and how long.
-    fn render_run_bar(&self, worktree: &Path, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_run_bar(&self, worktree: &Path, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let Some(state) = self.pest_runs.get(worktree) else {
             return div().into_any_element();
         };

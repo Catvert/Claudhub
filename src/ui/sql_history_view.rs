@@ -11,13 +11,13 @@
 
 use std::rc::Rc;
 
-use gpui::{div, prelude::*, px, App, Context, Entity, SharedString, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     menu::{ContextMenuExt, DropdownMenu as _, PopupMenu, PopupMenuItem},
     v_flex, v_virtual_list, ActiveTheme, Disableable, Sizable,
 };
+use gpui_kit::{div, prelude::*, px, App, Context, Entity, SharedString, Window};
 
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
@@ -164,7 +164,7 @@ impl ClaudhubApp {
             } else {
                 // The editor gets the focus: what one does with a recalled
                 // query is adjust it before running it.
-                let handle = gpui::Focusable::focus_handle(&input, cx);
+                let handle = gpui_kit::Focusable::focus_handle(&input, cx);
                 handle.focus(window, cx);
             }
         }
@@ -317,8 +317,8 @@ impl ClaudhubApp {
         let sizes = Rc::new(
             rows.iter()
                 .map(|row| match row {
-                    Row::Day(_) => gpui::size(px(0.), look.day),
-                    Row::Entry(_) => gpui::size(px(0.), look.row),
+                    Row::Day(_) => gpui_kit::size(px(0.), look.day),
+                    Row::Entry(_) => gpui_kit::size(px(0.), look.row),
                 })
                 .collect::<Vec<_>>(),
         );
@@ -396,7 +396,7 @@ impl ClaudhubApp {
                     .tooltip(tr!("sql-history-find"))
                     .on_click(cx.listener(|this, _, window, cx| {
                         let input = this.open_find_in(Pane::SqlHistory, window, cx);
-                        gpui::Focusable::focus_handle(&input, cx).focus(window, cx);
+                        gpui_kit::Focusable::focus_handle(&input, cx).focus(window, cx);
                     })),
             )
             .child(
@@ -433,7 +433,7 @@ pub(super) struct HistoryList {
     key: Key,
     shown: Rc<Vec<Shown>>,
     rows: Rc<Vec<Row>>,
-    sizes: Rc<Vec<gpui::Size<gpui::Pixels>>>,
+    sizes: Rc<Vec<gpui_kit::Size<gpui_kit::Pixels>>>,
     /// What the bar counts, which is not the length of the list: the search is
     /// not part of it.
     count: usize,
@@ -449,7 +449,7 @@ struct Key {
     /// `History::version`: the journal is the one input that changes without
     /// the panel asking for it.
     version: u64,
-    row: gpui::Pixels,
+    row: gpui_kit::Pixels,
     today: chrono::NaiveDate,
 }
 
@@ -487,12 +487,12 @@ impl Shown {
 struct Look {
     /// A history row is two storeys — the query, then what it did — and it is
     /// what says whether a query is worth recalling.
-    row: gpui::Pixels,
-    day: gpui::Pixels,
-    muted: gpui::Hsla,
-    accent: gpui::Hsla,
-    danger: gpui::Hsla,
-    text: gpui::Hsla,
+    row: gpui_kit::Pixels,
+    day: gpui_kit::Pixels,
+    muted: gpui_kit::Hsla,
+    accent: gpui_kit::Hsla,
+    danger: gpui_kit::Hsla,
+    text: gpui_kit::Hsla,
 }
 
 impl Look {
@@ -509,7 +509,7 @@ impl Look {
     }
 }
 
-fn render_day(day: &Day, look: &Look) -> gpui::AnyElement {
+fn render_day(day: &Day, look: &Look) -> gpui_kit::AnyElement {
     let label: SharedString = match day {
         Day::Today => tr!("sql-history-today"),
         Day::Yesterday => tr!("sql-history-yesterday"),
@@ -524,7 +524,7 @@ fn render_day(day: &Day, look: &Look) -> gpui::AnyElement {
             div()
                 .text_xs()
                 .text_color(look.muted)
-                .font_weight(gpui::FontWeight::MEDIUM)
+                .font_weight(gpui_kit::FontWeight::MEDIUM)
                 .child(label),
         )
         .into_any_element()
@@ -550,7 +550,7 @@ fn render_entry(
     look: &Look,
     entity: &Entity<ClaudhubApp>,
     cx: &App,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let Some(row) = shown.get(at) else {
         return div().into_any_element();
     };
@@ -638,7 +638,9 @@ fn render_entry(
         )
         .tooltip({
             let sql = row.sql.clone();
-            move |window, cx| gpui_component::tooltip::Tooltip::new(sql.clone()).build(window, cx)
+            move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(sql.clone()).build(window, cx)
+            }
         })
         .context_menu(move |popup, _window, _cx| row_menu(popup, &menu, &for_menu, at))
         .into_any_element()
@@ -694,7 +696,7 @@ fn row_menu(
                 let Some(sql) = shown.get(at).map(|row| row.entry.sql.clone()) else {
                     return;
                 };
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(sql));
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(sql));
                 entity.update(cx, |this, cx| {
                     this.announce(tr!("copied"), cx);
                 });
@@ -717,7 +719,7 @@ fn row_menu(
 ///
 /// Two messages and not one: "no query yet" in front of a search that has just
 /// failed would read as a history that lost everything.
-fn empty(query: &str, cx: &App) -> gpui::AnyElement {
+fn empty(query: &str, cx: &App) -> gpui_kit::AnyElement {
     let message = if query.trim().is_empty() {
         tr!("sql-history-empty")
     } else {

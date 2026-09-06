@@ -13,8 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gpui::{div, prelude::*, px, App, Context, Entity, Render, SharedString, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     h_flex,
@@ -22,6 +21,7 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
     v_flex, ActiveTheme, Sizable, StyledExt, WindowExt,
 };
+use gpui_kit::{div, prelude::*, px, App, Context, Entity, Render, SharedString, Window};
 
 use crate::runtime::{Action, Cmd};
 use crate::tr;
@@ -133,7 +133,7 @@ pub struct Console {
     /// The operation ended badly: the dialog stays, with a close button.
     pub failed: bool,
     /// Follows the tail, as a terminal does.
-    pub scroll: gpui::ScrollHandle,
+    pub scroll: gpui_kit::ScrollHandle,
 }
 
 impl Console {
@@ -142,7 +142,7 @@ impl Console {
             op,
             lines: Vec::new(),
             failed: false,
-            scroll: gpui::ScrollHandle::new(),
+            scroll: gpui_kit::ScrollHandle::new(),
         }
     }
 }
@@ -182,6 +182,13 @@ pub struct WtPrompt {
     /// The round in flight. A counter and not a comparison of the answers: the
     /// worker seeds them for a `wt up`, so what comes back is not what went out.
     pub round: u64,
+    /// The console has been put away while the operation runs.
+    ///
+    /// **Hidden and not dropped**: the lines keep arriving, and the status
+    /// bar's "operation on the worktree…" is what brings the dialog back with
+    /// all of them. Dropping the console on "hide" left a `new` cloning
+    /// databases for minutes with nothing to look at but a balloon at the end.
+    pub hidden: bool,
 }
 
 impl WtPrompt {
@@ -198,6 +205,7 @@ impl WtPrompt {
             filters: BTreeMap::new(),
             asking: false,
             round: 0,
+            hidden: false,
         }
     }
 }
@@ -280,7 +288,7 @@ impl WtAction {
 /// A child entity because the dialog's frame closure runs inside `ClaudhubApp`'s own render, and what has to read the
 /// application must render after the parent has given the borrow back.
 pub(super) struct CreationView {
-    app: gpui::WeakEntity<ClaudhubApp>,
+    app: gpui_kit::WeakEntity<ClaudhubApp>,
 }
 
 impl Render for CreationView {
@@ -889,12 +897,45 @@ impl ClaudhubApp {
         if !ops.contains(&console.op) {
             return;
         }
+        let hidden = creation.hidden;
         if ok {
             self.creation = None;
-            window.close_all_dialogs(cx);
+            // Only the console's own dialog: with it hidden there is none, and
+            // closing "all" would take the settings one has since opened.
+            if !hidden {
+                window.close_all_dialogs(cx);
+            }
         } else {
             console.failed = true;
+            // A failure brings a hidden console back: the steps that led to
+            // the error are the one account there is of it, and the status
+            // bar's link goes with the operation it named.
+            if hidden {
+                creation.hidden = false;
+                self.open_creation_dialog(window, cx);
+            }
         }
+        cx.notify();
+    }
+
+    /// Whether a console runs behind the scenes — what the status bar offers
+    /// to bring back.
+    pub(super) fn console_hidden(&self) -> bool {
+        self.creation
+            .as_ref()
+            .is_some_and(|creation| creation.hidden && matches!(creation.stage, Stage::Running(_)))
+    }
+
+    /// Brings back the console put away with "hide", with what it said since.
+    pub(super) fn reopen_console(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(creation) = self.creation.as_mut() else {
+            return;
+        };
+        if !creation.hidden {
+            return;
+        }
+        creation.hidden = false;
+        self.open_creation_dialog(window, cx);
         cx.notify();
     }
 
@@ -940,7 +981,7 @@ impl ClaudhubApp {
     /// the operation runs, and the one Enter that closes it is the one on a
     /// console — hiding a running one, or dismissing a failed one.
     fn confirm_creation(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(creation) = self.creation.as_ref() else {
+        let Some(creation) = self.creation.as_mut() else {
             return true;
         };
         match &creation.stage {
@@ -956,8 +997,14 @@ impl ClaudhubApp {
                 }
                 false
             }
-            Stage::Running(_) => {
+            // A failed console is closed for good; a running one is only put
+            // away, and the status bar is where it comes back from.
+            Stage::Running(console) if console.failed => {
                 self.creation = None;
+                true
+            }
+            Stage::Running(_) => {
+                creation.hidden = true;
                 true
             }
         }
@@ -996,9 +1043,17 @@ impl ClaudhubApp {
                     ok.update(cx, |this, cx| this.confirm_creation(window, cx))
                 })
                 .on_cancel(move |_, _window, cx| {
-                    // Escape on a console hides it; the operation goes on, and
-                    // the balloon says how it ended.
-                    cancel.update(cx, |this, _| this.creation = None);
+                    // Escape on a running console hides it — the operation
+                    // goes on, and the status bar brings it back; on a failed
+                    // one, or a form, it closes for good.
+                    cancel.update(cx, |this, _| match this.creation.as_mut() {
+                        Some(creation)
+                            if matches!(&creation.stage, Stage::Running(c) if !c.failed) =>
+                        {
+                            creation.hidden = true
+                        }
+                        _ => this.creation = None,
+                    });
                     true
                 })
         });
@@ -1032,16 +1087,16 @@ impl ClaudhubApp {
     /// dispatch the very actions the keys dispatch — `Confirm` and `Cancel` —
     /// so both routes end in the same `on_ok` / `on_cancel`, the rule
     /// `ui::dialogs` is built on.
-    fn render_creation_footer(&self) -> gpui::AnyElement {
-        use gpui_component::dialog::{Cancel, Confirm};
-        let dispatch = |action: fn() -> Box<dyn gpui::Action>| {
-            move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+    fn render_creation_footer(&self) -> gpui_kit::AnyElement {
+        use gpui_kit::component::dialog::{Cancel, Confirm};
+        let dispatch = |action: fn() -> Box<dyn gpui_kit::Action>| {
+            move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut App| {
                 window.dispatch_action(action(), cx);
             }
         };
         let confirm = dispatch(|| Box::new(Confirm { secondary: false }));
         let cancel = dispatch(|| Box::new(Cancel));
-        let buttons: Vec<gpui::AnyElement> =
+        let buttons: Vec<gpui_kit::AnyElement> =
             match self.creation.as_ref().map(|creation| &creation.stage) {
                 Some(Stage::Running(console)) if console.failed => vec![Button::new("dialog-ok")
                     .label(tr!("dialog-close"))
@@ -1256,7 +1311,7 @@ impl ClaudhubApp {
         let accent = cx.theme().accent;
         let radius = cx.theme().radius;
 
-        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        let mut rows: Vec<gpui_kit::AnyElement> = Vec::new();
         let row = |index: usize,
                    name: String,
                    label: SharedString,
@@ -2122,7 +2177,7 @@ impl ClaudhubApp {
                 "copy",
                 tr!("action-copy-path"),
                 move |_app, _window, cx| {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
                         target.display().to_string(),
                     ));
                 },
@@ -2266,11 +2321,11 @@ impl ClaudhubApp {
     /// What can be done to a worktree, folded into a menu.
     pub(super) fn worktree_menu(
         &mut self,
-        menu: gpui_component::menu::PopupMenu,
+        menu: gpui_kit::component::menu::PopupMenu,
         main: PathBuf,
         worktree: PathBuf,
         cx: &mut Context<Self>,
-    ) -> gpui_component::menu::PopupMenu {
+    ) -> gpui_kit::component::menu::PopupMenu {
         let entity = cx.entity();
         self.worktree_actions(main, worktree, cx)
             .into_iter()
@@ -2411,8 +2466,8 @@ impl ClaudhubApp {
         worktree: &Path,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
-        use gpui_component::button::{Button, ButtonVariants as _};
-        use gpui_component::{Disableable as _, Sizable as _};
+        use gpui_kit::component::button::{Button, ButtonVariants as _};
+        use gpui_kit::component::{Disableable as _, Sizable as _};
 
         let up = self.wt_state(worktree)?.up?;
         // Starting or stopping is the only state the glyph cannot show, being
@@ -2517,7 +2572,7 @@ impl ClaudhubApp {
     /// Opens a repository. The native folder picker is asynchronous: the answer
     /// comes back in a task, hence the `spawn`.
     pub(super) fn prompt_open_repository(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
+        let paths = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
             files: false,
             directories: true,
             multiple: true,

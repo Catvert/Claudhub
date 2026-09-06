@@ -4,7 +4,7 @@
 //! `AssetSource` in `ui::mod`. gpui-component also resolves its own `IconName`
 //! under `icons/`, so every built-in icon we use must exist on disk.
 
-use gpui_component::Icon;
+use gpui_kit::component::Icon;
 
 /// The path an icon's name resolves to, interned.
 ///
@@ -15,7 +15,7 @@ use gpui_component::Icon;
 /// name maps to one path, for good.
 pub fn icon(name: &str) -> Icon {
     thread_local! {
-        static PATHS: std::cell::RefCell<std::collections::HashMap<Box<str>, gpui::SharedString>> =
+        static PATHS: std::cell::RefCell<std::collections::HashMap<Box<str>, gpui_kit::SharedString>> =
             std::cell::RefCell::new(std::collections::HashMap::new());
     }
     let path = PATHS.with(|paths| {
@@ -23,7 +23,7 @@ pub fn icon(name: &str) -> Icon {
         if let Some(path) = paths.get(name) {
             return path.clone();
         }
-        let path = gpui::SharedString::from(format!("icons/{name}.svg"));
+        let path = gpui_kit::SharedString::from(format!("icons/{name}.svg"));
         paths.insert(Box::from(name), path.clone());
         path
     });
@@ -44,6 +44,6 @@ pub fn icon(name: &str) -> Icon {
 /// dot of a state — answers to nothing but itself. This is for the ones that
 /// come in front of a name, and it exists so that they answer to one thing.
 pub fn glyph(name: &str) -> Icon {
-    use gpui_component::Sizable as _;
+    use gpui_kit::component::Sizable as _;
     icon(name).small()
 }

@@ -35,12 +35,12 @@ use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
 
-use gpui::{HighlightStyle, SharedString};
-use gpui_component::highlighter::{HighlightTheme, SyntaxHighlighter};
-use gpui_component::input::{
+use gpui_kit::component::highlighter::{HighlightTheme, SyntaxHighlighter};
+use gpui_kit::component::input::{
     EditorState, FoldRange, HighlightStyleResolver, InputEdit, InputHighlighter,
     InputHighlighterFactory, Rope,
 };
+use gpui_kit::{HighlightStyle, SharedString};
 
 use super::highlight::LineStyles;
 use crate::git::FileDiff;
@@ -689,7 +689,7 @@ fn fragment(
 /// grammar read the whole file as HTML text, so the body of a `@php` block, the
 /// directives, the echoes and the comments all arrived grey, while the tags
 /// around them were coloured. The seam that fixes it is
-/// `gpui_base::input::InputHighlighter`, which `set_highlighter_factory`
+/// `gpui_kit::base::input::InputHighlighter`, which `set_highlighter_factory`
 /// installs — that is why `gpui-base` is a direct dependency here as it is in
 /// `theme.rs`.
 ///
@@ -878,8 +878,8 @@ impl InputHighlighter for BladeHighlighter {
         _edit: Option<InputEdit>,
         text: &Rope,
         _folding: bool,
-        _window: &mut gpui::Window,
-        _cx: &mut gpui::Context<EditorState>,
+        _window: &mut gpui_kit::Window,
+        _cx: &mut gpui_kit::Context<EditorState>,
     ) {
         if text.len() > MAX_BYTES {
             return;

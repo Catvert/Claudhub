@@ -9,16 +9,16 @@
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gpui::{
-    canvas, div, prelude::*, px, uniform_list, Bounds, Context, Entity, Hsla, PathBuilder, Pixels,
-    Point, SharedString, Size, Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     menu::{ContextMenuExt as _, PopupMenu},
     resizable::{h_resizable, resizable_panel, v_resizable},
     v_flex, ActiveTheme, Selectable, Sizable,
+};
+use gpui_kit::{
+    canvas, div, prelude::*, px, uniform_list, Bounds, Context, Entity, Hsla, PathBuilder, Pixels,
+    Point, SharedString, Size, Window,
 };
 
 use crate::git::{DiffRange, GraphRow, LogRange};
@@ -55,7 +55,7 @@ fn limit_of(range: &LogRange) -> usize {
 /// A column's colour. The hues rotate so two neighbouring branches are not
 /// confused; they have no other meaning, git having no notion of branch
 /// identity at commit level.
-fn lane_color(column: usize, cx: &gpui::App) -> Hsla {
+fn lane_color(column: usize, cx: &gpui_kit::App) -> Hsla {
     const HUES: [f32; 6] = [0.58, 0.35, 0.08, 0.78, 0.14, 0.95];
     let theme = cx.theme();
     Hsla {
@@ -234,6 +234,50 @@ impl ClaudhubApp {
     }
 
     /// Shows a commit's diff.
+    /// Replays a commit of the history on the checkout being looked at.
+    ///
+    /// PhpStorm's gesture on a commit of another branch, and the same words:
+    /// the graph is where one finds the commit, so the graph is where one asks
+    /// for it. The worker answers with git's account, and a pick that stops on
+    /// a conflict lands in the conflicts panel through the status it re-reads.
+    pub(super) fn cherry_pick(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        self.start(
+            Some(worktree.clone()),
+            crate::runtime::protocol::Action::CherryPick,
+            Cmd::CherryPick { worktree, id },
+            cx,
+        );
+    }
+
+    /// Takes what the commit being read did to the file being read.
+    ///
+    /// Only from a commit's diff: the range names the commit, the selection
+    /// names the file, and the menu that offers it is only shown there.
+    pub(super) fn take_file_from_commit(&mut self, cx: &mut Context<Self>) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let Some(state) = self.active_review() else {
+            return;
+        };
+        let DiffRange::Commit { id, .. } = &state.range else {
+            return;
+        };
+        let Some(path) = state.selected.clone() else {
+            return;
+        };
+        let id = id.clone();
+        self.start(
+            Some(worktree.clone()),
+            crate::runtime::protocol::Action::CherryPick,
+            Cmd::TakeFile { worktree, id, path },
+            cx,
+        );
+    }
+
     pub(super) fn open_commit(&mut self, index: usize, cx: &mut Context<Self>) {
         // Read before the state is borrowed: the highlighting depends on the
         // theme, and `cx.theme()` borrows `cx`.
@@ -341,7 +385,7 @@ impl ClaudhubApp {
             if Self::commit_matches(&history.commits[index], &query) {
                 self.open_commit(index, cx);
                 self.history_scroll
-                    .scroll_to_item(index, gpui::ScrollStrategy::Center);
+                    .scroll_to_item(index, gpui_kit::ScrollStrategy::Center);
                 return;
             }
         }
@@ -878,8 +922,8 @@ fn render_commit(
     dimmed: bool,
     columns: Columns,
     entity: &Entity<ClaudhubApp>,
-    cx: &mut gpui::App,
-) -> gpui::AnyElement {
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::AnyElement {
     let (Some(commit), Some(row), Some(text)) = (
         history.commits.get(index),
         history.graph.get(index),
@@ -1011,7 +1055,7 @@ fn commit_menu(
     index: usize,
     entity: &Entity<ClaudhubApp>,
 ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
-    use gpui_component::menu::PopupMenuItem;
+    use gpui_kit::component::menu::PopupMenuItem;
 
     let entity = entity.clone();
     // The three strings, taken now: the closure outlives the row, and the
@@ -1023,11 +1067,11 @@ fn commit_menu(
     );
     move |menu, _window, _cx| {
         let copy = |text: String| {
-            move |_: &gpui::ClickEvent, _window: &mut Window, cx: &mut gpui::App| {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+            move |_: &gpui_kit::ClickEvent, _window: &mut Window, cx: &mut gpui_kit::App| {
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text.clone()));
             }
         };
-        let (for_base, for_tag) = (entity.clone(), entity.clone());
+        let (for_base, for_tag, for_pick) = (entity.clone(), entity.clone(), entity.clone());
         let at = id.clone();
         menu.item(
             PopupMenuItem::new(tr!("commit-copy-ref"))
@@ -1066,6 +1110,20 @@ fn commit_menu(
                     }
                 }),
         )
+        .separator()
+        // A commit of another branch, replayed here: the one write the graph
+        // offers, and the reason one opens the graph on all branches.
+        .item(
+            PopupMenuItem::new(tr!("commit-cherry-pick"))
+                .icon(icon("git-commit-horizontal"))
+                .on_click({
+                    let (entity, id) = (for_pick.clone(), at.clone());
+                    move |_, _window, cx| {
+                        let id = id.clone();
+                        entity.update(cx, |this, cx| this.cherry_pick(id, cx));
+                    }
+                }),
+        )
     }
 }
 
@@ -1073,7 +1131,12 @@ fn commit_menu(
 ///
 /// The lines are drawn before the bullet so it covers them: a curve arriving on
 /// a commit must disappear under it, not cross it.
-fn paint_graph(row: &GraphRow, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut gpui::App) {
+fn paint_graph(
+    row: &GraphRow,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut gpui_kit::App,
+) {
     let x = |column: usize| bounds.origin.x + LANE * column as f32 + LANE / 2.;
     let top = bounds.origin.y;
     let middle = top + bounds.size.height / 2.;
@@ -1098,8 +1161,8 @@ fn paint_graph(row: &GraphRow, bounds: Bounds<Pixels>, window: &mut Window, cx: 
     for &column in &row.through {
         let color = lane_color(column, cx);
         line(
-            gpui::point(x(column), top),
-            gpui::point(x(column), bottom),
+            gpui_kit::point(x(column), top),
+            gpui_kit::point(x(column), bottom),
             None,
             color,
         );
@@ -1111,8 +1174,8 @@ fn paint_graph(row: &GraphRow, bounds: Bounds<Pixels>, window: &mut Window, cx: 
     // exactly what we want to see at the ends.
     let own = lane_color(row.column, cx);
     line(
-        gpui::point(x(row.column), top),
-        gpui::point(x(row.column), bottom),
+        gpui_kit::point(x(row.column), top),
+        gpui_kit::point(x(row.column), bottom),
         None,
         own,
     );
@@ -1122,9 +1185,9 @@ fn paint_graph(row: &GraphRow, bounds: Bounds<Pixels>, window: &mut Window, cx: 
     for &column in &row.incoming {
         let color = lane_color(column, cx);
         line(
-            gpui::point(x(column), top),
-            gpui::point(x(row.column), middle),
-            Some(gpui::point(x(column), middle)),
+            gpui_kit::point(x(column), top),
+            gpui_kit::point(x(row.column), middle),
+            Some(gpui_kit::point(x(column), middle)),
             color,
         );
     }
@@ -1133,19 +1196,19 @@ fn paint_graph(row: &GraphRow, bounds: Bounds<Pixels>, window: &mut Window, cx: 
     for &column in &row.outgoing {
         let color = lane_color(column, cx);
         line(
-            gpui::point(x(row.column), middle),
-            gpui::point(x(column), bottom),
-            Some(gpui::point(x(column), middle)),
+            gpui_kit::point(x(row.column), middle),
+            gpui_kit::point(x(column), bottom),
+            Some(gpui_kit::point(x(column), middle)),
             color,
         );
     }
 
     // The bullet, last so it covers the lines reaching it.
     let radius = DOT / 2.;
-    window.paint_quad(gpui::fill(
+    window.paint_quad(gpui_kit::fill(
         Bounds::new(
-            gpui::point(x(row.column) - radius, middle - radius),
-            gpui::size(DOT, DOT),
+            gpui_kit::point(x(row.column) - radius, middle - radius),
+            gpui_kit::size(DOT, DOT),
         ),
         own,
     ));
@@ -1156,7 +1219,7 @@ mod tests {
     use super::*;
 
     fn shape(width: f32, height: f32) -> Shape {
-        Shape::of(gpui::size(px(width), px(height)))
+        Shape::of(gpui_kit::size(px(width), px(height)))
     }
 
     /// The side zones are tall and narrow: everything stacks, which is the only

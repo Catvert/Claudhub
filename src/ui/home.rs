@@ -21,8 +21,8 @@
 
 use std::path::PathBuf;
 
-use gpui::{div, prelude::*, px, AnyElement, App, Context, SharedString, Window};
-use gpui_component::{h_flex, v_flex, ActiveTheme, Sizable as _, StyledExt as _};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Sizable as _, StyledExt as _};
+use gpui_kit::{div, prelude::*, px, AnyElement, App, Context, SharedString, Window};
 
 use crate::git::Summary;
 use crate::tr;
@@ -551,7 +551,7 @@ fn render_home_keys(cx: &mut Context<ClaudhubApp>) -> AnyElement {
 /// `flex_1` with a floor on the width: two of them share a row while the panel
 /// is wide enough and wrap when it is not — the centre is a tab group one is
 /// free to split down to a column.
-fn card(title: &'static str, glyph: &'static str, cx: &App) -> gpui::Div {
+fn card(title: &'static str, glyph: &'static str, cx: &App) -> gpui_kit::Div {
     let theme = cx.theme();
     v_flex()
         .flex_1()
@@ -574,7 +574,7 @@ fn card(title: &'static str, glyph: &'static str, cx: &App) -> gpui::Div {
 }
 
 /// A figure with its glyph: `↑2`, `+410`.
-fn chip(glyph: &'static str, text: SharedString, tone: gpui::Hsla) -> gpui::Div {
+fn chip(glyph: &'static str, text: SharedString, tone: gpui_kit::Hsla) -> gpui_kit::Div {
     h_flex()
         .gap_0p5()
         .items_center()
@@ -588,9 +588,9 @@ fn chip(glyph: &'static str, text: SharedString, tone: gpui::Hsla) -> gpui::Div 
 fn link(
     id: &'static str,
     label: SharedString,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    on_click: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
-) -> gpui::Stateful<gpui::Div> {
+) -> gpui_kit::Stateful<gpui_kit::Div> {
     let theme = cx.theme();
     div()
         .id(id)

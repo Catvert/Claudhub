@@ -18,14 +18,14 @@
 
 use std::path::{Path, PathBuf};
 
-use gpui::{div, prelude::*, px, Context, SharedString, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     h_flex,
     input::Input,
     v_flex, ActiveTheme, Disableable, Selectable, Sizable, WindowExt,
 };
+use gpui_kit::{div, prelude::*, px, Context, SharedString, Window};
 
 use crate::git::DiffRange;
 use crate::runtime::protocol::Cmd;
@@ -326,7 +326,7 @@ impl ClaudhubApp {
         self.task_editing = Some(line);
         self.task_edit_input
             .update(cx, |input, cx| input.set_value(label, window, cx));
-        gpui::Focusable::focus_handle(&self.task_edit_input, cx).focus(window, cx);
+        gpui_kit::Focusable::focus_handle(&self.task_edit_input, cx).focus(window, cx);
         cx.notify();
     }
 
@@ -539,7 +539,7 @@ impl ClaudhubApp {
         if let Some(state) = self.active_review_mut() {
             state.diff_selection = Some((from, to));
         }
-        self.reveal_diff_row(from, gpui::ScrollStrategy::Center, cx);
+        self.reveal_diff_row(from, gpui_kit::ScrollStrategy::Center, cx);
         cx.notify();
     }
 
@@ -855,7 +855,7 @@ impl ClaudhubApp {
         title: SharedString,
         count: SharedString,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let collapsed = self.notes_collapsed.contains(key);
         h_flex()
             .w_full()
@@ -1165,7 +1165,7 @@ impl ClaudhubApp {
                     // up in the same place would be one too many.
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.notes_collapsed.remove("todo");
-                        gpui::Focusable::focus_handle(&this.task_input, cx).focus(window, cx);
+                        gpui_kit::Focusable::focus_handle(&this.task_input, cx).focus(window, cx);
                         cx.notify();
                     })),
             );

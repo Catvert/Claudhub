@@ -694,8 +694,11 @@ registre de gpui-component ne se charge **que depuis un répertoire**, qu'il
 surveille ; les thèmes sont donc écrits dans `<config>/themes/` au démarrage, et
 réécrits à chaque fois — pour en modifier un, le copier sous un autre nom.
 
-**Le fork de gpui-component** (voir `Cargo.toml`) est vingt-cinq commits
-au-dessus de leur `main`, chacun payé par un symptôme :
+**Le fork de GPUI Kit** (voir `Cargo.toml` et
+[`docs/gpui-kit-migration.md`](docs/gpui-kit-migration.md)) porte 34 commits
+au-dessus du tag `v0.6.0`, pour les comportements ci-dessous (certains ont
+plusieurs commits). Seuls `gpui-base` et `gpui-component` sont patchés ;
+la façade `gpui-kit` et GPUI viennent de crates.io :
 
 1. le `TabVariant` que `DockSkin` fait passer jusqu'au `TabBar` ;
 2. les coins en boîte bordée réservés au variant classique ;
@@ -836,6 +839,18 @@ souligné par une **troisième couche** de style (`highlight::underline`, après
 grammaire et les occurrences), et c'est l'entrée survolée qui efface le
 soulignement d'une autre — un texte est l'enfant de sa ligne, donc il parle en
 premier.
+
+**Le cherry-pick** vit dans le graphe des branches, comme dans PhpStorm : le
+clic droit sur un commit le rejoue sur HEAD (`repo::cherry_pick`, sans `-x`),
+et le clic droit dans le diff d'un commit reprend **ce que ce commit a fait à
+ce fichier** (`repo::take_from_commit`) — le changement, pas le contenu du
+fichier à ce commit, qui traînerait les autres commits l'ayant touché ; le
+patch de `git show` passe à `git apply --3way --index` par l'entrée standard
+(`git_feeding`), jamais par un fichier temporaire, qui serait un chemin à
+traduire sous Windows. Les deux relisent le statut **même en échec**
+(`write_then_refresh_anyway`) : un pick qui conflit a écrit ses marqueurs et
+`CHERRY_PICK_HEAD`, que `repo::pending` connaît déjà, et c'est le statut qui
+donne son travail au panneau des conflits.
 
 **La revue** (`review.rs`) — `DiffRange` n'a ni `Unstaged` ni `Staged` : la
 distinction est un détail de plomberie git, restitué par une case à cocher par

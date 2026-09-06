@@ -18,13 +18,13 @@
 
 use std::path::PathBuf;
 
-use gpui::{div, prelude::*, px, App, Context, Pixels, SharedString, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::Input,
     v_flex, ActiveTheme, Disableable as _, Sizable as _, WindowExt as _,
 };
+use gpui_kit::{div, prelude::*, px, App, Context, Pixels, SharedString, Window};
 
 use crate::runtime::protocol::Caller;
 use crate::runtime::Cmd;
@@ -78,10 +78,10 @@ pub struct SentryState {
     pub list_call: u64,
     pub event_call: u64,
     pub tags_call: u64,
-    pub scroll: gpui::UniformListScrollHandle,
+    pub scroll: gpui_kit::UniformListScrollHandle,
     /// The error's own scroll: a trace is read by scrolling, and the list one
     /// picked it from is not what moves under the wheel.
-    pub issue_scroll: gpui::UniformListScrollHandle,
+    pub issue_scroll: gpui_kit::UniformListScrollHandle,
     /// The body of the error's page, laid out. Built when its key moves and
     /// kept otherwise: a frame spent only scrolling then costs a slice of a
     /// `Vec` rather than a grammar pass per excerpt.
@@ -304,7 +304,7 @@ impl ClaudhubApp {
     pub(super) fn watch_sentry_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let input = self.sentry_project_input.clone();
         cx.subscribe_in(&input, window, |this, input, event, _window, cx| {
-            use gpui_component::input::InputEvent;
+            use gpui_kit::component::input::InputEvent;
             if !matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
                 return;
             }
@@ -483,7 +483,7 @@ impl ClaudhubApp {
                 .child(
                     v_flex()
                         .gap_2()
-                        .w(gpui::px(640.))
+                        .w(gpui_kit::px(640.))
                         .child(div().text_xs().child(tr!("agent-prompt-hint")))
                         // The notes' dialog and this one paint the same field
                         // with the same harness: see `ui::surface::text_field`.
@@ -589,7 +589,7 @@ impl ClaudhubApp {
                     }),
             )
             .child(
-                gpui::uniform_list("sentry-issues", count, {
+                gpui_kit::uniform_list("sentry-issues", count, {
                     let rows = rows.clone();
                     move |range, _window, cx| {
                         range
@@ -685,10 +685,10 @@ impl ClaudhubApp {
 
 /// What a row's paint needs, read once per frame rather than per row.
 struct Look {
-    row: gpui::Pixels,
-    muted: gpui::Hsla,
-    selected: gpui::Hsla,
-    hovered: gpui::Hsla,
+    row: gpui_kit::Pixels,
+    muted: gpui_kit::Hsla,
+    selected: gpui_kit::Hsla,
+    hovered: gpui_kit::Hsla,
 }
 
 impl Look {
@@ -709,8 +709,8 @@ fn sentry_row(
     rank: usize,
     selected: bool,
     look: &Look,
-    app: &gpui::Entity<ClaudhubApp>,
-) -> gpui::AnyElement {
+    app: &gpui_kit::Entity<ClaudhubApp>,
+) -> gpui_kit::AnyElement {
     let app = app.clone();
     let last = when(&issue.last_seen);
     let subtitle = [issue.culprit.as_str(), last.as_str()]
@@ -806,7 +806,7 @@ pub struct PaintedFrame {
     pub opens: bool,
     pub context: Vec<(usize, SharedString)>,
     /// One entry per line of `context`; empty where nothing colours it.
-    pub styles: Vec<Vec<(std::ops::Range<usize>, gpui::HighlightStyle)>>,
+    pub styles: Vec<Vec<(std::ops::Range<usize>, gpui_kit::HighlightStyle)>>,
 }
 
 /// What the body was laid out for. It moves, the body is built again.
@@ -1083,7 +1083,7 @@ impl ClaudhubApp {
                                 .icon(icon("copy"))
                                 .label(SharedString::from(short_id.clone()))
                                 .on_click(cx.listener(move |this, _, _window, cx| {
-                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
                                         id.clone(),
                                     ));
                                     this.announce(tr!("sentry-id-copied", { id: id.clone() }), cx);
@@ -1163,7 +1163,7 @@ impl ClaudhubApp {
                         &handle,
                         crate::ui::motion::Axes::Vertical,
                         window,
-                        gpui::uniform_list("sentry-rows", count, move |range, _window, _cx| {
+                        gpui_kit::uniform_list("sentry-rows", count, move |range, _window, _cx| {
                             range
                                 .map(|index| sentry_row_of(&rows[index], &frames, &look, &entity))
                                 .collect::<Vec<_>>()
@@ -1182,13 +1182,13 @@ impl ClaudhubApp {
 struct CodeLook {
     line: Pixels,
     mono: SharedString,
-    muted: gpui::Hsla,
+    muted: gpui_kit::Hsla,
     code: Pixels,
-    marked: gpui::Hsla,
-    ground: gpui::Hsla,
-    info: gpui::Hsla,
-    primary: gpui::Hsla,
-    folded: gpui::Hsla,
+    marked: gpui_kit::Hsla,
+    ground: gpui_kit::Hsla,
+    info: gpui_kit::Hsla,
+    primary: gpui_kit::Hsla,
+    folded: gpui_kit::Hsla,
 }
 
 /// One line of the body.
@@ -1200,8 +1200,8 @@ fn sentry_row_of(
     row: &Row,
     frames: &std::rc::Rc<Vec<PaintedFrame>>,
     look: &CodeLook,
-    app: &gpui::Entity<ClaudhubApp>,
-) -> gpui::AnyElement {
+    app: &gpui_kit::Entity<ClaudhubApp>,
+) -> gpui_kit::AnyElement {
     let base = || h_flex().h(look.line).w_full().items_center().gap_2();
     match row {
         Row::Section(section, title) => {
@@ -1233,7 +1233,7 @@ fn sentry_row_of(
                 div().flex_1().h(px(6.)).rounded_sm().bg(look.folded).child(
                     div()
                         .h_full()
-                        .w(gpui::relative(f32::from(*share) / 100.))
+                        .w(gpui_kit::relative(f32::from(*share) / 100.))
                         .rounded_sm()
                         .bg(look.primary),
                 ),
@@ -1308,7 +1308,7 @@ fn sentry_row_of(
             let culprit = *number == frame.line;
             let styles = frame.styles.get(*index).cloned().unwrap_or_default();
             let painted = match styles.is_empty() {
-                false => gpui::StyledText::new(text.clone())
+                false => gpui_kit::StyledText::new(text.clone())
                     .with_highlights(styles)
                     .into_any_element(),
                 true => div().child(text.clone()).into_any_element(),
@@ -1364,7 +1364,7 @@ fn when(text: &str) -> String {
 }
 
 /// A word in a tinted pill: a level, a status, "app".
-fn sentry_badge(text: &str, tone: gpui::Hsla) -> impl IntoElement {
+fn sentry_badge(text: &str, tone: gpui_kit::Hsla) -> impl IntoElement {
     div()
         .px_1p5()
         .rounded_sm()
@@ -1377,7 +1377,7 @@ fn sentry_badge(text: &str, tone: gpui::Hsla) -> impl IntoElement {
 /// What a level is worth in colour. An unknown one is neutral rather than
 /// alarming: Sentry's list is open, and a word we have never seen is not
 /// necessarily bad news.
-fn level_tone(level: &str, cx: &App) -> gpui::Hsla {
+fn level_tone(level: &str, cx: &App) -> gpui_kit::Hsla {
     match level {
         "fatal" | "error" => cx.theme().danger,
         "warning" => cx.theme().warning,
@@ -1388,7 +1388,7 @@ fn level_tone(level: &str, cx: &App) -> gpui::Hsla {
 
 /// And what a status is worth. Resolved is the one piece of good news this
 /// page carries.
-fn status_tone(status: &str, cx: &App) -> gpui::Hsla {
+fn status_tone(status: &str, cx: &App) -> gpui_kit::Hsla {
     match status {
         "resolved" => cx.theme().success,
         "ignored" => cx.theme().muted_foreground,

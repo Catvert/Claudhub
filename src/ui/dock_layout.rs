@@ -19,10 +19,10 @@
 //! What it deliberately does not hold is any second opinion about where a panel
 //! is. The tree answers that, always.
 
-use gpui::{prelude::*, px, App, Context, Entity, Window};
-use gpui_component::dock::{
+use gpui_kit::component::dock::{
     BasePanelView, DockArea, DockLayout, DockPlacement, PanelInfo, PanelState,
 };
+use gpui_kit::{prelude::*, px, App, Context, Entity, Window};
 
 use crate::ui::rails::{self, Anchor, Half, Side};
 
@@ -70,8 +70,8 @@ pub fn build(
     let area = cx.entity().downgrade();
     let state = PanelState::new(name);
     let info = PanelInfo::panel(serde_json::Value::Null);
-    let context = gpui_component::dock::PanelBuildContext::new(area, &state, &info);
-    gpui_component::dock::PanelRegistry::build_panel(name, context, window, cx)
+    let context = gpui_kit::component::dock::PanelBuildContext::new(area, &state, &info);
+    gpui_kit::component::dock::PanelRegistry::build_panel(name, context, window, cx)
 }
 
 /// One half of one edge, in the table's order.
@@ -118,8 +118,8 @@ fn edge(side: Side, window: &mut Window, cx: &mut Context<DockArea>) -> DockLayo
         .filter_map(|half| tools_of(Anchor::new(side, *half), window, cx))
         .collect();
     let split = match side.axis() {
-        gpui::Axis::Horizontal => DockLayout::h_split(),
-        gpui::Axis::Vertical => DockLayout::v_split(),
+        gpui_kit::Axis::Horizontal => DockLayout::h_split(),
+        gpui_kit::Axis::Vertical => DockLayout::v_split(),
     };
     match held.len() {
         // An edge nothing asked for still needs a root the area can hold.
@@ -209,7 +209,7 @@ pub fn install_default_layout(
 /// Walked every frame: four regions, a couple of dozen nodes, one table lookup
 /// each. Cheaper than keeping anything in step, and it cannot be wrong.
 pub fn seats(area: &DockArea, cx: &App) -> Vec<rails::Seat> {
-    use gpui_component::dock::{PaneNode, PaneRef};
+    use gpui_kit::component::dock::{PaneNode, PaneRef};
 
     fn walk(
         node: &PaneNode,
@@ -296,8 +296,8 @@ pub fn seats(area: &DockArea, cx: &App) -> Vec<rails::Seat> {
 pub(super) fn target_for(
     area: &DockArea,
     anchor: Anchor,
-) -> Option<gpui_component::dock::InsertTarget> {
-    use gpui_component::dock::{InsertTarget, PaneRef};
+) -> Option<gpui_kit::component::dock::InsertTarget> {
+    use gpui_kit::component::dock::{InsertTarget, PaneRef};
 
     let tree = area.layout(placement_of(anchor.side))?;
     let root = tree.root();
@@ -323,8 +323,8 @@ pub(super) fn target_for(
         _ => {
             let node = first_group(root).unwrap_or_else(|| root.id());
             let beyond = match anchor.side.axis() {
-                gpui::Axis::Horizontal => gpui_base::Placement::Right,
-                gpui::Axis::Vertical => gpui_base::Placement::Bottom,
+                gpui_kit::Axis::Horizontal => gpui_kit::base::Placement::Right,
+                gpui_kit::Axis::Vertical => gpui_kit::base::Placement::Bottom,
             };
             match anchor.half {
                 Half::Start => Some(join(node)),
@@ -382,15 +382,15 @@ pub fn move_to(
 ///
 /// **By name**, as everything else here: a layout read back from `layout.json`
 /// was never built by us, so nothing outside the tree holds its entity.
-fn seat_id(area: &DockArea, panel: &str, cx: &App) -> Option<gpui_component::dock::PanelId> {
-    use gpui_component::dock::{PaneNode, PaneRef};
+fn seat_id(area: &DockArea, panel: &str, cx: &App) -> Option<gpui_kit::component::dock::PanelId> {
+    use gpui_kit::component::dock::{PaneNode, PaneRef};
 
     fn walk(
         node: &PaneNode,
         area: &DockArea,
         panel: &str,
         cx: &App,
-    ) -> Option<gpui_component::dock::PanelId> {
+    ) -> Option<gpui_kit::component::dock::PanelId> {
         match node.kind() {
             PaneRef::Tabs { panels, .. } => panels.iter().copied().find(|id| {
                 area.panel(*id)
@@ -428,7 +428,7 @@ pub fn shift(
     window: &mut Window,
     cx: &mut App,
 ) {
-    use gpui_component::dock::{InsertTarget, PaneNode, PaneRef};
+    use gpui_kit::component::dock::{InsertTarget, PaneNode, PaneRef};
 
     dock.update(cx, |area: &mut DockArea, cx: &mut Context<DockArea>| {
         let Some(id) = seat_id(area, panel, cx) else {
@@ -437,8 +437,8 @@ pub fn shift(
         // The group holding it, and where it sits among its tabs.
         fn group_of(
             node: &PaneNode,
-            id: gpui_component::dock::PanelId,
-        ) -> Option<(gpui_component::dock::NodeId, usize, usize)> {
+            id: gpui_kit::component::dock::PanelId,
+        ) -> Option<(gpui_kit::component::dock::NodeId, usize, usize)> {
             match node.kind() {
                 PaneRef::Tabs { panels, .. } => panels
                     .iter()
@@ -481,8 +481,10 @@ pub fn shift(
 }
 
 /// The first tab group of a subtree, in depth order.
-fn first_group(node: &gpui_component::dock::PaneNode) -> Option<gpui_component::dock::NodeId> {
-    use gpui_component::dock::PaneRef;
+fn first_group(
+    node: &gpui_kit::component::dock::PaneNode,
+) -> Option<gpui_kit::component::dock::NodeId> {
+    use gpui_kit::component::dock::PaneRef;
     match node.kind() {
         PaneRef::Tabs { .. } => Some(node.id()),
         PaneRef::Split { children, .. } => children.iter().find_map(first_group),
@@ -513,7 +515,7 @@ impl crate::ui::app::ClaudhubApp {
         // undefined height, which is zero. The whole window came up empty, rails
         // and nothing else. A row stretches its children by default, which is
         // what a column between two rails needs.
-        gpui::div()
+        gpui_kit::div()
             .flex()
             .flex_row()
             .flex_1()
@@ -521,7 +523,7 @@ impl crate::ui::app::ClaudhubApp {
             .min_w_0()
             .child(self.render_rail(&rails[Side::Left.index()], cx))
             .child(
-                gpui::div()
+                gpui_kit::div()
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
@@ -559,7 +561,7 @@ impl crate::ui::app::ClaudhubApp {
         &mut self,
         half: Half,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let seats = self.seats(cx);
         let (folded, off) = self.rail_states();
         let rail = rails::rails(&seats, &folded, &off)
@@ -572,9 +574,9 @@ impl crate::ui::app::ClaudhubApp {
         };
         let buttons = self.rail_buttons(run, cx);
         if buttons.is_empty() {
-            return gpui::Empty.into_any_element();
+            return gpui_kit::Empty.into_any_element();
         }
-        gpui_component::h_flex()
+        gpui_kit::component::h_flex()
             .flex_none()
             .gap(px(2.))
             .children(buttons)
@@ -590,7 +592,7 @@ impl crate::ui::app::ClaudhubApp {
     /// Nothing when that edge holds no view: an empty rail paints nothing, and
     /// a fold button for a zone with nothing in it would be the one thing left
     /// of it.
-    pub(super) fn render_bottom_zone(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(super) fn render_bottom_zone(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let seats = self.seats(cx);
         let (folded, off) = self.rail_states();
         let empty = rails::rails(&seats, &folded, &off)
@@ -598,7 +600,7 @@ impl crate::ui::app::ClaudhubApp {
             .nth(Side::Bottom.index())
             .is_none_or(|rail| rail.is_empty());
         if empty {
-            return gpui::Empty.into_any_element();
+            return gpui_kit::Empty.into_any_element();
         }
         self.zone_button(Side::Bottom, cx)
     }
@@ -641,16 +643,16 @@ impl crate::ui::app::ClaudhubApp {
     /// button puts its half away and leaves the other half filling the column;
     /// this is the gesture for "not this column at all", which until now took
     /// one press per half and was said by neither.
-    fn zone_button(&mut self, side: Side, cx: &mut Context<Self>) -> gpui::AnyElement {
-        use gpui_component::button::{Button, ButtonVariants as _};
-        use gpui_component::Sizable as _;
+    fn zone_button(&mut self, side: Side, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        use gpui_kit::component::button::{Button, ButtonVariants as _};
+        use gpui_kit::component::Sizable as _;
 
         let open = self.dock.read(cx).is_dock_open(placement_of(side));
         let label = match open {
             true => crate::tr!("rail-fold-zone"),
             false => crate::tr!("rail-unfold-zone"),
         };
-        Button::new(gpui::SharedString::from(format!(
+        Button::new(gpui_kit::SharedString::from(format!(
             "rail-zone-{}",
             side.index()
         )))
@@ -672,10 +674,10 @@ impl crate::ui::app::ClaudhubApp {
         &mut self,
         buttons: &[rails::Button],
         cx: &mut Context<Self>,
-    ) -> Vec<gpui::AnyElement> {
-        use gpui_component::button::{Button, ButtonVariants as _};
-        use gpui_component::menu::ContextMenuExt as _;
-        use gpui_component::Sizable as _;
+    ) -> Vec<gpui_kit::AnyElement> {
+        use gpui_kit::component::button::{Button, ButtonVariants as _};
+        use gpui_kit::component::menu::ContextMenuExt as _;
+        use gpui_kit::component::Sizable as _;
 
         let seats = self.seats(cx);
         let app = cx.entity();
@@ -687,7 +689,7 @@ impl crate::ui::app::ClaudhubApp {
                 // The panel **and its place**: with terminals on two edges
                 // there are two buttons of one name, and two elements sharing
                 // an id is one of them not being drawn.
-                Button::new(gpui::SharedString::from(format!(
+                Button::new(gpui_kit::SharedString::from(format!(
                     "rail-{panel}-{}-{}",
                     anchor.side.index(),
                     matches!(anchor.half, rails::Half::End) as u8
@@ -719,7 +721,7 @@ impl crate::ui::app::ClaudhubApp {
                     let app = app.clone();
                     let targets = rails::moves(panel, &seats);
                     move |menu, _window, _cx| {
-                        use gpui_component::menu::{PopupMenu, PopupMenuItem};
+                        use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
                         // **Along the rail first.** Where a view sits on
                         // its own edge is what one adjusts often — the
                         // files before the changes — and sending it to
@@ -774,18 +776,18 @@ impl crate::ui::app::ClaudhubApp {
     /// The top half is pinned to the start and the bottom half pushed to the
     /// end, which is what makes the two legible as two: a single run of nine
     /// buttons says nothing about which of them can be on screen together.
-    fn render_rail(&mut self, rail: &rails::Rail, cx: &mut Context<Self>) -> gpui::AnyElement {
-        use gpui_component::{v_flex, ActiveTheme as _};
+    fn render_rail(&mut self, rail: &rails::Rail, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        use gpui_kit::component::{v_flex, ActiveTheme as _};
 
         if rail.is_empty() {
             // Nothing to show, nothing painted — not an empty band.
-            return gpui::Empty.into_any_element();
+            return gpui_kit::Empty.into_any_element();
         }
         let top = self.rail_buttons(&rail.start, cx);
         let bottom = self.rail_buttons(&rail.end, cx);
         let zone = self.zone_button(rail.side, cx);
         let run =
-            |buttons: Vec<gpui::AnyElement>| v_flex().flex_none().gap(px(2.)).children(buttons);
+            |buttons: Vec<gpui_kit::AnyElement>| v_flex().flex_none().gap(px(2.)).children(buttons);
         // The flex is returned directly rather than wrapped: a `div()` is a
         // **block**, where a child's `h_full` resolves against an undefined
         // height.
