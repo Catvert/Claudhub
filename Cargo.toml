@@ -1,6 +1,6 @@
 [package]
 name = "claudhub"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 description = "Poste de travail pour la revue de code et le pilotage d'agents de codage en terminal, par worktree git"
 license = "Apache-2.0"
@@ -211,5 +211,5 @@ windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] 
 
 # Patches applicatifs portés sur le tag upstream v0.6.0.
 [patch.crates-io]
-gpui-base = { git = "https://github.com/Catvert/gpui-component", rev = "475a83b50844c2a209f76e73d72b20c6fe023c9d" }
-gpui-component = { git = "https://github.com/Catvert/gpui-component", rev = "475a83b50844c2a209f76e73d72b20c6fe023c9d" }
+gpui-base = { git = "https://github.com/Catvert/gpui-kit", rev = "475a83b50844c2a209f76e73d72b20c6fe023c9d" }
+gpui-component = { git = "https://github.com/Catvert/gpui-kit", rev = "475a83b50844c2a209f76e73d72b20c6fe023c9d" }

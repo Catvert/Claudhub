@@ -51,9 +51,11 @@ changing the version number alone cannot replace them.
 
 ## Reproducible dependency source
 
-The rebased series is on [Catvert/gpui-component, branch claudhub-v0.6.0](https://github.com/Catvert/gpui-component/tree/claudhub-v0.6.0),
-at `475a83b50844c2a209f76e73d72b20c6fe023c9d`. The original `claudhub` branch
-is preserved. Cargo patches pin that exact revision for both layers; there
+The fork is now [Catvert/gpui-kit](https://github.com/Catvert/gpui-kit). Its
+default branch, `master`, contains the rebased series, merged at
+`78aee01972ca9b845794d536e3691d718bc89e3d`. The original `claudhub` branch
+is preserved. Cargo patches pin the series tip
+`475a83b50844c2a209f76e73d72b20c6fe023c9d` for both layers; there
 are no local path dependencies. The unchanged `gpui-component-macros` and
 `gpui-kit-assets` packages follow the fork through its workspace dependencies.
 Kit itself and GPUI remain registry packages.
