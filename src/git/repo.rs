@@ -56,12 +56,19 @@ impl Repo {
             start.join(common)
         };
         let common = common.canonicalize().unwrap_or(common);
-        // `.git/` → the repository; a bare repository has no checkout and has no
-        // business here, but its parent is still a usable starting point.
-        let main = common
-            .parent()
-            .ok_or_else(|| anyhow!("repository with no working tree: {}", common.display()))?
-            .to_path_buf();
+        // Absorbed submodules keep their git directory under the parent's
+        // `.git/modules/`; its parent is not a checkout. core.worktree is
+        // relative to that git directory, also when opened from a linked tree.
+        let configured = git_opt(start, &["config", "--get", "core.worktree"]);
+        let main = if let Some(worktree) = configured {
+            let main = common.join(worktree);
+            main.canonicalize().unwrap_or(main)
+        } else {
+            common
+                .parent()
+                .ok_or_else(|| anyhow!("repository with no working tree: {}", common.display()))?
+                .to_path_buf()
+        };
         Ok(Self { main })
     }
 
@@ -77,7 +84,13 @@ impl Repo {
     /// the one the sidebar expects).
     pub fn worktrees(&self) -> Result<Vec<Worktree>> {
         let out = git(&self.main, &["worktree", "list", "--porcelain", "-z"])?;
-        Ok(parse_worktree_list(&out))
+        let mut worktrees = parse_worktree_list(&out);
+        // Git reports an absorbed submodule's git directory for the first
+        // worktree. Discovery has resolved its actual checkout above.
+        if let Some(main) = worktrees.first_mut() {
+            main.path = self.main.clone();
+        }
+        Ok(worktrees)
     }
 
     pub fn add_worktree(&self, path: &Path, branch: &str, from: Option<&str>) -> Result<()> {
@@ -129,40 +142,20 @@ impl Repo {
 /// the review view calls them on the selected worktree, which is data refreshed
 /// continuously and not an object we hold.
 pub fn stage(dir: &Path, paths: &[PathBuf]) -> Result<()> {
-    if paths.is_empty() {
-        return Ok(());
-    }
-    let mut args: Vec<OsString> = vec!["add".into(), "--".into()];
-    args.extend(paths.iter().map(OsString::from));
-    git(dir, &args).map(|_| ())
+    on_file_repositories(dir, paths, &["add"])
 }
 
 /// Unstages without touching the file. `restore --staged` is the modern
 /// wording of `reset HEAD --`, and it also works on a repository with no
 /// commit, where `reset HEAD` fails for want of a HEAD.
 pub fn unstage(dir: &Path, paths: &[PathBuf]) -> Result<()> {
-    if paths.is_empty() {
-        return Ok(());
-    }
-    let mut args: Vec<OsString> = vec!["restore".into(), "--staged".into(), "--".into()];
-    args.extend(paths.iter().map(OsString::from));
-    git(dir, &args).map(|_| ())
+    on_file_repositories(dir, paths, &["restore", "--staged"])
 }
 
 /// Discards the working tree's changes. Destructive and without a net: nothing
 /// in git makes it possible to get them back afterwards.
 pub fn discard(dir: &Path, paths: &[PathBuf]) -> Result<()> {
-    if paths.is_empty() {
-        return Ok(());
-    }
-    let mut args: Vec<OsString> = vec![
-        "restore".into(),
-        "--worktree".into(),
-        "--source=HEAD".into(),
-        "--".into(),
-    ];
-    args.extend(paths.iter().map(OsString::from));
-    git(dir, &args).map(|_| ())
+    on_file_repositories(dir, paths, &["restore", "--worktree", "--source=HEAD"])
 }
 
 /// Deletes files git does not track.
@@ -172,12 +165,41 @@ pub fn discard(dir: &Path, paths: &[PathBuf]) -> Result<()> {
 /// destroy a versioned file. `-d` covers directories, `-f` is required by git
 /// for any deletion.
 pub fn clean(dir: &Path, paths: &[PathBuf]) -> Result<()> {
-    if paths.is_empty() {
-        return Ok(());
+    on_file_repositories(dir, paths, &["clean", "-f", "-d"])
+}
+
+/// A nested file belongs to the innermost initialized repository above it.
+/// Stop before the final component: staging a gitlink updates its parent.
+pub(crate) fn file_repository(dir: &Path, path: &Path) -> (PathBuf, PathBuf) {
+    let mut prefix = PathBuf::new();
+    let mut owner = PathBuf::new();
+    if let Some(parent) = path.parent() {
+        for part in parent.components() {
+            prefix.push(part);
+            if dir.join(&prefix).join(".git").exists() {
+                owner = prefix.clone();
+            }
+        }
     }
-    let mut args: Vec<OsString> = vec!["clean".into(), "-f".into(), "-d".into(), "--".into()];
-    args.extend(paths.iter().map(OsString::from));
-    git(dir, &args).map(|_| ())
+    (
+        dir.join(&owner),
+        path.strip_prefix(&owner).unwrap_or(path).to_path_buf(),
+    )
+}
+
+fn on_file_repositories(dir: &Path, paths: &[PathBuf], command: &[&str]) -> Result<()> {
+    let mut grouped = std::collections::BTreeMap::<PathBuf, Vec<PathBuf>>::new();
+    for path in paths {
+        let (owner, local) = file_repository(dir, path);
+        grouped.entry(owner).or_default().push(local);
+    }
+    for (owner, paths) in grouped {
+        let mut args: Vec<OsString> = command.iter().map(OsString::from).collect();
+        args.push("--".into());
+        args.extend(paths.into_iter().map(OsString::from));
+        git(&owner, &args)?;
+    }
+    Ok(())
 }
 
 /// Puts the whole worktree back to `HEAD`: index, tracked files, and the
@@ -214,6 +236,8 @@ pub fn rollback_all(dir: &Path) -> Result<()> {
 /// that last empty line as added the moment the file was opened. A file ending
 /// with two blank lines got two.
 pub fn head_blob(dir: &Path, path: &Path) -> Option<String> {
+    let (owner, local) = file_repository(dir, path);
+    let (dir, path) = (owner.as_path(), local.as_path());
     let path = path.to_str()?;
     git_blob(dir, &["show", &format!("HEAD:./{path}")]).ok()
 }
@@ -697,7 +721,8 @@ pub fn resolve(dir: &Path, path: &Path, ours: bool) -> Result<()> {
     stage(dir, std::slice::from_ref(&path.to_path_buf()))
 }
 
-/// Every tracked file and every non-ignored new one, in **a single call**.
+/// Every tracked file and every non-ignored new one, in one call per checkout,
+/// including initialized submodules. Paths stay relative to the parent.
 ///
 /// It is already what the file watcher does to decide what to observe, and for
 /// the same reason: a Laravel project has forty thousand directories, and a
@@ -716,11 +741,39 @@ pub fn resolve(dir: &Path, path: &Path, ours: bool) -> Result<()> {
 /// put in the journal: `ls-files --ignored needs some exclude pattern`. The
 /// union therefore takes one call for each half.
 pub fn list_files(dir: &Path, ignored: bool) -> Result<Files> {
-    let mut files: Vec<PathBuf> = list_of(dir, &["--cached", "--others", "--exclude-standard"])?
-        .into_iter()
-        .map(|entry| entry.path)
+    list_files_in(dir, ignored, &mut std::collections::HashSet::new())
+}
+
+fn list_files_in(
+    dir: &Path,
+    ignored: bool,
+    seen: &mut std::collections::HashSet<PathBuf>,
+) -> Result<Files> {
+    if !seen.insert(dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())) {
+        return Ok(Files::default());
+    }
+    // The index mode distinguishes a gitlink from a file without a stat per
+    // path. -t disambiguates untracked names containing spaces and tabs from
+    // the metadata preceding a tracked path.
+    let entries = list_of(
+        dir,
+        &[
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--stage",
+            "-t",
+        ],
+    )?;
+    let mut submodules: Vec<PathBuf> = entries
+        .iter()
+        .filter(|entry| entry.dir)
+        .map(|entry| entry.path.clone())
         .collect();
-    let (excluded, dirs) = if ignored {
+    submodules.sort_unstable();
+    submodules.dedup();
+    let mut files: Vec<PathBuf> = entries.into_iter().map(|entry| entry.path).collect();
+    let (mut excluded, mut dirs) = if ignored {
         // `--directory` is what makes this affordable: git stops at a folder it
         // excludes whole rather than walking it. On a Laravel checkout that is
         // five hundred and twenty entries instead of a hundred and fifty-four
@@ -746,16 +799,29 @@ pub fn list_files(dir: &Path, ignored: bool) -> Result<Files> {
             .collect();
         let excluded: Vec<PathBuf> = excluded.into_iter().map(|entry| entry.path).collect();
         files.extend(excluded.iter().cloned());
-        // Two lists, each sorted, are not a sorted list — and the tree is built
-        // from the order git gives.
-        files.sort_unstable();
         (excluded, dirs)
     } else {
         (Vec::new(), Vec::new())
     };
-    // `--cached --others` may return the same path twice; the list being sorted,
-    // a local dedup is enough.
-    files.dedup();
+    for path in submodules {
+        // Even a deinitialized submodule is a folder, never a text file.
+        dirs.push(path.clone());
+        let checkout = dir.join(&path);
+        if !checkout.join(".git").exists() {
+            continue;
+        }
+        let child = list_files_in(&checkout, ignored, seen)
+            .with_context(|| format!("listing submodule {}", checkout.display()))?;
+        files.extend(child.all.into_iter().map(|file| path.join(file)));
+        excluded.extend(child.ignored.into_iter().map(|file| path.join(file)));
+        dirs.extend(child.dirs.into_iter().map(|child| path.join(child)));
+    }
+    // Untracked, tracked and nested lists each have their own order, and a
+    // conflicted index can name a gitlink more than once.
+    for paths in [&mut files, &mut excluded, &mut dirs] {
+        paths.sort_unstable();
+        paths.dedup();
+    }
     Ok(Files {
         all: files,
         ignored: excluded,
@@ -774,8 +840,9 @@ pub fn list_files(dir: &Path, ignored: bool) -> Result<Files> {
 pub struct Files {
     pub all: Vec<PathBuf>,
     pub ignored: Vec<PathBuf>,
-    /// Those of `ignored` that are **directories git stopped at**, and whose
-    /// contents are therefore unknown. Sorted, and a subset of `ignored`.
+    /// Explicit directories: submodule roots and ignored folders Git stopped
+    /// at. Sorted, and a subset of `all`. Only the intersection with `ignored`
+    /// needs a lazy directory read; initialized submodules are already listed.
     ///
     /// They are named rather than left to be guessed: a path with nothing under
     /// it is a file as far as a tree built from paths can tell, and `vendor/`
@@ -793,13 +860,31 @@ fn list_of(dir: &Path, flags: &[&str]) -> Result<Vec<Listed>> {
     let mut args: Vec<&str> = vec!["ls-files", "-z"];
     args.extend_from_slice(flags);
     let out = git(dir, &args)?;
+    let indexed = flags.contains(&"--stage");
     // The trailing slash is how `--directory` says "and I did not look inside".
     // It has to be read off the text: `PathBuf` drops it, and `vendor/` and
     // `vendor` are the same path once parsed.
     Ok(split_nul(&out)
-        .map(|text| Listed {
-            dir: text.ends_with('/'),
-            path: PathBuf::from(text.trim_end_matches('/')),
+        .filter_map(|text| {
+            let (text, submodule) = if indexed {
+                if let Some(path) = text.strip_prefix("? ") {
+                    (path, false)
+                } else {
+                    let (header, path) = text.split_once('\t')?;
+                    (
+                        path,
+                        header
+                            .get(2..)
+                            .is_some_and(|mode| mode.starts_with("160000 ")),
+                    )
+                }
+            } else {
+                (text, false)
+            };
+            Some(Listed {
+                dir: submodule || text.ends_with('/'),
+                path: PathBuf::from(text.trim_end_matches('/')),
+            })
         })
         .collect())
 }

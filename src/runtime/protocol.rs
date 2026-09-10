@@ -1234,8 +1234,8 @@ pub enum Evt {
         /// The subset of `files` that `.gitignore` excludes, sorted. Empty when
         /// they were not asked for.
         ignored: Vec<PathBuf>,
-        /// Those of `ignored` that are directories nobody has looked inside,
-        /// sorted. See `git::Files::dirs`.
+        /// Explicit directories, including submodule roots. Only ignored
+        /// directories need a lazy read. Sorted. See `git::repo::Files::dirs`.
         dirs: Vec<PathBuf>,
     },
     /// What one level of an excluded directory holds, folders and files apart.

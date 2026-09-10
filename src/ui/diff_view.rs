@@ -1494,7 +1494,11 @@ impl ClaudhubApp {
                 None => message,
             };
         };
-        let stageable = state.range == DiffRange::Working;
+        let stageable = state.range == DiffRange::Working
+            && !state
+                .status
+                .file(&path)
+                .is_some_and(|file| file.submodule.is_some());
         let diff = state.diff.clone();
         let settings = crate::ui::settings::Settings::global(cx);
         let (split, whole_file) = (settings.diff_split, settings.diff_whole_file);

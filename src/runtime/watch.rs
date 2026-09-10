@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use notify::RecursiveMode;
@@ -34,6 +34,10 @@ enum Order {
 /// write would amount to running `git status` in a loop. A quarter of a second
 /// stays imperceptible and reduces a burst to a single refresh.
 const DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// Git metadata can live outside the checkout (linked trees, submodules).
+/// Translate its events back to the checkout the UI actually watches.
+type GitWatches = HashMap<PathBuf, Vec<PathBuf>>;
 
 /// The interface-side facade: all it does is send orders.
 ///
@@ -59,6 +63,8 @@ impl Watcher {
         let (raw_tx, raw_rx) = mpsc::channel();
         let mut debouncer = new_debouncer(DEBOUNCE, None, raw_tx)?;
         let (order_tx, order_rx) = mpsc::channel::<Order>();
+        let git_watches = Arc::new(Mutex::new(GitWatches::new()));
+        let order_git_watches = git_watches.clone();
 
         // One thread to set up and remove the watches, long operations on a
         // large tree.
@@ -66,7 +72,7 @@ impl Watcher {
             .name("claudhub-watch-orders".into())
             .spawn(move || {
                 // What each order really watches, and not merely that it was
-                // watched: asking `watchable_directories` again to unwatch
+                // watched: asking `watch_plan` again to unwatch
                 // meant a second `git ls-files` for a list that may have moved
                 // in between — a folder created since was then left watched.
                 let mut watched: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
@@ -84,7 +90,12 @@ impl Watcher {
                                     path.display()
                                 );
                             }
-                            let dirs: Vec<PathBuf> = watchable_directories(&path)
+                            let plan = watch_plan(&path);
+                            if let Ok(mut mappings) = order_git_watches.lock() {
+                                mappings.insert(path.clone(), plan.git_dirs);
+                            }
+                            let dirs: Vec<PathBuf> = plan
+                                .directories
                                 .into_iter()
                                 .map(|(dir, mode)| {
                                     if let Err(e) = debouncer.watch(&dir, mode) {
@@ -96,6 +107,9 @@ impl Watcher {
                             watched.insert(path, dirs);
                         }
                         Order::Unwatch(path) => {
+                            if let Ok(mut mappings) = order_git_watches.lock() {
+                                mappings.remove(&path);
+                            }
                             if let Some(dirs) = watched.remove(&path) {
                                 for dir in dirs {
                                     let _ = debouncer.unwatch(&dir);
@@ -140,8 +154,9 @@ impl Watcher {
                     // thousand files made a thousand linear scans.
                     let mut seen: Vec<PathBuf> = Vec::new();
                     let mut known: HashSet<PathBuf> = HashSet::new();
+                    let mappings = git_watches.lock().unwrap_or_else(|e| e.into_inner());
                     for event in &events {
-                        for path in interesting_paths(event) {
+                        for path in interesting_paths(event, &mappings) {
                             if known.insert(path.clone()) {
                                 seen.push(path);
                             }
@@ -181,16 +196,39 @@ impl Watcher {
 }
 
 /// The paths of an event that deserve a refresh.
-fn interesting_paths(event: &DebouncedEvent) -> Vec<PathBuf> {
+fn interesting_paths(event: &DebouncedEvent, mappings: &GitWatches) -> Vec<PathBuf> {
     if !changes_content(&event.kind) {
         return Vec::new();
     }
     event
         .paths
         .iter()
-        .filter(|p| is_interesting(p))
-        .cloned()
+        .flat_map(|path| event_paths(path, mappings))
         .collect()
+}
+
+fn event_paths(path: &Path, mappings: &GitWatches) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut metadata = false;
+    for (worktree, git_dirs) in mappings {
+        // Pick the innermost git directory: a submodule's metadata is usually
+        // below its parent's, and testing only the parent would filter it out.
+        if let Some(relative) = git_dirs
+            .iter()
+            .filter_map(|dir| path.strip_prefix(dir).ok().map(|rel| (dir, rel)))
+            .max_by_key(|(dir, _)| dir.components().count())
+            .map(|(_, relative)| relative)
+        {
+            metadata = true;
+            if interesting_git_path(relative) {
+                paths.push(worktree.clone());
+            }
+        }
+    }
+    if !metadata && is_interesting(path) {
+        paths.push(path.to_path_buf());
+    }
+    paths
 }
 
 /// True for an event likely to change what `git status` answers.
@@ -226,6 +264,11 @@ fn is_interesting(path: &Path) -> bool {
         return !text.ends_with("/.git");
     };
     let inside = &text[pos + "/.git/".len()..];
+    interesting_git_path(Path::new(inside))
+}
+
+fn interesting_git_path(path: &Path) -> bool {
+    let inside = path.to_string_lossy().replace('\\', "/");
     // Locks are created then destroyed by every git command: they announce a
     // write that has not happened yet.
     if inside.ends_with(".lock") {
@@ -235,6 +278,7 @@ fn is_interesting(path: &Path) -> bool {
         || inside == "index"
         || inside == "ORIG_HEAD"
         || inside == "MERGE_HEAD"
+        || inside == "packed-refs"
         || inside.starts_with("refs/")
 }
 
@@ -307,34 +351,62 @@ pub(crate) fn is_windows_mount(path: &Path) -> bool {
 /// `.git` is added separately: its root for `HEAD` and `index`, and `refs/`
 /// recursively since it is small. Taking it whole would bring back the
 /// thousands of object directories.
-fn watchable_directories(worktree: &Path) -> Vec<(PathBuf, RecursiveMode)> {
-    let mut dirs: Vec<(PathBuf, RecursiveMode)> = Vec::new();
+#[derive(Default)]
+struct WatchPlan {
+    directories: Vec<(PathBuf, RecursiveMode)>,
+    git_dirs: Vec<PathBuf>,
+}
+
+fn watch_plan(worktree: &Path) -> WatchPlan {
+    let mut plan = WatchPlan::default();
+    add_checkout(worktree, &mut plan, &mut HashSet::new());
+    plan
+}
+
+fn add_checkout(worktree: &Path, plan: &mut WatchPlan, seen: &mut HashSet<PathBuf>) {
+    let canonical = worktree
+        .canonicalize()
+        .unwrap_or_else(|_| worktree.to_path_buf());
+    if !seen.insert(canonical) {
+        return;
+    }
 
     match tracked_directories(worktree) {
-        Some(tracked) => {
-            dirs.extend(
+        Some((tracked, submodules)) => {
+            plan.directories.extend(
                 tracked
                     .into_iter()
                     .map(|dir| (dir, RecursiveMode::NonRecursive)),
             );
-            dirs.push((worktree.to_path_buf(), RecursiveMode::NonRecursive));
+            plan.directories
+                .push((worktree.to_path_buf(), RecursiveMode::NonRecursive));
+            for submodule in submodules {
+                // An uninitialized gitlink has no repository to read. Do not
+                // accidentally walk back up into its parent's repository.
+                if submodule.join(".git").exists() {
+                    add_checkout(&submodule, plan, seen);
+                }
+            }
         }
         // Without git to hand, watching everything is still correct, only slow.
-        None => dirs.push((worktree.to_path_buf(), RecursiveMode::Recursive)),
+        None => plan
+            .directories
+            .push((worktree.to_path_buf(), RecursiveMode::Recursive)),
     }
 
     if let Some(git_dir) = git_dir(worktree) {
         let refs = git_dir.join("refs");
-        dirs.push((git_dir, RecursiveMode::NonRecursive));
+        plan.git_dirs.push(git_dir.clone());
+        plan.directories
+            .push((git_dir, RecursiveMode::NonRecursive));
         if refs.is_dir() {
-            dirs.push((refs, RecursiveMode::Recursive));
+            plan.directories.push((refs, RecursiveMode::Recursive));
         }
     }
-    dirs
 }
 
 /// The folders containing a file git tracks, or a new file it does not ignore.
-fn tracked_directories(worktree: &Path) -> Option<HashSet<PathBuf>> {
+fn tracked_directories(worktree: &Path) -> Option<(HashSet<PathBuf>, HashSet<PathBuf>)> {
     use std::process::{Command, Stdio};
 
     let out = Command::new("git")
@@ -344,6 +416,8 @@ fn tracked_directories(worktree: &Path) -> Option<HashSet<PathBuf>> {
             "ls-files",
             "-z",
             "--cached",
+            "--stage",
+            "-t",
             "--others",
             "--exclude-standard",
         ])
@@ -357,7 +431,25 @@ fn tracked_directories(worktree: &Path) -> Option<HashSet<PathBuf>> {
 
     let text = String::from_utf8_lossy(&out.stdout);
     let mut dirs = HashSet::new();
-    for file in text.split('\0').filter(|s| !s.is_empty()) {
+    let mut submodules = HashSet::new();
+    for record in text.split('\0').filter(|s| !s.is_empty()) {
+        // -t distinguishes an untracked name containing tabs from an index
+        // record. The path itself is never split on whitespace.
+        let (file, submodule) = if let Some(path) = record.strip_prefix("? ") {
+            (path, false)
+        } else if let Some((header, path)) = record.split_once('\t') {
+            (
+                path,
+                header
+                    .get(2..)
+                    .is_some_and(|mode| mode.starts_with("160000 ")),
+            )
+        } else {
+            continue;
+        };
+        if submodule {
+            submodules.insert(worktree.join(file));
+        }
         // Every ancestor, not only the parent: an intermediate folder holding
         // nothing but subfolders has to be watched too, otherwise creating a
         // file at that level would go unnoticed.
@@ -369,7 +461,7 @@ fn tracked_directories(worktree: &Path) -> Option<HashSet<PathBuf>> {
             current = dir.parent();
         }
     }
-    Some(dirs)
+    Some((dirs, submodules))
 }
 
 /// A checkout's git directory, read from disk.
@@ -382,7 +474,7 @@ fn tracked_directories(worktree: &Path) -> Option<HashSet<PathBuf>> {
 /// The reading lives in the git layer, which needs the same answer on every
 /// status and used to fork a `rev-parse` for it.
 fn git_dir(worktree: &Path) -> Option<PathBuf> {
-    crate::git::repo::git_dir_on_disk(worktree)
+    crate::git::repo::git_dir_on_disk(worktree).map(|dir| dir.canonicalize().unwrap_or(dir))
 }
 
 #[cfg(test)]
@@ -415,6 +507,87 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn submodule_watches_include_nested_code_and_map_git_events_to_the_checkout() {
+        use crate::git::submodule_tests::{add_submodule, Fixture};
+        let f = Fixture::new();
+        let nested = add_submodule(&f.child, "nested", Path::new("deps/nested"));
+        std::fs::create_dir_all(f.child.join("vendor/ignored/deep")).unwrap();
+        std::fs::write(f.child.join("vendor/ignored/deep/file"), "ignored").unwrap();
+        let plan = watch_plan(&f.parent);
+        let dirs: Vec<_> = plan.directories.iter().map(|(dir, _)| dir).collect();
+        assert!(dirs.contains(&&f.child.join("src/deep")));
+        assert!(dirs.contains(&&nested.join("src/deep")));
+        assert!(!dirs
+            .iter()
+            .any(|dir| dir.starts_with(f.child.join("vendor"))));
+        let metadata = git_dir(&f.child).unwrap();
+        assert!(dirs.contains(&&metadata));
+        let mappings = HashMap::from([(f.parent.clone(), plan.git_dirs)]);
+        assert_eq!(
+            event_paths(&metadata.join("index"), &mappings),
+            vec![f.parent.clone()]
+        );
+        assert_eq!(
+            event_paths(&git_dir(&nested).unwrap().join("HEAD"), &mappings),
+            vec![f.parent.clone()]
+        );
+        assert!(event_paths(&metadata.join("index.lock"), &mappings).is_empty());
+        assert!(event_paths(&metadata.join("objects/ab/cdef"), &mappings).is_empty());
+
+        // Opening the submodule itself watches metadata outside its own root.
+        let mappings = HashMap::from([(f.child.clone(), watch_plan(&f.child).git_dirs)]);
+        assert_eq!(
+            event_paths(&metadata.join("refs/heads/main"), &mappings),
+            vec![f.child.clone()]
+        );
+        assert!(event_paths(&metadata.join("logs/HEAD"), &mappings).is_empty());
+    }
+
+    #[test]
+    fn submodule_edits_and_commits_reach_the_live_watcher() {
+        let f = crate::git::submodule_tests::Fixture::new();
+        let (watcher, changes) = Watcher::new().unwrap();
+        watcher.watch(&f.parent);
+        let file = f.child.join("src/deep/code.txt");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut received = false;
+        while std::time::Instant::now() < deadline {
+            std::fs::write(&file, "edited\n").unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            if changes.try_recv().is_ok_and(|batch| batch.contains(&file)) {
+                received = true;
+                break;
+            }
+        }
+        assert!(
+            received,
+            "an edit inside the submodule must refresh the parent"
+        );
+
+        watcher.unwatch(&f.parent);
+        watcher.watch(&f.child);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut received = false;
+        while std::time::Instant::now() < deadline {
+            crate::git::git(&f.child, &["commit", "--allow-empty", "-m", "Advance HEAD"]).unwrap();
+            // Commits replace refs through lock-file renames. Let the batch
+            // settle instead of replacing it again inside the debounce window.
+            std::thread::sleep(DEBOUNCE + Duration::from_millis(150));
+            if changes
+                .try_recv()
+                .is_ok_and(|batch| batch.contains(&f.child))
+            {
+                received = true;
+                break;
+            }
+        }
+        assert!(
+            received,
+            "a commit's external metadata must map back to the submodule"
+        );
+    }
 
     /// A repository on `/mnt/c` reports no event; this test is what holds the
     /// recognition, the "am I under WSL" part not being checkable anywhere but
@@ -493,7 +666,7 @@ mod tests {
                 .unwrap();
         }
 
-        let dirs = watchable_directories(&root);
+        let dirs = watch_plan(&root).directories;
         let watched: Vec<&Path> = dirs.iter().map(|(p, _)| p.as_path()).collect();
 
         assert!(

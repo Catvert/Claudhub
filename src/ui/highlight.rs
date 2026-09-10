@@ -61,7 +61,7 @@ fn with_grammar<T>(language: &str, f: impl FnOnce(&mut SyntaxHighlighter) -> T) 
     out
 }
 
-/// Registers the grammars gpui-component does not embed.
+/// Registers additional grammars and completes the bundled TSX configuration.
 ///
 /// PHP is missing from it, although it is the language of half the repositories
 /// Claudhub serves to review; Nix is missing too, and it is what this repository
@@ -75,6 +75,20 @@ fn with_grammar<T>(language: &str, f: impl FnOnce(&mut SyntaxHighlighter) -> T) 
 /// singleton, and registering under a keystroke would amount to doing it while a
 /// highlighter reads it.
 pub fn register_languages() {
+    // Kit's TSX grammar ships with only TypeScript's extra type rules. Those
+    // omit JavaScript keywords, literals and comments as well as JSX itself.
+    // Reuse the complete TypeScript queries with the TSX parser, then add JSX.
+    // Registering here also fixes the editor, which reads this same registry.
+    let registry = LanguageRegistry::singleton();
+    let typescript = registry
+        .language("typescript")
+        .expect("bundled TypeScript grammar");
+    let mut tsx = registry.language("tsx").expect("bundled TSX grammar");
+    tsx.highlights = format!("{}\n{JSX_HIGHLIGHTS}", typescript.highlights).into();
+    tsx.injections = typescript.injections;
+    tsx.injection_languages = typescript.injection_languages;
+    registry.register("tsx", &tsx);
+
     // The injections describe the HTML surrounding the PHP and the SQL of query
     // strings: without them, a Blade file or a view would only have colours in
     // its `<?php` tags.
@@ -135,6 +149,17 @@ pub fn register_languages() {
     );
     LanguageRegistry::singleton().register("just", &just);
 }
+
+const JSX_HIGHLIGHTS: &str = r#"
+(jsx_opening_element name: (identifier) @tag)
+(jsx_closing_element name: (identifier) @tag)
+(jsx_self_closing_element name: (identifier) @tag)
+(jsx_attribute (property_identifier) @attribute)
+(jsx_opening_element ["<" ">"] @punctuation.bracket)
+(jsx_closing_element ["</" ">"] @punctuation.bracket)
+(jsx_self_closing_element ["<" "/>"] @punctuation.bracket)
+(jsx_expression "{" @punctuation.special "}" @punctuation.special)
+"#;
 
 /// A class constant, and with it every enum case.
 ///
@@ -1071,6 +1096,92 @@ mod tests {
             let hits =
                 DiffHighlights::compute(Path::new(path), &d, &HighlightTheme::default_dark());
             assert!(!hits.line(0, 0).is_empty(), "{path} got no colours");
+        }
+    }
+
+    #[test]
+    fn tsx_highlights_typescript_and_jsx_in_the_shared_editor_grammar() {
+        register_languages();
+        let theme = HighlightTheme::default_dark();
+        let source = "// A React component\n\
+                      type Props = { title: string };\n\
+                      export function Card({ title }: Props) {\n\
+                      \x20 const count = 2;\n\
+                      \x20 return <section className=\"card\"><Button disabled={count > 0}>{title}</Button></section>;\n\
+                      }";
+        let language = language_for_path(Path::new("Card.TSX")).unwrap();
+        // The editor constructs this same highlighter from the shared registry.
+        let mut grammar = SyntaxHighlighter::new(language);
+        grammar.update(None, &Rope::from_str(source), None);
+        let styles = grammar.styles(&(0..source.len()), theme.as_ref());
+        for (token, scope) in [
+            ("// A React component", "comment"),
+            ("type", "keyword"),
+            ("Props", "type"),
+            ("string", "type"),
+            ("function", "keyword"),
+            ("const", "keyword"),
+            ("2", "number"),
+            ("return", "keyword"),
+            ("section", "tag"),
+            ("className", "attribute"),
+            ("\"card\"", "string"),
+            ("Button", "tag"),
+            ("disabled", "attribute"),
+        ] {
+            let at = source.find(token).unwrap();
+            let color = styles
+                .iter()
+                .find(|(range, _)| range.contains(&at))
+                .and_then(|(_, style)| style.color);
+            assert!(color.is_some(), "{token} has no colour");
+            assert_eq!(
+                color,
+                theme.style(scope).and_then(|style| style.color),
+                "{token} should be {scope}"
+            );
+        }
+    }
+
+    #[test]
+    fn tsx_and_jsx_diffs_colour_tags_and_attributes_on_both_sides() {
+        register_languages();
+        let theme = HighlightTheme::default_dark();
+        let old = "const view = <><button className=\"old\">Before</button></>;";
+        let new = "const view = <><button className=\"new\">Après</button><Icon /></>;";
+        let d = diff(vec![
+            line(DiffLineKind::Removed, old),
+            line(DiffLineKind::Added, new),
+        ]);
+        for path in ["Card.tsx", "Card.jsx"] {
+            let highlighted = DiffHighlights::compute(Path::new(path), &d, &theme);
+            for (index, text) in [old, new].into_iter().enumerate() {
+                for (token, scope) in [
+                    ("const", "keyword"),
+                    ("button", "tag"),
+                    ("className", "attribute"),
+                ] {
+                    let at = text.find(token).unwrap();
+                    let color = highlighted
+                        .line(0, index)
+                        .iter()
+                        .find(|(range, _)| range.contains(&at))
+                        .and_then(|(_, style)| style.color);
+                    assert!(
+                        color.is_some(),
+                        "{path}: {token} has no colour on side {index}"
+                    );
+                    assert_eq!(
+                        color,
+                        theme.style(scope).and_then(|style| style.color),
+                        "{path}: {token}"
+                    );
+                }
+                assert!(highlighted
+                    .line(0, index)
+                    .iter()
+                    .all(|(range, _)| range.end <= text.len()));
+            }
         }
     }
 

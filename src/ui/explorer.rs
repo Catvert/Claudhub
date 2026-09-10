@@ -1,7 +1,7 @@
 //! The project explorer, and touching up a file.
 //!
-//! **The tree comes from a single git call** (`ls-files --cached --others
-//! --exclude-standard`), not from a disk walk: a Laravel project has forty
+//! **The tree comes from git** (`ls-files` in the checkout and its initialized
+//! submodules), not from a disk walk: a Laravel project has forty
 //! thousand directories, and opening them one by one would cost one system call
 //! each to reach the seven hundred that carry code.
 //!
@@ -302,6 +302,17 @@ impl Default for Explorer {
 }
 
 impl Explorer {
+    /// Submodule directories arrive with their contents already listed; only
+    /// ignored folders need the lazy read that marks their children ignored.
+    fn set_listing(&mut self, files: Vec<PathBuf>, ignored: Vec<PathBuf>, dirs: Vec<PathBuf>) {
+        let unexplored = dirs
+            .iter()
+            .filter(|dir| ignored.binary_search(dir).is_ok())
+            .cloned()
+            .collect();
+        self.set_files(files, ignored, dirs, unexplored);
+    }
+
     /// The list git has just given, and what of it is ignored.
     ///
     /// The one door in: the tree and the exclusion flags are read from the
@@ -924,7 +935,7 @@ impl ClaudhubApp {
     ) {
         let explorer = self.explorers.entry(worktree).or_default();
         explorer.state = Listing::Ready;
-        explorer.set_files(files, ignored, dirs.clone(), dirs);
+        explorer.set_listing(files, ignored, dirs);
         // A fresh listing puts every directory back to unread, so what was open
         // inside `vendor/` is read again on the next frame — a chevron that
         // shuts under the hand on every `git add` is worse than the reads it
@@ -948,9 +959,9 @@ impl ClaudhubApp {
             .map(|state| {
                 state
                     .status
-                    .files
-                    .iter()
-                    .map(|file| {
+                    .files_recursive()
+                    .into_iter()
+                    .map(|(path, file)| {
                         let code = if file.is_untracked() {
                             crate::git::StatusCode::Untracked
                         } else if !matches!(file.worktree, crate::git::StatusCode::Unmodified) {
@@ -958,7 +969,7 @@ impl ClaudhubApp {
                         } else {
                             file.index
                         };
-                        (file.path.clone(), code)
+                        (path, code)
                     })
                     .collect()
             })
@@ -3357,7 +3368,7 @@ impl ClaudhubApp {
         // the mode changes under the keys and the setting under the form, the
         // calls are idempotent, and it is what makes turning vim mode off give
         // the caret back without anything else to do.
-        self.sync_block_cursor(&surface, vim, cx);
+        self.sync_block_cursor(&surface, vim, window, cx);
         // The occurrences of the last search, lit as `Ctrl+F` lights them:
         // see `sync_search_matches`.
         self.sync_search_matches(&surface, vim, cx);
@@ -3969,6 +3980,46 @@ fn paint_hunk_mark(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn submodule_folders_expand_to_files_without_marking_them_ignored() {
+        let f = crate::git::submodule_tests::Fixture::new();
+        std::fs::create_dir_all(f.child.join("vendor/package")).unwrap();
+        std::fs::write(f.child.join("vendor/package/code.txt"), "ignored\n").unwrap();
+        let listing = crate::git::repo::list_files(&f.parent, true).unwrap();
+        let mut explorer = Explorer::default();
+        explorer.set_listing(listing.all, listing.ignored, listing.dirs);
+
+        let row = explorer.row_of(&f.path).expect("submodule folder");
+        assert!(explorer.is_dir(row));
+        assert!(!explorer.dimmed[row]);
+        let file = f.path.join("src/deep/code.txt");
+        assert!(explorer.row_of(&file).is_none(), "initially collapsed");
+        explorer.set_open(&f.path, true);
+        explorer.set_open(&f.path.join("src/deep"), true);
+        explorer.rebuild();
+        let row = explorer
+            .row_of(&file)
+            .expect("file inside expanded submodule");
+        assert!(!explorer.is_dir(row));
+        assert!(!explorer.dimmed[row]);
+        assert_eq!(explorer.unexplored, vec![f.path.join("vendor")]);
+
+        // Refresh keeps the open folder and does not queue a read that would
+        // reinterpret all the submodule's files as ignored.
+        let listing = crate::git::repo::list_files(&f.parent, false).unwrap();
+        explorer.set_listing(listing.all, listing.ignored, listing.dirs);
+        assert!(explorer.row_of(&file).is_some());
+        assert!(explorer.unexplored.is_empty());
+        explorer.set_query("code.txt".into());
+        assert!(
+            explorer.row_of(&file).is_some(),
+            "search finds submodule files"
+        );
+        assert!(!explorer.rows.iter().any(
+            |row| matches!(row, tree::Entry::Leaf { index, .. } if explorer.files[*index] == f.path)
+        ));
+    }
 
     /// The two fold sets, and the bug they exist for: a search opens the tree
     /// on its hits — so it reads the folds the other way round — and pressing

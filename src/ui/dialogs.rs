@@ -25,6 +25,11 @@ pub(super) fn confirm() -> DialogFooter {
     footer(tr!("dialog-ok"), Some(tr!("dialog-cancel")))
 }
 
+/// A form whose primary action names what submitting it does.
+pub(super) fn submit(label: SharedString) -> DialogFooter {
+    footer(label, Some(tr!("dialog-cancel")))
+}
+
 /// The single button of a dialog one only reads.
 pub(super) fn close() -> DialogFooter {
     footer(tr!("dialog-close"), None)

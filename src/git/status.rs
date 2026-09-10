@@ -75,6 +75,26 @@ pub struct FileStatus {
     pub original: Option<PathBuf>,
     pub index: StatusCode,
     pub worktree: StatusCode,
+    /// A gitlink's state relative to the index, separate from its staged change.
+    pub submodule: Option<SubmoduleStatus>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SubmoduleStatus {
+    pub commit_changed: bool,
+    pub modified: bool,
+    pub untracked: bool,
+}
+
+impl SubmoduleStatus {
+    fn parse(field: &str) -> Option<Self> {
+        let bytes = field.as_bytes();
+        (bytes.len() == 4 && bytes[0] == b'S').then(|| Self {
+            commit_changed: bytes[1] == b'C',
+            modified: bytes[2] == b'M',
+            untracked: bytes[3] == b'U',
+        })
+    }
 }
 
 impl FileStatus {
@@ -86,6 +106,15 @@ impl FileStatus {
     /// Has changes outside the index.
     pub fn is_unstaged(&self) -> bool {
         !matches!(self.worktree, StatusCode::Unmodified)
+    }
+
+    /// Dirty files inside a submodule belong to its own index. Only a changed
+    /// gitlink (or a deletion/type change) can be staged in the parent.
+    pub fn is_stageable(&self) -> bool {
+        self.is_unstaged()
+            && self
+                .submodule
+                .is_none_or(|sub| sub.commit_changed || self.worktree != StatusCode::Modified)
     }
 
     pub fn is_untracked(&self) -> bool {
@@ -135,6 +164,8 @@ pub struct Status {
     pub ahead: usize,
     pub behind: usize,
     pub files: Vec<FileStatus>,
+    /// Changes inside initialized submodules, each with its own index.
+    pub submodules: Vec<SubmoduleChanges>,
     /// Interrupted merge, rebase or cherry-pick.
     ///
     /// It lives in the status because it is read at the same moment and it
@@ -143,7 +174,80 @@ pub struct Status {
     pub pending: Option<super::repo::Pending>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SubmoduleChanges {
+    /// Relative to the repository holding this gitlink.
+    pub path: PathBuf,
+    pub status: Status,
+}
+
 impl Status {
+    /// Local file edits, excluding changes to submodule commit references.
+    pub fn has_file_changes(&self) -> bool {
+        self.files
+            .iter()
+            .any(|file| file.submodule.is_none() && file.index != StatusCode::Ignored)
+            || self
+                .submodules
+                .iter()
+                .any(|sub| sub.status.has_file_changes())
+    }
+
+    /// The index and branch of a repository displayed inside this checkout.
+    pub fn repository(&self, path: &Path) -> Option<&Status> {
+        if path.as_os_str().is_empty() {
+            return Some(self);
+        }
+        self.submodules.iter().find_map(|sub| {
+            path.strip_prefix(&sub.path)
+                .ok()
+                .and_then(|local| sub.status.repository(local))
+        })
+    }
+
+    /// Finds a displayed path, including paths inside a submodule.
+    pub fn file(&self, path: &Path) -> Option<&FileStatus> {
+        if let Some(file) = self.files.iter().find(|file| file.path == path) {
+            return Some(file);
+        }
+        self.submodules.iter().find_map(|sub| {
+            path.strip_prefix(&sub.path)
+                .ok()
+                .and_then(|path| sub.status.file(path))
+        })
+    }
+
+    /// Splits a displayed path into its repository and repository-local path.
+    /// The gitlink itself belongs to its parent; only its children move inside.
+    pub fn file_location(&self, path: &Path) -> (PathBuf, PathBuf) {
+        for sub in &self.submodules {
+            if let Ok(local) = path.strip_prefix(&sub.path) {
+                if !local.as_os_str().is_empty() {
+                    let (repo, local) = sub.status.file_location(local);
+                    return (crate::wslpath::join(&sub.path, repo), local);
+                }
+            }
+        }
+        (PathBuf::new(), path.to_path_buf())
+    }
+
+    pub fn files_recursive(&self) -> Vec<(PathBuf, &FileStatus)> {
+        let mut files: Vec<_> = self
+            .files
+            .iter()
+            .map(|file| (file.path.clone(), file))
+            .collect();
+        for sub in &self.submodules {
+            files.extend(
+                sub.status
+                    .files_recursive()
+                    .into_iter()
+                    .map(|(path, file)| (crate::wslpath::join(&sub.path, path), file)),
+            );
+        }
+        files
+    }
+
     pub fn staged(&self) -> impl Iterator<Item = &FileStatus> {
         self.files.iter().filter(|f| f.is_staged())
     }
@@ -167,6 +271,13 @@ impl Status {
 /// `node_modules/` has no value, and enumerating them costs a full walk of the
 /// excluded folders.
 pub fn status(dir: &Path) -> Result<Status> {
+    status_in(dir, &mut std::collections::HashSet::new())
+}
+
+fn status_in(dir: &Path, seen: &mut std::collections::HashSet<PathBuf>) -> Result<Status> {
+    if !seen.insert(dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())) {
+        return Ok(Status::default());
+    }
     let out = git(
         dir,
         &[
@@ -180,6 +291,9 @@ pub fn status(dir: &Path) -> Result<Status> {
             // full walk of the untracked *and non-ignored* folders, which
             // `.gitignore` already bounds.
             "--untracked-files=all",
+            // The review must include gitlinks even when a CLI preference
+            // hides them. This overrides config for this read only.
+            "--ignore-submodules=none",
         ],
     )?;
     let mut status = parse(&out);
@@ -189,6 +303,14 @@ pub fn status(dir: &Path) -> Result<Status> {
     status.pending = super::repo::git_dir(dir)
         .as_deref()
         .and_then(super::repo::pending_in);
+    for file in &status.files {
+        if file.submodule.is_some() && dir.join(&file.path).join(".git").exists() {
+            status.submodules.push(SubmoduleChanges {
+                path: file.path.clone(),
+                status: status_in(&dir.join(&file.path), seen)?,
+            });
+        }
+    }
     Ok(status)
 }
 
@@ -225,12 +347,14 @@ fn parse(out: &str) -> Status {
                 original: None,
                 index: StatusCode::Untracked,
                 worktree: StatusCode::Untracked,
+                submodule: None,
             }),
             Some('!') => status.files.push(FileStatus {
                 path: PathBuf::from(&rec[2..]),
                 original: None,
                 index: StatusCode::Ignored,
                 worktree: StatusCode::Ignored,
+                submodule: None,
             }),
             _ => {}
         }
@@ -259,7 +383,7 @@ fn parse_header(rec: &str, status: &mut Status) {
 }
 
 /// `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>` and the rename variant `2`,
-/// of which only the first two fields interest us.
+/// including the submodule's independent commit/content/untracked flags.
 fn parse_ordinary(rec: &str) -> Option<FileStatus> {
     let mut fields = rec.splitn(9, ' ');
     fields.next()?; // '1' or '2'
@@ -267,8 +391,9 @@ fn parse_ordinary(rec: &str) -> Option<FileStatus> {
     let mut xy = xy.chars();
     let index = StatusCode::from_char(xy.next()?);
     let worktree = StatusCode::from_char(xy.next()?);
-    // sub, mH, mI, mW, hH, hI — of no interest to the display.
-    for _ in 0..6 {
+    let submodule = SubmoduleStatus::parse(fields.next()?);
+    // mH, mI, mW, hH, hI.
+    for _ in 0..5 {
         fields.next()?;
     }
     let rest = fields.next()?;
@@ -287,6 +412,7 @@ fn parse_ordinary(rec: &str) -> Option<FileStatus> {
         original: None,
         index,
         worktree,
+        submodule,
     })
 }
 
@@ -298,7 +424,8 @@ fn parse_unmerged(rec: &str) -> Option<FileStatus> {
     let mut xy = xy.chars();
     let index = StatusCode::from_char(xy.next()?);
     let worktree = StatusCode::from_char(xy.next()?);
-    for _ in 0..8 {
+    let submodule = SubmoduleStatus::parse(fields.next()?);
+    for _ in 0..7 {
         fields.next()?;
     }
     Some(FileStatus {
@@ -306,6 +433,7 @@ fn parse_unmerged(rec: &str) -> Option<FileStatus> {
         original: None,
         index,
         worktree,
+        submodule,
     })
 }
 
@@ -388,6 +516,26 @@ mod tests {
         assert!(st.files[1].is_conflicted());
         assert_eq!(st.files[1].path, PathBuf::from("src/conflict.rs"));
         assert_eq!(st.conflicted().count(), 1);
+    }
+
+    #[test]
+    fn submodule_flags_survive_renames_and_conflicts() {
+        let st = parse(&rec(&[
+            "2 RM SCMU 160000 160000 160000 aaa bbb R100 new submodule",
+            "old submodule",
+            "u UU S... 160000 160000 160000 160000 aaa bbb ccc conflicted submodule",
+        ]));
+        assert_eq!(st.files[0].original, Some("old submodule".into()));
+        assert_eq!(
+            st.files[0].submodule,
+            Some(SubmoduleStatus {
+                commit_changed: true,
+                modified: true,
+                untracked: true,
+            })
+        );
+        assert!(st.files[1].is_conflicted());
+        assert!(st.files[1].submodule.is_some());
     }
 }
 

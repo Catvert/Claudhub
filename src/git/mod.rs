@@ -22,6 +22,9 @@ pub mod stash;
 pub mod status;
 pub mod tags;
 
+#[cfg(test)]
+pub(crate) mod submodule_tests;
+
 pub use branch::{Branch, BranchKind, Upstream};
 pub use diff::{DiffFile, DiffLine, DiffLineKind, FileDiff, Hunk, Range as DiffRange};
 pub use history::{Commit, GraphRow, LogRange};

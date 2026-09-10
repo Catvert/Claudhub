@@ -1921,7 +1921,7 @@ impl ClaudhubApp {
     }
 
     /// Opens a folder somebody handed over, on the server's terms.
-    fn open_handed(&mut self, folder: PathBuf) {
+    pub(super) fn open_handed(&mut self, folder: PathBuf) {
         self.launch_dir = Some(folder.clone());
         // Handed over is named: « Ouvrir avec Claudhub » on a folder is a
         // choice, and it must beat the remembered session.
@@ -2530,6 +2530,13 @@ impl ClaudhubApp {
 
     fn status_arrived(&mut self, worktree: PathBuf, status: Status, cx: &mut Context<Self>) {
         self.pending_status.remove(&worktree);
+        // A hunk staged inside a submodule answers with that repository's
+        // status. Refresh the containing Changes panel as well.
+        if let Some(active) = self.active.clone() {
+            if worktree != active && worktree.starts_with(&active) {
+                self.request_status(active);
+            }
+        }
         self.ensure_review(&worktree, cx);
         // `ensure_review` has just put it there, so no key is copied to look it
         // up.
@@ -2621,10 +2628,10 @@ impl ClaudhubApp {
         // it has gone — staged, discarded, committed — leaving its diff on
         // screen would mean reviewing a state that no longer exists.
         let gone = state.range == range
-            && state
-                .selected
-                .as_ref()
-                .is_some_and(|path| !files.iter().any(|f| &f.path == path));
+            && state.selected.as_ref().is_some_and(|path| {
+                !files.iter().any(|f| &f.path == path)
+                    && !(range == DiffRange::Working && state.status.file(path).is_some())
+            });
         // A stale review goes away with the list that disproves it: the file has
         // gone from the range, or it has changed again since it was ticked.
         // Keeping it would say "reviewed" of content nobody has read.
@@ -3546,11 +3553,7 @@ impl ClaudhubApp {
         // file with the mouse has to open it at the top.
         state.pending_jump = None;
         state.range = range.clone();
-        let untracked = state
-            .status
-            .files
-            .iter()
-            .any(|f| f.path == path && f.is_untracked());
+        let untracked = state.status.file(&path).is_some_and(|f| f.is_untracked());
         let partial = matches!(range, DiffRange::Working) && partially_staged(&state.status, &path);
         // Opening a file is leaving the merge: the centre shows one or the
         // other, and what one has just clicked is what one wants to see. After
@@ -3719,7 +3722,7 @@ impl ClaudhubApp {
     /// the user's, and guessing it again on every launch was exactly the gap the
     /// store fills. The folder collapses come from the same place, for the same
     /// reason.
-    fn ensure_review(&mut self, worktree: &Path, cx: &App) {
+    pub(super) fn ensure_review(&mut self, worktree: &Path, cx: &App) {
         if self.review.contains_key(worktree) {
             return;
         }
@@ -4324,7 +4327,7 @@ impl Render for ClaudhubApp {
         // The block cursor and the lit occurrences of the four writing fields,
         // two of which are painted from inside a dialog: see
         // `surface::sync_text_surfaces`.
-        self.sync_text_surfaces(cx);
+        self.sync_text_surfaces(window, cx);
         self.reclaim_stranded_focus(window, cx);
         v_flex()
             // Vim mode is read at render time and not at construction: the
@@ -5211,7 +5214,7 @@ impl ClaudhubApp {
         let Some(path) = state.selected.clone() else {
             return;
         };
-        let Some(file) = state.status.files.iter().find(|file| file.path == path) else {
+        let Some(file) = state.status.file(&path) else {
             return;
         };
         let staged = file.is_staged();
@@ -5227,10 +5230,9 @@ fn unmerged(state: &ReviewState, path: &Path) -> bool {
 /// Part of the file is in the index and part is not — what git writes `MM`.
 /// The remainder panel under the diff only exists for those.
 pub(super) fn partially_staged(status: &Status, path: &Path) -> bool {
-    status
-        .files
-        .iter()
-        .any(|f| f.path == path && f.is_staged() && f.is_unstaged() && !f.is_untracked())
+    status.file(path).is_some_and(|f| {
+        f.submodule.is_none() && f.is_staged() && f.is_unstaged() && !f.is_untracked()
+    })
 }
 
 #[cfg(test)]

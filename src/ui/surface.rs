@@ -212,10 +212,20 @@ pub(super) struct VimHost {
     /// caret that merely walks over one: only the first is worth moving the
     /// page for. See `centre_search_match`.
     pub search_centred: Option<(String, usize)>,
+    /// A jump is centred after the editor lays out its destination. Buffer
+    /// line numbers alone cannot place wrapped or folded text in the viewport.
+    pending_reveal: Option<PendingReveal>,
     /// Where `zm` and `zr` have got to: the nesting level below which folds are
     /// closed. `None` is everything open, which is one past the deepest — the
     /// state `zR` puts the surface back into, and the one it opens in.
     pub fold_level: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct PendingReveal {
+    head: usize,
+    at: crate::ui::vim::Reveal,
+    tries: u8,
 }
 
 /// The three colours a block cursor is painted in: the mode's, the ink of the
@@ -285,6 +295,7 @@ impl VimHost {
             absorb_selection: false,
             selection_at: None,
             search_centred: None,
+            pending_reveal: None,
             fold_level: None,
         }
     }
@@ -414,11 +425,11 @@ impl ClaudhubApp {
     /// the console both call it: it puts the occurrence the search bar jumped to
     /// in the middle of the panel, and a field five rows tall has no middle to
     /// speak of.
-    pub(super) fn sync_text_surfaces(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn sync_text_surfaces(&mut self, window: &Window, cx: &mut Context<Self>) {
         let vim = Settings::global(cx).vim_mode;
         for field in TextField::ALL {
             let surface = Surface::Text(field);
-            self.sync_block_cursor(&surface, vim, cx);
+            self.sync_block_cursor(&surface, vim, window, cx);
             self.sync_search_matches(&surface, vim, cx);
         }
     }
@@ -656,6 +667,11 @@ impl ClaudhubApp {
                         state.set_selected_range(edit.range, cx);
                         state.replace(edit.text, window, cx);
                     }
+                    if change.reveal.is_some() {
+                        use gpui_kit::component::input::RopeExt;
+                        let destination = state.text().offset_to_position(change.head);
+                        state.unfold_at(destination, cx);
+                    }
                     state.set_selected_range(change.selection, cx);
                 });
                 // What vim has just written, read **back**: the editor clips a
@@ -664,8 +680,17 @@ impl ClaudhubApp {
                 let written = input.read(cx).selected_range();
                 if let Some(host) = self.surface_host_mut(surface) {
                     host.selection_at = Some(written);
+                    host.pending_reveal = None;
                 }
-                self.scroll_to_line(&input, change.head, Place::Nearest, cx);
+                if let Some(at) = change.reveal {
+                    // `set_selected_range` first brings the result into view
+                    // using the editor's wrap/fold map. Centre its measured
+                    // position on the following frame instead of overwriting
+                    // that reveal with an estimated line-number offset.
+                    self.queue_reveal(surface, change.head, at, cx);
+                } else {
+                    self.scroll_to_line(&input, change.head, Place::Nearest, cx);
+                }
             }
             Response::Command(command) => match command {
                 // Undo and redo belong to the editor, which is the only one that
@@ -681,7 +706,16 @@ impl ClaudhubApp {
                     window.dispatch_action(Box::new(gpui_kit::component::input::Redo), cx);
                     self.absorb_selection(surface);
                 }
-                Command::Reveal(at) => self.place_caret_line(&input, at, cx),
+                Command::Reveal(at) => {
+                    let selection = input.read(cx).selected_range();
+                    let head = selection.start;
+                    // Scrolling by hand can leave the normal-mode caret off
+                    // screen. Let the editor reveal it before measuring it.
+                    if selection.is_empty() {
+                        input.update(cx, |state, cx| state.set_selected_range(selection, cx));
+                    }
+                    self.queue_reveal(surface, head, at, cx);
+                }
                 Command::Scroll(lines) => self.scroll_by_lines(&input, lines, cx),
                 Command::Fold(op) => self.fold(surface, op, cx),
                 // The four that name a file. A query has no path to write to, no
@@ -760,8 +794,10 @@ impl ClaudhubApp {
         &mut self,
         surface: &Surface,
         on: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
+        self.apply_pending_reveal(surface, window, cx);
         let (Some(input), Some(host)) = (self.surface_input(surface), self.surface_host(surface))
         else {
             return;
@@ -1113,19 +1149,96 @@ impl ClaudhubApp {
 
     // — Moving the view —————————————————————————————————————————
 
-    /// `zz`, `zt`, `zb`: puts the caret's line where the eye wants it.
-    ///
-    /// Nothing here moves the caret — that is what tells these from `z.` and
-    /// `z-`, which also go to the first non-blank and are therefore two answers
-    /// in one, where `Response` carries a single one.
-    fn place_caret_line(
+    /// Search jumps and `zz` share the same measured placement.
+    fn queue_reveal(
         &mut self,
-        input: &Entity<EditorState>,
+        surface: &Surface,
+        head: usize,
         at: crate::ui::vim::Reveal,
         cx: &mut Context<Self>,
     ) {
-        let head = input.read(cx).selected_range().start;
-        self.scroll_to_line(input, head, Place::Asked(at), cx);
+        let key = self.scroll_key(surface);
+        self.owned_motion(key, crate::ui::motion::Axes::Vertical)
+            .cancel();
+        if let Some(host) = self.surface_host_mut(surface) {
+            host.pending_reveal = Some(PendingReveal { head, at, tries: 0 });
+        }
+        // This runs in a key handler. Notify the view to render; requesting an
+        // animation frame here requires a current rendering view and panics.
+        cx.notify();
+    }
+
+    fn apply_pending_reveal(&mut self, surface: &Surface, window: &Window, cx: &mut Context<Self>) {
+        let Some(mut pending) = self
+            .surface_host_mut(surface)
+            .and_then(|host| host.pending_reveal.take())
+        else {
+            return;
+        };
+        let Some(input) = self.surface_input(surface) else {
+            return;
+        };
+        // Another gesture may have moved the caret before layout caught up.
+        if input.read(cx).selected_range().start != pending.head {
+            return;
+        }
+        // The search bar and Vim share a pattern, but Vim has already chosen
+        // this destination. Do not let the bar's older match index replace it.
+        let search_at = {
+            let state = input.read(cx);
+            let session = state.search_session();
+            (session.query.clone(), session.matcher.current_match_index())
+        };
+        if let Some(host) = self.surface_host_mut(surface) {
+            host.search_centred = Some(search_at);
+        }
+        let placed = input.update(cx, |state, cx| {
+            // Selection and unfolding update the layout on the next paint.
+            // Measuring before then can use the previous page's coordinates.
+            if pending.tries == 0 {
+                return false;
+            }
+            let row = line_at(state.text(), pending.head);
+            if !state
+                .visible_row_range()
+                .is_some_and(|rows| rows.contains(&row))
+            {
+                // Kit can resolve an offset above its laid-out range to the
+                // first visible line. That is not the destination's position.
+                return false;
+            }
+            let viewport = state.input_bounds();
+            let Some(hit) = state.range_to_bounds(&(pending.head..pending.head)) else {
+                return false;
+            };
+            if viewport.size.height <= px(0.) {
+                return false;
+            }
+            let top = match pending.at {
+                crate::ui::vim::Reveal::Top => viewport.origin.y,
+                crate::ui::vim::Reveal::Centre => {
+                    viewport.origin.y + (viewport.size.height - hit.size.height) / 2.
+                }
+                crate::ui::vim::Reveal::Bottom => {
+                    viewport.origin.y + viewport.size.height - hit.size.height
+                }
+            };
+            let offset = state.scroll_offset();
+            let min_y = (viewport.size.height - state.scroll_size().height).min(px(0.));
+            let y = (offset.y + top - hit.origin.y).clamp(min_y, px(0.));
+            state.set_scroll_offset(gpui_kit::point(offset.x, y), cx);
+            true
+        });
+        if !placed && pending.tries < 8 {
+            pending.tries += 1;
+            if let Some(host) = self.surface_host_mut(surface) {
+                host.pending_reveal = Some(pending);
+            }
+            // We are rendering now, so this safely schedules another render
+            // after the input has painted its new layout. A notification here
+            // can be absorbed by the frame already in progress.
+            window.request_animation_frame();
+        }
     }
 
     /// `Ctrl+E` and `Ctrl+Y`: the page moves, the caret stays.

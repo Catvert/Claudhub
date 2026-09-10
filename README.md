@@ -44,6 +44,21 @@ sans quitter l'application.
   modifications (avec confirmation, c'est la seule action que git ne rattrape
   pas), valider, récupérer, tirer en avance rapide, publier avec
   `--set-upstream`.
+- **Sous-modules** — les modifications affichent les changements de commit,
+  les fichiers modifiés et les fichiers non suivis, même si la configuration
+  Git les masque. Chaque sous-module a sa section dans Modifications, avec ses
+  groupes de fichiers suivis, non indexés et non suivis, dans une sous-liste
+  repliable. Les diffs et les cases agissent directement sur son propre index ;
+  le bouton Valider de la section permet de committer et pousser sans quitter
+  le projet parent. Chaque message de commit reste séparé. Les sections sans
+  fichier modifié disparaissent ; les changements de référence de commit sont
+  masqués par défaut et peuvent être réaffichés depuis la barre du panneau.
+  La case du sous-module dans le groupe parent indexe uniquement
+  sa référence de commit. Le panneau Fichiers permet de déplier leurs dossiers et d'ouvrir
+  leurs fichiers depuis le projet parent, y compris les sous-modules imbriqués.
+  La surveillance suit aussi ces fichiers.
+- **TSX et JSX** — coloration des composants React, attributs, expressions et
+  types TypeScript dans l'éditeur et les deux côtés des diffs.
 - **Historique** — la liste des commits avec son graphe dessiné : une couleur
   par colonne, des courbes pour les rattachements de branche, les étiquettes de
   branches et de tags. Toutes les branches ou seulement la courante ; cliquer
@@ -63,6 +78,7 @@ sans quitter l'application.
   un cran glisse en une fraction de seconde au lieu de sauter de trois lignes,
   ce qui garde sa place à l'œil quand on relit. Un pavé tactile reste
   directement attaché au doigt.
+  En mode Vim, `n` et `N` recentrent le résultat de recherche comme `zz`.
 - **Rafraîchissement automatique** — le worktree affiché est surveillé. Un
   agent qui écrit des fichiers, un `git commit` tapé dans le terminal intégré :
   la revue suit sans qu'on lui demande.

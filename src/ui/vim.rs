@@ -78,6 +78,9 @@ pub struct Change {
     /// Where vim considers the caret to be, which is the start of the selection
     /// except when the visual head is its end.
     pub head: usize,
+    /// Searches ask for the context around their result, as with `zz`.
+    /// Ordinary motions keep the viewport steady while the caret is visible.
+    pub reveal: Option<Reveal>,
     /// The ranges a **copy** left in place, for the view to flash.
     ///
     /// A yank is the one gesture of vim that changes nothing on screen: without
@@ -568,6 +571,7 @@ impl Vim {
             edit: minimal_edit(text, &buffer),
             selection: self.selection(&buffer),
             head: self.head,
+            reveal: None,
             flash,
             yank,
         })
@@ -726,7 +730,13 @@ impl Vim {
             find_forward(text, &self.last_search, self.head)
         };
         match found {
-            Some(offset) => self.motion_to(text, offset),
+            Some(offset) => {
+                let mut response = self.motion_to(text, offset);
+                if let Response::Apply(change) = &mut response {
+                    change.reveal = Some(Reveal::Centre);
+                }
+                response
+            }
             None => Response::Consumed,
         }
     }
@@ -1413,6 +1423,7 @@ impl Vim {
             edit: None,
             selection: self.selection(text),
             head: self.head,
+            reveal: None,
             flash: std::mem::take(&mut self.flashed),
             yank: self.yanked.take(),
         }
@@ -1441,6 +1452,7 @@ impl Vim {
                 text: replacement,
             }),
             head,
+            reveal: None,
             flash: std::mem::take(&mut self.flashed),
             yank: self.yanked.take(),
         }
@@ -2657,6 +2669,47 @@ tail
         assert_eq!(editor.cursor, 0);
         editor.press("N");
         assert_eq!(editor.cursor, 11);
+    }
+
+    #[test]
+    fn search_navigation_centres_matches_but_regular_motions_do_not() {
+        let text = format!("match\n{}match\n", "a long intervening line\n".repeat(80));
+        let far = text.rfind("match").unwrap();
+        let mut vim = Vim::default();
+        // Also covers a pattern handed over by the editor's Ctrl+F bar.
+        vim.set_search("match");
+        for (ch, from, destination) in [('n', 0, far), ('n', far, 0), ('N', 0, far)] {
+            let Response::Apply(change) = vim.press(&key(ch), &text, from, 20) else {
+                panic!("search must land on a match");
+            };
+            assert_eq!(change.head, destination);
+            assert_eq!(change.reveal, Some(Reveal::Centre));
+            assert!(change.edit.is_none());
+        }
+        let Response::Apply(change) = vim.press(&key('j'), &text, 0, 20) else {
+            panic!("motion")
+        };
+        assert_eq!(change.reveal, None);
+        vim.set_search("absent");
+        assert_eq!(vim.press(&key('n'), &text, 0, 20), Response::Consumed);
+
+        for prefix in ['/', '?'] {
+            let mut vim = Vim::default();
+            vim.press(&key(prefix), &text, 0, 20);
+            for ch in "match".chars() {
+                vim.press(&key(ch), &text, 0, 20);
+            }
+            let enter = Key {
+                ch: None,
+                name: "enter".into(),
+                ctrl: false,
+            };
+            let Response::Apply(change) = vim.press(&enter, &text, 0, 20) else {
+                panic!("search prompt")
+            };
+            assert_eq!(change.head, far);
+            assert_eq!(change.reveal, Some(Reveal::Centre));
+        }
     }
 
     /// The search reads case as `Ctrl+F` does — smart case: an all-lowercase

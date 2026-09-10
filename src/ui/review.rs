@@ -13,8 +13,9 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     h_flex,
+    input::{Textarea, TextareaState},
     select::Select,
-    v_flex, ActiveTheme, Disableable, Sizable, WindowExt,
+    v_flex, ActiveTheme, Disableable, Selectable, Sizable, WindowExt,
 };
 use gpui_kit::{div, prelude::*, px, uniform_list, Context, Focusable, Window};
 
@@ -32,6 +33,13 @@ use crate::ui::theme::{status_color, DiffColors};
 /// which stages or unstages everything at once.
 #[derive(Clone)]
 enum Row {
+    /// A submodule owns the groups that follow, including its own index.
+    Repository {
+        path: Rc<PathBuf>,
+        staged: usize,
+        depth: usize,
+        collapsed: bool,
+    },
     Group(GroupRow),
     /// A folder of the tree, collapsible.
     Dir(DirRow),
@@ -46,6 +54,7 @@ enum Row {
 #[derive(Clone)]
 struct GroupRow {
     group: Group,
+    depth: usize,
     paths: Rc<[PathBuf]>,
     /// The whole group is already staged.
     checked: bool,
@@ -115,6 +124,9 @@ struct FileRow {
     /// have to lie about partially staged files.
     index: StatusCode,
     worktree: StatusCode,
+    submodule: Option<crate::git::status::SubmoduleStatus>,
+    submodule_files: bool,
+    stageable: bool,
     added: usize,
     removed: usize,
     /// This file will go into the next commit, at least in part.
@@ -131,7 +143,7 @@ impl FileRow {
 
     /// Only part of the file is staged: what git writes `MM`.
     fn partial(&self) -> bool {
-        self.staged && !matches!(self.worktree, StatusCode::Unmodified)
+        self.submodule.is_none() && self.staged && !matches!(self.worktree, StatusCode::Unmodified)
     }
 
     fn codes(&self) -> String {
@@ -149,7 +161,137 @@ impl FileRow {
     }
 }
 
+/// Kept separate from the parent's commit field: writing a message for a
+/// submodule must not replace the draft already being written for the parent.
+struct SubmoduleCommitDraft {
+    message: gpui_kit::Entity<TextareaState>,
+    staged: usize,
+    push: bool,
+}
+
+impl Render for SubmoduleCommitDraft {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .gap_2()
+            .child(
+                div()
+                    .text_xs()
+                    .child(tr!("commit-staged-count", { count: self.staged })),
+            )
+            .child(Textarea::new(&self.message).h(px(120.)))
+            .child(
+                Checkbox::new("submodule-commit-push")
+                    .label(tr!("submodule-push-after-commit"))
+                    .checked(self.push)
+                    .on_click(cx.listener(|this, checked, _, cx| {
+                        this.push = *checked;
+                        cx.notify();
+                    })),
+            )
+    }
+}
+
 impl ClaudhubApp {
+    fn reveal_submodule(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some(state) = self.active_review_mut() else {
+            return;
+        };
+        state.collapsed.retain(|fold| !path.starts_with(fold));
+        state.rows_changed();
+        if let Some(view) = self.rows_view(&DiffRange::Working, cx) {
+            if let Some(index) = view.shown.iter().position(
+                |row| matches!(row, Row::Repository { path: repo, .. } if repo.as_path() == path),
+            ) {
+                self.file_scroll(&DiffRange::Working)
+                    .scroll_to_item(index, gpui_kit::ScrollStrategy::Center);
+            }
+        }
+        cx.notify();
+    }
+
+    fn prompt_submodule_commit(
+        &mut self,
+        parent: PathBuf,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(status) = self
+            .review
+            .get(&parent)
+            .and_then(|state| state.status.repository(&path))
+        else {
+            return;
+        };
+        let staged = status.staged().count();
+        if staged == 0 {
+            return;
+        }
+        let worktree = crate::wslpath::join(&parent, &path);
+        let saved = self
+            .review
+            .get(&worktree)
+            .map(|state| state.commit_draft.clone())
+            .unwrap_or_default();
+        let draft = cx.new(|cx| SubmoduleCommitDraft {
+            message: cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .placeholder(tr!("commit-placeholder"))
+                    .default_value(saved)
+            }),
+            staged,
+            push: false,
+        });
+        let entity = cx.entity();
+        let field = draft.read(cx).message.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (entity, draft, parent, path) =
+                (entity.clone(), draft.clone(), parent.clone(), path.clone());
+            dialog
+                .title(tr!("submodule-commit-title", { path: path.display() }))
+                .child(draft.clone())
+                .overlay_closable(false)
+                .footer(super::dialogs::submit(tr!("action-commit")))
+                .on_ok(move |_, _, cx| {
+                    let message = draft.read(cx).message.read(cx).value().to_string();
+                    let push = draft.read(cx).push;
+                    entity.update(cx, |this, cx| {
+                        let Some(state) = this.review.get(&parent) else {
+                            return false;
+                        };
+                        let Some(cmd) =
+                            submodule_commit_command(&parent, &state.status, &path, &message, push)
+                        else {
+                            return false;
+                        };
+                        let worktree = crate::wslpath::join(&parent, &path);
+                        if this.is_running(Some(&worktree), Action::Commit)
+                            || this.is_running(Some(&worktree), Action::CommitPush)
+                        {
+                            return false;
+                        }
+                        this.ensure_review(&worktree, cx);
+                        this.review
+                            .entry(worktree.clone())
+                            .or_default()
+                            .commit_draft = message;
+                        this.start(
+                            Some(worktree),
+                            if push {
+                                Action::CommitPush
+                            } else {
+                                Action::Commit
+                            },
+                            cmd,
+                            cx,
+                        );
+                        true
+                    })
+                })
+        });
+        super::dialogs::focus_field(&field, window, cx);
+    }
+
     /// The list of changes in progress, and what is needed to commit them.
     pub(super) fn render_changes(
         &mut self,
@@ -234,6 +376,19 @@ impl ClaudhubApp {
         let selected = state.selected.clone();
         let staged_count = view.staged;
         let rows = view.shown;
+        let committing: Rc<HashSet<PathBuf>> = Rc::new(
+            rows.iter()
+                .filter_map(|row| {
+                    let Row::Repository { path, .. } = row else {
+                        return None;
+                    };
+                    let owner = crate::wslpath::join(&worktree, path.as_path());
+                    (self.is_running(Some(&owner), Action::Commit)
+                        || self.is_running(Some(&owner), Action::CommitPush))
+                    .then(|| path.as_ref().clone())
+                })
+                .collect(),
+        );
         let can_commit = staged_count > 0;
         let commits = matches!(range, DiffRange::Working);
         // Two lists live side by side: they cannot carry the same id, otherwise
@@ -293,6 +448,7 @@ impl ClaudhubApp {
                                             .map(|ix| {
                                                 render_row(
                                                     &rows,
+                                                    &committing,
                                                     ix,
                                                     &worktree,
                                                     &row_range,
@@ -340,25 +496,29 @@ impl ClaudhubApp {
     fn rows_view(&mut self, range: &DiffRange, cx: &gpui_kit::App) -> Option<RowsView> {
         let query = self.query(Self::find_pane(range), cx);
         let tree = crate::ui::settings::Settings::global(cx).review_tree;
+        let show_gitlinks = crate::ui::settings::Settings::global(cx).show_submodule_commits;
         let worktree = self.active.clone()?;
         let state = self.review.get_mut(&worktree)?;
         let epoch = state.rows_epoch;
         let fresh = state.row_cache.get(range).is_some_and(|cache| {
-            cache.epoch == epoch && cache.tree == tree && cache.query == query
+            cache.epoch == epoch
+                && cache.tree == tree
+                && cache.query == query
+                && cache.show_gitlinks == show_gitlinks
         });
         if !fresh {
             let files = state.files.get(range).map(Vec::as_slice).unwrap_or(&[]);
-            let flat = Rc::new(rows_for(
+            let flat = Rc::new(rows_for_with_gitlinks(
                 range,
                 &state.status,
                 files,
                 &state.reviewed,
                 &query,
+                show_gitlinks,
             ));
-            let staged = flat
-                .iter()
-                .filter(|row| matches!(row, Row::File(file) if file.staged))
-                .count();
+            // The commit box belongs to this repository. A child index must
+            // never enable a parent commit, even while its files are shown.
+            let staged = state.status.staged().count();
             let shown = shown_rows(&flat, &query, tree, &state.collapsed);
             state.row_cache.insert(
                 range.clone(),
@@ -366,6 +526,7 @@ impl ClaudhubApp {
                     epoch,
                     query,
                     tree,
+                    show_gitlinks,
                     shown,
                     staged,
                 },
@@ -494,6 +655,41 @@ impl ClaudhubApp {
             // shown. The gap that follows is what says so — the buttons on the
             // right are the gestures, and this one is a way of looking.
             .child(self.tree_toggle(cx))
+            .child({
+                let shown = crate::ui::settings::Settings::global(cx).show_submodule_commits;
+                Button::new("show-submodule-commits")
+                    .ghost()
+                    .small()
+                    .icon(icon("git-commit-horizontal"))
+                    .selected(shown)
+                    .tooltip(if shown {
+                        tr!("submodule-hide-commits")
+                    } else {
+                        tr!("submodule-show-commits")
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        crate::ui::settings::Settings::update_global(cx, |settings| {
+                            settings.show_submodule_commits = !settings.show_submodule_commits
+                        });
+                        if !crate::ui::settings::Settings::global(cx).show_submodule_commits {
+                            if let Some(state) = this.active_review_mut() {
+                                if state.range == DiffRange::Working
+                                    && state
+                                        .selected
+                                        .as_deref()
+                                        .and_then(|path| state.status.file(path))
+                                        .is_some_and(|file| file.submodule.is_some())
+                                {
+                                    state.selected = None;
+                                    state.diff = None;
+                                    state.unstaged = None;
+                                    state.diff_selection = None;
+                                }
+                            }
+                        }
+                        cx.notify();
+                    }))
+            })
             .child(div().flex_1())
             .child(
                 // The one gesture that stays wordless. What it does — read what
@@ -716,7 +912,7 @@ impl ClaudhubApp {
                     // there is no number to correct, and a disabled button on
                     // a line that already reads "everything is in" says the
                     // same thing twice.
-                    .when(self.stageable(), |el| {
+                    .when(self.stageable(cx), |el| {
                         el.child(
                             Button::new("stage-all")
                                 .ghost()
@@ -921,13 +1117,15 @@ impl ClaudhubApp {
     /// leaves behind, so the two read the same list the same way — a checkout
     /// whose only unstaged files are conflicted offers no button, because
     /// pressing it would do nothing.
-    fn stageable(&self) -> bool {
+    fn stageable(&self, cx: &gpui_kit::App) -> bool {
+        let show_gitlinks = crate::ui::settings::Settings::global(cx).show_submodule_commits;
         self.active_review().is_some_and(|state| {
             state
                 .status
                 .files
                 .iter()
-                .any(|file| file.is_unstaged() && !file.is_conflicted())
+                .filter(|file| show_gitlinks || file.submodule.is_none())
+                .any(|file| file.is_stageable() && !file.is_conflicted())
         })
     }
 
@@ -940,6 +1138,7 @@ impl ClaudhubApp {
     /// `<<<<<<<` and all, and the next commit would carry them. Ticking such a
     /// file by hand still says it — one file, one decision.
     pub(super) fn stage_all(&mut self, cx: &mut Context<Self>) {
+        let show_gitlinks = crate::ui::settings::Settings::global(cx).show_submodule_commits;
         let Some(worktree) = self.active.clone() else {
             return;
         };
@@ -950,7 +1149,8 @@ impl ClaudhubApp {
             .status
             .files
             .iter()
-            .filter(|file| file.is_unstaged() && !file.is_conflicted())
+            .filter(|file| show_gitlinks || file.submodule.is_none())
+            .filter(|file| file.is_stageable() && !file.is_conflicted())
             .map(|file| file.path.clone())
             .collect();
         self.set_staged(worktree, paths, true, cx);
@@ -1078,7 +1278,13 @@ impl ClaudhubApp {
         let Some(hunk) = diff.file.hunks.get(hunk) else {
             return;
         };
-        let patch = crate::git::diff::hunk_patch(&diff.path, None, hunk, false);
+        let (repository, path) = self
+            .active_review()
+            .unwrap()
+            .status
+            .file_location(&diff.path);
+        let worktree = crate::wslpath::join(&worktree, &repository);
+        let patch = crate::git::diff::hunk_patch(&path, None, hunk, false);
         self.git.send(Cmd::ApplyHunk {
             worktree,
             patch,
@@ -1106,6 +1312,8 @@ impl ClaudhubApp {
         let Some(hunk) = diff.hunks.get(hunk) else {
             return;
         };
+        let (repository, path) = self.active_review().unwrap().status.file_location(&path);
+        let worktree = crate::wslpath::join(&worktree, &repository);
         let patch = crate::git::diff::hunk_patch(&path, None, hunk, false);
         self.git.send(Cmd::ApplyHunk {
             worktree,
@@ -1131,6 +1339,13 @@ impl ClaudhubApp {
             return None;
         }
         let path = state.selected.clone()?;
+        if state
+            .status
+            .file(&path)
+            .is_some_and(|file| file.submodule.is_some())
+        {
+            return None;
+        }
         let (kept, diff) = state.unstaged.clone()?;
         if kept != path || diff.hunks.is_empty() {
             return None;
@@ -1247,6 +1462,7 @@ impl ClaudhubApp {
 #[allow(clippy::too_many_arguments)]
 fn render_row(
     rows: &Rc<Vec<Row>>,
+    committing: &HashSet<PathBuf>,
     index: usize,
     worktree: &Rc<PathBuf>,
     range: &Rc<DiffRange>,
@@ -1260,6 +1476,79 @@ fn render_row(
     cx: &mut gpui_kit::App,
 ) -> gpui_kit::AnyElement {
     match rows.get(index) {
+        Some(Row::Repository {
+            path,
+            staged,
+            depth,
+            collapsed,
+        }) => h_flex()
+            .id(("submodule-section", index))
+            .h(crate::ui::theme::row_height(cx))
+            .w_full()
+            .px_2()
+            .gap_2()
+            .items_center()
+            .bg(cx.theme().accent.opacity(0.4))
+            .cursor_pointer()
+            .on_click({
+                let (entity, path) = (entity.clone(), path.clone());
+                move |_, _, cx| {
+                    entity.update(cx, |this, cx| this.toggle_directory((*path).clone(), cx))
+                }
+            })
+            .children(crate::ui::theme::indent_guides(
+                *depth,
+                crate::ui::theme::indent_guide(cx),
+            ))
+            .child(
+                icon(if *collapsed {
+                    "chevron-right"
+                } else {
+                    "chevron-down"
+                })
+                .xsmall(),
+            )
+            .child(icon("git-branch").xsmall())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .child(path.to_string_lossy().into_owned()),
+            )
+            .when(*staged > 0, |el| {
+                el.child(
+                    div()
+                        .text_xs()
+                        .child(tr!("submodule-staged", { count: staged })),
+                )
+            })
+            .child(
+                Button::new(("commit-submodule", index))
+                    .icon(icon("git-commit-horizontal"))
+                    .label(tr!("action-commit"))
+                    .ghost()
+                    .xsmall()
+                    .loading(committing.contains(path.as_path()))
+                    .disabled(*staged == 0 || committing.contains(path.as_path()))
+                    .on_click({
+                        let (entity, parent, path) =
+                            (entity.clone(), worktree.clone(), path.clone());
+                        move |_, window, cx| {
+                            cx.stop_propagation();
+                            entity.update(cx, |this, cx| {
+                                this.prompt_submodule_commit(
+                                    (*parent).clone(),
+                                    (*path).clone(),
+                                    window,
+                                    cx,
+                                )
+                            });
+                        }
+                    }),
+            )
+            .into_any_element(),
         Some(Row::Group(group)) => render_group(group, index, worktree, tree, entity, cx),
         Some(Row::Dir(dir)) => render_dir(dir, index, worktree, range, checkable, entity, cx),
         Some(Row::File(file)) => render_file(
@@ -1427,6 +1716,10 @@ fn render_group(
         .gap_2()
         .items_center()
         .bg(cx.theme().secondary)
+        .children(crate::ui::theme::indent_guides(
+            row.depth,
+            crate::ui::theme::indent_guide(cx),
+        ))
         .when(tree, |el| el.child(crate::ui::theme::chevron_space()))
         .child(
             Checkbox::new(("group", index))
@@ -1516,14 +1809,17 @@ fn render_file(
         // have nothing to tick: a box there would be a button that lies.
         .when(checkable, |el| {
             let (entity, worktree, paths) = (entity.clone(), worktree.clone(), row.paths.clone());
-            el.child(Checkbox::new(("stage", index)).checked(staged).on_click(
-                move |_, _window, cx| {
-                    cx.stop_propagation();
-                    entity.update(cx, |this, cx| {
-                        this.set_staged((*worktree).clone(), paths.to_vec(), !staged, cx)
-                    });
-                },
-            ))
+            el.child(
+                Checkbox::new(("stage", index))
+                    .checked(staged)
+                    .disabled(!staged && !row.stageable)
+                    .on_click(move |_, _window, cx| {
+                        cx.stop_propagation();
+                        entity.update(cx, |this, cx| {
+                            this.set_staged((*worktree).clone(), paths.to_vec(), !staged, cx)
+                        });
+                    }),
+            )
         })
         .child(
             div()
@@ -1546,7 +1842,11 @@ fn render_file(
         // The icon says the family by its shape and the language by its tint:
         // that is what makes a list of two hundred files scannable, where git's
         // codes only say what changed.
-        .child(crate::ui::file_icons::file_icon(row.path(), cx))
+        .child(if row.submodule.is_some() {
+            crate::ui::icons::glyph("git-branch").into_any_element()
+        } else {
+            crate::ui::file_icons::file_icon(row.path(), cx).into_any_element()
+        })
         .child(
             h_flex()
                 .flex_1()
@@ -1618,10 +1918,47 @@ fn render_file(
             )
         })
         .children(crate::ui::theme::volume(row.added, row.removed, colors))
+        .when_some(row.submodule, |el, sub| {
+            let (entity, paths) = (entity.clone(), row.paths.clone());
+            let mut details = vec![tr!("submodule-label").to_string()];
+            if sub.commit_changed {
+                details.push(tr!("submodule-commit-changed").to_string());
+            }
+            if sub.modified {
+                details.push(tr!("submodule-modified").to_string());
+            }
+            if sub.untracked {
+                details.push(tr!("submodule-untracked").to_string());
+            }
+            el.child(
+                div()
+                    .max_w(px(160.))
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(details.join(" · ")),
+            )
+            .when(row.submodule_files, |el| {
+                el.child(
+                    Button::new(("open-submodule", index))
+                        .ghost()
+                        .small()
+                        .icon(icon("list-tree"))
+                        .tooltip(tr!("submodule-show"))
+                        .on_click(move |_, _window, cx| {
+                            cx.stop_propagation();
+                            entity.update(cx, |this, cx| {
+                                this.reveal_submodule(&paths[0], cx);
+                            });
+                        }),
+                )
+            })
+        })
         // A tracked file goes back to its original state; a new file has none —
         // it is deleted, which is not the same gesture and therefore carries
         // neither the same icon nor the same warning.
-        .when(checkable, |el| {
+        .when(checkable && row.submodule.is_none(), |el| {
             let (entity, worktree, paths) = (entity.clone(), worktree.clone(), row.paths.clone());
             let untracked = row.untracked;
             el.child(
@@ -1748,17 +2085,41 @@ fn worth_sending(status: &Status, paths: Vec<PathBuf>, staged: bool) -> Vec<Path
     paths
         .into_iter()
         .filter(|path| {
-            match status.files.iter().find(|file| file.path == *path) {
+            match status.file(path) {
                 // Staging wants something outside the index; unstaging wants
                 // something in it.
                 Some(file) => match staged {
-                    true => file.is_unstaged(),
+                    true => file.is_stageable(),
                     false => file.is_staged(),
                 },
                 None => true,
             }
         })
         .collect()
+}
+
+/// A section's commit always names its repository explicitly. It never stages
+/// files implicitly and cannot fall back to committing the parent.
+fn submodule_commit_command(
+    parent: &Path,
+    status: &Status,
+    path: &Path,
+    message: &str,
+    push: bool,
+) -> Option<Cmd> {
+    if path.as_os_str().is_empty()
+        || message.trim().is_empty()
+        || status.repository(path)?.staged().next().is_none()
+    {
+        return None;
+    }
+    Some(Cmd::Commit {
+        worktree: crate::wslpath::join(parent, path),
+        message: message.trim().to_owned(),
+        amend: false,
+        all: false,
+        push,
+    })
 }
 
 /// A free function because it is this view's only real decision — which file
@@ -1769,12 +2130,52 @@ fn worth_sending(status: &Status, paths: Vec<PathBuf>, staged: bool) -> Vec<Path
 /// staged from what is not, a distinction the checkbox renders. The other ranges
 /// are about commits, which have no notion of an index, and come from
 /// `--numstat`.
+#[cfg(test)]
 fn rows_for(
     range: &DiffRange,
     status: &Status,
     files: &[DiffFile],
     reviewed: &[crate::ui::vault::Reviewed],
     query: &str,
+) -> Vec<Row> {
+    rows_for_with_gitlinks(range, status, files, reviewed, query, true)
+}
+
+struct RowFilter<'a> {
+    query: &'a str,
+    show_gitlinks: bool,
+}
+
+fn rows_for_with_gitlinks(
+    range: &DiffRange,
+    status: &Status,
+    files: &[DiffFile],
+    reviewed: &[crate::ui::vault::Reviewed],
+    query: &str,
+    show_gitlinks: bool,
+) -> Vec<Row> {
+    rows_for_repository(
+        range,
+        status,
+        files,
+        reviewed,
+        &RowFilter {
+            query,
+            show_gitlinks,
+        },
+        Path::new(""),
+        0,
+    )
+}
+
+fn rows_for_repository(
+    range: &DiffRange,
+    status: &Status,
+    files: &[DiffFile],
+    reviewed: &[crate::ui::vault::Reviewed],
+    filter: &RowFilter<'_>,
+    repository: &Path,
+    depth: usize,
 ) -> Vec<Row> {
     let volumes: std::collections::HashMap<&PathBuf, (usize, usize)> = files
         .iter()
@@ -1797,7 +2198,7 @@ fn rows_for(
     // The query filters the files before they are grouped: a group whose files
     // have all gone must go with them, and a group's box must only carry what
     // is still shown.
-    let keep = |path: &Path| crate::ui::find::matches(query, &path.to_string_lossy());
+    let keep = |path: &Path| crate::ui::find::matches(filter.query, &path.to_string_lossy());
 
     match range {
         DiffRange::Working => {
@@ -1807,22 +2208,32 @@ fn rows_for(
                 if matches!(file.index, StatusCode::Ignored) {
                     continue;
                 }
-                if !keep(&file.path) {
+                if file.submodule.is_some() && !filter.show_gitlinks {
                     continue;
                 }
-                let (added, removed) = volume(&file.path);
+                let path = crate::wslpath::join(repository, &file.path);
+                if !keep(&path) {
+                    continue;
+                }
+                let (added, removed) = volume(&path);
                 let row = FileRow {
-                    paths: Rc::from(vec![file.path.clone()]),
-                    depth: 0,
+                    paths: Rc::from(vec![path.clone()]),
+                    depth,
                     name: file.file_name(),
                     directory: file.directory(),
                     index: file.index,
                     worktree: file.worktree,
+                    submodule: file.submodule,
+                    submodule_files: status
+                        .submodules
+                        .iter()
+                        .any(|sub| sub.path == file.path && sub.status.has_file_changes()),
+                    stageable: file.is_stageable(),
                     added,
                     removed,
                     staged: file.is_staged(),
                     untracked: file.is_untracked(),
-                    reviewed: is_reviewed(&file.path, added, removed),
+                    reviewed: is_reviewed(&path, added, removed),
                 };
                 if row.untracked {
                     untracked.push(row);
@@ -1861,10 +2272,35 @@ fn rows_for(
                 }
                 rows.push(Row::Group(GroupRow {
                     group,
+                    depth,
                     paths: files.iter().map(|file| file.path().to_path_buf()).collect(),
                     checked: files.iter().all(|file| file.staged),
                 }));
                 rows.extend(files.into_iter().map(Row::File));
+            }
+            for submodule in &status.submodules {
+                if !submodule.status.has_file_changes() {
+                    continue;
+                }
+                let path = crate::wslpath::join(repository, &submodule.path);
+                let children = rows_for_repository(
+                    range,
+                    &submodule.status,
+                    files,
+                    reviewed,
+                    filter,
+                    &path,
+                    depth + 1,
+                );
+                if !children.is_empty() {
+                    rows.push(Row::Repository {
+                        path: Rc::new(path),
+                        staged: submodule.status.staged().count(),
+                        depth,
+                        collapsed: false,
+                    });
+                    rows.extend(children);
+                }
             }
             rows
         }
@@ -1885,6 +2321,9 @@ fn rows_for(
                         StatusCode::Modified
                     },
                     worktree: StatusCode::Unmodified,
+                    submodule: None,
+                    submodule_files: false,
+                    stageable: false,
                     added: f.added,
                     removed: f.removed,
                     // A commit is already written: nothing to tick.
@@ -1906,10 +2345,16 @@ fn rows_for(
 fn tree_rows(flat: &[Row], collapsed: &HashSet<PathBuf>) -> Vec<Row> {
     let mut out = Vec::new();
     let mut block: Vec<FileRow> = Vec::new();
+    let mut repository = PathBuf::new();
     for row in flat {
         match row {
+            Row::Repository { path, .. } => {
+                flush(&mut block, collapsed, &repository, &mut out);
+                repository = path.as_ref().clone();
+                out.push(row.clone());
+            }
             Row::Group(group) => {
-                flush(&mut block, collapsed, &mut out);
+                flush(&mut block, collapsed, &repository, &mut out);
                 out.push(Row::Group(group.clone()));
             }
             Row::File(file) => block.push(file.clone()),
@@ -1917,18 +2362,36 @@ fn tree_rows(flat: &[Row], collapsed: &HashSet<PathBuf>) -> Vec<Row> {
             Row::Dir(_) => {}
         }
     }
-    flush(&mut block, collapsed, &mut out);
+    flush(&mut block, collapsed, &repository, &mut out);
     out
 }
 
-fn flush(block: &mut Vec<FileRow>, collapsed: &HashSet<PathBuf>, out: &mut Vec<Row>) {
+fn flush(
+    block: &mut Vec<FileRow>,
+    collapsed: &HashSet<PathBuf>,
+    repository: &Path,
+    out: &mut Vec<Row>,
+) {
     if block.is_empty() {
         return;
     }
     let files: Vec<FileRow> = std::mem::take(block);
-    let paths: Vec<PathBuf> = files.iter().map(|file| file.path().to_path_buf()).collect();
+    let repository_depth = files[0].depth;
+    let paths: Vec<PathBuf> = files
+        .iter()
+        .map(|file| {
+            file.path()
+                .strip_prefix(repository)
+                .unwrap_or(file.path())
+                .to_path_buf()
+        })
+        .collect();
+    let local_collapsed: HashSet<PathBuf> = collapsed
+        .iter()
+        .filter_map(|path| path.strip_prefix(repository).ok().map(Path::to_path_buf))
+        .collect();
     // Open unless named: a review is a few dozen files, and is read wide open.
-    for entry in crate::ui::tree::build(&paths, crate::ui::tree::Folds::OpenBut(collapsed)) {
+    for entry in crate::ui::tree::build(&paths, crate::ui::tree::Folds::OpenBut(&local_collapsed)) {
         match entry {
             crate::ui::tree::Entry::Dir {
                 path,
@@ -1942,9 +2405,9 @@ fn flush(block: &mut Vec<FileRow>, collapsed: &HashSet<PathBuf>, out: &mut Vec<R
                 // tick marks reviewed.
                 let inside: Vec<&FileRow> = leaves.iter().map(|index| &files[*index]).collect();
                 out.push(Row::Dir(DirRow {
-                    path: Rc::new(path),
+                    path: Rc::new(crate::wslpath::join(repository, path)),
                     label,
-                    depth,
+                    depth: repository_depth + depth,
                     collapsed,
                     paths: inside
                         .iter()
@@ -1956,7 +2419,7 @@ fn flush(block: &mut Vec<FileRow>, collapsed: &HashSet<PathBuf>, out: &mut Vec<R
             }
             crate::ui::tree::Entry::Leaf { index, depth } => {
                 let mut file = files[index].clone();
-                file.depth = depth;
+                file.depth = repository_depth + depth;
                 // The folder is carried by the row above: repeating it on every
                 // file is exactly the noise the tree removes.
                 file.directory.clear();
@@ -1977,18 +2440,40 @@ fn shown_rows(
     tree: bool,
     collapsed: &HashSet<PathBuf>,
 ) -> Rc<Vec<Row>> {
+    let searching = !query.trim().is_empty();
+    let sections = if flat.iter().any(|row| matches!(row, Row::Repository { .. })) {
+        let mut hidden: Option<&Path> = None;
+        let mut rows = Vec::new();
+        for row in flat.iter() {
+            if let Row::Repository { path, .. } = row {
+                if hidden.is_some_and(|hidden| path.starts_with(hidden)) {
+                    continue;
+                }
+                let closed = !searching && collapsed.contains(path.as_path());
+                hidden = closed.then_some(path.as_path());
+                let mut row = row.clone();
+                if let Row::Repository { collapsed, .. } = &mut row {
+                    *collapsed = closed;
+                }
+                rows.push(row);
+            } else if hidden.is_none() {
+                rows.push(row.clone());
+            }
+        }
+        Rc::new(rows)
+    } else {
+        flat.clone()
+    };
     if !tree {
-        // Without the tree, the displayed list **is** the flat one, and copying
-        // several hundred rows to say so would be the cost of the whole panel.
-        return flat.clone();
+        return sections;
     }
     // During a search, collapses are ignored: a file found in a closed folder
     // would not be visible, and the search would look as if it had found
     // nothing.
-    if query.trim().is_empty() {
-        Rc::new(tree_rows(flat, collapsed))
+    if !searching {
+        Rc::new(tree_rows(&sections, collapsed))
     } else {
-        Rc::new(tree_rows(flat, &HashSet::new()))
+        Rc::new(tree_rows(&sections, &HashSet::new()))
     }
 }
 
@@ -2002,9 +2487,9 @@ pub struct RowCache {
     epoch: u64,
     query: String,
     tree: bool,
+    show_gitlinks: bool,
     shown: Rc<Vec<Row>>,
-    /// How many files are ticked, over the **whole** list: a collapsed folder
-    /// hides its files from `shown`, and it still stages them.
+    /// Files staged in the active repository, excluding child indexes.
     staged: usize,
 }
 
@@ -2025,6 +2510,7 @@ mod tests {
             original: None,
             index,
             worktree,
+            submodule: None,
         }
     }
 
@@ -2035,11 +2521,337 @@ mod tests {
         }
     }
 
+    #[test]
+    fn submodule_rows_keep_dirty_content_out_of_parent_staging() {
+        let mut dirty = file("app-tech", StatusCode::Unmodified, StatusCode::Modified);
+        dirty.submodule = Some(crate::git::status::SubmoduleStatus {
+            commit_changed: false,
+            modified: true,
+            untracked: true,
+        });
+        let mut changed = dirty.clone();
+        changed.path = "other-module".into();
+        changed.submodule.as_mut().unwrap().commit_changed = true;
+        let st = status(vec![dirty, changed]);
+        let rows = rows_for(&DiffRange::Working, &st, &[], &[], "");
+        let files = files_of(&rows);
+        assert_eq!(files.len(), 2);
+        assert!(files[0].submodule.unwrap().modified);
+        assert!(!files[0].stageable);
+        assert!(files[1].stageable);
+        assert_eq!(
+            worth_sending(&st, vec!["app-tech".into(), "other-module".into()], true),
+            vec![PathBuf::from("other-module")]
+        );
+
+        let mut st = st;
+        st.files[0].index = StatusCode::Modified;
+        let rows = rows_for(&DiffRange::Working, &st, &[], &[], "");
+        let files = files_of(&rows);
+        assert_eq!(
+            files.len(),
+            2,
+            "a dirty submodule is not a partially staged file"
+        );
+        assert!(files[0].staged && !files[0].partial());
+        assert_eq!(
+            worth_sending(&st, vec!["app-tech".into()], false),
+            vec![PathBuf::from("app-tech")]
+        );
+    }
+
+    #[test]
+    fn submodule_sections_have_their_own_groups_paths_and_tree() {
+        use crate::git::status::SubmoduleChanges;
+        let mut st = status(vec![file(
+            "src/a.tsx",
+            StatusCode::Unmodified,
+            StatusCode::Modified,
+        )]);
+        st.submodules.push(SubmoduleChanges {
+            path: "app-tech".into(),
+            status: status(vec![
+                file("src/a.tsx", StatusCode::Modified, StatusCode::Modified),
+                file("src/new.tsx", StatusCode::Untracked, StatusCode::Untracked),
+            ]),
+        });
+        let path = PathBuf::from("app-tech/src/a.tsx");
+        let volumes = vec![DiffFile {
+            path: path.clone(),
+            original: None,
+            added: 5,
+            removed: 2,
+            binary: false,
+        }];
+        let rows = rows_for(&DiffRange::Working, &st, &volumes, &[], "");
+        let section = rows
+            .iter()
+            .position(|row| matches!(row, Row::Repository { .. }))
+            .unwrap();
+        assert_eq!(section, 2, "the parent's group ends before the submodule");
+        assert!(
+            matches!(&rows[section], Row::Repository { path, staged: 1, .. } if path.as_path() == Path::new("app-tech"))
+        );
+        let child = &rows[section + 1..];
+        assert_eq!(
+            groups_of(child),
+            vec![Group::Tracked, Group::Unstaged, Group::Untracked]
+        );
+        assert_eq!(
+            group_of(child, Group::Tracked).paths.as_ref(),
+            std::slice::from_ref(&path)
+        );
+        assert!(group_of(child, Group::Tracked).checked);
+        assert!(!group_of(child, Group::Unstaged).checked);
+        let files = files_of(child);
+        assert_eq!((files[0].added, files[0].removed), (5, 2));
+        assert!(files[0].partial());
+        assert!(!files[1].staged);
+        assert_eq!(files[2].path(), Path::new("app-tech/src/new.tsx"));
+        assert_eq!(
+            st.staged().count(),
+            0,
+            "the parent commit box remains empty"
+        );
+        assert_eq!(
+            worth_sending(&st, vec![path.clone(), "src/a.tsx".into()], false),
+            vec![path.clone()]
+        );
+        assert!(crate::ui::app::partially_staged(&st, &path));
+        assert!(!crate::ui::app::partially_staged(
+            &st,
+            Path::new("src/a.tsx")
+        ));
+
+        let shown = tree_rows(&rows, &HashSet::from(["app-tech/src".into()]));
+        assert_eq!(
+            shape(&shown),
+            vec![
+                "groupe",
+                "[1] src",
+                " a.tsx",
+                "submodule app-tech",
+                "groupe",
+                " [1] src",
+                "groupe",
+                " [1] src",
+                "groupe",
+                " [1] src",
+            ]
+        );
+        let child_dir = shown
+            .iter()
+            .find_map(|row| match row {
+                Row::Dir(dir) if dir.path.as_path() == Path::new("app-tech/src") => Some(dir),
+                _ => None,
+            })
+            .unwrap();
+        assert!(child_dir.collapsed);
+        assert_eq!(child_dir.paths.as_ref(), &[path]);
+        let filtered = rows_for(&DiffRange::Working, &st, &volumes, &[], "new.tsx");
+        assert!(matches!(filtered.first(), Some(Row::Repository { .. })));
+        assert_eq!(groups_of(&filtered), vec![Group::Untracked]);
+        assert!(rows_for(&DiffRange::Working, &st, &volumes, &[], "missing.tsx").is_empty());
+    }
+
+    #[test]
+    fn submodule_commit_references_are_hidden_by_default_and_clean_sections_stay_hidden() {
+        use crate::git::status::{SubmoduleChanges, SubmoduleStatus};
+        let mut link = file("app-tech", StatusCode::Unmodified, StatusCode::Modified);
+        link.submodule = Some(SubmoduleStatus {
+            commit_changed: true,
+            modified: false,
+            untracked: false,
+        });
+        let mut st = status(vec![link]);
+        st.submodules.push(SubmoduleChanges {
+            path: "app-tech".into(),
+            status: Status::default(),
+        });
+        let show = crate::ui::settings::Settings::default().show_submodule_commits;
+        assert!(!show);
+        assert!(!st.has_file_changes());
+        assert!(rows_for_with_gitlinks(&DiffRange::Working, &st, &[], &[], "", show).is_empty());
+        let references = rows_for_with_gitlinks(&DiffRange::Working, &st, &[], &[], "", true);
+        assert_eq!(files_of(&references).len(), 1);
+        assert!(!references
+            .iter()
+            .any(|row| matches!(row, Row::Repository { .. })));
+        assert!(!files_of(&references)[0].submodule_files);
+
+        st.submodules[0].status.files = vec![
+            file("staged.tsx", StatusCode::Modified, StatusCode::Unmodified),
+            file("dirty.tsx", StatusCode::Unmodified, StatusCode::Modified),
+            file("new.tsx", StatusCode::Untracked, StatusCode::Untracked),
+        ];
+        let visible = rows_for_with_gitlinks(&DiffRange::Working, &st, &[], &[], "", show);
+        assert_eq!(files_of(&visible).len(), 3);
+        assert!(matches!(visible.first(), Some(Row::Repository { .. })));
+        assert!(files_of(&visible)
+            .iter()
+            .all(|file| file.submodule.is_none()));
+        assert_eq!(groups_of(&visible), vec![Group::Tracked, Group::Untracked]);
+        assert_eq!(
+            group_of(&visible, Group::Tracked).paths.as_ref(),
+            &[
+                PathBuf::from("app-tech/staged.tsx"),
+                PathBuf::from("app-tech/dirty.tsx")
+            ]
+        );
+        st.submodules[0].status.files.clear();
+        assert!(rows_for_with_gitlinks(&DiffRange::Working, &st, &[], &[], "", show).is_empty());
+    }
+
+    #[test]
+    fn submodule_sublists_fold_independently_and_search_reveals_nested_files() {
+        use crate::git::status::SubmoduleChanges;
+        let mut first = status(vec![file(
+            "a.tsx",
+            StatusCode::Modified,
+            StatusCode::Unmodified,
+        )]);
+        first.submodules.push(SubmoduleChanges {
+            path: "nested".into(),
+            status: status(vec![file(
+                "deep.tsx",
+                StatusCode::Unmodified,
+                StatusCode::Modified,
+            )]),
+        });
+        let mut st = status(vec![file(
+            "parent.txt",
+            StatusCode::Modified,
+            StatusCode::Unmodified,
+        )]);
+        st.submodules = vec![
+            SubmoduleChanges {
+                path: "first".into(),
+                status: first,
+            },
+            SubmoduleChanges {
+                path: "second".into(),
+                status: status(vec![file(
+                    "new.tsx",
+                    StatusCode::Untracked,
+                    StatusCode::Untracked,
+                )]),
+            },
+            SubmoduleChanges {
+                path: "clean".into(),
+                status: Status::default(),
+            },
+        ];
+        let flat = Rc::new(rows_for(&DiffRange::Working, &st, &[], &[], ""));
+        let collapsed = HashSet::from(["first".into()]);
+        for tree in [false, true] {
+            let shown = shown_rows(&flat, "", tree, &collapsed);
+            let paths: Vec<_> = files_of(&shown).into_iter().map(FileRow::path).collect();
+            assert_eq!(
+                paths,
+                vec![Path::new("parent.txt"), Path::new("second/new.tsx")]
+            );
+            assert!(shown.iter().any(|row| matches!(row, Row::Repository { path, collapsed: true, .. } if path.as_path() == Path::new("first"))));
+            assert!(!shown.iter().any(|row| matches!(row, Row::Repository { path, .. } if path.as_path() == Path::new("first/nested"))));
+            assert!(!shown.iter().any(|row| matches!(row, Row::Repository { path, .. } if path.as_path() == Path::new("clean"))));
+        }
+        let shown = shown_rows(&flat, "", false, &HashSet::from(["first/nested".into()]));
+        assert!(files_of(&shown)
+            .iter()
+            .any(|file| file.path() == Path::new("first/a.tsx")));
+        assert!(!files_of(&shown)
+            .iter()
+            .any(|file| file.path() == Path::new("first/nested/deep.tsx")));
+        let matching = Rc::new(rows_for(&DiffRange::Working, &st, &[], &[], "deep.tsx"));
+        let found = shown_rows(&matching, "deep.tsx", true, &collapsed);
+        assert_eq!(files_of(&found).len(), 1);
+        assert_eq!(
+            files_of(&found)[0].path(),
+            Path::new("first/nested/deep.tsx")
+        );
+        assert_eq!(files_of(&found)[0].depth, 2);
+        assert!(submodule_commit_command(
+            Path::new("/project"),
+            &st,
+            Path::new("first/nested"),
+            "unstaged",
+            false
+        )
+        .is_none());
+        assert!(submodule_commit_command(
+            Path::new("/project"),
+            &st,
+            Path::new(""),
+            "parent",
+            false
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn submodule_commit_from_parent_leaves_parent_index_and_child_unstaged_files_alone() {
+        use crate::git::{git, repo};
+        let f = crate::git::submodule_tests::Fixture::new();
+        std::fs::write(f.child.join("src/deep/code.txt"), "child commit\n").unwrap();
+        std::fs::write(f.child.join(".gitignore"), "vendor/\nother/\n").unwrap();
+        std::fs::write(f.parent.join("parent.txt"), "parent draft\n").unwrap();
+        repo::stage(
+            &f.parent,
+            &["parent.txt".into(), f.path.join("src/deep/code.txt")],
+        )
+        .unwrap();
+        let parent_head = git(&f.parent, &["rev-parse", "HEAD"]).unwrap();
+        let child_head = git(&f.child, &["rev-parse", "HEAD"]).unwrap();
+        let st = crate::git::status::status(&f.parent).unwrap();
+        assert!(submodule_commit_command(&f.parent, &st, &f.path, " \n", false).is_none());
+        assert!(
+            submodule_commit_command(&f.parent, &st, Path::new("missing"), "commit", false)
+                .is_none()
+        );
+        assert!(matches!(
+            submodule_commit_command(&f.parent, &st, &f.path, "child", true),
+            Some(Cmd::Commit { push: true, .. })
+        ));
+        let Cmd::Commit {
+            worktree,
+            message,
+            amend,
+            all,
+            push,
+        } = submodule_commit_command(&f.parent, &st, &f.path, "child message", false).unwrap()
+        else {
+            panic!("expected a commit")
+        };
+        assert_eq!(worktree, f.child);
+        assert!(!amend && !all && !push);
+        repo::commit(
+            &worktree,
+            repo::CommitOptions {
+                message: &message,
+                amend,
+                all,
+            },
+        )
+        .unwrap();
+        assert_eq!(git(&f.parent, &["rev-parse", "HEAD"]).unwrap(), parent_head);
+        assert_ne!(git(&f.child, &["rev-parse", "HEAD"]).unwrap(), child_head);
+        assert_eq!(
+            git(&f.child, &["log", "-1", "--format=%s"]).unwrap(),
+            "child message"
+        );
+        let st = crate::git::status::status(&f.parent).unwrap();
+        assert_eq!(st.staged().count(), 1);
+        let child = st.repository(&f.path).unwrap();
+        assert_eq!(child.staged().count(), 0);
+        assert_eq!(child.files[0].path, Path::new(".gitignore"));
+        assert!(submodule_commit_command(&f.parent, &st, &f.path, "again", false).is_none());
+        assert!(st.file(&f.path).unwrap().submodule.unwrap().commit_changed);
+    }
+
     fn files_of(rows: &[Row]) -> Vec<&FileRow> {
         rows.iter()
             .filter_map(|row| match row {
                 Row::File(file) => Some(file),
-                Row::Group(_) | Row::Dir(_) => None,
+                Row::Repository { .. } | Row::Group(_) | Row::Dir(_) => None,
             })
             .collect()
     }
@@ -2048,7 +2860,7 @@ mod tests {
         rows.iter()
             .filter_map(|row| match row {
                 Row::Group(group) => Some(group.group),
-                Row::File(_) | Row::Dir(_) => None,
+                Row::Repository { .. } | Row::File(_) | Row::Dir(_) => None,
             })
             .collect()
     }
@@ -2077,6 +2889,9 @@ mod tests {
                     directory: String::new(),
                     index: StatusCode::Modified,
                     worktree: StatusCode::Unmodified,
+                    submodule: None,
+                    submodule_files: false,
+                    stageable: false,
                     added: 1,
                     removed: 0,
                     staged: true,
@@ -2092,6 +2907,7 @@ mod tests {
     fn shape(rows: &[Row]) -> Vec<String> {
         rows.iter()
             .map(|row| match row {
+                Row::Repository { path, .. } => format!("submodule {}", path.display()),
                 Row::Group(_) => "groupe".to_string(),
                 Row::Dir(dir) => format!(
                     "{}[{}] {}",

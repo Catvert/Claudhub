@@ -2019,7 +2019,7 @@ impl ClaudhubApp {
         // see `ui::surface`. SQL is code, read and written the same way, and the
         // console was the one code panel that had none of them.
         self.advance_surface_scroll(&surface, &editor, window, cx);
-        self.sync_block_cursor(&surface, vim, cx);
+        self.sync_block_cursor(&surface, vim, window, cx);
         // The occurrences of the last search, lit as `Ctrl+F` lights them:
         // see `sync_search_matches`.
         self.sync_search_matches(&surface, vim, cx);

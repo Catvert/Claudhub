@@ -382,6 +382,8 @@ pub struct Settings {
     /// change set is a handful of files, and the folder rows were mostly
     /// chrome between them.
     pub review_tree: bool,
+    /// Show gitlink commit-reference changes alongside actual file edits.
+    pub show_submodule_commits: bool,
     /// Diff in two columns — old version on the left, new on the right — rather
     /// than as a single list.
     ///
@@ -590,6 +592,7 @@ impl Default for Settings {
             history_graph: false,
             history_branches: true,
             review_tree: false,
+            show_submodule_commits: false,
             diff_split: true,
             diff_whole_file: false,
             diff_wrap: true,

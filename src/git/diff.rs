@@ -111,7 +111,25 @@ pub struct FileDiff {
 
 /// Lists the review range's files with their volume.
 pub fn files(dir: &Path, range: &Range) -> Result<Vec<DiffFile>> {
-    let mut args: Vec<String> = vec!["diff".into(), "--numstat".into(), "-z".into(), "-M".into()];
+    files_in(dir, range, &mut std::collections::HashSet::new())
+}
+
+fn files_in(
+    dir: &Path,
+    range: &Range,
+    seen: &mut std::collections::HashSet<PathBuf>,
+) -> Result<Vec<DiffFile>> {
+    if !seen.insert(dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())) {
+        return Ok(Vec::new());
+    }
+    let mut args: Vec<String> = vec![
+        "diff".into(),
+        "--numstat".into(),
+        "-z".into(),
+        "-M".into(),
+        "--ignore-submodules=none".into(),
+        "--submodule=short".into(),
+    ];
     args.extend(range.args());
     // The revision list is closed, as it is under `file` — which closes it
     // because it has a path to add. A base named like a directory is refused
@@ -119,7 +137,22 @@ pub fn files(dir: &Path, range: &Range) -> Result<Vec<DiffFile>> {
     // filename`.
     args.push("--".into());
     let out = git(dir, &args)?;
-    Ok(parse_numstat(&out))
+    let mut files = parse_numstat(&out);
+    if matches!(range, Range::Working) {
+        let submodules: Vec<_> = files
+            .iter()
+            .filter(|file| dir.join(&file.path).join(".git").exists())
+            .map(|file| file.path.clone())
+            .collect();
+        for path in submodules {
+            for mut file in files_in(&dir.join(&path), range, seen)? {
+                file.path = path.join(file.path);
+                file.original = file.original.map(|original| path.join(original));
+                files.push(file);
+            }
+        }
+    }
+    Ok(files)
 }
 
 /// A single file's diff.
@@ -127,6 +160,12 @@ pub fn files(dir: &Path, range: &Range) -> Result<Vec<DiffFile>> {
 /// `context` is the number of lines around each change; the view raises it when
 /// "more context" is asked for.
 pub fn file(dir: &Path, range: &Range, path: &Path, context: usize) -> Result<FileDiff> {
+    let (owner, local) = if matches!(range, Range::Working) {
+        super::repo::file_repository(dir, path)
+    } else {
+        (dir.to_path_buf(), path.to_path_buf())
+    };
+    let (dir, path) = (owner.as_path(), local.as_path());
     let mut args: Vec<String> = vec![
         "diff".into(),
         format!("-U{context}"),
@@ -135,6 +174,8 @@ pub fn file(dir: &Path, range: &Range, path: &Path, context: usize) -> Result<Fi
         // the unified output with a format we do not know how to read.
         "--no-ext-diff".into(),
         "--no-color".into(),
+        "--ignore-submodules=none".into(),
+        "--submodule=short".into(),
     ];
     args.extend(range.args());
     args.push("--".into());
@@ -147,12 +188,16 @@ pub fn file(dir: &Path, range: &Range, path: &Path, context: usize) -> Result<Fi
 /// `git diff` with no range. On a partially staged file this is exactly what
 /// the next commit would leave behind; on a fully staged one it is empty.
 pub fn unstaged_file(dir: &Path, path: &Path, context: usize) -> Result<FileDiff> {
+    let (owner, local) = super::repo::file_repository(dir, path);
+    let (dir, path) = (owner.as_path(), local.as_path());
     let args: Vec<String> = vec![
         "diff".into(),
         format!("-U{context}"),
         "-M".into(),
         "--no-ext-diff".into(),
         "--no-color".into(),
+        "--ignore-submodules=none".into(),
+        "--submodule=short".into(),
         "--".into(),
         path.to_string_lossy().into_owned(),
     ];
@@ -180,6 +225,8 @@ pub fn staged_text(dir: &Path) -> Result<String> {
             "-M",
             "--no-ext-diff",
             "--no-color",
+            "--ignore-submodules=none",
+            "--submodule=short",
         ],
     )
 }
