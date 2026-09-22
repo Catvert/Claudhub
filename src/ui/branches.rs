@@ -490,6 +490,16 @@ impl ClaudhubApp {
             .strip_prefix("origin/")
             .unwrap_or(&branch)
             .to_string();
+        // A remote branch with no local counterpart **starts from the remote
+        // one**: `git worktree add -b <name>` without a start point starts from
+        // HEAD, and the worktree held the main checkout's commits under the
+        // remote branch's name, with nothing to say so.
+        let has_local = self.repo_of(&main).is_some_and(|repo| {
+            repo.branches
+                .iter()
+                .any(|known| known.kind == BranchKind::Local && known.name == local)
+        });
+        let from = (branch != local && !has_local).then(|| branch.clone());
         let slug = local.replace('/', "-");
         let repo_name = main
             .file_name()
@@ -503,7 +513,7 @@ impl ClaudhubApp {
             main,
             path: crate::wslpath::join(&root, slug),
             branch: local,
-            from: None,
+            from,
         });
         cx.notify();
     }
