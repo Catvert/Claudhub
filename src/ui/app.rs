@@ -319,6 +319,12 @@ pub struct ReviewState {
     /// answer — a repository with nothing to compare against — stays `None`
     /// rather than being asked again on the next keystroke.
     pub base_asked: bool,
+    /// The last review point set on this worktree (`git::snapshot`), as the
+    /// store keeps it. What "since my last review" compares against.
+    pub review_point: Option<crate::git::snapshot::Point>,
+    /// The branch review panel shows "since my last review" — see
+    /// `review::branch_panel_range`.
+    pub since_review: bool,
     /// The history and its graph, loaded on demand — opening a worktree must not
     /// pay for a `git log` nobody will look at.
     pub history: Option<std::rc::Rc<History>>,
@@ -490,6 +496,8 @@ impl Default for ReviewState {
             collapsed: std::collections::HashSet::new(),
             base: None,
             base_asked: false,
+            review_point: None,
+            since_review: false,
             history: None,
             // The current branch: what one asks a history first. The whole
             // graph is one click away.
@@ -1316,7 +1324,11 @@ impl ClaudhubApp {
             let SelectEvent::Confirm(Some(base)) = event else {
                 return;
             };
-            this.set_base(base.to_string(), cx);
+            if base.as_ref() == crate::ui::base_select::SINCE_REVIEW {
+                this.show_since_review(cx);
+            } else {
+                this.set_base(base.to_string(), cx);
+            }
         })
         .detach();
 
@@ -2234,6 +2246,9 @@ impl ClaudhubApp {
             } => self.history_arrived(worktree, range, commits, graph, patches, cx),
             Evt::Branches { main, branches } => self.branches_arrived(main, branches, window, cx),
             Evt::BaseGuessed { worktree, base } => self.base_guessed(worktree, base, window, cx),
+            Evt::ReviewMarked { worktree, point } => {
+                self.review_marked(worktree, point, window, cx)
+            }
             Evt::Tags { main, tags } => self.tags_arrived(main, tags, cx),
             Evt::RemoteTags { main, names } => self.remote_tags_arrived(main, names, cx),
             Evt::Stashes { main, stashes } => self.stashes_arrived(main, stashes, cx),
@@ -3679,7 +3694,12 @@ impl ClaudhubApp {
         // file with the mouse has to open it at the top.
         state.pending_jump = None;
         state.range = range.clone();
-        let untracked = state.status.file(&path).is_some_and(|f| f.is_untracked());
+        // Untracked **for the working range**: that is the one diff git cannot
+        // give for a file it does not know. Since a review point, the file is
+        // in both trees, and read against `/dev/null` it would come out whole
+        // however little had changed.
+        let untracked = matches!(range, DiffRange::Working)
+            && state.status.file(&path).is_some_and(|f| f.is_untracked());
         let partial = matches!(range, DiffRange::Working) && partially_staged(&state.status, &path);
         // Where a rename came from, as the list clicked read it — or the
         // status, for the working range's file opened before its list arrived.
@@ -3803,15 +3823,31 @@ impl ClaudhubApp {
         let Some(repo) = self.repo_of(&worktree) else {
             return;
         };
-        let choices: Vec<BaseChoice> = repo
-            .branches
-            .iter()
-            .map(|branch| BaseChoice::of(branch, &worktree))
+        let state = self.review.get(&worktree);
+        // The review point first, when there is one: it is the entry one comes
+        // back to round after round, and a branch list runs to hundreds. Its
+        // "how long ago" is worked out here, so it is as fresh as the last
+        // refill — a worktree change, a base chosen, a point set.
+        let now = chrono::Utc::now().timestamp();
+        let point = state
+            .and_then(|state| state.review_point.as_ref())
+            .map(|point| BaseChoice::since_review(point.at, now));
+        let choices: Vec<BaseChoice> = point
+            .into_iter()
+            .chain(
+                repo.branches
+                    .iter()
+                    .map(|branch| BaseChoice::of(branch, &worktree)),
+            )
             .collect();
-        let current = self
-            .review
-            .get(&worktree)
-            .and_then(|state| state.base.clone())
+        let current = state
+            .and_then(|state| {
+                if state.since_review && state.review_point.is_some() {
+                    Some(crate::ui::base_select::SINCE_REVIEW.to_string())
+                } else {
+                    state.base.clone()
+                }
+            })
             .map(SharedString::from);
 
         self.base_select.update(cx, |select, cx| {
@@ -3834,7 +3870,15 @@ impl ClaudhubApp {
         let Some(state) = self.review.get_mut(&worktree) else {
             return;
         };
+        // Choosing a branch — here or from a branch row's "compare with" — is
+        // leaving "since my last review", even for the base already set.
+        let left_since = std::mem::replace(&mut state.since_review, false);
         if state.base.as_deref() == Some(base.as_str()) {
+            if left_since {
+                self.persist_review(&worktree, cx);
+                self.base_changed = true;
+                cx.notify();
+            }
             return;
         }
         state.base = Some(base.clone());
@@ -3856,6 +3900,87 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    /// Turns the branch review panel to "since my last review".
+    fn show_since_review(&mut self, cx: &mut Context<Self>) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        let Some(state) = self.review.get_mut(&worktree) else {
+            return;
+        };
+        if state.since_review || state.review_point.is_none() {
+            return;
+        }
+        state.since_review = true;
+        self.persist_review(&worktree, cx);
+        self.base_changed = true;
+        cx.notify();
+    }
+
+    /// Sets the review point of a worktree to what is on disk now.
+    ///
+    /// The point is a command — a scratch index, a tree, a commit, a ref — and
+    /// comes back as `Evt::ReviewMarked`; nothing changes here before it does.
+    pub(super) fn mark_reviewed(&mut self, worktree: PathBuf, _cx: &mut Context<Self>) {
+        self.git.send(Cmd::MarkReviewed { worktree });
+    }
+
+    /// A review point has been set.
+    ///
+    /// Everything filed under the previous point goes: its lists, its rows, its
+    /// ticks (`notes::follow_point`), and the notes taken against it move to
+    /// the new one. A diff open "since" the old point is reopened since the new
+    /// one — it is the same question, asked again from here.
+    fn review_marked(
+        &mut self,
+        worktree: PathBuf,
+        point: crate::git::snapshot::Point,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.review.get_mut(&worktree) else {
+            return;
+        };
+        let commit = point.commit.clone();
+        state.review_point = Some(point);
+        let stale =
+            |range: &DiffRange| matches!(range, DiffRange::Since { point } if *point != commit);
+        state.files.retain(|range, _| !stale(range));
+        state.pending_files.retain(|range| !stale(range));
+        crate::ui::notes::follow_point(
+            Rc::make_mut(&mut state.notes).as_mut_slice(),
+            &mut state.reviewed,
+            &commit,
+        );
+        state.rows_changed();
+        let reopen = stale(&state.range)
+            .then(|| state.selected.clone())
+            .flatten();
+        if stale(&state.range) {
+            state.range = DiffRange::Since {
+                point: commit.clone(),
+            };
+        }
+        self.file_scroll.retain(|range, _| !stale(range));
+        self.persist_review(&worktree, cx);
+        // Reopened first: that clears the old point's diff, so the marks are
+        // not laid on a diff the notes no longer belong to.
+        if let Some(path) = reopen {
+            self.open_file(
+                worktree.clone(),
+                path,
+                DiffRange::Since { point: commit },
+                cx,
+            );
+        }
+        self.refresh_note_marks(&worktree);
+        if self.active.as_deref() == Some(worktree.as_path()) {
+            self.refresh_base_choices(window, cx);
+        }
+        self.announce(tr!("review-marked"), cx);
+        cx.notify();
+    }
+
     /// Creates a worktree's state, putting back into it what the store had kept.
     ///
     /// The base read back **wins** over the one git guesses: it is a choice of
@@ -3870,6 +3995,8 @@ impl ClaudhubApp {
         let mut state = ReviewState::default();
         if let Some(saved) = saved {
             state.base = saved.base;
+            state.review_point = saved.review_point;
+            state.since_review = saved.since_review;
             state.lsp = saved.lsp;
             state.collapsed = saved.collapsed.into_iter().collect();
             // A file written before this field existed carries zero, and a note
@@ -3921,9 +4048,12 @@ impl ClaudhubApp {
         let mut collapsed: Vec<PathBuf> = state.collapsed.iter().cloned().collect();
         collapsed.sort();
         let (base, next_note, lsp) = (state.base.clone(), state.next_note, state.lsp);
+        let (review_point, since_review) = (state.review_point.clone(), state.since_review);
         Store::update_global(cx, |store| {
             let saved = store.worktree_mut(worktree, &main);
             saved.base = base;
+            saved.review_point = review_point;
+            saved.since_review = since_review;
             saved.collapsed = collapsed;
             saved.next_note = next_note;
             saved.lsp = lsp;

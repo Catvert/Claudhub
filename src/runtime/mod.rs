@@ -726,6 +726,13 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             let base = branch::guess_base(&worktree);
             vec![Evt::BaseGuessed { worktree, base }]
         }
+        // No status re-read after it, although it writes: the index, the tree
+        // and HEAD are untouched, and the ref it moves is under `refs/`, which
+        // the watcher already reports.
+        Cmd::MarkReviewed { worktree } => match crate::git::snapshot::mark(&worktree) {
+            Ok(point) => vec![Evt::ReviewMarked { worktree, point }],
+            Err(e) => vec![fail(Some(worktree), Action::Diff, e)],
+        },
         Cmd::LoadBranches { main } => match branch::list(&main) {
             Ok(branches) => vec![branches_evt(main, branches)],
             Err(e) => vec![fail(None, Action::Branch, e)],
@@ -2331,6 +2338,14 @@ mod tests {
             Queue::Network
         );
         assert_eq!(queue_of(&Cmd::ReleaseCheck), Queue::Network);
+        // A review point is a local write of milliseconds, and it is what the
+        // notes' sending waits on before the agent starts rewriting the tree.
+        assert_eq!(
+            queue_of(&Cmd::MarkReviewed {
+                worktree: worktree(),
+            }),
+            Queue::Reads
+        );
     }
 
     /// A slow service never gets in front of a diff, and never behind a

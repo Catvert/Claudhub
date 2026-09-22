@@ -312,10 +312,15 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        match self.active_review().and_then(|state| state.base.clone()) {
-            Some(base) => self
-                .render_file_list(DiffRange::Branch { base }, window, cx)
-                .into_any_element(),
+        let range = self.active_review().and_then(|state| {
+            branch_panel_range(
+                state.base.as_deref(),
+                state.review_point.as_ref(),
+                state.since_review,
+            )
+        });
+        match range {
+            Some(range) => self.render_file_list(range, window, cx).into_any_element(),
             None => v_flex()
                 .size_full()
                 .child(self.render_base_bar(cx))
@@ -397,6 +402,7 @@ impl ClaudhubApp {
             DiffRange::Working => "working".to_string(),
             DiffRange::Branch { base } => format!("branch-{base}"),
             DiffRange::Commit { id, .. } => format!("commit-{id}"),
+            DiffRange::Since { point } => format!("since-{point}"),
         };
 
         // No right-hand rule: it was the seam with the neighbouring diff, from
@@ -828,6 +834,23 @@ impl ClaudhubApp {
                         .placeholder(tr!("range-base-placeholder"))
                         .menu_width(crate::ui::base_select::MENU_WIDTH),
                 ),
+            )
+            // Beside the selector whose first entry it feeds: "since my last
+            // review" is read from here. The notes' sending sets a point too
+            // (`notes_view::send_prompt`); this is for the round that ends
+            // with nothing to say.
+            .child(
+                Button::new("mark-reviewed")
+                    .ghost()
+                    .small()
+                    .icon(icon("eye"))
+                    .tooltip(tr!("review-mark-read"))
+                    .disabled(self.active.is_none())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(worktree) = this.active.clone() {
+                            this.mark_reviewed(worktree, cx);
+                        }
+                    })),
             )
             .child(self.find_button(crate::ui::find::Pane::Branch, cx))
     }
@@ -2130,6 +2153,33 @@ fn submodule_commit_command(
 /// staged from what is not, a distinction the checkbox renders. The other ranges
 /// are about commits, which have no notion of an index, and come from
 /// `--numstat`.
+/// What the branch review panel compares: the branch against its base, or —
+/// when that is what the selector says and a point exists — what has changed
+/// since the last review point.
+///
+/// "Since" wins over a missing base: a repository with nothing to compare the
+/// branch against still has a worktree an agent rewrites. And a choice of
+/// "since" with no point — a store written on another machine, a point
+/// forgotten — falls back to the branch rather than to an empty panel.
+///
+/// The range carries the point's **commit**: a new point is a new range, so
+/// its list, its ticks and its scroll start afresh, and nothing filed under
+/// the old one is taken for it.
+pub(super) fn branch_panel_range(
+    base: Option<&str>,
+    point: Option<&crate::git::snapshot::Point>,
+    since_review: bool,
+) -> Option<DiffRange> {
+    match point {
+        Some(point) if since_review => Some(DiffRange::Since {
+            point: point.commit.clone(),
+        }),
+        _ => base.map(|base| DiffRange::Branch {
+            base: base.to_string(),
+        }),
+    }
+}
+
 #[cfg(test)]
 fn rows_for(
     range: &DiffRange,
@@ -2304,7 +2354,7 @@ fn rows_for_repository(
             }
             rows
         }
-        DiffRange::Branch { .. } | DiffRange::Commit { .. } => files
+        DiffRange::Branch { .. } | DiffRange::Commit { .. } | DiffRange::Since { .. } => files
             .iter()
             .filter(|f| keep(&f.path))
             .map(|f| {
@@ -3399,5 +3449,73 @@ mod tests {
         assert_eq!(row.directory, "dossier");
         assert_eq!(row.index, StatusCode::Added);
         assert!(!row.partial());
+    }
+
+    #[test]
+    fn the_branch_panel_shows_since_the_review_only_when_asked_and_possible() {
+        let point = crate::git::snapshot::Point {
+            commit: "p1".into(),
+            at: 0,
+        };
+        let since = DiffRange::Since { point: "p1".into() };
+        let branch = DiffRange::Branch { base: "dev".into() };
+        // Asked for, and a point exists.
+        assert_eq!(
+            branch_panel_range(Some("dev"), Some(&point), true),
+            Some(since.clone())
+        );
+        // Even with no base to compare the branch against.
+        assert_eq!(branch_panel_range(None, Some(&point), true), Some(since));
+        // A point alone does not take the panel over.
+        assert_eq!(
+            branch_panel_range(Some("dev"), Some(&point), false),
+            Some(branch.clone())
+        );
+        // Asked for with no point: the branch, not an empty panel.
+        assert_eq!(branch_panel_range(Some("dev"), None, true), Some(branch));
+        assert_eq!(branch_panel_range(None, None, true), None);
+    }
+
+    /// The rows since a point come from the list alone, like a commit's —
+    /// untracked files included, since the two trees hold them — and a tick
+    /// taken against one point does not tick the same file against the next.
+    #[test]
+    fn rows_since_a_point_are_ticked_against_that_point_only() {
+        let files = vec![DiffFile {
+            path: PathBuf::from("neuf.rs"),
+            original: None,
+            added: 3,
+            removed: 0,
+            binary: false,
+        }];
+        let since = |point: &str| DiffRange::Since {
+            point: point.into(),
+        };
+        let tick = crate::ui::vault::Reviewed {
+            range: since("p1"),
+            path: PathBuf::from("neuf.rs"),
+            added: 3,
+            removed: 0,
+        };
+        let status = status(vec![file(
+            "neuf.rs",
+            StatusCode::Untracked,
+            StatusCode::Untracked,
+        )]);
+        let rows = rows_for(
+            &since("p1"),
+            &status,
+            &files,
+            std::slice::from_ref(&tick),
+            "",
+        );
+        assert!(groups_of(&rows).is_empty());
+        let row = files_of(&rows)[0];
+        assert_eq!(row.index, StatusCode::Added);
+        assert!(row.reviewed);
+        assert!(!row.stageable);
+
+        let rows = rows_for(&since("p2"), &status, &files, &[tick], "");
+        assert!(!files_of(&rows)[0].reviewed);
     }
 }

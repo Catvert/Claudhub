@@ -904,6 +904,13 @@ pub enum Cmd {
         path: PathBuf,
         force: bool,
     },
+    /// Sets the worktree's review point to what is on disk now — see
+    /// `git::snapshot`. A local write, in the reads' queue: it is an `add`
+    /// into a scratch index and three plumbing commands, and the view waits
+    /// on it to offer "since my last review".
+    MarkReviewed {
+        worktree: WorktreeId,
+    },
 }
 
 impl Cmd {
@@ -1020,6 +1027,7 @@ impl Cmd {
             Self::Call { .. } => "Call",
             Self::AddWorktree { .. } => "AddWorktree",
             Self::RemoveWorktree { .. } => "RemoveWorktree",
+            Self::MarkReviewed { .. } => "MarkReviewed",
         }
     }
 }
@@ -1513,6 +1521,12 @@ pub enum Evt {
         worktree: Option<WorktreeId>,
         action: Action,
         message: String,
+    },
+    /// A review point has been set: the commit holding the state read, and
+    /// when. A failure comes back as a `Failed` on `Action::Diff`.
+    ReviewMarked {
+        worktree: WorktreeId,
+        point: crate::git::snapshot::Point,
     },
 }
 

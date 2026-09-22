@@ -343,6 +343,10 @@ pub fn render_note(note: &Note) -> String {
                 front.insert("parent", parent.clone());
             }
         }
+        DiffRange::Since { point } => {
+            front.insert("range", "since".into());
+            front.insert("point", point.clone());
+        }
     }
     front.insert("sent", note.sent.to_string());
     front.insert("done", note.done.to_string());
@@ -382,6 +386,9 @@ pub fn parse_note(text: &str) -> Option<Note> {
         Some("commit") => DiffRange::Commit {
             id: front.get("commit")?.clone(),
             parent: front.get("parent").cloned(),
+        },
+        Some("since") => DiffRange::Since {
+            point: front.get("point")?.clone(),
         },
         _ => DiffRange::Working,
     };
@@ -490,6 +497,7 @@ fn range_key(range: &DiffRange) -> String {
         DiffRange::Working => "working".into(),
         DiffRange::Branch { base } => format!("branch {base}"),
         DiffRange::Commit { id, .. } => format!("commit {id}"),
+        DiffRange::Since { point } => format!("since {point}"),
     }
 }
 
@@ -503,6 +511,9 @@ fn range_of(key: &str) -> Option<DiffRange> {
         "commit" if !rest.is_empty() => Some(DiffRange::Commit {
             id: rest.to_string(),
             parent: None,
+        }),
+        "since" if !rest.is_empty() => Some(DiffRange::Since {
+            point: rest.to_string(),
         }),
         _ => None,
     }
@@ -676,6 +687,21 @@ mod tests {
         assert_eq!(parse_note(&text), Some(note));
     }
 
+    /// A note taken since the last review keeps its point: read back as a
+    /// working note, it would be placed on another diff altogether.
+    #[test]
+    fn a_note_taken_since_a_review_point_keeps_it() {
+        let note = Note {
+            range: DiffRange::Since {
+                point: "0123abcd".into(),
+            },
+            ..note()
+        };
+        let text = render_note(&note);
+        assert!(text.contains("range: since"), "{text}");
+        assert_eq!(parse_note(&text), Some(note));
+    }
+
     /// The name carries only the id and the file: a note that slips by ten lines
     /// would otherwise have a different name on every write, and the vault's
     /// links would point into the void.
@@ -760,6 +786,14 @@ mod tests {
                 path: PathBuf::from("un fichier avec une espace.rs"),
                 added: 0,
                 removed: 7,
+            },
+            Reviewed {
+                range: DiffRange::Since {
+                    point: "0123abcd".into(),
+                },
+                path: PathBuf::from("src/relu.rs"),
+                added: 4,
+                removed: 1,
             },
         ];
         let text = render_index(Path::new("/tmp/wt"), &reviewed);
