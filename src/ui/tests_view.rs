@@ -2185,7 +2185,9 @@ impl ClaudhubApp {
             .border_color(cx.theme().border)
             .text_xs();
         if state.running {
-            let stop = state.id;
+            // Every id of this campaign, and none other: another worktree's
+            // campaign may queue on the same worker, and a stop is by id.
+            let stop = state.since..=state.id;
             return bar
                 .child(
                     Spinner::new()
@@ -2209,7 +2211,9 @@ impl ClaudhubApp {
                         .icon(icon("circle-stop"))
                         .tooltip(tr!("tests-stop"))
                         .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.git.send(Cmd::TestsStop { id: stop });
+                            for id in stop.clone() {
+                                this.git.send(Cmd::TestsStop { id });
+                            }
                             cx.notify();
                         })),
                 )

@@ -20,7 +20,7 @@
 //! and not a flag on one, because they are two different regrets.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui_kit::component::{
@@ -185,6 +185,20 @@ impl ClaudhubApp {
         state.remote = Some(Rc::new(names.into_iter().collect()));
         state.remote_pending = false;
         cx.notify();
+    }
+
+    /// A `PushTag` failure — the `ls-remote` among them, which answers under
+    /// that action. Lowers the remote guard, without which one unreachable
+    /// `origin` leaves the "check on origin" button mute for the session: the
+    /// answer it waits for is the one that just failed. A real push failing
+    /// meanwhile lowers it too, and the worst that costs is a second read.
+    pub(super) fn remote_tags_failed(&mut self, worktree: &Path) {
+        if let Some(state) = self
+            .main_of(worktree)
+            .and_then(|main| self.tags.get_mut(&main))
+        {
+            state.remote_pending = false;
+        }
     }
 
     /// Re-reads the list, and forgets what was known of the remote.

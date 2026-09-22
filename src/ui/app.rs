@@ -2974,6 +2974,11 @@ impl ClaudhubApp {
         if action == Action::SuggestMessage {
             self.suggesting_message = None;
         }
+        if action == Action::PushTag {
+            if let Some(worktree) = worktree.as_deref() {
+                self.remote_tags_failed(worktree);
+            }
+        }
         // Same reason as the status above: without this, one `ls-files` that
         // fails leaves the explorer waiting for an answer that will never come,
         // and its tree stays empty for the rest of the session.
