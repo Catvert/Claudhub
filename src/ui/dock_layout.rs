@@ -215,6 +215,7 @@ pub fn seats(area: &DockArea, cx: &App) -> Vec<rails::Seat> {
         node: &PaneNode,
         area: &DockArea,
         anchor: Option<Anchor>,
+        at_root: bool,
         open: bool,
         cx: &App,
         out: &mut Vec<rails::Seat>,
@@ -234,10 +235,16 @@ pub fn seats(area: &DockArea, cx: &App) -> Vec<rails::Seat> {
                             .find(|id| area.panel(**id).is_some_and(|panel| panel.visible(cx)))
                     })
                     .copied();
-                for (order, id) in panels.iter().enumerate() {
+                // The rank runs on across the groups of one half, in the
+                // tree's order: a half the user has split holds two groups,
+                // and ranking each from zero tied their tabs, the rail then
+                // falling back on the table's order for both.
+                let before = out.iter().filter(|seat| seat.anchor == anchor).count();
+                for (ix, id) in panels.iter().enumerate() {
                     let Some(panel) = area.panel(*id) else {
                         continue;
                     };
+                    let order = before + ix;
                     out.push(rails::Seat {
                         panel: panel.panel_name(cx).to_string(),
                         anchor,
@@ -250,17 +257,8 @@ pub fn seats(area: &DockArea, cx: &App) -> Vec<rails::Seat> {
             }
             PaneRef::Split { children, .. } => {
                 for (ix, child) in children.iter().enumerate() {
-                    // **The half is read off the tree and nowhere else.** A
-                    // region split in two is its two halves, in order; deeper
-                    // than that — a user's own split inside one of them — keeps
-                    // the half it is in. What decides is position, which is what
-                    // the layout wrote and what a drag rewrites.
-                    let anchor = anchor.map(|anchor| match children.len() {
-                        1 => anchor,
-                        _ if ix == 0 => Anchor::new(anchor.side, Half::Start),
-                        _ => Anchor::new(anchor.side, Half::End),
-                    });
-                    walk(child, area, anchor, open, cx, out);
+                    let (anchor, at_root) = split_child(anchor, at_root, children.len(), ix);
+                    walk(child, area, anchor, at_root, open, cx, out);
                 }
             }
             // A tile is its own window inside the region; nothing here docks
@@ -284,9 +282,38 @@ pub fn seats(area: &DockArea, cx: &App) -> Vec<rails::Seat> {
         // The top half until a split says otherwise — an edge holding one group
         // has no second half to be in.
         let anchor = side_of(placement).map(|side| Anchor::new(side, Half::Start));
-        walk(tree.root(), area, anchor, open, cx, &mut out);
+        walk(tree.root(), area, anchor, true, open, cx, &mut out);
     }
     out
+}
+
+/// The anchor of the `ix`-th of `len` children of a split, and whether the
+/// halves are still to come below it.
+///
+/// **The half is read off the tree and nowhere else.** A region split in two
+/// is its two halves, in order — **at its root**, the first split that
+/// divides anything, which is where `target_for` looks for them too. Deeper
+/// than that, a user's own split inside one of
+/// them keeps the half it is in: it was remapped at every depth, so the
+/// second group of a split first half — `Split[Split[B, C], D]` — read as the
+/// second half, and its button sat on the wrong series of the rail. What
+/// decides is position, which is what the layout wrote and what a drag
+/// rewrites.
+///
+/// A split of one only wraps — every group needs a parent stack — so below
+/// it the halves are still to come.
+fn split_child(
+    anchor: Option<Anchor>,
+    at_root: bool,
+    len: usize,
+    ix: usize,
+) -> (Option<Anchor>, bool) {
+    let anchor = anchor.map(|anchor| match (at_root, len, ix) {
+        (false, ..) | (_, 1, _) => anchor,
+        (true, _, 0) => Anchor::new(anchor.side, Half::Start),
+        _ => Anchor::new(anchor.side, Half::End),
+    });
+    (anchor, at_root && len == 1)
 }
 
 /// Where a tool window should be inserted to land on one anchor.
@@ -831,5 +858,60 @@ impl crate::ui::app::ClaudhubApp {
             }
         }
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shape of a region's tree, without a dock to hold it.
+    enum Node {
+        Tabs(&'static str),
+        Split(Vec<Node>),
+    }
+
+    /// `seats`'s walk, reduced to the anchor each group ends up with.
+    fn halves(root: &Node) -> Vec<(&'static str, Half)> {
+        fn walk(node: &Node, anchor: Anchor, at_root: bool, out: &mut Vec<(&'static str, Half)>) {
+            match node {
+                Node::Tabs(name) => out.push((name, anchor.half)),
+                Node::Split(children) => {
+                    for (ix, child) in children.iter().enumerate() {
+                        let (anchor, at_root) =
+                            split_child(Some(anchor), at_root, children.len(), ix);
+                        walk(child, anchor.expect("an edge"), at_root, out);
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, Anchor::new(Side::Left, Half::Start), true, &mut out);
+        out
+    }
+
+    /// The halves are the region's first split; a split inside one of them
+    /// keeps the half it is in — its second group is not the second half.
+    #[test]
+    fn a_split_inside_a_half_stays_in_that_half() {
+        use Node::*;
+        let tree = Split(vec![Split(vec![Tabs("b"), Tabs("c")]), Tabs("d")]);
+        assert_eq!(
+            halves(&tree),
+            vec![("b", Half::Start), ("c", Half::Start), ("d", Half::End)]
+        );
+
+        // The wrapping splits of one change nothing, above or below.
+        let tree = Split(vec![Split(vec![
+            Split(vec![Tabs("b")]),
+            Split(vec![Split(vec![Tabs("c"), Tabs("d")])]),
+        ])]);
+        assert_eq!(
+            halves(&tree),
+            vec![("b", Half::Start), ("c", Half::End), ("d", Half::End)]
+        );
+
+        // One group alone is the first half.
+        assert_eq!(halves(&Split(vec![Tabs("b")])), vec![("b", Half::Start)]);
     }
 }
