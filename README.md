@@ -33,6 +33,11 @@ sans quitter l'application.
   virtualisé : un diff de plusieurs milliers de lignes défile sans peiner. À
   l'ouverture d'un worktree, Claudhub se place sur le domaine où il y a quelque
   chose à lire — un worktree propre s'ouvre sur la revue de sa branche.
+  « Marquer comme relu » pose un point de relecture — l'état du worktree, non
+  commité compris, sans toucher l'index — et la portée « depuis ma dernière
+  relecture » ne montre plus que ce que l'agent a changé depuis. Envoyer toutes
+  ses notes à l'agent pose ce point de soi-même. En vue « fichier entier », un
+  fichier s'ouvre sur son premier changement.
 
   Les modifications en cours tiennent dans **une seule liste, avec une case par
   fichier** : la cocher indexe, la décocher retire de l'index, et c'est ce qui
@@ -66,14 +71,27 @@ sans quitter l'application.
 - **Branches** — liste locale et distante avec leur dernier commit et leur
   écart à l'amont, bascule, création, et création d'un worktree depuis une
   branche existante.
+- **Agents** — Claudhub pose des hooks Claude Code dans les worktrees qu'il
+  crée (`.claude/settings.local.json`, fusionnés avec les vôtres ; un réglage
+  les coupe) : chaque worktree et chaque colonne du multiplexeur disent alors
+  si leur agent travaille, a fini ou attend une permission, et une bulle le
+  signale une fois. Sans hooks, l'état se devine encore à la consommation du
+  processus.
+- **Tests** — Pest, Vitest et Jest détectés et fusionnés en un arbre ; un test
+  rouge, ou tous les échecs d'un run, partent à l'agent avec le message, le
+  fichier, la ligne et la commande qui le relance seul.
 - **GitHub** — les pull requests ouvertes du dépôt : pour chacune, ce qu'elle
   vise, qui l'a ouverte, l'état de ses vérifications et la décision de revue ;
   celle de la branche affichée est marquée. Un bouton en ouvre une quand la
   branche n'en a pas — titre et description proposés d'après ses commits, et la
   branche poussée au passage si elle ne l'avait jamais été. La bascule d'à côté
   montre les exécutions de la CI de la branche, avec le journal de celle qui a
-  échoué et de quoi le confier à un agent. Tout passe par `gh`, déjà
-  authentifié : Claudhub n'a aucun jeton à tenir.
+  échoué et de quoi le confier à un agent. Une troisième montre ce qui tourne
+  sur tout le dépôt, jobs et étapes, en direct tant que le panneau est à
+  l'écran — annuler, relancer les jobs échoués. Une PR s'ouvre dans son propre
+  worktree (une PR de fork aussi), ses vérifications se déplient, et ses fils
+  de revue non résolus partent à l'agent de ce worktree. Tout passe par `gh`,
+  déjà authentifié : Claudhub n'a aucun jeton à tenir.
 - **Défilement** — chaque panneau porte sa barre, et la molette y est lissée :
   un cran glisse en une fraction de seconde au lieu de sauter de trois lignes,
   ce qui garde sa place à l'œil quand on relit. Un pavé tactile reste
