@@ -749,8 +749,9 @@ pub enum Cmd {
         /// worktree since closed must not paint another's panel.
         id: u64,
     },
-    /// Stops every test run up to `id` — the one in flight and its
-    /// campaign's queued remainder. **Never queued**: `Handle::send` hands it
+    /// Stops the test run `id`, and that run only: a campaign sends one per
+    /// run it launched, the one in flight and its queued remainder alike —
+    /// a floor would reach another worktree's run. **Never queued**: `Handle::send` hands it
     /// straight to the suite module, the watcher's route — queued behind the
     /// run it names, it would arrive after the death it asks for.
     TestsStop {
