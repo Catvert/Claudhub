@@ -2603,6 +2603,12 @@ impl ClaudhubApp {
         // so this is where the title bar's branch stops being the one one has
         // just left.
         let branch = status.branch.clone();
+        // The branch list is read on our own writes, and a `fetch` or a
+        // `reset` typed in a terminal is none of them: its only trace here is
+        // a status whose upstream or divergence has moved. Not on the first
+        // status, which the opening of the repository already pairs with a
+        // read of the list.
+        let refs_moved = state.status.branch.is_some() && refs_moved(&state.status, &status);
         state.status = status;
         state.rows_changed();
         self.repos.set_branch(&worktree, branch.as_deref());
@@ -2631,6 +2637,11 @@ impl ClaudhubApp {
             self.git.send(Cmd::GuessBase {
                 worktree: worktree.clone(),
             });
+        }
+        if refs_moved {
+            if let Some(main) = self.main_of(&worktree) {
+                self.git.send(Cmd::LoadBranches { main });
+            }
         }
         // The tree's rows read the status by path: filed once here rather than
         // at every frame of the panel.
@@ -5422,6 +5433,17 @@ impl ClaudhubApp {
 }
 
 /// Whether git still reports this file as unmerged.
+/// Whether two statuses of one checkout disagree on where it stands against
+/// its upstream — the one sign a status gives that references moved.
+fn refs_moved(before: &crate::git::Status, after: &crate::git::Status) -> bool {
+    (
+        &before.branch,
+        &before.upstream,
+        before.ahead,
+        before.behind,
+    ) != (&after.branch, &after.upstream, after.ahead, after.behind)
+}
+
 fn unmerged(state: &ReviewState, path: &Path) -> bool {
     state.status.conflicted().any(|file| file.path == path)
 }
@@ -5672,5 +5694,27 @@ mod tests {
         let zone = zone.expect("the notes are still there");
         assert_eq!(zone.panel().panel_name, "ClaudhubNotes");
         assert!(zone.panel().children.is_empty());
+    }
+
+    /// A `fetch` typed in a terminal is seen only as a status whose divergence
+    /// moved; a status that only re-reads the same place is not one.
+    #[test]
+    fn only_a_moved_upstream_rereads_the_branches() {
+        let before = crate::git::Status {
+            branch: Some("main".into()),
+            upstream: Some("origin/main".into()),
+            ..Default::default()
+        };
+        assert!(!refs_moved(&before, &before.clone()));
+        let fetched = crate::git::Status {
+            behind: 2,
+            ..before.clone()
+        };
+        assert!(refs_moved(&before, &fetched));
+        let switched = crate::git::Status {
+            branch: Some("feature".into()),
+            ..before.clone()
+        };
+        assert!(refs_moved(&before, &switched));
     }
 }
