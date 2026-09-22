@@ -2588,6 +2588,8 @@ impl ClaudhubApp {
         // git has just enumerated: it is the only moment the list is certain, so
         // the only one where forgetting an entry is safe.
         self.forget_missing_worktrees(&main, cx);
+        // A pull request being opened in a worktree goes there once it exists.
+        self.pr_worktree_arrived(&main, window, cx);
         // The active worktree may have been removed under our feet.
         if let Some(active) = self.active.clone() {
             if !self.worktree_exists(&active) {

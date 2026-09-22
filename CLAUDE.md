@@ -124,6 +124,8 @@ src/
     sync.rs     versions de document, et l'édition à une plage (UTF-16)
     uri.rs      chemins ⇄ `file://`
   outside.rs    ce qu'on demande au monde hors du dépôt : HTTP, une commande
+  github.rs     ce que `gh` répond : exécutions, jobs, fils de revue, et une PR
+                changée en checkout — pur, testé
   sentry.rs     les erreurs d'un projet Sentry : les URL, ce que l'API rend,
                 le filtre, et ce qui part à l'agent — pur, testé
   wt.rs         le `wt.toml` d'un projet : questions, tâches, statut, URLs
@@ -235,7 +237,8 @@ src/
     merge_view.rs   les trois colonnes, et le clic qui tranche
     keyring.rs      où vit un jeton : la valeur, `$NOM`, ou le trousseau
     sentry.rs       les deux vues Sentry : la liste et l'erreur qu'on lit
-    github.rs       la PR de la branche et ses exécutions, lues par `gh`
+    github.rs       les PR du dépôt, les exécutions de la branche et celles
+                    qui tournent, lues par `gh`
     find.rs         la recherche d'un panneau, et son routage
     motion.rs       le lissage de la molette — pur
     vim.rs          les modes de vim de l'éditeur — pur
@@ -1115,10 +1118,12 @@ le compte et le projet, jamais par un drapeau : avec un drapeau, renseigner le
 jeton dans les réglages puis revenir laissait le panneau dire « renseignez le
 jeton » pour toujours.
 
-**GitHub** (`ui/github.rs`) — les pull requests ouvertes du dépôt et les
-exécutions de la branche, par `gh` et non par l'API GitHub : la CLI est déjà authentifiée, c'est un
+**GitHub** (`github.rs`, `ui/github.rs`) — les pull requests ouvertes du dépôt,
+les exécutions de la branche et ce que le dépôt a **en cours**, par `gh` et non
+par l'API GitHub : la CLI est déjà authentifiée, c'est un
 programme que l'utilisateur installe comme les agents du terminal, et Claudhub
-n'a ni jeton à tenir ni OAuth à parcourir.
+n'a ni jeton à tenir ni OAuth à parcourir. Tout passe par `outside::Cap::Shell`
+sous `Caller::Github` : aucune variante de protocole par geste.
 
 **Deux formes de lecture, et l'écart n'est pas un goût.** Les exécutions
 reviennent en lignes séparées par des tabulations, formatées par
@@ -1127,6 +1132,27 @@ JSON qu'on analyserait serait une forme de plus à suivre. Une pull request n'es
 pas plate — ses vérifications sont un tableau dont les entrées ont elles-mêmes
 deux formes, `CheckRun` et `StatusContext` — et un modèle Go qui replierait cela
 en une ligne serait un analyseur écrit dans une chaîne : elle est lue en JSON.
+Les jobs d'une exécution et les fils de revue aussi, **champ par champ**, pour
+la raison de Sentry : GraphQL écrit `null` pour la ligne d'un fil périmé et
+l'auteur d'un compte supprimé.
+
+**Ce qui tourne se relit, et seulement peint.** Tant qu'une exécution ou un job
+affiché tourne, un minuteur de dix secondes **ne lit rien** : il marque la
+lecture due et demande une frame, et c'est `ensure_github` — que seul un
+panneau peint appelle — qui l'envoie. Un panneau replié ne coûte donc aucun
+`gh`, et montre des chiffres frais en revenant. Une lecture en vol à la fois,
+un identifiant d'envoi par lecture. L'exécution dépliée est une **copie**,
+pas un rang : finie, elle quitte la liste de ce qui tourne au moment même où
+on la guettait, et la lecture de ses jobs dit où elle en est.
+
+**Une PR s'ouvre dans un worktree par la route de toute création**
+(`worktree_from_branch` : `wt` s'il y a un `wt.toml`, `git worktree add`
+sinon), après un `fetch` explicite dans le checkout principal — jamais
+`gh pr checkout`, qui changerait sa branche. La PR d'un fork n'a pas de
+branche sur `origin` : `refs/pull/<n>/head` est récupérée dans `pr/<n>`. Le
+worktree venu, la fenêtre y va et compare contre `origin/<base>`. Ses fils de
+revue non résolus partent à l'agent **de ce worktree**, pas de celui qu'on
+regarde.
 
 Un piège est écrit dans le modèle des exécutions et ce n'est pas un raffinement
 — `printf "%.0f"` sur l'identifiant, un modèle Go formatant un nombre JSON en
