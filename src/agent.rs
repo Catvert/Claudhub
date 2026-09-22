@@ -11,6 +11,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use crate::agent_hooks::{Record, Signal};
 
 /// The markers an agent session leaves in the environment.
 ///
@@ -74,6 +77,38 @@ pub struct Process {
 /// The agents found, by worktree.
 pub type Agents = HashMap<PathBuf, Vec<Process>>;
 
+/// What an agent is doing, as far as anything can tell.
+///
+/// Two sources say it, and they do not say the same things. The processor a
+/// process burns tells `Working` from `Idle` and nothing more; the agent's own
+/// hooks (`agent_hooks`) also say `Finished` and `Waiting` — the two words one
+/// watches five agents for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Activity {
+    /// Nothing to report: a session waiting for its first prompt, or a guess
+    /// that sees no work.
+    #[default]
+    Idle,
+    Working,
+    /// It said its turn is over.
+    Finished,
+    /// It asks the user something — a permission, an answer — in its words.
+    Waiting(String),
+}
+
+impl Activity {
+    /// Which of two agents in one worktree the badge speaks of: the one that
+    /// needs you, then the one at work, then the one done.
+    fn rank(&self) -> u8 {
+        match self {
+            Self::Idle => 0,
+            Self::Finished => 1,
+            Self::Working => 2,
+            Self::Waiting(_) => 3,
+        }
+    }
+}
+
 /// What is known about a worktree's agents, as the sidebar shows it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct State {
@@ -84,13 +119,12 @@ pub struct State {
     /// here" does not say which, and that is precisely what one looks at while
     /// scanning the list.
     pub programs: Vec<String>,
-    /// True when at least one agent has used CPU since the previous reading.
-    ///
-    /// It is an accepted approximation: nothing in a process says "I am
-    /// thinking" or "I am waiting for an answer". An agent at work redraws its
-    /// display several times a second and is seen; an agent waiting for the
-    /// user's answer costs nothing.
+    /// True when the activity is `Working` — the one question the views asked
+    /// before hooks, kept as a field so they need not match an enum for it.
     pub working: bool,
+    pub activity: Activity,
+    /// True when an agent's own word stands behind `activity`, not a guess.
+    pub heard: bool,
 }
 
 /// The usage below which an agent is deemed to be waiting.
@@ -100,60 +134,316 @@ pub struct State {
 /// it is a cursor blinking.
 const BUSY_TICKS: u64 = 3;
 
-/// Turns successive readings of `/proc` into what the sidebar shows.
+/// How long a session said to be working may sit idle before its word lapses.
+///
+/// `Stop` does not fire when the user interrupts a turn, so "working" can
+/// outlive the work. An agent at work redraws its spinner several times a
+/// second; a full minute without a tick is an agent back at its prompt.
+const WORKING_LAPSES: Duration = Duration::from_secs(60);
+
+/// How long a waiting session must burn processor to be taken as answered.
+///
+/// A granted permission is followed by `PostToolUse` — but only once the tool
+/// is done, which for a test suite is minutes of "waiting" on an agent visibly
+/// at work. Several busy readings in a row, **after** the question was asked,
+/// is the answer having been given.
+const ANSWERED: Duration = Duration::from_secs(5);
+
+/// A session seen for the first time is announced only if it spoke this
+/// recently: opening a repository reads sessions that finished yesterday.
+const FRESH: Duration = Duration::from_secs(10);
+
+/// An agent that has just finished, or starts waiting — worth a balloon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transition {
+    pub worktree: PathBuf,
+    /// `Finished` or `Waiting`: nothing else is announced.
+    pub activity: Activity,
+}
+
+/// One session's word, and what makes it belong to a process.
+#[derive(Debug, Clone)]
+struct Session {
+    record: Record,
+    /// When the word was said, on this machine's clock.
+    said_at: Instant,
+    /// Its pid has been seen among the agents. From then on the pid's
+    /// disappearance is the session's end; before, the pid may be a wrapper's
+    /// and says nothing — the worktree still holding an agent is the proof of
+    /// life.
+    confirmed: bool,
+}
+
+/// The processor seen of one process, or of a worktree's: since when it has
+/// been busy, or since when idle — one of the two.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Cpu {
+    busy_since: Option<Instant>,
+    idle_since: Option<Instant>,
+}
+
+/// Turns successive readings of `/proc` — and what the agents say through
+/// their hooks — into what the sidebar shows.
 ///
 /// It exists because "an agent is working" is not something a reading says: it
 /// is the **difference** between two of them. The tracker is what holds the
 /// previous one, and it is deliberately free of any view type — this is the one
 /// decision of the sidebar that can be tested, and it lives here so the core's
 /// test run covers it.
+///
+/// **An agent's word wins over the guess**, while it holds: see `resolve` for
+/// when it lapses. The guess stays for every agent that has no hooks.
 #[derive(Debug, Default)]
 pub struct Tracker {
     /// CPU time at the previous reading, by pid. Rebuilt whole every time: a
     /// pid that has gone must not keep a slot, and a pid reused by another
     /// program would compare against a stranger.
     cpu: HashMap<u32, u64>,
+    /// Each pid's current streak: busy or not, and since when.
+    streaks: HashMap<u32, (bool, Instant)>,
+    /// The last reading: which processes, where.
+    processes: HashMap<PathBuf, Vec<Process>>,
+    sessions: HashMap<String, Session>,
+    /// A first hearing announces nothing: it is what was already there.
+    heard_once: bool,
+    now: Option<Instant>,
     states: HashMap<PathBuf, State>,
 }
 
 impl Tracker {
-    /// Takes a reading in, and works out who is busy.
-    pub fn update(&mut self, agents: Agents) {
-        let mut states = HashMap::with_capacity(agents.len());
+    /// Takes a reading of `/proc` in, and works out who is busy.
+    pub fn update(&mut self, agents: Agents, now: Instant) {
         let mut cpu = HashMap::new();
-        for (worktree, processes) in agents {
-            let working = processes.iter().any(|process| {
-                let before = self.cpu.get(&process.pid).copied();
-                // A process seen for the first time has no variation: we call it
-                // waiting, and the next reading will decide. The opposite would
-                // make the list flicker on every agent that starts.
-                before.is_some_and(|before| process.cpu.saturating_sub(before) >= BUSY_TICKS)
-            });
-            for process in &processes {
-                cpu.insert(process.pid, process.cpu);
+        let mut streaks = HashMap::new();
+        for process in agents.values().flatten() {
+            let before = self.cpu.get(&process.pid).copied();
+            // A process seen for the first time has no variation: we call it
+            // waiting, and the next reading will decide. The opposite would
+            // make the list flicker on every agent that starts.
+            let busy =
+                before.is_some_and(|before| process.cpu.saturating_sub(before) >= BUSY_TICKS);
+            let streak = match self.streaks.get(&process.pid) {
+                Some(&(was, since)) if was == busy => (busy, since),
+                _ => (busy, now),
+            };
+            streaks.insert(process.pid, streak);
+            cpu.insert(process.pid, process.cpu);
+        }
+        self.cpu = cpu;
+        self.streaks = streaks;
+        self.processes = agents;
+        self.now = Some(now);
+        self.settle();
+    }
+
+    /// Takes in what the hooks last wrote, and returns what deserves saying.
+    ///
+    /// **Once per transition**: a session is announced when its word changes
+    /// to `Finished` or `Waiting`, or when the same word is said again later —
+    /// a second `Stop` is a second turn over. `idle_prompt` comes a minute
+    /// after a `Stop` and is not a new end.
+    pub fn hear(&mut self, records: Vec<Record>, now: Instant) -> Vec<Transition> {
+        let mut before = std::mem::take(&mut self.sessions);
+        let mut told = Vec::new();
+        for record in records {
+            if record.signal == Signal::Ended {
+                continue;
             }
-            let mut programs: Vec<String> = processes
-                .iter()
-                .map(|process| process.program.clone())
-                .collect();
-            programs.sort();
-            programs.dedup();
-            states.insert(
-                worktree,
-                State {
-                    count: processes.len(),
-                    programs,
-                    working,
+            let previous = before.remove(&record.session);
+            let said_at = match &previous {
+                Some(previous) if previous.record.stamp == record.stamp => previous.said_at,
+                _ => now
+                    .checked_sub(Duration::from_millis(record.age_ms))
+                    .unwrap_or(now),
+            };
+            if self.heard_once && news(previous.as_ref().map(|p| &p.record), &record) {
+                told.push(record.session.clone());
+            }
+            self.sessions.insert(
+                record.session.clone(),
+                Session {
+                    confirmed: previous.is_some_and(|p| p.confirmed),
+                    record,
+                    said_at,
                 },
             );
         }
-        self.cpu = cpu;
-        self.states = states;
+        self.heard_once = true;
+        self.now = Some(now);
+        self.settle();
+        told.into_iter()
+            .filter_map(|id| {
+                let session = self.sessions.get(&id)?;
+                let worktree = self.home_of(session)?;
+                let activity = match &session.record.signal {
+                    Signal::Waiting(message) => Activity::Waiting(message.clone()),
+                    _ => Activity::Finished,
+                };
+                Some(Transition { worktree, activity })
+            })
+            .collect()
     }
 
     /// What is known about this worktree, if anything was found there.
     pub fn get(&self, worktree: &Path) -> Option<&State> {
         self.states.get(worktree)
+    }
+
+    /// Where a session lives, if it is alive: the worktree its process was
+    /// found in, or — its pid never seen — the one its directory names, as
+    /// long as an agent still runs there.
+    fn home_of(&self, session: &Session) -> Option<PathBuf> {
+        if let Some(pid) = session.record.pid {
+            if let Some((worktree, _)) = self
+                .processes
+                .iter()
+                .find(|(_, processes)| processes.iter().any(|p| p.pid == pid))
+            {
+                return Some(worktree.clone());
+            }
+        }
+        if session.confirmed {
+            return None;
+        }
+        self.processes
+            .get(&session.record.worktree)
+            .is_some_and(|processes| !processes.is_empty())
+            .then(|| session.record.worktree.clone())
+    }
+
+    fn cpu_of(&self, pids: impl Iterator<Item = u32>) -> Cpu {
+        let mut cpu = Cpu::default();
+        let mut busy = false;
+        for pid in pids {
+            let Some(&(is_busy, since)) = self.streaks.get(&pid) else {
+                continue;
+            };
+            if is_busy {
+                busy = true;
+                cpu.busy_since = Some(cpu.busy_since.map_or(since, |s| s.min(since)));
+            } else {
+                cpu.idle_since = Some(cpu.idle_since.map_or(since, |s| s.max(since)));
+            }
+        }
+        if busy {
+            cpu.idle_since = None;
+        }
+        cpu
+    }
+
+    /// Rebuilds every worktree's state from the last reading and the last
+    /// words heard.
+    fn settle(&mut self) {
+        let now = self.now.unwrap_or_else(Instant::now);
+        // Confirm first: a pid found among the agents is the session's own.
+        let running: std::collections::HashSet<u32> =
+            self.processes.values().flatten().map(|p| p.pid).collect();
+        for session in self.sessions.values_mut() {
+            if session.record.pid.is_some_and(|pid| running.contains(&pid)) {
+                session.confirmed = true;
+            }
+        }
+        let mut live: HashMap<PathBuf, Vec<&Session>> = HashMap::new();
+        for session in self.sessions.values() {
+            if let Some(home) = self.home_of(session) {
+                live.entry(home).or_default().push(session);
+            }
+        }
+        let mut states = HashMap::with_capacity(self.processes.len());
+        for (worktree, processes) in &self.processes {
+            let sessions = live.get(worktree).map(Vec::as_slice).unwrap_or_default();
+            let claimed: Vec<u32> = sessions
+                .iter()
+                .filter(|s| s.confirmed)
+                .filter_map(|s| s.record.pid)
+                .collect();
+            let unconfirmed = sessions.iter().filter(|s| !s.confirmed).count();
+            let all = processes.iter().map(|p| p.pid);
+            let mut candidates: Vec<Activity> = sessions
+                .iter()
+                .map(|session| {
+                    let cpu = match (session.confirmed, session.record.pid) {
+                        (true, Some(pid)) => self.cpu_of(std::iter::once(pid)),
+                        _ => self.cpu_of(all.clone()),
+                    };
+                    resolve(&session.record.signal, session.said_at, cpu, now)
+                })
+                .collect();
+            // The agents no word accounts for — no hooks, or another program —
+            // are guessed as before.
+            let unclaimed: Vec<u32> = processes
+                .iter()
+                .map(|p| p.pid)
+                .filter(|pid| !claimed.contains(pid))
+                .collect();
+            if unclaimed.len() > unconfirmed {
+                let guess = self.cpu_of(unclaimed.into_iter());
+                candidates.push(match guess.busy_since {
+                    Some(_) => Activity::Working,
+                    None => Activity::Idle,
+                });
+            }
+            let activity = candidates
+                .into_iter()
+                .max_by_key(Activity::rank)
+                .unwrap_or_default();
+            let mut programs: Vec<String> = processes.iter().map(|p| p.program.clone()).collect();
+            programs.sort();
+            programs.dedup();
+            states.insert(
+                worktree.clone(),
+                State {
+                    count: processes.len(),
+                    programs,
+                    working: activity == Activity::Working,
+                    activity,
+                    heard: !sessions.is_empty(),
+                },
+            );
+        }
+        self.states = states;
+    }
+}
+
+/// Whether a session's new word is worth announcing, against its previous one.
+fn news(previous: Option<&Record>, record: &Record) -> bool {
+    match (&record.signal, previous) {
+        // Seen for the first time: only if it has just spoken.
+        (Signal::Finished | Signal::Waiting(_) | Signal::Idle, None) => {
+            Duration::from_millis(record.age_ms) <= FRESH
+        }
+        (Signal::Finished | Signal::Waiting(_), Some(previous)) => {
+            previous.signal != record.signal || previous.stamp != record.stamp
+        }
+        // A minute at the prompt after a turn that ended without `Stop` — an
+        // interruption — is the end one was not told of.
+        (Signal::Idle, Some(previous)) => !matches!(
+            previous.signal,
+            Signal::Finished | Signal::Idle | Signal::Waiting(_)
+        ),
+        _ => false,
+    }
+}
+
+/// What a session's word means now, given what its process has done since.
+///
+/// Its word stands, with two exceptions, each for an event Claude Code does
+/// not send: `Working` lapses after a minute without a tick (an interrupted
+/// turn has no `Stop`), and `Waiting` yields to a few seconds of work **after**
+/// the question (a granted permission says so only when the tool is done).
+fn resolve(signal: &Signal, said_at: Instant, cpu: Cpu, now: Instant) -> Activity {
+    let since = |start: Instant| now.saturating_duration_since(start.max(said_at));
+    match signal {
+        Signal::Working => match cpu.idle_since {
+            Some(idle) if since(idle) >= WORKING_LAPSES => Activity::Idle,
+            _ => Activity::Working,
+        },
+        Signal::Waiting(message) => match cpu.busy_since {
+            Some(busy) if since(busy) >= ANSWERED => Activity::Working,
+            _ => Activity::Waiting(message.clone()),
+        },
+        Signal::Finished | Signal::Idle => Activity::Finished,
+        Signal::Ready | Signal::Ended => Activity::Idle,
     }
 }
 
@@ -261,8 +551,7 @@ fn cmdline_matches(cmdline: &[u8], program: &str) -> bool {
 ///
 /// The deepest, and not the first found: a worktree nested in another would
 /// otherwise hand its agents to the wrong one.
-#[cfg(target_os = "linux")]
-fn owning_worktree(worktrees: &[PathBuf], cwd: &Path) -> Option<PathBuf> {
+pub fn owning_worktree(worktrees: &[PathBuf], cwd: &Path) -> Option<PathBuf> {
     worktrees
         .iter()
         .filter(|worktree| cwd.starts_with(worktree))
@@ -345,7 +634,7 @@ mod proc_tests {
         // Nothing to compare against yet: calling it busy would light up every
         // agent the moment it starts, and go out on the next reading.
         let mut tracker = Tracker::default();
-        tracker.update(reading(vec![process(1, "claude", 5_000)]));
+        tracker.update(reading(vec![process(1, "claude", 5_000)]), Instant::now());
         let state = tracker.get(Path::new("/p/repo")).expect("the worktree");
         assert_eq!(state.count, 1);
         assert!(!state.working);
@@ -354,14 +643,14 @@ mod proc_tests {
     #[test]
     fn burnt_ticks_are_what_makes_an_agent_working() {
         let mut tracker = Tracker::default();
-        tracker.update(reading(vec![process(1, "claude", 100)]));
+        tracker.update(reading(vec![process(1, "claude", 100)]), Instant::now());
         // Below the threshold: a blinking cursor, not a working agent.
-        tracker.update(reading(vec![process(1, "claude", 102)]));
+        tracker.update(reading(vec![process(1, "claude", 102)]), Instant::now());
         assert!(!tracker.get(Path::new("/p/repo")).expect("state").working);
-        tracker.update(reading(vec![process(1, "claude", 200)]));
+        tracker.update(reading(vec![process(1, "claude", 200)]), Instant::now());
         assert!(tracker.get(Path::new("/p/repo")).expect("state").working);
         // And it goes out again once the agent hands back to its prompt.
-        tracker.update(reading(vec![process(1, "claude", 200)]));
+        tracker.update(reading(vec![process(1, "claude", 200)]), Instant::now());
         assert!(!tracker.get(Path::new("/p/repo")).expect("state").working);
     }
 
@@ -369,19 +658,22 @@ mod proc_tests {
     fn a_counter_that_went_backwards_does_not_underflow() {
         // A reused pid: the new process has burnt less than the old one.
         let mut tracker = Tracker::default();
-        tracker.update(reading(vec![process(1, "claude", 9_000)]));
-        tracker.update(reading(vec![process(1, "aider", 12)]));
+        tracker.update(reading(vec![process(1, "claude", 9_000)]), Instant::now());
+        tracker.update(reading(vec![process(1, "aider", 12)]), Instant::now());
         assert!(!tracker.get(Path::new("/p/repo")).expect("state").working);
     }
 
     #[test]
     fn the_programs_are_named_once_each_and_in_order() {
         let mut tracker = Tracker::default();
-        tracker.update(reading(vec![
-            process(1, "claude", 0),
-            process(2, "aider", 0),
-            process(3, "claude", 0),
-        ]));
+        tracker.update(
+            reading(vec![
+                process(1, "claude", 0),
+                process(2, "aider", 0),
+                process(3, "claude", 0),
+            ]),
+            Instant::now(),
+        );
         let state = tracker.get(Path::new("/p/repo")).expect("state");
         assert_eq!(state.count, 3);
         assert_eq!(state.programs, vec!["aider", "claude"]);
@@ -392,8 +684,8 @@ mod proc_tests {
         // The states are rebuilt whole: a badge left behind would say an agent
         // is there long after it has gone.
         let mut tracker = Tracker::default();
-        tracker.update(reading(vec![process(1, "claude", 0)]));
-        tracker.update(Agents::new());
+        tracker.update(reading(vec![process(1, "claude", 0)]), Instant::now());
+        tracker.update(Agents::new(), Instant::now());
         assert!(tracker.get(Path::new("/p/repo")).is_none());
     }
 
@@ -411,5 +703,226 @@ mod proc_tests {
             Some(PathBuf::from("/p/repo"))
         );
         assert_eq!(owning_worktree(&worktrees, Path::new("/elsewhere")), None);
+    }
+}
+
+/// The merge of the two sources — what an agent says, what its process does.
+#[cfg(test)]
+mod hook_tests {
+    use super::*;
+
+    const WT: &str = "/p/repo";
+
+    fn agents(processes: &[(u32, u64)]) -> Agents {
+        Agents::from([(
+            PathBuf::from(WT),
+            processes
+                .iter()
+                .map(|&(pid, cpu)| Process {
+                    pid,
+                    program: "claude".into(),
+                    cpu,
+                })
+                .collect(),
+        )])
+    }
+
+    fn said(session: &str, pid: Option<u32>, signal: Signal, stamp: u64) -> Record {
+        Record {
+            session: session.into(),
+            worktree: PathBuf::from(WT),
+            pid,
+            signal,
+            stamp,
+            age_ms: 0,
+        }
+    }
+
+    fn activity(tracker: &Tracker) -> Activity {
+        tracker
+            .get(Path::new(WT))
+            .map(|state| state.activity.clone())
+            .unwrap_or_default()
+    }
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    #[test]
+    fn the_agents_word_wins_over_the_guess() {
+        let t0 = Instant::now();
+        let mut tracker = Tracker::default();
+        tracker.update(agents(&[(10, 100)]), t0);
+        tracker.hear(vec![said("s", Some(10), Signal::Finished, 1)], t0);
+        // Busy by the processor, finished by its word: the word stands.
+        tracker.update(agents(&[(10, 500)]), t0 + secs(2));
+        let state = tracker.get(Path::new(WT)).expect("state");
+        assert_eq!(state.activity, Activity::Finished);
+        assert!(state.heard);
+        assert!(!state.working);
+    }
+
+    #[test]
+    fn without_a_word_the_guess_remains() {
+        let t0 = Instant::now();
+        let mut tracker = Tracker::default();
+        tracker.hear(Vec::new(), t0);
+        tracker.update(agents(&[(10, 100)]), t0);
+        tracker.update(agents(&[(10, 500)]), t0 + secs(2));
+        let state = tracker.get(Path::new(WT)).expect("state");
+        assert_eq!(state.activity, Activity::Working);
+        assert!(!state.heard);
+    }
+
+    #[test]
+    fn a_word_lapses_when_its_process_is_gone() {
+        let t0 = Instant::now();
+        let mut tracker = Tracker::default();
+        tracker.update(agents(&[(10, 0), (11, 0)]), t0);
+        tracker.hear(
+            vec![said("s", Some(10), Signal::Waiting("Bash?".into()), 1)],
+            t0,
+        );
+        assert_eq!(activity(&tracker), Activity::Waiting("Bash?".into()));
+        // The session's own process has gone, another agent remains: that one
+        // is guessed, the dead session's question is not asked any more.
+        tracker.update(agents(&[(11, 0)]), t0 + secs(2));
+        assert_eq!(activity(&tracker), Activity::Idle);
+    }
+
+    #[test]
+    fn an_unconfirmed_pid_lives_as_long_as_its_worktree_has_an_agent() {
+        // The hook's `$PPID` was some wrapper: never seen among the agents.
+        let t0 = Instant::now();
+        let mut tracker = Tracker::default();
+        tracker.update(agents(&[(10, 0)]), t0);
+        tracker.hear(vec![said("s", Some(999), Signal::Finished, 1)], t0);
+        assert_eq!(activity(&tracker), Activity::Finished);
+        tracker.update(Agents::new(), t0 + secs(2));
+        assert!(tracker.get(Path::new(WT)).is_none());
+    }
+
+    #[test]
+    fn working_lapses_after_a_minute_at_rest() {
+        // An interrupted turn has no `Stop`.
+        let t0 = Instant::now();
+        let mut tracker = Tracker::default();
+        tracker.update(agents(&[(10, 0)]), t0);
+        tracker.hear(vec![said("s", Some(10), Signal::Working, 1)], t0);
+        tracker.update(agents(&[(10, 0)]), t0 + secs(30));
+        assert_eq!(activity(&tracker), Activity::Working);
+        tracker.update(agents(&[(10, 0)]), t0 + secs(61));
+        assert_eq!(activity(&tracker), Activity::Idle);
+    }
+
+    #[test]
+    fn a_question_is_answered_by_work_after_it_not_before() {
+        let t0 = Instant::now();
+        let mut tracker = Tracker::default();
+        tracker.update(agents(&[(10, 0)]), t0);
+        // Busy for a while before the question...
+        tracker.update(agents(&[(10, 100)]), t0 + secs(2));
+        tracker.update(agents(&[(10, 200)]), t0 + secs(8));
+        // ...then the question, heard at the next sweep with its work behind.
+        tracker.hear(
+            vec![said("s", Some(10), Signal::Waiting("Bash?".into()), 1)],
+            t0 + secs(9),
+        );
+        tracker.update(agents(&[(10, 300)]), t0 + secs(10));
+        assert_eq!(activity(&tracker), Activity::Waiting("Bash?".into()));
+        // Still busy five seconds **after** it was asked: it was answered.
+        tracker.update(agents(&[(10, 400)]), t0 + secs(12));
+        tracker.update(agents(&[(10, 500)]), t0 + secs(15));
+        assert_eq!(activity(&tracker), Activity::Working);
+    }
+
+    #[test]
+    fn the_worktree_speaks_of_the_agent_that_needs_you() {
+        let t0 = Instant::now();
+        let mut tracker = Tracker::default();
+        tracker.update(agents(&[(10, 0), (11, 0)]), t0);
+        tracker.hear(
+            vec![
+                said("a", Some(10), Signal::Finished, 1),
+                said("b", Some(11), Signal::Waiting("Edit?".into()), 1),
+            ],
+            t0,
+        );
+        let state = tracker.get(Path::new(WT)).expect("state");
+        assert_eq!(state.count, 2);
+        assert_eq!(state.activity, Activity::Waiting("Edit?".into()));
+    }
+
+    #[test]
+    fn an_agent_without_hooks_beside_one_with_them_is_still_guessed() {
+        let t0 = Instant::now();
+        let mut tracker = Tracker::default();
+        tracker.update(agents(&[(10, 0), (11, 0)]), t0);
+        tracker.hear(vec![said("a", Some(10), Signal::Finished, 1)], t0);
+        tracker.update(agents(&[(10, 0), (11, 400)]), t0 + secs(2));
+        assert_eq!(activity(&tracker), Activity::Working);
+    }
+
+    #[test]
+    fn each_transition_is_announced_once() {
+        let t0 = Instant::now();
+        let mut tracker = Tracker::default();
+        tracker.update(agents(&[(10, 0)]), t0);
+        // What was there when the window opened is not news.
+        assert!(tracker
+            .hear(vec![said("s", Some(10), Signal::Finished, 1)], t0)
+            .is_empty());
+        let told = tracker.hear(vec![said("s", Some(10), Signal::Working, 2)], t0);
+        assert!(told.is_empty());
+        let told = tracker.hear(vec![said("s", Some(10), Signal::Finished, 3)], t0);
+        assert_eq!(
+            told,
+            vec![Transition {
+                worktree: PathBuf::from(WT),
+                activity: Activity::Finished
+            }]
+        );
+        // The same file read again: nothing new.
+        assert!(tracker
+            .hear(vec![said("s", Some(10), Signal::Finished, 3)], t0)
+            .is_empty());
+        // `idle_prompt` a minute after: the same end, not a second one.
+        assert!(tracker
+            .hear(vec![said("s", Some(10), Signal::Idle, 4)], t0)
+            .is_empty());
+        // A second turn over, even missed in between: a new `Stop`.
+        let told = tracker.hear(vec![said("s", Some(10), Signal::Finished, 5)], t0);
+        assert_eq!(told.len(), 1);
+        let told = tracker.hear(
+            vec![said("s", Some(10), Signal::Waiting("Bash?".into()), 6)],
+            t0,
+        );
+        assert_eq!(told[0].activity, Activity::Waiting("Bash?".into()));
+    }
+
+    #[test]
+    fn an_old_session_of_a_repository_just_opened_is_not_news() {
+        let t0 = Instant::now();
+        let mut tracker = Tracker::default();
+        tracker.update(agents(&[(10, 0)]), t0);
+        tracker.hear(Vec::new(), t0);
+        let mut old = said("s", Some(10), Signal::Finished, 1);
+        old.age_ms = 3_600_000;
+        assert!(tracker.hear(vec![old], t0).is_empty());
+        let fresh = said("t", Some(10), Signal::Finished, 1);
+        assert_eq!(tracker.hear(vec![fresh], t0).len(), 1);
+    }
+
+    #[test]
+    fn a_dead_sessions_news_is_not_announced() {
+        let t0 = Instant::now();
+        let mut tracker = Tracker::default();
+        tracker.update(agents(&[(10, 0)]), t0);
+        tracker.hear(vec![said("s", Some(10), Signal::Working, 1)], t0);
+        tracker.update(Agents::new(), t0 + secs(2));
+        assert!(tracker
+            .hear(vec![said("s", Some(10), Signal::Finished, 2)], t0 + secs(2))
+            .is_empty());
     }
 }

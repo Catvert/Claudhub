@@ -1089,6 +1089,9 @@ pub struct ClaudhubApp {
     /// holds the previous reading: "working" is a difference between two of
     /// them, not something a single one says.
     pub(super) agents: crate::agent::Tracker,
+    /// The worktrees whose hooks a gesture asked for — see `ui::agents`: the
+    /// answer is announced for those, and only failures for the others.
+    pub(super) agent_hooks_asked: std::collections::HashSet<PathBuf>,
     /// True between the press and the release of the button in the diff view:
     /// it is what tells a selection drag from a plain hover, and what prevents a
     /// drag started elsewhere — in the sidebar, on a resize handle — from
@@ -1504,6 +1507,7 @@ impl ClaudhubApp {
             displaced_panels: std::collections::HashSet::new(),
             summaries: HashMap::new(),
             agents: crate::agent::Tracker::default(),
+            agent_hooks_asked: Default::default(),
             diff_dragging: false,
             diff_scroll: gpui_kit::UniformListScrollHandle::new(),
             diff_width: gpui_kit::px(0.),
@@ -2211,6 +2215,12 @@ impl ClaudhubApp {
                 self.summaries.extend(summaries);
             }
             Evt::Agents { agents } => self.agents_scanned(agents),
+            Evt::AgentSessions { sessions } => self.agent_sessions_heard(sessions, cx),
+            Evt::AgentHooksWritten {
+                worktree,
+                install,
+                result,
+            } => self.agent_hooks_written(worktree, install, result, cx),
 
             // — Review ————————————————————————————————————————————
             Evt::Status { worktree, status } => self.status_arrived(worktree, status, cx),
@@ -2567,6 +2577,13 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let before = self
+            .repos
+            .iter()
+            .find(|repo| repo.main == main)
+            .map(|repo| repo.worktrees.iter().map(|w| w.path.clone()).collect());
+        let after: Vec<PathBuf> = worktrees.iter().map(|w| w.path.clone()).collect();
+        self.hook_new_worktrees(before, &after, cx);
         self.repos.set_worktrees(&main, worktrees);
         // git has just enumerated: it is the only moment the list is certain, so
         // the only one where forgetting an entry is safe.
@@ -2593,7 +2610,7 @@ impl ClaudhubApp {
 
     /// "Working" means **has burnt processor since the previous reading**.
     fn agents_scanned(&mut self, agents: crate::agent::Agents) {
-        self.agents.update(agents);
+        self.agents.update(agents, std::time::Instant::now());
     }
 
     // — Review ————————————————————————————————————————————————————

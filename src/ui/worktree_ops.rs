@@ -2306,6 +2306,30 @@ impl ClaudhubApp {
                 move |_app, _window, cx| cx.open_url(&format!("file://{}", target.display())),
             ));
         }
+        // The agents' hooks — `ui::agents`. By hand for a worktree that was
+        // there before Claudhub, or when the setting that puts them in every
+        // new one is off; and the way to take them out again.
+        {
+            let target = worktree.clone();
+            actions.push(
+                WtAction::new(
+                    "agent-hooks",
+                    "bell",
+                    tr!("agent-hooks-install"),
+                    move |app, _window, _cx| app.set_agent_hooks(target.clone(), true, true),
+                )
+                .group(),
+            );
+        }
+        {
+            let target = worktree.clone();
+            actions.push(WtAction::new(
+                "agent-hooks-remove",
+                "eraser",
+                tr!("agent-hooks-remove"),
+                move |app, _window, _cx| app.set_agent_hooks(target.clone(), false, true),
+            ));
+        }
         // Pinning: the one entry here that is not about the checkout but about
         // the window — it puts a button for it in the top bar, where switching
         // to it costs a click instead of a popover and a filter. It lives in

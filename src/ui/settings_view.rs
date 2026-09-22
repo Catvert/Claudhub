@@ -831,7 +831,20 @@ fn terminal_page(
                 .title(tr!("settings-group-shell"))
                 .item(shell_item(shells))
                 .item(agents_item())
-                .item(default_agent_item()),
+                .item(default_agent_item())
+                .item(
+                    SettingItem::new(
+                        tr!("settings-agent-hooks"),
+                        SettingField::switch(
+                            |cx: &App| Settings::global(cx).terminal.agent_hooks,
+                            |value: bool, cx: &mut App| {
+                                Settings::update_global(cx, |s| s.terminal.agent_hooks = value)
+                            },
+                        )
+                        .default_value(true),
+                    )
+                    .description(tr!("settings-agent-hooks-help")),
+                ),
         )
         .group(
             SettingGroup::new()

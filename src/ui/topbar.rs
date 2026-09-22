@@ -152,10 +152,14 @@ pub(super) fn volume_on(
         })
 }
 
-/// An agent's badge: filled when it works, hollow when it waits.
+/// An agent's badge: filled when it works — or has something to say — hollow
+/// when it rests.
 ///
 /// A badge and not a word: the row already carries a name and a branch, and this
 /// is information read out of the corner of the eye while scanning the list.
+/// **Except for the two words one watches agents for** — finished, waiting —
+/// which the agent said itself through its hooks, and which are the point of
+/// looking.
 pub(super) fn agent_badge(agent: &crate::agent::State, cx: &gpui_kit::App) -> impl IntoElement {
     let color = agent_colour(agent, cx);
     agent_dot(agent, cx)
@@ -167,13 +171,57 @@ pub(super) fn agent_badge(agent: &crate::agent::State, cx: &gpui_kit::App) -> im
                 .text_color(color)
                 .child(agent.programs.join(", ")),
         )
+        .children(activity_word(agent).map(|word| {
+            div()
+                .max_w(px(320.))
+                .truncate()
+                .text_xs()
+                .text_color(color)
+                .child(word)
+        }))
+}
+
+/// The dot and, when the agent said one, its word — the picker's row and a
+/// multiplexer tile, where the program's name is not what one reads.
+pub(super) fn activity_badge(
+    agent: &crate::agent::State,
+    max_width: gpui_kit::Pixels,
+    cx: &gpui_kit::App,
+) -> gpui_kit::Div {
+    let color = agent_colour(agent, cx);
+    agent_dot(agent, cx)
+        .min_w_0()
+        .children(activity_word(agent).map(|word| {
+            div()
+                .min_w_0()
+                .max_w(max_width)
+                .truncate()
+                .text_xs()
+                .text_color(color)
+                .child(word)
+        }))
+}
+
+/// "finished", "waiting: …" — or nothing, where only the processor spoke.
+pub(super) fn activity_word(agent: &crate::agent::State) -> Option<SharedString> {
+    use crate::agent::Activity;
+    match &agent.activity {
+        Activity::Finished => Some(tr!("agent-finished")),
+        Activity::Waiting(message) if message.is_empty() => Some(tr!("agent-waiting-bare")),
+        Activity::Waiting(message) => Some(tr!("agent-waiting", { message: message })),
+        Activity::Working | Activity::Idle => None,
+    }
 }
 
 fn agent_colour(agent: &crate::agent::State, cx: &gpui_kit::App) -> gpui_kit::Hsla {
-    if agent.working {
-        cx.theme().warning
-    } else {
-        cx.theme().muted_foreground
+    use crate::agent::Activity;
+    match agent.activity {
+        Activity::Working => cx.theme().warning,
+        // It needs you: the one state that asks for a hand, in the colour the
+        // window keeps for what cannot go on without you.
+        Activity::Waiting(_) => cx.theme().danger,
+        Activity::Finished => cx.theme().success,
+        Activity::Idle => cx.theme().muted_foreground,
     }
 }
 
@@ -195,18 +243,18 @@ pub(super) fn agent_dot_on(
     cx: &gpui_kit::App,
 ) -> gpui_kit::Div {
     let color = on.unwrap_or_else(|| agent_colour(agent, cx));
+    let filled = agent.activity != crate::agent::Activity::Idle;
     h_flex()
         .flex_none()
         .gap_1()
         .items_center()
         .child(
             div()
+                .flex_none()
                 .size(px(7.))
                 .rounded_full()
-                .when(agent.working, |el| el.bg(color))
-                .when(!agent.working, |el| {
-                    el.border_1().border_color(color.opacity(0.8))
-                }),
+                .when(filled, |el| el.bg(color))
+                .when(!filled, |el| el.border_1().border_color(color.opacity(0.8))),
         )
         // Two agents in the same worktree does happen: we say so rather than
         // let it look as if there were only one.

@@ -911,6 +911,12 @@ pub enum Cmd {
     MarkReviewed {
         worktree: WorktreeId,
     },
+    /// Writes our agent hooks into a worktree's Claude Code settings, or takes
+    /// them out — see `agent_hooks::configure`. A local write: the reads' queue.
+    AgentHooks {
+        worktree: WorktreeId,
+        install: bool,
+    },
 }
 
 impl Cmd {
@@ -1028,6 +1034,7 @@ impl Cmd {
             Self::AddWorktree { .. } => "AddWorktree",
             Self::RemoveWorktree { .. } => "RemoveWorktree",
             Self::MarkReviewed { .. } => "MarkReviewed",
+            Self::AgentHooks { .. } => "AgentHooks",
         }
     }
 }
@@ -1527,6 +1534,19 @@ pub enum Evt {
     ReviewMarked {
         worktree: WorktreeId,
         point: crate::git::snapshot::Point,
+    },
+    /// What the agents last said of themselves through their hooks — see
+    /// `agent_hooks`. Sent right after `Agents`, by the same sweep: the view
+    /// merges the two, and the word only counts for a process it can see.
+    AgentSessions {
+        sessions: Vec<crate::agent_hooks::Record>,
+    },
+    /// Our hooks were written into, or taken out of, a worktree's
+    /// `.claude/settings.local.json`. `Ok(false)`: there was nothing to change.
+    AgentHooksWritten {
+        worktree: WorktreeId,
+        install: bool,
+        result: std::result::Result<bool, String>,
     },
 }
 

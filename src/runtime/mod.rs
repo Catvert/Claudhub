@@ -716,9 +716,18 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
         Cmd::ScanAgents {
             worktrees,
             programs,
-        } => vec![Evt::Agents {
-            agents: crate::agent::scan(&worktrees, &programs),
-        }],
+        } => vec![
+            Evt::Agents {
+                agents: crate::agent::scan(&worktrees, &programs),
+            },
+            // What the hooks wrote, read by the same sweep: a directory
+            // listing and a few small files every two seconds, and no watcher
+            // — the sweep also prunes that folder, and a watch on it would be
+            // woken by its own hand.
+            Evt::AgentSessions {
+                sessions: crate::agent_hooks::read(&worktrees),
+            },
+        ],
         // A read of the refs, in the reads' queue: it is `for-each-ref` walking
         // the graph once, the same order of work as the status beside it, and
         // the branch review waits on it to know what it compares against.
@@ -1358,6 +1367,17 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
                 .remove_worktree(&path, force)
                 .map(|()| path.display().to_string());
             worktrees_changed(main, removed)
+        }
+        Cmd::AgentHooks { worktree, install } => {
+            let result = crate::agent_hooks::configure(&worktree, install).map_err(|e| {
+                log::warn!("agent hooks{}: {e:#}", at(&Some(worktree.clone())));
+                format!("{e:#}")
+            });
+            vec![Evt::AgentHooksWritten {
+                worktree,
+                install,
+                result,
+            }]
         }
     }
 }
@@ -2264,6 +2284,19 @@ mod tests {
     /// blank behind a fetch.
     /// A picture is what a frame is waiting for, exactly like the text next to
     /// it: the tab is already open and empty until it lands.
+    /// Writing a settings file is a local write, a few milliseconds: the
+    /// reads' queue, as a stage is — never behind a `wt up` or the sweep.
+    #[test]
+    fn installing_agent_hooks_is_a_local_write() {
+        assert_eq!(
+            queue_of(&Cmd::AgentHooks {
+                worktree: worktree(),
+                install: true,
+            }),
+            Queue::Reads
+        );
+    }
+
     #[test]
     fn an_image_is_a_read() {
         assert_eq!(
