@@ -359,12 +359,11 @@ impl ClaudhubApp {
     /// **First is a sequence, not two sends.** The remote deletion goes to the
     /// network queue and the local one to the reads, which are three workers
     /// and never wait for it: sent together, the local one routinely finished
-    /// first. And both are one in-flight key, so the first answer turned the
-    /// indicator off while the other was still out. The local deletion is
-    /// therefore parked (`local_deletion`) and sent from `action_done` once the
-    /// remote one has gone through — the key coming back on in the same
-    /// handler, so no frame shows it off — and dropped if the remote one fails,
-    /// which leaves both halves as they were.
+    /// first. The local deletion is therefore parked (`local_deletion`) beside
+    /// the remote one's ticket, and sent from `action_done` when that ticket
+    /// comes back — the spinner coming back on in the same handler, so no frame
+    /// shows it off — and dropped if the remote one fails, which leaves both
+    /// halves as they were.
     fn delete_branch(&mut self, name: String, also_remote: bool, cx: &mut Context<Self>) {
         let Some(main) = self.active.clone().and_then(|w| self.main_of(&w)) else {
             return;
@@ -375,13 +374,13 @@ impl ClaudhubApp {
             force: false,
         };
         if also_remote {
-            self.local_deletion = Some(local);
-            self.start(
+            let remote = self.start(
                 None,
                 crate::runtime::Action::Branch,
                 Cmd::DeleteRemoteBranch { main, name },
                 cx,
             );
+            self.local_deletion = Some((remote, local));
             return;
         }
         self.start(None, crate::runtime::Action::Branch, local, cx);

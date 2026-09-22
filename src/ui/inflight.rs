@@ -10,22 +10,26 @@
 //! and it comes from a key put down that never gets taken back: that is a thing
 //! to be tested, not a thing to be watched for.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::runtime::Action;
+use crate::runtime::{Action, Ticket};
 
-/// One operation under way, keyed exactly as the worker will answer.
+/// What one operation under way is about: what a button asks after. The
+/// worktree is an `Option` because `wt up` and `wt down` name none — `wt`
+/// works from the main repository.
+type Doing = (Option<PathBuf>, Action);
+
+/// The operations under way, **by ticket**.
 ///
-/// `write_then_refresh` echoes the worktree and the action it was given, so
-/// what is put down here is exactly what [`InFlight::finish`] will find. The
-/// worktree is an `Option` because `wt up` and `wt down` name none — `wt` works
-/// from the main repository.
-type Key = (Option<PathBuf>, Action);
-
+/// The ticket is exactly what comes back: the worker stamps its command's on
+/// the `Done` or `Failed` it answers with, whatever worktree and action that
+/// answer names. Keyed by the pair instead, a write that panicked past its own
+/// net — which answers with neither — left its button spinning for good, and
+/// a write sent from elsewhere under the same pair let another's go.
 #[derive(Debug, Default)]
 pub struct InFlight {
-    running: HashSet<Key>,
+    running: HashMap<Ticket, Doing>,
     /// The worktree a `wt up` or `wt down` is working on.
     ///
     /// Those two do not name a worktree in their answer, so `running` alone
@@ -37,13 +41,16 @@ pub struct InFlight {
 
 impl InFlight {
     /// Remembers a write is under way.
-    pub fn start(&mut self, worktree: Option<PathBuf>, action: Action) {
-        self.running.insert((worktree, action));
+    pub fn start(&mut self, ticket: Ticket, worktree: Option<PathBuf>, action: Action) {
+        self.running.insert(ticket, (worktree, action));
     }
 
-    /// Takes the key back, and lets go of the `wt` worktree when it was one.
-    pub fn finish(&mut self, worktree: &Option<PathBuf>, action: Action) {
-        self.running.remove(&(worktree.clone(), action));
+    /// Takes the ticket back, and lets go of the `wt` worktree when it was one
+    /// of those two.
+    pub fn finish(&mut self, ticket: Ticket) {
+        let Some((_, action)) = self.running.remove(&ticket) else {
+            return;
+        };
         if matches!(action, Action::WtUp | Action::WtDown) {
             self.wt_pending = None;
         }
@@ -65,7 +72,7 @@ impl InFlight {
     /// entries at most — one per write a hand has started.
     pub fn is_running(&self, worktree: Option<&Path>, action: Action) -> bool {
         self.running
-            .iter()
+            .values()
             .any(|(path, running)| *running == action && path.as_deref() == worktree)
     }
 
@@ -85,7 +92,7 @@ impl InFlight {
     /// The i18n keys of what is running, for the status bar.
     ///
     /// **Sorted and without duplicates**, and sorted on the key rather than on
-    /// the translated label: a `HashSet` iterates in a different order on every
+    /// the translated label: a `HashMap` iterates in a different order on every
     /// frame, and the words would dance. Sorting on the key also keeps the order
     /// the same in both languages, which the label would not.
     ///
@@ -94,7 +101,7 @@ impl InFlight {
     pub fn announcements(&self) -> Vec<&'static str> {
         let mut keys: Vec<&'static str> = self
             .running
-            .iter()
+            .values()
             .map(|(_, action)| action.running_key())
             .collect();
         keys.sort_unstable();
@@ -114,13 +121,12 @@ mod tests {
     #[test]
     fn a_write_stops_running_when_its_own_answer_comes_back() {
         let mut flight = InFlight::default();
-        flight.start(worktree("/p/a"), Action::Push);
+        flight.start(Ticket(1), worktree("/p/a"), Action::Push);
         assert!(flight.is_running(Some(Path::new("/p/a")), Action::Push));
-        // Another worktree's answer, and another action's, leave it alone.
-        flight.finish(&worktree("/p/b"), Action::Push);
-        flight.finish(&worktree("/p/a"), Action::Pull);
+        // Another command's answer leaves it alone.
+        flight.finish(Ticket(2));
         assert!(flight.is_running(Some(Path::new("/p/a")), Action::Push));
-        flight.finish(&worktree("/p/a"), Action::Push);
+        flight.finish(Ticket(1));
         assert!(!flight.is_running(Some(Path::new("/p/a")), Action::Push));
         assert!(flight.is_empty());
     }
@@ -128,21 +134,36 @@ mod tests {
     #[test]
     fn the_same_write_on_two_worktrees_spins_two_buttons() {
         let mut flight = InFlight::default();
-        flight.start(worktree("/p/a"), Action::Fetch);
-        flight.start(worktree("/p/b"), Action::Fetch);
-        flight.finish(&worktree("/p/a"), Action::Fetch);
+        flight.start(Ticket(1), worktree("/p/a"), Action::Fetch);
+        flight.start(Ticket(2), worktree("/p/b"), Action::Fetch);
+        flight.finish(Ticket(1));
         assert!(!flight.is_running(Some(Path::new("/p/a")), Action::Fetch));
         assert!(flight.is_running(Some(Path::new("/p/b")), Action::Fetch));
+    }
+
+    /// Two of the same write on the same worktree are two tickets: the first
+    /// answer does not turn off the button the second still spins.
+    #[test]
+    fn the_same_write_twice_spins_until_both_are_back() {
+        let mut flight = InFlight::default();
+        flight.start(Ticket(1), None, Action::Branch);
+        flight.start(Ticket(2), None, Action::Branch);
+        flight.finish(Ticket(1));
+        assert!(flight.is_running(None, Action::Branch));
+        flight.finish(Ticket(2));
+        assert!(flight.is_empty());
     }
 
     #[test]
     fn wt_up_names_no_worktree_so_it_carries_its_own() {
         let mut flight = InFlight::default();
-        flight.start(None, Action::WtUp);
+        flight.start(Ticket(1), None, Action::WtUp);
         flight.set_wt_target(PathBuf::from("/p/a"));
         assert_eq!(flight.wt_target(), Some(Path::new("/p/a")));
-        // The answer names nothing: it is the action alone that lets the badge go.
-        flight.finish(&None, Action::WtUp);
+        // Something else coming back leaves the badge where it is.
+        flight.finish(Ticket(2));
+        assert_eq!(flight.wt_target(), Some(Path::new("/p/a")));
+        flight.finish(Ticket(1));
         assert!(flight.wt_target().is_none());
         assert!(flight.is_empty());
     }
@@ -150,8 +171,8 @@ mod tests {
     #[test]
     fn a_dead_server_leaves_nothing_spinning() {
         let mut flight = InFlight::default();
-        flight.start(worktree("/p/a"), Action::Push);
-        flight.start(None, Action::WtDown);
+        flight.start(Ticket(1), worktree("/p/a"), Action::Push);
+        flight.start(Ticket(2), None, Action::WtDown);
         flight.set_wt_target(PathBuf::from("/p/a"));
         flight.clear();
         assert!(flight.is_empty());
@@ -161,22 +182,22 @@ mod tests {
     #[test]
     fn the_status_bar_reads_the_same_words_in_the_same_order() {
         let mut flight = InFlight::default();
-        flight.start(worktree("/p/a"), Action::Push);
-        flight.start(worktree("/p/b"), Action::Fetch);
+        flight.start(Ticket(1), worktree("/p/a"), Action::Push);
+        flight.start(Ticket(2), worktree("/p/b"), Action::Fetch);
         // Two worktrees, one word: the bar names operations, it does not count
         // them.
-        flight.start(worktree("/p/c"), Action::Fetch);
+        flight.start(Ticket(3), worktree("/p/c"), Action::Fetch);
         let names = flight.announcements();
         assert_eq!(names, vec!["running-fetch", "running-push"]);
-        // And it is the same on the next frame, whatever the set's order.
+        // And it is the same on the next frame, whatever the map's order.
         assert_eq!(flight.announcements(), names);
     }
 
     #[test]
     fn the_unnamed_actions_share_one_line() {
         let mut flight = InFlight::default();
-        flight.start(worktree("/p/a"), Action::Stage);
-        flight.start(worktree("/p/a"), Action::Unstage);
+        flight.start(Ticket(1), worktree("/p/a"), Action::Stage);
+        flight.start(Ticket(2), worktree("/p/a"), Action::Unstage);
         assert_eq!(flight.announcements(), vec!["running-generic"]);
     }
 }

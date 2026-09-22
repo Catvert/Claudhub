@@ -611,7 +611,7 @@ impl ClaudhubApp {
         cmd: Cmd,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> crate::runtime::Ticket {
         let action = action_of(op);
         // The target is only read for the phase of a question round, which a
         // console never asks for; `Create` is the neutral one.
@@ -626,7 +626,7 @@ impl ClaudhubApp {
             Stage::Running(Console::new(op)),
         ));
         self.open_creation_dialog(window, cx);
-        self.start(None, action, cmd, cx);
+        self.start(None, action, cmd, cx)
     }
 
     /// The bare git add, for a repository with no `wt.toml`.
@@ -1832,17 +1832,15 @@ impl ClaudhubApp {
         worktree: &Path,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let Some(slug) = self.wt_slug(&main, worktree) else {
-            return;
-        };
+    ) -> Option<crate::runtime::Ticket> {
+        let slug = self.wt_slug(&main, worktree)?;
         // `worktrees_changed` answers without naming a checkout — the one that
         // was removed no longer exists — so the key is the bare action.
         let cmd = Cmd::WtRemove {
             main: main.clone(),
             slug: slug.clone(),
         };
-        self.run_in_console(main, slug, wt::Op::Remove, cmd, window, cx);
+        Some(self.run_in_console(main, slug, wt::Op::Remove, cmd, window, cx))
     }
 
     // — `just` ————————————————————————————————————————————————
@@ -2135,10 +2133,10 @@ impl ClaudhubApp {
     /// deleted from the same click, on the reads queue, while the removal went
     /// to the hooks one a frame later: git refused — "cannot delete branch
     /// checked out at…" — every time, the checkout still being there. The
-    /// branch is now left to `removal_ended`, which sends it on the removal's
-    /// success and forgets it on its failure. Without `wt` the bare git removal
-    /// does the job, which refuses a dirty checkout — the base has the work,
-    /// what it would lose is what came after.
+    /// branch is now left to `removal_ended`, which sends it when the
+    /// removal's ticket comes back a success and forgets it on its failure.
+    /// Without `wt` the bare git removal does the job, which refuses a dirty
+    /// checkout — the base has the work, what it would lose is what came after.
     fn remove_integrated(
         &mut self,
         main: PathBuf,
@@ -2147,28 +2145,31 @@ impl ClaudhubApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.branch_after_removal = Some((main.clone(), branch));
-        if self.wt_slug(&main, &worktree).is_some() {
-            self.wt_remove(main, &worktree, window, cx);
-        } else {
-            self.git.send(Cmd::RemoveWorktree {
-                main,
-                path: worktree,
-                force: false,
-            });
-            cx.notify();
-        }
+        let removal = match self.wt_slug(&main, &worktree) {
+            Some(_) => self.wt_remove(main.clone(), &worktree, window, cx),
+            None => {
+                cx.notify();
+                Some(self.git.send(Cmd::RemoveWorktree {
+                    main: main.clone(),
+                    path: worktree,
+                    force: false,
+                }))
+            }
+        };
+        self.branch_after_removal = removal.map(|ticket| (ticket, main, branch));
     }
 
-    /// A worktree removal has ended: the branch waiting on it goes, or stays.
+    /// A write has ended: when it is the removal a branch waits on, the branch
+    /// goes, or stays.
     ///
-    /// `Action::Worktree` is what both removals answer under — `wt rm` and the
-    /// bare one — and nothing else is waited on here.
-    pub(super) fn removal_ended(&mut self, action: Action, ok: bool) {
-        if action != Action::Worktree {
-            return;
-        }
-        let Some((main, name)) = self.branch_after_removal.take() else {
+    /// By the removal's ticket: every worktree operation answers under
+    /// `Action::Worktree` and names no checkout — the list's re-read, a `wt`
+    /// task, a creation — and the next such answer was not always the removal.
+    pub(super) fn removal_ended(&mut self, ticket: crate::runtime::Ticket, ok: bool) {
+        let Some((_, main, name)) = self
+            .branch_after_removal
+            .take_if(|(removal, _, _)| *removal == ticket)
+        else {
             return;
         };
         if ok {
@@ -2700,7 +2701,9 @@ impl ClaudhubApp {
             let _ = this.update(cx, |this, cx| {
                 for path in paths {
                     match this.repo_path_for_server(path, cx) {
-                        Ok(path) => this.git.send(Cmd::OpenRepo(path)),
+                        Ok(path) => {
+                            this.git.send(Cmd::OpenRepo(path));
+                        }
                         Err(message) => this.announce(message, cx),
                     }
                 }

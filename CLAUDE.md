@@ -259,6 +259,13 @@ conflit et le fil se retrouve avec deux protocoles sous un seul numéro.
 
 Toute écriture git est suivie d'une relecture du statut (`write_then_refresh`).
 
+**`send` rend un `Ticket`, et `Done`/`Failed` le rapportent** : c'est la seule
+façon de savoir *quelle* commande a répondu. Le ticket voyage à côté de la
+commande (`Order`) et `runtime::handle` le pose sur la réponse, filet de
+panique compris. Qui attend une écriture précise — les boutons en vol, une
+sauvegarde parmi plusieurs, la seconde moitié d'une paire — l'attend par son
+ticket, jamais par « la prochaine réponse de ce worktree et de cette action ».
+
 ### Les sept files
 
 `queue_of` dit, du seul examen d'une commande, dans quelle file elle part. Une

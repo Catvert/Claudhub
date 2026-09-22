@@ -201,26 +201,13 @@ impl ClaudhubApp {
     fn read_next_file(&mut self, cx: &mut Context<Self>) {
         if self.pending_files.is_empty() {
             self.restoring_files = false;
+            self.restore_read = None;
             cx.notify();
             return;
         }
         let next = self.pending_files.remove(0);
-        self.git.send(self.read_file_cmd(next.worktree, next.path));
+        self.restore_read = Some(self.git.send(self.read_file_cmd(next.worktree, next.path)));
         cx.notify();
-    }
-
-    /// The remembered tab whose read is out, while a restore is under way.
-    ///
-    /// Worked out rather than kept: `pending_files` starts as a copy of
-    /// `replaying` and `read_next_file` sends from its head, so the file in
-    /// flight is the last one `replaying` has that `pending_files` no longer
-    /// holds.
-    pub(super) fn restoring_file(&self) -> Option<&crate::ui::store::OpenFile> {
-        if !self.restoring_files {
-            return None;
-        }
-        let sent = self.replaying.len().checked_sub(self.pending_files.len())?;
-        self.replaying.get(sent.checked_sub(1)?)
     }
 
     /// One remembered tab has arrived: asks for the one after it, and brings
