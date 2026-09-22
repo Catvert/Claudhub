@@ -37,7 +37,16 @@ const DEBOUNCE: Duration = Duration::from_millis(250);
 
 /// Git metadata can live outside the checkout (linked trees, submodules).
 /// Translate its events back to the checkout the UI actually watches.
-type GitWatches = HashMap<PathBuf, Vec<PathBuf>>;
+type GitWatches = HashMap<PathBuf, Vec<GitDir>>;
+
+/// A git directory whose events belong to a checkout, and how much of it does.
+#[derive(Debug, Clone, PartialEq)]
+struct GitDir {
+    path: PathBuf,
+    /// The common directory of a linked worktree: its references are this
+    /// checkout's too, its `HEAD` and `index` are the main checkout's.
+    shared: bool,
+}
 
 /// The interface-side facade: all it does is send orders.
 ///
@@ -76,6 +85,11 @@ impl Watcher {
                 // meant a second `git ls-files` for a list that may have moved
                 // in between — a folder created since was then left watched.
                 let mut watched: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+                // How many orders hold each folder. Two worktrees of one
+                // repository watch the same `refs/`, and `notify` keeps one
+                // watch per path: unwatching it for the one leaving took it
+                // from the one staying.
+                let mut holders = Holders::default();
                 while let Ok(order) = order_rx.recv() {
                     match order {
                         Order::Watch(path) => {
@@ -94,16 +108,20 @@ impl Watcher {
                             if let Ok(mut mappings) = order_git_watches.lock() {
                                 mappings.insert(path.clone(), plan.git_dirs);
                             }
-                            let dirs: Vec<PathBuf> = plan
-                                .directories
-                                .into_iter()
-                                .map(|(dir, mode)| {
-                                    if let Err(e) = debouncer.watch(&dir, mode) {
+                            let mut dirs = Vec::new();
+                            for (dir, mode) in plan.directories {
+                                if !holders.take(&dir) {
+                                    dirs.push(dir);
+                                    continue;
+                                }
+                                match debouncer.watch(&dir, mode) {
+                                    Ok(()) => dirs.push(dir),
+                                    Err(e) => {
+                                        holders.release(&dir);
                                         log::warn!("cannot watch {}: {e}", dir.display());
                                     }
-                                    dir
-                                })
-                                .collect();
+                                }
+                            }
                             watched.insert(path, dirs);
                         }
                         Order::Unwatch(path) => {
@@ -112,7 +130,9 @@ impl Watcher {
                             }
                             if let Some(dirs) = watched.remove(&path) {
                                 for dir in dirs {
-                                    let _ = debouncer.unwatch(&dir);
+                                    if holders.release(&dir) {
+                                        let _ = debouncer.unwatch(&dir);
+                                    }
                                 }
                             }
                         }
@@ -126,15 +146,22 @@ impl Watcher {
                             if watched.contains_key(&path) || !path.is_dir() {
                                 continue;
                             }
+                            if !holders.take(&path) {
+                                watched.insert(path.clone(), vec![path]);
+                                continue;
+                            }
                             match debouncer.watch(&path, RecursiveMode::NonRecursive) {
                                 Ok(()) => {
                                     watched.insert(path.clone(), vec![path]);
                                 }
-                                Err(e) => log::warn!("cannot watch {}: {e}", path.display()),
+                                Err(e) => {
+                                    holders.release(&path);
+                                    log::warn!("cannot watch {}: {e}", path.display());
+                                }
                             }
                         }
                         Order::UnwatchDir(path) => {
-                            if watched.remove(&path).is_some() {
+                            if watched.remove(&path).is_some() && holders.release(&path) {
                                 let _ = debouncer.unwatch(&path);
                             }
                         }
@@ -195,6 +222,37 @@ impl Watcher {
     }
 }
 
+/// How many orders hold each watched folder.
+///
+/// One `notify` watch per path, however many worktrees asked for it: the
+/// first taker sets it up and the last one out removes it.
+#[derive(Default)]
+struct Holders(HashMap<PathBuf, usize>);
+
+impl Holders {
+    /// Counts one more holder; true when it is the first, who must watch.
+    fn take(&mut self, dir: &Path) -> bool {
+        let count = self.0.entry(dir.to_path_buf()).or_default();
+        *count += 1;
+        *count == 1
+    }
+
+    /// Counts one holder less; true when it was the last, who must unwatch.
+    fn release(&mut self, dir: &Path) -> bool {
+        match self.0.get_mut(dir) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
+            }
+            Some(_) => {
+                self.0.remove(dir);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 /// The paths of an event that deserve a refresh.
 fn interesting_paths(event: &DebouncedEvent, mappings: &GitWatches) -> Vec<PathBuf> {
     if !changes_content(&event.kind) {
@@ -213,14 +271,20 @@ fn event_paths(path: &Path, mappings: &GitWatches) -> Vec<PathBuf> {
     for (worktree, git_dirs) in mappings {
         // Pick the innermost git directory: a submodule's metadata is usually
         // below its parent's, and testing only the parent would filter it out.
-        if let Some(relative) = git_dirs
+        // A linked worktree's own git directory sits inside the common one:
+        // innermost again, so its `HEAD` is read as its own and not as shared.
+        if let Some((dir, relative)) = git_dirs
             .iter()
-            .filter_map(|dir| path.strip_prefix(dir).ok().map(|rel| (dir, rel)))
-            .max_by_key(|(dir, _)| dir.components().count())
-            .map(|(_, relative)| relative)
+            .filter_map(|dir| path.strip_prefix(&dir.path).ok().map(|rel| (dir, rel)))
+            .max_by_key(|(dir, _)| dir.path.components().count())
         {
             metadata = true;
-            if interesting_git_path(relative) {
+            let interesting = if dir.shared {
+                interesting_shared_path(relative)
+            } else {
+                interesting_git_path(relative)
+            };
+            if interesting {
                 paths.push(worktree.clone());
             }
         }
@@ -280,6 +344,14 @@ fn interesting_git_path(path: &Path) -> bool {
         || inside == "MERGE_HEAD"
         || inside == "packed-refs"
         || inside.starts_with("refs/")
+}
+
+/// What a linked worktree reads in the common directory: the references only.
+/// Its `HEAD` and `index` are the main checkout's, whose every commit would
+/// otherwise refresh this one too.
+fn interesting_shared_path(path: &Path) -> bool {
+    let inside = path.to_string_lossy().replace('\\', "/");
+    !inside.ends_with(".lock") && (inside == "packed-refs" || inside.starts_with("refs/"))
 }
 
 /// True if this path is on a Windows drive mounted by WSL.
@@ -354,7 +426,7 @@ pub(crate) fn is_windows_mount(path: &Path) -> bool {
 #[derive(Default)]
 struct WatchPlan {
     directories: Vec<(PathBuf, RecursiveMode)>,
-    git_dirs: Vec<PathBuf>,
+    git_dirs: Vec<GitDir>,
 }
 
 fn watch_plan(worktree: &Path) -> WatchPlan {
@@ -394,14 +466,35 @@ fn add_checkout(worktree: &Path, plan: &mut WatchPlan, seen: &mut HashSet<PathBu
             .push((worktree.to_path_buf(), RecursiveMode::Recursive)),
     }
 
-    if let Some(git_dir) = git_dir(worktree) {
-        let refs = git_dir.join("refs");
-        plan.git_dirs.push(git_dir.clone());
-        plan.directories
-            .push((git_dir, RecursiveMode::NonRecursive));
-        if refs.is_dir() {
-            plan.directories.push((refs, RecursiveMode::Recursive));
-        }
+    let Some(git_dir) = git_dir(worktree) else {
+        return;
+    };
+    // A linked worktree keeps only `HEAD`, `index` and the markers of an
+    // operation under way in its own git directory; the branches live in the
+    // common one. Without it a `fetch`, a `branch -f` or a `reset` of another
+    // branch typed in a terminal left the divergence and the branch list as
+    // they were. Watched the way the main checkout watches it — root without
+    // recursion for `packed-refs`, `refs/` whole — so both hold the same
+    // folders, which `Holders` shares.
+    let common = crate::git::repo::common_dir_on_disk(&git_dir)
+        .map(|dir| dir.canonicalize().unwrap_or(dir))
+        .filter(|dir| *dir != git_dir);
+    add_git_dir(git_dir, false, plan);
+    if let Some(common) = common {
+        add_git_dir(common, true, plan);
+    }
+}
+
+/// A git directory's root without recursion, and its `refs/` whole.
+fn add_git_dir(dir: PathBuf, shared: bool, plan: &mut WatchPlan) {
+    let refs = dir.join("refs");
+    plan.git_dirs.push(GitDir {
+        path: dir.clone(),
+        shared,
+    });
+    plan.directories.push((dir, RecursiveMode::NonRecursive));
+    if refs.is_dir() {
+        plan.directories.push((refs, RecursiveMode::Recursive));
     }
 }
 
@@ -586,6 +679,121 @@ mod tests {
         assert!(
             received,
             "a commit's external metadata must map back to the submodule"
+        );
+    }
+
+    /// A main checkout and one linked worktree, each with a commit to stand on.
+    fn linked_worktree(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "claudhub-watch-linked-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let main = root.join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        let root = root.canonicalize().unwrap();
+        let main = root.join("main");
+        let git = |args: &[&str]| crate::git::git(&main, args).unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(main.join("code.txt"), "code\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "Start"]);
+        let linked = root.join("linked");
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            &linked.to_string_lossy(),
+        ]);
+        (root, main, linked)
+    }
+
+    /// A linked worktree's branches live in the common directory: a `fetch`
+    /// or a `branch -f` typed elsewhere must reach it, the main checkout's
+    /// `index` must not.
+    #[test]
+    fn a_linked_worktree_watches_the_references_it_shares() {
+        let (root, main, linked) = linked_worktree("plan");
+        let plan = watch_plan(&linked);
+        let common = main.join(".git");
+        let dirs: Vec<_> = plan.directories.iter().map(|(dir, _)| dir).collect();
+        assert!(dirs.contains(&&common), "{dirs:?}");
+        assert!(dirs.contains(&&common.join("refs")), "{dirs:?}");
+
+        let mappings = HashMap::from([(linked.clone(), plan.git_dirs)]);
+        for shared in ["packed-refs", "refs/heads/main", "refs/remotes/origin/main"] {
+            assert_eq!(
+                event_paths(&common.join(shared), &mappings),
+                vec![linked.clone()],
+                "{shared}"
+            );
+        }
+        // The main checkout's own state, and the noise of a write.
+        for foreign in [
+            "index",
+            "HEAD",
+            "packed-refs.lock",
+            "worktrees/linked/logs/HEAD",
+        ] {
+            assert!(
+                event_paths(&common.join(foreign), &mappings).is_empty(),
+                "{foreign}"
+            );
+        }
+        // Its own `HEAD` is still its own: the innermost directory decides.
+        assert_eq!(
+            event_paths(&common.join("worktrees/linked/HEAD"), &mappings),
+            vec![linked.clone()]
+        );
+
+        // The main checkout keeps its plan: no second, shared copy of itself.
+        assert!(watch_plan(&main).git_dirs.iter().all(|dir| !dir.shared));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_folder_two_worktrees_watch_stays_watched_until_the_last_leaves() {
+        let mut holders = Holders::default();
+        let refs = Path::new("/repo/.git/refs");
+        assert!(holders.take(refs), "the first sets the watch up");
+        assert!(!holders.take(refs), "the second shares it");
+        assert!(!holders.release(refs), "one leaving keeps it");
+        assert!(holders.release(refs), "the last one out removes it");
+        assert!(!holders.release(refs), "nothing left to remove");
+    }
+
+    #[test]
+    fn a_branch_moved_from_the_main_checkout_reaches_the_linked_worktree() {
+        let (root, main, linked) = linked_worktree("live");
+        let (watcher, changes) = Watcher::new().unwrap();
+        // Both open, then the main one closed: the shared `refs/` must survive.
+        watcher.watch(&main);
+        watcher.watch(&linked);
+        watcher.unwatch(&main);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut received = false;
+        let mut round = 0;
+        while std::time::Instant::now() < deadline {
+            round += 1;
+            crate::git::git(&main, &["branch", "-f", &format!("moved-{round}"), "HEAD"]).unwrap();
+            std::thread::sleep(DEBOUNCE + Duration::from_millis(150));
+            if changes
+                .try_recv()
+                .is_ok_and(|batch| batch.contains(&linked))
+            {
+                received = true;
+                break;
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            received,
+            "a branch written in the common refs must refresh the linked worktree"
         );
     }
 

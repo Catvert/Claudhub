@@ -278,24 +278,55 @@ fn status_in(dir: &Path, seen: &mut std::collections::HashSet<PathBuf>) -> Resul
     if !seen.insert(dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())) {
         return Ok(Status::default());
     }
-    let out = git(
-        dir,
-        &[
-            "status",
-            "--porcelain=v2",
-            "--branch",
-            "-z",
-            // `all` and not `normal`: without it, a wholly new folder appears
-            // as a single `folder/` entry that can neither be read nor staged
-            // file by file — and an agent worktree creates some. The cost is a
-            // full walk of the untracked *and non-ignored* folders, which
-            // `.gitignore` already bounds.
-            "--untracked-files=all",
-            // The review must include gitlinks even when a CLI preference
-            // hides them. This overrides config for this read only.
-            "--ignore-submodules=none",
-        ],
-    )?;
+    let mut args: Vec<String> = [
+        "status",
+        "--porcelain=v2",
+        "--branch",
+        "-z",
+        // `all` and not `normal`: without it, a wholly new folder appears
+        // as a single `folder/` entry that can neither be read nor staged
+        // file by file — and an agent worktree creates some. The cost is a
+        // full walk of the untracked *and non-ignored* folders, which
+        // `.gitignore` already bounds.
+        "--untracked-files=all",
+        // The review must include gitlinks even when a CLI preference
+        // hides them. This overrides config for this read only.
+        "--ignore-submodules=none",
+    ]
+    .map(String::from)
+    .to_vec();
+    let out = match git(dir, &args) {
+        Ok(out) => out,
+        // A submodule whose `.git` file points at a `modules/` folder that is
+        // gone makes git give up on the **parent**: it opens every gitlink to
+        // say whether it is dirty, and one it cannot open is fatal. Left alone,
+        // one stale checkout emptied the review of everything else. Those
+        // gitlinks are left out by pathspec — the rest comes back, and they
+        // simply are not listed, which is what git could say of them anyway.
+        // Only in the failure path: finding them costs an `ls-files`.
+        Err(e) => {
+            let broken = broken_submodules(dir);
+            if broken.is_empty() {
+                return Err(e);
+            }
+            log::warn!(
+                "{}: left out of the status, their git directory is gone: {}",
+                dir.display(),
+                broken
+                    .iter()
+                    .map(|path| path.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            args.push("--".into());
+            args.extend(
+                broken
+                    .iter()
+                    .map(|path| format!(":(exclude,literal){}", path.to_string_lossy())),
+            );
+            git(dir, &args)?
+        }
+    };
     let mut status = parse(&out);
     // The git directory and the markers are both read from disk — no second
     // process per refresh, and one refresh arrives per file write. That is the
@@ -305,13 +336,42 @@ fn status_in(dir: &Path, seen: &mut std::collections::HashSet<PathBuf>) -> Resul
         .and_then(super::repo::pending_in);
     for file in &status.files {
         if file.submodule.is_some() && dir.join(&file.path).join(".git").exists() {
-            status.submodules.push(SubmoduleChanges {
-                path: file.path.clone(),
-                status: status_in(&dir.join(&file.path), seen)?,
-            });
+            // A submodule that cannot be read keeps its gitlink line in the
+            // parent; it does not take the parent's status down with it.
+            match status_in(&dir.join(&file.path), seen) {
+                Ok(inner) => status.submodules.push(SubmoduleChanges {
+                    path: file.path.clone(),
+                    status: inner,
+                }),
+                Err(e) => log::warn!(
+                    "submodule {} left unread: {e:#}",
+                    dir.join(&file.path).display()
+                ),
+            }
         }
     }
     Ok(status)
+}
+
+/// The gitlinks of `dir` whose checkout has a `.git` leading nowhere: a file
+/// naming a git directory that no longer exists.
+///
+/// An uninitialized gitlink has no `.git` at all and git skips it by itself;
+/// only this half-removed state is fatal to `git status`.
+fn broken_submodules(dir: &Path) -> Vec<PathBuf> {
+    let Ok(out) = git(dir, &["ls-files", "-z", "--stage"]) else {
+        return Vec::new();
+    };
+    split_nul(&out)
+        .filter_map(|record| {
+            let (header, path) = record.split_once('\t')?;
+            header.starts_with("160000 ").then(|| PathBuf::from(path))
+        })
+        .filter(|path| {
+            let checkout = dir.join(path);
+            checkout.join(".git").exists() && super::repo::git_dir_on_disk(&checkout).is_none()
+        })
+        .collect()
 }
 
 fn parse(out: &str) -> Status {
@@ -671,5 +731,40 @@ mod counting_tests {
         assert_eq!(lines_of(&file), 0);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod broken_submodule_tests {
+    use crate::git::submodule_tests::{add_submodule, Fixture};
+    use std::path::Path;
+
+    /// `rm -rf .git/modules/<name>` with the checkout left in place: git
+    /// refuses the parent's whole status, and the review used to go blank.
+    #[test]
+    fn a_submodule_without_its_git_directory_does_not_empty_the_parent_status() {
+        let f = Fixture::new();
+        let healthy = add_submodule(&f.parent, "healthy", Path::new("deps/healthy"));
+        std::fs::remove_dir_all(f.parent.join(".git/modules/app-tech")).unwrap();
+        std::fs::write(f.parent.join("new file"), "x").unwrap();
+        std::fs::write(healthy.join("src/deep/code.txt"), "after\n").unwrap();
+
+        let st = super::status(&f.parent).expect("the rest of the status comes back");
+        let paths: Vec<&Path> = st.files.iter().map(|file| file.path.as_path()).collect();
+        assert!(paths.contains(&Path::new("new file")), "{paths:?}");
+        // The healthy submodule is still read, dirt included.
+        let gitlink = st
+            .files
+            .iter()
+            .find(|file| file.path == Path::new("deps/healthy"))
+            .expect("the healthy gitlink is listed");
+        assert!(gitlink.submodule.is_some_and(|sub| sub.modified));
+        assert!(st
+            .submodules
+            .iter()
+            .any(|sub| sub.path == Path::new("deps/healthy")));
+        // The broken one is left out, its name with a space and all.
+        assert!(!paths.contains(&f.path.as_path()), "{paths:?}");
+        assert_eq!(super::broken_submodules(&f.parent), vec![f.path.clone()]);
     }
 }
