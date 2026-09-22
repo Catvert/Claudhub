@@ -2199,9 +2199,10 @@ impl ClaudhubApp {
             } => self.diff_files_arrived(worktree, range, files, cx),
             Evt::FileDiff {
                 worktree,
+                range,
                 path,
                 diff,
-            } => self.file_diff_arrived(worktree, path, diff, cx),
+            } => self.file_diff_arrived(worktree, range, path, diff, cx),
             Evt::UnstagedDiff {
                 worktree,
                 path,
@@ -2739,6 +2740,7 @@ impl ClaudhubApp {
     fn file_diff_arrived(
         &mut self,
         worktree: PathBuf,
+        range: DiffRange,
         path: PathBuf,
         diff: crate::git::FileDiff,
         cx: &mut Context<Self>,
@@ -2753,7 +2755,10 @@ impl ClaudhubApp {
         let mut jumped = None;
         let mut note = None;
         if let Some(state) = self.review.get_mut(&worktree) {
-            if state.selected.as_deref() == Some(path.as_path()) {
+            // The path **and the range**: the same file in "Changes" and in the
+            // branch review is two diffs, and the first answer to arrive after
+            // a click in the other list was painted under it.
+            if state.selected.as_deref() == Some(path.as_path()) && state.range == range {
                 let rendered = std::rc::Rc::new(Rendered::new(&path, diff, &theme));
                 // The arrow that opened this file expects a change, not the top
                 // of the file.
@@ -3641,6 +3646,19 @@ impl ClaudhubApp {
         state.range = range.clone();
         let untracked = state.status.file(&path).is_some_and(|f| f.is_untracked());
         let partial = matches!(range, DiffRange::Working) && partially_staged(&state.status, &path);
+        // Where a rename came from, as the list clicked read it — or the
+        // status, for the working range's file opened before its list arrived.
+        // Without it the diff reads a renamed file as one added whole.
+        let original = state
+            .files
+            .get(&range)
+            .and_then(|files| files.iter().find(|file| file.path == path))
+            .and_then(|file| file.original.clone())
+            .or_else(|| {
+                matches!(range, DiffRange::Working)
+                    .then(|| state.status.file(&path).and_then(|f| f.original.clone()))
+                    .flatten()
+            });
         // Opening a file is leaving the merge: the centre shows one or the
         // other, and what one has just clicked is what one wants to see. After
         // the state above and not before, so that one lookup serves for all of
@@ -3650,6 +3668,7 @@ impl ClaudhubApp {
             worktree: worktree.clone(),
             range: range.clone(),
             path: path.clone(),
+            original,
             context: Settings::global(cx).context_lines(),
             untracked,
         });

@@ -146,7 +146,7 @@ fn submodule_dirty_and_untracked_changes_override_ignore_preferences() {
         diff::files(&f.parent, &DiffRange::Working).unwrap()[0].path,
         f.path
     );
-    let patch = diff::file(&f.parent, &DiffRange::Working, &f.path, 3).unwrap();
+    let patch = diff::file(&f.parent, &DiffRange::Working, &f.path, None, 3).unwrap();
     assert!(!patch.empty);
     assert!(patch
         .hunks
@@ -202,7 +202,11 @@ fn submodule_commits_and_parent_gitlinks_use_separate_indexes() {
         id: git(&f.parent, &["rev-parse", "HEAD"]).unwrap(),
         parent: Some(git(&f.parent, &["rev-parse", "HEAD^"]).unwrap()),
     };
-    assert!(!diff::file(&f.parent, &range, &f.path, 3).unwrap().empty);
+    assert!(
+        !diff::file(&f.parent, &range, &f.path, None, 3)
+            .unwrap()
+            .empty
+    );
 }
 
 #[test]
@@ -340,7 +344,7 @@ fn submodule_changes_are_grouped_with_separate_indexes_and_file_actions() {
     let files = diff::files(&f.parent, &DiffRange::Working).unwrap();
     let changed = files.iter().find(|file| file.path == displayed).unwrap();
     assert_eq!((changed.added, changed.removed), (1, 1));
-    let whole = diff::file(&f.parent, &DiffRange::Working, &displayed, 3).unwrap();
+    let whole = diff::file(&f.parent, &DiffRange::Working, &displayed, None, 3).unwrap();
     assert!(whole.hunks[0]
         .lines
         .iter()
@@ -398,7 +402,7 @@ fn submodule_nested_changes_route_to_the_innermost_repository() {
         .iter()
         .any(|file| file.path == displayed));
     assert!(
-        !diff::file(&f.parent, &DiffRange::Working, &displayed, 3)
+        !diff::file(&f.parent, &DiffRange::Working, &displayed, None, 3)
             .unwrap()
             .empty
     );

@@ -102,11 +102,20 @@ impl LogRange {
 /// or `\t` always end up appearing in a subject sooner or later.
 const FIELD: char = '\u{1f}';
 
+/// Goes with every `--format` this module asks for.
+///
+/// `log.showSignature = true` — a setting people who sign their commits turn on
+/// once and forget — makes `log` and `show` write gpg's account of each
+/// signature **before** the format, on stdout: the first field of every signed
+/// commit became `gpg: Signature made …`, and the list read as garbage.
+const NO_SIGNATURE: &str = "--no-show-signature";
+
 pub fn commits(dir: &Path, range: &LogRange, limit: usize) -> Result<Vec<Commit>> {
     let format = format!("--format=%H{f}%h{f}%P{f}%an{f}%ar{f}%D{f}%s", f = "%x1f");
     let mut args: Vec<String> = vec![
         "log".into(),
         "-z".into(),
+        NO_SIGNATURE.into(),
         format,
         format!("--max-count={limit}"),
     ];
@@ -149,6 +158,7 @@ pub fn line_history(
     };
     let mut args: Vec<String> = vec![
         "log".into(),
+        NO_SIGNATURE.into(),
         format,
         format!("--max-count={limit}"),
         // A `diff.external` or a `.gitattributes` driver would replace the
@@ -161,8 +171,14 @@ pub fn line_history(
     Ok(parse_line_history(&out))
 }
 
+/// Records are cut at a `\x01` **opening a line**, and only there: a file that
+/// holds that byte in a line the patch shows — a binary-ish fixture, a
+/// terminal capture — would otherwise have cut its own commit in two, and the
+/// second half, read as a commit, came out as a row of nonsense. The first
+/// record opens the output rather than a line, hence the newline put in front.
 fn parse_line_history(out: &str) -> Vec<(Commit, FileDiff)> {
-    out.split('\u{1}')
+    format!("\n{out}")
+        .split("\n\u{1}")
         .filter(|record| !record.trim().is_empty())
         .filter_map(|record| {
             let (fields, patch) = record.split_once('\n').unwrap_or((record, ""));
@@ -184,6 +200,7 @@ pub fn recent_subjects(dir: &Path, limit: usize) -> Vec<String> {
         &[
             "log".to_string(),
             "-z".to_string(),
+            NO_SIGNATURE.to_string(),
             "--format=%s".to_string(),
             format!("--max-count={limit}"),
         ],
@@ -215,7 +232,13 @@ pub fn detail(dir: &Path, id: &str) -> Result<CommitDetail> {
     let format = format!("--format=%an{f}%ar{f}%B", f = "%x1f");
     let out = git(
         dir,
-        &["show".into(), "--no-patch".into(), format, id.to_string()],
+        &[
+            "show".into(),
+            "--no-patch".into(),
+            NO_SIGNATURE.into(),
+            format,
+            id.to_string(),
+        ],
     )?;
     Ok(parse_detail(&out))
 }
@@ -668,6 +691,68 @@ diff --git a/f.rs b/f.rs
         assert!(commit.refs.is_empty());
         assert_eq!(patch.hunks.len(), 1);
         assert!(!patch.empty);
+    }
+
+    /// A `\x01` inside a patch line is the file's, not a record boundary: only
+    /// one opening a line starts a commit.
+    #[test]
+    fn a_line_history_is_not_cut_by_a_byte_of_the_file() {
+        let out = "\u{1}aaa\u{1f}aaa1234\u{1f}\u{1f}Ada\u{1f}now\u{1f}\u{1f}Only
+diff --git a/f.txt b/f.txt
+--- /dev/null
++++ b/f.txt
+@@ -0,0 +1,2 @@
++before\u{1}after
++next
+";
+        let found = parse_line_history(out);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let lines = &found[0].1.hunks[0].lines;
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "before\u{1}after");
+    }
+
+    /// With `log.showSignature` set, the history still reads: the signature's
+    /// account would otherwise come first in every signed commit's record.
+    /// Signed with an SSH key when `ssh-keygen` is there to make one; unsigned
+    /// otherwise, which still proves git takes the flag.
+    #[test]
+    fn a_signature_setting_does_not_reach_the_format() {
+        let dir = std::env::temp_dir().join(format!("claudhub-sig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("key");
+        let signed = std::process::Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&key)
+            .status()
+            .is_ok_and(|status| status.success());
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "T"]);
+        git(&["config", "log.showSignature", "true"]);
+        if signed {
+            git(&["config", "gpg.format", "ssh"]);
+            git(&["config", "user.signingkey", key.to_str().unwrap()]);
+            git(&["commit", "-q", "-S", "--allow-empty", "-m", "first"]);
+        } else {
+            git(&["commit", "-q", "--allow-empty", "-m", "first"]);
+        }
+        let found = commits(&dir, &LogRange::Head, 5).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].summary, "first");
+        let id = found[0].id.clone();
+        assert_eq!(detail(&dir, &id).unwrap().message, "first");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -54,7 +54,11 @@ pub fn list(main: &Path) -> Result<Vec<Tag>> {
     // message can contain anything else. The starred fields dereference an
     // annotated tag to the commit it points at, and are empty for a lightweight
     // one — which is what tells the two apart without a second command.
-    const FORMAT: &str = "%(refname:short)%00%(objecttype)%00%(objectname:short)%00\
+    //
+    // `lstrip=2` and not `:short`, which disambiguates: a tag named like a
+    // branch came out as `tags/v1`, and every gesture on it then named a tag
+    // that does not exist.
+    const FORMAT: &str = "%(refname:lstrip=2)%00%(objecttype)%00%(objectname:short)%00\
                           %(*objectname:short)%00%(creatordate:relative)%00\
                           %(contents:subject)%00%(taggername)%00%(authorname)";
 

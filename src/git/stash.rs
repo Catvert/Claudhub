@@ -63,7 +63,15 @@ pub fn list(main: &Path) -> Result<Vec<Stash>> {
 
     let raw = git(
         main,
-        &["stash", "list", "-z", &format!("--format={FORMAT}")],
+        // `stash list` is a `log`, and `log.showSignature` would write the
+        // account of a signature before the format — see `history`.
+        &[
+            "stash",
+            "list",
+            "-z",
+            "--no-show-signature",
+            &format!("--format={FORMAT}"),
+        ],
     )?;
     Ok(parse(&raw))
 }

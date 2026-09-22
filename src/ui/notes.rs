@@ -368,6 +368,7 @@ mod tests {
             old_no: old,
             new_no: new,
             text: text.into(),
+            cr: false,
         }
     }
 

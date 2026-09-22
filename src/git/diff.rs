@@ -88,7 +88,15 @@ pub struct DiffLine {
     /// removed line no new one.
     pub old_no: Option<usize>,
     pub new_no: Option<usize>,
+    /// The line's text, **without** the carriage return a CRLF file ends it
+    /// with: that byte is the file's line ending and not something to paint.
     pub text: String,
+    /// The line ended with `\r` before its `\n` — a CRLF file, or one CRLF
+    /// line in a file of LFs. Kept apart from the text so that the view never
+    /// sees it, and kept at all so that `hunk_patch` writes it back: a context
+    /// line missing its `\r` does not match the file any more, and git refuses
+    /// the patch.
+    pub cr: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -159,29 +167,77 @@ fn files_in(
 ///
 /// `context` is the number of lines around each change; the view raises it when
 /// "more context" is asked for.
-pub fn file(dir: &Path, range: &Range, path: &Path, context: usize) -> Result<FileDiff> {
+///
+/// `original` is the path a rename came from, and it goes into the pathspec
+/// beside the new one: `-M` pairs the two halves of a rename **among the paths
+/// it was given**, so restricted to the new name alone it saw an added file and
+/// no deleted one — and a file renamed with three lines changed read as a
+/// whole file added.
+pub fn file(
+    dir: &Path,
+    range: &Range,
+    path: &Path,
+    original: Option<&Path>,
+    context: usize,
+) -> Result<FileDiff> {
     let (owner, local) = if matches!(range, Range::Working) {
         super::repo::file_repository(dir, path)
     } else {
         (dir.to_path_buf(), path.to_path_buf())
     };
+    // The former path belongs to the same repository as the new one, or it is
+    // not a rename this diff can pair: a file moved into a submodule is two
+    // changes in two repositories.
+    let original = original.and_then(|original| {
+        let (from, local) = if matches!(range, Range::Working) {
+            super::repo::file_repository(dir, original)
+        } else {
+            (dir.to_path_buf(), original.to_path_buf())
+        };
+        (from == owner).then_some(local)
+    });
     let (dir, path) = (owner.as_path(), local.as_path());
-    let mut args: Vec<String> = vec![
-        "diff".into(),
-        format!("-U{context}"),
-        "-M".into(),
-        // Without this, a `diff.external` or a `.gitattributes` driver replaces
-        // the unified output with a format we do not know how to read.
-        "--no-ext-diff".into(),
-        "--no-color".into(),
-        "--ignore-submodules=none".into(),
-        "--submodule=short".into(),
-    ];
-    args.extend(range.args());
-    args.push("--".into());
-    args.push(path.to_string_lossy().into_owned());
-    let out = git(dir, &args)?;
+    let read = |original: Option<&Path>| -> Result<String> {
+        let mut args: Vec<String> = vec![
+            super::LITERAL_PATHS.into(),
+            "diff".into(),
+            format!("-U{context}"),
+            "-M".into(),
+            // Without this, a `diff.external` or a `.gitattributes` driver
+            // replaces the unified output with a format we do not know how to
+            // read.
+            "--no-ext-diff".into(),
+            "--no-color".into(),
+            "--ignore-submodules=none".into(),
+            "--submodule=short".into(),
+        ];
+        args.extend(range.args());
+        args.push("--".into());
+        args.extend(original.map(|original| original.to_string_lossy().into_owned()));
+        args.push(path.to_string_lossy().into_owned());
+        // Bytes and not `git`'s answer: that one strips the last line's `\r`,
+        // and this diff is what a hunk's patch is rebuilt from.
+        let out = super::git_bytes(dir, &args)?;
+        Ok(String::from_utf8_lossy(&out).into_owned())
+    };
+    let mut out = read(original.as_deref())?;
+    // The status and this range need not agree on the rename: a file moved
+    // in the index and then rewritten in the tree is renamed for one and not
+    // for the other. Unpaired, the two paths are two sections, and the first
+    // one — the deletion, whenever the old name sorts first — is all
+    // `parse_unified` reads. The new path alone is then the right question.
+    if original.is_some() && !pairs_a_rename(&out) {
+        out = read(None)?;
+    }
     Ok(parse_unified(&out))
+}
+
+/// Does this diff open on a rename? Read off the extended header git writes
+/// before the first hunk.
+fn pairs_a_rename(out: &str) -> bool {
+    out.lines()
+        .take_while(|line| !line.starts_with("@@"))
+        .any(|line| line.starts_with("rename from "))
 }
 
 /// The unstaged remainder of one file: index → working tree, plain
@@ -191,6 +247,7 @@ pub fn unstaged_file(dir: &Path, path: &Path, context: usize) -> Result<FileDiff
     let (owner, local) = super::repo::file_repository(dir, path);
     let (dir, path) = (owner.as_path(), local.as_path());
     let args: Vec<String> = vec![
+        super::LITERAL_PATHS.into(),
         "diff".into(),
         format!("-U{context}"),
         "-M".into(),
@@ -201,8 +258,9 @@ pub fn unstaged_file(dir: &Path, path: &Path, context: usize) -> Result<FileDiff
         "--".into(),
         path.to_string_lossy().into_owned(),
     ];
-    let out = git(dir, &args)?;
-    Ok(parse_unified(&out))
+    // Bytes, for `file`'s reason: the remainder's hunks are staged from this.
+    let out = super::git_bytes(dir, &args)?;
+    Ok(parse_unified(&String::from_utf8_lossy(&out)))
 }
 
 /// The raw text of what is staged, as git writes it.
@@ -297,7 +355,15 @@ pub(super) fn parse_unified(out: &str) -> FileDiff {
     let mut old_no = 0usize;
     let mut new_no = 0usize;
 
-    for line in out.lines() {
+    // Split on `\n` alone, and not by `lines()`: that one eats the `\r` of a
+    // CRLF line, and the patch rebuilt from it no longer matched the file. The
+    // `\r` is taken off here, once, and remembered on the line.
+    let body = out.strip_suffix('\n').unwrap_or(out);
+    for line in body.split('\n') {
+        let (line, cr) = match line.strip_suffix('\r') {
+            Some(line) => (line, true),
+            None => (line, false),
+        };
         if line.starts_with("@@") {
             let (old_start, new_start) = parse_hunk_header(line);
             old_no = old_start;
@@ -355,16 +421,27 @@ pub(super) fn parse_unified(out: &str) -> FileDiff {
             old_no: l_old,
             new_no: l_new,
             text: text.to_string(),
+            cr,
         });
     }
     diff
 }
 
 /// `@@ -12,7 +12,9 @@ fn something()` → (12, 12).
+///
+/// Only the two ranges between the `@@`s are read. What follows the second is
+/// the function git names as context — a line of the file, which may well hold
+/// a `-1` or a `+2` of its own: `@@ -15,3 +15,3 @@ limit = -1` read as starting
+/// at line 1, and every number of the hunk was off.
 fn parse_hunk_header(line: &str) -> (usize, usize) {
     let mut old = 1;
     let mut new = 1;
-    for tok in line.split_whitespace() {
+    let ranges = line
+        .trim_start_matches('@')
+        .split("@@")
+        .next()
+        .unwrap_or("");
+    for tok in ranges.split_whitespace().take(2) {
         let (target, body) = match tok.as_bytes().first() {
             Some(b'-') => (&mut old, &tok[1..]),
             Some(b'+') => (&mut new, &tok[1..]),
@@ -407,6 +484,9 @@ pub fn hunk_patch(path: &Path, original: Option<&Path>, hunk: &Hunk, reverse: bo
             DiffLineKind::NoNewline => {}
         }
         patch.push_str(&line.text);
+        if line.cr {
+            patch.push('\r');
+        }
         patch.push('\n');
     }
     // `reverse` does not flip the text: `git apply --reverse` takes care of it,
@@ -545,6 +625,23 @@ index 1234567..89abcde 100644
         assert!(patch.ends_with(" context\n-old\n+new\n+more\n"));
     }
 
+    /// The `\r` of a CRLF line leaves the text and comes back in the patch —
+    /// the last line's too, which `lines()` and a trimmed output both ate.
+    #[test]
+    fn a_crlf_line_keeps_its_carriage_return_out_of_the_text() {
+        let out = "@@ -1,2 +1,2 @@\r\n one\r\n-two\r\n+TWO\r\n";
+        let d = parse_unified(out);
+        let lines = &d.hunks[0].lines;
+        assert_eq!(lines.len(), 3);
+        assert!(lines.iter().all(|line| line.cr));
+        assert_eq!(lines[2].text, "TWO");
+        let patch = hunk_patch(Path::new("w.txt"), None, &d.hunks[0], false);
+        assert!(
+            patch.ends_with("@@ -1,2 +1,2 @@\n one\r\n-two\r\n+TWO\r\n"),
+            "{patch:?}"
+        );
+    }
+
     #[test]
     fn a_commit_compares_against_its_parent_or_the_empty_tree() {
         let with_parent = Range::Commit {
@@ -565,5 +662,136 @@ index 1234567..89abcde 100644
     fn header_defaults_to_one_when_unparsable() {
         assert_eq!(parse_hunk_header("@@ -1 +1 @@"), (1, 1));
         assert_eq!(parse_hunk_header("@@ -0,0 +1,5 @@"), (0, 1));
+    }
+
+    /// The function git names after the second `@@` is a line of the file, and
+    /// its numbers are not the hunk's.
+    #[test]
+    fn the_section_after_the_header_is_not_read_as_a_range() {
+        assert_eq!(parse_hunk_header("@@ -15,3 +15,3 @@ limit = -1"), (15, 15));
+        assert_eq!(parse_hunk_header("@@ -7 +9,2 @@ x = +2 - -3"), (7, 9));
+    }
+
+    /// A real repository of its own, with an author, and CRLF left alone.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("claudhub-diff-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("test directory");
+        for args in [
+            &["init", "-q", "."][..],
+            &["config", "user.email", "t@example.com"],
+            &["config", "user.name", "T"],
+            &["config", "core.autocrlf", "false"],
+        ] {
+            sh(&dir, args);
+        }
+        dir
+    }
+
+    fn sh(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// A hunk of a CRLF file is staged: its lines keep the `\r` git wrote, the
+    /// last line included, and the view is never handed it.
+    #[test]
+    fn a_hunk_of_a_crlf_file_is_staged() {
+        let dir = scratch("crlf");
+        std::fs::write(dir.join("win.txt"), "one\r\ntwo\r\nthree\r\n").unwrap();
+        sh(&dir, &["add", "win.txt"]);
+        sh(&dir, &["commit", "-q", "-m", "first"]);
+        std::fs::write(dir.join("win.txt"), "one\r\nTWO\r\nthree\r\n").unwrap();
+
+        let diff = file(&dir, &Range::Working, Path::new("win.txt"), None, 3).unwrap();
+        let hunk = &diff.hunks[0];
+        assert!(hunk.lines.iter().all(|line| line.cr), "{hunk:?}");
+        assert!(
+            hunk.lines.iter().all(|line| !line.text.contains('\r')),
+            "the line ending is not text to paint: {hunk:?}"
+        );
+
+        let patch = hunk_patch(Path::new("win.txt"), None, hunk, false);
+        super::super::repo::apply_patch(&dir, &patch, false).expect("the patch applies");
+        assert_eq!(
+            sh(&dir, &["show", ":win.txt"]),
+            "one\r\nTWO\r\nthree\r\n",
+            "staged byte for byte"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file renamed and then edited reads as its edit, not as a whole file
+    /// added: the former path is part of the question.
+    #[test]
+    fn a_renamed_and_edited_file_shows_its_edit() {
+        let dir = scratch("rename");
+        let text: String = (1..=12).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(dir.join("old.txt"), &text).unwrap();
+        sh(&dir, &["add", "old.txt"]);
+        sh(&dir, &["commit", "-q", "-m", "first"]);
+        sh(&dir, &["mv", "old.txt", "new.txt"]);
+        std::fs::write(dir.join("new.txt"), text.replace("line 6\n", "line six\n")).unwrap();
+
+        let path = Path::new("new.txt");
+        let diff = file(&dir, &Range::Working, path, Some(Path::new("old.txt")), 3).unwrap();
+        let changed: Vec<_> = diff
+            .hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| line.kind != DiffLineKind::Context)
+            .map(|line| (line.kind, line.text.as_str()))
+            .collect();
+        assert_eq!(
+            changed,
+            [
+                (DiffLineKind::Removed, "line 6"),
+                (DiffLineKind::Added, "line six")
+            ]
+        );
+
+        // Rewritten past recognition, the two are no rename to this range: the
+        // new path is then read alone, and not the deletion sorting first.
+        std::fs::write(dir.join("new.txt"), "something else entirely\n").unwrap();
+        let diff = file(&dir, &Range::Working, path, Some(Path::new("old.txt")), 3).unwrap();
+        let lines: Vec<_> = diff.hunks.iter().flat_map(|hunk| &hunk.lines).collect();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0].kind, DiffLineKind::Added);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A path with brackets is a path: the diff of `app/[id]/page.tsx` is not
+    /// the diff of every `app/?/page.tsx`.
+    #[test]
+    fn a_path_with_brackets_is_not_a_pattern() {
+        let dir = scratch("literal");
+        for path in ["app/[id]", "app/i"] {
+            std::fs::create_dir_all(dir.join(path)).unwrap();
+            std::fs::write(dir.join(path).join("page.tsx"), "a\n").unwrap();
+        }
+        sh(&dir, &["add", "."]);
+        sh(&dir, &["commit", "-q", "-m", "first"]);
+        std::fs::write(dir.join("app/i/page.tsx"), "b\n").unwrap();
+
+        let diff = file(
+            &dir,
+            &Range::Working,
+            Path::new("app/[id]/page.tsx"),
+            None,
+            3,
+        )
+        .unwrap();
+        assert!(diff.hunks.is_empty(), "{diff:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

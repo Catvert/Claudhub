@@ -83,11 +83,13 @@ pub enum Cmd {
         context: usize,
     },
     /// A file's diff; `untracked` switches to `--no-index`, git not knowing the
-    /// file yet.
+    /// file yet. `original` is where a rename came from, which the diff needs
+    /// to pair the two halves — see `git::diff::file`.
     LoadFileDiff {
         worktree: WorktreeId,
         range: DiffRange,
         path: PathBuf,
+        original: Option<PathBuf>,
         context: usize,
         untracked: bool,
     },
@@ -1029,8 +1031,13 @@ pub enum Evt {
         range: DiffRange,
         files: Vec<DiffFile>,
     },
+    /// A file's diff, with the range it was read in: the same path is asked
+    /// for in two ranges — "Changes" and the branch review list it both —
+    /// and an answer arriving after the other list was clicked would paint
+    /// the wrong comparison under the right name.
     FileDiff {
         worktree: WorktreeId,
+        range: DiffRange,
         path: PathBuf,
         diff: FileDiff,
     },

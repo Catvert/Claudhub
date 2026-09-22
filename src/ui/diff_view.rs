@@ -3041,6 +3041,7 @@ mod tests {
                     old_no: Some(1),
                     new_no: Some(1),
                     text: "x".into(),
+                    cr: false,
                 })
                 .collect(),
         }
