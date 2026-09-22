@@ -30,13 +30,32 @@
 //! `OsStr::from_encoded_bytes_unchecked`, whose contract it would not meet.
 //! That leaves a local program able to make this window come forward and open
 //! a folder, which is what the gesture does anyway; it buys nothing else.
+//!
+//! **And on Linux the peer's user is checked, at both ends** (`SO_PEERCRED`,
+//! which the kernel fills and nobody can forge). The window drops a
+//! connection from another account; a launch that finds the name held by
+//! another account keeps its folder and opens its own window — the name
+//! carries the user, but a name is only a string, and the first to bind it
+//! owns it. The payload is capped and its read given a deadline (on Linux: a
+//! named pipe has no timeouts, and only its own user opens it), since the
+//! window hears launches one at a time: a client that connected and said
+//! nothing would otherwise have held the door shut for every launch after it.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use interprocess::local_socket::{
     prelude::*, GenericNamespaced, ListenerOptions, Stream as LocalStream,
 };
+
+/// The most a launch may say: a path, which no file system spells in more
+/// than a few kilobytes. Anything longer is not a launch.
+const MAX_PAYLOAD: u64 = 16 * 1024;
+
+/// How long a launch has to say it, once connected. A real one writes a path
+/// and closes in a few microseconds.
+const READ_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What a launch turned out to be.
 pub enum Instance {
@@ -106,8 +125,15 @@ fn claim_named(name: &str, folder: Option<&Path>) -> Instance {
     // the name free at the same instant. The loser of *that* finds it taken on
     // the second pass.
     for _ in 0..2 {
-        if hand_over(name, folder) {
-            return Instance::Handed;
+        match hand_over(name, folder) {
+            Knock::Handed => return Instance::Handed,
+            Knock::Stranger => {
+                log::warn!(
+                    "the single-instance socket belongs to another user: this window stands alone"
+                );
+                return Instance::Only(inert());
+            }
+            Knock::Nobody => {}
         }
         match listen(name) {
             Ok(listener) => return Instance::Only(accept_in_a_thread(listener)),
@@ -123,6 +149,17 @@ fn claim_named(name: &str, folder: Option<&Path>) -> Instance {
     Instance::Only(inert())
 }
 
+/// What knocking on the name found.
+enum Knock {
+    /// Nobody: the name is free, or nothing answers on it.
+    Nobody,
+    /// Our own window, which has the folder now.
+    Handed,
+    /// Somebody else's process holds the name. It is told nothing: the folder
+    /// would open in their window, or be read by whatever squats there.
+    Stranger,
+}
+
 /// Hands the folder to the running instance, and says whether there was one.
 ///
 /// The payload is the path and nothing else: one connection is one message, so
@@ -131,13 +168,16 @@ fn claim_named(name: &str, folder: Option<&Path>) -> Instance {
 /// what a path this side cannot spell in UTF-8 comes down to. That is the
 /// wire's own limit too: postcard carries a `PathBuf` as a string, so a folder
 /// we could not spell is one the server could not be told about either.
-fn hand_over(name: &str, folder: Option<&Path>) -> bool {
+fn hand_over(name: &str, folder: Option<&Path>) -> Knock {
     let Ok(name) = name.to_ns_name::<GenericNamespaced>() else {
-        return false;
+        return Knock::Nobody;
     };
     let Ok(mut stream) = LocalStream::connect(name) else {
-        return false; // nobody there, which is the ordinary case
+        return Knock::Nobody; // nobody there, which is the ordinary case
     };
+    if !same_user(&stream) {
+        return Knock::Stranger;
+    }
     // Windows only lets the foreground process, or one it spawned, raise a
     // window; we are the one Explorer just started, and the window to raise
     // belongs to somebody else. This is the hand-off of that right, and
@@ -150,7 +190,48 @@ fn hand_over(name: &str, folder: Option<&Path>) -> bool {
         // window now would be the surprise this module exists to avoid.
         log::warn!("the running instance did not take the folder: {e}");
     }
+    Knock::Handed
+}
+
+/// Whether the other end of the socket runs as the user we run as.
+///
+/// On Linux, from the credentials the kernel recorded at `connect` or
+/// `listen`; a peer whose credentials cannot be read is not taken for us. On
+/// Windows the pipe's default security descriptor already admits only this
+/// user and the administrators, and a pipe exposes no user id to compare.
+#[cfg(unix)]
+fn same_user(stream: &LocalStream) -> bool {
+    // SAFETY: `geteuid` has no preconditions and cannot fail.
+    let own = unsafe { libc::geteuid() };
+    let peer = stream.peer_creds().ok().and_then(|creds| creds.euid());
+    peer == Some(own)
+}
+
+#[cfg(not(unix))]
+fn same_user(_stream: &LocalStream) -> bool {
     true
+}
+
+/// A launch's payload, read to its end within `MAX_PAYLOAD` bytes.
+///
+/// `None` for one that goes over, and for a read that failed or ran out of
+/// time: each is a connection that is not a launch, and is dropped whole
+/// rather than read in part — half a path is another folder.
+fn read_payload(mut conn: impl Read) -> Option<Vec<u8>> {
+    let mut payload = Vec::new();
+    if let Err(e) = conn
+        .by_ref()
+        .take(MAX_PAYLOAD + 1)
+        .read_to_end(&mut payload)
+    {
+        log::warn!("a launch was cut short: {e}");
+        return None;
+    }
+    if payload.len() as u64 > MAX_PAYLOAD {
+        log::warn!("a launch said more than a folder: ignored");
+        return None;
+    }
+    Some(payload)
 }
 
 fn listen(name: &str) -> std::io::Result<interprocess::local_socket::Listener> {
@@ -170,7 +251,7 @@ fn accept_in_a_thread(
         .name("claudhub-instance".into())
         .spawn(move || {
             for conn in listener.incoming() {
-                let mut conn = match conn {
+                let conn = match conn {
                     Ok(conn) => conn,
                     // One refused connection is not the end of the listener:
                     // the next launch deserves its chance.
@@ -179,11 +260,23 @@ fn accept_in_a_thread(
                         continue;
                     }
                 };
-                let mut payload = Vec::new();
-                if let Err(e) = conn.read_to_end(&mut payload) {
-                    log::warn!("a launch was cut short: {e}");
+                if !same_user(&conn) {
+                    log::warn!("a connection from another user: ignored");
                     continue;
                 }
+                // Without a deadline, a client that never closes would keep
+                // every later launch waiting at the door. A named pipe has no
+                // timeouts (`Unsupported`), and needs one less: only this user
+                // and the administrators can open it at all.
+                if let Err(e) = conn.set_recv_timeout(Some(READ_TIMEOUT)) {
+                    if e.kind() != std::io::ErrorKind::Unsupported {
+                        log::warn!("a launch could not be given a deadline: {e}");
+                        continue;
+                    }
+                }
+                let Some(payload) = read_payload(conn) else {
+                    continue;
+                };
                 // The window is gone: so is the reason to listen.
                 if tx.send_blocking(decode(&payload)).is_err() {
                     return;
@@ -326,6 +419,42 @@ mod tests {
         assert_eq!(decode(&[0xff, 0xfe]), None);
         assert_eq!(decode(b""), None);
         assert_eq!(decode(b"/r/wt/a"), Some(PathBuf::from("/r/wt/a")));
+    }
+
+    /// A folder is a few hundred bytes; what goes past the cap is not a
+    /// launch, and is dropped whole rather than cut into another path.
+    #[test]
+    fn a_payload_past_the_cap_is_not_read() {
+        let path = b"/r/wt/a".to_vec();
+        assert_eq!(read_payload(&path[..]), Some(path.clone()));
+        let at_cap = vec![b'a'; MAX_PAYLOAD as usize];
+        assert_eq!(
+            read_payload(&at_cap[..]).map(|p| p.len()),
+            Some(at_cap.len())
+        );
+        let over = vec![b'a'; MAX_PAYLOAD as usize + 1];
+        assert_eq!(read_payload(&over[..]), None);
+    }
+
+    /// A client that connects and says nothing does not keep the door shut:
+    /// its read runs out of time, and the launch after it is heard.
+    #[cfg(unix)]
+    #[test]
+    fn a_silent_client_does_not_hold_up_the_next_launch() {
+        use interprocess::local_socket::prelude::*;
+        let name = format!("claudhub-test-silent-{}.sock", std::process::id());
+        let Instance::Only(handoffs) = claim_named(&name, None) else {
+            panic!("the first launch is the only instance");
+        };
+        // Connected, and never a byte nor a close while the next one knocks.
+        let silent = LocalStream::connect(name.as_str().to_ns_name::<GenericNamespaced>().unwrap())
+            .expect("the listener accepts");
+        let folder = PathBuf::from("/r/wt/b");
+        let Instance::Handed = claim_named(&name, Some(&folder)) else {
+            panic!("the second launch hands over and leaves");
+        };
+        assert_eq!(handoffs.recv_blocking().unwrap(), Some(folder));
+        drop(silent);
     }
 
     /// The whole chain, with the real socket: a first launch claims the name,
