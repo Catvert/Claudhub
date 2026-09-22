@@ -449,6 +449,17 @@ pub enum Jump {
     Last,
 }
 
+/// Where a file's diff lands when it arrives.
+///
+/// An arrow says so itself. Otherwise the top — the first change is already
+/// there when the diff shows only its hunks — except in the whole-file view,
+/// where the top is the head of the file and the first change can be
+/// screens further down. Only on opening: a re-read after a write keeps its
+/// place, and a note being shown has a line of its own.
+fn entry_jump(armed: Option<Jump>, opened: bool, whole_file: bool) -> Option<Jump> {
+    armed.or((opened && whole_file).then_some(Jump::First))
+}
+
 /// What the diff's commit block says, ready to paint.
 ///
 /// `SharedString`s because the block is rendered on every frame the diff is on
@@ -2818,18 +2829,26 @@ impl ClaudhubApp {
             // a click in the other list was painted under it.
             if state.selected.as_deref() == Some(path.as_path()) && state.range == range {
                 let rendered = std::rc::Rc::new(Rendered::new(&path, diff, &theme));
-                // The arrow that opened this file expects a change, not the top
-                // of the file.
-                if let Some(jump) = state.pending_jump.take() {
+                // `open_file` empties the diff: an answer landing on nothing is
+                // a file being opened, one landing on a diff is the same file
+                // re-read after a write, which must stay where the eye is.
+                let opened = state.diff.is_none();
+                note = state.pending_note.take();
+                let armed = state.pending_jump.take();
+                if let Some(jump) = entry_jump(armed, opened && note.is_none(), whole_file) {
                     let stops = rendered.blocks(split, whole_file);
                     jumped = match jump {
                         Jump::First => stops.first(),
                         Jump::Last => stops.last(),
                     }
                     .map(|(start, _)| *start);
-                    state.diff_selection = jumped.map(|row| (row, row));
+                    // Only the arrow selects the hunk it lands on: a click
+                    // shows the first change without taking the keyboard's
+                    // place in the file.
+                    if armed.is_some() {
+                        state.diff_selection = jumped.map(|row| (row, row));
+                    }
                 }
-                note = state.pending_note.take();
                 state.diff = Some(rendered);
                 // The hits carry offsets into a text that has just been
                 // replaced.
@@ -3709,8 +3728,9 @@ impl ClaudhubApp {
         state.diff = None;
         state.unstaged = None;
         state.diff_selection = None;
-        // A jump armed by an arrow does not survive another gesture: opening a
-        // file with the mouse has to open it at the top.
+        // A jump armed by an arrow does not survive another gesture: a file
+        // opened with the mouse lands where `entry_jump` says, at the top — or,
+        // whole file shown, on its first change.
         state.pending_jump = None;
         state.range = range.clone();
         // Untracked **for the working range**: that is the one diff git cannot
@@ -5865,5 +5885,17 @@ mod tests {
             ..before.clone()
         };
         assert!(refs_moved(&before, &switched));
+    }
+
+    #[test]
+    fn a_whole_file_opens_on_its_first_change() {
+        // Opened by a click, whole file shown: the first change.
+        assert_eq!(entry_jump(None, true, true), Some(Jump::First));
+        // Hunks only: the top already is the first change.
+        assert_eq!(entry_jump(None, true, false), None);
+        // Re-read after a write: the place is kept.
+        assert_eq!(entry_jump(None, false, true), None);
+        // An arrow keeps the end it came from.
+        assert_eq!(entry_jump(Some(Jump::Last), true, true), Some(Jump::Last));
     }
 }
