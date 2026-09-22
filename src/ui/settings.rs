@@ -260,6 +260,12 @@ pub struct TerminalSettings {
     pub default_agent: String,
     /// Which side a screen's first terminal opens on.
     pub placement: TerminalPlacement,
+    /// Puts our Claude Code hooks in every worktree that appears — see
+    /// `agent_hooks`. On by default: it is what makes "finished" and "waiting
+    /// for you" something an agent says rather than something we guess. Off,
+    /// nothing is written anywhere; the gesture in a worktree's actions still
+    /// installs by hand.
+    pub agent_hooks: bool,
 }
 
 impl Default for TerminalSettings {
@@ -278,6 +284,7 @@ impl Default for TerminalSettings {
             agents: Vec::new(),
             default_agent: String::new(),
             placement: TerminalPlacement::default(),
+            agent_hooks: true,
         }
     }
 }
@@ -1272,6 +1279,18 @@ pub(super) fn write_private(path: &Path, contents: &str) -> std::io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_written_before_agent_hooks_turns_them_on() {
+        // The field did not exist: `#[serde(default)]` takes the struct's
+        // default, which is on — what a fresh install gets.
+        let terminal: TerminalSettings =
+            serde_json::from_str(r#"{ "shell": "fish" }"#).expect("terminal");
+        assert!(terminal.agent_hooks);
+        let off: TerminalSettings =
+            serde_json::from_str(r#"{ "agent_hooks": false }"#).expect("terminal");
+        assert!(!off.agent_hooks);
+    }
 
     #[test]
     fn an_unreadable_file_is_put_aside_beside_itself() {

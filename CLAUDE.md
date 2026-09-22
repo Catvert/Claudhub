@@ -143,7 +143,10 @@ src/
     tags.rs     les tags : lecture, création, publication, suppression
     stash.rs    la pile des remisages : la lire, y poser, en reprendre
     search.rs   `git grep` : les arguments, le parsage, les plafonds
-  agent.rs      les agents dans `/proc`, et le suivi qui dit lesquels travaillent
+  agent.rs      les agents dans `/proc`, et le suivi qui dit lesquels travaillent,
+                ont fini ou attendent — le mot de l'agent fusionné à la devinette
+  agent_hooks.rs  les hooks de Claude Code : la ligne shell qui écrit, le fichier
+                qu'on lit, la fusion dans `.claude/settings.local.json`
   runtime/      les workers
     protocol.rs `Cmd` / `Evt` — des données, aucune logique, sérialisables
     mod.rs      six files (`queue_of`), des threads consommant les mêmes canaux
@@ -159,6 +162,7 @@ src/
   ui/           tout gpui
     mod.rs      `run()`, `AssetSource`, polices, i18n
     app.rs      `ClaudhubApp` : l'état, la pompe d'événements, le chrome
+    agents.rs   ce que disent les agents : les bulles, les hooks posés
     topbar.rs   la barre de titre : le menu, les sélecteurs worktree et branche
     repos.rs        les dépôts ouverts et ceux qui manquent — sans gpui, testé
     inflight.rs     les écritures en vol, et ce que la barre en dit — testé
@@ -1302,6 +1306,19 @@ programme pouvant contenir espaces et parenthèses. Les marqueurs de session de
 l'agent qui nous a lancés sont effacés au démarrage
 (`agent::disinherit_session`), sinon un `claude` ouvert dans un onglet se croit
 la sous-session de celui d'à côté.
+
+**Un agent dit lui-même qu'il a fini ou qu'il attend** (`agent_hooks`) : les
+hooks de Claude Code (`Stop`, `Notification`, `UserPromptSubmit`…) lancent une
+ligne de **shell POSIX** — pas notre binaire, dont le chemin change à chaque
+version sous WSL — qui écrit un fichier par session dans `~/.claudhub/agents/`,
+relu par le relevé des agents et **jamais surveillé** : le relevé l'élague, un
+watcher s'y réveillerait de sa propre main. `$PPID` y lie la session à un
+processus de `/proc` ; le mot l'emporte sur la devinette tant qu'il tient
+(`agent::resolve`), et la devinette reste pour qui n'a pas de hooks. Les hooks
+sont posés dans chaque worktree qui **apparaît** (réglage, actif par défaut) et
+par un geste du menu d'un worktree, **fusionnés** dans
+`.claude/settings.local.json`, reconnus à leur marque, jamais sur un fichier
+suivi, et cachés par `info/exclude` si rien ne les ignore.
 
 **`wt`** — une dépendance, pas un sous-processus : parser la sortie de sa CLI
 reviendrait à lire ce qui est fait pour un humain. Sa CLI reste derrière la

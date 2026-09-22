@@ -241,6 +241,7 @@ impl WorktreePicker {
             up: app.wt_state(&checkout.path).and_then(|state| state.up),
             detail: app.wt_state(&checkout.path).and_then(worktrees::detail),
             pinned: pinned.contains(&checkout.path),
+            agent: app.agents.get(&checkout.path).cloned(),
         })
     }
 
@@ -740,6 +741,12 @@ fn worktree_row(
                         el.border_1().border_color(look.muted.opacity(0.8))
                     }),
             )
+        })
+        // Who is working in it — and, when the agent said so itself, that it
+        // has finished or is waiting for an answer: the reason one opens this
+        // list with five agents running.
+        .when_some(item.agent.as_ref(), |el, agent| {
+            el.child(crate::ui::topbar::activity_badge(agent, px(120.), cx))
         })
         .when_some(
             item.summary.filter(|summary| !summary.is_empty()),

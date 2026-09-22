@@ -247,6 +247,7 @@ impl ClaudhubApp {
                     .unwrap_or_else(|| terminal.view.read(cx).label()),
                 project: self.project_label(&terminal.worktree),
                 worktree: terminal.worktree.clone(),
+                agent: self.agents.get(&terminal.worktree).cloned(),
                 width: terminal.column,
                 rank: 0,
                 count: 0,
@@ -669,6 +670,11 @@ struct Tile {
     /// The repository and the checkout, as the picker writes them.
     project: (Option<SharedString>, SharedString),
     worktree: PathBuf,
+    /// The worktree's agents, as the badge says them. The worktree's and not
+    /// the terminal's: under WSL the pty is a Windows process and the agent a
+    /// Linux one, and nothing ties the two — so every tile of a checkout
+    /// carries its word.
+    agent: Option<crate::agent::State>,
     width: Width,
     /// Its place along the strip, and how many there are: what says whether
     /// there is a neighbour on either side to change places with.
@@ -750,6 +756,13 @@ impl Tile {
                             .flex_none()
                             .text_color(muted)
                             .child(checkout),
+                    )
+                    // "Finished", "waiting: …": the question this screen is
+                    // for, answered on the head of every column it concerns.
+                    .children(
+                        self.agent
+                            .as_ref()
+                            .map(|agent| super::topbar::activity_badge(agent, px(220.), cx)),
                     )
                     .child(
                         gpui_kit::div()

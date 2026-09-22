@@ -29,6 +29,9 @@ pub(super) struct Item {
     pub detail: Option<Detail>,
     /// Whether it has a button of its own in the top bar.
     pub pinned: bool,
+    /// The agents at work in it, and what they last said — `None` when none
+    /// runs there.
+    pub agent: Option<crate::agent::State>,
 }
 
 /// The `wt` preview of a checkout: one part per line, nothing abbreviated.
@@ -273,6 +276,7 @@ mod tests {
             up: None,
             detail: None,
             pinned: false,
+            agent: None,
         }
     }
 

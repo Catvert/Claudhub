@@ -5,6 +5,7 @@
 //! drained by a foreground gpui task. Terminals have their own loop, in
 //! `crate::terminal`.
 
+mod agents;
 mod app;
 mod base_select;
 mod blade;
