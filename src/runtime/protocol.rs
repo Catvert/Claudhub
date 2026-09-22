@@ -836,7 +836,8 @@ pub enum Cmd {
     /// left without an answer keeps the request open.
     LspApplied {
         worktree: WorktreeId,
-        /// The **server's** request id, echoed back.
+        /// The token the session handed out for the server's request, echoed
+        /// back: the session keeps the real id, which may be a string.
         id: u64,
         applied: bool,
     },
