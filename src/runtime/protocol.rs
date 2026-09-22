@@ -48,6 +48,38 @@ pub enum Caller {
     Github,
 }
 
+/// Which command a `Done` or a `Failed` answers.
+///
+/// Issued by `Handle::send` to every command and handed back to the caller,
+/// then carried beside the command to the worker and stamped on its answer.
+/// It is what lets the view tell **which** write came back: a worktree and an
+/// action say what kind of operation it was, and two saves of two files, two
+/// branch deletions or a removal and the list's re-read wear the same pair.
+///
+/// Beside the command and not inside sixty variants (see [`Order`]): the
+/// workers stamp it in one place, `runtime::handle`, which is also where a
+/// panicking command is caught — so even the net under everything answers the
+/// command that fell.
+///
+/// Counted for the **process**, from one: zero is issued to nothing, and is
+/// what an answer carries until `runtime::handle` stamps it.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
+pub struct Ticket(pub u64);
+
+/// A command and its ticket: what the queues and the wire carry.
+///
+/// **An envelope rather than a field on every `Cmd`**: `queue_of`, `Cmd::name`
+/// and the sixty arms of `dispatch` read the command alone and have no use for
+/// its ticket, which only the answer needs. Fields never reordered — it is the
+/// frame the server reads, and postcard is positional.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Order {
+    pub ticket: Ticket,
+    pub cmd: Cmd,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Cmd {
     /// Opens a repository (or a repository's worktree) and enumerates its worktrees.
@@ -1466,12 +1498,18 @@ pub enum Evt {
     /// A write operation succeeded. `output` is git's output, which the view
     /// shows as it is: it is what says what was pushed, advanced or created, and
     /// rewording it would only add approximations.
+    ///
+    /// `ticket` names the command it answers — see [`Ticket`]. The worktree
+    /// and the action stay: they are what the message is phrased from and
+    /// what is refreshed next, whoever sent the command.
     Done {
+        ticket: Ticket,
         worktree: Option<WorktreeId>,
         action: Action,
         output: String,
     },
     Failed {
+        ticket: Ticket,
         worktree: Option<WorktreeId>,
         action: Action,
         message: String,

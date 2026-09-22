@@ -755,7 +755,7 @@ impl BranchPicker {
                                 no_ff: false,
                             },
                             cx,
-                        )
+                        );
                     })
                 }
             },
@@ -780,7 +780,7 @@ impl BranchPicker {
                             Action::Rebase,
                             Cmd::Rebase { worktree, onto },
                             cx,
-                        )
+                        );
                     })
                 }
             },
@@ -806,7 +806,7 @@ impl BranchPicker {
                         };
                         let branch = branch.clone();
                         this.act(window, cx, move |app, _window, cx| {
-                            app.start(None, Action::Pull, Cmd::UpdateBranch { main, branch }, cx)
+                            app.start(None, Action::Pull, Cmd::UpdateBranch { main, branch }, cx);
                         })
                     }
                 },
@@ -835,7 +835,7 @@ impl BranchPicker {
                                     force_with_lease: false,
                                 },
                                 cx,
-                            )
+                            );
                         })
                     }
                 },

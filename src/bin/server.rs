@@ -28,9 +28,10 @@ fn main() {
 
     // Our handshake goes first; the client's follows. Both ends write before
     // reading: two small frames fit in the pipe buffers, so neither waits on
-    // the other.
-    if let Err(e) = wire::write_frame(&mut stdout, &wire::Hello::current()) {
-        eprintln!("claudhub-server: handshake failed: {e}");
+    // the other. One that cannot be written is the end of the server, said on
+    // stderr — which is what the client quotes in its `ServerLost`.
+    if let Err(e) = wire::write_hello(&mut stdout, &wire::Hello::current()) {
+        eprintln!("claudhub-server: {e}");
         std::process::exit(1);
     }
     let client: wire::Hello = match wire::read_frame(&mut stdin.lock()) {
@@ -59,8 +60,10 @@ fn main() {
     std::thread::Builder::new()
         .name("claudhub-server-in".into())
         .spawn(move || loop {
-            match wire::read_frame::<runtime::Cmd>(&mut stdin.lock()) {
-                Ok(Some(cmd)) => handle.send(cmd),
+            // The ticket the window issued goes on with the command: it is
+            // the one the answer must carry.
+            match wire::read_frame::<runtime::Order>(&mut stdin.lock()) {
+                Ok(Some(order)) => handle.submit(order),
                 // Clean end: the parent closed the wire, we follow.
                 Ok(None) => std::process::exit(0),
                 Err(e) => {

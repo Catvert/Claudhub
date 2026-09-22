@@ -12,11 +12,13 @@
 //! translates it into [`Evt::ServerHello`] — or [`Evt::ServerLost`] if the
 //! versions disagree, with something to tell the user.
 
-use std::io::BufRead;
+use std::io::{BufRead, Write};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use super::wire::{self, Hello};
-use super::{Cmd, Evt, Handle};
+use super::{Evt, Handle, Order};
 
 /// The command line dictated by the environment, if there is one.
 ///
@@ -48,13 +50,21 @@ pub fn connect_wsl(
 
 /// Launches the server and returns what is needed to talk and listen to it.
 ///
-/// Failure here is a **launch** failure (program not found); everything after
-/// — handshake, death of the server — comes back through the event channel,
-/// the window being open by then.
+/// Failure here is a **launch** failure (program not found, or a handshake
+/// this end cannot write); everything after — the server's handshake, its
+/// death — comes back through the event channel, the window being open by
+/// then.
 pub fn connect(argv: &[String]) -> anyhow::Result<(Handle, async_channel::Receiver<Evt>)> {
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("empty server target"))?;
+
+    // Our handshake, framed **before** anything is launched: one that cannot
+    // be written is refused here, where the caller hears of it, rather than in
+    // the writer thread — where it left the server waiting for it and the
+    // window waiting for the server, for ever.
+    let mut hello = Vec::new();
+    wire::write_hello(&mut hello, &Hello::current())?;
 
     let mut command = Command::new(program);
     // The server is a console program launched by a windowed one: without this
@@ -74,15 +84,19 @@ pub fn connect(argv: &[String]) -> anyhow::Result<(Handle, async_channel::Receiv
 
     // The writer. Our handshake goes first, outside the queue: it must precede
     // any `Cmd`, and the server waits for it before serving.
-    let (cmd_tx, cmd_rx) = async_channel::unbounded::<Cmd>();
+    let (cmd_tx, cmd_rx) = async_channel::unbounded::<Order>();
     std::thread::Builder::new()
         .name("claudhub-remote-out".into())
         .spawn(move || {
-            if wire::write_frame(&mut stdin, &Hello::current()).is_err() {
+            if stdin
+                .write_all(&hello)
+                .and_then(|()| stdin.flush())
+                .is_err()
+            {
                 return;
             }
-            while let Ok(cmd) = cmd_rx.recv_blocking() {
-                if wire::write_frame(&mut stdin, &cmd).is_err() {
+            while let Ok(order) = cmd_rx.recv_blocking() {
+                if wire::write_frame(&mut stdin, &order).is_err() {
                     return; // the reader will report the server's death
                 }
             }
@@ -90,17 +104,39 @@ pub fn connect(argv: &[String]) -> anyhow::Result<(Handle, async_channel::Receiv
             // reads that end of stream as the order to shut down.
         })?;
 
+    // What the server last said on stderr, and the moment it stops talking.
+    // One that dies before its handshake says why there — a handshake it could
+    // not write, a `wsl.exe` that found no distribution — and a `ServerLost`
+    // that only said "it died" sent the user to the journal for the one
+    // sentence that mattered. Before the handshake only: after it, the last
+    // line is whatever the server's journal said last.
+    let last_words = Arc::new(Mutex::new(None::<String>));
+    let (silent_tx, silent_rx) = std::sync::mpsc::channel::<()>();
+
     // The reader: the handshake, then the events.
     let (evt_tx, evt_rx) = async_channel::unbounded::<Evt>();
+    let heard = Arc::clone(&last_words);
     std::thread::Builder::new()
         .name("claudhub-remote-in".into())
         .spawn(move || {
             let lost = |message: String| {
                 let _ = evt_tx.send_blocking(Evt::ServerLost { message });
             };
+            // The end of stdout and the end of stderr are two pipes closing,
+            // in no set order: the other thread is given a moment to read the
+            // last line before it is looked for.
+            let died_early = || {
+                let what = "the server died before the handshake";
+                let _ = silent_rx.recv_timeout(Duration::from_millis(500));
+                let words = heard.lock().ok().and_then(|mut words| words.take());
+                lost(match words {
+                    Some(words) => format!("{what}: {words}"),
+                    None => what.to_string(),
+                })
+            };
             let hello: Hello = match wire::read_frame(&mut stdout) {
                 Ok(Some(hello)) => hello,
-                Ok(None) => return lost("the server died before the handshake".into()),
+                Ok(None) => return died_early(),
                 Err(e) => return lost(format!("unreadable handshake: {e}")),
             };
             if hello.protocol != wire::PROTOCOL_VERSION {
@@ -141,7 +177,11 @@ pub fn connect(argv: &[String]) -> anyhow::Result<(Handle, async_channel::Receiv
             for line in std::io::BufReader::new(stderr).lines() {
                 let Ok(line) = line else { break };
                 log::info!(target: "claudhub_server", "{line}");
+                if let (Ok(mut words), false) = (last_words.lock(), line.trim().is_empty()) {
+                    *words = Some(line);
+                }
             }
+            drop(silent_tx);
             match child.wait() {
                 Ok(status) => log::info!(target: "claudhub_server", "server exited: {status}"),
                 Err(e) => log::warn!("waiting for the server: {e}"),

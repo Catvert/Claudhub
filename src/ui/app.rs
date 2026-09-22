@@ -595,6 +595,9 @@ pub struct ClaudhubApp {
     pub(super) pending_files: Vec<crate::ui::store::OpenFile>,
     /// A restore is under way: what arrives is not a gesture.
     pub(super) restoring_files: bool,
+    /// The ticket of the remembered tab's read that is out: a failure bearing
+    /// it passes that tab over rather than hold up the ones after it.
+    pub(super) restore_read: Option<crate::runtime::Ticket>,
     /// The directory `claudhub` was launched from, when it is a repository's.
     ///
     /// It is what tells a launch from a mere remembered repository: `opened_at`
@@ -760,12 +763,14 @@ pub struct ClaudhubApp {
     /// The worktree whose integration has gone out, and its branch: it is on the
     /// success arriving that the cleanup is offered.
     pub(super) integrated: Option<(PathBuf, String)>,
-    /// The branch the cleanup deletes once its checkout has gone, and its
-    /// repository — see `worktree_ops::removal_ended`.
-    pub(super) branch_after_removal: Option<(PathBuf, String)>,
+    /// The branch the cleanup deletes once its checkout has gone, its
+    /// repository, and the ticket of the removal it waits on — see
+    /// `worktree_ops::removal_ended`.
+    pub(super) branch_after_removal: Option<(crate::runtime::Ticket, PathBuf, String)>,
     /// The local half of a branch deletion that also asked for `origin`'s,
-    /// waiting for that one to go through (`branches::delete_branch`).
-    pub(super) local_deletion: Option<Cmd>,
+    /// waiting for that one — named by its ticket — to go through
+    /// (`branches::delete_branch`).
+    pub(super) local_deletion: Option<(crate::runtime::Ticket, Cmd)>,
     /// Each worktree's files and their tree.
     pub(super) explorers: HashMap<PathBuf, crate::ui::explorer::Explorer>,
     /// The file open in the built-in editor, **one per worktree**.
@@ -1187,12 +1192,12 @@ pub struct ClaudhubApp {
     /// read, and what the status bar names.
     ///
     /// **The key is exactly what comes back.** Every write answers with an
-    /// `Evt::Done` or an `Evt::Failed` carrying the same worktree and the same
-    /// action, and both go through one place: an entry can therefore not be left
-    /// behind, which is the only failure mode of a spinner.
+    /// `Evt::Done` or an `Evt::Failed` carrying its command's ticket, and both
+    /// go through one place: an entry can therefore not be left behind, which
+    /// is the only failure mode of a spinner.
     pub(super) flight: crate::ui::inflight::InFlight,
-    /// The writes of open files, one in flight per worktree: what tells which
-    /// tab an `Action::Write` answer is about. See `explorer::Saves`.
+    /// The writes of open files, by ticket: what tells which tab a write's
+    /// answer is about. See `explorer::Saves`.
     pub(super) saves: crate::ui::explorer::Saves,
     /// Where the settings screen is: the page one last chose in its sidebar, or
     /// the one a button asked for. It is read at the next opening — the form
@@ -1377,6 +1382,7 @@ impl ClaudhubApp {
             replaying_focus: None,
             pending_files: Vec::new(),
             restoring_files: false,
+            restore_read: None,
             launch_dir: None,
             launch_chosen: false,
             launch_arg: folder,
@@ -2234,15 +2240,17 @@ impl ClaudhubApp {
 
             // — Writes ————————————————————————————————————————————
             Evt::Done {
+                ticket,
                 worktree,
                 action,
                 output,
-            } => self.action_done(worktree, action, output, window, cx),
+            } => self.action_done(ticket, worktree, action, output, window, cx),
             Evt::Failed {
+                ticket,
                 worktree,
                 action,
                 message,
-            } => self.action_failed(worktree, action, message, window, cx),
+            } => self.action_failed(ticket, worktree, action, message, window, cx),
             Evt::Fetched { main } => self.fetched(main),
             Evt::ReleaseChecked { version, url } => {
                 // Compared against the window's own version, not the
@@ -2924,25 +2932,20 @@ impl ClaudhubApp {
 
     fn action_done(
         &mut self,
+        ticket: crate::runtime::Ticket,
         worktree: Option<PathBuf>,
         action: Action,
         output: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.finish(&worktree, action);
+        self.flight.finish(ticket);
         // A file written: its tab is saved now, and not when the write left.
-        if action == Action::Write {
-            self.file_written(worktree.as_deref(), true, window, cx);
-        }
+        self.file_written(ticket, true, window, cx);
         // `origin`'s half of a branch deletion has gone through: the local half
-        // follows, under the key just taken back. A branch answer carries no
-        // name, so this is the next one to arrive — which is the remote's as
-        // long as one branch gesture is out at a time, as a hand makes them.
-        if action == Action::Branch && worktree.is_none() {
-            if let Some(local) = self.local_deletion.take() {
-                self.start(None, Action::Branch, local, cx);
-            }
+        // follows, its spinner coming back on in the same handler.
+        if let Some((_, local)) = self.local_deletion.take_if(|(out, _)| *out == ticket) {
+            self.start(None, Action::Branch, local, cx);
         }
         // A git write can have moved `HEAD` under the files being edited — a
         // commit is the everyday case, and it is the one where the gutter's
@@ -2973,7 +2976,7 @@ impl ClaudhubApp {
         );
         // A `wt` console closes on success; the balloon above keeps the result.
         self.wt_operation_ended(action, true, window, cx);
-        self.removal_ended(action, true);
+        self.removal_ended(ticket, true);
         // The integration has succeeded: what is left is to decide the fate of
         // the worktree and its branch, which `wt` deliberately keeps.
         if action == Action::Integrate {
@@ -3022,18 +3025,17 @@ impl ClaudhubApp {
 
     fn action_failed(
         &mut self,
+        ticket: crate::runtime::Ticket,
         worktree: Option<PathBuf>,
         action: Action,
         message: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.finish(&worktree, action);
+        self.flight.finish(ticket);
         // A write refused — an agent wrote in the file meanwhile: the tab
-        // stays unsaved, and the next write of the worktree goes.
-        if action == Action::Write {
-            self.file_written(worktree.as_deref(), false, window, cx);
-        }
+        // stays unsaved, and the next write of that file goes.
+        self.file_written(ticket, false, window, cx);
         // Without this, a status that fails once — repository briefly locked,
         // disk busy — would block every later refresh of that worktree for good.
         if let Some(worktree) = worktree.as_ref() {
@@ -3054,19 +3056,18 @@ impl ClaudhubApp {
         }
         // The remote half of a branch deletion refused: the local half is not
         // sent, and the branch stays where it is on both sides.
-        if action == Action::Branch && worktree.is_none() {
+        if self
+            .local_deletion
+            .as_ref()
+            .is_some_and(|(out, _)| *out == ticket)
+        {
             self.local_deletion = None;
         }
         // Same reason as the status above: without this, one `ls-files` that
         // fails leaves the explorer waiting for an answer that will never come,
         // and its tree stays empty for the rest of the session. A file's read
-        // wears the same action, and is told apart there — a restore waits on
-        // it.
-        if action == Action::Read {
-            if let Some(worktree) = worktree.as_deref() {
-                self.read_failed(worktree, &message, window, cx);
-            }
-        }
+        // fails the same way, and a restore waits on it.
+        self.read_failed(ticket, window, cx);
         // A push the remote rejected because it moved on, or a pull the
         // fast-forward rule refuses, is not an error to read: it is a question
         // — merge or rebase? — and the dialog asks it, the way PhpStorm does.
@@ -3094,7 +3095,7 @@ impl ClaudhubApp {
         );
         // A `wt` console stays on failure, with the steps that led to the error.
         self.wt_operation_ended(action, false, window, cx);
-        self.removal_ended(action, false);
+        self.removal_ended(ticket, false);
     }
 
     /// The divergence dialog: merge, rebase, or leave it.
@@ -3263,19 +3264,22 @@ impl ClaudhubApp {
 
     /// Sends a write, and remembers it is under way.
     ///
-    /// The key is the pair the worker will answer with, and that is the whole
-    /// point: `write_then_refresh` echoes the worktree and the action it was
-    /// given, so what is put down here is exactly what `finish` will find.
+    /// Filed under the ticket its answer will carry, and that is the whole
+    /// point: the worker stamps it on the `Done` or the `Failed`, so what is
+    /// put down here is exactly what `action_done` takes back. The worktree
+    /// and the action are what a button asks after. The ticket is handed back
+    /// for a caller whose next step waits on this write.
     pub(super) fn start(
         &mut self,
         worktree: Option<PathBuf>,
         action: Action,
         cmd: Cmd,
         cx: &mut Context<Self>,
-    ) {
-        self.flight.start(worktree, action);
-        self.git.send(cmd);
+    ) -> crate::runtime::Ticket {
+        let ticket = self.git.send(cmd);
+        self.flight.start(ticket, worktree, action);
         cx.notify();
+        ticket
     }
 
     /// Forgets everything under way.
@@ -3286,10 +3290,7 @@ impl ClaudhubApp {
         self.flight.clear();
         self.saves.clear();
         self.local_deletion = None;
-    }
-
-    fn finish(&mut self, worktree: &Option<PathBuf>, action: Action) {
-        self.flight.finish(worktree, action);
+        self.branch_after_removal = None;
     }
 
     /// Is this operation under way? What a button reads to turn.

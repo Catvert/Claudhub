@@ -41,7 +41,7 @@ use gpui_kit::{
 };
 
 use crate::files;
-use crate::runtime::Cmd;
+use crate::runtime::{Cmd, Ticket};
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::icons::icon;
@@ -143,8 +143,9 @@ fn drop_dir(path: &Path, is_dir: bool) -> PathBuf {
 pub enum Listing {
     /// Never asked for, or something has invalidated it.
     Idle,
-    /// A command has gone out and has not come back.
-    Loading,
+    /// A command has gone out and has not come back — this one: a failure
+    /// that names another is not the list's.
+    Loading(Ticket),
     Ready,
     /// git refused. Not asked again by itself: the panel renders at every
     /// frame, and retrying there would be a git command per frame for as long
@@ -691,142 +692,127 @@ fn oldest_spare<'a>(
         .map(|(path, _, _)| path)
 }
 
-/// The writes of open files, per worktree, and **one in flight at a time**.
+/// The writes of open files: **one in flight per file**, each known by the
+/// ticket its answer carries.
 ///
-/// One at a time because the answer does not say which file it is about:
-/// `Evt::Done` and `Evt::Failed` carry a worktree and an action, and the reads
-/// queue has three workers, so two writes sent together come back in whatever
-/// order they finish. Sending the next only once the last has answered makes
-/// the answer name its file — the head of the queue — and that is what lets a
-/// refused write (an agent wrote in the file meanwhile) leave **that** tab
-/// unsaved, and only that one. A decision of its own, before the view, for
-/// the reason `oldest_spare` is: each rule here was a way of losing work.
+/// By ticket because that is what names the write an answer is about — the
+/// worktree and the action are the same for every save — and it is what lets
+/// a refused write (an agent wrote in the file meanwhile) leave **that** tab
+/// unsaved, and only that one. Two files go out together and come back in
+/// whatever order the reads queue's three workers finish them.
+///
+/// One per file still, and that is the digest's subtlety: a second save of a
+/// file whose write is on its way must leave with the digest the first leaves
+/// behind — which is how two saves in a row do not have the second refused
+/// over a change that was ours — and sent together, the three workers could
+/// even run the second first. A decision of its own, before the view, for the
+/// reason `oldest_spare` is: each rule here was a way of losing work.
 #[derive(Default)]
 pub struct Saves {
-    queues: std::collections::HashMap<PathBuf, std::collections::VecDeque<Save>>,
+    files: Vec<Save>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Save {
+    pub worktree: PathBuf,
     pub path: PathBuf,
-    /// The digest of the text sent, once it is: what the tab's digest becomes
-    /// when the write goes through. `None` while it waits for its turn.
-    pub sent: Option<u64>,
+    /// The write on its way, and the digest of the text it carries: what the
+    /// tab's digest becomes when it goes through. `None` until it leaves.
+    pub sent: Option<(Ticket, u64)>,
     /// Close the tab once the write has gone through — the closing dialog's
     /// "save". Never before the answer: a tab closed on a refused write is the
     /// work the dialog was asked to keep.
     pub close: bool,
+    /// Another save of the file, asked while this one was on its way — and
+    /// whether it closes the tab. It leaves when this one has gone through,
+    /// reading the text as it goes; so a third save joins it rather than go
+    /// behind it, which would write the same text twice.
+    pub again: Option<bool>,
 }
 
 impl Saves {
-    /// Files a write. `true` when nothing is under way for the worktree, so
-    /// that it is to be sent now.
-    ///
-    /// A write of this file already waiting for its turn absorbs this one: it
-    /// reads the text when it goes, so a second would write the same text
-    /// twice. One **in flight** does not: what it carries is the text of the
-    /// moment it left, and the new one goes behind it — with the digest the
-    /// first leaves behind, which is how two saves in a row do not have the
-    /// second refused over a change that was ours.
+    /// Files a write. `true` when nothing is under way for the file, so that
+    /// it is to be sent now.
     pub fn push(&mut self, worktree: &Path, path: &Path, close: bool) -> bool {
-        let queue = self.queues.entry(worktree.to_path_buf()).or_default();
-        if let Some(waiting) = queue
-            .iter_mut()
-            .find(|save| save.path == path && save.sent.is_none())
-        {
-            waiting.close |= close;
-            return false;
-        }
-        queue.push_back(Save {
-            path: path.to_path_buf(),
-            sent: None,
-            close,
-        });
-        queue.len() == 1
-    }
-
-    /// The file whose turn it is, when its write has not left yet.
-    pub fn next(&self, worktree: &Path) -> Option<&Path> {
-        self.queues
-            .get(worktree)?
-            .front()
-            .filter(|save| save.sent.is_none())
-            .map(|save| save.path.as_path())
-    }
-
-    /// The write whose turn it is has left, carrying a text of this digest.
-    pub fn sent(&mut self, worktree: &Path, digest: u64) {
-        if let Some(save) = self.queues.get_mut(worktree).and_then(|q| q.front_mut()) {
-            save.sent = Some(digest);
-        }
-    }
-
-    /// The write whose turn it is will not leave — its tab has closed, or holds
-    /// a picture.
-    pub fn skip(&mut self, worktree: &Path) {
-        if self.next(worktree).is_some() {
-            self.pop(worktree);
-        }
-    }
-
-    /// The worker has answered for this worktree: the write in flight, which
-    /// is the head. `None` for an answer to nothing sent from here.
-    ///
-    /// A refusal takes the writes of the same file waiting behind with it:
-    /// they would be checked against the digest that has just been refused,
-    /// and refused in their turn.
-    pub fn answered(&mut self, worktree: &Path, ok: bool) -> Option<Save> {
-        // Nothing in flight: the head is still waiting for its turn.
-        self.queues.get(worktree)?.front()?.sent?;
-        let save = self.pop(worktree)?;
-        if !ok {
-            if let Some(queue) = self.queues.get_mut(worktree) {
-                queue.retain(|waiting| waiting.path != save.path);
-                if queue.is_empty() {
-                    self.queues.remove(worktree);
+        match self.find(worktree, path) {
+            Some(index) => {
+                let save = &mut self.files[index];
+                match save.sent {
+                    // Not left yet: it will read the text as it goes.
+                    None => save.close |= close,
+                    Some(_) => save.again = Some(save.again.unwrap_or(false) | close),
                 }
+                false
             }
+            None => {
+                self.files.push(Save {
+                    worktree: worktree.to_path_buf(),
+                    path: path.to_path_buf(),
+                    sent: None,
+                    close,
+                    again: None,
+                });
+                true
+            }
+        }
+    }
+
+    /// The file's write has left, with this ticket and a text of this digest.
+    pub fn sent(&mut self, worktree: &Path, path: &Path, ticket: Ticket, digest: u64) {
+        if let Some(index) = self.find(worktree, path) {
+            self.files[index].sent = Some((ticket, digest));
+        }
+    }
+
+    /// The file's write will not leave — its tab has closed, or holds a
+    /// picture.
+    pub fn skip(&mut self, worktree: &Path, path: &Path) {
+        self.files.retain(|save| {
+            !(save.worktree == worktree && save.path == path && save.sent.is_none())
+        });
+    }
+
+    /// The worker has answered this ticket: the save it names, or `None` for
+    /// an answer to anything else.
+    ///
+    /// Gone through with `again` set, the next save of the file is filed in
+    /// its place, waiting to leave. Refused, it is dropped: it would be checked
+    /// against the digest that has just been refused, and refused in its turn.
+    pub fn answered(&mut self, ticket: Ticket, ok: bool) -> Option<Save> {
+        let index = self
+            .files
+            .iter()
+            .position(|save| save.sent.is_some_and(|(sent, _)| sent == ticket))?;
+        let save = self.files.remove(index);
+        if let (true, Some(close)) = (ok, save.again) {
+            self.files.push(Save {
+                sent: None,
+                close,
+                again: None,
+                ..save.clone()
+            });
         }
         Some(save)
     }
 
     /// Forgets everything: the server has gone, and nothing sent will answer.
     pub fn clear(&mut self) {
-        self.queues.clear();
+        self.files.clear();
     }
 
-    fn pop(&mut self, worktree: &Path) -> Option<Save> {
-        let queue = self.queues.get_mut(worktree)?;
-        let save = queue.pop_front();
-        if queue.is_empty() {
-            self.queues.remove(worktree);
-        }
-        save
+    /// A handful of entries at most — one per file a hand has saved.
+    fn find(&self, worktree: &Path, path: &Path) -> Option<usize> {
+        self.files
+            .iter()
+            .position(|save| save.worktree == worktree && save.path == path)
     }
-}
-
-/// Whether a failed read is the read of this file.
-///
-/// `Evt::Failed` names no file, and `Action::Read` answers for the file list
-/// as well as for a file: taking one for the other either leaves a restore
-/// waiting for a file that will never come, or marks the tree unreadable over
-/// a deleted tab. So the message is read, against the two shapes
-/// `files::read` and `files::read_image` give it: the full path after
-/// `cannot read`, or the path as sent at the head of the sentence. Joined by
-/// `wslpath::join`: the worker wrote it on Linux.
-fn read_failure_names(message: &str, worktree: &Path, path: &Path) -> bool {
-    let full = crate::wslpath::join(worktree, path);
-    let unreadable = format!("cannot read {}", full.display());
-    let refused = format!("{} is ", path.display());
-    message
-        .strip_prefix(&unreadable)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
-        || message.starts_with(&refused)
 }
 
 pub struct Pending {
     pub worktree: PathBuf,
     pub path: PathBuf,
+    /// The read this waits on: its failure is the landing's end.
+    pub read: Ticket,
     /// Where the caret goes, or `None` to leave it where the editor puts it:
     /// opening a file from the explorer is a jump to a file, not to a place.
     pub landing: Option<Landing>,
@@ -1036,7 +1022,7 @@ impl ClaudhubApp {
         let due = match explorer.state {
             // Waiting for an answer: asking again would only queue a second
             // command behind the first.
-            Listing::Loading => false,
+            Listing::Loading(_) => false,
             // Already answered for the setting in force. A failure is not
             // retried either, until something invalidates it — a toggle, a file
             // operation, a refresh.
@@ -1044,12 +1030,11 @@ impl ClaudhubApp {
             _ => true,
         };
         if due {
-            explorer.state = Listing::Loading;
             explorer.ignored = ignored;
-            self.git.send(Cmd::ListFiles {
+            explorer.state = Listing::Loading(self.git.send(Cmd::ListFiles {
                 worktree: worktree.clone(),
                 ignored,
-            });
+            }));
         }
         // Here and not in each gesture that opens a folder: five of them do —
         // the chevron, the right arrow, a drag that lingers, a drop, a restored
@@ -1171,47 +1156,36 @@ impl ClaudhubApp {
         }
     }
 
-    /// git refused to list the files.
+    /// A command has failed: when it is a read something waits on — a file's,
+    /// or the file list's — that wait ends.
     ///
-    /// Only what was under way: a failure that names this worktree while
-    /// nothing was expected of it — another read, another panel — has nothing
-    /// to say about the tree.
-    /// A read of this worktree has failed: a file's, or the file list's.
-    ///
-    /// Told apart by the message (`read_failure_names`), the event naming
-    /// neither. A file a restore was waiting for — deleted since, or grown
-    /// binary — is **passed over**: the restore reads one tab at a time, and
-    /// until it ends nothing is filed in the session, so a file that failed
-    /// held up every tab after it and every save of the session for good. A
-    /// gesture's file drops its landing, which names a tab that will not come.
-    /// Only what is neither is the list's.
+    /// Told apart by the ticket, all three answering `Action::Read`. A file a
+    /// restore was waiting for — deleted since, or grown binary — is **passed
+    /// over**: the restore reads one tab at a time, and until it ends nothing
+    /// is filed in the session, so a file that failed held up every tab after
+    /// it and every save of the session for good. A gesture's file drops its
+    /// landing, which names a tab that will not come. And the list's marks the
+    /// tree unreadable, rather than under way for the rest of the session.
     pub(super) fn read_failed(
         &mut self,
-        worktree: &Path,
-        message: &str,
+        ticket: Ticket,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let restoring = self.restoring_file().is_some_and(|open| {
-            open.worktree == worktree && read_failure_names(message, worktree, &open.path)
-        });
-        if restoring {
+        if self.restore_read == Some(ticket) {
             self.continue_restore(window, cx);
             return;
         }
-        let landing = self.landing.as_ref().is_some_and(|pending| {
-            pending.worktree == worktree && read_failure_names(message, worktree, &pending.path)
-        });
-        if landing {
+        if self
+            .landing
+            .as_ref()
+            .is_some_and(|pending| pending.read == ticket)
+        {
             self.landing = None;
             return;
         }
-        self.project_files_failed(worktree);
-    }
-
-    pub(super) fn project_files_failed(&mut self, worktree: &Path) {
-        if let Some(explorer) = self.explorers.get_mut(worktree) {
-            if explorer.state == Listing::Loading {
+        for explorer in self.explorers.values_mut() {
+            if explorer.state == Listing::Loading(ticket) {
                 explorer.state = Listing::Failed;
             }
         }
@@ -1560,15 +1534,18 @@ impl ClaudhubApp {
         // Reopening the file already open is not a jump: it would put the same
         // place on the trail twice and make one step back do nothing visible.
         let from = Some(self.here(cx)).filter(|from| from.path() != Some(path.as_path()));
+        let read = self
+            .git
+            .send(self.read_file_cmd(worktree.clone(), path.clone()));
         self.landing = Some(Pending {
-            worktree: worktree.clone(),
-            path: path.clone(),
+            worktree,
+            path,
+            read,
             landing,
             from,
             ephemeral,
             lit,
         });
-        self.git.send(self.read_file_cmd(worktree, path));
         cx.notify();
     }
 
@@ -1711,9 +1688,13 @@ impl ClaudhubApp {
                     // No origin: the step is already written in the trail, and
                     // putting it back would be a place one could go back from
                     // for ever.
+                    let read = self
+                        .git
+                        .send(self.read_file_cmd(worktree.clone(), spot.path.clone()));
                     self.landing = Some(Pending {
                         worktree: worktree.clone(),
                         path: spot.path.clone(),
+                        read,
                         landing: Some(Landing::Offset(spot.offset)),
                         from: None,
                         // Stepping through the trail is not browsing: the file
@@ -1723,7 +1704,6 @@ impl ClaudhubApp {
                         // not a question.
                         lit: false,
                     });
-                    self.git.send(self.read_file_cmd(worktree, spot.path));
                 }
             }
         }
@@ -2275,39 +2255,37 @@ impl ClaudhubApp {
             return;
         }
         if self.saves.push(worktree, path, close) {
-            self.send_next_save(worktree, cx);
+            self.send_save(worktree, path, cx);
         }
     }
 
-    /// Sends the write whose turn it is, reading the text as it goes.
-    fn send_next_save(&mut self, worktree: &Path, cx: &mut Context<Self>) {
-        while let Some(path) = self.saves.next(worktree).map(Path::to_path_buf) {
-            let Some(editing) = self
-                .editors(worktree)
-                .and_then(|tabs| tabs.by_path(&path))
-                .filter(|editing| editing.preview.is_none())
-            else {
-                self.saves.skip(worktree);
-                continue;
-            };
-            let content = editing.input.read(cx).value().to_string();
-            // The digest of what we had read — or of what the last write that
-            // went through left: an agent that wrote in the meantime makes the
-            // save be refused rather than be overwritten.
-            let expect = Some(editing.hash);
-            self.saves.sent(worktree, files::digest(&content));
-            self.git.send(Cmd::WriteFile {
-                worktree: worktree.to_path_buf(),
-                path,
-                content,
-                expect,
-            });
+    /// Sends a file's write, reading the text as it goes.
+    fn send_save(&mut self, worktree: &Path, path: &Path, cx: &mut Context<Self>) {
+        let Some(editing) = self
+            .editors(worktree)
+            .and_then(|tabs| tabs.by_path(path))
+            .filter(|editing| editing.preview.is_none())
+        else {
+            self.saves.skip(worktree, path);
             return;
-        }
+        };
+        let content = editing.input.read(cx).value().to_string();
+        // The digest of what we had read — or of what the last write that
+        // went through left: an agent that wrote in the meantime makes the
+        // save be refused rather than be overwritten.
+        let expect = Some(editing.hash);
+        let digest = files::digest(&content);
+        let ticket = self.git.send(Cmd::WriteFile {
+            worktree: worktree.to_path_buf(),
+            path: path.to_path_buf(),
+            content,
+            expect,
+        });
+        self.saves.sent(worktree, path, ticket, digest);
     }
 
-    /// The worker has answered a file's write: `Evt::Done` or `Evt::Failed`
-    /// of `Action::Write`.
+    /// The worker has answered a command: when it is a file's write, its tab
+    /// hears of it.
     ///
     /// On success the digest follows what was written — without that, the next
     /// save would be refused over a change that was ours — and the tab is
@@ -2317,31 +2295,32 @@ impl ClaudhubApp {
     /// says why.
     pub(super) fn file_written(
         &mut self,
-        worktree: Option<&Path>,
+        ticket: Ticket,
         ok: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(worktree) = worktree else {
-            return;
-        };
-        let Some(save) = self.saves.answered(worktree, ok) else {
+        let Some(save) = self.saves.answered(ticket, ok) else {
             return;
         };
         let editing = self
             .editings
-            .get_mut(worktree)
+            .get_mut(&save.worktree)
             .and_then(|tabs| tabs.by_path_mut(&save.path));
         let mut saved = false;
-        if let (true, Some(editing), Some(sent)) = (ok, editing, save.sent) {
+        if let (true, Some(editing), Some((_, sent))) = (ok, editing, save.sent) {
             editing.hash = sent;
             editing.dirty = files::digest(&editing.input.read(cx).value()) != sent;
             saved = !editing.dirty;
         }
         if save.close && saved {
-            self.close_file(worktree.to_path_buf(), save.path, window, cx);
+            self.close_file(save.worktree.clone(), save.path.clone(), window, cx);
         }
-        self.send_next_save(worktree, cx);
+        // The save asked while this one was on its way leaves now, with the
+        // digest just recorded.
+        if ok && save.again.is_some() {
+            self.send_save(&save.worktree, &save.path, cx);
+        }
         cx.notify();
     }
 
@@ -3067,7 +3046,7 @@ impl ClaudhubApp {
         // search with no result. During the first `ls-files`, the list stays
         // blank — announcing "no file" and then showing them reads as a display
         // glitch.
-        if count == 0 && state != Listing::Loading {
+        if count == 0 && !matches!(state, Listing::Loading(_)) {
             return v_flex()
                 .size_full()
                 .child(bar)
@@ -4432,94 +4411,72 @@ mod tests {
         );
     }
 
-    /// One write in flight per worktree, and the answer is the head's: that
-    /// is what lets a refusal land on the tab it is about.
+    /// Two files go out together, and each answer lands on its own save,
+    /// in whatever order the workers finish them: the ticket names the file.
     #[test]
-    fn writes_leave_one_at_a_time_and_the_answer_names_the_head() {
+    fn two_files_leave_together_and_each_answer_names_its_own() {
         let (w, a, b) = (Path::new("/w"), Path::new("a.rs"), Path::new("b.rs"));
         let mut saves = Saves::default();
-        // Nothing under way: the first goes now, the second waits.
         assert!(saves.push(w, a, false));
-        assert!(!saves.push(w, b, false));
-        assert_eq!(saves.next(w), Some(a));
-        saves.sent(w, 11);
-        // In flight, the head is no longer "to send".
-        assert_eq!(saves.next(w), None);
-        let answered = saves.answered(w, true).unwrap();
-        assert_eq!((answered.path.as_path(), answered.sent), (a, Some(11)));
-        assert_eq!(saves.next(w), Some(b));
-        // Another worktree is a queue of its own.
+        assert!(saves.push(w, b, false));
+        saves.sent(w, a, Ticket(1), 11);
+        saves.sent(w, b, Ticket(2), 22);
+        let first = saves.answered(Ticket(2), true).unwrap();
+        assert_eq!(
+            (first.path.as_path(), first.sent),
+            (b, Some((Ticket(2), 22)))
+        );
+        let refused = saves.answered(Ticket(1), false).unwrap();
+        assert_eq!(refused.path, a);
+        // An answer to nothing sent from here is nobody's.
+        assert!(saves.answered(Ticket(3), true).is_none());
+        // The same file in another worktree is another file.
         assert!(saves.push(Path::new("/v"), a, false));
     }
 
-    /// Two saves in a row: the second waits for the first, so it leaves with
-    /// the digest the first wrote rather than be refused over our own change.
-    /// And a second save of a file still waiting joins it.
+    /// Two saves of one file in a row: the second waits for the first, so it
+    /// leaves with the digest the first wrote rather than be refused over our
+    /// own change. And a third, asked meanwhile, joins the second.
     #[test]
-    fn a_second_save_waits_behind_the_first_and_a_waiting_one_absorbs_it() {
+    fn a_second_save_of_a_file_waits_behind_the_first_and_a_third_joins_it() {
         let (w, a) = (Path::new("/w"), Path::new("a.rs"));
         let mut saves = Saves::default();
         assert!(saves.push(w, a, false));
-        saves.sent(w, 1);
+        saves.sent(w, a, Ticket(1), 1);
         assert!(!saves.push(w, a, false));
         assert!(!saves.push(w, a, true));
-        assert!(saves.answered(w, true).is_some());
-        let waiting = saves.next(w).unwrap().to_path_buf();
-        assert_eq!(waiting, a);
-        saves.sent(w, 2);
-        // The two pushes were one write, and it carries the closing.
-        let last = saves.answered(w, true).unwrap();
+        // Gone through: the next one is to send, and carries the closing.
+        let landed = saves.answered(Ticket(1), true).unwrap();
+        assert_eq!(landed.again, Some(true));
+        assert!(!landed.close);
+        // Waiting to leave, it still absorbs another.
+        assert!(!saves.push(w, a, false));
+        saves.sent(w, a, Ticket(2), 2);
+        let last = saves.answered(Ticket(2), true).unwrap();
         assert!(last.close);
-        assert_eq!(saves.next(w), None);
-        assert!(saves.answered(w, true).is_none());
+        assert_eq!(last.again, None);
+        // Nothing left: the next save goes straight away.
+        assert!(saves.push(w, a, false));
     }
 
-    /// A refused write takes the writes of that file waiting behind it — they
+    /// A refused write takes the save of that file waiting behind it — it
     /// would be refused against the same digest — and none of the others.
     #[test]
-    fn a_refusal_drops_the_same_file_waiting_behind_it() {
+    fn a_refusal_drops_the_save_of_that_file_behind_it() {
         let (w, a, b) = (Path::new("/w"), Path::new("a.rs"), Path::new("b.rs"));
         let mut saves = Saves::default();
         saves.push(w, a, false);
-        saves.sent(w, 1);
+        saves.sent(w, a, Ticket(1), 1);
         saves.push(w, a, true);
         saves.push(w, b, false);
-        let refused = saves.answered(w, false).unwrap();
-        assert_eq!(refused.path, a);
-        assert_eq!(saves.next(w), Some(b));
-        // An answer to nothing sent from here is nobody's.
-        assert!(saves.answered(w, false).is_none());
-        // A tab gone before its turn is passed over.
-        saves.skip(w);
-        assert_eq!(saves.next(w), None);
-    }
-
-    /// A failed read is told from the file list's by its message, in the two
-    /// shapes `files::read` writes.
-    #[test]
-    fn a_failed_read_is_known_by_the_file_it_names() {
-        let (w, a) = (Path::new("/w"), Path::new("src/a.rs"));
-        let gone = "cannot read /w/src/a.rs : No such file or directory (os error 2)";
-        assert!(read_failure_names(gone, w, a));
-        assert!(read_failure_names("src/a.rs is a binary file", w, a));
-        assert!(read_failure_names("src/a.rs is not UTF-8 text", w, a));
-        // A neighbour whose name ends or starts like it is not it.
-        assert!(!read_failure_names(
-            "cannot read /w/src/a.rs.bak : gone",
-            w,
-            a
-        ));
-        assert!(!read_failure_names("xsrc/a.rs is a binary file", w, a));
-        assert!(!read_failure_names("src/b.rs is a binary file", w, a));
-        // What `ls-files` says names no file of ours.
-        assert!(!read_failure_names("fatal: not a git repository", w, a));
-        // A path given whole — a test file opened by its absolute path.
-        let whole = Path::new("/w/tests/t.php");
-        assert!(read_failure_names(
-            "cannot read /w/tests/t.php : gone",
-            w,
-            whole
-        ));
+        saves.sent(w, b, Ticket(2), 2);
+        assert!(saves.answered(Ticket(1), false).is_some());
+        assert!(saves.push(w, a, false), "nothing of a is left waiting");
+        // A tab gone before its write left is passed over.
+        saves.skip(w, a);
+        assert!(saves.push(w, a, false));
+        // And the other file's write is still the one its answer names.
+        assert_eq!(saves.answered(Ticket(2), true).unwrap().path, b);
     }
 
     /// What a drop on a row asks for. This is the whole decision of dragging

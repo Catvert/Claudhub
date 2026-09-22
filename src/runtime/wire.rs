@@ -11,7 +11,8 @@
 //!
 //! A non-UTF-8 path does not serialise (it is `PathBuf` that refuses, whatever
 //! the format): sending logs it and drops it rather than closing the wire —
-//! see [`write_frame`].
+//! see [`write_frame`]. Except in the handshake, where a dropped frame is two
+//! ends waiting on each other for ever: see [`write_hello`].
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -23,7 +24,7 @@ use serde::Serialize;
 /// `Evt` or to a type they carry: the two ends are two binaries shipped
 /// together but installed separately, and a disagreement should be told at the
 /// handshake rather than as an unreadable frame on the first diff.
-pub const PROTOCOL_VERSION: u32 = 46;
+pub const PROTOCOL_VERSION: u32 = 47;
 
 /// The first frame from each end, before any `Cmd` or `Evt`.
 ///
@@ -113,6 +114,37 @@ fn write_within<T: Serialize>(
             return Ok(());
         }
     };
+    write_body(out, &body, ceiling)
+}
+
+/// Writes the handshake, and **refuses** what does not serialise.
+///
+/// The one frame `write_frame`'s rule does not fit: losing an event costs that
+/// event, losing a hello costs the wire — each end waits for the other's
+/// before anything else, and a hello dropped in silence left both waiting for
+/// ever, the window saying neither "connected" nor "lost". The cause in
+/// practice is a launch directory whose name is not UTF-8, and the error says
+/// so: postcard's own is a bare "serialization error", its `custom` keeping no
+/// message.
+pub fn write_hello(out: &mut impl Write, hello: &Hello) -> std::io::Result<()> {
+    let body = postcard::to_stdvec(hello).map_err(|e| {
+        let why = match hello.cwd.to_str() {
+            None => format!(
+                "the launch directory {} is not UTF-8, which the wire cannot carry",
+                hello.cwd.display()
+            ),
+            Some(_) => e.to_string(),
+        };
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("the handshake cannot be sent: {why}"),
+        )
+    })?;
+    write_body(out, &body, MAX_FRAME)
+}
+
+/// A serialised body, framed — or dropped when it is over the ceiling.
+fn write_body(out: &mut impl Write, body: &[u8], ceiling: u32) -> std::io::Result<()> {
     let Ok(len) = u32::try_from(body.len()) else {
         log::warn!("{}-byte value dropped from the wire", body.len());
         return Ok(());
@@ -122,7 +154,7 @@ fn write_within<T: Serialize>(
         return Ok(());
     }
     out.write_all(&len.to_le_bytes())?;
-    out.write_all(&body)?;
+    out.write_all(body)?;
     // One frame per event, and one flush per frame: the other end sometimes
     // waits for that very answer to draw, and a buffer would hold it back.
     out.flush()
@@ -153,7 +185,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::runtime::protocol::{Cmd, Evt, Secret};
+    use crate::runtime::protocol::{Cmd, Evt, Order, Secret, Ticket};
 
     /// A round trip over the wire, frame included.
     fn roundtrip<T: Serialize + DeserializeOwned>(value: &T) -> T {
@@ -172,6 +204,7 @@ mod tests {
         // big, which the window reads as "server lost".
         let mut buffer = Vec::new();
         let evt = Evt::Failed {
+            ticket: crate::runtime::Ticket(1),
             worktree: None,
             action: crate::runtime::Action::Refresh,
             message: "x".repeat(64),
@@ -194,6 +227,7 @@ mod tests {
         // reads back as itself and not as gibberish.
         let mut buffer = Vec::new();
         let big = Evt::Failed {
+            ticket: crate::runtime::Ticket(1),
             worktree: None,
             action: crate::runtime::Action::Refresh,
             message: "x".repeat(64),
@@ -319,6 +353,55 @@ mod tests {
             Some(Cmd::OpenIfRepo(p)) if p == std::path::Path::new("/b")
         ));
         assert!(read_frame::<Cmd>(&mut input).unwrap().is_none());
+    }
+
+    /// A command's ticket crosses with it, and comes back on its answer: it is
+    /// all the window has to tell one write from another of the same kind.
+    #[test]
+    fn a_ticket_crosses_both_ways() {
+        let order = Order {
+            ticket: Ticket(41),
+            cmd: Cmd::Fetch {
+                worktree: PathBuf::from("/p"),
+            },
+        };
+        let back = roundtrip(&order);
+        assert_eq!(back.ticket, Ticket(41));
+        assert!(matches!(back.cmd, Cmd::Fetch { .. }));
+        let evt = Evt::Done {
+            ticket: Ticket(41),
+            worktree: None,
+            action: crate::runtime::Action::Fetch,
+            output: String::new(),
+        };
+        assert!(matches!(
+            roundtrip(&evt),
+            Evt::Done {
+                ticket: Ticket(41),
+                ..
+            }
+        ));
+    }
+
+    /// A hello that cannot be written is an error and not a dropped frame:
+    /// dropped, it left both ends waiting for the other's for ever.
+    #[cfg(unix)]
+    #[test]
+    fn a_hello_that_does_not_serialise_is_an_error() {
+        use std::os::unix::ffi::OsStrExt;
+        let hello = Hello {
+            cwd: PathBuf::from(std::ffi::OsStr::from_bytes(b"/home/z\xffe")),
+            ..Hello::current()
+        };
+        let mut buffer = Vec::new();
+        let err = write_hello(&mut buffer, &hello).expect_err("must be refused");
+        assert!(err.to_string().contains("not UTF-8"), "{err}");
+        assert!(buffer.is_empty(), "nothing half-written");
+
+        // And one that does goes out whole, readable by the other end.
+        write_hello(&mut buffer, &Hello::current()).expect("write");
+        let back: Hello = read_frame(&mut buffer.as_slice()).unwrap().unwrap();
+        assert_eq!(back.protocol, PROTOCOL_VERSION);
     }
 
     /// An absurd length is an error, not an allocation.

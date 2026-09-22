@@ -21,7 +21,7 @@ use anyhow::Result;
 pub mod remote;
 pub mod wire;
 
-pub use protocol::{Action, Cmd, Evt, Secret, WorktreeId};
+pub use protocol::{Action, Cmd, Evt, Order, Secret, Ticket, WorktreeId};
 
 use crate::git::{branch, diff, history, repo, stash, status, tags, DiffRange, LogRange};
 
@@ -237,12 +237,12 @@ pub struct Handle {
 
 enum HandleInner {
     Local {
-        reads: async_channel::Sender<Cmd>,
-        network: async_channel::Sender<Cmd>,
-        long: async_channel::Sender<Cmd>,
-        background: async_channel::Sender<Cmd>,
-        databases: async_channel::Sender<Cmd>,
-        search: async_channel::Sender<Cmd>,
+        reads: async_channel::Sender<Order>,
+        network: async_channel::Sender<Order>,
+        long: async_channel::Sender<Order>,
+        background: async_channel::Sender<Order>,
+        databases: async_channel::Sender<Order>,
+        search: async_channel::Sender<Order>,
         /// The fifth channel: watch orders go through no queue — setting up a
         /// watch is already deferred into the watcher thread, and making it wait
         /// behind a diff would make no sense. `None` when watching could not
@@ -250,14 +250,14 @@ enum HandleInner {
         /// hand.
         watcher: Option<watch::Watcher>,
         /// The test runs — see `is_tests`.
-        tests: async_channel::Sender<Cmd>,
+        tests: async_channel::Sender<Order>,
         /// The eighth lane: the language servers. Outside the queues for the
         /// watcher's reason and one of its own — **order matters**. A
         /// `didChange` must reach the server before the completion that depends
         /// on it, which several workers sharing one channel cannot promise.
         lsp: std::sync::Arc<crate::lsp::Host>,
     },
-    Remote(async_channel::Sender<Cmd>),
+    Remote(async_channel::Sender<Order>),
     /// No worker at all: the commands are dropped.
     ///
     /// The state before the connection, on Windows, where the workers live in a
@@ -277,7 +277,7 @@ enum HandleInner {
 impl Handle {
     /// A remote transport's handle: everything goes down the same channel,
     /// towards the thread that writes the frames.
-    pub(crate) fn remote(wire: async_channel::Sender<Cmd>) -> Self {
+    pub(crate) fn remote(wire: async_channel::Sender<Order>) -> Self {
         Self {
             inner: HandleInner::Remote(wire),
         }
@@ -290,10 +290,26 @@ impl Handle {
         }
     }
 
-    /// Sends a command into the queue that suits it. Failure (closed channel)
-    /// only happens at shutdown — or, remotely, at the server's death, which the
-    /// view learns through `Evt::ServerLost`: nothing to say here.
-    pub fn send(&self, cmd: Cmd) {
+    /// Sends a command into the queue that suits it, and says which ticket its
+    /// answer will carry. Failure (closed channel) only happens at shutdown —
+    /// or, remotely, at the server's death, which the view learns through
+    /// `Evt::ServerLost`: nothing to say here.
+    ///
+    /// Every command gets a ticket, and most callers drop it: only a `Done` or
+    /// a `Failed` carries one back, and only a caller waiting on **that** write
+    /// — one save among several, the second half of a pair — has a use for it.
+    pub fn send(&self, cmd: Cmd) -> Ticket {
+        let ticket = issue();
+        self.submit(Order { ticket, cmd });
+        ticket
+    }
+
+    /// Sends a command whose ticket is already issued.
+    ///
+    /// The server's door: the tickets it relays were issued by the window, and
+    /// they are the ones its answers must carry.
+    pub fn submit(&self, order: Order) {
+        let Order { ticket, cmd } = order;
         match &self.inner {
             HandleInner::Local {
                 reads,
@@ -327,18 +343,26 @@ impl Handle {
                     Queue::Tests => tests,
                     Queue::Reads => reads,
                 };
-                send_to(queue, cmd);
+                send_to(queue, Order { ticket, cmd });
             }
-            HandleInner::Remote(wire) => send_to(wire, cmd),
+            HandleInner::Remote(wire) => send_to(wire, Order { ticket, cmd }),
             HandleInner::Pending => log::debug!("command issued before the server, dropped"),
         }
     }
 }
 
-fn send_to(queue: &async_channel::Sender<Cmd>, cmd: Cmd) {
-    if let Err(err) = queue.try_send(cmd) {
+fn send_to(queue: &async_channel::Sender<Order>, order: Order) {
+    if let Err(err) = queue.try_send(order) {
         log::debug!("command dropped: {err}");
     }
+}
+
+/// The next ticket. Counted for the process and never reused: a window has
+/// one handle at a time, but a relaunched server gives it a new one, and a
+/// counter per handle would start again at one under the view's feet.
+fn issue() -> Ticket {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    Ticket(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Hands the watch orders to the watcher and returns the others.
@@ -403,13 +427,13 @@ fn route_lsp(host: &std::sync::Arc<crate::lsp::Host>, cmd: Cmd) -> Option<Cmd> {
 
 /// Starts the workers and returns what is needed to talk and listen to them.
 pub fn spawn() -> (Handle, async_channel::Receiver<Evt>) {
-    let (read_tx, read_rx) = async_channel::unbounded::<Cmd>();
-    let (net_tx, net_rx) = async_channel::unbounded::<Cmd>();
-    let (long_tx, long_rx) = async_channel::unbounded::<Cmd>();
-    let (bg_tx, bg_rx) = async_channel::unbounded::<Cmd>();
-    let (db_tx, db_rx) = async_channel::unbounded::<Cmd>();
-    let (search_tx, search_rx) = async_channel::unbounded::<Cmd>();
-    let (tests_tx, tests_rx) = async_channel::unbounded::<Cmd>();
+    let (read_tx, read_rx) = async_channel::unbounded::<Order>();
+    let (net_tx, net_rx) = async_channel::unbounded::<Order>();
+    let (long_tx, long_rx) = async_channel::unbounded::<Order>();
+    let (bg_tx, bg_rx) = async_channel::unbounded::<Order>();
+    let (db_tx, db_rx) = async_channel::unbounded::<Order>();
+    let (search_tx, search_rx) = async_channel::unbounded::<Order>();
+    let (tests_tx, tests_rx) = async_channel::unbounded::<Order>();
     let (evt_tx, evt_rx) = async_channel::unbounded::<Evt>();
 
     for n in 0..READERS {
@@ -488,7 +512,7 @@ type Emit<'a> = &'a (dyn Fn(Evt) + Sync);
 
 fn worker(
     name: String,
-    commands: async_channel::Receiver<Cmd>,
+    commands: async_channel::Receiver<Order>,
     events: async_channel::Sender<Evt>,
 ) {
     std::thread::Builder::new()
@@ -500,8 +524,8 @@ fn worker(
             let emit = |evt: Evt| {
                 let _ = events.send_blocking(evt);
             };
-            while let Ok(cmd) = commands.recv_blocking() {
-                for evt in handle(cmd, &emit) {
+            while let Ok(Order { ticket, cmd }) = commands.recv_blocking() {
+                for evt in handle(ticket, cmd, &emit) {
                     if events.send_blocking(evt).is_err() {
                         return; // the window is gone
                     }
@@ -532,26 +556,15 @@ fn worker(
 /// leaves behind is its own locals: nothing here is shared across commands but
 /// the channels, which is what makes `AssertUnwindSafe` true rather than
 /// hopeful.
-fn handle(cmd: Cmd, emit: Emit) -> Vec<Evt> {
+///
+/// **And the ticket is stamped here**, on whatever `Done` or `Failed` came
+/// out — the arms build theirs without it, sixty of them having no other use
+/// for it. The net's own `Failed` gets it too, and that is what lets the view
+/// let go of the command that fell, whatever worktree and action it wore.
+fn handle(ticket: Ticket, cmd: Cmd, emit: Emit) -> Vec<Evt> {
     let name = cmd.name();
     let started = std::time::Instant::now();
-    let evts = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(cmd, emit)))
-    {
-        Ok(evts) => evts,
-        Err(payload) => {
-            let message = format!("internal error in {name}: {}", panic_message(&*payload));
-            log::error!("{message}");
-            // No worktree and no action of its own: which of them the command
-            // wore is known to its arm only. The writes are caught one floor
-            // down, by `shielded`, where both are known and the button that
-            // spins can stop; this is the net under everything else.
-            vec![Evt::Failed {
-                worktree: None,
-                action: Action::Refresh,
-                message,
-            }]
-        }
-    };
+    let evts = answer(ticket, name, || dispatch(cmd, emit));
     let elapsed = crate::logging::ms(started.elapsed());
     // A command that produced a `Done` or a `Failed` is a **write**: that is
     // what those two events mean, and it saves classifying sixty variants a
@@ -565,6 +578,35 @@ fn handle(cmd: Cmd, emit: Emit) -> Vec<Evt> {
         log::info!("{name} — {elapsed}");
     } else {
         log::debug!("{name} — {elapsed} ({} event(s))", evts.len());
+    }
+    evts
+}
+
+/// Runs an arm, catches its panic, and puts the command's ticket on what came
+/// out.
+fn answer(ticket: Ticket, name: &str, arm: impl FnOnce() -> Vec<Evt>) -> Vec<Evt> {
+    let mut evts = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(arm)) {
+        Ok(evts) => evts,
+        Err(payload) => {
+            let message = format!("internal error in {name}: {}", panic_message(&*payload));
+            log::error!("{message}");
+            // No worktree and no action of its own: which of them the command
+            // wore is known to its arm only. The writes are caught one floor
+            // down, by `shielded`, where both are known; this is the net under
+            // everything else, and its ticket is the one thing that still
+            // names the command.
+            vec![Evt::Failed {
+                ticket,
+                worktree: None,
+                action: Action::Refresh,
+                message,
+            }]
+        }
+    };
+    for evt in &mut evts {
+        if let Evt::Done { ticket: slot, .. } | Evt::Failed { ticket: slot, .. } = evt {
+            *slot = ticket;
+        }
     }
     evts
 }
@@ -1786,6 +1828,8 @@ fn done(worktree: Option<PathBuf>, action: Action, output: String) -> Evt {
     // an event.
     log::info!("{action:?}{} — done{}", at(&worktree), first_line(&output));
     Evt::Done {
+        // Stamped by `answer`, which is the one place that knows it.
+        ticket: Ticket::default(),
         worktree,
         action,
         output,
@@ -1846,6 +1890,7 @@ fn fail(worktree: Option<PathBuf>, action: Action, err: anyhow::Error) -> Evt {
     // known that somebody was waiting for it.
     log::warn!("{action:?}{} — {message}", at(&worktree));
     Evt::Failed {
+        ticket: Ticket::default(),
         worktree,
         action,
         message,
@@ -1871,6 +1916,7 @@ mod tests {
                 worktree: Some(at),
                 action: Action::Push,
                 message,
+                ..
             }] => {
                 assert_eq!(at, &worktree());
                 assert!(message.contains("boom at 42"), "{message}");
@@ -1878,6 +1924,77 @@ mod tests {
             other => panic!("unexpected events: {other:?}"),
         }
         assert_eq!(panic_message(&"literal"), "literal");
+    }
+
+    /// The answer carries the ticket of the command it answers, success or
+    /// failure — and what goes out beside it, a status re-read or a list, is
+    /// left as it is.
+    #[test]
+    fn an_answer_carries_its_commands_ticket() {
+        let evts = answer(Ticket(7), "Stage", || {
+            vec![
+                done(Some(worktree()), Action::Stage, String::new()),
+                Evt::VaultWritten {
+                    worktree: worktree(),
+                },
+            ]
+        });
+        assert!(
+            matches!(
+                evts.as_slice(),
+                [
+                    Evt::Done {
+                        ticket: Ticket(7),
+                        ..
+                    },
+                    Evt::VaultWritten { .. }
+                ]
+            ),
+            "{evts:?}"
+        );
+        let evts = answer(Ticket(8), "Push", || {
+            write_then_refresh(worktree(), Action::Push, |_| {
+                Err(anyhow::anyhow!("rejected"))
+            })
+        });
+        assert!(
+            matches!(
+                evts.as_slice(),
+                [Evt::Failed {
+                    ticket: Ticket(8),
+                    ..
+                }]
+            ),
+            "{evts:?}"
+        );
+    }
+
+    /// The net under everything knows neither the worktree nor the action a
+    /// command wore — but it knows its ticket, which is what lets the view
+    /// stop waiting on the command that fell.
+    #[test]
+    fn a_panic_the_arms_did_not_catch_still_answers_its_command() {
+        let evts = answer(Ticket(9), "ReadFile", || panic!("unforeseen"));
+        match evts.as_slice() {
+            [Evt::Failed {
+                ticket: Ticket(9),
+                worktree: None,
+                message,
+                ..
+            }] => assert!(message.contains("ReadFile") && message.contains("unforeseen")),
+            other => panic!("unexpected events: {other:?}"),
+        }
+    }
+
+    /// Tickets are never reused: a relaunched server gives the window a new
+    /// handle, and a counter that started again would name a command twice.
+    #[test]
+    fn two_sends_never_share_a_ticket() {
+        let handle = Handle::pending();
+        let first = handle.send(Cmd::ReleaseCheck);
+        let second = Handle::pending().send(Cmd::ReleaseCheck);
+        assert_ne!(first, second);
+        assert_ne!(first, Ticket::default(), "zero is issued to nothing");
     }
 
     #[test]
