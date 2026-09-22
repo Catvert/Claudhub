@@ -391,22 +391,37 @@ impl ClaudhubApp {
     }
 
     /// Adds a task to the worktree's `TODO.md`, creating it if there is none.
-    pub(super) fn add_task(&mut self, label: &str, cx: &mut Context<Self>) {
+    ///
+    /// Answers whether the task went out: the field keeps what was typed when
+    /// it did not.
+    pub(super) fn add_task(&mut self, label: &str, cx: &mut Context<Self>) -> bool {
         if label.trim().is_empty() {
-            return;
+            return false;
         }
         let Some(worktree) = self.active.clone() else {
-            return;
+            return false;
         };
         let Some(dir) = self.notes_dir(&worktree, cx) else {
-            return;
+            return false;
         };
-        let current = self
-            .review
-            .get(&worktree)
-            .and_then(|state| state.todo.as_ref())
-            .map(|todo| todo.text.clone());
-        let expect = current.as_deref().map(crate::files::digest);
+        let Some(state) = self.review.get(&worktree) else {
+            return false;
+        };
+        // Before the folder has answered, `todo` is `None` because nothing has
+        // been read, not because there is no list: seeding one then replaced
+        // the agent's whole file with our header and a single line.
+        if !state.notes_loaded {
+            self.announce(tr!("todo-not-loaded"), cx);
+            return false;
+        }
+        let current = state.todo.as_ref().map(|todo| todo.text.clone());
+        // And "there is none" is itself what the write checks: the agent may
+        // lay the file down between the last read and this line.
+        let expect = Some(
+            current
+                .as_deref()
+                .map_or(crate::files::ABSENT, crate::files::digest),
+        );
         let base = current.unwrap_or_else(|| crate::ui::vault::seed_todo(&worktree));
         let text = crate::ui::vault::append_task(&base, label);
         if let Some(state) = self.review.get_mut(&worktree) {
@@ -419,6 +434,7 @@ impl ClaudhubApp {
             expect,
         });
         cx.notify();
+        true
     }
 
     /// Hands every file of a worktree back to be reviewed.

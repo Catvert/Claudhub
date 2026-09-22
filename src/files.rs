@@ -188,8 +188,8 @@ pub fn write(worktree: &Path, path: &Path, text: &str, expect: Option<u64>) -> R
 /// well — it is the agent writing in it while we watch.
 pub fn write_at(full: &Path, text: &str, expect: Option<u64>) -> Result<()> {
     if let Some(expected) = expect {
-        let current = std::fs::read_to_string(full).map(|text| digest(&text)).ok();
-        if current != Some(expected) {
+        let current = std::fs::read_to_string(full).ok();
+        if !still(expected, current.as_deref()) {
             bail!(
                 "{} has changed since it was opened: reload it before saving",
                 full.display()
@@ -200,6 +200,28 @@ pub fn write_at(full: &Path, text: &str, expect: Option<u64>) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(full, text).with_context(|| format!("cannot write {}", full.display()))
+}
+
+/// The `expect` of a file one believes **is not there yet**.
+///
+/// `None` writes blind, and that is what "I have not read anything" used to
+/// send: a `TODO.md` created by the agent a second before our first task was
+/// then replaced by a seed and one line. This says the opposite — refuse if
+/// something is there — without a third shape on the wire. Zero is a digest
+/// FNV-1a may produce in theory, and never has on a text anyone wrote; an
+/// **empty** file counts as absent, a vault not telling the two apart.
+pub const ABSENT: u64 = 0;
+
+/// Is the file still what `expected` says we saw?
+///
+/// `current` is the text on disk, `None` when there is none. A vanished file
+/// is a change, except to whoever expected it absent.
+fn still(expected: u64, current: Option<&str>) -> bool {
+    match current {
+        None => expected == ABSENT,
+        Some("") if expected == ABSENT => true,
+        Some(text) => digest(text) == expected,
+    }
 }
 
 /// What we do to a file from the explorer.
@@ -445,11 +467,46 @@ pub fn open_external(worktree: &Path, template: &str, path: &Path, line: usize) 
 /// `claudhub: todo` carries our mark but **does not belong to us** — it is the
 /// agent, or its reader, that keeps it, and writing a note must not take the
 /// running task list away.
-const OURS: [&str; 2] = ["\nclaudhub: note", "\nclaudhub: review"];
+const OURS: [&str; 2] = ["note", "review"];
 
 /// True for a file Claudhub writes whole, and may therefore erase.
+///
+/// The mark is read **where it is written and nowhere else**: the `claudhub`
+/// key of a frontmatter that opens the file and is closed. Searching the text
+/// for `\nclaudhub: note` also found `claudhub: notebook`, and the line quoted
+/// in a note's body — and erasure is the one mistake here nobody undoes.
 fn is_ours(text: &str) -> bool {
-    text.starts_with("---") && OURS.iter().any(|mark| text.contains(mark))
+    mark_of(text).is_some_and(|mark| OURS.contains(&mark))
+}
+
+/// The value of the frontmatter's `claudhub` key.
+///
+/// CRLF is accepted — a vault synced through Windows gets it — and so are the
+/// quotes `ui::vault` accepts on reading a scalar: the two sides have to agree
+/// on what is a note, or a note the panel shows would be one the folder keeps
+/// after it is deleted. An unclosed frontmatter carries no mark.
+fn mark_of(text: &str) -> Option<&str> {
+    let mut lines = text.lines();
+    if lines.next()?.trim_end() != "---" {
+        return None;
+    }
+    let mut mark = None;
+    for line in lines {
+        if line.trim_end() == "---" {
+            return mark;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            if key.trim() == "claudhub" && mark.is_none() {
+                let value = value.trim();
+                let value = value
+                    .strip_prefix('"')
+                    .and_then(|v| v.strip_suffix('"'))
+                    .unwrap_or(value);
+                mark = Some(value);
+            }
+        }
+    }
+    None
 }
 
 /// Writes a vault file, or erases it if its text is empty.
@@ -466,7 +523,7 @@ pub fn write_vault_file(path: &Path, text: &str, expect: Option<u64>) -> Result<
     }
     match std::fs::read_to_string(path) {
         Ok(current) => {
-            if expect.is_some_and(|expected| digest(&current) != expected) {
+            if expect.is_some_and(|expected| !still(expected, Some(&current))) {
                 bail!(
                     "{} has changed since it was opened: reload it before saving",
                     path.display()
@@ -612,6 +669,37 @@ mod tests {
         assert_eq!(names, ["Journal.md", "TODO.md"]);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Only the frontmatter's `claudhub` key marks a file as ours, with its
+    /// exact value — and a note saved through Windows keeps its mark.
+    #[test]
+    fn the_mark_is_read_in_the_frontmatter_only() {
+        assert!(is_ours("---\nclaudhub: note\nid: 3\n---\n\nx\n"));
+        assert!(is_ours("---\r\nclaudhub: review\r\n---\r\n\r\nx\r\n"));
+        assert!(is_ours("---\nid: 3\nclaudhub: \"note\"\n---\n"));
+        // Another value that happens to start the same way.
+        assert!(!is_ours("---\nclaudhub: notebook\n---\n"));
+        assert!(!is_ours("---\nclaudhub: todo\n---\n"));
+        // The mark quoted in a body, below somebody else's frontmatter.
+        assert!(!is_ours("---\ntags: [me]\n---\n\nclaudhub: note\n"));
+        // A frontmatter that never closes is not one.
+        assert!(!is_ours("---\nclaudhub: note\n\nx\n"));
+        assert!(!is_ours("claudhub: note\n"));
+    }
+
+    /// The guard of a conditional write, `ABSENT` included: a file one
+    /// expected not to find refuses the write once somebody has created it.
+    #[test]
+    fn a_write_expecting_nothing_refuses_a_file_that_is_there() {
+        assert!(still(ABSENT, None));
+        assert!(still(ABSENT, Some("")));
+        assert!(!still(ABSENT, Some("- [ ] a task\n")));
+        assert!(still(digest("a"), Some("a")));
+        assert!(!still(digest("a"), Some("b")));
+        // A vanished file is a change to whoever had read it.
+        assert!(!still(digest("a"), None));
+        assert_ne!(digest(""), ABSENT);
     }
 
     #[test]

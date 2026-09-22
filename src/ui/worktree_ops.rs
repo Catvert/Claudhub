@@ -182,6 +182,13 @@ pub struct WtPrompt {
     /// The round in flight. A counter and not a comparison of the answers: the
     /// worker seeds them for a `wt up`, so what comes back is not what went out.
     pub round: u64,
+    /// The questions already put in this dialog, by name.
+    ///
+    /// `wt` filters out a question once it has an answer, except one marked
+    /// `always` — asked at every start, which is what the flag means — and the
+    /// loop took "every start" for "every round": the same page came back after
+    /// each confirmation, for ever. See [`unasked`].
+    pub asked: std::collections::BTreeSet<String>,
     /// The console has been put away while the operation runs.
     ///
     /// **Hidden and not dropped**: the lines keep arriving, and the status
@@ -205,6 +212,7 @@ impl WtPrompt {
             filters: BTreeMap::new(),
             asking: false,
             round: 0,
+            asked: std::collections::BTreeSet::new(),
             hidden: false,
         }
     }
@@ -676,6 +684,10 @@ impl ClaudhubApp {
         // The worker may have seeded them — a `wt up` starts from what the
         // worktree remembers — so what comes back is what counts.
         creation.answers = answers;
+        let questions = unasked(questions, &creation.asked);
+        creation
+            .asked
+            .extend(questions.iter().map(|question| question.name.clone()));
         // Nothing left to ask: the project has finished asking its questions.
         if questions.is_empty() {
             self.run_wt_target(window, cx);
@@ -1766,7 +1778,55 @@ impl ClaudhubApp {
         self.run_in_console(main, slug, wt::Op::Down, cmd, window, cx);
     }
 
-    pub(super) fn wt_remove(
+    /// Asks before `wt rm`, which asks nothing itself.
+    ///
+    /// The worker answers `wt`'s own question with yes (`wt::remove`), and
+    /// what follows is `git worktree remove --force` and the folder deleted
+    /// whole: uncommitted changes go with it, where the bare git removal
+    /// refuses. The menu entry went straight there. What the dialog knows of
+    /// the checkout is the last summary — no git from a click — so it says the
+    /// count of changed files when there is one to say.
+    pub(super) fn confirm_wt_remove(
+        &mut self,
+        main: PathBuf,
+        worktree: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let label = SharedString::from(worktree.display().to_string());
+        let dirty = self
+            .summaries
+            .get(&worktree)
+            .filter(|summary| !summary.is_empty())
+            .map(|summary| tr!("worktree-remove-wt-dirty", { count: summary.files }));
+        let entity = cx.entity();
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let (main, worktree, entity) = (main.clone(), worktree.clone(), entity.clone());
+            dialog
+                .title(tr!("worktree-remove-title"))
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().text_sm().child(label.clone()))
+                        .children(dirty.clone().map(|dirty| div().text_sm().child(dirty)))
+                        .child(div().text_xs().child(tr!("worktree-remove-wt-help"))),
+                )
+                .overlay_closable(false)
+                .close_button(false)
+                .footer(super::dialogs::submit(tr!("worktree-remove")))
+                .on_ok(move |_, window, cx| {
+                    // Deferred for the reason `offer_cleanup` gives: the removal
+                    // opens its console, and `true` closes the topmost dialog.
+                    let (entity, main, worktree) = (entity.clone(), main.clone(), worktree.clone());
+                    window.defer(cx, move |window, cx| {
+                        entity.update(cx, |this, cx| this.wt_remove(main, &worktree, window, cx));
+                    });
+                    true
+                })
+        });
+    }
+
+    fn wt_remove(
         &mut self,
         main: PathBuf,
         worktree: &Path,
@@ -1993,12 +2053,14 @@ impl ClaudhubApp {
             return;
         };
         // The base may be a remote branch (`origin/main`); it is the main
-        // repository's that gets updated, so its short name.
-        let base = base
-            .rsplit_once('/')
-            .map(|(_, b)| b)
-            .unwrap_or(&base)
-            .to_string();
+        // repository's that gets updated, so its local name.
+        let branches = self
+            .repos
+            .iter()
+            .find(|repo| repo.main == main)
+            .map(|repo| repo.branches.as_slice())
+            .unwrap_or_default();
+        let base = local_base(&base, branches).to_string();
         // Recorded before the send: it is on the success arriving that the
         // cleanup is offered, and the worktree cannot be derived from the answer.
         self.integrated = Some((worktree, branch.clone()));
@@ -2048,23 +2110,74 @@ impl ClaudhubApp {
                 .close_button(false)
                 .footer(super::dialogs::confirm())
                 .on_ok(move |_, window, cx| {
-                    entity.update(cx, |this, _cx| {
-                        this.git.send(Cmd::DeleteBranch {
-                            main: main.clone(),
-                            name: branch.clone(),
-                            force: false,
-                        });
-                    });
                     // The removal opens its console, and it opens **after**
                     // this dialog has closed: `true` closes the topmost one,
                     // which would be the console if it were opened here.
-                    let (entity, main, worktree) = (entity.clone(), main.clone(), worktree.clone());
+                    let (entity, main, worktree, branch) = (
+                        entity.clone(),
+                        main.clone(),
+                        worktree.clone(),
+                        branch.clone(),
+                    );
                     window.defer(cx, move |window, cx| {
-                        entity.update(cx, |this, cx| this.wt_remove(main, &worktree, window, cx));
+                        entity.update(cx, |this, cx| {
+                            this.remove_integrated(main, worktree, branch, window, cx)
+                        });
                     });
                     true
                 })
         });
+    }
+
+    /// Removes an integrated worktree, then its branch.
+    ///
+    /// **In that order, and the second waits for the first.** The branch was
+    /// deleted from the same click, on the reads queue, while the removal went
+    /// to the hooks one a frame later: git refused — "cannot delete branch
+    /// checked out at…" — every time, the checkout still being there. The
+    /// branch is now left to `removal_ended`, which sends it on the removal's
+    /// success and forgets it on its failure. Without `wt` the bare git removal
+    /// does the job, which refuses a dirty checkout — the base has the work,
+    /// what it would lose is what came after.
+    fn remove_integrated(
+        &mut self,
+        main: PathBuf,
+        worktree: PathBuf,
+        branch: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.branch_after_removal = Some((main.clone(), branch));
+        if self.wt_slug(&main, &worktree).is_some() {
+            self.wt_remove(main, &worktree, window, cx);
+        } else {
+            self.git.send(Cmd::RemoveWorktree {
+                main,
+                path: worktree,
+                force: false,
+            });
+            cx.notify();
+        }
+    }
+
+    /// A worktree removal has ended: the branch waiting on it goes, or stays.
+    ///
+    /// `Action::Worktree` is what both removals answer under — `wt rm` and the
+    /// bare one — and nothing else is waited on here.
+    pub(super) fn removal_ended(&mut self, action: Action, ok: bool) {
+        if action != Action::Worktree {
+            return;
+        }
+        let Some((main, name)) = self.branch_after_removal.take() else {
+            return;
+        };
+        if ok {
+            self.git.send(Cmd::DeleteBranch {
+                main,
+                name,
+                force: false,
+            });
+        }
     }
 
     /// A worktree's context menu: git on one side, the project on the other.
@@ -2265,7 +2378,9 @@ impl ClaudhubApp {
                 "wt-remove",
                 "trash-2",
                 tr!("worktree-remove"),
-                move |app, window, cx| app.wt_remove(main.clone(), &target, window, cx),
+                move |app, window, cx| {
+                    app.confirm_wt_remove(main.clone(), target.clone(), window, cx)
+                },
             );
             actions.push(if first { action.group() } else { action });
         }
@@ -2691,9 +2806,111 @@ impl ClaudhubApp {
     }
 }
 
+/// The questions of a round that this dialog has not put yet.
+///
+/// A dialog asks a question once. The round after it has an answer, `wt` drops
+/// it — unless it is `always`, which comes back on every round and made the
+/// dialog loop; what the loop still needs from `wt` is the questions a new
+/// answer **unlocks**, and those have never been put.
+fn unasked(
+    questions: Vec<wt::Question>,
+    asked: &std::collections::BTreeSet<String>,
+) -> Vec<wt::Question> {
+    questions
+        .into_iter()
+        .filter(|question| !asked.contains(&question.name))
+        .collect()
+}
+
+/// The base's name in the main repository, where the integration updates it.
+///
+/// A remote-tracking base (`origin/release/2.0`) loses its remote and **only
+/// that**: cutting at the last slash made `2.0` of it, and at the first one
+/// would make `2.0` of a local `release/2.0`. The branch list decides which
+/// it is — it holds every local branch, and the remote ones with no local twin
+/// — and without one, only `origin/` is taken off, `ui::github`'s rule.
+fn local_base<'a>(base: &'a str, branches: &[crate::git::Branch]) -> &'a str {
+    use crate::git::BranchKind;
+    let is = |name: &str, kind: BranchKind| {
+        branches
+            .iter()
+            .any(|branch| branch.kind == kind && branch.name == name)
+    };
+    if is(base, BranchKind::Local) {
+        return base;
+    }
+    if let Some((_, rest)) = base.split_once('/') {
+        if is(base, BranchKind::Remote) || is(rest, BranchKind::Local) {
+            return rest;
+        }
+    }
+    base.strip_prefix("origin/").unwrap_or(base)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn branch(name: &str, kind: crate::git::BranchKind) -> crate::git::Branch {
+        crate::git::Branch {
+            name: name.into(),
+            kind,
+            date: String::new(),
+            subject: String::new(),
+            author: String::new(),
+            upstream: None,
+            checked_out_at: None,
+        }
+    }
+
+    /// A base carrying slashes of its own keeps them: only the remote goes.
+    #[test]
+    fn the_base_loses_its_remote_and_nothing_else() {
+        use crate::git::BranchKind::{Local, Remote};
+        let branches = [
+            branch("main", Local),
+            branch("release/2.0", Local),
+            branch("upstream/hotfix/1.2", Remote),
+        ];
+        // A remote-tracking name whose local twin hides it from the list.
+        assert_eq!(local_base("origin/main", &branches), "main");
+        assert_eq!(local_base("origin/release/2.0", &branches), "release/2.0");
+        // A local branch with a slash is not a remote one.
+        assert_eq!(local_base("release/2.0", &branches), "release/2.0");
+        // Another remote, known as such.
+        assert_eq!(local_base("upstream/hotfix/1.2", &branches), "hotfix/1.2");
+        assert_eq!(local_base("main", &branches), "main");
+        // No list yet: `origin/` only.
+        assert_eq!(local_base("origin/release/2.0", &[]), "release/2.0");
+        assert_eq!(local_base("wt/feature", &[]), "wt/feature");
+    }
+
+    fn question(name: &str) -> wt::Question {
+        wt::Question {
+            name: name.into(),
+            title: name.into(),
+            kind: wt::Kind::Text,
+            choices: Vec::new(),
+            default: None,
+            separator: String::new(),
+        }
+    }
+
+    /// An `always` question comes back on every round; the dialog asks it
+    /// once, and the loop ends.
+    #[test]
+    fn a_question_is_put_once_per_dialog() {
+        let mut asked = std::collections::BTreeSet::new();
+        let first = unasked(vec![question("tenants")], &asked);
+        assert_eq!(first.len(), 1);
+        asked.extend(first.iter().map(|q| q.name.clone()));
+        // Round 1: `wt` sends the `always` one again, plus one it unlocked.
+        let second = unasked(vec![question("tenants"), question("services")], &asked);
+        let names: Vec<&str> = second.iter().map(|q| q.name.as_str()).collect();
+        assert_eq!(names, ["services"]);
+        asked.extend(second.iter().map(|q| q.name.clone()));
+        assert!(unasked(vec![question("tenants"), question("services")], &asked).is_empty());
+    }
 
     /// A console is opened under an action and closed by the `Done` that
     /// echoes it: the two tables must agree, or a console would never close —
