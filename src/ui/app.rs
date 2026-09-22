@@ -742,6 +742,9 @@ pub struct ClaudhubApp {
     /// The worktree whose integration has gone out, and its branch: it is on the
     /// success arriving that the cleanup is offered.
     pub(super) integrated: Option<(PathBuf, String)>,
+    /// The local half of a branch deletion that also asked for `origin`'s,
+    /// waiting for that one to go through (`branches::delete_branch`).
+    pub(super) local_deletion: Option<Cmd>,
     /// Each worktree's files and their tree.
     pub(super) explorers: HashMap<PathBuf, crate::ui::explorer::Explorer>,
     /// The file open in the built-in editor, **one per worktree**.
@@ -1385,6 +1388,7 @@ impl ClaudhubApp {
             wt_links: HashMap::new(),
             creation: None,
             integrated: None,
+            local_deletion: None,
             explorers: HashMap::new(),
             editings: HashMap::new(),
             jumps: HashMap::new(),
@@ -2310,9 +2314,10 @@ impl ClaudhubApp {
                 request,
                 result,
             } => {
-                // An answer about a worktree one has left: kept all the same,
-                // the panel saying which checkout its results belong to. What
-                // would be wrong is showing them as this worktree's.
+                // The request id says which search it answers, and that is
+                // enough: an answer about a worktree one has left is filed with
+                // that worktree's search (`file_late_search`) and shown on
+                // coming back, never under this one's field.
                 let _ = worktree;
                 self.search_done(request, result, window, cx)
             }
@@ -2801,23 +2806,26 @@ impl ClaudhubApp {
         let Some(state) = self.review.get_mut(&worktree) else {
             return;
         };
-        state.history_pending = false;
         // A late answer, for a range no longer being looked at, would replace
-        // the history with the wrong one.
-        if state.history_range == range {
-            let width = crate::git::history::width(&graph);
-            // The row's texts are built here, once, and not in the list's
-            // closure: that one runs for every visible row of every frame, and
-            // it was four strings copied per row.
-            let texts = crate::ui::history_view::commit_texts(&commits);
-            state.history = Some(std::rc::Rc::new(History {
-                commits,
-                graph,
-                patches,
-                texts,
-                width,
-            }));
+        // the history with the wrong one — and it says nothing of the range
+        // that is: the pending flag is that one's, and so is the commit a
+        // line history opens.
+        if state.history_range != range {
+            return;
         }
+        state.history_pending = false;
+        let width = crate::git::history::width(&graph);
+        // The row's texts are built here, once, and not in the list's
+        // closure: that one runs for every visible row of every frame, and
+        // it was four strings copied per row.
+        let texts = crate::ui::history_view::commit_texts(&commits);
+        state.history = Some(std::rc::Rc::new(History {
+            commits,
+            graph,
+            patches,
+            texts,
+            width,
+        }));
         // A line history is asked for by a gesture on a selection, and it is
         // that selection's story one wants to read: showing the list without
         // opening anything would ask for a second click to say what was already
@@ -2877,6 +2885,15 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         self.finish(&worktree, action);
+        // `origin`'s half of a branch deletion has gone through: the local half
+        // follows, under the key just taken back. A branch answer carries no
+        // name, so this is the next one to arrive — which is the remote's as
+        // long as one branch gesture is out at a time, as a hand makes them.
+        if action == Action::Branch && worktree.is_none() {
+            if let Some(local) = self.local_deletion.take() {
+                self.start(None, Action::Branch, local, cx);
+            }
+        }
         // A git write can have moved `HEAD` under the files being edited — a
         // commit is the everyday case, and it is the one where the gutter's
         // marks have to go quiet. Hooked on a completed gesture and not on a
@@ -2973,6 +2990,11 @@ impl ClaudhubApp {
         }
         if action == Action::SuggestMessage {
             self.suggesting_message = None;
+        }
+        // The remote half of a branch deletion refused: the local half is not
+        // sent, and the branch stays where it is on both sides.
+        if action == Action::Branch && worktree.is_none() {
+            self.local_deletion = None;
         }
         // Same reason as the status above: without this, one `ls-files` that
         // fails leaves the explorer waiting for an answer that will never come,
@@ -3198,6 +3220,7 @@ impl ClaudhubApp {
     /// dying, and a new one taking its place.
     fn clear_running(&mut self) {
         self.flight.clear();
+        self.local_deletion = None;
     }
 
     fn finish(&mut self, worktree: &Option<PathBuf>, action: Action) {
