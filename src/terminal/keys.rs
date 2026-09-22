@@ -58,6 +58,17 @@ pub fn key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
         Some(format!("{intro}{letter}").into_bytes())
     };
 
+    // F1 to F4, xterm's SS3 keys: `ESC O P` alone, and with a modifier the
+    // same long form as the arrows — `ESC [ 1 ; 2 P` for Shift+F1. Sending the
+    // bare form whatever the modifiers made Shift+F1 a plain F1, and a
+    // program binding both could only ever see one.
+    let function = |letter: char| -> Option<Vec<u8>> {
+        match modifier_code(m) {
+            Some(n) => Some(format!("\x1b[1;{n}{letter}").into_bytes()),
+            None => Some(format!("\x1bO{letter}").into_bytes()),
+        }
+    };
+
     // Editing keys, of the form `ESC [ n ~`.
     let tilde = |n: u8| -> Option<Vec<u8>> {
         match modifier_code(m) {
@@ -77,10 +88,10 @@ pub fn key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
         "delete" => tilde(3),
         "pageup" => tilde(5),
         "pagedown" => tilde(6),
-        "f1" => Some(b"\x1bOP".to_vec()),
-        "f2" => Some(b"\x1bOQ".to_vec()),
-        "f3" => Some(b"\x1bOR".to_vec()),
-        "f4" => Some(b"\x1bOS".to_vec()),
+        "f1" => function('P'),
+        "f2" => function('Q'),
+        "f3" => function('R'),
+        "f4" => function('S'),
         "f5" => tilde(15),
         "f6" => tilde(17),
         "f7" => tilde(18),
@@ -247,6 +258,18 @@ mod tests {
         assert_eq!(bytes("delete", TermMode::empty()), b"\x1b[3~");
         assert_eq!(bytes("ctrl-delete", TermMode::empty()), b"\x1b[3;5~");
         assert_eq!(bytes("pageup", TermMode::empty()), b"\x1b[5~");
+    }
+
+    /// F1–F4 carry their modifiers in the long form, as the arrows do; F5 and
+    /// up already did, through the tilde form.
+    #[test]
+    fn function_keys_carry_their_modifiers() {
+        assert_eq!(bytes("f1", TermMode::empty()), b"\x1bOP");
+        assert_eq!(bytes("f4", TermMode::empty()), b"\x1bOS");
+        assert_eq!(bytes("shift-f1", TermMode::empty()), b"\x1b[1;2P");
+        assert_eq!(bytes("ctrl-f2", TermMode::empty()), b"\x1b[1;5Q");
+        assert_eq!(bytes("alt-shift-f3", TermMode::empty()), b"\x1b[1;4R");
+        assert_eq!(bytes("shift-f5", TermMode::empty()), b"\x1b[15;2~");
     }
 
     #[test]
