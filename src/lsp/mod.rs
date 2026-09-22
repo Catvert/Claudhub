@@ -34,7 +34,7 @@ pub mod uri;
 use std::collections::{BTreeMap, HashMap};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -202,9 +202,9 @@ pub enum Ask {
     /// The view's answer to a `workspace/applyEdit` the server asked for.
     ///
     /// It is the only order that answers a **request of the server's**, and it
-    /// carries the server's own id: the session held nothing while it waited,
-    /// so a view that never answers costs the server one pending request and
-    /// costs us nothing.
+    /// carries the number the session gave the view for it — the server's own
+    /// id may be a string, which the wire's `u64` cannot carry, so the session
+    /// keeps it and puts it back on the answer (`Session::server_asks`).
     Applied {
         id: u64,
         applied: bool,
@@ -270,13 +270,40 @@ impl Host {
     /// Hands an order to a session. A worktree with no session drops it — the
     /// same behaviour as a command issued before the remote server is up, and
     /// for the same reason: the view re-asks by itself.
+    ///
+    /// **A request is never dropped in silence**, though: the view is waiting
+    /// on it, and a `Task` nobody resolves is a popover that spins for ever
+    /// and a definition that never falls back on `git grep`. Two ways to get
+    /// here — no session at all, or one whose thread has ended (the server
+    /// crashed; only `stop` takes a sender out of the table, so a dead one
+    /// stays) — and both answer with an error. The dead sender goes with it:
+    /// its channel will never be read again.
     pub fn ask(&self, worktree: &Path, ask: Ask) {
-        let sessions = self.sessions.lock().unwrap();
-        let Some(session) = sessions.get(worktree) else {
-            log::debug!("no language server for {}, dropped", worktree.display());
-            return;
+        let mut sessions = self.sessions.lock().unwrap();
+        let refused = match sessions.get(worktree) {
+            None => {
+                log::debug!("no language server for {}, dropped", worktree.display());
+                ask
+            }
+            Some(session) => match session.send(Message::Ask(ask)) {
+                Ok(()) => return,
+                Err(mpsc::SendError(message)) => {
+                    log::debug!("language server for {} is gone", worktree.display());
+                    sessions.remove(worktree);
+                    let Message::Ask(ask) = message else {
+                        return;
+                    };
+                    ask
+                }
+            },
         };
-        let _ = session.send(Message::Ask(ask));
+        if let Ask::Request { id, .. } = refused {
+            let _ = self.events.try_send(Evt::LspAnswer {
+                worktree: worktree.to_path_buf(),
+                id,
+                result: Err("no language server is running".into()),
+            });
+        }
     }
 }
 
@@ -328,26 +355,30 @@ fn session(
             return;
         }
     };
-    let mut stdin = child.stdin.take().expect("stdin was piped");
+    let stdin = child.stdin.take().expect("stdin was piped");
     read_pipes(&mut child, &server, self_tx);
 
-    let mut state = Session {
-        worktree: worktree.clone(),
-        server,
-        events: events.clone(),
-        next_id: 1,
-        pending: HashMap::new(),
-        documents: HashMap::new(),
-        sync: SyncKind::Full,
-        ready: false,
-        queued: Vec::new(),
+    let reason = match write_pipe(stdin, &server) {
+        Ok(mut outbox) => {
+            Session::new(worktree.clone(), server, events.clone()).run(&mut outbox, inbox)
+        }
+        Err(e) => Some(format!("no thread to write to the language server: {e}")),
     };
-
-    let reason = state.run(&mut stdin, inbox);
 
     // The child dies with the session, always: a language server on a
     // twenty-thousand-file project holds hundreds of megabytes, and one left
     // behind by a worktree nobody looks at is a leak nothing else would catch.
+    //
+    // **The group, not the child.** What is declared is often a launcher —
+    // `npx intelephense`, a shell script, `sail` — whose own child is the
+    // server, and `Child::kill` reaches the launcher alone: the node process
+    // under it was left running, reparented to init, for every restart.
+    #[cfg(unix)]
+    // SAFETY: the child has not been reaped — `wait` comes after — so the pid
+    // is still its own, and the group it leads is the one `launch` made.
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL)
+    };
     let _ = child.kill();
     let _ = child.wait();
     let _ = events.try_send(Evt::LspStopped { worktree, reason });
@@ -362,7 +393,69 @@ fn launch(worktree: &Path, server: &Server) -> anyhow::Result<Child> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // A group of its own, so that ending the session can end everything the
+    // declared command started — see the kill in `session`.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
     Ok(command.spawn()?)
+}
+
+/// The server's stdin, behind a thread of its own.
+///
+/// **The session must never block on a write.** A pipe holds sixty-four
+/// kilobytes; a server that stops reading — wedged, or busy indexing on the
+/// thread that reads — fills it with the first large `didChange`, and a
+/// session blocked in `write` reads nothing else: not the `Stop` that would
+/// kill the child, not the timeouts that would fail what waits. The writer
+/// takes whole frames from a channel and blocks in its place; the kill breaks
+/// the pipe, and that is what ends it.
+fn write_pipe(mut stdin: ChildStdin, server: &Server) -> std::io::Result<Outbox> {
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let name = format!("claudhub-lsp-{}-out", server.name);
+    std::thread::Builder::new().name(name).spawn(move || {
+        use std::io::Write;
+        for frame in rx {
+            if let Err(e) = stdin.write_all(&frame).and_then(|()| stdin.flush()) {
+                log::debug!("the language server's input closed: {e}");
+                return;
+            }
+        }
+    })?;
+    Ok(Outbox {
+        buffer: Vec::new(),
+        writer: tx,
+    })
+}
+
+/// What the session writes to: a buffer that leaves, whole, on `flush`.
+///
+/// `frame::write` writes the header and the payload and then flushes, so a
+/// flush is a frame and the writer thread never sees half of one. The error a
+/// dead writer gives back is the broken pipe a direct write would have met.
+struct Outbox {
+    buffer: Vec<u8>,
+    writer: Sender<Vec<u8>>,
+}
+
+impl std::io::Write for Outbox {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.buffer.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        self.writer
+            .send(std::mem::take(&mut self.buffer))
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "the language server's input is closed",
+                )
+            })
+    }
 }
 
 /// The two reader threads: frames on stdout, and the journal on stderr.
@@ -414,13 +507,44 @@ struct Session {
     documents: HashMap<PathBuf, sync::Document>,
     sync: SyncKind,
     ready: bool,
-    /// What the view asked before the handshake came back. Replayed in order:
-    /// a `didOpen` issued the moment the button was pressed must not be lost,
-    /// and it must not arrive after the completion that needs it either.
-    queued: Vec<Ask>,
+    /// What the view asked before the handshake came back, and when. Replayed
+    /// in order: a `didOpen` issued the moment the button was pressed must not
+    /// be lost, and it must not arrive after the completion that needs it
+    /// either. The instant is a request's clock: its fifteen seconds start
+    /// when the view asked, not when a slow handshake let it leave — a
+    /// completion asked during a minute of indexing is long stale by then.
+    queued: Vec<(Ask, Instant)>,
+    /// Why the session has to end, said by a handler that cannot return it —
+    /// a server refusing `initialize` is noticed deep inside `answer`.
+    ended: Option<String>,
+    /// The ids of the server's own requests that wait on the view, under the
+    /// number the view is given for them.
+    ///
+    /// An id is a number **or a string** — lsp4j sends strings — and it must
+    /// come back exactly as it came. The wire carries a `u64` towards the view
+    /// (`Evt::LspApplyEdit`); the stand-in is ours, and the real id stays here.
+    server_asks: HashMap<u64, Value>,
+    next_ask: u64,
 }
 
 impl Session {
+    fn new(worktree: WorktreeId, server: Server, events: async_channel::Sender<Evt>) -> Self {
+        Self {
+            worktree,
+            server,
+            events,
+            next_id: 1,
+            pending: HashMap::new(),
+            documents: HashMap::new(),
+            sync: SyncKind::Full,
+            ready: false,
+            queued: Vec::new(),
+            ended: None,
+            server_asks: HashMap::new(),
+            next_ask: 1,
+        }
+    }
+
     /// The loop. Returns why it ended, for the event that says so.
     fn run(&mut self, stdin: &mut impl std::io::Write, inbox: Receiver<Message>) -> Option<String> {
         if let Err(e) = self.handshake(stdin) {
@@ -430,9 +554,9 @@ impl Session {
             match inbox.recv_timeout(TICK) {
                 Ok(Message::Ask(ask)) => {
                     if self.ready {
-                        self.perform(stdin, ask);
+                        self.perform(stdin, ask, Instant::now());
                     } else {
-                        self.queued.push(ask);
+                        self.hold(ask);
                     }
                 }
                 Ok(Message::Incoming(payload)) => self.incoming(stdin, &payload),
@@ -442,10 +566,29 @@ impl Session {
                 // The host dropped the sender: the window is gone.
                 Err(RecvTimeoutError::Disconnected) => return None,
             }
+            if let Some(reason) = self.ended.take() {
+                return Some(reason);
+            }
             if let Some(reason) = self.expire() {
                 return Some(reason);
             }
         }
+    }
+
+    /// Keeps an order for after the handshake. A cancel finds its request still
+    /// in the queue and takes it out: sending it only to cancel it at once
+    /// would be a round trip for nothing.
+    fn hold(&mut self, ask: Ask) {
+        if let Ask::Cancel { id } = ask {
+            let before = self.queued.len();
+            self.queued.retain(
+                |(queued, _)| !matches!(queued, Ask::Request { id: waiting, .. } if *waiting == id),
+            );
+            if self.queued.len() != before {
+                return;
+            }
+        }
+        self.queued.push((ask, Instant::now()));
     }
 
     fn handshake(&mut self, stdin: &mut impl std::io::Write) -> anyhow::Result<()> {
@@ -454,7 +597,7 @@ impl Session {
             "initialize",
             initialize_params(&self.worktree),
             Origin::Handshake,
-            HANDSHAKE_TIMEOUT,
+            Instant::now() + HANDSHAKE_TIMEOUT,
         )?;
         log::info!(
             "language server {} starting in {} (request {id})",
@@ -471,19 +614,16 @@ impl Session {
         method: &str,
         params: Value,
         origin: Origin,
-        timeout: Duration,
+        deadline: Instant,
     ) -> anyhow::Result<u64> {
         let id = self.next_id;
         self.next_id += 1;
-        self.pending.insert(
-            id,
-            Pending {
-                origin,
-                deadline: Instant::now() + timeout,
-            },
-        );
         let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         frame::write(stdin, &message.to_string())?;
+        // Filed once it has left: a request that could not be written is
+        // answered by the caller at once, and must not be answered a second
+        // time by the timeout.
+        self.pending.insert(id, Pending { origin, deadline });
         Ok(id)
     }
 
@@ -500,14 +640,33 @@ impl Session {
         }
     }
 
-    /// Carries out one of the view's orders.
-    fn perform(&mut self, stdin: &mut impl std::io::Write, ask: Ask) {
+    /// Carries out one of the view's orders, asked at `asked`.
+    fn perform(&mut self, stdin: &mut impl std::io::Write, ask: Ask, asked: Instant) {
         match ask {
             Ask::Open {
                 path,
                 language_id,
                 text,
             } => {
+                // Already open: a reread, told as the full-text change it is —
+                // see `Document::replace`.
+                if let Some(document) = self.documents.get_mut(&path) {
+                    if document.replace(text) && self.sync != SyncKind::None {
+                        let version = document.version;
+                        let text = document.text.clone();
+                        self.notify(
+                            stdin,
+                            "textDocument/didChange",
+                            json!({
+                                "textDocument": {"uri": uri::of(&path), "version": version},
+                                // No range: the whole document, which a server
+                                // asking for ranges accepts all the same.
+                                "contentChanges": [{"text": text}],
+                            }),
+                        );
+                    }
+                    return;
+                }
                 let document = sync::Document::new(text);
                 self.notify(
                     stdin,
@@ -583,7 +742,7 @@ impl Session {
                     &method.clone(),
                     params,
                     Origin::View(id),
-                    REQUEST_TIMEOUT,
+                    asked + REQUEST_TIMEOUT,
                 ) {
                     self.emit(Evt::LspAnswer {
                         worktree: self.worktree.clone(),
@@ -593,6 +752,10 @@ impl Session {
                 }
             }
             Ask::Applied { id, applied } => {
+                let Some(id) = self.server_asks.remove(&id) else {
+                    log::debug!("an answer to an edit the server never asked for");
+                    return;
+                };
                 let answer = json!({
                     "jsonrpc": "2.0", "id": id,
                     "result": {"applied": applied},
@@ -622,11 +785,21 @@ impl Session {
             log::warn!("unreadable message from the language server");
             return;
         };
-        let id = message.get("id").and_then(Value::as_u64);
+        // Kept as it came: `"1"` is as much an id as `1` — lsp4j writes them
+        // as strings — and reading only numbers took every request of such a
+        // server for a notification, which nobody answered.
+        let id = message.get("id").filter(|id| !id.is_null()).cloned();
         let method = message.get("method").and_then(Value::as_str);
         match (id, method) {
-            // An answer to one of ours.
-            (Some(id), None) => self.answer(stdin, id, &message),
+            // An answer to one of ours. We only ever send numbers, but a
+            // server that stringifies them on the way back is still answering.
+            (Some(id), None) => match id
+                .as_u64()
+                .or_else(|| id.as_str().and_then(|s| s.parse().ok()))
+            {
+                Some(id) => self.answer(stdin, id, &message),
+                None => log::debug!("an answer to a request we never made: {id}"),
+            },
             // A request from the server: it waits for an answer, and a server
             // left waiting stops serving.
             (Some(id), Some(method)) => self.serve(stdin, id, method, &message),
@@ -648,8 +821,13 @@ impl Session {
         });
         match pending.origin {
             Origin::Handshake => {
+                // A refused `initialize` is a server that will not serve, and
+                // the session ends on it: left running it was `Starting` for
+                // ever — no `ready`, no `LspStopped`, a child alive and a
+                // queue of the view's orders growing behind a door that would
+                // never open.
                 if let Some(error) = error {
-                    log::warn!("language server {}: {error}", self.server.name);
+                    self.ended = Some(format!("initialize refused: {error}"));
                     return;
                 }
                 let capabilities = message
@@ -670,8 +848,8 @@ impl Session {
                     name: self.server.name.clone(),
                     capabilities: capabilities.to_string(),
                 });
-                for ask in std::mem::take(&mut self.queued) {
-                    self.perform(stdin, ask);
+                for (ask, asked) in std::mem::take(&mut self.queued) {
+                    self.perform(stdin, ask, asked);
                 }
             }
             Origin::View(view_id) => {
@@ -694,19 +872,23 @@ impl Session {
     /// everything else gets the error the specification defines. Saying nothing
     /// is the one thing that must not happen: a server that registers a
     /// capability and waits for the acknowledgement stops there.
-    fn serve(&self, stdin: &mut impl std::io::Write, id: u64, method: &str, message: &Value) {
+    fn serve(&mut self, stdin: &mut impl std::io::Write, id: Value, method: &str, message: &Value) {
         // The one request we cannot answer from here: applying an edit is the
         // view's to do — it holds the buffer, and it is the only one that knows
-        // whether the file is open. The answer comes back as `Ask::Applied`.
+        // whether the file is open. The answer comes back as `Ask::Applied`,
+        // under the stand-in the view was given for the server's id.
         if method == "workspace/applyEdit" {
             let edit = message
                 .get("params")
                 .and_then(|p| p.get("edit"))
                 .cloned()
                 .unwrap_or(Value::Null);
+            let token = self.next_ask;
+            self.next_ask += 1;
+            self.server_asks.insert(token, id);
             self.emit(Evt::LspApplyEdit {
                 worktree: self.worktree.clone(),
-                id,
+                id: token,
                 edit: edit.to_string(),
             });
             return;
@@ -809,6 +991,23 @@ impl Session {
                 }),
                 None => {}
             }
+        }
+        // And what is still queued behind the handshake: its clock started
+        // when the view asked.
+        let mut overdue = Vec::new();
+        self.queued.retain(|(ask, asked)| match ask {
+            Ask::Request { id, .. } if *asked + REQUEST_TIMEOUT <= now => {
+                overdue.push(*id);
+                false
+            }
+            _ => true,
+        });
+        for view_id in overdue {
+            self.emit(Evt::LspAnswer {
+                worktree: self.worktree.clone(),
+                id: view_id,
+                result: Err("the language server is still starting".into()),
+            });
         }
         None
     }
@@ -994,30 +1193,28 @@ mod tests {
     /// computed from the two texts, and the answer finding the view's own id
     /// again.
     fn drive(messages: Vec<Message>) -> (String, Vec<Evt>) {
+        let (_, written, events) = drive_to_end(messages);
+        (written, events)
+    }
+
+    /// The same, and why the loop ended: `None` is the `Stop` queued last,
+    /// anything else is the session ending on its own before reaching it.
+    fn drive_to_end(messages: Vec<Message>) -> (Option<String>, String, Vec<Evt>) {
         let (events_tx, events_rx) = async_channel::unbounded();
         let (inbox_tx, inbox_rx) = mpsc::channel();
         for message in messages {
             inbox_tx.send(message).unwrap();
         }
         inbox_tx.send(Message::Stop).unwrap();
-        let mut session = Session {
-            worktree: PathBuf::from("/p/site"),
-            server: server("php", &["php"]),
-            events: events_tx,
-            next_id: 1,
-            pending: HashMap::new(),
-            documents: HashMap::new(),
-            sync: SyncKind::Full,
-            ready: false,
-            queued: Vec::new(),
-        };
+        let mut session =
+            Session::new(PathBuf::from("/p/site"), server("php", &["php"]), events_tx);
         let mut written: Vec<u8> = Vec::new();
-        session.run(&mut written, inbox_rx);
+        let reason = session.run(&mut written, inbox_rx);
         let mut events = Vec::new();
         while let Ok(event) = events_rx.try_recv() {
             events.push(event);
         }
-        (String::from_utf8(written).unwrap(), events)
+        (reason, String::from_utf8(written).unwrap(), events)
     }
 
     /// What the session wrote, read back through our own framing — asserting
@@ -1169,29 +1366,31 @@ mod tests {
         let (written, events) = drive(vec![
             answer(1, json!({"capabilities": {}})),
             Message::Incoming(
+                // A string id, as lsp4j writes them: the view is handed a
+                // number of ours, and the server gets its own string back.
                 json!({
-                    "jsonrpc": "2.0", "id": 9, "method": "workspace/applyEdit",
+                    "jsonrpc": "2.0", "id": "edit-9", "method": "workspace/applyEdit",
                     "params": {"edit": {"changes": {"file:///p/site/a.php": []}}},
                 })
                 .to_string(),
             ),
             Message::Ask(Ask::Applied {
-                id: 9,
+                id: 1,
                 applied: true,
             }),
         ]);
         // Nothing is answered until the view has spoken...
         match &events[..] {
-            [Evt::LspReady { .. }, Evt::LspApplyEdit { id: 9, edit, .. }] => {
+            [Evt::LspReady { .. }, Evt::LspApplyEdit { id: 1, edit, .. }] => {
                 assert!(edit.contains("a.php"))
             }
             other => panic!("{other:?}"),
         }
-        // ...and then it is, with the server's own id.
+        // ...and then it is, with the server's own id, exactly as it came.
         let messages = frames(&written);
         let answered = messages
             .iter()
-            .find(|m| m.get("id").and_then(Value::as_u64) == Some(9))
+            .find(|m| m.get("id") == Some(&json!("edit-9")))
             .expect("the server was left waiting");
         assert_eq!(answered["result"], json!({"applied": true}));
     }
@@ -1215,6 +1414,182 @@ mod tests {
         let messages = frames(&written);
         assert_eq!(sent(&messages, "$/cancelRequest")["params"]["id"], 2);
         assert!(!events.iter().any(|e| matches!(e, Evt::LspAnswer { .. })));
+    }
+
+    /// A server that refuses `initialize` ends the session, and says why: it
+    /// used to stay `Starting` for ever, its child alive and the view's orders
+    /// piling up behind a handshake that had already failed.
+    #[test]
+    fn a_refused_handshake_ends_the_session() {
+        let (reason, _, events) = drive_to_end(vec![
+            Message::Ask(Ask::Request {
+                id: 3,
+                method: "textDocument/hover".into(),
+                params: "{}".into(),
+            }),
+            Message::Incoming(
+                json!({"jsonrpc": "2.0", "id": 1,
+                       "error": {"code": -32603, "message": "no composer.json"}})
+                .to_string(),
+            ),
+        ]);
+        let reason = reason.expect("the session ended on its own, before the Stop");
+        assert!(reason.contains("no composer.json"), "{reason}");
+        assert!(!events.iter().any(|e| matches!(e, Evt::LspReady { .. })));
+    }
+
+    /// A request queued behind a slow handshake keeps its own clock: it fails
+    /// fifteen seconds after the view asked, not fifteen seconds after the
+    /// server finally came up.
+    #[test]
+    fn a_request_queued_behind_the_handshake_expires_on_its_own_clock() {
+        let (events_tx, events_rx) = async_channel::unbounded();
+        let mut session =
+            Session::new(PathBuf::from("/p/site"), server("php", &["php"]), events_tx);
+        let long_ago = Instant::now()
+            .checked_sub(REQUEST_TIMEOUT + Duration::from_secs(1))
+            .expect("a clock that has run that long");
+        let request = |id| Ask::Request {
+            id,
+            method: "textDocument/completion".into(),
+            params: "{}".into(),
+        };
+        session.queued.push((request(4), long_ago));
+        session.queued.push((request(5), Instant::now()));
+        assert!(session.expire().is_none());
+        match events_rx.try_recv() {
+            Ok(Evt::LspAnswer {
+                id: 4,
+                result: Err(_),
+                ..
+            }) => {}
+            other => panic!("{other:?}"),
+        }
+        assert!(events_rx.try_recv().is_err(), "the fresh one keeps waiting");
+        assert_eq!(session.queued.len(), 1);
+    }
+
+    /// Cancelled before the handshake: taken out of the queue, never sent.
+    #[test]
+    fn a_request_cancelled_before_the_handshake_is_never_sent() {
+        let (written, _) = drive(vec![
+            Message::Ask(Ask::Request {
+                id: 6,
+                method: "textDocument/completion".into(),
+                params: "{}".into(),
+            }),
+            Message::Ask(Ask::Cancel { id: 6 }),
+            answer(1, json!({"capabilities": {}})),
+        ]);
+        let messages = frames(&written);
+        assert!(!messages
+            .iter()
+            .any(|m| m.get("method").and_then(Value::as_str) == Some("textDocument/completion")));
+        assert!(!messages
+            .iter()
+            .any(|m| m.get("method").and_then(Value::as_str) == Some("$/cancelRequest")));
+    }
+
+    /// A file announced twice — the view rereads it on every save — is opened
+    /// once and changed after: a second `didOpen` is a protocol error, and the
+    /// versions must keep climbing.
+    #[test]
+    fn a_document_opened_twice_is_changed_the_second_time() {
+        let open = |text: &str| {
+            Message::Ask(Ask::Open {
+                path: PathBuf::from("/p/site/a.php"),
+                language_id: "php".into(),
+                text: text.into(),
+            })
+        };
+        let (written, _) = drive(vec![
+            answer(1, json!({"capabilities": {"textDocumentSync": 2}})),
+            open("<?php\n"),
+            // The same text again is nothing to say.
+            open("<?php\n"),
+            open("<?php\necho 1;\n"),
+        ]);
+        let messages = frames(&written);
+        let methods: Vec<&str> = messages
+            .iter()
+            .filter_map(|m| m.get("method").and_then(Value::as_str))
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                "initialize",
+                "initialized",
+                "textDocument/didOpen",
+                "textDocument/didChange"
+            ]
+        );
+        let change = sent(&messages, "textDocument/didChange");
+        assert_eq!(change["params"]["textDocument"]["version"], 2);
+        // The whole text, with no range: a reread is not an edit we computed.
+        assert_eq!(
+            change["params"]["contentChanges"],
+            json!([{"text": "<?php\necho 1;\n"}])
+        );
+    }
+
+    /// A request of the server's with a string id is a request, answered under
+    /// that same string — not a notification nobody answers.
+    #[test]
+    fn a_string_id_is_a_request_and_comes_back_as_it_came() {
+        let (written, _) = drive(vec![
+            answer(1, json!({"capabilities": {}})),
+            Message::Incoming(
+                json!({"jsonrpc": "2.0", "id": "1", "method": "client/registerCapability",
+                       "params": {"registrations": []}})
+                .to_string(),
+            ),
+        ]);
+        let messages = frames(&written);
+        let answered = messages
+            .iter()
+            .find(|m| m.get("id") == Some(&json!("1")))
+            .expect("the server was left waiting");
+        assert_eq!(answered["result"], Value::Null);
+    }
+
+    /// A request to a worktree with no session — or one whose server has died,
+    /// whose sender the table still holds — is answered with an error at once:
+    /// the view is waiting on it, and a definition waiting for ever never falls
+    /// back on `git grep`.
+    #[test]
+    fn a_request_to_a_dead_session_is_answered_and_the_session_forgotten() {
+        let (events_tx, events_rx) = async_channel::unbounded();
+        let host = Host::new(events_tx);
+        let request = |id| Ask::Request {
+            id,
+            method: "textDocument/definition".into(),
+            params: "{}".into(),
+        };
+        host.ask(Path::new("/nowhere"), request(1));
+        // A session whose thread is gone: its receiver was dropped with it.
+        let (dead, _) = mpsc::channel();
+        host.sessions
+            .lock()
+            .unwrap()
+            .insert(PathBuf::from("/p/site"), dead);
+        host.ask(Path::new("/p/site"), request(2));
+        for expected in [1, 2] {
+            match events_rx.try_recv() {
+                Ok(Evt::LspAnswer {
+                    id, result: Err(_), ..
+                }) => assert_eq!(id, expected),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(host.sessions.lock().unwrap().is_empty());
+        // What is not a request is dropped quietly, as before.
+        host.ask(
+            Path::new("/p/site"),
+            Ask::Close {
+                path: PathBuf::from("/p/site/a.php"),
+            },
+        );
+        assert!(events_rx.try_recv().is_err());
     }
 
     #[test]

@@ -59,6 +59,58 @@ impl Document {
         self.version += 1;
         Some(change)
     }
+
+    /// Takes a whole new text, as a second `didOpen` of the same file would
+    /// have: returns whether the server has to be told.
+    ///
+    /// **A document is opened once.** The view re-announces a file each time it
+    /// reads it — a save is a reread — and the protocol has no second
+    /// `didOpen` for a document already open: servers answer it with an error,
+    /// or quietly keep two copies. What it does have is a full-text
+    /// `didChange`, which is what a reread is, and the version keeps climbing.
+    pub fn replace(&mut self, text: String) -> bool {
+        if self.text == text {
+            return false;
+        }
+        self.text = text;
+        self.version += 1;
+        true
+    }
+}
+
+/// How many UTF-16 code units the first `byte` bytes of a line make — the
+/// column LSP counts in.
+///
+/// The offset is clamped to the line and brought back to a character boundary:
+/// an editor's caret is always on one, and a column computed for half a
+/// character would be a column the server has never heard of.
+pub fn utf16_column(line: &str, byte: usize) -> u32 {
+    let mut units = 0u32;
+    for (index, c) in line.char_indices() {
+        if index >= byte {
+            break;
+        }
+        units += c.len_utf16() as u32;
+    }
+    units
+}
+
+/// And back: the byte offset in a line of a UTF-16 column.
+///
+/// A column past the end of the line lands at its end — a server's position
+/// may name a line as it was before the last edit — and one that falls in the
+/// **middle** of a surrogate pair lands before the character, never inside it,
+/// which would be an offset no string can be cut at.
+pub fn byte_of_utf16(line: &str, column: u32) -> usize {
+    let mut units = 0u32;
+    for (index, c) in line.char_indices() {
+        let next = units + c.len_utf16() as u32;
+        if next > column {
+            return index;
+        }
+        units = next;
+    }
+    line.len()
 }
 
 /// The one replacement that turns `old` into `new`.
@@ -201,6 +253,46 @@ mod tests {
         assert!(doc.edit("ab".into()).is_some());
         assert_eq!(doc.version, 2);
         assert_eq!(doc.text, "ab");
+    }
+
+    /// A reread of an open file is a new version, and the same text is none.
+    #[test]
+    fn a_reread_climbs_the_version_only_when_the_text_moved() {
+        let mut doc = Document::new("a".into());
+        assert!(!doc.replace("a".into()));
+        assert_eq!(doc.version, 1);
+        assert!(doc.replace("b".into()));
+        assert_eq!(doc.version, 2);
+        assert_eq!(doc.text, "b");
+    }
+
+    /// The column the protocol speaks: `é` is one unit, an emoji outside the
+    /// basic plane is two — counting characters puts every position after one
+    /// a column early.
+    #[test]
+    fn a_column_is_counted_in_utf16_units() {
+        let line = "a🐘é b";
+        assert_eq!(utf16_column(line, 0), 0);
+        assert_eq!(utf16_column(line, 1), 1);
+        // After the elephant: one character, four bytes, two units.
+        assert_eq!(utf16_column(line, 5), 3);
+        assert_eq!(utf16_column(line, 7), 4);
+        assert_eq!(utf16_column(line, line.len()), 6);
+        // Clamped to the line.
+        assert_eq!(utf16_column(line, 100), 6);
+    }
+
+    #[test]
+    fn a_utf16_column_reads_back_to_its_byte() {
+        let line = "a🐘é b";
+        for byte in [0, 1, 5, 7, 8, line.len()] {
+            assert_eq!(byte_of_utf16(line, utf16_column(line, byte)), byte);
+        }
+        // Inside the surrogate pair: before the character, never inside it.
+        assert_eq!(byte_of_utf16(line, 2), 1);
+        // Past the end of the line: its end.
+        assert_eq!(byte_of_utf16(line, 99), line.len());
+        assert_eq!(byte_of_utf16("", 3), 0);
     }
 
     #[test]
