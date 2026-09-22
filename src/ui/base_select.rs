@@ -9,6 +9,9 @@
 //! It is shown in the entry itself rather than in a tooltip: a list is scanned
 //! by eye, and information that requires stopping on each row to reveal it does
 //! not help you compare.
+//!
+//! The first entry, once a review point has been set, is no branch: it is
+//! "since my last review" (`git::snapshot`), and it says when the point was set.
 
 use gpui_kit::component::{h_flex, select::SelectItem, v_flex, ActiveTheme};
 use gpui_kit::{div, prelude::*, px, App, IntoElement, SharedString, Window};
@@ -16,7 +19,16 @@ use gpui_kit::{div, prelude::*, px, App, IntoElement, SharedString, Window};
 use crate::git::{Branch, BranchKind};
 use crate::tr;
 
-/// A branch as the selector offers it.
+/// The value of the "since my last review" entry.
+///
+/// A value no branch can have, so the selector's one list holds both: git
+/// refuses a `:` anywhere in a ref name, where any word we picked could be
+/// somebody's branch. (Not `@`: that one alone is refused as a whole ref, but
+/// `refs/heads/@` is a perfectly good branch.)
+pub const SINCE_REVIEW: &str = ":review";
+
+/// A branch as the selector offers it — or, first in the list when one has
+/// been set, the review point.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseChoice {
     pub name: SharedString,
@@ -27,9 +39,64 @@ pub struct BaseChoice {
     /// True when this is the branch checked out in the worktree being looked
     /// at: comparing it to itself would show nothing.
     pub is_head: bool,
+    /// The "since my last review" entry, which is no branch.
+    ///
+    /// **In the base selector and not a third panel**: it answers the question
+    /// the selector asks — what the branch review compares against — and one
+    /// more panel would be one more list of the same files to keep in step.
+    pub review: bool,
+}
+
+/// How long ago something was, in the words the window uses elsewhere.
+///
+/// Pure, for the tests: the words themselves are `tr!`'s, and a clock read
+/// inside would make the answer depend on when the test runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ago {
+    JustNow,
+    Minutes(i64),
+    Hours(i64),
+    /// A day or more: the moment itself says more than a count of days.
+    Earlier,
+}
+
+pub fn ago(now: i64, at: i64) -> Ago {
+    let minutes = (now - at) / 60;
+    match minutes {
+        // Ahead of us is a clock out of step: "just now" is the honest reading.
+        i64::MIN..=0 => Ago::JustNow,
+        1..=59 => Ago::Minutes(minutes),
+        60..=1439 => Ago::Hours(minutes / 60),
+        _ => Ago::Earlier,
+    }
 }
 
 impl BaseChoice {
+    /// The review point's entry, saying when it was set.
+    pub fn since_review(at: i64, now: i64) -> Self {
+        let when = match ago(now, at) {
+            Ago::JustNow => tr!("when-just-now").to_string(),
+            Ago::Minutes(n) => tr!("when-minutes", { n: n }).to_string(),
+            Ago::Hours(n) => tr!("when-hours", { n: n }).to_string(),
+            Ago::Earlier => chrono::DateTime::from_timestamp(at, 0)
+                .map(|at| {
+                    at.with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string()
+                })
+                .unwrap_or_default(),
+        };
+        Self {
+            name: SharedString::from(SINCE_REVIEW),
+            subject: tr!("range-since-review-at", { when: when }),
+            author: SharedString::default(),
+            date: SharedString::default(),
+            remote: false,
+            is_head: false,
+            review: true,
+        }
+    }
+
     /// `worktree` is the checkout being looked at: "here" is its branch, not
     /// the one git marks as HEAD where the list was read (the main worktree).
     pub fn of(branch: &Branch, worktree: &std::path::Path) -> Self {
@@ -40,6 +107,7 @@ impl BaseChoice {
             date: SharedString::from(branch.date.clone()),
             remote: branch.kind == BranchKind::Remote,
             is_head: branch.is_head_in(worktree),
+            review: false,
         }
     }
 
@@ -64,8 +132,14 @@ impl BaseChoice {
 impl SelectItem for BaseChoice {
     type Value = SharedString;
 
+    /// What the closed selector reads, after "Base:" — the name of the base,
+    /// or for the review point the words for it: its value would say nothing.
     fn title(&self) -> SharedString {
-        self.name.clone()
+        if self.review {
+            tr!("range-since-review")
+        } else {
+            self.name.clone()
+        }
     }
 
     fn value(&self) -> &Self::Value {
@@ -85,7 +159,7 @@ impl SelectItem for BaseChoice {
                     .min_w_0()
                     .gap_1()
                     .items_center()
-                    .child(div().flex_1().min_w_0().truncate().child(self.name.clone()))
+                    .child(div().flex_1().min_w_0().truncate().child(self.title()))
                     .when(self.remote, |el| el.child(tag(tr!("branch-remote"), cx)))
                     .when(self.is_head, |el| el.child(tag(tr!("branch-here"), cx))),
             )
@@ -130,7 +204,30 @@ mod tests {
             date: date.to_string().into(),
             remote: false,
             is_head: false,
+            review: false,
         }
+    }
+
+    #[test]
+    fn a_review_point_reads_as_how_long_ago_it_was_set() {
+        let now = 1_790_000_000;
+        assert_eq!(ago(now, now), Ago::JustNow);
+        assert_eq!(ago(now, now - 30), Ago::JustNow);
+        // A clock out of step does not say "in five minutes".
+        assert_eq!(ago(now, now + 300), Ago::JustNow);
+        assert_eq!(ago(now, now - 5 * 60), Ago::Minutes(5));
+        assert_eq!(ago(now, now - 3 * 3600 - 60), Ago::Hours(3));
+        assert_eq!(ago(now, now - 2 * 86_400), Ago::Earlier);
+    }
+
+    /// No branch can take the entry's value: git refuses a `:` in a ref name.
+    #[test]
+    fn the_review_entry_cannot_be_a_branch() {
+        let out = std::process::Command::new("git")
+            .args(["check-ref-format", "--branch", SINCE_REVIEW])
+            .output()
+            .expect("git");
+        assert!(!out.status.success());
     }
 
     #[test]

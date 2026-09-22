@@ -18,6 +18,7 @@ pub mod diff;
 pub mod history;
 pub mod repo;
 pub mod search;
+pub mod snapshot;
 pub mod stash;
 pub mod status;
 pub mod tags;
@@ -151,6 +152,32 @@ pub(crate) fn git_feeding<S: AsRef<OsStr>>(
     let out = wait_feeding(cmd, Some(input), TIMEOUT, || {
         format!("git {}", describe(args))
     })?;
+    report(dir, args, started.elapsed(), &out);
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!("git {}: {}", describe(args), stderr.trim());
+    }
+    Ok(strip_trailing_newline(
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    ))
+}
+
+/// The same as `git`, with variables of its own in the command's environment.
+///
+/// For the review point (`snapshot`), whose commands work on an index that is
+/// **not** the user's: `GIT_INDEX_FILE` is the only way to name one, git
+/// having no option for it.
+pub(crate) fn git_env<S: AsRef<OsStr>>(
+    dir: &Path,
+    args: &[S],
+    env: &[(&str, &OsStr)],
+) -> Result<String> {
+    let started = Instant::now();
+    let mut cmd = command(dir, args);
+    cmd.envs(env.iter().copied())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let out = wait_with_timeout(cmd, TIMEOUT, || format!("git {}", describe(args)))?;
     report(dir, args, started.elapsed(), &out);
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);

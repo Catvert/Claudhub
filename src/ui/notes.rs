@@ -357,6 +357,41 @@ fn fence_language(path: &std::path::Path) -> &'static str {
     crate::ui::highlight::language_for_path(path).unwrap_or("")
 }
 
+/// A new review point has been set: what was said "since the last review" is
+/// now said since this one.
+///
+/// **The notes follow the point.** A note taken since the previous point is
+/// numbered in the file as it was on disk — the new side, which the new
+/// point's diff numbers the same way — so it goes on being placed by
+/// `relocate`: on the lines the agent has touched again, or marked drifted
+/// when nothing since has touched them. Left on the old point, it would open
+/// a diff whose commit the ref no longer holds, and which the next `gc` takes.
+///
+/// **The ticks do not.** A tick records the volume a file had in the range it
+/// was ticked in, and a volume counted from the old point says nothing of one
+/// counted from the new: it would never match again, and would sit in the
+/// vault's index for good.
+///
+/// Returns whether anything changed, so that nothing is written for nothing.
+pub fn follow_point(
+    notes: &mut [Note],
+    reviewed: &mut Vec<crate::ui::vault::Reviewed>,
+    point: &str,
+) -> bool {
+    let mut changed = false;
+    for note in notes.iter_mut() {
+        if matches!(&note.range, DiffRange::Since { point: old } if old != point) {
+            note.range = DiffRange::Since {
+                point: point.to_string(),
+            };
+            changed = true;
+        }
+    }
+    let before = reviewed.len();
+    reviewed.retain(|item| !matches!(&item.range, DiffRange::Since { point: old } if old != point));
+    changed || reviewed.len() != before
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,5 +574,51 @@ mod tests {
         }];
         let text = prompt("main", &notes);
         assert!(text.contains("````"), "{text}");
+    }
+
+    #[test]
+    fn a_new_point_takes_the_notes_along_and_drops_the_ticks() {
+        use crate::ui::vault::Reviewed;
+        let since = |point: &str| DiffRange::Since {
+            point: point.into(),
+        };
+        let branch = DiffRange::Branch { base: "dev".into() };
+        let mut notes = vec![
+            Note {
+                id: 1,
+                range: since("old"),
+                ..Default::default()
+            },
+            Note {
+                id: 2,
+                range: branch.clone(),
+                ..Default::default()
+            },
+            Note {
+                id: 3,
+                range: DiffRange::Working,
+                ..Default::default()
+            },
+        ];
+        let tick = |range: DiffRange| Reviewed {
+            range,
+            path: "a.rs".into(),
+            added: 1,
+            removed: 0,
+        };
+        let mut reviewed = vec![tick(since("old")), tick(branch.clone())];
+
+        assert!(follow_point(&mut notes, &mut reviewed, "new"));
+        // The note follows; the others keep the range they were taken in.
+        assert_eq!(notes[0].range, since("new"));
+        assert_eq!(notes[1].range, branch);
+        assert_eq!(notes[2].range, DiffRange::Working);
+        // The old point's tick goes, the branch's stays.
+        assert_eq!(reviewed, vec![tick(branch.clone())]);
+
+        // The same point again changes nothing, so nothing is written.
+        reviewed.push(tick(since("new")));
+        assert!(!follow_point(&mut notes, &mut reviewed, "new"));
+        assert_eq!(reviewed.len(), 2);
     }
 }

@@ -87,7 +87,15 @@ impl LogRange {
             // `--all` without `--topo-order` would interleave the branches by
             // date, which gives an unreadable graph: the lines would jump from
             // one branch to another on every row.
-            Self::All => vec!["--all".into(), "--topo-order".into()],
+            //
+            // The review points (`snapshot`) are refs too, and `--all` would
+            // draw each one as a branch of its own. `--exclude` goes first: it
+            // applies to the `--all` that follows it.
+            Self::All => vec![
+                format!("--exclude={}/*", super::snapshot::REF_ROOT),
+                "--all".into(),
+                "--topo-order".into(),
+            ],
             // `-L` takes no pathspec and refuses `--graph`: the list it returns
             // has holes — a commit's parent is usually missing — which is why
             // the view paints no lanes in this mode.
@@ -628,6 +636,12 @@ mod tests {
         );
         // Topological order is what keeps the branches grouped.
         assert!(LogRange::All.args().contains(&"--topo-order".to_string()));
+        // The review points are no branch: excluded, and before the `--all`
+        // the exclusion applies to.
+        let all = LogRange::All.args();
+        let exclude = all.iter().position(|arg| arg.starts_with("--exclude="));
+        let every = all.iter().position(|arg| arg == "--all");
+        assert!(exclude.is_some() && exclude < every, "{all:?}");
         // And every one of them ends the revision list: a branch named like a
         // directory is refused outright otherwise.
         for range in [

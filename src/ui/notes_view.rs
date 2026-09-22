@@ -597,7 +597,9 @@ impl ClaudhubApp {
         }
         let ids: Vec<u64> = chosen.iter().map(|note| note.id).collect();
         let text = notes::prompt(&branch, &chosen);
-        self.confirm_prompt(worktree, ids, text, window, cx);
+        // Sending every open note is the end of a round; sending one is a
+        // remark in the middle of it — see `send_prompt`.
+        self.confirm_prompt(worktree, ids, text, only.is_none(), window, cx);
     }
 
     /// Shows the prompt before it goes out, and lets it be edited.
@@ -611,6 +613,7 @@ impl ClaudhubApp {
         worktree: PathBuf,
         ids: Vec<u64>,
         text: String,
+        ends_round: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -642,7 +645,14 @@ impl ClaudhubApp {
                 .on_ok(move |_, window, cx| {
                     let text = input.read(cx).value().to_string();
                     entity.update(cx, |this, cx| {
-                        this.send_prompt(worktree.clone(), ids.clone(), text, window, cx);
+                        this.send_prompt(
+                            worktree.clone(),
+                            ids.clone(),
+                            text,
+                            ends_round,
+                            window,
+                            cx,
+                        );
                     });
                     true
                 })
@@ -657,11 +667,20 @@ impl ClaudhubApp {
     ///
     /// `sent` and not `done`: it is the review of the answer that closes a note,
     /// not its sending.
+    ///
+    /// **Sending every open note sets the review point** (`ends_round`): it is
+    /// the moment "I have read this" is true, and what the agent writes next is
+    /// exactly what the next round has to read. Not on a single note sent from
+    /// its row — that is a remark in the middle of a review, and moving the
+    /// point then would push what is left to read behind it. The point goes out
+    /// **before** the paste: both are queued at once, and the agent has to read
+    /// the prompt before it can write anything the point would miss.
     fn send_prompt(
         &mut self,
         worktree: PathBuf,
         ids: Vec<u64>,
         text: String,
+        ends_round: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -669,6 +688,9 @@ impl ClaudhubApp {
             return;
         }
         let count = ids.len();
+        if ends_round {
+            self.mark_reviewed(worktree.clone(), cx);
+        }
         self.deliver(worktree.clone(), text, window, cx);
         if let Some(state) = self.review.get_mut(&worktree) {
             for note in std::rc::Rc::make_mut(&mut state.notes)

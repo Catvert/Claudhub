@@ -88,6 +88,18 @@ pub struct WorktreeState {
     /// a checkout browsed for a week would otherwise carry every file it has.
     /// `quick::promote` is what writes it, and `quick::recent` what reads it.
     pub recent: Vec<PathBuf>,
+    /// The last review point set here — see `git::snapshot`.
+    ///
+    /// Kept by its **commit**, not by the ref: the ref is what keeps the
+    /// commit from `gc`, and it moves with the next point; the commit is what
+    /// the range and the notes name. It is a fact of where one is at — "I read
+    /// this far" — and not a guess, which is why it belongs here when the
+    /// guessed base does not.
+    pub review_point: Option<crate::git::snapshot::Point>,
+    /// The branch review panel shows "since my last review" rather than the
+    /// branch against its base. A choice made in the base selector, kept for
+    /// the reason `base` is.
+    pub since_review: bool,
 }
 
 /// One test's last known fate.
@@ -714,5 +726,26 @@ mod tests {
             store.pinned,
             vec![PathBuf::from("/r/a"), PathBuf::from("/elsewhere/c")]
         );
+    }
+
+    /// A file written before the review point existed opens with none, and a
+    /// point written comes back as it was — commit and moment.
+    #[test]
+    fn a_review_point_survives_the_file() {
+        let old: WorktreeState = serde_json::from_str(r#"{"base":"dev"}"#).unwrap();
+        assert!(old.review_point.is_none());
+        assert!(!old.since_review);
+
+        let state = WorktreeState {
+            review_point: Some(crate::git::snapshot::Point {
+                commit: "0123abcd".into(),
+                at: 1_790_000_000,
+            }),
+            since_review: true,
+            ..Default::default()
+        };
+        let text = serde_json::to_string(&state).unwrap();
+        let back: WorktreeState = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, state);
     }
 }

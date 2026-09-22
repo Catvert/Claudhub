@@ -143,6 +143,8 @@ src/
     tags.rs     les tags : lecture, création, publication, suppression
     stash.rs    la pile des remisages : la lire, y poser, en reprendre
     search.rs   `git grep` : les arguments, le parsage, les plafonds
+    snapshot.rs le point de relecture : l'état du worktree en commit, sans
+                toucher l'index de l'utilisateur
   agent.rs      les agents dans `/proc`, et le suivi qui dit lesquels travaillent
   runtime/      les workers
     protocol.rs `Cmd` / `Evt` — des données, aucune logique, sérialisables
@@ -870,6 +872,18 @@ divergé** — git ne stocke aucun parent, ça se lit sur le graphe en un
 Elle est demandée une fois par worktree (`Cmd::GuessBase`) et **n'est pas
 enregistrée** : le magasin garde ce qu'on a choisi, une devinette écrite y
 serait une devinette pour toujours.
+
+**« Depuis ma dernière relecture »** (`DiffRange::Since`, `git::snapshot`) est
+la première entrée du sélecteur de base dès qu'un point existe. Le point est
+l'état du disque — non commité et non suivi compris — construit dans un **index
+à nous** (`GIT_INDEX_FILE`, copie de celui de l'utilisateur, jamais écrit), puis
+`commit-tree` et une ref `refs/claudhub/review/<empreinte>` contre le `gc`, que
+`--all` exclut du graphe. Le diff compare **deux arbres**, le courant construit
+de la même façon : `git diff <point>` passe par l'index et lirait supprimé un
+fichier non suivi des deux côtés. Le point se pose au bouton de la barre, et à
+l'envoi de **toutes** les notes — le moment où « j'ai relu » est vrai. Le
+magasin garde le **commit** ; un point neuf emmène les notes et jette les cases
+cochées de l'ancien (`notes::follow_point`).
 
 **L'explorateur** (`explorer.rs`, `tree.rs`) — l'arbre vient d'un seul appel git,
 jamais d'un parcours de disque. `tree` ne connaît que des chemins et rend des

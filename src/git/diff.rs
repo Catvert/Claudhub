@@ -42,12 +42,37 @@ pub enum Range {
     /// where the latter would mix in everything that has landed on the base
     /// since — noise the reviewer has no business reading.
     Branch { base: String },
+    /// What has changed since the last review point (`git::snapshot`): the
+    /// state read then against the state on disk now, uncommitted work and
+    /// untracked files on both sides.
+    ///
+    /// Two trees and not `git diff <point>`: that one walks the index, so a
+    /// file untracked then and still untracked now read as deleted. The
+    /// current side is built the way the point was, into a scratch index —
+    /// see `snapshot::working_tree`.
+    ///
+    /// `point` is the commit and not the ref: the ref moves with the next
+    /// point, and a list filed under it would silently change meaning.
+    Since { point: String },
 }
 
 impl Range {
+    /// The revisions handed to `git diff`, once whatever has to be computed
+    /// has been. Only `Since` computes something: the tree of the state on
+    /// disk, which is a command of its own.
+    fn resolve(&self, dir: &Path) -> Result<Vec<String>> {
+        match self {
+            Self::Since { point } => Ok(vec![point.clone(), super::snapshot::working_tree(dir)?]),
+            _ => Ok(self.args()),
+        }
+    }
+
     fn args(&self) -> Vec<String> {
         match self {
             Self::Working => vec!["HEAD".into()],
+            // Never asked: `resolve` answers for it. Were it asked, the point
+            // against the index would be the nearest honest reading.
+            Self::Since { point } => vec![point.clone()],
             Self::Branch { base } => vec![format!("{base}...HEAD")],
             Self::Commit { id, parent } => match parent {
                 Some(parent) => vec![parent.clone(), id.clone()],
@@ -138,7 +163,7 @@ fn files_in(
         "--ignore-submodules=none".into(),
         "--submodule=short".into(),
     ];
-    args.extend(range.args());
+    args.extend(range.resolve(dir)?);
     // The revision list is closed, as it is under `file` — which closes it
     // because it has a path to add. A base named like a directory is refused
     // outright otherwise: `ambiguous argument 'dev': both revision and
@@ -197,6 +222,8 @@ pub fn file(
         (from == owner).then_some(local)
     });
     let (dir, path) = (owner.as_path(), local.as_path());
+    // Once, before the two reads below: under `Since` it builds a tree.
+    let revisions = range.resolve(dir)?;
     let read = |original: Option<&Path>| -> Result<String> {
         let mut args: Vec<String> = vec![
             super::LITERAL_PATHS.into(),
@@ -211,7 +238,7 @@ pub fn file(
             "--ignore-submodules=none".into(),
             "--submodule=short".into(),
         ];
-        args.extend(range.args());
+        args.extend(revisions.iter().cloned());
         args.push("--".into());
         args.extend(original.map(|original| original.to_string_lossy().into_owned()));
         args.push(path.to_string_lossy().into_owned());
