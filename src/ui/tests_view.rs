@@ -25,7 +25,7 @@ use gpui_kit::component::{
 use gpui_kit::{div, img, prelude::*, uniform_list, App, Context, Entity, SharedString, Window};
 
 use crate::runtime::Cmd;
-use crate::suite::{Outcome, Report, Run, Runner, Status, Target, Test};
+use crate::suite::{Handoff, Outcome, Report, Run, Runner, Status, Target, Test};
 use crate::tr;
 use crate::ui::app::ClaudhubApp;
 use crate::ui::find::Pane;
@@ -525,6 +525,185 @@ fn clock(at: i64) -> String {
 
 fn now() -> i64 {
     chrono::Local::now().timestamp()
+}
+
+// — Handing the red to an agent ————————————————————————————————————————
+
+/// What one red row of the tree hands over: each failed outcome the run at
+/// hand pairs with it — a Jest row is a file, and hands every red test in it
+/// — or, when that run does not speak of it, the row itself with no text.
+///
+/// The second case is common and not an error: the dots survive a restart,
+/// the accounts do not, and a campaign replaces the one before it.
+pub fn row_failures(test: &Test, label: &str, run: Option<&Run>, sail: bool) -> Vec<Handoff> {
+    let red: Vec<Handoff> = run
+        .map(|run| {
+            paired(std::slice::from_ref(test), &run.outcomes)
+                .into_iter()
+                .map(|(_, outcome)| &run.outcomes[outcome])
+                .filter(|outcome| outcome.status == Status::Failed)
+                .map(|outcome| crate::suite::handoff_of(Some(test), outcome, sail))
+                .collect()
+        })
+        .unwrap_or_default();
+    if red.is_empty() {
+        return vec![crate::suite::handoff_unexplained(test, label, sail)];
+    }
+    red
+}
+
+/// Every red row of the tree, in the tree's order.
+pub fn tree_failures(
+    tests: &[Test],
+    labels: &[SharedString],
+    statuses: &[Option<Status>],
+    run: Option<&Run>,
+    sail: bool,
+) -> Vec<Handoff> {
+    tests
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| statuses.get(*at).copied().flatten() == Some(Status::Failed))
+        .flat_map(|(at, test)| {
+            let label: &str = labels.get(at).map(|l| l.as_ref()).unwrap_or(&test.name);
+            row_failures(test, label, run, sail)
+        })
+        .collect()
+}
+
+/// A run's red, in the account's order — each paired back to its listed
+/// test, which is what knows the command that runs it alone.
+pub fn run_failures(tests: &[Test], outcomes: &[Outcome], sail: bool) -> Vec<Handoff> {
+    let listed: HashMap<usize, usize> = paired(tests, outcomes)
+        .into_iter()
+        .map(|(test, outcome)| (outcome, test))
+        .collect();
+    outcomes
+        .iter()
+        .enumerate()
+        .filter(|(_, outcome)| outcome.status == Status::Failed)
+        .map(|(at, outcome)| {
+            let test = listed.get(&at).and_then(|&test| tests.get(test));
+            crate::suite::handoff_of(test, outcome, sail)
+        })
+        .collect()
+}
+
+/// Does the run's printed output speak of this failure alone? Only then does
+/// its tail go along: the run of one test — what a click on a red row
+/// launches — or a suite where it is the only red, whose runner writes the
+/// failure's own report at the end. With a second red in the run, the tail
+/// would be about the other one as often as not.
+pub fn output_speaks_of(run: &Run, handed: &[Handoff]) -> bool {
+    let [alone] = handed else {
+        return false;
+    };
+    if alone.message.is_none() {
+        return false;
+    }
+    let mut red = run
+        .outcomes
+        .iter()
+        .filter(|outcome| outcome.status == Status::Failed);
+    matches!(
+        (red.next(), red.next()),
+        (Some(outcome), None) if outcome.class == alone.class && outcome.name == alone.name
+    )
+}
+
+impl ClaudhubApp {
+    /// Hands failures to the worktree's agent, through the dialog Sentry and
+    /// CI use — edited before it goes, delivered by a bracketed paste and a
+    /// second send, an agent opened when none runs.
+    fn hand_failures(
+        &mut self,
+        failures: Vec<Handoff>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(worktree) = self.active.clone() else {
+            return;
+        };
+        if failures.is_empty() {
+            return;
+        }
+        let state = self.pest_runs.get(&worktree);
+        let output: Vec<String> = match state.and_then(|state| state.run.as_deref()) {
+            Some(run) if output_speaks_of(run, &failures) => state
+                .map(|state| state.lines.iter().map(|line| line.to_string()).collect())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let intro = match failures.len() {
+            1 => tr!("tests-agent-intro-one"),
+            _ => tr!("tests-agent-intro-many"),
+        };
+        let text = crate::suite::failure_prompt(&intro, &failures, &output);
+        self.confirm_agent_prompt(worktree, text, window, cx);
+    }
+
+    /// The listed tests and the last followed run of the worktree being
+    /// looked at, and whether its Pest goes through Sail — what every
+    /// handing gesture reads.
+    fn handing_context(&self) -> Option<(Rc<Report>, Option<Rc<Run>>, bool)> {
+        let worktree = self.active.as_deref()?;
+        let report = self.pest.get(worktree)?.report.clone()?;
+        let run = self
+            .pest_runs
+            .get(worktree)
+            .and_then(|state| state.run.clone());
+        // A look at the disk, like the terminal line the menu copies.
+        Some((report, run, crate::suite::uses_sail(worktree)))
+    }
+
+    /// One red row of the tree.
+    fn hand_test(&mut self, test: &Test, label: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((_, run, sail)) = self.handing_context() else {
+            return;
+        };
+        let failures = row_failures(test, label, run.as_deref(), sail);
+        self.hand_failures(failures, window, cx);
+    }
+
+    /// Every red row of the tree.
+    fn hand_tree_failures(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((report, run, sail)) = self.handing_context() else {
+            return;
+        };
+        let Report::Tests(tests) = report.as_ref() else {
+            return;
+        };
+        let Some(state) = self.active.as_deref().and_then(|w| self.pest.get(w)) else {
+            return;
+        };
+        let failures = tree_failures(tests, &state.labels, &state.statuses, run.as_deref(), sail);
+        self.hand_failures(failures, window, cx);
+    }
+
+    /// One failure of the run panel, or all of them.
+    fn hand_run_failures(
+        &mut self,
+        only: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((report, Some(run), sail)) = self.handing_context() else {
+            return;
+        };
+        let tests: &[Test] = match report.as_ref() {
+            Report::Tests(tests) => tests,
+            _ => &[],
+        };
+        let outcomes = match only {
+            Some(at) => match run.outcomes.get(at) {
+                Some(outcome) => std::slice::from_ref(outcome),
+                None => return,
+            },
+            None => &run.outcomes[..],
+        };
+        let failures = run_failures(tests, outcomes, sail);
+        self.hand_failures(failures, window, cx);
+    }
 }
 
 // — Asking, running, landing ————————————————————————————————
@@ -1323,6 +1502,19 @@ impl ClaudhubApp {
             .as_deref()
             .and_then(|worktree| self.pest.get(worktree))
             .and_then(|state| state.last_run.clone());
+        // The red rows, read from the cache the tree itself reads: the
+        // button that hands them over is there only when there are some.
+        let failing = self
+            .active
+            .as_deref()
+            .and_then(|worktree| self.pest.get(worktree))
+            .map_or(0, |state| {
+                state
+                    .statuses
+                    .iter()
+                    .filter(|status| **status == Some(Status::Failed))
+                    .count()
+            });
         let summary = h_flex()
             .flex_1()
             .min_w_0()
@@ -1382,6 +1574,18 @@ impl ClaudhubApp {
                         cx.notify();
                     })),
             )
+            .when(failing > 0, |el| {
+                el.child(
+                    Button::new("tests-hand-all")
+                        .ghost()
+                        .small()
+                        .icon(icon("bot"))
+                        .tooltip(tr!("tests-hand-all", { n: failing }))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.hand_tree_failures(window, cx);
+                        })),
+                )
+            })
             .child(
                 Button::new("tests-reset")
                     .ghost()
@@ -1774,7 +1978,13 @@ fn render_test(
             )
         })
         .context_menu(move |popup, _window, _cx| match for_menu.get(at) {
-            Some(test) => row_menu(popup, &menu, test, &menu_label),
+            Some(test) => row_menu(
+                popup,
+                &menu,
+                test,
+                &menu_label,
+                status == Some(Status::Failed),
+            ),
             None => popup,
         })
         .into_any_element()
@@ -1785,6 +1995,7 @@ fn row_menu(
     entity: &Entity<ClaudhubApp>,
     test: &Test,
     label: &SharedString,
+    failed: bool,
 ) -> PopupMenu {
     let popup = popup.item({
         let entity = entity.clone();
@@ -1799,6 +2010,21 @@ fn row_menu(
                 });
             })
     });
+    // Red rows only: a green test has nothing to hand over, and an entry
+    // that would send "this passes" is one nobody means to press.
+    let popup = match failed {
+        false => popup,
+        true => popup.item({
+            let entity = entity.clone();
+            let test = test.clone();
+            let label = label.to_string();
+            PopupMenuItem::new(tr!("tests-hand"))
+                .icon(icon("bot"))
+                .on_click(move |_, window, cx| {
+                    entity.update(cx, |this, cx| this.hand_test(&test, &label, window, cx));
+                })
+        }),
+    };
     // Only when the file is known — a Pest class outside the autoloader has
     // none, and an entry that opens nothing is worse than no entry.
     let popup = match test.file.is_empty() {
@@ -2150,6 +2376,22 @@ impl ClaudhubApp {
                                 }
                             }),
                     )
+                    .child({
+                        let hand = entity.clone();
+                        Button::new(("pest-failure-hand", index))
+                            .ghost()
+                            .small()
+                            .icon(icon("bot"))
+                            .tooltip(tr!("tests-hand"))
+                            .on_click(move |_, window, cx| {
+                                // Same as the copy beside it: the row
+                                // underneath opens the file.
+                                cx.stop_propagation();
+                                hand.update(cx, |this, cx| {
+                                    this.hand_run_failures(Some(index), window, cx);
+                                });
+                            })
+                    })
                     .into_any_element()
             }))
             .when(failed.len() > shown, |el| {
@@ -2276,12 +2518,28 @@ impl ClaudhubApp {
             })
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
                     .text_color(cx.theme().muted_foreground)
                     .child(SharedString::from(format!(
                         "{secs:.1}s · {}",
                         clock(state.started_at)
                     ))),
             )
+            .when(run.failed > 0, |el| {
+                el.child(
+                    Button::new("tests-run-hand-all")
+                        .ghost()
+                        .small()
+                        .icon(icon("bot"))
+                        .label(tr!("tests-hand-label"))
+                        .tooltip(tr!("tests-hand-all", { n: run.failed }))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.hand_run_failures(None, window, cx);
+                        })),
+                )
+            })
             .into_any_element()
     }
 }
@@ -2760,5 +3018,126 @@ mod tests {
         assert!(!reloads(wt, Path::new("/p/site/app/Models/User.php")));
         assert!(!reloads(wt, Path::new("/p/site/tests/fixtures/data.json")));
         assert!(!reloads(wt, Path::new("/elsewhere/tests/T.php")));
+    }
+
+    fn fate(class: &str, name: &str, status: Status, message: &str) -> Outcome {
+        Outcome {
+            class: class.into(),
+            name: name.into(),
+            status,
+            message: message.into(),
+            file: class.into(),
+            line: None,
+            cases: 1,
+            time_ms: 0,
+        }
+    }
+
+    fn jest_file(path: &str) -> Test {
+        Test {
+            runner: Runner::Jest,
+            class: "src".into(),
+            method: path.into(),
+            name: path.rsplit('/').next().unwrap_or(path).into(),
+            pattern: String::new(),
+            datasets: 0,
+            file: path.into(),
+        }
+    }
+
+    fn account(outcomes: Vec<Outcome>) -> Run {
+        Run {
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            duration_ms: 0,
+            outcomes,
+        }
+    }
+
+    #[test]
+    fn a_red_row_hands_what_the_run_said_of_it() {
+        let file = jest_file("src/http.test.js");
+        let run = account(vec![
+            fate("src/http.test.js", "answers", Status::Passed, ""),
+            fate("src/http.test.js", "inside fails", Status::Failed, "boom"),
+            fate("src/other.test.js", "elsewhere", Status::Failed, "other"),
+        ]);
+        // A Jest row is a file: the red **in it**, each run again alone.
+        let handed = row_failures(&file, "http.test.js", Some(&run), false);
+        assert_eq!(handed.len(), 1);
+        assert_eq!(handed[0].name, "inside fails");
+        assert_eq!(handed[0].message.as_deref(), Some("boom"));
+        let command = handed[0].command.as_deref().unwrap_or_default();
+        assert!(command.contains("--runTestsByPath src/http.test.js"));
+        assert!(command.contains(r#"-t "^inside fails\$""#));
+
+        // No account at hand — a restart, a later campaign: the row itself,
+        // with nothing claimed about why.
+        let handed = row_failures(&file, "http.test.js", None, false);
+        assert_eq!(handed.len(), 1);
+        assert_eq!(handed[0].message, None);
+        assert_eq!(handed[0].name, "http.test.js");
+        let passed = account(vec![fate("src/other.test.js", "x", Status::Failed, "")]);
+        assert_eq!(
+            row_failures(&file, "http.test.js", Some(&passed), false)[0].message,
+            None
+        );
+    }
+
+    #[test]
+    fn the_tree_hands_its_red_rows_only() {
+        let tests = suite();
+        let (labels, mut statuses) = plain(&tests);
+        statuses[1] = Some(Status::Failed);
+        statuses[2] = Some(Status::Passed);
+        statuses[3] = Some(Status::Failed);
+        let handed = tree_failures(&tests, &labels, &statuses, None, false);
+        let names: Vec<&str> = handed.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, ["it divides", "it answers"]);
+    }
+
+    #[test]
+    fn a_runs_red_keeps_its_order_and_its_commands() {
+        let tests = vec![jest_file("src/http.test.js")];
+        let outcomes = vec![
+            fate("src/gone.test.js", "unlisted", Status::Failed, "x"),
+            fate("src/http.test.js", "fine", Status::Passed, ""),
+            fate("src/http.test.js", "broken", Status::Failed, "y"),
+        ];
+        let handed = run_failures(&tests, &outcomes, false);
+        assert_eq!(handed.len(), 2);
+        // Unpaired: no listed test to say the runner, so no command either —
+        // an invented one would run something else.
+        assert_eq!(handed[0].command, None);
+        assert_eq!(handed[0].runner, None);
+        assert_eq!(handed[1].runner, Some(Runner::Jest));
+        assert!(handed[1].command.is_some());
+    }
+
+    #[test]
+    fn the_output_goes_along_only_when_it_speaks_of_that_test_alone() {
+        let one = account(vec![
+            fate("src/a.test.js", "fine", Status::Passed, ""),
+            fate("src/a.test.js", "broken", Status::Failed, "y"),
+        ]);
+        let handed = run_failures(&[], &one.outcomes, false);
+        assert!(output_speaks_of(&one, &handed));
+
+        let two = account(vec![
+            fate("src/a.test.js", "broken", Status::Failed, "y"),
+            fate("src/b.test.js", "also", Status::Failed, "z"),
+        ]);
+        let first = run_failures(&[], &two.outcomes[..1], false);
+        assert!(!output_speaks_of(&two, &first));
+        assert!(!output_speaks_of(
+            &two,
+            &run_failures(&[], &two.outcomes, false)
+        ));
+
+        // A verdict whose account is gone speaks of nothing in this run.
+        let test = jest_file("src/a.test.js");
+        let blind = vec![crate::suite::handoff_unexplained(&test, "a", false)];
+        assert!(!output_speaks_of(&one, &blind));
     }
 }
