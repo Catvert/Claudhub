@@ -178,7 +178,9 @@ src/
                     l'onglet n'existe que si un lanceur existe, les verdicts
                     persistent par worktree dans le magasin ; un clic droit
                     ouvre le test dans l'éditeur, le fichier venant du listing
-                    et la ligne du texte qu'on y cherche
+                    et la ligne du texte qu'on y cherche ; un rouge, ou tous,
+                    part à l'agent par le dialogue de Sentry — le prompt est
+                    écrit dans `suite.rs`, pur, d'après ce que le compte porte
     highlight.rs    coloration tree-sitter d'un diff
     blade.rs        les vues Blade : surcouche du diff, coloriseur de l'éditeur
     panels.rs       les panneaux du dock, leur macro et leur registre

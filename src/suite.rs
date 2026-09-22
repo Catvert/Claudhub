@@ -89,6 +89,15 @@ impl Runner {
             Runner::Jest => "jest",
         }
     }
+
+    /// The tool's own name, as a sentence writes it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Runner::Pest => "Pest",
+            Runner::Vitest => "Vitest",
+            Runner::Jest => "Jest",
+        }
+    }
 }
 
 /// What a run covers: everything, a folder, a file, or one test — said in
@@ -754,7 +763,13 @@ fn jest_rows(output: &str, worktree: &Path) -> Vec<Test> {
 /// ` > `, the matched full name joins them with a single space, and the rest
 /// is the title verbatim, regex characters escaped.
 fn title_pattern(title: &str) -> String {
-    let joined = title.replace(" > ", " ");
+    title_regex(&title.replace(" > ", " "))
+}
+
+/// A title as a literal in a `-t` regex. Jest's `fullName` is already the
+/// space-joined full title, so it goes through this alone — `title_pattern`'s
+/// ` > ` rewrite would break a Jest title that happens to contain one.
+fn title_regex(joined: &str) -> String {
     let mut pattern = String::with_capacity(joined.len());
     for c in joined.chars() {
         if ".^$*+?()[]{}|\\/".contains(c) {
@@ -1918,10 +1933,17 @@ pub fn scope_target(test: &Test, depth: usize) -> Target {
 /// where an interactive suite can ask. The Sail detour is decided here too,
 /// on the same file the worker reads.
 pub fn terminal_command(worktree: &Path, target: &Target) -> String {
-    command_line(sail_of(worktree).is_some(), target)
+    command_line(uses_sail(worktree), target)
 }
 
-fn command_line(sail: bool, target: &Target) -> String {
+/// Does this checkout run Pest through Sail? A look at the disk — the one
+/// thing [`command_line`] needs that is not in the target.
+pub fn uses_sail(worktree: &Path) -> bool {
+    sail_of(worktree).is_some()
+}
+
+/// The line a shell runs for a target, the Sail detour already decided.
+pub fn command_line(sail: bool, target: &Target) -> String {
     let mut parts: Vec<String> = if sail && target.runner == Runner::Pest {
         vec![SAIL.to_string(), "pest".to_string()]
     } else {
@@ -2051,6 +2073,320 @@ fn path_regex(path: &str) -> String {
         out.push(c);
     }
     out
+}
+
+// — Handing a red test to an agent ——————————————————————————————————————
+//
+// The prompt is written here and not in the view: what it carries is decided
+// by what a run's account holds, and that is this module's knowledge. The
+// view only says which failures and hands the text to `confirm_agent_prompt`,
+// the path Sentry and CI already take.
+//
+// **What an account holds, and what it does not.** The failure's text — the
+// JUnit `<failure>` body for Pest and Vitest, `failureMessages[0]` for Jest —
+// is the message *and* its trace: `at tests/…:3` for Pest, `❯ src/…:3:46`
+// for Vitest, Jest's stack. A test's own stdout is not in it: `parse_junit`
+// never reads `<system-out>`, and Jest's `--json` has no console. What the
+// runner printed lives in the run panel's lines, which is why a lone failure
+// takes their tail along.
+
+/// Failures one prompt carries at most. Past this the prompt says how many
+/// were left out: an agent handed forty stack traces reads the first ones,
+/// and the paste has buried the question under the rest.
+pub const HANDED_MAX: usize = 15;
+
+/// Lines of a failure's text kept when it goes alone, and when it goes with
+/// others. The **head**: the message comes first and the trace after it, and
+/// a trace's last frames are the runner's own machinery.
+const MESSAGE_LINES_ALONE: usize = 80;
+const MESSAGE_LINES_GROUPED: usize = 20;
+
+/// Lines of the runner's own output that go with a lone failure — the
+/// **tail**, where every runner writes its failures and its summary.
+pub const OUTPUT_LINES: usize = 60;
+
+/// Beyond this, a line is cut: a minified bundle in a stack trace is one line
+/// a megabyte long.
+const LINE_CHARS: usize = 400;
+
+/// One red test, as it goes to an agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Handoff {
+    /// `None` for an outcome no listed test answers and whose file does not
+    /// say — a listing gone stale under the run.
+    pub runner: Option<Runner>,
+    /// The PHP class for Pest, the file for a JS test.
+    pub class: String,
+    /// The real description when an account taught it, the row's label
+    /// otherwise.
+    pub name: String,
+    pub file: String,
+    pub line: Option<u32>,
+    /// The failure's text, message and trace, as the account carried it.
+    /// `None` when the verdict comes from an earlier run whose account is no
+    /// longer at hand: a mark survives a restart, the message does not.
+    pub message: Option<String>,
+    /// The line that runs this test again, alone.
+    pub command: Option<String>,
+}
+
+/// What runs again the test an outcome is about: the listed test's own
+/// target — except for a Jest row, which is a **file**, and whose outcome's
+/// `fullName` narrows it to the one test with the anchored `-t` Vitest gets.
+pub fn outcome_target(test: &Test, outcome: &Outcome) -> Target {
+    let mut target = test_target(test);
+    if test.runner == Runner::Jest && !outcome.name.is_empty() {
+        target.filter = Some(format!("^{}$", title_regex(&outcome.name)));
+    }
+    target
+}
+
+/// A failed outcome, ready to go. `test` is the listed test it pairs with,
+/// when one does: that is what knows the runner and the exact filter.
+pub fn handoff_of(test: Option<&Test>, outcome: &Outcome, sail: bool) -> Handoff {
+    let runner = test.map(|test| test.runner).or_else(|| {
+        // Pest's classes are PHP's; nothing unpaired tells Vitest from Jest.
+        (outcome.file.ends_with(".php") || outcome.class.contains('\\')).then_some(Runner::Pest)
+    });
+    let file = match (outcome.file.is_empty(), test) {
+        (true, Some(test)) => test.file.clone(),
+        _ => outcome.file.clone(),
+    };
+    Handoff {
+        runner,
+        class: outcome.class.clone(),
+        name: outcome.name.clone(),
+        file,
+        line: outcome.line,
+        message: Some(outcome.message.clone()),
+        command: test.map(|test| command_line(sail, &outcome_target(test, outcome))),
+    }
+}
+
+/// A test the tree shows red with no account at hand to say why — a verdict
+/// kept from a run before the restart, or from a campaign since replaced.
+pub fn handoff_unexplained(test: &Test, label: &str, sail: bool) -> Handoff {
+    Handoff {
+        runner: Some(test.runner),
+        class: test.class.clone(),
+        name: label.to_string(),
+        file: test.file.clone(),
+        line: None,
+        message: None,
+        command: Some(command_line(sail, &test_target(test))),
+    }
+}
+
+/// The text an agent is handed for one or several red tests.
+///
+/// One failure is laid out in full, with `output` — the tail of what the
+/// runner printed — when the caller knows it speaks of that test alone.
+/// Several are grouped **by file**, each with its own command, and capped at
+/// [`HANDED_MAX`]. Every cut is said: an agent that does not know text is
+/// missing reasons as if it had it all.
+///
+/// The intro is the caller's, translated; the body is in English, like the
+/// Sentry prompt — it is read by an agent, next to code written in English.
+pub fn failure_prompt(intro: &str, failures: &[Handoff], output: &[String]) -> String {
+    let mut out = String::new();
+    out.push_str(intro.trim());
+    out.push_str("\n\n");
+    match failures {
+        [] => {}
+        [alone] => one_failure(&mut out, alone, output),
+        _ => many_failures(&mut out, failures),
+    }
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+fn one_failure(out: &mut String, failure: &Handoff, output: &[String]) {
+    out.push_str(&format!("# {}\n", failure.name));
+    if let Some(runner) = failure.runner {
+        out.push_str(&format!("- Runner: {}\n", runner.name()));
+    }
+    if !failure.class.is_empty() && failure.class != failure.file {
+        out.push_str(&format!("- Class: {}\n", failure.class));
+    }
+    if let Some(place) = place(failure) {
+        out.push_str(&format!("- File: {place}\n"));
+    }
+    if let Some(command) = &failure.command {
+        out.push_str(&format!(
+            "- Run it again, alone, from the worktree's root: {}\n",
+            inline_code(command)
+        ));
+    }
+    out.push_str("\n## Failure\n");
+    failure_text(out, failure, MESSAGE_LINES_ALONE);
+    let said: Vec<&str> = output
+        .iter()
+        .map(String::as_str)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if !said.is_empty() {
+        let start = said.len().saturating_sub(OUTPUT_LINES);
+        let kept: Vec<String> = said[start..].iter().map(|line| cut_line(line)).collect();
+        if start > 0 {
+            out.push_str(&format!(
+                "\n## The runner's output, last {} of {} lines\n",
+                kept.len(),
+                said.len()
+            ));
+        } else {
+            out.push_str("\n## The runner's output\n");
+        }
+        out.push_str(&fenced(&kept));
+    }
+}
+
+fn many_failures(out: &mut String, failures: &[Handoff]) {
+    // Grouped by file, the files in order, each file's tests in the order
+    // they came: the cap then falls on whole files at the end, not on a
+    // scatter of tests across all of them.
+    let mut groups: Vec<(&str, Vec<&Handoff>)> = Vec::new();
+    for failure in failures {
+        let key = group_of(failure);
+        match groups.iter_mut().find(|(group, _)| *group == key) {
+            Some((_, members)) => members.push(failure),
+            None => groups.push((key, vec![failure])),
+        }
+    }
+    groups.sort_by(|a, b| a.0.cmp(b.0));
+    let files = groups.len();
+    out.push_str(&format!(
+        "{} failing tests in {} {}.",
+        failures.len(),
+        files,
+        if files == 1 { "file" } else { "files" }
+    ));
+    if failures.len() > HANDED_MAX {
+        out.push_str(&format!(
+            " Only the first {HANDED_MAX} are below; run the suite again to see the other {}.",
+            failures.len() - HANDED_MAX
+        ));
+    }
+    out.push('\n');
+    let mut left = HANDED_MAX;
+    for (group, members) in groups {
+        if left == 0 {
+            break;
+        }
+        out.push_str(&format!("\n## {group}\n"));
+        for failure in members.into_iter().take(left) {
+            left -= 1;
+            out.push_str(&format!("\n### {}\n", failure.name));
+            let mut facts = Vec::new();
+            if let Some(runner) = failure.runner {
+                facts.push(runner.name().to_string());
+            }
+            if !failure.class.is_empty() && failure.class != group {
+                facts.push(failure.class.clone());
+            }
+            if let Some(line) = failure.line {
+                facts.push(format!("line {line}"));
+            }
+            if !facts.is_empty() {
+                out.push_str(&format!("- {}\n", facts.join(" · ")));
+            }
+            if let Some(command) = &failure.command {
+                out.push_str(&format!("- Run it again: {}\n", inline_code(command)));
+            }
+            failure_text(out, failure, MESSAGE_LINES_GROUPED);
+        }
+    }
+}
+
+/// The file a failure is grouped under — its class when the account named
+/// no file, which is what a PHPUnit class outside the autoloader gives.
+fn group_of(failure: &Handoff) -> &str {
+    if !failure.file.is_empty() {
+        &failure.file
+    } else if !failure.class.is_empty() {
+        &failure.class
+    } else {
+        "(no file)"
+    }
+}
+
+/// `tests/Unit/MathTest.php:12`, or the file alone, or nothing.
+fn place(failure: &Handoff) -> Option<String> {
+    if failure.file.is_empty() {
+        return None;
+    }
+    Some(match failure.line {
+        Some(line) => format!("{}:{line}", failure.file),
+        None => failure.file.clone(),
+    })
+}
+
+fn failure_text(out: &mut String, failure: &Handoff, max: usize) {
+    let Some(message) = &failure.message else {
+        out.push_str(
+            "The failure's text is not at hand: this verdict comes from an earlier run. \
+             Run the command above to see it.\n",
+        );
+        return;
+    };
+    let lines: Vec<&str> = message.trim_end().lines().collect();
+    if lines.iter().all(|line| line.trim().is_empty()) {
+        out.push_str("The runner said nothing more than that it failed.\n");
+        return;
+    }
+    let kept: Vec<String> = lines.iter().take(max).map(|line| cut_line(line)).collect();
+    out.push_str(&fenced(&kept));
+    if lines.len() > max {
+        out.push_str(&format!("({} more lines cut)\n", lines.len() - max));
+    }
+}
+
+/// A line at most [`LINE_CHARS`] characters long, the cut said by an
+/// ellipsis.
+fn cut_line(line: &str) -> String {
+    let line = line.trim_end();
+    match line.char_indices().nth(LINE_CHARS) {
+        Some((at, _)) => format!("{}…", &line[..at]),
+        None => line.to_string(),
+    }
+}
+
+/// A fenced block the text cannot close: one backtick more than its longest
+/// run, and never fewer than three.
+fn fenced(lines: &[String]) -> String {
+    let longest = lines
+        .iter()
+        .map(|line| backtick_run(line))
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat((longest + 1).max(3));
+    format!("{fence}\n{}\n{fence}\n", lines.join("\n"))
+}
+
+/// Inline code the text cannot close, by the same rule — a shell line can
+/// hold a backtick inside its quotes.
+fn inline_code(text: &str) -> String {
+    let fence = "`".repeat(backtick_run(text) + 1);
+    let pad = if text.starts_with('`') || text.ends_with('`') {
+        " "
+    } else {
+        ""
+    };
+    format!("{fence}{pad}{text}{pad}{fence}")
+}
+
+fn backtick_run(text: &str) -> usize {
+    let (mut longest, mut run) = (0, 0);
+    for c in text.chars() {
+        if c == '`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    longest
 }
 
 #[cfg(test)]
@@ -2801,5 +3137,198 @@ at tests/Feature/HttpTest.php:3</failure>
             " FAIL  src/http.test.js"
         );
         assert_eq!(strip_ansi("plain"), "plain");
+    }
+
+    fn listed(runner: Runner, class: &str, method: &str, file: &str) -> Test {
+        Test {
+            runner,
+            class: class.into(),
+            method: method.into(),
+            name: method.into(),
+            pattern: match runner {
+                Runner::Pest => pattern_of(method),
+                Runner::Vitest => title_pattern(method),
+                Runner::Jest => String::new(),
+            },
+            datasets: 0,
+            file: file.into(),
+        }
+    }
+
+    fn red(class: &str, name: &str, file: &str, line: Option<u32>, message: &str) -> Outcome {
+        Outcome {
+            class: class.into(),
+            name: name.into(),
+            status: Status::Failed,
+            message: message.into(),
+            file: file.into(),
+            line,
+            cases: 1,
+            time_ms: 3,
+        }
+    }
+
+    #[test]
+    fn a_lone_failure_says_what_where_and_how_to_run_it_again() {
+        let test = listed(
+            Runner::Pest,
+            "Tests\\Unit\\MathTest",
+            "__pest_evaluable_it_sums_2___2",
+            "tests/Unit/MathTest.php",
+        );
+        let outcome = red(
+            "Tests\\Unit\\MathTest",
+            "it sums 2 + 2",
+            "tests/Unit/MathTest.php",
+            Some(5),
+            "Failed asserting that 3 is identical to 4.\n\nat tests/Unit/MathTest.php:5",
+        );
+        let handed = handoff_of(Some(&test), &outcome, false);
+        assert_eq!(handed.runner, Some(Runner::Pest));
+        // The listing's own filter, the one the panel runs: verified on Pest.
+        assert_eq!(
+            handed.command.as_deref(),
+            Some(command_line(false, &test_target(&test)).as_str())
+        );
+        let prompt = failure_prompt(
+            "Fix it.",
+            &[handed],
+            &[
+                "".into(),
+                "  ⨯ it sums 2 + 2".into(),
+                "Tests: 1 failed".into(),
+            ],
+        );
+        assert!(prompt.starts_with("Fix it.\n\n# it sums 2 + 2\n- Runner: Pest\n"));
+        assert!(prompt.contains("- Class: Tests\\Unit\\MathTest\n"));
+        assert!(prompt.contains("- File: tests/Unit/MathTest.php:5\n"));
+        assert!(prompt.contains("vendor/bin/pest --filter"));
+        assert!(prompt.contains("```\nFailed asserting that 3 is identical to 4.\n\nat tests/"));
+        // The runner's output, blank lines dropped, whole since it is short.
+        assert!(prompt
+            .ends_with("## The runner's output\n```\n  ⨯ it sums 2 + 2\nTests: 1 failed\n```"));
+    }
+
+    #[test]
+    fn a_jest_outcome_is_run_again_alone_not_with_its_file() {
+        let file = listed(Runner::Jest, "src", "src/http.test.js", "src/http.test.js");
+        let outcome = red(
+            "src/http.test.js",
+            "inside will fail (twice)",
+            "src/http.test.js",
+            Some(2),
+            "expect(received).toBe(expected)",
+        );
+        let target = outcome_target(&file, &outcome);
+        assert_eq!(target.path.as_deref(), Some("src/http.test.js"));
+        assert!(target.exact);
+        assert_eq!(
+            target.filter.as_deref(),
+            Some("^inside will fail \\(twice\\)$")
+        );
+        let handed = handoff_of(Some(&file), &outcome, false);
+        let prompt = failure_prompt("Fix it.", &[handed], &[]);
+        // A JS test's class is its file: said once.
+        assert!(!prompt.contains("- Class:"));
+        assert!(prompt.contains("- Runner: Jest\n"));
+        assert!(!prompt.contains("runner's output"));
+    }
+
+    #[test]
+    fn a_long_failure_is_cut_and_says_so() {
+        let message = (1..=200)
+            .map(|n| format!("frame {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let wide = "x".repeat(1000);
+        let outcome = red(
+            "src/a.test.ts",
+            "t",
+            "src/a.test.ts",
+            None,
+            &format!("{wide}\n{message}"),
+        );
+        let prompt = failure_prompt("Go.", &[handoff_of(None, &outcome, false)], &[]);
+        assert!(prompt.contains(&format!("{}…\n", "x".repeat(LINE_CHARS))));
+        assert!(prompt.contains("frame 79\n```"));
+        assert!(!prompt.contains("frame 80\n"));
+        assert!(prompt.ends_with("(121 more lines cut)"));
+        // Unpaired and not PHP: no runner claimed, no command invented.
+        assert!(!prompt.contains("Runner:"));
+        assert!(!prompt.contains("Run it again"));
+
+        let output: Vec<String> = (1..=100).map(|n| format!("line {n}")).collect();
+        let prompt = failure_prompt("Go.", &[handoff_of(None, &outcome, false)], &output);
+        assert!(prompt.contains("## The runner's output, last 60 of 100 lines\n```\nline 41\n"));
+    }
+
+    #[test]
+    fn a_verdict_without_its_account_says_the_text_is_missing() {
+        let test = listed(
+            Runner::Vitest,
+            "src/a.test.ts",
+            "suite > adds",
+            "src/a.test.ts",
+        );
+        let prompt = failure_prompt(
+            "Go.",
+            &[handoff_unexplained(&test, "suite > adds", false)],
+            &[],
+        );
+        assert!(prompt.contains("not at hand"));
+        // The whole line, in inline code: what the panel's own run would do.
+        let line = command_line(false, &test_target(&test));
+        assert!(line.starts_with("node_modules/.bin/vitest run src/a.test.ts"));
+        assert!(prompt.contains(&format!("`{line}`")));
+    }
+
+    #[test]
+    fn several_failures_go_grouped_by_file_and_capped() {
+        let mut handed: Vec<Handoff> = (0..HANDED_MAX + 3)
+            .map(|n| {
+                let file = if n % 2 == 0 {
+                    "tests/B.php"
+                } else {
+                    "tests/A.php"
+                };
+                handoff_of(
+                    None,
+                    &red(
+                        "Tests\\X",
+                        &format!("case {n}"),
+                        file,
+                        Some(n as u32),
+                        "boom",
+                    ),
+                    false,
+                )
+            })
+            .collect();
+        handed.push(handoff_of(None, &red("Legacy", "old", "", None, ""), false));
+        let prompt = failure_prompt("Go.", &handed, &["ignored".into()]);
+        assert!(prompt.contains(&format!(
+            "{} failing tests in 3 files. Only the first {HANDED_MAX} are below; run the suite \
+             again to see the other 4.",
+            HANDED_MAX + 4
+        )));
+        // Files in order — the class-only group sorts before `tests/` — and a
+        // file's tests in the order they came.
+        let legacy = prompt.find("\n## Legacy\n").unwrap();
+        let a = prompt.find("\n## tests/A.php\n").unwrap();
+        let b = prompt.find("\n## tests/B.php\n").unwrap();
+        assert!(legacy < a && a < b);
+        assert!(prompt.find("### case 1\n").unwrap() < prompt.find("### case 3\n").unwrap());
+        assert!(prompt.contains("The runner said nothing more than that it failed."));
+        assert!(prompt.contains("- Pest · Tests\\X · line 1\n"));
+        assert_eq!(prompt.matches("\n### ").count(), HANDED_MAX);
+        // Output goes with a lone failure only.
+        assert!(!prompt.contains("ignored"));
+    }
+
+    #[test]
+    fn a_fence_is_longer_than_what_it_holds() {
+        assert_eq!(fenced(&["a ``` b".into()]), "````\na ``` b\n````\n");
+        assert_eq!(inline_code("echo `x`"), "`` echo `x` ``");
+        assert_eq!(inline_code("plain"), "`plain`");
     }
 }
