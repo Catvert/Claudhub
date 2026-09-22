@@ -419,10 +419,11 @@ impl ClaudhubApp {
         if let Some(path) = previous.worktree.clone() {
             // What the fields hold, which only they knew until now.
             previous.field = self.search_query(cx);
-            // An answer still owed is dropped when it lands — its id is not the
-            // one the shown search is waiting for — so the panel must not come
-            // back to this project saying it is still searching.
-            previous.running = false;
+            // An answer still owed is **filed here when it lands**
+            // (`file_late_search`), so the search stays running. It used to be
+            // dropped, and the project came back to the older results under
+            // the newer query — which the debounce then refused to ask again,
+            // the field being the query it believed it had sent.
             self.searches.insert(path, previous);
         }
         self.search = self.searches.remove(worktree).unwrap_or_default();
@@ -480,7 +481,8 @@ impl ClaudhubApp {
     ///
     /// An answer that is not the last one asked for is **dropped**: one types,
     /// and the results of a query already replaced would flash on screen and
-    /// then be replaced in turn.
+    /// then be replaced in turn. The exception is the last one asked for **in
+    /// another worktree**, which goes where it belongs (`file_late_search`).
     pub(super) fn search_done(
         &mut self,
         request: u64,
@@ -489,6 +491,7 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         if request != self.search.request {
+            self.file_late_search(request, result, cx);
             return;
         }
         // Taken here and not further down: whatever happens to this answer, the
@@ -549,6 +552,45 @@ impl ClaudhubApp {
             }
         }
         cx.notify();
+    }
+
+    /// The answer to a search whose worktree one has left meanwhile, put away
+    /// with that worktree's search so that coming back shows it.
+    ///
+    /// Only the one its search is still waiting for — an id is the last sent
+    /// or it is stale, there as here. Nothing that shows goes with it: no
+    /// focus, no preview, no jump to definition, all of which were about the
+    /// worktree on screen when the question went out and not now.
+    fn file_late_search(&mut self, request: u64, result: Result<Results, String>, cx: &App) {
+        let theme = cx.theme().highlight_theme.clone();
+        let Some(state) = self
+            .searches
+            .values_mut()
+            .find(|state| state.running && state.request == request)
+        else {
+            return;
+        };
+        state.running = false;
+        state.definition = None;
+        state.preview = None;
+        state.folded = Rc::new(HashSet::new());
+        let results = match result {
+            Ok(results) => {
+                state.hits = Rc::new(HitHighlights::compute(&results, &theme));
+                state.marks = Rc::new(Marks::compute(&results, &state.sent));
+                state.error = None;
+                results
+            }
+            Err(message) => {
+                state.hits = Rc::new(HitHighlights::default());
+                state.marks = Rc::new(Marks::default());
+                state.error = Some(message);
+                Results::default()
+            }
+        };
+        state.rows = Rc::new(search::rows(&results, &state.folded));
+        state.selected = search::first_hit(&state.rows);
+        state.results = Rc::new(results);
     }
 
     /// Lays the displayed list out again.

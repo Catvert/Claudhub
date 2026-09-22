@@ -759,7 +759,10 @@ impl Vim {
             if at == keys.len() {
                 return Response::Consumed;
             }
-            let count = count.unwrap_or(1) * second.unwrap_or(1);
+            let count = count
+                .unwrap_or(1)
+                .saturating_mul(second.unwrap_or(1))
+                .min(MAX_COUNT);
             return self.operate(text, operator, count, &keys[at..]);
         }
         // A text object only exists after an operator or in visual mode: `i` and
@@ -821,7 +824,22 @@ impl Vim {
                 Response::Consumed
             }
             Parsed::Motion(motion) => {
-                let target = self.aim(text, motion, Some(count));
+                let target = match motion {
+                    // vim's other special case: `cw` in a word is `ce`, and
+                    // leaves the blank after the word alone — what one changes
+                    // is the word, and the space is what separates it from the
+                    // next. On the last character of a word it changes that
+                    // character, where `ce` would reach the end of the next.
+                    Motion::WordForward(big)
+                        if operator == 'c' && class_at(text, self.head, big) != Class::Blank =>
+                    {
+                        self.column = None;
+                        let first = word_end_here(text, self.head, big);
+                        let last = repeat_step(first, count - 1, |at| word_end(text, at, big));
+                        Some(Target::inclusive(last))
+                    }
+                    _ => self.aim(text, motion, Some(count)),
+                };
                 self.pending.clear();
                 let Some(Target { offset, kind }) = target else {
                     return Response::Consumed;
@@ -839,6 +857,10 @@ impl Vim {
                 };
                 let (from, to) = (self.head.min(offset), self.head.max(offset));
                 let range = match kind {
+                    // `$` reaches the end of the line and never past it: on an
+                    // empty line its "last character" is the newline, and
+                    // reading it inclusively made `d$` join the next line up.
+                    _ if motion == Motion::LineEnd => from..end_of_line(text, to).max(from),
                     Kind::Exclusive => from..to,
                     Kind::Inclusive => from..next_boundary(text, to),
                     Kind::Linewise => {
@@ -919,10 +941,14 @@ impl Vim {
             if self.mode == Mode::VisualBlock {
                 return self.block_replace(text, rest[1]);
             }
-            let end = advance(text, self.head, n).min(end_of_line(text, self.head));
-            if end <= self.head {
+            // A count longer than what is left of the line replaces nothing,
+            // as in vim: `5rx` with three characters to go is refused, not
+            // shortened — and never lengthens the line.
+            let eol = end_of_line(text, self.head);
+            if text[self.head..eol].chars().count() < n {
                 return Response::Consumed;
             }
+            let end = advance(text, self.head, n);
             let replacement: String = std::iter::repeat_n(rest[1], n).collect();
             return Response::Apply(self.edit(text, self.head..end, replacement, self.head));
         }
@@ -1268,7 +1294,10 @@ impl Vim {
                 None => (end, typed.clone()),
                 Some(column) => {
                     let at = column_offset(text, start, column);
-                    if at >= end {
+                    // A line that ends exactly at the column still reaches
+                    // it — vim writes there, an empty line at column zero
+                    // included; only one that stops short of it is short.
+                    if column_of(text, end) < column {
                         // The line stops before the block: `A` pads out to the
                         // column, `I` skips the line, as vim does with each.
                         if !pending.pad {
@@ -1317,6 +1346,7 @@ impl Vim {
         if register.text.is_empty() {
             return Response::Consumed;
         }
+        let count = count.min((MAX_PASTE / register.text.len()).max(1));
         let payload = register.text.repeat(count);
         if register.linewise {
             let at = if after {
@@ -1330,13 +1360,17 @@ impl Vim {
                 start_of_line(text, self.head)
             };
             // A file whose last line has no newline needs one before a line is
-            // laid after it.
-            let payload = if at == text.len() && !text.ends_with('\n') && at > 0 {
-                format!("\n{}", payload.trim_end_matches('\n'))
+            // laid after it — and loses the register's **last** newline in
+            // exchange, only that one: the others are empty lines it holds.
+            let (payload, first) = if at == text.len() && !text.ends_with('\n') && at > 0 {
+                let lines = payload.strip_suffix('\n').unwrap_or(&payload);
+                (format!("\n{lines}"), at + 1)
             } else {
-                payload
+                (payload, at)
             };
-            let head = at + leading_blanks(&payload);
+            // The caret goes to the first line put back, which begins after
+            // that added newline and not on it.
+            let head = first + leading_blanks(&payload[first - at..]);
             return Response::Apply(self.edit(text, at..at, payload, head));
         }
         let at = if after {
@@ -1527,27 +1561,15 @@ impl Vim {
             }
             Motion::WordForward(big) => {
                 self.column = None;
-                let mut at = head;
-                for _ in 0..count {
-                    at = word_forward(text, at, big);
-                }
-                Target::exclusive(at)
+                Target::exclusive(repeat_step(head, count, |at| word_forward(text, at, big)))
             }
             Motion::WordBackward(big) => {
                 self.column = None;
-                let mut at = head;
-                for _ in 0..count {
-                    at = word_backward(text, at, big);
-                }
-                Target::exclusive(at)
+                Target::exclusive(repeat_step(head, count, |at| word_backward(text, at, big)))
             }
             Motion::WordEnd(big) => {
                 self.column = None;
-                let mut at = head;
-                for _ in 0..count {
-                    at = word_end(text, at, big);
-                }
-                Target::inclusive(at)
+                Target::inclusive(repeat_step(head, count, |at| word_end(text, at, big)))
             }
             Motion::LineStart => {
                 self.column = Some(0);
@@ -1693,6 +1715,18 @@ enum Parsed {
     None,
 }
 
+/// The largest count a command takes, as vim has one too.
+///
+/// A count is typed, and a key held down types a lot of digits: unbounded, the
+/// sum overflowed, and a count that size turned into a loop the interface
+/// waited on. No gesture of a hand needs more — a file of a hundred thousand
+/// lines is walked by `G`, not counted through.
+const MAX_COUNT: usize = 100_000;
+
+/// What `p` puts back at most, in bytes, however large its count: `1000p` of
+/// a register holding a whole file is an allocation, not a paste.
+const MAX_PASTE: usize = 64 << 20;
+
 /// Reads the count a command starts with. A leading `0` is `^`'s neighbour and
 /// not a count, which is why the digit is only taken when one is under way.
 fn read_count(keys: &[char], at: &mut usize) -> Option<usize> {
@@ -1702,7 +1736,7 @@ fn read_count(keys: &[char], at: &mut usize) -> Option<usize> {
         if !c.is_ascii_digit() || (c == '0' && count == 0) {
             break;
         }
-        count = count.saturating_mul(10) + (c as usize - '0' as usize);
+        count = (count * 10 + (c as usize - '0' as usize)).min(MAX_COUNT);
         *at += 1;
     }
     (count > 0).then_some(count)
@@ -1788,18 +1822,25 @@ fn prev_boundary_in(text: &str, at: usize, floor: usize) -> usize {
     i
 }
 
-fn advance(text: &str, mut at: usize, count: usize) -> usize {
+/// `step` done `count` times, stopping as soon as a step does not move: at the
+/// edge of the text the rest of a large count would go round in place.
+fn repeat_step(mut at: usize, count: usize, step: impl Fn(usize) -> usize) -> usize {
     for _ in 0..count {
-        at = next_boundary(text, at);
+        let next = step(at);
+        if next == at {
+            break;
+        }
+        at = next;
     }
     at
 }
 
-fn retreat(text: &str, mut at: usize, count: usize) -> usize {
-    for _ in 0..count {
-        at = prev_boundary(text, at);
-    }
-    at
+fn advance(text: &str, at: usize, count: usize) -> usize {
+    repeat_step(at, count, |at| next_boundary(text, at))
+}
+
+fn retreat(text: &str, at: usize, count: usize) -> usize {
+    repeat_step(at, count, |at| prev_boundary(text, at))
 }
 
 fn start_of_line(text: &str, at: usize) -> usize {
@@ -2076,8 +2117,20 @@ fn word_forward(text: &str, mut at: usize, big: bool) -> usize {
     }
     while at < len && class_at(text, at, big) == Class::Blank {
         at = next_boundary(text, at);
+        if empty_line_at(text, at) {
+            break;
+        }
     }
     at
+}
+
+/// Whether `at` is the start of an empty line — which `w` and `b` stop on, an
+/// empty line being a word of its own for vim. Without it `w` ran through a
+/// paragraph break as if it were a blank, and `5w` counted five words that
+/// did not include the gap one was reading.
+fn empty_line_at(text: &str, at: usize) -> bool {
+    (at == 0 || text.as_bytes().get(at - 1) == Some(&b'\n'))
+        && text.as_bytes().get(at) == Some(&b'\n')
 }
 
 fn word_backward(text: &str, mut at: usize, big: bool) -> usize {
@@ -2086,6 +2139,9 @@ fn word_backward(text: &str, mut at: usize, big: bool) -> usize {
     }
     at = prev_boundary(text, at);
     while at > 0 && class_at(text, at, big) == Class::Blank {
+        if empty_line_at(text, at) {
+            return at;
+        }
         at = prev_boundary(text, at);
     }
     let class = class_at(text, at, big);
@@ -2102,18 +2158,27 @@ fn word_backward(text: &str, mut at: usize, big: bool) -> usize {
     at
 }
 
-fn word_end(text: &str, mut at: usize, big: bool) -> usize {
+fn word_end(text: &str, start: usize, big: bool) -> usize {
     let len = text.len();
-    if at >= len {
+    if start >= len {
         return len;
     }
-    at = next_boundary(text, at);
+    let mut at = next_boundary(text, start);
     while at < len && class_at(text, at, big) == Class::Blank {
         at = next_boundary(text, at);
     }
     if at >= len {
-        return prev_boundary(text, len);
+        // No word ahead: the last character of the last line, and not the
+        // newline that closes it — which `de` on the last word would take.
+        // Never behind where it started, from an empty last line.
+        return prev_boundary(text, len - usize::from(text.ends_with('\n'))).max(start);
     }
+    word_end_here(text, at, big)
+}
+
+/// The last character of the run `at` is in — `at` itself when it ends there.
+fn word_end_here(text: &str, mut at: usize, big: bool) -> usize {
+    let len = text.len();
     let class = class_at(text, at, big);
     loop {
         let next = next_boundary(text, at);
@@ -2196,15 +2261,14 @@ fn pair_object(
     close: char,
 ) -> Option<Range<usize>> {
     let here = char_at(text, at);
+    // On a closing bracket the scan starts **on** it, and `scan_back` leaves
+    // the bracket at its start out of the count: starting one character back
+    // instead read a `)` right before it — `(a(b))` — as its own opening, and
+    // chose the inner pair.
     let start = if here == Some(open) {
         at
     } else {
-        let from = if here == Some(close) {
-            prev_boundary(text, at)
-        } else {
-            at
-        };
-        scan_back(text, from, open, close)?
+        scan_back(text, at, open, close)?
     };
     let end = scan_forward(text, next_boundary(text, start), open, close)?;
     if around {
@@ -2332,11 +2396,14 @@ fn find_forward(text: &str, needle: &str, at: usize) -> Option<usize> {
     crate::ui::find::find_from(needle, text, 0).map(|hit| hit.start)
 }
 
+/// The previous occurrence: the last one that **starts** before the caret, as
+/// in vim — the one the caret is in the middle of counts, and `N` from inside
+/// a match goes to its start rather than past it.
 fn find_backward(text: &str, needle: &str, at: usize) -> Option<usize> {
     let hits = crate::ui::find::find_all(needle, text);
     hits.iter()
         .rev()
-        .find(|hit| hit.end <= at)
+        .find(|hit| hit.start < at)
         .or_else(|| hits.last())
         .map(|hit| hit.start)
 }
@@ -3171,7 +3238,8 @@ tail
     }
 
     /// `A` goes past the right edge of the block, and pads out a line too short
-    /// to reach it; `I` skips such a line, as vim does.
+    /// to reach it; `I` skips such a line, as vim does — one that stops short
+    /// of the column, and not one that ends on it.
     #[test]
     fn appending_to_a_block_pads_a_short_line() {
         let mut editor = Editor::new("ab\nc\nde\n");
@@ -3179,10 +3247,10 @@ tail
         editor.press("ljjA!\x1b");
         assert_eq!(editor.text, "ab!\nc !\nde!\n");
 
-        let mut editor = Editor::new("ab\nc\nde\n");
-        editor.press("l").control("v");
+        let mut editor = Editor::new("abc\nd\nefg\n");
+        editor.press("ll").control("v");
         editor.press("jjI!\x1b");
-        assert_eq!(editor.text, "a!b\nc\nd!e\n");
+        assert_eq!(editor.text, "ab!c\nd\nef!g\n");
     }
 
     /// `$` sticks here as it does everywhere: the block reaches the end of every
@@ -3588,6 +3656,184 @@ tail
         editor.press("i");
         editor.drag(4..7, false);
         assert_eq!(editor.mode(), Mode::Insert);
+    }
+
+    /// `cw` in a word is `ce`: the blank that follows the word stays. On the
+    /// last character of a word it changes that one, and a count reaches the
+    /// end of the words it counts — each checked against vim.
+    #[test]
+    fn changing_a_word_leaves_the_blank_after_it() {
+        let mut editor = Editor::new("foo bar\n");
+        editor.press("cwX\x1b");
+        assert_eq!(editor.text, "X bar\n");
+
+        let mut editor = Editor::new("foo\nbar\n");
+        editor.press("llcwX\x1b");
+        assert_eq!(editor.text, "foX\nbar\n");
+
+        let mut editor = Editor::new("foo bar baz\n");
+        editor.press("c2wX\x1b");
+        assert_eq!(editor.text, "X baz\n");
+
+        // On a blank it is still `dw`, the blanks going to the next word.
+        let mut editor = Editor::new("foo   bar\n");
+        editor.cursor = 3;
+        editor.press("cwX\x1b");
+        assert_eq!(editor.text, "fooXbar\n");
+    }
+
+    /// `$` never reaches past the end of its line: on an empty line there is
+    /// nothing for `d$`, `c$` or `y$` to take, the newline least of all.
+    #[test]
+    fn to_the_end_of_an_empty_line_is_nothing() {
+        let mut editor = Editor::new("a\n\nb\n");
+        editor.press("jd$");
+        assert_eq!(editor.text, "a\n\nb\n");
+
+        let mut editor = Editor::new("a\n\nb\n");
+        editor.press("jc$X\x1b");
+        assert_eq!(editor.text, "a\nX\nb\n");
+
+        let mut editor = Editor::new("a\n\nb\n");
+        editor.press("jy$jp");
+        assert_eq!(editor.text, "a\n\nb\n");
+
+        // And on a line with something in it, `$` still takes its last one.
+        let mut editor = Editor::new("abc\nd\n");
+        editor.press("ld$");
+        assert_eq!(editor.text, "a\nd\n");
+    }
+
+    /// `e` on the last word of the file has nowhere to go, and `de` takes the
+    /// rest of the word — not the newline that closes the file.
+    #[test]
+    fn the_last_word_ends_before_the_last_newline() {
+        let mut editor = Editor::new("foo\n");
+        editor.press("llde");
+        assert_eq!(editor.text, "fo\n");
+
+        let mut editor = Editor::new("foo  \n");
+        editor.press("llde");
+        assert_eq!(editor.text, "fo\n");
+
+        let mut editor = Editor::new("foo x\n");
+        editor.press("4lde");
+        assert_eq!(editor.text, "foo \n");
+    }
+
+    /// On a closing bracket, the pair is the one that bracket closes — even
+    /// right after another closing bracket.
+    #[test]
+    fn a_closing_bracket_names_its_own_pair() {
+        let mut editor = Editor::new("(a(b))\n");
+        editor.press("$di)");
+        assert_eq!(editor.text, "()\n");
+
+        let mut editor = Editor::new("(a(b))\n");
+        editor.press("4ldi)");
+        assert_eq!(editor.text, "(a())\n");
+    }
+
+    /// A count longer than what is left of the line replaces nothing: vim
+    /// refuses the command rather than shorten it, or lengthen the line.
+    #[test]
+    fn replacing_more_than_the_line_holds_does_nothing() {
+        let mut editor = Editor::new("abc\n");
+        editor.press("l5rx");
+        assert_eq!(editor.text, "abc\n");
+        editor.press("2rx");
+        assert_eq!(editor.text, "axx\n");
+    }
+
+    /// An empty line is a word to `w` and `b`: a paragraph break is where a
+    /// hand walking by words stops, as it does in vim.
+    #[test]
+    fn an_empty_line_is_a_word() {
+        let mut editor = Editor::new("a\n\nb");
+        editor.press("w");
+        assert_eq!(editor.cursor, 2);
+        editor.press("w");
+        assert_eq!(editor.cursor, 3);
+        editor.press("b");
+        assert_eq!(editor.cursor, 2);
+        editor.press("b");
+        assert_eq!(editor.cursor, 0);
+
+        // Two of them are two words.
+        let mut editor = Editor::new("a\n\n\nb\n");
+        editor.press("w");
+        assert_eq!(editor.cursor, 2);
+        editor.press("w");
+        assert_eq!(editor.cursor, 3);
+        editor.press("w");
+        assert_eq!(editor.cursor, 4);
+    }
+
+    /// `N` and `?` take the occurrence the caret is inside of: it starts
+    /// before the caret, which is all vim asks of a match behind it.
+    #[test]
+    fn searching_back_from_inside_a_match_goes_to_its_start() {
+        let mut editor = Editor::new("foo foo\n");
+        editor.cursor = 5;
+        editor.press("?foo\n");
+        assert_eq!(editor.cursor, 4);
+
+        let mut editor = Editor::new("foo foo foo\n");
+        editor.press("/foo\n");
+        assert_eq!(editor.cursor, 4);
+        editor.cursor = 9;
+        editor.press("N");
+        assert_eq!(editor.cursor, 8);
+    }
+
+    /// A blockwise `I` writes on every line that reaches its column, one that
+    /// ends exactly there included — an empty line at column zero is one.
+    #[test]
+    fn a_block_insertion_reaches_a_line_that_ends_at_its_column() {
+        let mut editor = Editor::new("ab\n\ncd\n");
+        editor.control("v");
+        editor.press("jjIX\x1b");
+        assert_eq!(editor.text, "Xab\nX\nXcd\n");
+
+        let mut editor = Editor::new("abc\na\nab\nabcd\n");
+        editor.press("ll");
+        editor.control("v");
+        editor.press("jjjIX\x1b");
+        assert_eq!(editor.text, "abXc\na\nabX\nabXcd\n");
+    }
+
+    /// A count is capped, and a motion that has reached the edge stops
+    /// counting: `99999999l` is a keystroke, not a loop the window waits on.
+    #[test]
+    fn a_huge_count_is_capped_and_stops_at_the_edge() {
+        let mut editor = Editor::new("abc\n");
+        editor.press("99999999999999999999999l");
+        assert_eq!(editor.cursor, 2);
+        editor.press("0999999999e");
+        assert_eq!(editor.cursor, 2);
+
+        let mut editor = Editor::new("one two three\n");
+        editor.press("99999999d99999999w");
+        assert_eq!(editor.text, "\n");
+
+        let digits: Vec<char> = "9".repeat(40).chars().collect();
+        assert_eq!(read_count(&digits, &mut 0), Some(MAX_COUNT));
+    }
+
+    /// A line put after the last one of a file without a final newline: the
+    /// caret goes onto it, and the empty lines the register holds stay.
+    #[test]
+    fn a_line_pasted_after_an_unterminated_last_line() {
+        let mut editor = Editor::new("one\ntwo");
+        editor.press("jyyp");
+        assert_eq!(editor.text, "one\ntwo\ntwo");
+        assert_eq!(editor.cursor, 8);
+
+        let mut editor = Editor::new("one");
+        editor.vim.set_register("  x\n\n".into());
+        editor.press("p");
+        assert_eq!(editor.text, "one\n  x\n");
+        assert_eq!(editor.cursor, 6);
     }
 
     fn key(ch: char) -> Key {
