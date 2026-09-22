@@ -690,6 +690,139 @@ fn oldest_spare<'a>(
         .map(|(path, _, _)| path)
 }
 
+/// The writes of open files, per worktree, and **one in flight at a time**.
+///
+/// One at a time because the answer does not say which file it is about:
+/// `Evt::Done` and `Evt::Failed` carry a worktree and an action, and the reads
+/// queue has three workers, so two writes sent together come back in whatever
+/// order they finish. Sending the next only once the last has answered makes
+/// the answer name its file — the head of the queue — and that is what lets a
+/// refused write (an agent wrote in the file meanwhile) leave **that** tab
+/// unsaved, and only that one. A decision of its own, before the view, for
+/// the reason `oldest_spare` is: each rule here was a way of losing work.
+#[derive(Default)]
+pub struct Saves {
+    queues: std::collections::HashMap<PathBuf, std::collections::VecDeque<Save>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Save {
+    pub path: PathBuf,
+    /// The digest of the text sent, once it is: what the tab's digest becomes
+    /// when the write goes through. `None` while it waits for its turn.
+    pub sent: Option<u64>,
+    /// Close the tab once the write has gone through — the closing dialog's
+    /// "save". Never before the answer: a tab closed on a refused write is the
+    /// work the dialog was asked to keep.
+    pub close: bool,
+}
+
+impl Saves {
+    /// Files a write. `true` when nothing is under way for the worktree, so
+    /// that it is to be sent now.
+    ///
+    /// A write of this file already waiting for its turn absorbs this one: it
+    /// reads the text when it goes, so a second would write the same text
+    /// twice. One **in flight** does not: what it carries is the text of the
+    /// moment it left, and the new one goes behind it — with the digest the
+    /// first leaves behind, which is how two saves in a row do not have the
+    /// second refused over a change that was ours.
+    pub fn push(&mut self, worktree: &Path, path: &Path, close: bool) -> bool {
+        let queue = self.queues.entry(worktree.to_path_buf()).or_default();
+        if let Some(waiting) = queue
+            .iter_mut()
+            .find(|save| save.path == path && save.sent.is_none())
+        {
+            waiting.close |= close;
+            return false;
+        }
+        queue.push_back(Save {
+            path: path.to_path_buf(),
+            sent: None,
+            close,
+        });
+        queue.len() == 1
+    }
+
+    /// The file whose turn it is, when its write has not left yet.
+    pub fn next(&self, worktree: &Path) -> Option<&Path> {
+        self.queues
+            .get(worktree)?
+            .front()
+            .filter(|save| save.sent.is_none())
+            .map(|save| save.path.as_path())
+    }
+
+    /// The write whose turn it is has left, carrying a text of this digest.
+    pub fn sent(&mut self, worktree: &Path, digest: u64) {
+        if let Some(save) = self.queues.get_mut(worktree).and_then(|q| q.front_mut()) {
+            save.sent = Some(digest);
+        }
+    }
+
+    /// The write whose turn it is will not leave — its tab has closed, or holds
+    /// a picture.
+    pub fn skip(&mut self, worktree: &Path) {
+        if self.next(worktree).is_some() {
+            self.pop(worktree);
+        }
+    }
+
+    /// The worker has answered for this worktree: the write in flight, which
+    /// is the head. `None` for an answer to nothing sent from here.
+    ///
+    /// A refusal takes the writes of the same file waiting behind with it:
+    /// they would be checked against the digest that has just been refused,
+    /// and refused in their turn.
+    pub fn answered(&mut self, worktree: &Path, ok: bool) -> Option<Save> {
+        // Nothing in flight: the head is still waiting for its turn.
+        self.queues.get(worktree)?.front()?.sent?;
+        let save = self.pop(worktree)?;
+        if !ok {
+            if let Some(queue) = self.queues.get_mut(worktree) {
+                queue.retain(|waiting| waiting.path != save.path);
+                if queue.is_empty() {
+                    self.queues.remove(worktree);
+                }
+            }
+        }
+        Some(save)
+    }
+
+    /// Forgets everything: the server has gone, and nothing sent will answer.
+    pub fn clear(&mut self) {
+        self.queues.clear();
+    }
+
+    fn pop(&mut self, worktree: &Path) -> Option<Save> {
+        let queue = self.queues.get_mut(worktree)?;
+        let save = queue.pop_front();
+        if queue.is_empty() {
+            self.queues.remove(worktree);
+        }
+        save
+    }
+}
+
+/// Whether a failed read is the read of this file.
+///
+/// `Evt::Failed` names no file, and `Action::Read` answers for the file list
+/// as well as for a file: taking one for the other either leaves a restore
+/// waiting for a file that will never come, or marks the tree unreadable over
+/// a deleted tab. So the message is read, against the two shapes
+/// `files::read` and `files::read_image` give it: the full path after
+/// `cannot read`, or the path as sent at the head of the sentence. Joined by
+/// `wslpath::join`: the worker wrote it on Linux.
+fn read_failure_names(message: &str, worktree: &Path, path: &Path) -> bool {
+    let full = crate::wslpath::join(worktree, path);
+    let unreadable = format!("cannot read {}", full.display());
+    let refused = format!("{} is ", path.display());
+    message
+        .strip_prefix(&unreadable)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+        || message.starts_with(&refused)
+}
+
 pub struct Pending {
     pub worktree: PathBuf,
     pub path: PathBuf,
@@ -755,8 +888,8 @@ pub struct Editing {
     /// a render, it would lose the cursor and the selection on the first
     /// keystroke.
     pub input: Entity<EditorState>,
-    /// Digest of the content read, which makes it possible to refuse to
-    /// overwrite an agent's work.
+    /// Digest of the content read — or of the last write that went through —
+    /// which makes it possible to refuse to overwrite an agent's work.
     pub hash: u64,
     /// The modal harness — the vim state and the layers it paints on. One per
     /// open file: leaving a file in insert mode and coming back to another in
@@ -1042,6 +1175,39 @@ impl ClaudhubApp {
     /// Only what was under way: a failure that names this worktree while
     /// nothing was expected of it — another read, another panel — has nothing
     /// to say about the tree.
+    /// A read of this worktree has failed: a file's, or the file list's.
+    ///
+    /// Told apart by the message (`read_failure_names`), the event naming
+    /// neither. A file a restore was waiting for — deleted since, or grown
+    /// binary — is **passed over**: the restore reads one tab at a time, and
+    /// until it ends nothing is filed in the session, so a file that failed
+    /// held up every tab after it and every save of the session for good. A
+    /// gesture's file drops its landing, which names a tab that will not come.
+    /// Only what is neither is the list's.
+    pub(super) fn read_failed(
+        &mut self,
+        worktree: &Path,
+        message: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let restoring = self.restoring_file().is_some_and(|open| {
+            open.worktree == worktree && read_failure_names(message, worktree, &open.path)
+        });
+        if restoring {
+            self.continue_restore(window, cx);
+            return;
+        }
+        let landing = self.landing.as_ref().is_some_and(|pending| {
+            pending.worktree == worktree && read_failure_names(message, worktree, &pending.path)
+        });
+        if landing {
+            self.landing = None;
+            return;
+        }
+        self.project_files_failed(worktree);
+    }
+
     pub(super) fn project_files_failed(&mut self, worktree: &Path) {
         if let Some(explorer) = self.explorers.get_mut(worktree) {
             if explorer.state == Listing::Loading {
@@ -1868,6 +2034,21 @@ impl ClaudhubApp {
         // opened: the preview tab is a gesture's, and there is no gesture here.
         let ephemeral = !restored && self.asked_for(&worktree, &path).unwrap_or(false);
         let lit = !restored && self.asked_lit(&worktree, &path);
+        // **A tab holding unsaved text is not rebuilt from the disk.** Every
+        // opening reads the file, a tab already open included — which is what
+        // refreshes a clean one after an agent's write — and the arrival used
+        // to rebuild the tab from what came back, clean: opening again, from
+        // the tree or a search hit, a file one had typed in threw the typing
+        // away without a word. Such a tab is brought forward as it stands; its
+        // digest stays the one it was read with, so that a save over an
+        // agent's write is still refused.
+        let unsaved = self
+            .editors(&worktree)
+            .and_then(|tabs| tabs.index_of(&path).filter(|&ix| tabs.open[ix].dirty));
+        if let Some(ix) = unsaved {
+            self.resume_tab(&worktree, &path, ix, restored, lit, window, cx);
+            return;
+        }
         if !restored {
             self.make_tab_room(&worktree, &path, ephemeral, window, cx);
         }
@@ -1978,6 +2159,44 @@ impl ClaudhubApp {
         self.finish_tab(&worktree, &path, restored, true, window, cx);
     }
 
+    /// Brings forward a tab already open, as an arrival would have built it:
+    /// the caret asked for, the trail, the screen — everything but the text.
+    ///
+    /// An arrival nobody asked for moves nothing, as a reread would not have
+    /// (see `tab_panel`); a restore still counts, so that it goes on to the
+    /// next remembered tab.
+    #[allow(clippy::too_many_arguments)]
+    fn resume_tab(
+        &mut self,
+        worktree: &Path,
+        path: &Path,
+        ix: usize,
+        restored: bool,
+        lit: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let asked = self.asked_for(worktree, path).is_some();
+        if !asked && !restored {
+            return;
+        }
+        self.close_previous_document(worktree, path);
+        let stamp = self.touch_tab();
+        let Some(tabs) = self.editings.get_mut(worktree) else {
+            return;
+        };
+        tabs.active = ix;
+        let editing = &mut tabs.open[ix];
+        editing.used = stamp;
+        editing.lit |= lit;
+        let panel = editing.panel.clone();
+        if asked {
+            crate::ui::panels::FilePanel::activate(&panel, window, cx);
+        }
+        self.lsp_sync_editor(window, cx);
+        self.finish_tab(worktree, path, restored, true, window, cx);
+    }
+
     /// `Ctrl+S`: writes what has been typed.
     ///
     /// **Every unsaved tab of the checkout**, and not only the one on screen —
@@ -2027,7 +2246,26 @@ impl ClaudhubApp {
     /// the dock is not showing, and the index of a tab is not a thing to hold
     /// across a write.
     fn save_tab(&mut self, path: &Path, cx: &mut Context<Self>) {
-        let Some(editing) = self.editing_at(path) else {
+        let Some(worktree) = self
+            .editing_at(path)
+            .map(|editing| editing.worktree.clone())
+        else {
+            return;
+        };
+        self.save_tab_in(&worktree, path, false, cx);
+    }
+
+    /// The same, in a named worktree, and saying whether the tab closes once
+    /// the write has gone through.
+    ///
+    /// **Nothing about the tab changes here**: it is marked saved when the
+    /// worker says the file is written (`file_written`), and not a moment
+    /// before. Marked on sending, a write refused because an agent had written
+    /// in the file left a tab that said "saved" over text that was not — and
+    /// every later save refused in its turn, the digest having moved to a text
+    /// the disk never held.
+    fn save_tab_in(&mut self, worktree: &Path, path: &Path, close: bool, cx: &mut Context<Self>) {
+        let Some(editing) = self.editors(worktree).and_then(|tabs| tabs.by_path(path)) else {
             return;
         };
         // Nothing to write back from a picture: the tab holds an empty editor
@@ -2035,22 +2273,75 @@ impl ClaudhubApp {
         if editing.preview.is_some() {
             return;
         }
-        let content = editing.input.read(cx).value().to_string();
-        self.git.send(Cmd::WriteFile {
-            worktree: editing.worktree.clone(),
-            path: path.to_path_buf(),
-            content: content.clone(),
-            // The digest of what we had read: an agent that wrote in the
-            // meantime makes the save be refused rather than be overwritten.
-            expect: Some(editing.hash),
-        });
-        // The digest follows what has just been sent: without that, two saves in
-        // a row would make the second be refused, the file having changed — by
-        // us.
-        if let Some(editing) = self.editing_at_mut(path) {
-            editing.hash = files::digest(&content);
-            editing.dirty = false;
+        if self.saves.push(worktree, path, close) {
+            self.send_next_save(worktree, cx);
         }
+    }
+
+    /// Sends the write whose turn it is, reading the text as it goes.
+    fn send_next_save(&mut self, worktree: &Path, cx: &mut Context<Self>) {
+        while let Some(path) = self.saves.next(worktree).map(Path::to_path_buf) {
+            let Some(editing) = self
+                .editors(worktree)
+                .and_then(|tabs| tabs.by_path(&path))
+                .filter(|editing| editing.preview.is_none())
+            else {
+                self.saves.skip(worktree);
+                continue;
+            };
+            let content = editing.input.read(cx).value().to_string();
+            // The digest of what we had read — or of what the last write that
+            // went through left: an agent that wrote in the meantime makes the
+            // save be refused rather than be overwritten.
+            let expect = Some(editing.hash);
+            self.saves.sent(worktree, files::digest(&content));
+            self.git.send(Cmd::WriteFile {
+                worktree: worktree.to_path_buf(),
+                path,
+                content,
+                expect,
+            });
+            return;
+        }
+    }
+
+    /// The worker has answered a file's write: `Evt::Done` or `Evt::Failed`
+    /// of `Action::Write`.
+    ///
+    /// On success the digest follows what was written — without that, the next
+    /// save would be refused over a change that was ours — and the tab is
+    /// saved **if its text is still the one sent**: what was typed while the
+    /// write was on its way is not on disk. On a refusal nothing moves: the
+    /// tab keeps its text and its star, and the balloon the failure raises
+    /// says why.
+    pub(super) fn file_written(
+        &mut self,
+        worktree: Option<&Path>,
+        ok: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(worktree) = worktree else {
+            return;
+        };
+        let Some(save) = self.saves.answered(worktree, ok) else {
+            return;
+        };
+        let editing = self
+            .editings
+            .get_mut(worktree)
+            .and_then(|tabs| tabs.by_path_mut(&save.path));
+        let mut saved = false;
+        if let (true, Some(editing), Some(sent)) = (ok, editing, save.sent) {
+            editing.hash = sent;
+            editing.dirty = files::digest(&editing.input.read(cx).value()) != sent;
+            saved = !editing.dirty;
+        }
+        if save.close && saved {
+            self.close_file(worktree.to_path_buf(), save.path, window, cx);
+        }
+        self.send_next_save(worktree, cx);
+        cx.notify();
     }
 
     // — The gutter's change marks ————————————————————————————————
@@ -2556,12 +2847,13 @@ impl ClaudhubApp {
                     tr!("editor-discard-drop"),
                     dropping,
                 ))
-                .on_ok(move |_, window, cx| {
+                .on_ok(move |_, _window, cx| {
                     let (worktree, path) = (worktree.clone(), path.clone());
+                    // The tab closes when the write has gone through, and not
+                    // on sending it: refused, it stays, star and text intact.
                     entity.update(cx, |this, cx| {
-                        this.save_tab(&path, cx);
+                        this.save_tab_in(&worktree, &path, true, cx);
                         this.lsp_editor_saved();
-                        this.close_file(worktree, path, window, cx);
                     });
                     true
                 })
@@ -4137,6 +4429,96 @@ mod tests {
             oldest_spare(all_dirty.iter().copied(), Path::new("d.rs")),
             None
         );
+    }
+
+    /// One write in flight per worktree, and the answer is the head's: that
+    /// is what lets a refusal land on the tab it is about.
+    #[test]
+    fn writes_leave_one_at_a_time_and_the_answer_names_the_head() {
+        let (w, a, b) = (Path::new("/w"), Path::new("a.rs"), Path::new("b.rs"));
+        let mut saves = Saves::default();
+        // Nothing under way: the first goes now, the second waits.
+        assert!(saves.push(w, a, false));
+        assert!(!saves.push(w, b, false));
+        assert_eq!(saves.next(w), Some(a));
+        saves.sent(w, 11);
+        // In flight, the head is no longer "to send".
+        assert_eq!(saves.next(w), None);
+        let answered = saves.answered(w, true).unwrap();
+        assert_eq!((answered.path.as_path(), answered.sent), (a, Some(11)));
+        assert_eq!(saves.next(w), Some(b));
+        // Another worktree is a queue of its own.
+        assert!(saves.push(Path::new("/v"), a, false));
+    }
+
+    /// Two saves in a row: the second waits for the first, so it leaves with
+    /// the digest the first wrote rather than be refused over our own change.
+    /// And a second save of a file still waiting joins it.
+    #[test]
+    fn a_second_save_waits_behind_the_first_and_a_waiting_one_absorbs_it() {
+        let (w, a) = (Path::new("/w"), Path::new("a.rs"));
+        let mut saves = Saves::default();
+        assert!(saves.push(w, a, false));
+        saves.sent(w, 1);
+        assert!(!saves.push(w, a, false));
+        assert!(!saves.push(w, a, true));
+        assert!(saves.answered(w, true).is_some());
+        let waiting = saves.next(w).unwrap().to_path_buf();
+        assert_eq!(waiting, a);
+        saves.sent(w, 2);
+        // The two pushes were one write, and it carries the closing.
+        let last = saves.answered(w, true).unwrap();
+        assert!(last.close);
+        assert_eq!(saves.next(w), None);
+        assert!(saves.answered(w, true).is_none());
+    }
+
+    /// A refused write takes the writes of that file waiting behind it — they
+    /// would be refused against the same digest — and none of the others.
+    #[test]
+    fn a_refusal_drops_the_same_file_waiting_behind_it() {
+        let (w, a, b) = (Path::new("/w"), Path::new("a.rs"), Path::new("b.rs"));
+        let mut saves = Saves::default();
+        saves.push(w, a, false);
+        saves.sent(w, 1);
+        saves.push(w, a, true);
+        saves.push(w, b, false);
+        let refused = saves.answered(w, false).unwrap();
+        assert_eq!(refused.path, a);
+        assert_eq!(saves.next(w), Some(b));
+        // An answer to nothing sent from here is nobody's.
+        assert!(saves.answered(w, false).is_none());
+        // A tab gone before its turn is passed over.
+        saves.skip(w);
+        assert_eq!(saves.next(w), None);
+    }
+
+    /// A failed read is told from the file list's by its message, in the two
+    /// shapes `files::read` writes.
+    #[test]
+    fn a_failed_read_is_known_by_the_file_it_names() {
+        let (w, a) = (Path::new("/w"), Path::new("src/a.rs"));
+        let gone = "cannot read /w/src/a.rs : No such file or directory (os error 2)";
+        assert!(read_failure_names(gone, w, a));
+        assert!(read_failure_names("src/a.rs is a binary file", w, a));
+        assert!(read_failure_names("src/a.rs is not UTF-8 text", w, a));
+        // A neighbour whose name ends or starts like it is not it.
+        assert!(!read_failure_names(
+            "cannot read /w/src/a.rs.bak : gone",
+            w,
+            a
+        ));
+        assert!(!read_failure_names("xsrc/a.rs is a binary file", w, a));
+        assert!(!read_failure_names("src/b.rs is a binary file", w, a));
+        // What `ls-files` says names no file of ours.
+        assert!(!read_failure_names("fatal: not a git repository", w, a));
+        // A path given whole — a test file opened by its absolute path.
+        let whole = Path::new("/w/tests/t.php");
+        assert!(read_failure_names(
+            "cannot read /w/tests/t.php : gone",
+            w,
+            whole
+        ));
     }
 
     /// What a drop on a row asks for. This is the whole decision of dragging

@@ -161,14 +161,19 @@ pub(super) struct VimHost {
     /// that the block cursor, the yank flash and a blockwise selection all keep
     /// their colours where they cross one.
     pub matches: gpui_kit::component::input::TextDecorationCollection,
-    /// The pattern and text length the occurrences were found for.
+    /// The pattern and the text the occurrences were found for.
     ///
     /// `find_all` walks the whole file, which is a keystroke's worth of work and
     /// not a frame's: it is redone when the pattern changes and when the text
     /// does, and never otherwise. **The caret is deliberately not in this key**:
     /// it moves at every `j`, and the search does not have to be run again to
     /// find out which occurrence one has landed on — that is `matches_lit`.
-    pub matches_at: Option<(String, usize)>,
+    ///
+    /// The text itself and not its length: an edit that keeps the length — `r`,
+    /// an undo, a paste over as many bytes — left ranges over the old text,
+    /// which lit the wrong words and could cut a character in two. See
+    /// `matches_stale` for what the comparison costs.
+    pub matches_at: Option<(String, gpui_kit::component::input::Rope)>,
     /// Where the occurrences are, kept from one frame to the next so that a
     /// caret moving over them costs a comparison and not a walk of the file.
     pub matches_found: Vec<std::ops::Range<usize>>,
@@ -322,6 +327,29 @@ pub(super) enum Place {
 pub(super) fn line_at(text: &gpui_kit::component::input::Rope, offset: usize) -> usize {
     use gpui_kit::component::input::RopeExt;
     text.offset_to_position(offset.min(text.len())).line as usize
+}
+
+/// Whether the occurrences found for `prev` have to be looked for again.
+///
+/// Called at every frame a surface is painted, so the order of the questions
+/// is the cost: a pattern that changed answers at once, and **no pattern at
+/// all** — the common case by far — answers without looking at the text, there
+/// being nothing to find in any of them. Only a lit pattern compares the text,
+/// and that comparison is a walk of the rope in memory; the search it saves
+/// is the same walk plus a copy of the whole text into a `String`. The length
+/// goes first inside it, which is where an edit usually shows.
+pub(super) fn matches_stale(
+    prev: Option<&(String, gpui_kit::component::input::Rope)>,
+    pattern: &str,
+    text: &gpui_kit::component::input::Rope,
+) -> bool {
+    let Some((searched, over)) = prev else {
+        return true;
+    };
+    if searched != pattern {
+        return true;
+    }
+    !pattern.is_empty() && over != text
 }
 
 /// How many lines `Ctrl+D` moves by half of, before the surface has been laid
@@ -947,11 +975,12 @@ impl ClaudhubApp {
         if pattern.is_empty() {
             pattern = self.hit_pattern(surface);
         }
-        let (caret, len, bar) = {
+        let (caret, text, bar) = {
             let state = input.read(cx);
             (
                 state.selected_range().start,
-                state.text().len(),
+                // A rope clones by sharing its tree: no copy of the text.
+                state.text().clone(),
                 state.search_session().open,
             )
         };
@@ -961,10 +990,10 @@ impl ClaudhubApp {
         if bar {
             pattern = "";
         }
-        let at = (pattern.to_string(), len);
         // The walk of the file, and only when the question has changed. What
         // invalidates it: the pattern, and the text it was run over.
-        let searched = host.matches_at.as_ref() != Some(&at);
+        let searched = matches_stale(host.matches_at.as_ref(), pattern, &text);
+        let at = (pattern.to_string(), text);
         if searched {
             let ranges = match pattern.is_empty() {
                 true => Vec::new(),
@@ -1917,6 +1946,26 @@ fn ink_on(colour: gpui_kit::Hsla, cx: &gpui_kit::App) -> gpui_kit::Hsla {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_edit_of_the_same_length_invalidates_the_occurrences() {
+        use gpui_kit::component::input::Rope;
+        let before = Rope::from_str("let été = 1;");
+        let found = (String::from("été"), before.clone());
+        // Nothing moved: the walk is not redone.
+        assert!(!matches_stale(Some(&found), "été", &before));
+        // `r` over one byte, an undo: the same length, another text — and the
+        // old ranges may now fall inside a character.
+        let after = Rope::from_str("let étè = 1;");
+        assert_eq!(before.len(), after.len());
+        assert!(matches_stale(Some(&found), "été", &after));
+        // Another pattern, or nothing found yet.
+        assert!(matches_stale(Some(&found), "let", &before));
+        assert!(matches_stale(None, "", &before));
+        // No pattern finds nothing in any text, so the text is not looked at.
+        let unlit = (String::new(), before.clone());
+        assert!(!matches_stale(Some(&unlit), "", &after));
+    }
 
     /// Every writing field is in `TextField::ALL`, and each has a scroll key of
     /// its own.

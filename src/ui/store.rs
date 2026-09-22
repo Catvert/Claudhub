@@ -16,7 +16,7 @@
 //! added field does not break a file already written, and an unreadable file
 //! never prevents startup.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -238,9 +238,14 @@ pub struct RepoState {
 #[serde(default)]
 pub struct Store {
     /// Key: the checkout path, as everywhere else in Claudhub.
-    pub worktrees: HashMap<PathBuf, WorktreeState>,
-    /// Key: the main repository path.
-    pub repos: HashMap<PathBuf, RepoState>,
+    ///
+    /// A `BTreeMap` and not a `HashMap`, for the rule the sets below follow:
+    /// a hash map serialises in an order drawn afresh at every run, so the file
+    /// was rewritten in another order at every save — a `state.json` that
+    /// changes without anything having changed. The JSON is the same object.
+    pub worktrees: BTreeMap<PathBuf, WorktreeState>,
+    /// Key: the main repository path. Ordered for the same reason.
+    pub repos: BTreeMap<PathBuf, RepoState>,
     /// Where one was, all repositories taken together.
     pub session: Session,
     /// The checkouts pinned to the top bar, in the order they were pinned.
@@ -314,22 +319,30 @@ impl Store {
         let Some(path) = state_path() else {
             return Self::default();
         };
+        // Overwriting a file we failed to read would lose the notes of every
+        // worktree over a single malformed key — and the first change after a
+        // start on the defaults would do exactly that. So the file is put
+        // aside first, or, when even that fails, never written this session:
+        // see `settings::set_aside`.
         match std::fs::read_to_string(&path) {
             Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-                // Overwriting a file we failed to read would lose the notes of
-                // every worktree over a single malformed key.
                 log::warn!("unreadable state ({}): {e}", path.display());
+                crate::ui::settings::hold_unless_set_aside(&path, &STATE_HELD);
                 Self::default()
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
             Err(e) => {
                 log::warn!("reading the state: {e}");
+                crate::ui::settings::hold_unless_set_aside(&path, &STATE_HELD);
                 Self::default()
             }
         }
     }
 
     pub fn save(&self) {
+        if STATE_HELD.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         let Some(path) = state_path() else { return };
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -482,6 +495,10 @@ fn schedule_save(cx: &mut App) {
     .detach();
 }
 
+/// Set when `state.json` could be neither read nor put aside: see
+/// `settings::set_aside`.
+static STATE_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Where the state is kept, beside the settings and the layout.
 fn state_path() -> Option<PathBuf> {
     crate::ui::settings::config_dir().map(|dir| dir.join("state.json"))
@@ -505,6 +522,32 @@ mod tests {
         assert!(store.repos.is_empty());
         // Including the session, which no file written before it carries.
         assert_eq!(store.session, Session::default());
+    }
+
+    #[test]
+    fn the_file_is_written_in_one_order_whatever_the_order_of_filing() {
+        // The same state filed in two orders is the same file: a map that
+        // serialised in its own order rewrote `state.json` at every save.
+        let paths = ["/w/zeta", "/w/alpha", "/w/mid"];
+        let write = |order: &[&str]| {
+            let mut store = Store::default();
+            for path in order {
+                store.worktree_mut(Path::new(path), Path::new("/w"));
+                store.repos.entry(PathBuf::from(path)).or_default();
+            }
+            serde_json::to_string(&store).unwrap()
+        };
+        let reversed: Vec<&str> = paths.iter().rev().copied().collect();
+        let json = write(&paths);
+        assert_eq!(json, write(&reversed));
+        let (alpha, zeta) = (
+            json.find("/w/alpha").unwrap(),
+            json.find("/w/zeta").unwrap(),
+        );
+        assert!(alpha < zeta);
+        // And it is still the object a `HashMap` wrote: an older file reads.
+        let back: Store = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.worktrees.len(), 3);
     }
 
     fn a_place() -> Place {
