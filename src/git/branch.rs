@@ -63,8 +63,15 @@ pub fn list(main: &Path) -> Result<Vec<Branch>> {
     // `%(refname)` is what removed the second `for-each-ref`: it says whether a
     // reference lives under `refs/heads` or `refs/remotes`, which the short name
     // alone cannot tell — a local branch may well be called `origin/x`.
-    const FORMAT: &str = "%(refname:short)%00%(HEAD)%00%(committerdate:relative)%00\
-                          %(contents:subject)%00%(upstream:short)%00%(upstream:track)%00\
+    //
+    // `lstrip=2` and not `:short`, for the name and the upstream alike: `short`
+    // is "the shortest name that is not ambiguous", so a branch sharing its
+    // name with a tag came out as `heads/v1` — a name `switch` does not take —
+    // and `refs/remotes/origin/HEAD` as a bare `origin`, a branch nobody has.
+    // Two components off is `refs/heads/` or `refs/remotes/`, whatever else
+    // exists.
+    const FORMAT: &str = "%(refname:lstrip=2)%00%(HEAD)%00%(committerdate:relative)%00\
+                          %(contents:subject)%00%(upstream:lstrip=2)%00%(upstream:track)%00\
                           %(authorname)%00%(refname)";
 
     let raw = git(
@@ -656,6 +663,41 @@ mod tests {
         assert_eq!(parse_ref(line, &locals).unwrap().kind, BranchKind::Local);
         let line = "origin/x\0 \0yesterday\0Draft\0\0\0Zoé\0refs/remotes/origin/x";
         assert_eq!(parse_ref(line, &locals).unwrap().kind, BranchKind::Remote);
+    }
+
+    /// A branch and a tag of the same name: each list names its own by that
+    /// name, not by the `heads/` or `tags/` git adds to tell them apart.
+    #[test]
+    fn a_branch_named_like_a_tag_keeps_its_name() {
+        let dir = std::env::temp_dir().join(format!("claudhub-twins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.email", "t@example.com"],
+            &["config", "user.name", "T"],
+            &["commit", "-q", "--allow-empty", "-m", "first"],
+            &["branch", "v1"],
+            &["tag", "v1"],
+        ] {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        }
+        let branches = list(&dir).unwrap();
+        let mut names: Vec<_> = branches.iter().map(|b| b.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["main", "v1"]);
+        let tags = super::super::tags::list(&dir).unwrap();
+        assert_eq!(
+            tags.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            ["v1"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -60,9 +60,22 @@ impl Repo {
         // `.git/modules/`; its parent is not a checkout. core.worktree is
         // relative to that git directory, also when opened from a linked tree.
         let configured = git_opt(start, &["config", "--get", "core.worktree"]);
+        // A bare repository with linked worktrees — `repo.git` beside them, or
+        // the `.bare` a `.git` file points at — has no checkout of its own,
+        // and the parent of its directory is merely the folder it sits in:
+        // taken for the main one, it made every command of the repository run
+        // outside it. The main one is then the repository itself, which is
+        // what `git worktree list` names first. `core.bare` and not
+        // `rev-parse --is-bare-repository`: asked from a linked worktree, the
+        // latter speaks of that worktree, which is not bare. `--type=bool`
+        // turns `yes`, `on` and `1` into the one spelling compared here.
+        let bare = git_opt(start, &["config", "--type=bool", "--get", "core.bare"])
+            .is_some_and(|value| value == "true");
         let main = if let Some(worktree) = configured {
             let main = common.join(worktree);
             main.canonicalize().unwrap_or(main)
+        } else if bare {
+            common
         } else {
             common
                 .parent()
@@ -86,8 +99,10 @@ impl Repo {
         let out = git(&self.main, &["worktree", "list", "--porcelain", "-z"])?;
         let mut worktrees = parse_worktree_list(&out);
         // Git reports an absorbed submodule's git directory for the first
-        // worktree. Discovery has resolved its actual checkout above.
-        if let Some(main) = worktrees.first_mut() {
+        // worktree. Discovery has resolved its actual checkout above. A bare
+        // repository has no main checkout at all, and its first entry is
+        // already gone: see `parse_worktree_list`.
+        if let Some(main) = worktrees.first_mut().filter(|w| w.is_main) {
             main.path = self.main.clone();
         }
         Ok(worktrees)
@@ -194,7 +209,10 @@ fn on_file_repositories(dir: &Path, paths: &[PathBuf], command: &[&str]) -> Resu
         grouped.entry(owner).or_default().push(local);
     }
     for (owner, paths) in grouped {
-        let mut args: Vec<OsString> = command.iter().map(OsString::from).collect();
+        // Literal: a discard of `app/[id]/page.tsx` also restored every
+        // `app/?/page.tsx` beside it — see `LITERAL_PATHS`.
+        let mut args: Vec<OsString> = vec![super::LITERAL_PATHS.into()];
+        args.extend(command.iter().map(OsString::from));
         args.push("--".into());
         args.extend(paths.into_iter().map(OsString::from));
         git(&owner, &args)?;
@@ -422,23 +440,36 @@ pub fn cherry_pick(dir: &Path, id: &str) -> Result<String> {
 /// once, as a pick leaves things, and with conflict markers rather than a
 /// refusal where it does not apply cleanly. `--first-parent -m` says which
 /// side a merge commit is read against; on a plain commit both are inert.
+///
+/// The patch is read **as bytes** and handed on as it came: `git` converts
+/// lossily and strips the final newline and carriage return, so a CRLF file's
+/// last line lost its `\r` — and a file in Latin-1 its accents — and the patch
+/// no longer applied to the file it was cut from. The user's configuration is
+/// kept out of it too, each option for a setting that changes what `show`
+/// writes: `log.showSignature` puts gpg's account before the diff, an external
+/// driver or a textconv filter writes something that is not the file's bytes,
+/// and `diff.noPrefix` drops the `a/` and `b/` that `apply` strips.
 pub fn take_from_commit(dir: &Path, id: &str, path: &Path) -> Result<String> {
     let mut args: Vec<std::ffi::OsString> = vec![
+        super::LITERAL_PATHS.into(),
         "show".into(),
         "--format=".into(),
+        "--no-show-signature".into(),
         "--first-parent".into(),
         "-m".into(),
         "--no-color".into(),
+        "--no-ext-diff".into(),
+        "--no-textconv".into(),
+        "--src-prefix=a/".into(),
+        "--dst-prefix=b/".into(),
         id.into(),
         "--".into(),
     ];
     args.push(path.as_os_str().to_os_string());
-    let patch = git(dir, &args)?;
-    if patch.trim().is_empty() {
+    let patch = super::git_bytes(dir, &args)?;
+    if patch.iter().all(u8::is_ascii_whitespace) {
         bail!("commit {id} does not touch {}", path.display());
     }
-    let mut patch = patch.into_bytes();
-    patch.push(b'\n');
     super::git_feeding(dir, &["apply", "--3way", "--index"], patch)
 }
 
@@ -713,7 +744,12 @@ pub fn resolve(dir: &Path, path: &Path, ours: bool) -> Result<()> {
     } else {
         "--theirs"
     };
-    let mut args: Vec<OsString> = vec!["checkout".into(), flag.into(), "--".into()];
+    let mut args: Vec<OsString> = vec![
+        super::LITERAL_PATHS.into(),
+        "checkout".into(),
+        flag.into(),
+        "--".into(),
+    ];
     args.push(path.as_os_str().to_os_string());
     git(dir, &args)?;
     // Keeping a version is deciding: the file moves into the index, which takes
@@ -905,23 +941,35 @@ pub fn is_repo(dir: &Path) -> bool {
 /// The format is a sequence of `key value` records separated by null bytes, one
 /// block per worktree, blocks separated by an empty record — which `split_nul`
 /// removes, hence the split on `worktree `.
+///
+/// A `bare` block is dropped: it is the repository of a bare setup, listed
+/// first as the main worktree is, and it is not a checkout — no status, no
+/// files, nothing a worktree panel could show. The linked worktrees that follow
+/// are none of them the main one, and none is marked so.
 fn parse_worktree_list(out: &str) -> Vec<Worktree> {
     let mut trees: Vec<Worktree> = Vec::new();
+    let mut blocks = 0;
     for rec in split_nul(out) {
         let (key, value) = match rec.split_once(' ') {
             Some((k, v)) => (k, v),
             None => (rec, ""),
         };
         match key {
-            "worktree" => trees.push(Worktree {
-                path: PathBuf::from(value),
-                branch: None,
-                head: String::new(),
-                // The first block git returns is always the main one.
-                is_main: trees.is_empty(),
-                locked: false,
-                prunable: false,
-            }),
+            "worktree" => {
+                trees.push(Worktree {
+                    path: PathBuf::from(value),
+                    branch: None,
+                    head: String::new(),
+                    // The first block git returns is always the main one.
+                    is_main: blocks == 0,
+                    locked: false,
+                    prunable: false,
+                });
+                blocks += 1;
+            }
+            "bare" => {
+                trees.pop();
+            }
             "HEAD" => {
                 if let Some(w) = trees.last_mut() {
                     w.head = value.to_string();
@@ -942,7 +990,7 @@ fn parse_worktree_list(out: &str) -> Vec<Worktree> {
                     w.prunable = true;
                 }
             }
-            // "detached", "bare": nothing to keep, `branch` stays None.
+            // "detached": nothing to keep, `branch` stays None.
             _ => {}
         }
     }
@@ -1073,6 +1121,84 @@ mod tests {
         assert_eq!(staged, "src/other.rs", "staged, as a pick leaves things");
         // A file the commit did not touch is refused, not silently a no-op.
         assert!(take_from_commit(&root, &id, Path::new(".gitignore")).is_err());
+    }
+
+    /// A path is not a pattern: discarding `app/[id]/page.tsx` leaves
+    /// `app/i/page.tsx` alone, which the glob `[id]` also matches.
+    #[test]
+    fn a_discard_touches_the_file_named_and_no_other() {
+        let root = scratch_repo("literal");
+        for dir in ["app/[id]", "app/i"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            std::fs::write(root.join(dir).join("page.tsx"), "first\n").unwrap();
+        }
+        sh(&root, &["add", "app"]);
+        sh(&root, &["commit", "-q", "-m", "first"]);
+        for dir in ["app/[id]", "app/i"] {
+            std::fs::write(root.join(dir).join("page.tsx"), "edited\n").unwrap();
+        }
+
+        discard(&root, &[PathBuf::from("app/[id]/page.tsx")]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("app/[id]/page.tsx")).unwrap(),
+            "first\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("app/i/page.tsx")).unwrap(),
+            "edited\n",
+            "the neighbour the glob matched is left as it was"
+        );
+
+        stage(&root, &[PathBuf::from("app/[id]/page.tsx")]).unwrap();
+        assert_eq!(sh(&root, &["diff", "--cached", "--name-only"]), "");
+        std::fs::write(root.join("app/[id]/page.tsx"), "again\n").unwrap();
+        stage(&root, &[PathBuf::from("app/[id]/page.tsx")]).unwrap();
+        assert_eq!(
+            sh(&root, &["diff", "--cached", "--name-only"]),
+            "app/[id]/page.tsx",
+            "staged alone"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A bare repository with a linked worktree: the main one is the
+    /// repository itself, not the folder around it, and it is no checkout.
+    #[test]
+    fn a_bare_repository_is_its_own_main() {
+        let root = std::env::temp_dir().join(format!("claudhub-bare-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let seed = scratch_repo("bare-seed");
+        sh(&seed, &["commit", "-q", "-m", "first"]);
+        let bare = root.join("repo.git");
+        sh(
+            &root,
+            &["clone", "-q", "--bare", seed.to_str().unwrap(), "repo.git"],
+        );
+        sh(&bare, &["worktree", "add", "-q", "../feat", "-b", "feat"]);
+
+        let feat = root.join("feat").canonicalize().unwrap();
+        let repo = Repo::discover(&feat).unwrap();
+        assert_eq!(repo.main, bare.canonicalize().unwrap());
+        let worktrees = repo.worktrees().unwrap();
+        assert_eq!(
+            worktrees.iter().map(|w| w.path.clone()).collect::<Vec<_>>(),
+            [feat],
+            "the bare repository is not a checkout to list"
+        );
+        assert!(!worktrees[0].is_main);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&seed);
+    }
+
+    #[test]
+    fn a_bare_block_is_not_a_worktree() {
+        let out = "worktree /x/repo.git\0bare\0\0\
+                   worktree /x/feat\0HEAD abc\0branch refs/heads/feat\0\0";
+        let trees = parse_worktree_list(out);
+        assert_eq!(trees.len(), 1);
+        assert_eq!(trees[0].path, PathBuf::from("/x/feat"));
+        assert!(!trees[0].is_main, "a linked worktree is never the main one");
     }
 
     /// A pick replays the whole commit on HEAD, message included.

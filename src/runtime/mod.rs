@@ -522,10 +522,36 @@ fn worker(
 /// `emit` is for what an operation has to say **before** it returns — the
 /// lines of a `wt` hook — and nothing else goes through it: the result is the
 /// returned list, so that an arm stays a function of its command.
+///
+/// **A panic stays in its command.** A worker is a thread, and a thread that
+/// unwinds is gone: the queues with a single worker — the network, the hooks,
+/// the background, the search, the tests — then stop answering for the rest of
+/// the session, every later command waiting behind a consumer that no longer
+/// exists, and nothing on screen says so. Caught here, the panic is one failed
+/// command, said in the journal and in a balloon. The state a panicking arm
+/// leaves behind is its own locals: nothing here is shared across commands but
+/// the channels, which is what makes `AssertUnwindSafe` true rather than
+/// hopeful.
 fn handle(cmd: Cmd, emit: Emit) -> Vec<Evt> {
     let name = cmd.name();
     let started = std::time::Instant::now();
-    let evts = dispatch(cmd, emit);
+    let evts = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(cmd, emit)))
+    {
+        Ok(evts) => evts,
+        Err(payload) => {
+            let message = format!("internal error in {name}: {}", panic_message(&*payload));
+            log::error!("{message}");
+            // No worktree and no action of its own: which of them the command
+            // wore is known to its arm only. The writes are caught one floor
+            // down, by `shielded`, where both are known and the button that
+            // spins can stop; this is the net under everything else.
+            vec![Evt::Failed {
+                worktree: None,
+                action: Action::Refresh,
+                message,
+            }]
+        }
+    };
     let elapsed = crate::logging::ms(started.elapsed());
     // A command that produced a `Done` or a `Failed` is a **write**: that is
     // what those two events mean, and it saves classifying sixty variants a
@@ -623,9 +649,10 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             worktree,
             range,
             path,
+            original,
             context,
             untracked,
-        } => file_diff(worktree, range, path, context, untracked),
+        } => file_diff(worktree, range, path, original, context, untracked),
         Cmd::LoadHistory {
             worktree,
             range,
@@ -761,11 +788,13 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
         } => write_then_refresh(worktree, Action::Push, |dir| {
             repo::push(dir, force_with_lease)
         }),
+        // Anyway, as a pick: a pull that merges or rebases can stop on a
+        // conflict, and the markers it wrote are the status to show.
         Cmd::Reconcile {
             worktree,
             rebase,
             push,
-        } => write_then_refresh(
+        } => write_then_refresh_anyway(
             worktree,
             // The action the gesture that failed had worn: it is the same
             // button that spins again, and the same key `finish` will find.
@@ -880,11 +909,17 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
         Cmd::StashClear { worktree } => {
             stash_written(worktree, |dir| stash::clear(dir).map(|_| String::new()))
         }
+        // The four that can stop half-way, all re-read **even on failure**, for
+        // the cherry-pick's reason: a merge or a rebase that conflicts — and a
+        // `--continue` that reaches the next conflicting commit — exits
+        // non-zero with its markers written and `MERGE_HEAD` or `rebase-merge`
+        // beside them. Refreshed on success only, the conflicts panel stayed
+        // empty in front of a repository that was mid-operation.
         Cmd::Merge {
             worktree,
             from,
             no_ff,
-        } => write_then_refresh(worktree, Action::Merge, |dir| {
+        } => write_then_refresh_anyway(worktree, Action::Merge, |dir| {
             repo::merge(dir, &from, no_ff)
         }),
         Cmd::Integrate {
@@ -892,15 +927,15 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             branch,
             base,
             no_ff,
-        } => write_then_refresh(main, Action::Integrate, |dir| {
+        } => write_then_refresh_anyway(main, Action::Integrate, |dir| {
             integrate(dir, &branch, &base, no_ff)
         }),
         Cmd::Rebase { worktree, onto } => {
-            write_then_refresh(worktree, Action::Rebase, |dir| repo::rebase(dir, &onto))
+            write_then_refresh_anyway(worktree, Action::Rebase, |dir| repo::rebase(dir, &onto))
         }
         Cmd::AbortPending { worktree } => write_then_refresh(worktree, Action::Abort, repo::abort),
         Cmd::ResumePending { worktree } => {
-            write_then_refresh(worktree, Action::Resume, repo::resume)
+            write_then_refresh_anyway(worktree, Action::Resume, repo::resume)
         }
         Cmd::ResolveConflict {
             worktree,
@@ -1279,17 +1314,19 @@ fn file_diff(
     worktree: PathBuf,
     range: DiffRange,
     path: PathBuf,
+    original: Option<PathBuf>,
     context: usize,
     untracked: bool,
 ) -> Vec<Evt> {
     let result = if untracked {
         diff::untracked_file(&worktree, &path)
     } else {
-        diff::file(&worktree, &range, &path, context)
+        diff::file(&worktree, &range, &path, original.as_deref(), context)
     };
     match result {
         Ok(diff) => vec![Evt::FileDiff {
             worktree,
+            range,
             path,
             diff,
         }],
@@ -1391,7 +1428,7 @@ fn branch_written(
     action: Action,
     f: impl FnOnce(&Path) -> anyhow::Result<String>,
 ) -> Vec<Evt> {
-    match f(&main) {
+    match shielded(|| f(&main)) {
         Ok(output) => {
             let mut evts = vec![done(None, action, output)];
             evts.extend(
@@ -1603,6 +1640,30 @@ fn open_repo(path: &Path) -> Result<Evt> {
     })
 }
 
+/// What a panic carried, as a sentence: `panic!` with a format gives a
+/// `String`, with a literal a `&str`, and anything else says nothing readable.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_else(|| "a panic with no message".into())
+}
+
+/// Runs a write and turns a panic into its failure.
+///
+/// For the writes' helpers, which know the worktree and the action: the
+/// `Failed` that comes back then carries both, and the button that started
+/// the write stops spinning — where the net in `handle` can only say that
+/// something failed.
+fn shielded(op: impl FnOnce() -> Result<String>) -> Result<String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(op)).unwrap_or_else(|payload| {
+        let message = panic_message(&*payload);
+        log::error!("a write panicked: {message}");
+        Err(anyhow::anyhow!("internal error: {message}"))
+    })
+}
+
 /// Every write is followed by a re-read of the status: that is what keeps the
 /// review panel accurate without the view having to know which command touches
 /// what. The cost is one more `git status` per action triggered by hand.
@@ -1611,7 +1672,7 @@ fn write_then_refresh(
     action: Action,
     op: impl FnOnce(&Path) -> Result<String>,
 ) -> Vec<Evt> {
-    match op(&worktree) {
+    match shielded(|| op(&worktree)) {
         Ok(output) => {
             let mut evts = vec![done(Some(worktree.clone()), action, output)];
             if let Ok(status) = status::status(&worktree) {
@@ -1634,7 +1695,7 @@ fn write_then_refresh_anyway(
     action: Action,
     op: impl FnOnce(&Path) -> Result<String>,
 ) -> Vec<Evt> {
-    let mut evts = vec![match op(&worktree) {
+    let mut evts = vec![match shielded(|| op(&worktree)) {
         Ok(output) => done(Some(worktree.clone()), action, output),
         Err(e) => fail(Some(worktree.clone()), action, e),
     }];
@@ -1655,7 +1716,7 @@ fn tag_written(
     action: Action,
     op: impl FnOnce(&Path) -> Result<String>,
 ) -> Vec<Evt> {
-    match op(&worktree) {
+    match shielded(|| op(&worktree)) {
         Ok(output) => {
             let main = main_of(&worktree);
             let mut evts = vec![done(Some(worktree.clone()), action, output)];
@@ -1678,7 +1739,7 @@ fn tag_written(
 /// the review panel showing the tree as it was before, which is the one state
 /// it certainly is not in.
 fn stash_written(worktree: PathBuf, op: impl FnOnce(&Path) -> Result<String>) -> Vec<Evt> {
-    let outcome = op(&worktree);
+    let outcome = shielded(|| op(&worktree));
     let main = main_of(&worktree);
     let mut evts = vec![match outcome {
         Ok(output) => done(Some(worktree.clone()), Action::Stash, output),
@@ -1797,6 +1858,26 @@ mod tests {
 
     fn worktree() -> PathBuf {
         PathBuf::from("/p/site")
+    }
+
+    /// A write that panics comes back as its own failure — the worktree and
+    /// the action it wore, so the button that started it stops — and the
+    /// worker that ran it lives on.
+    #[test]
+    fn a_panicking_write_is_a_failure_of_that_write() {
+        let evts = write_then_refresh(worktree(), Action::Push, |_| panic!("boom at {}", 42));
+        match evts.as_slice() {
+            [Evt::Failed {
+                worktree: Some(at),
+                action: Action::Push,
+                message,
+            }] => {
+                assert_eq!(at, &worktree());
+                assert!(message.contains("boom at 42"), "{message}");
+            }
+            other => panic!("unexpected events: {other:?}"),
+        }
+        assert_eq!(panic_message(&"literal"), "literal");
     }
 
     #[test]

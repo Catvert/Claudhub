@@ -949,6 +949,7 @@ mod tests {
             old_no: None,
             new_no: None,
             text: text.to_string(),
+            cr: false,
         }
     }
 
@@ -1341,6 +1342,7 @@ mod php_tests {
                         old_no: None,
                         new_no: Some(40),
                         text: text.to_string(),
+                        cr: false,
                     })
                     .collect(),
             }],
@@ -1624,6 +1626,7 @@ mod php_tests {
                         old_no: None,
                         new_no: Some(1),
                         text: text.to_string(),
+                        cr: false,
                     })
                     .collect(),
             }],

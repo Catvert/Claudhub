@@ -137,6 +137,10 @@ pub fn args(query: &Query) -> Vec<String> {
         // a line of control characters.
         "-I".into(),
         "--line-number".into(),
+        // `grep.column = true` in the user's configuration adds a column
+        // field after the line — `path NUL line NUL column NUL text` — and the
+        // column then read as the start of every line's text.
+        "--no-column".into(),
         // `path NUL line NUL text`: a path may contain a space, a colon or a
         // newline, and every `-z` format in this layer exists for that reason.
         "-z".into(),
@@ -424,6 +428,36 @@ mod tests {
         )
         .expect("git grep with no match is not an error");
         assert_eq!(empty.total, 0);
+    }
+
+    /// `grep.column` in the user's configuration adds a field to every record;
+    /// the text of a hit is still the line's text.
+    #[test]
+    fn a_column_setting_does_not_reach_the_records() {
+        let dir = std::env::temp_dir().join(format!("claudhub-grep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for args in [&["init", "-q"][..], &["config", "grep.column", "true"]] {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        }
+        std::fs::write(dir.join("a.txt"), "    needle here\n").unwrap();
+        let results = run(
+            &dir,
+            &Query {
+                text: "needle".into(),
+                ..Default::default()
+            },
+        )
+        .expect("git grep");
+        assert_eq!(results.files[0].hits[0].line, 1);
+        assert_eq!(results.files[0].hits[0].text, "    needle here");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

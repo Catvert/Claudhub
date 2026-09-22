@@ -42,6 +42,19 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
+/// Goes **before** the subcommand of every command that names files: paths are
+/// then paths, and not patterns.
+///
+/// A pathspec is a glob by default, so `app/[id]/page.tsx` — a Next.js route,
+/// named exactly like that on disk — also matches `app/i/page.tsx` and
+/// `app/d/page.tsx`: a discard of the first restored the others too, and
+/// nothing said so. Every path this layer hands git is one the status or the
+/// explorer read off the disk, never a pattern typed by someone.
+///
+/// Per command and not in `command()`: `git grep` is given the user's globs
+/// (`*.php`, `!vendor`) on purpose, and needs them read as such.
+pub(crate) const LITERAL_PATHS: &str = "--literal-pathspecs";
+
 /// Beyond this, the command is killed and the failure comes back as a message.
 ///
 /// No git read takes thirty seconds: a `status` costs ten milliseconds on a
@@ -206,31 +219,21 @@ pub(crate) fn wait_feeding(
         })
     });
 
-    let mut stdout = child.stdout.take().expect("stdout requested as piped");
-    let mut stderr = child.stderr.take().expect("stderr requested as piped");
+    let stdout = child.stdout.take().expect("stdout requested as piped");
+    let stderr = child.stderr.take().expect("stderr requested as piped");
     // Closing an output is the process's last act: whoever finishes reading one
     // wakes the wait below, which is what replaced polling every five
     // milliseconds for an answer that usually arrives in ten.
     let (closed, closes) = std::sync::mpsc::channel::<()>();
-    let out_closed = closed.clone();
-    let out_reader = std::thread::spawn(move || {
-        let mut buffer = Vec::new();
-        let _ = stdout.read_to_end(&mut buffer);
-        let _ = out_closed.send(());
-        buffer
-    });
-    let err_reader = std::thread::spawn(move || {
-        let mut buffer = Vec::new();
-        let _ = stderr.read_to_end(&mut buffer);
-        let _ = closed.send(());
-        buffer
-    });
+    let out_read = drain(stdout, closed.clone());
+    let err_read = drain(stderr, closed);
 
     /// The pipes are closed and the process still has not been reaped: it is
     /// about to be, or a grandchild inherited them. Rare enough to be polled.
     const RESIDUAL: Duration = Duration::from_millis(50);
 
     let deadline = Instant::now() + limit;
+    let mut outputs_closed = 0;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
@@ -247,22 +250,87 @@ pub(crate) fn wait_feeding(
         }
         // Both outputs already closed: nothing will wake us any more, and the
         // exit status is a hair away — a short step, not the residual one.
-        if closes
-            .recv_timeout(RESIDUAL.min(deadline - now))
-            .is_err_and(|e| e == std::sync::mpsc::RecvTimeoutError::Disconnected)
-        {
-            std::thread::sleep(Duration::from_millis(1));
+        match closes.recv_timeout(RESIDUAL.min(deadline - now)) {
+            Ok(()) => outputs_closed += 1,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                std::thread::sleep(Duration::from_millis(1))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
     };
 
-    if let Some(feeder) = feeder {
-        let _ = feeder.join();
+    // **The process has exited; its pipes may not have.** A hook that starts
+    // a daemon — a `post-checkout` bringing up a watcher, a `wt` hook running
+    // `docker compose up -d` — hands it our stdout and stderr, and the daemon
+    // keeps them open for as long as it lives. Waiting for the end of file
+    // then meant waiting for the daemon, with no ceiling at all: the command
+    // was over and the worker gone for good. What was written before the exit
+    // is what counts, and the rest of the linger is left to the readers.
+    let linger = Instant::now() + LINGER;
+    while outputs_closed < 2 {
+        let now = Instant::now();
+        if now >= linger {
+            log::debug!(
+                "{} exited but left its output open; not waiting for it",
+                describe()
+            );
+            break;
+        }
+        match closes.recv_timeout(linger - now) {
+            Ok(()) => outputs_closed += 1,
+            Err(_) => break,
+        }
     }
+
+    // The feeder is not waited for either, for the same reason: a program that
+    // exited has closed its end, and one that handed its stdin to a daemon
+    // could hold the write forever. Dropping the handle detaches it.
+    drop(feeder);
     Ok(std::process::Output {
         status,
-        stdout: out_reader.join().unwrap_or_default(),
-        stderr: err_reader.join().unwrap_or_default(),
+        stdout: take(&out_read),
+        stderr: take(&err_read),
     })
+}
+
+/// How long the outputs of an exited process are still waited for.
+///
+/// The bytes a process wrote before exiting are in the pipe already, and a
+/// reader needs microseconds to take them: this is not a delay anything pays in
+/// the ordinary case, only a ceiling for the one where a grandchild holds the
+/// pipe open.
+const LINGER: Duration = Duration::from_secs(2);
+
+/// Reads an output to its end on a thread of its own, into a buffer the waiter
+/// can take **at any moment** — which a `read_to_end` returning its buffer on
+/// `join` could not give, the join being exactly the wait with no ceiling.
+fn drain(
+    mut pipe: impl Read + Send + 'static,
+    closed: std::sync::mpsc::Sender<()>,
+) -> std::sync::Arc<std::sync::Mutex<Vec<u8>>> {
+    let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let filled = buffer.clone();
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 64 * 1024];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => filled
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        let _ = closed.send(());
+    });
+    buffer
+}
+
+/// What a reader has gathered so far, taken out of its buffer.
+fn take(buffer: &std::sync::Mutex<Vec<u8>>) -> Vec<u8> {
+    std::mem::take(&mut *buffer.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// Runs git and returns **what it told the user**, stderr included.
@@ -315,6 +383,23 @@ pub(crate) fn git_blob<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<String
         bail!("git {}: {}", describe(args), stderr.trim());
     }
     String::from_utf8(out.stdout).context("this file is binary")
+}
+
+/// Runs git and returns its standard output as bytes, untouched.
+///
+/// For what is read to be **written back**: a patch. `git` converts lossily and
+/// strips the trailing newlines *and carriage returns*, so the last line of a
+/// CRLF file lost its `\r` on the way — and a patch whose context line lacks it
+/// no longer applies to the file it came from.
+pub(crate) fn git_bytes<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<Vec<u8>> {
+    let started = Instant::now();
+    let out = run(dir, args)?;
+    report(dir, args, started.elapsed(), &out);
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!("git {}: {}", describe(args), stderr.trim());
+    }
+    Ok(out.stdout)
 }
 
 /// The same, but failure counts as `None`: for optional reads (an upstream
@@ -573,6 +658,29 @@ mod tests {
         let out = wait_with_timeout(cmd, TIMEOUT, || "large output".into())
             .expect("the command must finish");
         assert_eq!(out.stdout.len(), 2_000_000);
+    }
+
+    /// A process that exits while a grandchild still holds its outputs — the
+    /// daemon a hook starts — is answered from what it wrote before exiting,
+    /// and not after the daemon dies.
+    #[test]
+    fn an_exited_process_is_not_waited_for_through_its_daemon() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 20 & echo written; echo said >&2"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let started = Instant::now();
+        let out = wait_with_timeout(cmd, TIMEOUT, || "daemon".into()).expect("it exited");
+        let elapsed = started.elapsed();
+
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"written\n");
+        assert_eq!(out.stderr, b"said\n");
+        assert!(
+            elapsed < LINGER + Duration::from_secs(3),
+            "the wait took {elapsed:?}: it waited for the daemon"
+        );
     }
 
     /// Writing and reading at the same time, both past a pipe's size: writing

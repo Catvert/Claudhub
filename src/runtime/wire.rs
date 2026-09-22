@@ -23,7 +23,7 @@ use serde::Serialize;
 /// `Evt` or to a type they carry: the two ends are two binaries shipped
 /// together but installed separately, and a disagreement should be told at the
 /// handshake rather than as an unreadable frame on the first diff.
-pub const PROTOCOL_VERSION: u32 = 45;
+pub const PROTOCOL_VERSION: u32 = 46;
 
 /// The first frame from each end, before any `Cmd` or `Evt`.
 ///
@@ -241,12 +241,16 @@ mod tests {
                     text: "élaborate answer".into(),
                     old_no: None,
                     new_no: Some(1),
+                    cr: true,
                 }],
             }],
             ..Default::default()
         };
         let evt = Evt::FileDiff {
             worktree: PathBuf::from("/tmp/wt"),
+            range: crate::git::DiffRange::Branch {
+                base: "main".into(),
+            },
             path: PathBuf::from("src/élan.rs"),
             diff: diff.clone(),
         };
