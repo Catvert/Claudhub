@@ -1080,22 +1080,44 @@ pub struct Run {
 /// one's half-written file.
 static RUN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// The highest run id asked to stop. **Outside the queues**, like the watcher
-/// and the language servers, and for their reason: a stop has to reach a
-/// worker already busy with the very run it names — queued behind it, it
-/// would arrive after the death it asks for. Send ids only grow, so "stop
-/// everything up to this id" also empties the campaign's queued remainder,
-/// which each refuses on arrival.
-static STOP_BELOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The run ids asked to stop. **Outside the queues**, like the watcher and
+/// the language servers, and for their reason: a stop has to reach a worker
+/// already busy with the very run it names — queued behind it, it would
+/// arrive after the death it asks for.
+///
+/// A set of ids, not a floor. It was "every id up to this one", and send ids
+/// are counted for the window while a campaign runs per worktree: stopping
+/// one worktree's campaign killed the run another had queued before it. The
+/// panel names each id of its campaign — the one in flight is killed at the
+/// next poll, the queued ones refuse as they arrive — and each is forgotten
+/// once it has been obeyed.
+static STOPS: std::sync::Mutex<std::collections::BTreeSet<u64>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
 
-/// Asks every run up to `id` to stop — the one in flight is killed at the
-/// next poll, the queued ones refuse as they arrive.
+/// Past this, the oldest stops go: a stop naming a run that had already
+/// ended is never obeyed, so never forgotten either. Ids only grow, and the
+/// oldest is the one furthest behind every live run.
+const STOPS_KEPT: usize = 1024;
+
+/// Asks run `id` to stop, whether it runs already or still queues.
 pub fn request_stop(id: u64) {
-    STOP_BELOW.fetch_max(id, std::sync::atomic::Ordering::Relaxed);
+    let mut stops = STOPS.lock().unwrap_or_else(|e| e.into_inner());
+    stops.insert(id);
+    while stops.len() > STOPS_KEPT {
+        stops.pop_first();
+    }
 }
 
 fn stop_requested(id: u64) -> bool {
-    STOP_BELOW.load(std::sync::atomic::Ordering::Relaxed) >= id
+    STOPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&id)
+}
+
+/// The stop has been obeyed: the run refused, or was killed.
+fn stop_obeyed(id: u64) {
+    STOPS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
 }
 
 /// What a stopped run answers: recognisable, and shown as it is.
@@ -1125,6 +1147,7 @@ pub fn run(
     // A campaign stopped while this command still queued: refuse on arrival
     // rather than boot a suite nobody is waiting for.
     if stop_requested(id) {
+        stop_obeyed(id);
         return Err(STOPPED.to_string());
     }
     let bin = worktree.join(target.runner.binary());
@@ -1199,21 +1222,14 @@ pub fn run(
                 .arg("--reporter=default")
                 .arg("--reporter=junit")
                 .arg(format!("--outputFile.junit={account_arg}"));
-            if let Some(path) = &target.path {
-                cmd.arg(path);
-            }
+            cmd.args(js_path_args(target));
             if let Some(filter) = &target.filter {
                 cmd.arg("-t").arg(filter);
             }
         }
         Runner::Jest => {
             cmd.arg("--json").arg("--outputFile").arg(&account_arg);
-            if let Some(path) = &target.path {
-                if target.exact {
-                    cmd.arg("--runTestsByPath");
-                }
-                cmd.arg(path);
-            }
+            cmd.args(js_path_args(target));
             if let Some(filter) = &target.filter {
                 cmd.arg("-t").arg(filter);
             }
@@ -1359,6 +1375,7 @@ fn follow(
     const POLL: Duration = Duration::from_millis(250);
     let ended = loop {
         if stop_requested(id) {
+            stop_obeyed(id);
             break Some(STOPPED.to_string());
         }
         let now = std::time::Instant::now();
@@ -1382,6 +1399,12 @@ fn follow(
         }
     };
     if let Some(why) = ended {
+        // The receiver goes first. A reader blocked on a full channel — a
+        // suite narrating faster than it was drained — waits in `send`, not
+        // in `read`, so killing the process does not wake it: only a closed
+        // channel does, and the join below would wait for good, taking the
+        // Tests worker with it.
+        drop(incoming);
         kill_run(&mut child);
         for reader in readers {
             let _ = reader.join();
@@ -1919,28 +1942,105 @@ fn command_line(sail: bool, target: &Target) -> String {
         }
         Runner::Vitest => {
             parts.push("run".into());
-            if let Some(path) = &target.path {
-                parts.push(path.clone());
-            }
+            parts.extend(js_path_args(target));
             if let Some(filter) = &target.filter {
                 parts.push("-t".into());
                 parts.push(filter.clone());
             }
         }
         Runner::Jest => {
-            if let Some(path) = &target.path {
-                if target.exact {
-                    parts.push("--runTestsByPath".into());
-                }
-                parts.push(path.clone());
-            }
+            parts.extend(js_path_args(target));
             if let Some(filter) = &target.filter {
                 parts.push("-t".into());
                 parts.push(filter.clone());
             }
         }
     }
-    crate::cmdline::join_command(parts)
+    parts
+        .iter()
+        .map(|part| shell_word(part))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// One word of the line `sh -lc` reads. `join_command` quotes what would not
+/// survive its own splitting — spaces, quotes, backslashes — and leaves the
+/// rest bare, which a shell then reads as syntax: the `?*` of a Vitest
+/// `--exclude` globbed there, and `zsh` refuses a glob that matches nothing.
+/// Such a word goes in single quotes, where nothing is special but the quote.
+fn shell_word(part: &str) -> String {
+    let quoted = crate::cmdline::join_command([part]);
+    if quoted != part || !part.chars().any(|c| "*?[]{}()|&;<>!~#`".contains(c)) {
+        return quoted;
+    }
+    // Bare means no quote in it: `join_command` would have quoted that.
+    format!("'{part}'")
+}
+
+/// The arguments that narrow a JS run to `target.path`, **anchored**: neither
+/// runner takes a path as a path, and a bare one reaches its neighbours.
+///
+/// - Vitest keeps a test file when its path, relative to the root and
+///   lowercased, **contains** a positional filter — a substring, nothing
+///   else (`filterFiles`, unchanged through Vitest 4 and 5). `src/ui` runs
+///   `src/uikit/`, `a.test.ts` runs `a.test.tsx`. A folder is therefore
+///   passed with its trailing separator, which no sibling carries; a file
+///   cannot be closed on the right by a substring, so the longer names are
+///   taken back out by an `--exclude` glob — the file itself plus at least
+///   one character.
+/// - Jest takes a positional as a **regex** (case-insensitive, tried on the
+///   path relative to `rootDir` and on the absolute one). A file goes by
+///   `--runTestsByPath`, which is exact; a folder is escaped and framed by a
+///   separator at both ends, `/src/ui/` — tried on the absolute path, Jest
+///   seeing it absolute, where the checkout's own path always puts a `/` in
+///   front. Not `^src/ui/`: `rootDir` may be a sub-folder, where the path
+///   relative to it no longer starts there.
+///
+/// What neither closes is the left end of a Vitest path: `pkg/src/ui/` still
+/// contains `src/ui/`. It takes a folder of the same name nested deeper in
+/// the tree, which the listing's own paths make rare.
+fn js_path_args(target: &Target) -> Vec<String> {
+    let Some(path) = &target.path else {
+        return Vec::new();
+    };
+    match (target.runner, target.exact) {
+        (Runner::Vitest, true) => vec![
+            path.clone(),
+            "--exclude".into(),
+            format!("{}?*", glob_escape(path)),
+        ],
+        (Runner::Vitest, false) => vec![format!("{}/", path.trim_end_matches('/'))],
+        (Runner::Jest, true) => vec!["--runTestsByPath".into(), path.clone()],
+        (Runner::Jest, false) => vec![format!("/{}/", path_regex(path.trim_end_matches('/')))],
+        (Runner::Pest, _) => Vec::new(),
+    }
+}
+
+/// A path as a literal in a picomatch glob — what Vitest's `--exclude` is
+/// read by. `[id].test.ts` and `(group)/` are ordinary JS file names.
+fn glob_escape(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        if "\\*?[]{}()!@+".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A path as a literal in a Jest path regex. The `/` stays bare: Jest turns
+/// each one into the platform's separator, and an escaped one would become
+/// a separator after a stray backslash on Windows.
+fn path_regex(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        if ".^$*+?()[]{}|\\".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -2575,7 +2675,8 @@ at tests/Feature/HttpTest.php:3</failure>
         };
         assert_eq!(
             command_line(false, &vitest),
-            "node_modules/.bin/vitest run tests/unit/math.test.js -t \"^sums 2 \\\\+ 2$\""
+            "node_modules/.bin/vitest run tests/unit/math.test.js \
+             --exclude 'tests/unit/math.test.js?*' -t \"^sums 2 \\\\+ 2$\""
         );
         let jest = Target {
             runner: Runner::Jest,
@@ -2592,6 +2693,82 @@ at tests/Feature/HttpTest.php:3</failure>
             command_line(true, &jest),
             "node_modules/.bin/jest --runTestsByPath src/http.test.js"
         );
+    }
+
+    /// A stop names runs, not a floor: stopping one worktree's campaign must
+    /// leave the run another worktree queued before it alone.
+    #[test]
+    fn a_stop_reaches_the_ids_it_names_and_no_other() {
+        // Far from any id another test uses: the set is the process's.
+        let base = u64::MAX / 2;
+        request_stop(base + 5);
+        request_stop(base + 6);
+        assert!(!stop_requested(base + 4));
+        assert!(stop_requested(base + 5));
+        assert!(stop_requested(base + 6));
+        assert!(!stop_requested(base + 7));
+        // Obeyed, forgotten.
+        stop_obeyed(base + 5);
+        assert!(!stop_requested(base + 5));
+        stop_obeyed(base + 6);
+    }
+
+    /// A suite narrating faster than the loop drains it fills the channel,
+    /// and its readers then wait in `send`. Stopping it must still return:
+    /// with the receiver alive, the join waited for readers nothing would
+    /// ever wake, and the Tests worker was gone for the session.
+    #[cfg(unix)]
+    #[test]
+    fn stopping_a_chatty_run_does_not_wedge_the_worker() {
+        let id = u64::MAX / 2 + 100;
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg("yes");
+            let asked = std::sync::atomic::AtomicBool::new(false);
+            let progress = |_line: String| {
+                if !asked.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    request_stop(id);
+                    // Long enough for `yes` to fill the channel's 256 slots.
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            };
+            let _ = done.send(follow(cmd, "yes", id, &progress));
+        });
+        let result = finished
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the stopped run never returned");
+        assert_eq!(result, Err(STOPPED.to_string()));
+    }
+
+    /// A folder or a file narrows a JS run to itself, not to every path it
+    /// is a prefix of — `src/ui` is not `src/uikit`, `a.test.ts` is not
+    /// `a.test.tsx`. Checked against each runner's own matching: a substring
+    /// for Vitest, a regex for Jest.
+    #[test]
+    fn a_js_path_narrows_to_itself_and_not_to_its_neighbours() {
+        let target = |runner, path: &str, exact| Target {
+            path: Some(path.into()),
+            exact,
+            ..Target::everything(runner)
+        };
+        assert_eq!(
+            js_path_args(&target(Runner::Vitest, "src/ui", false)),
+            vec!["src/ui/"]
+        );
+        assert_eq!(
+            js_path_args(&target(Runner::Vitest, "src/[id].test.ts", true)),
+            vec!["src/[id].test.ts", "--exclude", "src/\\[id\\].test.ts?*"]
+        );
+        assert_eq!(
+            js_path_args(&target(Runner::Jest, "src/ui.v2", false)),
+            vec!["/src/ui\\.v2/"]
+        );
+        assert_eq!(
+            js_path_args(&target(Runner::Jest, "src/a.test.ts", true)),
+            vec!["--runTestsByPath", "src/a.test.ts"]
+        );
+        assert!(js_path_args(&Target::everything(Runner::Vitest)).is_empty());
     }
 
     #[test]

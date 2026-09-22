@@ -412,6 +412,16 @@ pub fn log_command(id: &str) -> String {
 ///
 /// A short line is skipped rather than failing the read: `gh` writes its own
 /// notices to stdout on occasion, and one of them must not empty the list.
+/// Is the log that just landed still the chosen run's? Compared by **id**,
+/// not rank: a list re-read meanwhile moves the runs under their ranks, and
+/// the chosen row may now be another run at the same place.
+pub fn log_still_wanted(runs: &[Run], chosen: Option<usize>, asked: Option<&str>) -> bool {
+    let here = chosen
+        .and_then(|rank| runs.get(rank))
+        .map(|run| run.id.as_str());
+    here.is_some() && here == asked
+}
+
 pub fn parse(out: &str) -> Vec<Run> {
     out.lines()
         .filter_map(|line| {
@@ -479,6 +489,10 @@ pub struct GithubState {
     pub web_call: u64,
     pub list_call: u64,
     pub log_call: u64,
+    /// The run `log_call` was sent for, by id. The answer carries only the
+    /// text: without this it would land under whatever row is chosen when it
+    /// arrives — and be handed to the agent as that run's failure.
+    pub log_run: Option<String>,
     /// The `git log` that fills the new-pull-request dialog, and the `gh pr
     /// create` that answers it.
     pub draft_call: u64,
@@ -678,6 +692,7 @@ impl ClaudhubApp {
             return;
         };
         let command = log_command(&run.id);
+        self.github.log_run = Some(run.id.clone());
         self.github.log_for_agent = for_agent;
         self.github.log_call = self.ask_gh(command, worktree);
         cx.notify();
@@ -741,6 +756,11 @@ impl ClaudhubApp {
                 Err(why) => self.github.error = Some(SharedString::from(why)),
             }
         } else if call == self.github.log_call {
+            let asked = self.github.log_run.take();
+            if !log_still_wanted(&self.github.runs, self.github.chosen, asked.as_deref()) {
+                cx.notify();
+                return;
+            }
             match result {
                 Ok(text) if self.github.log_for_agent => {
                     self.hand_ci_run(&text, window, cx);
@@ -1390,6 +1410,22 @@ impl Render for PrDraft {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A log lands under the run that asked for it, or nowhere: choosing
+    /// another row meanwhile, or a re-read that moved the runs under their
+    /// ranks, must not paint — nor hand the agent — someone else's failure.
+    #[test]
+    fn a_late_log_belongs_to_the_run_that_asked() {
+        let runs = parse("42\tFix\tCI\tcompleted\tfailure\n43\tOther\tCI\tcompleted\tfailure\n");
+        assert!(log_still_wanted(&runs, Some(0), Some("42")));
+        assert!(!log_still_wanted(&runs, Some(1), Some("42")));
+        assert!(!log_still_wanted(&runs, None, Some("42")));
+        assert!(!log_still_wanted(&runs, Some(0), None));
+        // Re-read: 42 is now second, the first row is a newer run.
+        let moved = parse("44\tNew\tCI\tin_progress\t\n42\tFix\tCI\tcompleted\tfailure\n");
+        assert!(!log_still_wanted(&moved, Some(0), Some("42")));
+        assert!(log_still_wanted(&moved, Some(1), Some("42")));
+    }
 
     #[test]
     fn a_short_line_is_skipped_rather_than_failing_the_read() {
