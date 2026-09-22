@@ -63,8 +63,10 @@ pub fn split_command(line: &str) -> Vec<String> {
 /// split in two on the first pass.
 ///
 /// Inside the double quotes it writes, a backslash is always doubled and a
-/// quote always escaped — the two escapes both readings agree on, ours and a
-/// shell's, since this line may go to either.
+/// quote, a `$` and a backtick always escaped — the escapes both readings
+/// agree on, ours and a shell's, since this line may go to either. A `$`
+/// left bare there was expansion to a shell: `"cost $5"` reached the program
+/// as `cost `, and `` "`x`" `` ran `x`.
 pub fn join_command(parts: impl IntoIterator<Item = impl AsRef<str>>) -> String {
     parts
         .into_iter()
@@ -77,7 +79,16 @@ pub fn join_command(parts: impl IntoIterator<Item = impl AsRef<str>>) -> String 
                     .chars()
                     .any(|c| c.is_whitespace() || c == '\'' || c == '"' || c == '\\')
             {
-                format!("\"{}\"", part.replace('\\', "\\\\").replace('"', "\\\""))
+                let mut quoted = String::with_capacity(part.len() + 2);
+                quoted.push('"');
+                for c in part.chars() {
+                    if matches!(c, '\\' | '"' | '$' | '`') {
+                        quoted.push('\\');
+                    }
+                    quoted.push(c);
+                }
+                quoted.push('"');
+                quoted
             } else {
                 part.to_string()
             }
@@ -136,9 +147,21 @@ mod tests {
             r#"agent --say "it says \"no\"""#,
             r#""C:\Program Files\agent.exe""#,
             r#""C:\dir\\" "a\\\"b" "cost \$5" "\`x\`""#,
+            r#""$HOME/my dir" "`uname` -a" "a \$b \`c\`""#,
         ] {
             let parts = split_command(line);
             assert_eq!(split_command(&join_command(&parts)), parts, "{line}");
         }
+    }
+
+    /// What goes between double quotes reads the same to a shell: no
+    /// expansion, no command substitution.
+    #[test]
+    fn a_dollar_or_backtick_in_double_quotes_is_escaped() {
+        assert_eq!(join_command(["cost $5 each"]), r#""cost \$5 each""#);
+        assert_eq!(join_command(["run `x` now"]), r#""run \`x\` now""#);
+        assert_eq!(join_command([r#"C:\a "$b""#]), r#""C:\\a \"\$b\"""#);
+        // A word with nothing to quote stays bare, `$` and all.
+        assert_eq!(join_command(["^Test$"]), "^Test$");
     }
 }

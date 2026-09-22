@@ -927,9 +927,25 @@ fn dispatch(cmd: Cmd, emit: Emit) -> Vec<Evt> {
             branch,
             base,
             no_ff,
-        } => write_then_refresh_anyway(main, Action::Integrate, |dir| {
-            integrate(dir, &branch, &base, no_ff)
-        }),
+        } => {
+            // Still answered under `main`, which is what the view waits on;
+            // the checkout that merged is re-read as well when it is another.
+            let mut merged_in = None;
+            let mut evts = write_then_refresh_anyway(main.clone(), Action::Integrate, |dir| {
+                let checkout = integration_checkout(dir, &base);
+                merged_in.clone_from(&checkout);
+                integrate(dir, checkout.as_deref(), &branch, &base, no_ff)
+            });
+            if let Some(checkout) = merged_in.filter(|checkout| *checkout != main) {
+                if let Ok(status) = status::status(&checkout) {
+                    evts.push(Evt::Status {
+                        worktree: checkout,
+                        status,
+                    });
+                }
+            }
+            evts
+        }
         Cmd::Rebase { worktree, onto } => {
             write_then_refresh_anyway(worktree, Action::Rebase, |dir| repo::rebase(dir, &onto))
         }
@@ -1604,20 +1620,55 @@ fn worktrees_changed(main: PathBuf, result: Result<String>) -> Vec<Evt> {
 /// dirty checkout mixes the changes in progress with the integrated work, and
 /// merging while sitting on another branch writes into that one — two kinds of
 /// damage discovered after the fact, and a message avoids both.
-fn integrate(main: &Path, branch: &str, base: &str, no_ff: bool) -> Result<String> {
-    if repo::is_dirty(main) {
-        anyhow::bail!(
-            "the main repository has changes in progress: commit or stash them before integrating"
-        );
+///
+/// A bare repository has no checkout to merge in (`checkout` is where the
+/// merge runs, see `integration_checkout`): the base is merged where a
+/// worktree holds it, and when none does, moved by its ref alone if that is a
+/// fast-forward — anything else needs a work tree, and the error says so
+/// instead of git's "must be run in a work tree".
+fn integrate(
+    main: &Path,
+    checkout: Option<&Path>,
+    branch: &str,
+    base: &str,
+    no_ff: bool,
+) -> Result<String> {
+    let Some(checkout) = checkout else {
+        if no_ff {
+            anyhow::bail!(
+                "no worktree has \"{base}\" checked out, and a bare repository has no \
+                 checkout of its own: a merge commit needs one — check \"{base}\" out in a \
+                 worktree, or integrate without --no-ff"
+            );
+        }
+        return repo::fast_forward(main, base, branch);
+    };
+    let place = if checkout == main {
+        "the main repository".to_string()
+    } else {
+        format!("the worktree holding \"{base}\" ({})", checkout.display())
+    };
+    if repo::is_dirty(checkout) {
+        anyhow::bail!("{place} has changes in progress: commit or stash them before integrating");
     }
-    let current = branch::current(main);
+    let current = branch::current(checkout);
     if current.as_deref() != Some(base) {
         anyhow::bail!(
-            "the main repository is on \"{}\" and not on \"{base}\"",
+            "{place} is on \"{}\" and not on \"{base}\"",
             current.as_deref().unwrap_or("detached HEAD")
         );
     }
-    repo::merge(main, branch, no_ff)
+    repo::merge(checkout, branch, no_ff)
+}
+
+/// Where an integration merges: the main checkout — or, in a bare
+/// repository, which has none, the worktree that holds the base. `None` when
+/// the repository is bare and no worktree does.
+fn integration_checkout(main: &Path, base: &str) -> Option<PathBuf> {
+    if !repo::is_bare(main) {
+        return Some(main.to_path_buf());
+    }
+    branch::checked_out_at(main, base)
 }
 
 fn open_repo(path: &Path) -> Result<Evt> {
@@ -2222,5 +2273,117 @@ mod tests {
             }
         )
         .is_some());
+    }
+
+    /// `clone --bare` and a `feat` worktree one commit ahead of `main`.
+    fn bare_with_a_feature(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("claudhub-integrate-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let seed = root.join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        let root = root.canonicalize().unwrap();
+        let seed = root.join("seed");
+        let run = |dir: &Path, args: &[&str]| crate::git::git(dir, args).unwrap();
+        run(&seed, &["init", "-q", "-b", "main"]);
+        std::fs::write(seed.join("a.txt"), "a\n").unwrap();
+        run(&seed, &["add", "."]);
+        run(
+            &seed,
+            &[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "first",
+            ],
+        );
+        run(&root, &["clone", "-q", "--bare", "seed", "repo.git"]);
+        let bare = root.join("repo.git");
+        for (key, value) in [
+            ("user.name", "T"),
+            ("user.email", "t@example.com"),
+            ("commit.gpgsign", "false"),
+        ] {
+            run(&bare, &["config", key, value]);
+        }
+        run(&bare, &["worktree", "add", "-q", "../feat", "-b", "feat"]);
+        let feat = root.join("feat");
+        std::fs::write(feat.join("b.txt"), "b\n").unwrap();
+        run(&feat, &["add", "."]);
+        run(&feat, &["commit", "-q", "-m", "feature"]);
+        (root, bare, feat)
+    }
+
+    fn integrate_in(bare: &Path, no_ff: bool) -> Result<String> {
+        let checkout = integration_checkout(bare, "main");
+        integrate(bare, checkout.as_deref(), "feat", "main", no_ff)
+    }
+
+    /// No worktree holds `main`: a fast-forward is a ref update, and anything
+    /// else is refused in words, not with git's "must be run in a work tree".
+    #[test]
+    fn a_bare_repository_integrates_by_its_ref_when_no_checkout_holds_the_base() {
+        let (root, bare, feat) = bare_with_a_feature("ref");
+        assert_eq!(integration_checkout(&bare, "main"), None);
+
+        let refused = integrate_in(&bare, true).unwrap_err().to_string();
+        assert!(refused.contains("checked out"), "{refused}");
+
+        integrate_in(&bare, false).unwrap();
+        let tip = |rev: &str| crate::git::git(&bare, &["rev-parse", rev]).unwrap();
+        assert_eq!(tip("main"), tip("feat"));
+        assert_eq!(integrate_in(&bare, false).unwrap(), "Already up to date.");
+
+        // `main` moves on its own: no longer a fast-forward.
+        crate::git::git(&bare, &["worktree", "add", "-q", "../main", "main"]).unwrap();
+        let main = root.join("main");
+        std::fs::write(main.join("c.txt"), "c\n").unwrap();
+        crate::git::git(&main, &["add", "."]).unwrap();
+        crate::git::git(&main, &["commit", "-q", "-m", "on main"]).unwrap();
+        crate::git::git(&bare, &["worktree", "remove", "../main"]).unwrap();
+        std::fs::write(feat.join("d.txt"), "d\n").unwrap();
+        crate::git::git(&feat, &["add", "."]).unwrap();
+        crate::git::git(&feat, &["commit", "-q", "-m", "more"]).unwrap();
+        let before = tip("main");
+        let refused = integrate_in(&bare, false).unwrap_err().to_string();
+        assert!(refused.contains("bare repository"), "{refused}");
+        assert_eq!(tip("main"), before, "nothing moved");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A worktree holds `main`: the merge runs there, checks included.
+    #[test]
+    fn a_bare_repository_integrates_in_the_worktree_holding_the_base() {
+        let (root, bare, _feat) = bare_with_a_feature("checkout");
+        crate::git::git(&bare, &["worktree", "add", "-q", "../main", "main"]).unwrap();
+        let main = root.join("main").canonicalize().unwrap();
+        assert_eq!(
+            integration_checkout(&bare, "main").map(|dir| dir.canonicalize().unwrap()),
+            Some(main.clone())
+        );
+
+        std::fs::write(main.join("a.txt"), "dirty\n").unwrap();
+        let refused = integrate_in(&bare, true).unwrap_err().to_string();
+        assert!(refused.contains("changes in progress"), "{refused}");
+        crate::git::git(&main, &["checkout", "--", "a.txt"]).unwrap();
+
+        integrate_in(&bare, true).unwrap();
+        assert!(main.join("b.txt").exists(), "merged into the checkout");
+        let parents = crate::git::git(&main, &["rev-list", "--parents", "-n1", "HEAD"]).unwrap();
+        assert_eq!(parents.split(' ').count(), 3, "a merge commit: {parents}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The ordinary case is untouched: the main checkout itself.
+    #[test]
+    fn a_checkout_repository_integrates_in_its_main_checkout() {
+        let (root, _bare, _feat) = bare_with_a_feature("plain");
+        let seed = root.join("seed");
+        assert_eq!(integration_checkout(&seed, "main"), Some(seed));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

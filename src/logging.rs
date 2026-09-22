@@ -24,6 +24,30 @@ use std::sync::{Mutex, OnceLock};
 /// the memory of the review it is there to explain.
 const CAPACITY: usize = 2000;
 
+/// How much of one message the ring keeps, in bytes.
+///
+/// The count bounds the ring, not its weight: one record carrying a whole
+/// command output or a server's answer is megabytes, and two thousand of
+/// them is the memory the capacity was there to protect. Eight kibibytes is
+/// several screens of the page; stderr still gets the message whole.
+const MESSAGE_CAP: usize = 8 * 1024;
+
+/// `message`, cut to [`MESSAGE_CAP`] on a character boundary, saying how
+/// much went.
+fn bounded(mut message: String) -> String {
+    if message.len() <= MESSAGE_CAP {
+        return message;
+    }
+    let mut end = MESSAGE_CAP;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    let cut = message.len() - end;
+    message.truncate(end);
+    message.push_str(&format!("… [{cut} more bytes cut from the journal]"));
+    message
+}
+
 /// One record, as the page shows it.
 ///
 /// The pieces stay apart rather than being formatted at once: the level is what
@@ -110,7 +134,7 @@ impl log::Log for Tee {
             at: chrono::Local::now(),
             level: record.level(),
             target: record.target().to_string(),
-            message: record.args().to_string(),
+            message: bounded(record.args().to_string()),
         };
         if let Ok(mut buffer) = buffer().lock() {
             if buffer.len() == CAPACITY {
@@ -218,6 +242,25 @@ mod tests {
             }
         }
         files
+    }
+
+    #[test]
+    fn a_long_message_is_cut_on_a_character_and_says_so() {
+        assert_eq!(bounded("short".into()), "short");
+        let exact = "a".repeat(MESSAGE_CAP);
+        assert_eq!(bounded(exact.clone()), exact);
+
+        // A two-byte character straddling the limit goes out whole.
+        let long = format!("{}é{}", "a".repeat(MESSAGE_CAP - 1), "b".repeat(100));
+        let kept = bounded(long.clone());
+        assert!(kept.starts_with(&"a".repeat(MESSAGE_CAP - 1)));
+        assert!(!kept.contains('é'));
+        let cut = long.len() - (MESSAGE_CAP - 1);
+        assert!(
+            kept.ends_with(&format!("[{cut} more bytes cut from the journal]")),
+            "{kept}"
+        );
+        assert!(kept.len() < MESSAGE_CAP + 64);
     }
 
     #[test]

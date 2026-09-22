@@ -1968,9 +1968,12 @@ fn command_line(sail: bool, target: &Target) -> String {
 /// rest bare, which a shell then reads as syntax: the `?*` of a Vitest
 /// `--exclude` globbed there, and `zsh` refuses a glob that matches nothing.
 /// Such a word goes in single quotes, where nothing is special but the quote.
+/// So does a `$` with anything after it — `test$name` is an expansion to a
+/// shell; only a closing one, a regex anchor, is literal and left bare.
 fn shell_word(part: &str) -> String {
     let quoted = crate::cmdline::join_command([part]);
-    if quoted != part || !part.chars().any(|c| "*?[]{}()|&;<>!~#`".contains(c)) {
+    let expands = part.strip_suffix('$').unwrap_or(part).contains('$');
+    if quoted != part || !(expands || part.chars().any(|c| "*?[]{}()|&;<>!~#`".contains(c))) {
         return quoted;
     }
     // Bare means no quote in it: `join_command` would have quoted that.
@@ -1998,7 +2001,14 @@ fn shell_word(part: &str) -> String {
 ///
 /// What neither closes is the left end of a Vitest path: `pkg/src/ui/` still
 /// contains `src/ui/`. It takes a folder of the same name nested deeper in
-/// the tree, which the listing's own paths make rare.
+/// the tree, which the listing's own paths make rare. Vitest has no option
+/// that anchors it, checked in its sources (0.34 and 5.0): an **absolute**
+/// filter is kept on `startsWith`, but the same filter made relative is then
+/// tried as a substring too, so the neighbour still matches; `--dir` moves
+/// the folder the `include` globs are read from, which breaks every project
+/// whose `include` names its own folders (`src/**/*.test.ts` under `src/ui`
+/// finds nothing); `--root` and `--project` move the configuration, not the
+/// filter.
 fn js_path_args(target: &Target) -> Vec<String> {
     let Some(path) = &target.path else {
         return Vec::new();
@@ -2618,6 +2628,17 @@ at tests/Feature/HttpTest.php:3</failure>
         assert!(scope_target(test, 2).exact);
     }
 
+    /// A `$` reaches the program as a `$`, whether the word needed quoting
+    /// for another reason or not.
+    #[test]
+    fn a_dollar_in_a_filter_is_not_expanded_by_the_shell() {
+        assert_eq!(shell_word("^Test$"), "^Test$");
+        assert_eq!(shell_word("test$name"), "'test$name'");
+        assert_eq!(shell_word("a$$"), "'a$$'");
+        assert_eq!(shell_word("costs $5 now"), r#""costs \$5 now""#);
+        assert_eq!(shell_word("run `x`"), r#""run \`x\`""#);
+    }
+
     /// The terminal line carries the same narrowing, quoted for a shell.
     #[test]
     fn the_terminal_line_says_the_same_run() {
@@ -2676,7 +2697,7 @@ at tests/Feature/HttpTest.php:3</failure>
         assert_eq!(
             command_line(false, &vitest),
             "node_modules/.bin/vitest run tests/unit/math.test.js \
-             --exclude 'tests/unit/math.test.js?*' -t \"^sums 2 \\\\+ 2$\""
+             --exclude 'tests/unit/math.test.js?*' -t \"^sums 2 \\\\+ 2\\$\""
         );
         let jest = Target {
             runner: Runner::Jest,

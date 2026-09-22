@@ -620,6 +620,19 @@ pub(crate) fn git_dir_on_disk(dir: &Path) -> Option<PathBuf> {
     path.is_dir().then_some(path)
 }
 
+/// The directory a linked worktree shares with its main: `refs/`,
+/// `packed-refs`, the objects. `None` for a git directory that is its own
+/// common directory — a main checkout, a submodule's `modules/<name>`.
+///
+/// Git writes it as `commondir` inside the checkout's git directory, almost
+/// always the relative `../..`. Read from disk for the reason of
+/// `git_dir_on_disk`: the watcher asks on every worktree it sets up.
+pub(crate) fn common_dir_on_disk(git_dir: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(git_dir.join("commondir")).ok()?;
+    let path = absolute(git_dir, Path::new(text.trim_end_matches(['\n', '\r'])));
+    path.is_dir().then_some(path)
+}
+
 /// The operation in progress, from the markers git leaves in its directory.
 ///
 /// A free function with no subprocess: `status` calls it on every refresh, and
@@ -644,6 +657,69 @@ pub fn pending_in(git_dir: &Path) -> Option<Pending> {
 /// The operation in progress in this checkout, if there is one.
 pub fn pending(dir: &Path) -> Option<Pending> {
     pending_in(&git_dir(dir)?)
+}
+
+/// True for a repository with no checkout of its own — asked of the
+/// repository directory itself, where `rev-parse` answers for it and not for
+/// a linked worktree.
+pub fn is_bare(dir: &Path) -> bool {
+    git_opt(dir, &["rev-parse", "--is-bare-repository"]).is_some_and(|answer| answer == "true")
+}
+
+/// Moves the local branch `base` up to `branch` without a checkout — only
+/// when that is a fast-forward, the one merge that writes nothing but a ref.
+///
+/// For a bare repository whose base no worktree holds: `git merge` needs a
+/// work tree and says only that, which tells nobody what to do instead. The
+/// ref is updated against the value read, so a `fetch` or a commit landing in
+/// between makes it refuse rather than drop what arrived.
+pub fn fast_forward(main: &Path, base: &str, branch: &str) -> Result<String> {
+    let base_ref = format!("refs/heads/{base}");
+    let old = git_opt(
+        main,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{base_ref}^{{commit}}"),
+        ],
+    )
+    .ok_or_else(|| anyhow!("there is no local branch \"{base}\" to integrate into"))?;
+    let new = git_opt(
+        main,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{branch}^{{commit}}"),
+        ],
+    )
+    .ok_or_else(|| anyhow!("\"{branch}\" does not name a commit"))?;
+    if old == new || git_ok(main, &["merge-base", "--is-ancestor", &new, &old]) {
+        return Ok("Already up to date.".into());
+    }
+    if !git_ok(main, &["merge-base", "--is-ancestor", &old, &new]) {
+        bail!(
+            "\"{base}\" has commits \"{branch}\" does not have, and no worktree has \
+             \"{base}\" checked out: in a bare repository a merge needs one — check \
+             \"{base}\" out in a worktree, then integrate again"
+        );
+    }
+    git(
+        main,
+        &[
+            "update-ref",
+            "-m",
+            &format!("integrate: fast-forward to {branch}"),
+            &base_ref,
+            &new,
+            &old,
+        ],
+    )?;
+    Ok(format!(
+        "Fast-forwarded \"{base}\" to \"{branch}\" ({})",
+        &new[..new.len().min(12)]
+    ))
 }
 
 /// Integrates `from` into the current branch.
