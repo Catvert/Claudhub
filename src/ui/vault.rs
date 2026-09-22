@@ -513,8 +513,15 @@ fn range_of(key: &str) -> Option<DiffRange> {
 /// A subset of YAML, accepted as such: our keys are scalars — numbers, booleans,
 /// paths — and embedding a full parser for six lines would cost one dependency
 /// more than what we write.
+///
+/// **CRLF is read as LF.** A vault synced through Windows, or a note saved
+/// there, comes back with them, and a note this refuses is a note the panel
+/// drops — the next write then erased its file, the mark being what
+/// `files::is_ours` reads, with the same tolerance.
 fn front_matter(text: &str) -> Option<(BTreeMap<String, String>, &str)> {
-    let rest = text.strip_prefix("---\n")?;
+    let rest = text
+        .strip_prefix("---\n")
+        .or_else(|| text.strip_prefix("---\r\n"))?;
     let end = rest.find("\n---")?;
     let (head, tail) = rest.split_at(end);
     let mut map = BTreeMap::new();
@@ -525,7 +532,26 @@ fn front_matter(text: &str) -> Option<(BTreeMap<String, String>, &str)> {
     }
     let tail = tail.trim_start_matches('\n');
     let tail = tail.strip_prefix("---").unwrap_or(tail);
-    Some((map, tail.trim_start_matches('\n')))
+    Some((map, tail.trim_start_matches(['\r', '\n'])))
+}
+
+/// A file that says it is one of our notes, whether or not it reads back.
+///
+/// The folder is edited by hand, and a note whose `lines` or `file` was
+/// retouched no longer parses: the view keeps such a file **as it is** in the
+/// list it hands the worker, since what is missing from that list and carries
+/// our mark is erased.
+pub fn is_note_file(text: &str) -> bool {
+    front_matter(text)
+        .is_some_and(|(front, _)| front.get("claudhub").map(String::as_str) == Some("note"))
+}
+
+/// The id a note's file name starts with (`0012 main.rs.md`).
+///
+/// What a note that does not read back still says of itself: the next note
+/// must not take its number, and with it its file name.
+pub fn id_of_file(name: &str) -> Option<u64> {
+    name.split(' ').next()?.parse().ok()
 }
 
 /// The quoted excerpt, and the remark following it.
@@ -661,6 +687,32 @@ mod tests {
         note.end += 10;
         assert_eq!(note_file(&note), before);
         assert_eq!(before, "0003 Kernel.php.md");
+    }
+
+    /// A note saved through Windows reads back: refused, it left the panel,
+    /// and the next write erased its file.
+    #[test]
+    fn a_note_with_crlf_reads_back() {
+        let note = note();
+        let text = render_note(&note).replace('\n', "\r\n");
+        let read = parse_note(&text).expect("a CRLF note reads back");
+        assert_eq!(read.start, note.start);
+        assert_eq!(read.path, note.path);
+        assert_eq!(read.body, note.body);
+        assert_eq!(read.excerpt.replace('\r', ""), note.excerpt);
+    }
+
+    /// A retouched note that no longer parses still says it is ours, and
+    /// still says its number.
+    #[test]
+    fn a_note_that_does_not_read_back_is_still_recognised() {
+        let text = render_note(&note()).replace("lines: 42-44", "lines: forty-two");
+        assert!(parse_note(&text).is_none());
+        assert!(is_note_file(&text));
+        assert!(!is_note_file("---\nclaudhub: todo\n---\n"));
+        assert!(!is_note_file("---\nclaudhub: notebook\n---\n"));
+        assert_eq!(id_of_file("0012 Kernel.php.md"), Some(12));
+        assert_eq!(id_of_file("Journal.md"), None);
     }
 
     /// What we did not write does not belong to us.

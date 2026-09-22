@@ -371,7 +371,9 @@ pub fn create(
 
 pub fn remove(main: &Path, slug: &str, progress: Progress) -> Result<String> {
     let app = app(main).ok_or_else(|| anyhow::anyhow!("this repository has no wt.toml"))?;
-    // `yes`: confirmation is the view's business, and it has already asked.
+    // `yes`: confirmation is the view's business — `confirm_wt_remove`, or the
+    // cleanup offered after an integration. What `yes` answers is the loss of
+    // uncommitted changes, so nothing may reach here without one of the two.
     let (output, result) = capturing(&app, Op::Remove, slug, progress, |app| {
         app.cmd_rm(slug, true)
     });

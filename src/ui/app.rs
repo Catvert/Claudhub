@@ -370,6 +370,14 @@ pub struct ReviewState {
     /// and Claudhub does not lay that file down by itself — it is the agent's,
     /// and one does not sow an empty list in the vault of every worktree opened.
     pub todo: Option<crate::ui::vault::Todo>,
+    /// The folder's files that carry our note mark and do not read back — a
+    /// field retouched by hand — as they are on disk, name and text.
+    ///
+    /// Handed back **verbatim** with every `WriteNotes`: the list is
+    /// exhaustive, and a file of ours missing from it is erased. Dropping a
+    /// note from the panel because its `lines` no longer parse is bad enough;
+    /// deleting the file somebody was fixing is what this prevents.
+    pub unread_notes: Vec<(String, String)>,
     /// The notes folder has answered. Until it has, there is nothing to write:
     /// doing so would erase what has not been read yet.
     pub notes_loaded: bool,
@@ -495,6 +503,7 @@ impl Default for ReviewState {
             journal: String::new(),
             commit_draft: String::new(),
             todo: None,
+            unread_notes: Vec::new(),
             notes_loaded: false,
             notes_on_disk: false,
             note_marks: std::rc::Rc::new(crate::ui::notes::Marks::default()),
@@ -683,6 +692,15 @@ pub struct ClaudhubApp {
     /// one per open worktree would keep that many editing states alive, and there
     /// is only ever one in front of you.
     pub(super) journal_input: Entity<EditorState>,
+    /// The worktree whose free note the input holds, once its folder has
+    /// answered — and the one a write of the input goes to.
+    ///
+    /// Not `active`: the write is deferred by a second, and the worktree may
+    /// change in between. Reading `active` then sent the text typed for one
+    /// worktree to the next one's `NOTES.md`, with the digest of that one's
+    /// note, so the guard let it through. `None` while the input holds nothing
+    /// that was read — a blank page before the folder answers.
+    pub(super) journal_owner: Option<PathBuf>,
     /// A write of the free note is already scheduled.
     pub(super) journal_save: bool,
     /// The modal state of each writing field — see `ui::surface`.
@@ -742,6 +760,9 @@ pub struct ClaudhubApp {
     /// The worktree whose integration has gone out, and its branch: it is on the
     /// success arriving that the cleanup is offered.
     pub(super) integrated: Option<(PathBuf, String)>,
+    /// The branch the cleanup deletes once its checkout has gone, and its
+    /// repository — see `worktree_ops::removal_ended`.
+    pub(super) branch_after_removal: Option<(PathBuf, String)>,
     /// Each worktree's files and their tree.
     pub(super) explorers: HashMap<PathBuf, crate::ui::explorer::Explorer>,
     /// The file open in the built-in editor, **one per worktree**.
@@ -1370,6 +1391,7 @@ impl ClaudhubApp {
             task_edit_input,
             task_editing: None,
             journal_input,
+            journal_owner: None,
             text_hosts,
             journal_save: false,
             notes_collapsed: std::collections::HashSet::new(),
@@ -1385,6 +1407,7 @@ impl ClaudhubApp {
             wt_links: HashMap::new(),
             creation: None,
             integrated: None,
+            branch_after_removal: None,
             explorers: HashMap::new(),
             editings: HashMap::new(),
             jumps: HashMap::new(),
@@ -1963,8 +1986,9 @@ impl ClaudhubApp {
                     return;
                 }
                 let label = input.read(cx).value().to_string();
-                this.add_task(&label, cx);
-                input.update(cx, |input, cx| input.set_value("", window, cx));
+                if this.add_task(&label, cx) {
+                    input.update(cx, |input, cx| input.set_value("", window, cx));
+                }
             },
         )
         .detach();
@@ -2002,9 +2026,9 @@ impl ClaudhubApp {
         .detach();
     }
 
-    /// Writes the displayed worktree's free note, or erases it if it is empty.
+    /// Writes the free note the input holds, or erases it if it is empty.
     fn persist_journal(&mut self, cx: &mut Context<Self>) {
-        let Some(worktree) = self.active.clone() else {
+        let Some(worktree) = self.journal_owner.clone() else {
             return;
         };
         let Some(dir) = self.notes_dir(&worktree, cx) else {
@@ -2020,7 +2044,13 @@ impl ClaudhubApp {
         if !state.notes_loaded || state.journal == text {
             return;
         }
-        let expect = (!state.journal.is_empty()).then(|| crate::files::digest(&state.journal));
+        // An empty note is "no file", and that too is checked: a `NOTES.md`
+        // the agent lays down meanwhile is not replaced blind.
+        let expect = Some(if state.journal.is_empty() {
+            crate::files::ABSENT
+        } else {
+            crate::files::digest(&state.journal)
+        });
         state.journal = text.clone();
         self.git.send(Cmd::WriteVaultFile {
             worktree,
@@ -2037,26 +2067,33 @@ impl ClaudhubApp {
     /// would move the cursor into the middle of a sentence. What arrives
     /// meanwhile will therefore wait for the next load, and that is the right
     /// trade: two hands on the same paragraph have no merge.
+    ///
+    /// **Only on this worktree's note, though.** The focus survives a change
+    /// of worktree, and an input kept because it had the caret still held the
+    /// previous worktree's text — or the blank page shown before the folder
+    /// answered — and its next keystroke wrote that over the note just read.
     fn sync_journal_input(&mut self, worktree: &Path, window: &mut Window, cx: &mut Context<Self>) {
         if self.active.as_deref() != Some(worktree) {
             return;
         }
-        if self
+        let focused = self
             .journal_input
             .read(cx)
             .focus_handle(cx)
-            .is_focused(window)
-        {
+            .is_focused(window);
+        if focused && self.journal_owner.as_deref() == Some(worktree) {
             return;
         }
-        let Some(text) = self.review.get(worktree).map(|state| state.journal.clone()) else {
-            return;
-        };
-        if self.journal_input.read(cx).value() == text.as_str() {
-            return;
+        let (text, loaded) = self
+            .review
+            .get(worktree)
+            .map(|state| (state.journal.clone(), state.notes_loaded))
+            .unwrap_or_default();
+        if self.journal_input.read(cx).value() != text.as_str() {
+            self.journal_input
+                .update(cx, |input, cx| input.set_value(text, window, cx));
         }
-        self.journal_input
-            .update(cx, |input, cx| input.set_value(text, window, cx));
+        self.journal_owner = loaded.then(|| worktree.to_path_buf());
     }
 
     /// The directory `file_changed` weighs a path against.
@@ -2906,6 +2943,7 @@ impl ClaudhubApp {
         );
         // A `wt` console closes on success; the balloon above keeps the result.
         self.wt_operation_ended(action, true, window, cx);
+        self.removal_ended(action, true);
         // The integration has succeeded: what is left is to decide the fate of
         // the worktree and its branch, which `wt` deliberately keeps.
         if action == Action::Integrate {
@@ -3009,6 +3047,7 @@ impl ClaudhubApp {
         );
         // A `wt` console stays on failure, with the steps that led to the error.
         self.wt_operation_ended(action, false, window, cx);
+        self.removal_ended(action, false);
     }
 
     /// The divergence dialog: merge, rebase, or leave it.
@@ -3271,6 +3310,7 @@ impl ClaudhubApp {
         let mut reviewed: Vec<crate::ui::vault::Reviewed> = Vec::new();
         let mut todo = None;
         let mut journal = String::new();
+        let mut unread = Vec::new();
         let on_disk = !files.is_empty();
         for (name, text) in files {
             if name == crate::ui::vault::INDEX || name == crate::ui::vault::LEGACY_INDEX {
@@ -3281,6 +3321,9 @@ impl ClaudhubApp {
                 journal = text;
             } else if let Some(note) = crate::ui::vault::parse_note(&text) {
                 notes.push(note);
+            } else if crate::ui::vault::is_note_file(&text) {
+                log::info!("{name}: a note that does not read back, kept as it is");
+                unread.push((name, text));
             }
         }
         notes.sort_by_key(|note| note.id);
@@ -3289,7 +3332,18 @@ impl ClaudhubApp {
         if let Some(state) = self.review.get_mut(&worktree) {
             // An id already taken by a note from the folder would make two notes
             // with the same number, and the prompt would name one for the other.
-            let highest = notes.iter().map(|note| note.id).max().unwrap_or(0);
+            // The unreadable ones included: their number is in their file
+            // name, and a new note taking it would take the file too.
+            let highest = notes
+                .iter()
+                .map(|note| note.id)
+                .chain(
+                    unread
+                        .iter()
+                        .filter_map(|(name, _)| crate::ui::vault::id_of_file(name)),
+                )
+                .max()
+                .unwrap_or(0);
             state.next_note = state.next_note.max(highest + 1);
             state.notes = Rc::new(notes);
             // Sorted here, and kept sorted by `set_reviewed`: the panel showed
@@ -3299,6 +3353,7 @@ impl ClaudhubApp {
             state.reviewed = reviewed;
             state.rows_changed();
             state.todo = todo;
+            state.unread_notes = unread;
             state.journal = journal;
             state.notes_loaded = true;
             state.notes_on_disk = on_disk;
@@ -3439,6 +3494,16 @@ impl ClaudhubApp {
             if let Some(state) = self.review.get_mut(&previous) {
                 state.commit_draft = draft;
             }
+        }
+        // The free note and a task being corrected are the worktree's being
+        // left, and are settled **before** `active` moves: the note's write is
+        // a second away, and the task's line is a line of this `TODO.md` — the
+        // field losing its focus later would confirm it into the next one's.
+        // Confirmed, as losing the focus does, rather than dropped.
+        self.persist_journal(cx);
+        if self.task_editing.is_some() {
+            let label = self.task_edit_input.read(cx).value().to_string();
+            self.commit_task_edit(&label, cx);
         }
         self.active = Some(path.clone());
         self.ensure_review(&path, cx);
@@ -3828,6 +3893,11 @@ impl ClaudhubApp {
             crate::ui::vault::INDEX.to_string(),
             crate::ui::vault::render_index(worktree, &state.reviewed),
         ));
+        for (name, text) in &state.unread_notes {
+            if !files.iter().any(|(kept, _)| kept == name) {
+                files.push((name.clone(), text.clone()));
+            }
+        }
         self.git.send(Cmd::WriteNotes {
             worktree: worktree.to_path_buf(),
             dir,
@@ -4580,7 +4650,72 @@ impl ClaudhubApp {
     /// now rather than one screen out of nine, which is what makes it worth
     /// reaching for — and folding a zone is not what it repairs, the rails
     /// putting a folded zone one press from its return.
+    ///
+    /// **Asked first when it costs something.** Rebuilding the tree removes
+    /// every panel, and a removed panel closes what it shows: each terminal —
+    /// its pty, whatever runs in it — and each open file, saved or not. The
+    /// menu entry did it on the spot. Nothing is asked when there is no
+    /// terminal and no unsaved tab, the layout being then all there is to lose.
     pub(super) fn reset_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let busy: Vec<SharedString> = self
+            .terminals
+            .iter()
+            .map(|terminal| terminal.view.read(cx))
+            .filter(|terminal| terminal.busy())
+            .map(|terminal| terminal.label())
+            .collect();
+        let unsaved: Vec<SharedString> = self
+            .editings
+            .values()
+            .flat_map(|tabs| tabs.open.iter())
+            .filter(|editing| editing.dirty)
+            .map(|editing| SharedString::from(editing.path.display().to_string()))
+            .collect();
+        if self.terminals.is_empty() && unsaved.is_empty() {
+            self.reset_layout_now(window, cx);
+            return;
+        }
+        let terminals = (!self.terminals.is_empty())
+            .then(|| tr!("menu-reset-layout-terminals", { count: self.terminals.len() }));
+        let entity = cx.entity();
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let entity = entity.clone();
+            dialog
+                .title(tr!("menu-reset-layout-title"))
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .children(terminals.clone().map(|line| div().text_sm().child(line)))
+                        .children(
+                            busy.iter()
+                                .map(|label| div().text_sm().child(label.clone())),
+                        )
+                        .when(!unsaved.is_empty(), |el| {
+                            el.child(div().text_sm().child(tr!("menu-reset-layout-unsaved")))
+                                .children(
+                                    unsaved
+                                        .iter()
+                                        .map(|path| div().text_sm().child(path.clone())),
+                                )
+                        })
+                        .child(div().text_xs().child(tr!("menu-reset-layout-help"))),
+                )
+                .overlay_closable(false)
+                .close_button(false)
+                .footer(super::dialogs::submit(tr!("menu-reset-layout")))
+                .on_ok(move |_, window, cx| {
+                    // After the dialog has gone: the rebuild moves the focus,
+                    // and a dialog still up would take it back.
+                    let entity = entity.clone();
+                    window.defer(cx, move |window, cx| {
+                        entity.update(cx, |this, cx| this.reset_layout_now(window, cx));
+                    });
+                    true
+                })
+        });
+    }
+
+    fn reset_layout_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dock.update(cx, |area, cx| {
             crate::ui::dock_layout::install_default_layout(area, window, cx);
         });
