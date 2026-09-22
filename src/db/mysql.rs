@@ -104,8 +104,14 @@ pub async fn databases(connection: &Connection) -> Result<Vec<Database>> {
 
 pub async fn tables(connection: &Connection, database: &str) -> Result<Vec<Table>> {
     let mut db = open(connection, None).await?;
+    // **Every column read is aliased**, the same name on both sides of the
+    // `AS`: MySQL 8 names an unaliased `information_schema` column in capitals
+    // (`TABLE_TYPE`) whatever case the query wrote it in, MariaDB and MySQL 5
+    // in the query's, and `try_get` looks names up exactly — the schema tree
+    // came back empty on MySQL 8 with "no column found for name: table_type".
     sqlx::query(
-        "SELECT table_name AS name, table_type, engine, table_rows, \
+        "SELECT table_name AS name, table_type AS table_type, engine AS engine, \
+                table_rows AS table_rows, \
                 CAST(data_length + index_length AS UNSIGNED) AS total_size, \
                 table_collation AS collation, table_comment AS comment \
          FROM information_schema.tables WHERE table_schema = ? ORDER BY table_name",
@@ -135,7 +141,9 @@ pub async fn tables(connection: &Connection, database: &str) -> Result<Vec<Table
 pub async fn columns(connection: &Connection, database: &str, table: &str) -> Result<Vec<Column>> {
     let mut db = open(connection, None).await?;
     let foreign: BTreeMap<String, String> = sqlx::query(
-        "SELECT column_name, referenced_table_name, referenced_column_name \
+        "SELECT column_name AS column_name, \
+                referenced_table_name AS referenced_table_name, \
+                referenced_column_name AS referenced_column_name \
          FROM information_schema.key_column_usage \
          WHERE table_schema = ? AND table_name = ? AND referenced_table_name IS NOT NULL",
     )
@@ -152,24 +160,23 @@ pub async fn columns(connection: &Connection, database: &str, table: &str) -> Re
     })
     .collect::<Result<_>>()?;
 
-    sqlx::query(
-        "SELECT column_name AS name, column_type, is_nullable, column_default, column_key, \
-                extra, character_set_name AS charset, collation_name AS collation, \
-                column_comment AS comment \
+    let sql = format!(
+        "SELECT column_name AS name, {COLUMN_FIELDS} \
          FROM information_schema.columns WHERE table_schema = ? AND table_name = ? \
-         ORDER BY ordinal_position",
-    )
-    .bind(database)
-    .bind(table)
-    .fetch_all(&mut db)
-    .await?
-    .into_iter()
-    .map(|row| {
-        let name: String = row.try_get("name")?;
-        let target = foreign.get(&name).cloned();
-        column(&row, name, target)
-    })
-    .collect()
+         ORDER BY ordinal_position"
+    );
+    sqlx::query(&sql)
+        .bind(database)
+        .bind(table)
+        .fetch_all(&mut db)
+        .await?
+        .into_iter()
+        .map(|row| {
+            let name: String = row.try_get("name")?;
+            let target = foreign.get(&name).cloned();
+            column(&row, name, target)
+        })
+        .collect()
 }
 
 pub async fn all_columns(
@@ -178,7 +185,9 @@ pub async fn all_columns(
 ) -> Result<BTreeMap<String, Vec<Column>>> {
     let mut db = open(connection, None).await?;
     let foreign: BTreeMap<(String, String), String> = sqlx::query(
-        "SELECT table_name, column_name, referenced_table_name, referenced_column_name \
+        "SELECT table_name AS table_name, column_name AS column_name, \
+                referenced_table_name AS referenced_table_name, \
+                referenced_column_name AS referenced_column_name \
          FROM information_schema.key_column_usage \
          WHERE table_schema = ? AND referenced_table_name IS NOT NULL",
     )
@@ -195,13 +204,11 @@ pub async fn all_columns(
     })
     .collect::<Result<_>>()?;
 
-    let rows = sqlx::query(
-        "SELECT table_name, column_name AS name, column_type, is_nullable, column_default, \
-                column_key, extra, character_set_name AS charset, collation_name AS collation, \
-                column_comment AS comment \
+    let rows = sqlx::query(&format!(
+        "SELECT table_name AS table_name, column_name AS name, {COLUMN_FIELDS} \
          FROM information_schema.columns WHERE table_schema = ? \
-         ORDER BY table_name, ordinal_position",
-    )
+         ORDER BY table_name, ordinal_position"
+    ))
     .bind(database)
     .fetch_all(&mut db)
     .await?;
@@ -216,6 +223,13 @@ pub async fn all_columns(
     }
     Ok(out)
 }
+
+/// What `column` reads of `information_schema.columns`, each field under the
+/// name it is read by — see `tables` for why every one carries an alias.
+const COLUMN_FIELDS: &str = "column_type AS column_type, is_nullable AS is_nullable, \
+     column_default AS column_default, column_key AS column_key, extra AS extra, \
+     character_set_name AS charset, collation_name AS collation, \
+     column_comment AS comment";
 
 /// A column, as both queries above return it: they do not start with the same
 /// fields, but they name them the same way.
@@ -246,12 +260,20 @@ pub async fn query(
     offset: usize,
     limit: usize,
 ) -> Result<Rows> {
+    // Past the first page, the query runs **again**: refused outright for what
+    // is not a plain read, or `INSERT …; SELECT …` would insert once more per
+    // page. The console does not ask — `super::replayable` is what it reads
+    // before offering a next page — so this is the guard behind the guard.
+    if offset > 0 && !super::replayable(super::Engine::Mysql, sql) {
+        anyhow::bail!("this query is not a plain read, and it is not run a second time");
+    }
     let mut db = open(connection, database).await?;
     // The page is asked of the engine when the query lets itself be wrapped —
     // see `super::paged`. The wrap can still be refused at run time: MySQL
     // rejects a derived table whose two columns are named alike, which is the
     // `SELECT * FROM a JOIN b` of every schema. Reading from the start is
-    // therefore kept as the fallback.
+    // therefore kept as the fallback — a plain read, since `paged` only wraps
+    // one, and running it once more changes nothing.
     if let Some(paged) = super::paged(sql, offset, limit) {
         match run(&mut db, &paged, offset, 0, limit).await {
             Ok(rows) => return Ok(rows),
@@ -315,6 +337,10 @@ pub async fn export(
     sql: &str,
     out: &mut dyn std::io::Write,
 ) -> Result<u64> {
+    // An export runs the query again, all of it: see `query`.
+    if !super::replayable(super::Engine::Mysql, sql) {
+        anyhow::bail!("this query is not a plain read, and exporting it would run it again");
+    }
     let mut db = open(connection, database).await?;
     let mut stream = sqlx::raw_sql(sql).fetch_many(&mut db);
     let mut written = 0;
@@ -445,20 +471,25 @@ fn value_to_cell(row: &MySqlRow, index: usize, decoder: Decoder) -> Cell {
                 return Some(value.to_string());
             }
         }
+        // A date chrono cannot hold falls through to `as_sent`, which is the
+        // answer here and not a last resort: see there.
         Decoder::DateTime => {
             if let Ok(value) = row.try_get::<chrono::NaiveDateTime, _>(index) {
                 return Some(value.to_string());
             }
+            return as_sent(row, index);
         }
         Decoder::Date => {
             if let Ok(value) = row.try_get::<chrono::NaiveDate, _>(index) {
                 return Some(value.to_string());
             }
+            return as_sent(row, index);
         }
         Decoder::Time => {
             if let Ok(value) = row.try_get::<chrono::NaiveTime, _>(index) {
                 return Some(value.to_string());
             }
+            return as_sent(row, index);
         }
         Decoder::Json => {
             if let Ok(value) = row.try_get::<serde_json::Value, _>(index) {
@@ -513,6 +544,27 @@ fn cascade(row: &MySqlRow, index: usize) -> Cell {
         return Some(value.to_string());
     }
     if let Ok(value) = row.try_get::<Vec<u8>, _>(index) {
+        return Some(bytes_to_string(value));
+    }
+    as_sent(row, index)
+}
+
+/// The value as the server wrote it, with no decoding at all.
+///
+/// What every typed decoding refused still has a text: the console's queries
+/// go through `raw_sql`, the **text** protocol, where every value travels as
+/// the characters the server would print. That is what a `0000-00-00
+/// 00:00:00` is — MySQL's "zero date", which no calendar holds and chrono
+/// refuses — and a `TIME` of `-12:30:00` or `838:59:59`, a duration MySQL
+/// calls a time and chrono's time of day cannot be. They came out `<?>`, on
+/// screen and in the exported CSV, where the server's own text is exact.
+///
+/// `<?>` is left for bytes that are not even text.
+fn as_sent(row: &MySqlRow, index: usize) -> Cell {
+    if let Ok(value) = row.try_get_unchecked::<String, _>(index) {
+        return Some(value);
+    }
+    if let Ok(value) = row.try_get_unchecked::<Vec<u8>, _>(index) {
         return Some(bytes_to_string(value));
     }
     Some("<?>".to_string())
