@@ -770,23 +770,30 @@ impl Settings {
         let Some(path) = settings_path() else {
             return Self::default();
         };
+        // Starting from the defaults keeps a malformed key from preventing
+        // startup, and the first change would then write those defaults over
+        // the file — every other setting lost over that one key. The file is
+        // therefore put aside before anything can write, and when even that
+        // fails, nothing is written for the rest of the session.
         match std::fs::read_to_string(&path) {
             Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-                // Overwriting a file we failed to read would lose settings over
-                // a single malformed key: we start again from the default values
-                // without erasing anything.
                 log::warn!("unreadable settings ({}): {e}", path.display());
+                hold_unless_set_aside(&path, &SETTINGS_HELD);
                 Self::default()
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
             Err(e) => {
                 log::warn!("reading the settings: {e}");
+                hold_unless_set_aside(&path, &SETTINGS_HELD);
                 Self::default()
             }
         }
     }
 
     pub fn save(&self) {
+        if SETTINGS_HELD.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         let Some(path) = settings_path() else { return };
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -1181,6 +1188,59 @@ pub fn migrate_from_perch() {
     log::info!("configuration taken over from {}", old.display());
 }
 
+/// Set when `settings.json` could be neither read nor put aside: the file on
+/// disk is then the only copy of what it holds, and no save may replace it.
+static SETTINGS_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Puts aside a file that could not be read, before anything writes over it.
+///
+/// A copy beside the original — `settings.json.unreadable-<seconds>` — which
+/// one can mend by hand and put back; the original is left for the next save
+/// to replace. Gives back whether that copy exists: when it does not, the
+/// original is the only one left, and the caller must not overwrite it.
+pub(super) fn set_aside(path: &Path) -> bool {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let aside = aside_path(path, stamp);
+    match std::fs::copy(path, &aside) {
+        Ok(_) => {
+            log::warn!("{} put aside as {}", path.display(), aside.display());
+            true
+        }
+        Err(e) => {
+            log::warn!(
+                "{} could not be put aside ({e}): it will not be written this session",
+                path.display()
+            );
+            false
+        }
+    }
+}
+
+/// `set_aside`, and the writes held when it fails.
+///
+/// Shared with the state store, which has its own flag: `state.json` being
+/// unreadable says nothing about `settings.json`.
+pub(super) fn hold_unless_set_aside(path: &Path, held: &std::sync::atomic::AtomicBool) {
+    if !set_aside(path) {
+        held.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Where an unreadable file is put aside: beside it, its name followed by the
+/// moment it was found unreadable — a second failure on another day keeps the
+/// first copy rather than writing over it.
+pub(super) fn aside_path(path: &Path, stamp: u64) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_default();
+    name.push(format!(".unreadable-{stamp}"));
+    path.with_file_name(name)
+}
+
 /// Written 0600 on Unix: the file carries the repositories' paths and the
 /// agent's command line, which are none of the other accounts' business on the
 /// machine.
@@ -1212,6 +1272,20 @@ pub(super) fn write_private(path: &Path, contents: &str) -> std::io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unreadable_file_is_put_aside_beside_itself() {
+        let aside = aside_path(Path::new("/c/claudhub/settings.json"), 1_790_000_000);
+        assert_eq!(
+            aside,
+            PathBuf::from("/c/claudhub/settings.json.unreadable-1790000000")
+        );
+        // The copy is not a file the next read would mistake for the original.
+        assert_ne!(
+            aside.file_name(),
+            Some(std::ffi::OsStr::new("settings.json"))
+        );
+    }
 
     #[test]
     fn only_the_fields_the_theme_reads_make_it_apply() {

@@ -1188,6 +1188,9 @@ pub struct ClaudhubApp {
     /// action, and both go through one place: an entry can therefore not be left
     /// behind, which is the only failure mode of a spinner.
     pub(super) flight: crate::ui::inflight::InFlight,
+    /// The writes of open files, one in flight per worktree: what tells which
+    /// tab an `Action::Write` answer is about. See `explorer::Saves`.
+    pub(super) saves: crate::ui::explorer::Saves,
     /// Where the settings screen is: the page one last chose in its sidebar, or
     /// the one a button asked for. It is read at the next opening — the form
     /// keeps nothing once it is put away. See `settings_view::show_settings`.
@@ -1506,6 +1509,7 @@ impl ClaudhubApp {
             history_split_branches: cx
                 .new(|_| gpui_kit::component::resizable::ResizableState::default()),
             flight: crate::ui::inflight::InFlight::default(),
+            saves: Default::default(),
             settings_page: Default::default(),
             settings_epoch: 0,
             settings_env: None,
@@ -2914,6 +2918,10 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         self.finish(&worktree, action);
+        // A file written: its tab is saved now, and not when the write left.
+        if action == Action::Write {
+            self.file_written(worktree.as_deref(), true, window, cx);
+        }
         // A git write can have moved `HEAD` under the files being edited — a
         // commit is the everyday case, and it is the one where the gutter's
         // marks have to go quiet. Hooked on a completed gesture and not on a
@@ -2999,6 +3007,11 @@ impl ClaudhubApp {
         cx: &mut Context<Self>,
     ) {
         self.finish(&worktree, action);
+        // A write refused — an agent wrote in the file meanwhile: the tab
+        // stays unsaved, and the next write of the worktree goes.
+        if action == Action::Write {
+            self.file_written(worktree.as_deref(), false, window, cx);
+        }
         // Without this, a status that fails once — repository briefly locked,
         // disk busy — would block every later refresh of that worktree for good.
         if let Some(worktree) = worktree.as_ref() {
@@ -3019,10 +3032,12 @@ impl ClaudhubApp {
         }
         // Same reason as the status above: without this, one `ls-files` that
         // fails leaves the explorer waiting for an answer that will never come,
-        // and its tree stays empty for the rest of the session.
+        // and its tree stays empty for the rest of the session. A file's read
+        // wears the same action, and is told apart there — a restore waits on
+        // it.
         if action == Action::Read {
             if let Some(worktree) = worktree.as_deref() {
-                self.project_files_failed(worktree);
+                self.read_failed(worktree, &message, window, cx);
             }
         }
         // A push the remote rejected because it moved on, or a pull the
@@ -3242,6 +3257,7 @@ impl ClaudhubApp {
     /// dying, and a new one taking its place.
     fn clear_running(&mut self) {
         self.flight.clear();
+        self.saves.clear();
     }
 
     fn finish(&mut self, worktree: &Option<PathBuf>, action: Action) {

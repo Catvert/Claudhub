@@ -209,6 +209,20 @@ impl ClaudhubApp {
         cx.notify();
     }
 
+    /// The remembered tab whose read is out, while a restore is under way.
+    ///
+    /// Worked out rather than kept: `pending_files` starts as a copy of
+    /// `replaying` and `read_next_file` sends from its head, so the file in
+    /// flight is the last one `replaying` has that `pending_files` no longer
+    /// holds.
+    pub(super) fn restoring_file(&self) -> Option<&crate::ui::store::OpenFile> {
+        if !self.restoring_files {
+            return None;
+        }
+        let sent = self.replaying.len().checked_sub(self.pending_files.len())?;
+        self.replaying.get(sent.checked_sub(1)?)
+    }
+
     /// One remembered tab has arrived: asks for the one after it, and brings
     /// the tab that was on screen forward once they are all there.
     ///
